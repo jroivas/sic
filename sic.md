@@ -221,8 +221,43 @@ On that case, module usage would be (in C):
         printf("%d\n", test_power(5));
     }
 
+Module can spread into multiple compile units.
+Files in a module must be in one folder to be included.
+Headers and other files can be included still with preprocessor `#include`.
+
 When compiling a module, it produces these outputs:
 
-- [module_name].o
-- module_[module_name].h
+- [module\_name]\_[file\_name].o
+- [module\_name].a
+- module\_[module\_name].h
+- module\_[module\_name].def
 
+# Switch - case
+
+One problematic construction is `switch` and it's `case`.
+Biggest problem is the fallthrough in case of missing break.
+
+We're breaking `switch` and making it opposite.
+Default is to break after case, and fallthrough
+must be specificly stated:
+
+    int test(int x)
+    {
+        int r = 0;
+        switch (x) {
+            case 1: r = 111;
+            case 2: r = 222;
+            case 3: r = 333;
+            case 4: r = 444;
+            case 5: r = 555;
+            case 6: fallthrough;
+            case 7: fallthrough;
+            case 8: r = 678;
+            case 9: r = 999;
+            default: r = 0;
+        }
+        return r;
+    }
+
+On this example all other cases break, except 6 and 7.
+So instead of `break` one must state `fallthrough`.
