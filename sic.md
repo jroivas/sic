@@ -92,11 +92,15 @@ Without `overflow` keyword execution would be ended at first `a++`.
 Traditionally int size may be different according the system where it's compiled into.
 We specify size of all types specificly:
 
-- 8 bits: char and unsigned char
+- 8 bits: char == unsigned char
+- 8 bits: byte and unsigned byte
 - 16 bits: short and unsigned short
 - 32 bits: int and unsigned int
 - 64 bits: long and unsigned long
 - 64 bits: long long and unsigned long long
+
+All chars are unsigned, and signed char does not exists. Value is always between 0 - 255.
+Instead byte is signed in range -128 - 127 and unsigned byte matches char.
 
 On top of that we have specific bit size ints:
 
@@ -105,6 +109,7 @@ On top of that we have specific bit size ints:
 - 32 bits: int32, uint32
 - 64 bits: int64, uint64
 - 128 bits: int128, uint128
+
 
 # Built-in fixed point
 
