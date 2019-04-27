@@ -319,3 +319,44 @@ must be specificly stated:
 On this example all other cases break, except 6 and 7.
 So instead of `break` one must state `fallthrough`.
 Having break is not a fault, but fallthrough case is a breaking change.
+
+# Rotate and shift
+
+Original C has only shift left and right operators, but missing rotate,
+even thought there's instructions for it on some CPU's, and it's widely used.
+
+Introducing rotate left `<<<` and rotate right `>>>` operators, we extend support for it.
+
+Example:
+
+    int main()
+    {
+        unsigned int a = 0x12345678;
+        printf("%x\n", a <<< 8);
+    }
+
+That would print out `0x34567812`.
+
+Shift cases are cleared:
+
+- Right shift case
+  * Unsigned fills always zero
+  * Signed fills always sign bit
+- Shift count can be anything
+  * If overflow result is in most cases zero, except if signed, it's filled with sign bit
+  * If count is zero or negative, value is not shifted at all.
+
+Examples:
+
+    int main()
+    {
+        unsigned int a = 0x12345678;
+        int b = -88888888;
+        printf("%x\n", a << 100);
+        printf("%x\n", a << -1);
+        printf("%x\n", b >> 0);
+        printf("%x\n", b >> 16);
+        printf("%x\n", b >> 32);
+    }
+
+Results would be: `0`, `0x12345678`, `0xfab3a9c8`, `0xfffffab3`, `0xffffffff`.
