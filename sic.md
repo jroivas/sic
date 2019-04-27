@@ -30,6 +30,63 @@ Reason is to avoid hard to debug problematic cases.
 Our thesis is, compiler can do optimal code even with these rules
 but avoid lost programmer time.
 
+## Integer overflow
+
+Integer overflow is not undefiined behaviour.
+Instead these rules apply:
+
+- signed overflow causes exception
+- unsigned overflow causes modulo 2^n like C
+
+Exception must be either handler, or it causes run time failure.
+Example:
+
+    int main()
+    {
+        int a = MAX_INT - 5;
+
+        while (true) {
+            if (overflow { a++ }) {
+                a = 0;
+            }
+        }
+
+        return 0;
+    }
+
+Without `overflow` keyword execution of program would be
+ended into an exception.
+Only way to guard and prevent exception is to enclose operation
+into `overflow` keyword.
+On case of overflow any values are not changed.
+Thus it can be used without if as well:
+
+    int main()
+    {
+        int a = MAX_INT;
+        int b = 0;
+
+        overflow { a++ };
+        int c = overflow {
+            b = 1;
+            a += 10;
+            b = 2;
+            a += 20;
+            b = 3;
+            a += 30;
+            b = 4;
+        };
+
+        assert(a == MAX_INT);
+        assert(b == 1);
+
+        return c;
+    }
+
+That program would exit with error code,
+but would not fail at any point.
+Without `overflow` keyword execution would be ended at first `a++`.
+
 
 # Built-in fixed point
 
@@ -261,3 +318,4 @@ must be specificly stated:
 
 On this example all other cases break, except 6 and 7.
 So instead of `break` one must state `fallthrough`.
+Having break is not a fault, but fallthrough case is a breaking change.
