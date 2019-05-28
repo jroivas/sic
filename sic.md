@@ -26,7 +26,7 @@ when copiler may do whatever it wants.
 
 We remove that freedom and try to specify what to do on each of the cases.
 
-Reason is to avoid hard to debug problematic cases.
+Reason is to avoid hard to debug undefined behaviour cases.
 Our thesis is, compiler can do optimal code even with these rules
 but avoid lost programmer time.
 
@@ -114,13 +114,15 @@ On top of that we have specific bit size ints:
 # Built-in fixed point
 
 Floating point is great, but sometimes more exact representation is needed.
-Solution if fixed point math, and it improves precision on, for example,
-financial calculations.
+Solution if fixed point math, and it improves precision, for example,
+on financial calculations.
 
 # Built-in string
 
 We have built in string type, which creates optimal code to target.
 However null terminated strings are of course still supported...
+
+Conversion to null terminated can be performed easily.
 
 # Empty brackets pointer
 
@@ -153,11 +155,13 @@ As assumed, they're automatically called on creation:
 
     void test()
     {
+        // constructor of 'test' for 'a' is called here
         struct test a;
+        // constructor of 'test' for 'b' is called here
         struct test *b = new struct test;;
 
-        // destructor of a called here, and a is released,
-        // but b is not
+        // destructor of 'test' for 'a' called here, and 'a' is released,
+        // but 'b' is not
     }
 
 
@@ -342,6 +346,7 @@ must be specificly stated:
 On this example all other cases break, except 6 and 7.
 So instead of `break` one must state `fallthrough`.
 Having break is not a fault, but fallthrough case is a breaking change.
+
 
 # Rotate and shift
 
