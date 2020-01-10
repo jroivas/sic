@@ -32,11 +32,21 @@ but avoid lost programmer time.
 
 ## Integer overflow
 
-Integer overflow is not undefiined behaviour.
+Integer overflow is not undefined behaviour.
 Instead these rules apply:
 
-- signed overflow causes exception
-- unsigned overflow causes modulo 2^n like C
+- By default signed and unsigned overflow causes wrap around
+- For example: unsigned 8 bit integer `255` plus one becomes `0`
+- For example: signed 8 bit integer `127` plus one becomes `-128`
+- Divide by zero results in `0`.
+
+There's possibility to relax these checks and make all operations unsafe.
+Thus operations must be wrapped inside `unsafe` block:
+
+    unsafe {
+        int
+    }
+
 
 Exception must be either handler, or it causes run time failure.
 Example:
