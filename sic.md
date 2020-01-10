@@ -27,8 +27,8 @@ when copiler may do whatever it wants.
 We remove that freedom and try to specify what to do on each of the cases.
 
 Reason is to avoid hard to debug undefined behaviour cases.
-Our thesis is, compiler can do optimal code even with these rules
-but avoid lost programmer time.
+Our thesis is, compiler can do good enough (if not optimal) code even with
+these rules, and same time prevent unnecessary lost human time.
 
 ## Integer overflow
 
@@ -38,24 +38,67 @@ Instead these rules apply:
 - By default signed and unsigned overflow causes wrap around
 - For example: unsigned 8 bit integer `255` plus one becomes `0`
 - For example: signed 8 bit integer `127` plus one becomes `-128`
-- Divide by zero results in `0`.
+- Divide by zero results in `0`
 
 There's possibility to relax these checks and make all operations unsafe.
 Thus operations must be wrapped inside `unsafe` block:
 
     unsafe {
-        int
+        int a = MAX_INT;
+        a++;
     }
 
+That would cause exception instead of becoming MIN_INT.
+Only way to guard and prevent exception inside `unsafe` block is to
+enclose operation into `overflow` keyword.
+The usage of `overflow` is not limited to `unsafe` blocks
+and it can be used to detect overflow situations.
 
-Exception must be either handler, or it causes run time failure.
 Example:
 
     int main()
     {
         int a = MAX_INT - 5;
 
-        while (true) {
+        unsafe {
+            while (a > MAX_INT - 10 || a < 5) {
+                if (overflow { a++ }) {
+                    a = 0;
+                }
+            }
+        }
+
+        return 0;
+    }
+
+Without `overflow` keyword execution of program would be
+ended into an exception. Now it just iterates first from
+MAX_INT - 5 to MAX_INT, then assings a = 0, and continues
+iteration until 5.
+
+However this example is perfectly valid:
+
+    int main()
+    {
+        int a = MAX_INT - 5;
+
+        while (a > MAX_INT - 10 || a < 5) {
+            a++;
+        }
+
+        return 0;
+    }
+
+That would turn from MAX_INT to MIN_INT, and then continue
+until would reach 5. However on functionality way it's not
+ same as first example.
+Thus most logical way to use `overflow` is just:
+
+    int main()
+    {
+        int a = MAX_INT - 5;
+
+        while (a > MAX_INT - 10 || a < 5) {
             if (overflow { a++ }) {
                 a = 0;
             }
@@ -64,28 +107,29 @@ Example:
         return 0;
     }
 
-Without `overflow` keyword execution of program would be
-ended into an exception.
-Only way to guard and prevent exception is to enclose operation
-into `overflow` keyword.
-On case of overflow any values are not changed.
-Thus it can be used without if as well:
+
+On case of overflow no values are changed.
+Thus let's consider this example:
 
     int main()
     {
         int a = MAX_INT;
         int b = 0;
 
-        overflow { a++ };
-        int c = overflow {
-            b = 1;
-            a += 10;
-            b = 2;
-            a += 20;
-            b = 3;
-            a += 30;
-            b = 4;
-        };
+        unsafe {
+            overflow { a++ };
+            // Value of a is unchanged, so it's still MAX_INT
+            int c = overflow {
+                b = 1;
+                a += 10; // This will overflow and
+                         // break out from overflow block
+                b = 2;
+                a += 20;
+                b = 3;
+                a += 30;
+                b = 4;
+            };
+        }
 
         assert(a == MAX_INT);
         assert(b == 1);
@@ -95,7 +139,10 @@ Thus it can be used without if as well:
 
 That program would exit with error code,
 but would not fail at any point.
-Without `overflow` keyword execution would be ended at first `a++`.
+Without `overflow` keywords execution would be ended at first `a++`.
+Also, here we first time take return value `overflow` and assign it into
+and integer. Earlier example in case of `if` works same way.
+So `overflow` return `0` in case of success, and `1` if overflow was detected.
 
 # Integer sizes
 
