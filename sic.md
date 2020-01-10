@@ -146,8 +146,8 @@ So `overflow` return `0` in case of success, and `1` if overflow was detected.
 
 # Integer sizes
 
-Traditionally int size may be different according the system where it's compiled into.
-We specify size of all types specificly:
+Traditionally in C the size of `int` may be different according the system where it's compiled into.
+We specify size of all types explicitly:
 
 - 8 bits: char == unsigned char
 - 8 bits: byte and unsigned byte
@@ -167,6 +167,7 @@ On top of that we have specific bit size ints:
 - 64 bits: int64, uint64
 - 128 bits: int128, uint128
 
+Extending to bigger types is trivial, if there comes hardware support.
 
 # Built-in fixed point
 
