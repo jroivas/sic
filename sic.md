@@ -337,6 +337,8 @@ Example of module:
 
     module test;
 
+    int meaning = 42;
+
     int double_int(int x)
     {
         return 2 * x;
@@ -350,9 +352,9 @@ Example of module:
 
 Everything is by default exported, unless defined as static.
 Difference from C headers is, that implementation is not exported,
-but only the definitions.
+but only definitions of non-static symbols from the module.
 
-To use module:
+To use the module:
 
     import test;
 
@@ -360,16 +362,17 @@ To use module:
     {
         printf("%d\n", test.double_int(5));
         printf("%d\n", test.power(5));
+        printf("%d\n", test.meaning);
     }
 
-Not also, that exported symbols are on module's namespace.
-Import can be overridden with preprocessor, specific import or with rename:
+Not also that exported symbols are accessible only from module's namespace.
+We can import specific symbols from module, or assign a new local identifier to them:
 
-    // Imports only double_int from test and specifies it as "double_int" here
+    // Imports only "double_int" from test and specifies it as "double_int" here
     import test.double_int;
-    // Imports power from test, but renames it to "my_power"
+    // Imports "power" from test, but renames it to "my_power"
     import test.power as my_power;
-    // Module "test" is NOT imported, only those two symbols from it
+    // Module "test" itself is NOT imported, only those two symbols from it
 
     void main()
     {
@@ -391,8 +394,10 @@ On that case, module usage would be (in C):
     }
 
 Module can spread into multiple compile units.
-Files in a module must be in one folder to be included.
-Headers and other files can be included still with preprocessor `#include`.
+Files of the module must be located in one folder,
+and it's considered to be different module if files located in different folder.
+Headers and other files can be included still with preprocessor `#include`
+from outside the module folder.
 
 When compiling a module, it produces these outputs:
 
