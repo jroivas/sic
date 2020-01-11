@@ -232,17 +232,17 @@ which is not always the case in C.
 Example in C:
 
     while (c = getc(in) != EOF)
-        putc(c,out);
+        putc(c, out);
 
 This is actually:
 
     while (c = (getc(in) != EOF))
-        putc(c,out);
+        putc(c, out);
 
 Which is wrong on that case, and code should have been written as:
 
     while ((c = getc(in)) != EOF)
-        putc(c,out);
+        putc(c, out);
 
 
 Same problem applies to:
@@ -262,32 +262,32 @@ First case would then be:
 
     c = getc(in);
     while (c != EOF) {
-        putc(c,out);
+        putc(c, out);
         c = getc(in);
     }
 
-Second would cause compiler error if intended that way.
-This is, however, way much longer and against the expressiveness of C language.
-On the other hand, we have `for` where this would go like:
+Second solution would cause compiler error if intended that way.
 
-    if (char *c = getc(int); c != EOF; c = getc(int))
-        putc(c,out);
+Third option is to keep with what we have, for example `for` statement would be:
 
-We still have our repeated steps.
+    for (char *c = getc(int); c != EOF; c = getc(int))
+        putc(c, out);
 
-This leads to conclusion, that our first solution might not be the best.
+But we still have our repeated calls to `getc`.
+
+This leads to conclusion, that our solutions so far might not be the best ones.
 Better is to mandate usage of braces with assignment operators when using
 in evaluation expression. Thus this is fully valid:
 
     while ((c = getc(in)) != EOF)
-        putc(c,out);
+        putc(c, out);
 
-So would be if that's what you want:
+This would be valid with braces, if that's what you want:
 
     while (c = (getc(in) != EOF))
-        putc(c,out);
+        putc(c, out);
 
-Other case looks bit more stupid, but tells compiler you really mean it:
+The another case looks bit more stupid with double braces, but tells compiler you really mean it:
 
     if ((x = y))
         foo();
@@ -300,6 +300,31 @@ On that case compiler is allowed to optimize this to:
 # Dangling else
 
 Force curly braces for non-trivial if-statement.
+
+This is valid:
+
+    if (test)
+        do_something();
+    else
+        do_other();
+
+This would not be:
+
+    if (test)
+        if (second_test)
+            do_something();
+    else
+        do_other();
+
+Proper way would be:
+
+    if (test) {
+        if (second_test)
+            do_something();
+    } else
+        do_other();
+
+Now it's clear to for which `if`the `else` belongs to.
 
 # Imports
 
