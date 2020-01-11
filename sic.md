@@ -412,30 +412,42 @@ One problematic construction is `switch` and it's `case`.
 Biggest problem is the fallthrough in case of missing break.
 
 We're breaking `switch` and making it opposite.
-Default is to break after case, and fallthrough
+Default is to break after each case, and fallthrough
 must be specificly stated:
 
     int test(int x)
     {
         int r = 0;
+        int a = 0;
         switch (x) {
-            case 1: r = 111;
-            case 2: r = 222;
+            case 1: r = 111; a = 1;
+            case 2:
+                int tmp = x;
+                r = 222;
+                a = 1 + tmp;
             case 3: r = 333;
-            case 4: r = 444;
+            case 4:
+                r = 444;
+                a = 2;
             case 5: r = 555;
             case 6: fallthrough;
             case 7: fallthrough;
             case 8: r = 678;
-            case 9: r = 999;
+            case 9: r = 999; a = 3;
             default: r = 0;
         }
-        return r;
+        return r + a;
     }
 
 On this example all other cases break, except 6 and 7.
 So instead of `break` one must state `fallthrough`.
-Having break is not a fault, but fallthrough case is a breaking change.
+You can imagine automatic `break` just before every new `case` or `default` statement.
+Case may contain multiple expressions and span to multiple lines.
+It's valid to define variables inside case, unlike in C.
+One can imagine automatic curly braces after the colon, until next `case`,
+with automatic `break` added.
+
+Compared to C this is a breaking change.
 
 
 # Rotate and shift
