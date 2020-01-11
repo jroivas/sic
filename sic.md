@@ -453,11 +453,9 @@ Compared to C this is a breaking change.
 # Rotate and shift
 
 Original C has only shift left and right operators, but missing rotate,
-even thought there's instructions for it on some CPU's, and it's widely used.
+even thought there's instructions for it on some CPU's, and it's widely utilized on programs.
 
-Introducing rotate left `<<<` and rotate right `>>>` operators, we extend support for it.
-
-Example:
+Introducing rotate left `<<<` and rotate right `>>>` operators.  Example:
 
     int main()
     {
@@ -467,13 +465,15 @@ Example:
 
 That would print out `0x34567812`.
 
-Shift cases are cleared:
+Shifts are exaclty specified:
 
-- Right shift case
+- Left shift `<<`
+  * Always fills zero
+- Right shift `>>`
   * Unsigned fills always zero
   * Signed fills always sign bit
 - Shift count can be anything
-  * If overflow result is in most cases zero, except if signed, it's filled with sign bit
+  * In case of overflow result is zero, except if signed, it's filled with sign bit
   * If count is zero or negative, value is not shifted at all.
 
 Examples:
