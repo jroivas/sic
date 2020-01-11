@@ -196,9 +196,7 @@ This is not valid:
 
 We borrow `new` keyword from C++ to create new "objects".
 However they're not fat objects like in C++, but structs which can have
-constructor and destructor.
-
-Example:
+constructor and destructor:
 
     struct test {
         test() {
@@ -211,25 +209,25 @@ Example:
     }
 
 
-Seems like C++ classes, but all allowed method members are constructor and destructor.
-As assumed, they're automatically called on creation:
+These looks like C++ classes, but we do not support direclty other member methods
+than the constructor and destructor. Like in C++ they're automatically called on creation
+and when getting out of scope:
 
 
     void test()
     {
-        // constructor of 'test' for 'a' is called here
-        struct test a;
-        // constructor of 'test' for 'b' is called here
-        struct test *b = new struct test;;
+        struct test a; // constructor of 'test' for 'a' is called here
+        struct test *b = new struct test; // constructor of 'test' for 'b' is called here
 
         // destructor of 'test' for 'a' called here, and 'a' is released,
-        // but 'b' is not
+        // however 'b' is not released since it's not getting ouf of scope
     }
 
 
 # Assignment and equals
 
-Making clear rules for assignment and equals operators.
+There's make clear rules for assignment and equals operators,
+which is not always the case in C.
 
 Example in C:
 
