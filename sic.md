@@ -30,6 +30,17 @@ Reason is to avoid hard to debug undefined behaviour cases.
 Our thesis is, compiler can do good enough (if not optimal) code even with
 these rules, and same time prevent unnecessary lost human time.
 
+## Initialized variables
+
+All variables are initialized to 0 (or logically similar).
+This avoids problems with uninitialized variables.
+
+- Integral values to 0
+- Floating and fixed point to 0.0
+- Pointers to NULL
+- Strings to empty string
+- Structures to memset(sizeof(struct), 0)
+
 ## Integer overflow
 
 Integer overflow is not undefined behaviour.
@@ -184,6 +195,20 @@ Built-in strings supports natively UTF-8.
 
 Conversion to traditional null terminated can be performed easily,
 with certain constraints.
+
+Strings support concatenate and substring:
+
+    int main()
+    {
+        string test = "Hello world!"
+        string another = test + " And all others!";
+
+        printf("%s\n", test);
+        printf("%s\n", another);
+        // Substring, will print "world", open interval
+        printf("%s\n", another[6:11]);
+    }
+
 
 # Empty brackets pointer
 
@@ -490,3 +515,29 @@ Examples:
     }
 
 Results would be: `0`, `0x12345678`, `0xfab3a9c8`, `0xfffffab3`, `0xffffffff`.
+
+## Arrays and lists
+
+Extend arrays and list handling with helpful sugar. Let's take an example:
+
+    int main()
+    {
+        int values[5];
+        int tail[5];
+        string test = "Hello world!"
+
+        for (int i = 0; i < values.size(); i++) {
+            values[i] = i;
+            tail[i] = i + values.size();
+        }
+
+        printf("String: %s, len: %d\n", test, test.length());
+
+        int combined[20] = values + tail;
+        // Will print 20, and not 10
+        // Contents will be 1..10 and rest zeros
+        printf("Combined length: %d\n", combined.length());
+
+        // Will print 10
+        printf("Combined2 length: %d\n", (values + tail).length());
+    }
