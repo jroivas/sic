@@ -180,11 +180,15 @@ on financial calculations.
 We have built in string type, which creates optimal code to target.
 However null terminated strings are of course still supported...
 
-Conversion to null terminated can be performed easily.
+Built-in strings supports natively UTF-8.
+
+Conversion to traditional null terminated can be performed easily,
+with certain constraints.
 
 # Empty brackets pointer
 
 This is not valid:
+
     char test[];
 
 
