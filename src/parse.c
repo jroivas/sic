@@ -79,11 +79,6 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_DEC_LIT:
             res = make_leaf(A_DEC_LIT, token);
             break;
-        case T_MINUS:
-            scan(f, token);
-            res = primary_expression(f, token);
-            res = make_node(A_NEGATE, res, NULL);
-            break;
         default:
             ERR("Unexpected token: %s", token_str(token));
     }
@@ -92,13 +87,51 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *postfix_expression(struct scanfile *f, struct token *token)
+{
+    // TODO
+    return primary_expression(f, token);
+}
+struct node *cast_expression(struct scanfile *f, struct token *token);
+
+struct node *unary_expression(struct scanfile *f, struct token *token)
+{
+    struct node *left /*, *right*/;
+    enum tokentype type;
+
+    type = token->token;
+    switch (type) {
+            case T_PLUS:
+                scan(f, token);
+                return cast_expression(f, token);
+            case T_MINUS:
+                scan(f, token);
+                left = cast_expression(f, token);
+                return make_node(A_NEGATE, left, NULL);
+            default:
+                break;
+    }
+
+    left = postfix_expression(f, token);
+    if (token->token == T_EOF)
+        return left;
+
+
+    return left;
+}
+
+struct node *cast_expression(struct scanfile *f, struct token *token)
+{
+    // TODO
+    return unary_expression(f, token);
+}
+
 struct node *multiplicative_expression(struct scanfile *f, struct token *token)
 {
     struct node *left, *right;
     enum tokentype type;
 
-    // FIXME shortcut here
-    left = primary_expression(f, token);
+    left = cast_expression(f, token);
     if (token->token == T_EOF)
         return left;
 
@@ -106,7 +139,7 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
     while (type == T_STAR || type == T_SLASH || type == T_MOD) {
         scan(f, token);
 
-        right = primary_expression(f, token);
+        right = cast_expression(f, token);
         left = make_node(oper(type), left, right);
 
         if (token->token == EOF)
