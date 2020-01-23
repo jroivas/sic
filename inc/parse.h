@@ -6,6 +6,7 @@
 
 enum nodetype {
     A_ADD, A_MINUS, A_MUL, A_DIV, A_MOD,
+    A_NEGATE,
     A_INT_LIT, A_DEC_LIT
 };
 

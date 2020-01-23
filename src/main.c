@@ -26,10 +26,11 @@ int main(int argc, char **argv)
     if (!f.infile)
         ERR("Can't open file: %s", argv[1]);
 
-    if (scan(&f, &token)) {
-        node = expression(&f, &token);
-        node_walk(node);
-    }
+    if (!scan(&f, &token))
+        ERR("Error while parsing %s", argv[1]);
+
+    node = expression(&f, &token);
+    node_walk(node);
 
     return res;
 }

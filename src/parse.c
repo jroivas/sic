@@ -2,6 +2,7 @@
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
+    "-",
     "INT_LIT", "DEC_LIT", "EOF"
 };
 
@@ -53,12 +54,12 @@ struct node *make_leaf(enum nodetype node, struct token *t)
 
     if (t->token == T_INT_LIT) {
 #if DEBUG
-        printf("  INT: %lld\n", t->value);
+        printf("  INT: %llu\n", t->value);
 #endif
         n->value = t->value;
     } else if (t->token == T_DEC_LIT) {
 #if DEBUG
-        printf("  DEC: %lld\n", t->value);
+        printf("  DEC: %llu.%llu\n", t->value, t->fraction);
 #endif
         n->value = t->value;
         n->fraction = t->fraction;
@@ -73,11 +74,18 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
 
     switch (token->token) {
         case T_INT_LIT:
-        case T_DEC_LIT:
             res = make_leaf(A_INT_LIT, token);
             break;
+        case T_DEC_LIT:
+            res = make_leaf(A_DEC_LIT, token);
+            break;
+        case T_MINUS:
+            scan(f, token);
+            res = primary_expression(f, token);
+            res = make_node(A_NEGATE, res, NULL);
+            break;
         default:
-            ERR("Invalid token: %s", token_str(token));
+            ERR("Unexpected token: %s", token_str(token));
     }
 
     scan(f, token);
@@ -160,6 +168,9 @@ void __node_walk(struct node *node, int depth)
             break;
         case A_MINUS:
             printf("-");
+            break;
+        case A_NEGATE:
+            printf("NEGATE");
             break;
         case A_MUL:
             printf("*");
