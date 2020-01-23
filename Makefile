@@ -1,12 +1,11 @@
-
-
+INC_FILES := inc/*.h
 SRC_FILES = src/main.c src/scan.c
 CFLAGS = -O3 -Iinc/
 
-sic: build
+build/sic: build $(INC_FILES) $(SRC_FILES)
 	$(CC) -o build/sic $(SRC_FILES) $(CFLAGS)
 
-test: sic
+test: build/sic
 	CC=build/sic tests/runtest.sh build
 
 testc:

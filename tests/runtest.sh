@@ -6,5 +6,6 @@ outfolder=$1
 #echo $tests
 ls $MYDIR/*.sic | while read test; do
     base=$(basename $test .sic)
-    echo ${CC} $test -o "$outfolder/$base.out"
+    echo "*** $base"
+    ${CC} $test -o "$outfolder/$base.out"
 done

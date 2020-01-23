@@ -1,20 +1,20 @@
-#ifndef __SCAN_C
-#define __SCAN_C
+#ifndef __SCAN_H
+#define __SCAN_H
 
 #include <stdio.h>
 
+typedef unsigned long long literalnum;
+
 struct token {
     int token;
-    union {
-        char *value_string;
-        unsigned long value_int;
-        unsigned long long value_ll;
-        double value_float;
-    };
+    char *value_string;
+    literalnum value;
+    literalnum fraction;
 };
 
 enum {
-    T_PLUS, T_MINUS, T_INTLIT
+    T_PLUS, T_MINUS,
+    T_INT_LIT, T_DEC_LIT
 };
 
 struct scanfile {
@@ -22,5 +22,9 @@ struct scanfile {
     int line;
     int putback;
 };
+
+int scan(struct scanfile *f, struct token *t);
+const char *token_str(struct token *t);
+char *token_dump(struct token *t);
 
 #endif
