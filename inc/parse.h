@@ -24,5 +24,6 @@ struct node {
 
 struct node *expression(struct scanfile *f, struct token *token);
 void node_walk(struct node *node);
+double interpret(struct node *node);
 
 #endif

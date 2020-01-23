@@ -31,6 +31,7 @@ int main(int argc, char **argv)
 
     node = expression(&f, &token);
     node_walk(node);
+    printf("res: %lf\n", interpret(node));
 
     return res;
 }
