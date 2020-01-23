@@ -142,3 +142,45 @@ struct node *expression(struct scanfile *f, struct token *token)
     return additive_expression(f, token);
     //assignment_expression(f);
 }
+
+void __node_walk(struct node *node, int depth)
+{
+    if (node == NULL)
+        return;
+
+    if (node->left)
+        __node_walk(node->left, depth + 1);
+    if (node->right)
+        __node_walk(node->right, depth + 1);
+
+    printf("%*s", depth * 2, "");
+    switch (node->node) {
+        case A_ADD:
+            printf("+");
+            break;
+        case A_MINUS:
+            printf("-");
+            break;
+        case A_MUL:
+            printf("*");
+            break;
+        case A_DIV:
+            printf("/");
+            break;
+        case A_MOD:
+            printf("%%");
+            break;
+        case A_INT_LIT:
+            printf("%llu", node->value);
+            break;
+        case A_DEC_LIT:
+            printf("%llu.%llu", node->value, node->fraction);
+            break;
+    }
+    printf("\n");
+}
+
+void node_walk(struct node *node)
+{
+    __node_walk(node, 0);
+}

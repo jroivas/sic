@@ -28,7 +28,7 @@ int main(int argc, char **argv)
 
     if (scan(&f, &token)) {
         node = expression(&f, &token);
-        (void)node;
+        node_walk(node);
     }
 
     return res;
