@@ -5,14 +5,19 @@
 
 static const char *tokenstr[] = {
     "+", "-", "*", "/", "%",
-    "INT_LIT", "DEC_LIT"
+    "INT_LIT", "DEC_LIT", "EOF"
 };
+
+const char *token_val_str(enum tokentype t)
+{
+    FATAL(t >= sizeof(tokenstr) / sizeof (char*),
+            "Token string table overflow with %d", t);
+    return tokenstr[t];
+}
 
 const char *token_str(struct token *t)
 {
-    FATAL(t->token >= sizeof(tokenstr) / sizeof (char*),
-            "Token string table overflow with %d", t->token);
-    return tokenstr[t->token];
+    return token_val_str(t->token);
 }
 
 char *token_dump(struct token *t)
@@ -102,6 +107,7 @@ int scan(struct scanfile *f, struct token *t)
 
     switch (c) {
         case EOF:
+            t->token = T_EOF;
             return 0;
         case '+':
             t->token = T_PLUS;
@@ -113,7 +119,7 @@ int scan(struct scanfile *f, struct token *t)
             t->token = T_STAR;
             break;
         case '/':
-            t->token = T_DIV;
+            t->token = T_SLASH;
             break;
         case '%':
             t->token = T_MOD;

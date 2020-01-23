@@ -4,8 +4,8 @@
 #include <stdio.h>
 
 enum tokentype {
-    T_PLUS, T_MINUS, T_STAR, T_DIV, T_MOD,
-    T_INT_LIT, T_DEC_LIT
+    T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
+    T_INT_LIT, T_DEC_LIT, T_EOF
 };
 
 struct token {
@@ -22,6 +22,7 @@ struct scanfile {
 };
 
 int scan(struct scanfile *f, struct token *t);
+const char *token_val_str(enum tokentype t);
 const char *token_str(struct token *t);
 char *token_dump(struct token *t);
 

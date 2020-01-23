@@ -11,6 +11,8 @@ test: build/sic
 testc:
 	CC=$(CC) tests/runtest.sh build
 
+tests: test
+
 build:
 	mkdir -p build
 
