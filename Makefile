@@ -1,9 +1,9 @@
 INC_FILES := inc/*.h
 SRC_FILES = src/main.c src/scan.c
-CFLAGS = -O3 -Iinc/
+CFLAGS = -std=c99 -Wall -Werror -pedantic -O3 -Iinc/
 
 build/sic: build $(INC_FILES) $(SRC_FILES)
-	$(CC) -o build/sic $(SRC_FILES) $(CFLAGS)
+	$(CC) $(CFLAGS) -o build/sic $(SRC_FILES)
 
 test: build/sic
 	CC=build/sic tests/runtest.sh build

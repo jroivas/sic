@@ -5,16 +5,16 @@
 
 typedef unsigned long long literalnum;
 
+enum tokentype {
+    T_PLUS, T_MINUS, T_STAR, T_DIV, T_MOD,
+    T_INT_LIT, T_DEC_LIT
+};
+
 struct token {
-    int token;
+    enum tokentype token;
     char *value_string;
     literalnum value;
     literalnum fraction;
-};
-
-enum {
-    T_PLUS, T_MINUS, T_STAR, T_DIV, T_MOD,
-    T_INT_LIT, T_DEC_LIT
 };
 
 struct scanfile {

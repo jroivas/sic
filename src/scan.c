@@ -8,7 +8,7 @@ static const char *tokenstr[] = {
     "INT_LIT", "DEC_LIT"
 };
 
-inline const char *token_str(struct token *t)
+const char *token_str(struct token *t)
 {
     FATAL(t->token >= sizeof(tokenstr) / sizeof (char*),
             "Token string table overflow with %d", t->token);
@@ -17,7 +17,7 @@ inline const char *token_str(struct token *t)
 
 char *token_dump(struct token *t)
 {
-    static const int MAX_LEN = 128;
+    static size_t MAX_LEN = 128;
     char *tmp = calloc(1, MAX_LEN);
     switch (t->token) {
         case T_INT_LIT:
