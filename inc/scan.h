@@ -3,8 +3,6 @@
 
 #include <stdio.h>
 
-typedef unsigned long long literalnum;
-
 enum tokentype {
     T_PLUS, T_MINUS, T_STAR, T_DIV, T_MOD,
     T_INT_LIT, T_DEC_LIT

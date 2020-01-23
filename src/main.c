@@ -17,7 +17,7 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 1;
     }
-    
+
     f.infile = fopen(argv[1], "r");
     f.line = 0;
     f.putback = 0;
