@@ -4,12 +4,14 @@
 #include <ctype.h>
 
 static const char *tokenstr[] = {
-    "+", "-",
+    "+", "-", "*", "/", "%",
     "INT_LIT", "DEC_LIT"
 };
 
 inline const char *token_str(struct token *t)
 {
+    FATAL(t->token >= sizeof(tokenstr) / sizeof (char*),
+            "Token string table overflow with %d", t->token);
     return tokenstr[t->token];
 }
 
@@ -106,6 +108,15 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '-':
             t->token = T_MINUS;
+            break;
+        case '*':
+            t->token = T_STAR;
+            break;
+        case '/':
+            t->token = T_DIV;
+            break;
+        case '%':
+            t->token = T_MOD;
             break;
         default:
             if (isdigit(c)) {

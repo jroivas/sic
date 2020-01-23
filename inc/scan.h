@@ -13,7 +13,7 @@ struct token {
 };
 
 enum {
-    T_PLUS, T_MINUS,
+    T_PLUS, T_MINUS, T_STAR, T_DIV, T_MOD,
     T_INT_LIT, T_DEC_LIT
 };
 
