@@ -541,3 +541,8 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         // Will print 10
         printf("Combined2 length: %d\n", (values + tail).length());
     }
+
+## Swap
+
+Support built-in swap operation, which can be compiled to assembly instruction
+on target architectures supporting it.
