@@ -1,23 +1,7 @@
 # SIC - Slighltly Improved C
 
-
-# All variables are initialized
-
-All variables are initialized to their type default.
-
-Example:
-
-    int main()
-    {
-        int a;
-        double b;
-        char *p;
-
-        assert(a == 0);
-        assert(b == 0.0);
-        assert(p == NULL);
-    }
-
+Slightly Improved C is a programming language that borrows a lot from C,
+but is not afraid to introduce breaking changes in order to improve it.
 
 # Limit undefined behaviour
 
@@ -39,7 +23,20 @@ This avoids problems with uninitialized variables.
 - Floating and fixed point to 0.0
 - Pointers to NULL
 - Strings to empty string
-- Structures to memset(sizeof(struct), 0)
+- Structures to memset(struct, sizeof(struct), 0)
+
+Example:
+
+    int main()
+    {
+        int a;
+        double b;
+        char *p;
+
+        assert(a == 0);
+        assert(b == 0.0);
+        assert(p == NULL);
+    }
 
 ## Integer overflow
 
@@ -83,7 +80,7 @@ Example:
     }
 
 Without `overflow` keyword execution of program would be
-ended into an exception. Now it just iterates first from
+ended with an exception. Now it just iterates first from
 MAX_INT - 5 to MAX_INT, then assings a = 0, and continues
 iteration until 5.
 
@@ -102,7 +99,7 @@ However this example is perfectly valid:
 
 That would turn from MAX_INT to MIN_INT, and then continue
 until would reach 5. However on functionality way it's not
- same as first example.
+same as the first example.
 Thus most logical way to use `overflow` is just:
 
     int main()
@@ -148,8 +145,7 @@ Thus let's consider this example:
         return c;
     }
 
-That program would exit with error code,
-but would not fail at any point.
+That program would exit with error code, but would not fail at any point.
 Without `overflow` keywords execution would be ended at first `a++`.
 Also, here we first time take return value `overflow` and assign it into
 and integer. Earlier example in case of `if` works same way.
@@ -179,12 +175,76 @@ On top of that we have specific bit size ints:
 - 128 bits: int128, uint128
 
 Extending to bigger types is trivial, if there comes hardware support.
+However compiler supports built-in bigint, which allows arbitrary big integers.
+These are not any specific bit/byte size, but can grow any size when needed.
+This of course has it's performance and storage size issues.
+Otherwise bigints can be used like any other integer type:
 
-# Built-in fixed point
+    int32 a = 12345;
+    int64 b = 567890;
+    bigint c = 123456789123456789001234567890;
+
+    bigint d = a + b;
+    d += c;
+
+
+# Built-in fixed point, and extended floats
 
 Floating point is great, but sometimes more exact representation is needed.
 Solution if fixed point math, and it improves precision, for example,
 on financial calculations.
+
+For float:
+
+- 32 bits: float32, float
+- 64 bits: float64, double
+- 128 bits: float128
+
+Fixed point precision contains two parts: integral and fraction.
+It's possible to select precision for both of them separately.
+From integral part one bit is reserved for sign flag.
+Syntax for fixed number types is `fixed<a,b>`
+where a integral bytes and b is fraction bytes:
+
+- fixed<2,4>: 2 bytes for integral, 4 bytes for fraction, 6 bytes total, allowing max 32768.4294967295 and minimum -32767.4294967295
+- fixed<2,2>: 2 bytes for integral, 2 bytes for fraction, 4 bytes total, allowing max 32768.65535 and minimum -32767.65535
+- fixed<10,1>: 10 bytes for integral, 1 byte for fraction, 11 bytes total, allowing max 604462909807314587353088.255 and minimum -604462909807314587353087.255
+
+One can use plain `fixed` but it's in most cases suboptimal.
+Compiler tries to determine maximum values for both sides,
+but sometimes that's just impossible.
+On these cases plain `fixed` can be exteneded to bigger precision.
+Unfortunately that's expensive and compiler is unable to produce optimal code.
+It's always recommended to define precisions for fixed types.
+
+On can perform operations on different sized fixed numbers with certain constraints.
+Result of the operation must fit into the combined bigger precision limits.
+Compiler takes bigger integral and fraction parts and uses that as result type.
+
+For example:
+
+    fixed<10,1> a = 123456789.55;
+    fixed<1,9> b = 1.123456789;
+
+    // Prints fixed<10,9>
+    printf("%s\n", typestr(a + b));
+
+Similar way if storing the result to new fixed point number, reserved precision must be bigger:
+
+    fixed<10,1> a = 123456789.55;
+    fixed<1,9> b = 1.123456789;
+
+    fixed<10,9>  c = a + b;
+    fixed<11,11> d = a + b;
+    fixed<5,4> f = a + b;  // Compiler failure
+
+Fixed sized numbers are most effective on max 64bit (8 byte) values, but are not limited to that.
+One just need to keep in mind, that compiler can generate wy much more optimal code if both values
+are max 8 bytes. Otherwise it might need to rely on bigint feature, which means performance hit.
+Systems supporting efficient 128 bit integer handling can be efficient till 16 byte values.
+This cannot be ensured, thus 64bit is the safe limit.
+
+
 
 # Built-in string
 
