@@ -1,11 +1,17 @@
 #include "gc.h"
 #include "parse.h"
 
+enum gen_type {
+    G_INT, G_FLOAT, G_FIXED
+};
+
 struct value {
     int reg;
     int bits;
     int direct;
+    enum gen_type type;
     literalnum value;
+    literalnum frac;
     struct value *next;
 };
 
@@ -52,16 +58,22 @@ struct value *find_value(struct gen_context *ctx, int reg)
     return NULL;
 }
 
-struct value *new_value(struct gen_context *ctx, literalnum value)
+struct value *new_value_frac(struct gen_context *ctx, literalnum value, literalnum frac)
 {
     struct value *val = calloc(1, sizeof(struct value));
     val->bits = determine_size(value);
     val->reg = ctx->regnum++;
     val->value = value;
+    val->frac = frac;
     val->next = ctx->values;
     val->direct = 0;
     ctx->values = val;
     return val;
+}
+
+struct value *new_value(struct gen_context *ctx, literalnum value)
+{
+    return new_value_frac(ctx, value, 0);
 }
 
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
@@ -72,9 +84,16 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
     return reg;
 }
 
+int gen_allocate_double(struct gen_context *ctx, int reg)
+{
+    fprintf(ctx->f, "%%%d = alloca double, align 8\n", reg);
+    return reg;
+}
+
 int gen_store_int(struct gen_context *ctx, literalnum value)
 {
     struct value *val = new_value(ctx, value);
+    val->type = G_INT;
     gen_allocate_int(ctx, val->reg, val->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
@@ -82,9 +101,31 @@ int gen_store_int(struct gen_context *ctx, literalnum value)
     return val->reg;
 }
 
+char *double_str(struct value *val)
+{
+    char *tmp = calloc(1, 256);
+    snprintf(tmp, 255, "%llu.%llue+00", val->value, val->frac);
+    return tmp;
+}
+
+int gen_store_double(struct gen_context *ctx, literalnum value, literalnum frac)
+{
+    struct value *val = new_value_frac(ctx, value, frac);
+    val->type = G_FLOAT;
+    gen_allocate_double(ctx, val->reg);
+
+    char *tmp = double_str(val);
+
+    fprintf(ctx->f, "store double %s, double* %%%d, align 8\n",
+            tmp, val->reg);
+    return val->reg;
+}
+
 int gen_load_int(struct gen_context *ctx, int reg)
 {
     struct value *v = find_value(ctx, reg);
+    if (v == NULL)
+        ERR("Value not found: %d", reg);
     if (v->direct)
         return v->reg;
     struct value *res = new_value(ctx, v->value);
@@ -173,7 +214,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             //fprintf(ctx->f, "gen intlit\n");
             //printf("%llu", node->value);
         case A_DEC_LIT:
-            fprintf(ctx->f, "gen declit\n");
+            // FIXME Double for now
+            return gen_store_double(ctx, node->value, node->fraction);
             //printf("%llu.%llu", node->value, node->fraction);
             break;
     }
