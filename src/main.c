@@ -2,6 +2,7 @@
 #include "sic.h"
 #include "scan.h"
 #include "parse.h"
+#include "cg.h"
 
 static void usage(char *cname)
 {
@@ -14,6 +15,8 @@ int main(int argc, char **argv)
     struct scanfile f;
     struct token token;
     struct node *node;
+    FILE *outfile;
+    char outname[255];
 
     if (argc <= 1) {
         usage(argv[0]);
@@ -31,7 +34,11 @@ int main(int argc, char **argv)
 
     node = expression(&f, &token);
     node_walk(node);
-    printf("res: %lf\n", interpret(node));
+
+    snprintf(outname, 255, "%s.ir", argv[1]);
+    outfile = fopen(outname, "w+");
+    codegen(outfile, node);
+    fclose(outfile);
 
     return res;
 }
