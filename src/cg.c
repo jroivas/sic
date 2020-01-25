@@ -74,7 +74,10 @@ struct value *new_value_frac(struct gen_context *ctx, literalnum value, literaln
     val->type = type;
     val->next = ctx->values;
     val->direct = 0;
-    val->sign = 0;
+    if (type == V_INT)
+        val->sign = value < 0;
+    else
+        val->sign = 0;
     ctx->values = val;
     return val;
 }
@@ -141,11 +144,23 @@ int gen_allocate_double(struct gen_context *ctx, int reg)
 
 int gen_store_int(struct gen_context *ctx, struct node *n)
 {
+    if (!n)
+        ERR("No valid node given!");
     struct value *val = new_value(ctx, n->value, n->bits, V_INT);
     gen_allocate_int(ctx, val->reg, val->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
             val->bits, n->value, val->bits, val->reg);
+    return val->reg;
+}
+
+int gen_store_int_lit(struct gen_context *ctx, literalnum value)
+{
+    struct value *val = new_value(ctx, value, 32, V_INT);
+    gen_allocate_int(ctx, val->reg, val->bits);
+
+    fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
+            val->bits, value, val->bits, val->reg);
     return val->reg;
 }
 
@@ -323,7 +338,7 @@ int gen_div(struct gen_context *ctx, int a, int b)
         v1 = gen_bits(ctx, v1, v2);
         v2 = gen_bits(ctx, v2, v1);
         res = new_inst_value(ctx, 0, v1->bits, restype);
-        if (v1->sign && v2->sign) {
+        if (v1->sign || v2->sign) {
             fprintf(ctx->f, "%%%d = sdiv i%d %%%d, %%%d\n",
                 res->reg, v1->bits, v1->reg, v2->reg);
         } else {
@@ -339,6 +354,39 @@ int gen_div(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
+int gen_mod(struct gen_context *ctx, int a, int b)
+{
+    struct value *v1 = find_value(ctx, a);
+    struct value *v2 = find_value(ctx, b);
+    v1 = gen_load(ctx, v1, a);
+    v2 = gen_load(ctx, v2, b);
+
+    enum var_type restype = resolve_type(v1->type, v2->type);
+    v1 = gen_cast(ctx, v1, restype);
+    v2 = gen_cast(ctx, v2, restype);
+
+    struct value *res;
+
+    if (restype == V_INT) {
+        v1 = gen_bits(ctx, v1, v2);
+        v2 = gen_bits(ctx, v2, v1);
+        res = new_inst_value(ctx, 0, v1->bits, restype);
+        if (v1->sign && v2->sign) {
+            fprintf(ctx->f, "%%%d = srem i%d %%%d, %%%d\n",
+                res->reg, v1->bits, v1->reg, v2->reg);
+        } else {
+            fprintf(ctx->f, "%%%d = urem i%d %%%d, %%%d\n",
+                res->reg, v1->bits, v1->reg, v2->reg);
+        }
+    } else if (restype == V_FLOAT) {
+        res = new_inst_value(ctx, 0, v1->bits, restype);
+        fprintf(ctx->f, "%%%d = frem double %%%d, %%%d\n",
+            res->reg, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type: %d", restype);
+    return res->reg;
+}
+
 int gen_negate(struct gen_context *ctx, int a)
 {
     struct value *v = find_value(ctx, a);
@@ -346,7 +394,7 @@ int gen_negate(struct gen_context *ctx, int a)
 
     v = gen_load(ctx, v, a);
     if (v->type == V_INT) {
-        int zeroreg = gen_store_int(ctx, 0);
+        int zeroreg = gen_store_int_lit(ctx, 0);
         struct value *zero = find_value(ctx, zeroreg);
         zero = gen_load(ctx, zero, zeroreg);
         zero = gen_bits(ctx, zero, v);
@@ -387,8 +435,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_DIV:
             return gen_div(ctx, resleft, resright);
         case A_MOD:
-            fprintf(ctx->f, "gen mod\n");
-            break;
+            return gen_mod(ctx, resleft, resright);
         case A_INT_LIT:
             return gen_store_int(ctx, node);
         case A_DEC_LIT:
