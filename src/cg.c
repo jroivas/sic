@@ -407,6 +407,11 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_DEC_LIT:
             // FIXME Double for now
             return gen_store_double(ctx, node);
+        case A_GLUE:
+            printf("Got clue\n");
+            break;
+        default:
+            ERR("Unknown node: %s", node_str(node));
     }
     return 0;
 }

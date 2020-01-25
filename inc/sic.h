@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 typedef unsigned long long literalnum;
+static const int MAX_STR_LEN = 512;
 #define DEBUG 0
 
 enum var_type {

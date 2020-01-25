@@ -4,8 +4,12 @@
 #include <ctype.h>
 
 static const char *tokenstr[] = {
+    "<INVALID>",
     "+", "-", "*", "/", "%",
-    "INT_LIT", "DEC_LIT", "EOF"
+    "=",
+    "IDENTIFIER",
+    "INT_LIT", "DEC_LIT",
+    "SEMI", "EOF"
 };
 
 const char *token_val_str(enum tokentype t)
@@ -64,6 +68,20 @@ static int skip(struct scanfile *f)
     return c;
 }
 
+void match(struct scanfile *f, struct token *t, enum tokentype token, const char *expect)
+{
+    if (t->token == token)
+        scan(f, t);
+    else
+        ERR("Expected %s on line %d", expect, f->line);
+
+}
+
+void semi(struct scanfile *f, struct token *t)
+{
+    match(f, t, T_SEMI, ";");
+}
+
 static void putback(struct scanfile *f, int c)
 {
     f->putback = c;
@@ -99,11 +117,39 @@ literalnum scan_number(struct scanfile *f, int c)
     return res;
 }
 
+char *scan_identifier(struct scanfile *f, int c)
+{
+    char *buf = calloc(1, MAX_STR_LEN);
+    char *ptr = buf;
+    while (isalpha(c) || isdigit(c) || c == '_') {
+        if (ptr - buf - 1 >= MAX_STR_LEN)
+            ERR("Identifier too long: %s", buf);
+        *ptr = c;
+        ptr++;
+        c = next(f);
+    }
+    putback(f, c);
+    return buf;
+}
+#if 0
+void return_token(struct scanfile *f, struct token *t)
+{
+    memcpy(&f->peek, t, sizeof(struct token));
+    t->token = T_INVALID;
+}
+#endif
+
 int scan(struct scanfile *f, struct token *t)
 {
     int c = skip(f);
     int ok = 0;
     memset(t, 0, sizeof(struct token));
+
+    if (f->peek.token != T_INVALID) {
+        memcpy(t, &f->peek, sizeof(struct token));
+        f->peek.token = T_INVALID;
+        return 1;
+    }
 
     switch (c) {
         case EOF:
@@ -124,6 +170,12 @@ int scan(struct scanfile *f, struct token *t)
         case '%':
             t->token = T_MOD;
             break;
+        case '=':
+            t->token = T_EQ;
+            break;
+        case ';':
+            t->token = T_SEMI;
+            break;
         default:
             if (isdigit(c)) {
                 t->token = T_INT_LIT;
@@ -136,6 +188,10 @@ int scan(struct scanfile *f, struct token *t)
                 t->token = T_DEC_LIT;
                 t->fraction = scan_number(f, c);
                 ok = 1;
+            } else if (!ok && (isalpha(c) || c == '_')) {
+                t->value_string = scan_identifier(f, c);
+                t->token = T_IDENTIFIER;
+                ok = 1;
             } else {
                 putback(f, c);
             }
@@ -143,4 +199,11 @@ int scan(struct scanfile *f, struct token *t)
                 ERR("Invalid token: %c", c);
     }
     return 1;
+}
+
+int peek(struct scanfile *f, struct token **t)
+{
+    int res = scan(f, &f->peek);
+    *t = &f->peek;
+    return res;
 }

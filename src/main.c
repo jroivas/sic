@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "sic.h"
 #include "scan.h"
 #include "parse.h"
@@ -23,9 +24,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    memset(&f, 0, sizeof(f));
     f.infile = fopen(argv[1], "r");
-    f.line = 0;
-    f.putback = 0;
     if (!f.infile)
         ERR("Can't open file: %s", argv[1]);
 

@@ -54,6 +54,20 @@ void __node_walk(struct node *node, int depth)
         case A_DEC_LIT:
             printf("%llu.%llu", node->value, node->fraction);
             break;
+        case A_GLUE:
+            printf("GLUE");
+            break;
+        case A_TYPE:
+            printf("TYPE");
+            break;
+        case A_IDENTIFIER:
+            printf("IDENTIFIER");
+            break;
+        case A_ASSIGN:
+            printf("ASSIGN");
+            break;
+        default:
+            ERR("Unknown node: %s", node_str(node));
     }
     printf("\n");
 }

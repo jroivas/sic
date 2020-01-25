@@ -6,8 +6,10 @@
 
 enum nodetype {
     A_ADD, A_MINUS, A_MUL, A_DIV, A_MOD,
+    A_IDENTIFIER,
     A_NEGATE,
-    A_INT_LIT, A_DEC_LIT
+    A_INT_LIT, A_DEC_LIT,
+    A_ASSIGN, A_GLUE, A_TYPE
 };
 
 struct node {
@@ -25,5 +27,6 @@ struct node {
 
 struct node *parse(struct scanfile *f, struct token *token);
 extern void node_walk(struct node *node);
+const char *node_str(struct node *n);
 
 #endif
