@@ -98,6 +98,9 @@ struct node *make_leaf(enum nodetype node, struct token *t)
         n->value = t->value;
         n->type = V_INT;
         n->bits = determine_size(t->value);
+        /* Minimum 32 bits on literals */
+        if (n->bits < 32)
+            n->bits = 32;
     } else if (t->token == T_DEC_LIT) {
 #if DEBUG
         printf("  DEC: %llu.%llu\n", t->value, t->fraction);
