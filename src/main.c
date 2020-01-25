@@ -16,7 +16,7 @@ int main(int argc, char **argv)
     struct token token;
     struct node *node;
     FILE *outfile;
-    char outname[255];
+    char outname[256];
 
     if (argc <= 1) {
         usage(argv[0]);
@@ -32,10 +32,11 @@ int main(int argc, char **argv)
     if (!scan(&f, &token))
         ERR("Error while parsing %s", argv[1]);
 
-    node = expression(&f, &token);
+    node = parse(&f, &token);
     node_walk(node);
 
     snprintf(outname, 255, "%s.ir", argv[1]);
+    outname[255] = 0;
     outfile = fopen(outname, "w+");
     codegen(outfile, node);
     fclose(outfile);

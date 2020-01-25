@@ -120,7 +120,6 @@ struct value *gen_cast(struct gen_context *ctx, struct value *v, enum var_type t
         fprintf(ctx->f, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->bits, v->reg);
         val->direct = 1;
-        //    sitofp i32 %6 to float
     } else
         ERR("Invalid cast for %d, %d -> %d",
             v->reg, v->type, target);

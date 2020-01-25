@@ -23,7 +23,7 @@ struct node {
     struct node *right;
 };
 
-struct node *expression(struct scanfile *f, struct token *token);
-void node_walk(struct node *node);
+struct node *parse(struct scanfile *f, struct token *token);
+extern void node_walk(struct node *node);
 
 #endif
