@@ -14,6 +14,10 @@ testc:
 
 tests: test
 
+runtest: build/sic
+	build/sic tests/test_$(TEST).sic
+	cat tests/test_$(TEST).sic.ir
+
 build:
 	mkdir -p build
 
