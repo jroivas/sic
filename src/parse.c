@@ -31,6 +31,41 @@ enum nodetype oper(enum tokentype t)
     }
 }
 
+enum var_type resolve_var_type(struct node *n)
+{
+    enum var_type v1 = V_VOID;
+    enum var_type v2 = V_VOID;
+    int s1 = 0;
+    int s2 = 0;
+
+    if (n->left) {
+        if (n->left->type == V_VOID)
+            v1 = resolve_var_type(n->left);
+        else
+            v1 = n->left->type;
+        s1 = n->left->bits;
+    }
+    if (n->right) {
+        if (n->right->type == V_VOID)
+            v2 = resolve_var_type(n->right);
+        else
+            v2 = n->right->type;
+        s2 = n->right->bits;
+    }
+
+    if (v1 == V_VOID && v2 != V_VOID)
+        v1 = v2;
+    if (v1 == V_INT && v2 == V_FLOAT)
+        v1 = v2;
+
+    if (s1 < s2)
+        s1 = s2;
+
+    n->type = v1;
+    n->bits = s1;
+    return v1;
+}
+
 struct node *make_node(enum nodetype node, struct node *left,
         struct node *right)
 {
@@ -41,6 +76,10 @@ struct node *make_node(enum nodetype node, struct node *left,
     res->node = node;
     res->left = left;
     res->right = right;
+    if (left != NULL || right != NULL)
+        res->type = resolve_var_type(res);
+    else
+        res->type = V_VOID;
 #if DEBUG
     printf("MAKE: %d, %s\n", node, node_str(res));
 #endif
@@ -57,12 +96,16 @@ struct node *make_leaf(enum nodetype node, struct token *t)
         printf("  INT: %llu\n", t->value);
 #endif
         n->value = t->value;
+        n->type = V_INT;
+        n->bits = determine_size(t->value);
     } else if (t->token == T_DEC_LIT) {
 #if DEBUG
         printf("  DEC: %llu.%llu\n", t->value, t->fraction);
 #endif
         n->value = t->value;
         n->fraction = t->fraction;
+        n->bits = 8;
+        n->type = V_FLOAT;
     } else
         ERR("Invalid leaf: %s", node_str(n));
     return n;
@@ -96,7 +139,7 @@ struct node *cast_expression(struct scanfile *f, struct token *token);
 
 struct node *unary_expression(struct scanfile *f, struct token *token)
 {
-    struct node *left /*, *right*/;
+    struct node *left;
     enum tokentype type;
 
     type = token->token;

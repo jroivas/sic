@@ -12,7 +12,8 @@ enum nodetype {
 
 struct node {
     enum nodetype node;
-    int type;
+    enum var_type type;
+    int bits;
 
     char *value_string;
     literalnum value;

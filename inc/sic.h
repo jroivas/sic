@@ -7,6 +7,11 @@
 typedef unsigned long long literalnum;
 #define DEBUG 0
 
+enum var_type {
+    V_VOID, V_INT, V_FLOAT, V_FIXED
+};
+
+
 #define ERR(...) { \
     fprintf(stderr, "ERROR: ");\
     fprintf(stderr, __VA_ARGS__);\
@@ -20,5 +25,7 @@ typedef unsigned long long literalnum;
     fprintf(stderr, "\n");\
     exit(1); \
 }
+
+int determine_size(literalnum value);
 
 #endif
