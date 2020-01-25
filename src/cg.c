@@ -5,6 +5,8 @@ struct value {
     int reg;
     int bits;
     int direct;
+    int sign;
+
     enum var_type type;
     literalnum value;
     literalnum frac;
@@ -87,6 +89,7 @@ struct value *new_value_frac(struct gen_context *ctx, literalnum value, literaln
     val->type = type;
     val->next = ctx->values;
     val->direct = 0;
+    val->sign = 0;
     ctx->values = val;
     return val;
 }
@@ -95,6 +98,14 @@ struct value *new_value(struct gen_context *ctx, literalnum value,
         enum var_type type)
 {
     return new_value_frac(ctx, value, 0, type);
+}
+
+struct value *new_inst_value(struct gen_context *ctx, literalnum value,
+        enum var_type type)
+{
+    struct value *res = new_value(ctx, value, type);
+    res->direct = 1;
+    return res;
 }
 
 enum var_type resolve_type(enum var_type a, enum var_type b)
@@ -207,6 +218,27 @@ struct value *gen_load(struct gen_context *ctx, struct value *v, int reg)
     ERR("Invalid type: %d", v->type);
 }
 
+struct value *gen_bits(struct gen_context *ctx, struct value *v1, struct value *v2)
+{
+    int bits1 = v1->bits;
+    int bits2 = v2->bits;
+    if (bits1 == bits2)
+        return v1;
+    if (bits1 > bits2)
+        return v1;
+
+    struct value *res = new_inst_value(ctx, 0, V_INT);
+    res->bits = bits2;
+    if (v2->sign) {
+        fprintf(ctx->f, "%%%d = sext i%d %%%d to i%d\n",
+            res->reg, bits1, v1->reg, bits2);
+    } else {
+        fprintf(ctx->f, "%%%d = zext i%d %%%d to i%d\n",
+            res->reg, bits1, v1->reg, bits2);
+    }
+    return res;
+}
+
 int gen_add(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
@@ -218,18 +250,21 @@ int gen_add(struct gen_context *ctx, int a, int b)
     v1 = gen_cast(ctx, v1, restype);
     v2 = gen_cast(ctx, v2, restype);
 
-    struct value *res = new_value(ctx, 0, restype);
-    res->direct = 1;
+    struct value *res;
 
     if (restype == V_INT) {
-        int bits = v1->bits;
-        if (bits < v2->bits)
-            bits = v2->bits;
+        v1 = gen_bits(ctx, v1, v2);
+        v2 = gen_bits(ctx, v2, v1);
+        res = new_inst_value(ctx, 0, restype);
+        res->bits = v1->bits;
         fprintf(ctx->f, "%%%d = add i%d %%%d, %%%d\n",
-            res->reg, bits, v1->reg, v2->reg);
-    } else if (restype == V_FLOAT)
+            res->reg, v1->bits, v1->reg, v2->reg);
+    } else if (restype == V_FLOAT) {
+        res = new_inst_value(ctx, 0, restype);
         fprintf(ctx->f, "%%%d = fadd double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type: %d", restype);
     return res->reg;
 }
 
@@ -244,18 +279,21 @@ int gen_sub(struct gen_context *ctx, int a, int b)
     v1 = gen_cast(ctx, v1, restype);
     v2 = gen_cast(ctx, v2, restype);
 
-    struct value *res = new_value(ctx, 0, restype);
-    res->direct = 1;
+    struct value *res;
 
     if (restype == V_INT) {
-        int bits = v1->bits;
-        if (bits < v2->bits)
-            bits = v2->bits;
+        v1 = gen_bits(ctx, v1, v2);
+        v2 = gen_bits(ctx, v2, v1);
+        res = new_inst_value(ctx, 0, restype);
+        res->bits = v1->bits;
         fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
-            res->reg, bits, v1->reg, v2->reg);
-    } else if (restype == V_FLOAT)
+            res->reg, v1->bits, v1->reg, v2->reg);
+    } else if (restype == V_FLOAT) {
+        res = new_inst_value(ctx, 0, restype);
         fprintf(ctx->f, "%%%d = fsub double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type: %d", restype);
     return res->reg;
 }
 
@@ -269,14 +307,14 @@ int gen_negate(struct gen_context *ctx, int a)
         int zeroreg = gen_store_int(ctx, 0);
         struct value *zero = find_value(ctx, zeroreg);
         zero = gen_load(ctx, zero, zeroreg);
+        zero = gen_bits(ctx, zero, v);
 
-        res = new_value(ctx, 0, v->type);
-        res->direct = 1;
+        res = new_inst_value(ctx, 0, v->type);
+        res->bits = v->bits;
         fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
             res->reg, v->bits, zero->reg, v->reg);
     } else if (v->type == V_FLOAT) {
-        res = new_value(ctx, 0, v->type);
-        res->direct = 1;
+        res = new_inst_value(ctx, 0, v->type);
         fprintf(ctx->f, "%%%d = fneg double %%%d\n",
             res->reg, v->reg);
     } else
