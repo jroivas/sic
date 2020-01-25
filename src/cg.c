@@ -64,7 +64,7 @@ struct value *find_value(struct gen_context *ctx, int reg)
     return NULL;
 }
 
-struct value *new_value_frac(struct gen_context *ctx, literalnum value, literalnum frac, int bits, enum var_type type)
+struct value *new_value_frac(struct gen_context *ctx, literalnum value, literalnum frac, int bits, enum var_type type, int sign)
 {
     struct value *val = calloc(1, sizeof(struct value));
     val->bits = bits;
@@ -74,24 +74,24 @@ struct value *new_value_frac(struct gen_context *ctx, literalnum value, literaln
     val->type = type;
     val->next = ctx->values;
     val->direct = 0;
-    if (type == V_INT)
+    if (!sign && type == V_INT)
         val->sign = value < 0;
     else
-        val->sign = 0;
+        val->sign = sign;
     ctx->values = val;
     return val;
 }
 
 struct value *new_value(struct gen_context *ctx, literalnum value,
-        int bits, enum var_type type)
+        int bits, enum var_type type, int sign)
 {
-    return new_value_frac(ctx, value, 0, bits, type);
+    return new_value_frac(ctx, value, 0, bits, type, sign);
 }
 
 struct value *new_inst_value(struct gen_context *ctx,
-        literalnum value, int bits, enum var_type type)
+        literalnum value, int bits, enum var_type type, int sign)
 {
-    struct value *res = new_value(ctx, value, bits, type);
+    struct value *res = new_value(ctx, value, bits, type, sign);
     res->direct = 1;
     return res;
 }
@@ -116,7 +116,7 @@ struct value *gen_cast(struct gen_context *ctx, struct value *v, enum var_type t
 
     struct value *val;
     if (target == V_FLOAT && v->type == V_INT) {
-        val = new_value_frac(ctx, v->value, 0, v->bits, V_FLOAT);
+        val = new_value_frac(ctx, v->value, 0, v->bits, V_FLOAT, 0);
         fprintf(ctx->f, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->bits, v->reg);
         val->direct = 1;
@@ -146,7 +146,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct value *val = new_value(ctx, n->value, n->bits, V_INT);
+    struct value *val = new_value(ctx, n->value, n->bits, V_INT, 0);
     gen_allocate_int(ctx, val->reg, val->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
@@ -156,7 +156,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 
 int gen_store_int_lit(struct gen_context *ctx, literalnum value)
 {
-    struct value *val = new_value(ctx, value, 32, V_INT);
+    struct value *val = new_value(ctx, value, 32, V_INT, 0);
     gen_allocate_int(ctx, val->reg, val->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
@@ -173,7 +173,7 @@ char *double_str(struct value *val)
 
 int gen_store_double(struct gen_context *ctx, struct node *n)
 {
-    struct value *val = new_value_frac(ctx, n->value, n->fraction, n->bits, V_FLOAT);
+    struct value *val = new_value_frac(ctx, n->value, n->fraction, n->bits, V_FLOAT, 0);
     gen_allocate_double(ctx, val->reg);
 
     char *tmp = double_str(val);
@@ -187,7 +187,7 @@ struct value *gen_load_int(struct gen_context *ctx, struct value *v)
 {
     if (v->direct)
         return v;
-    struct value *res = new_value(ctx, v->value, v->bits, V_INT);
+    struct value *res = new_value(ctx, v->value, v->bits, V_INT, 0);
 
     fprintf(ctx->f, "%%%d = load i%d, i%d* %%%d, align 4\n",
             res->reg, res->bits, res->bits, v->reg);
@@ -198,17 +198,17 @@ struct value *gen_load_float(struct gen_context *ctx, struct value *v)
 {
     if (v->direct)
         return v;
-    struct value *res = new_value(ctx, v->value, v->bits, V_FLOAT);
+    struct value *res = new_value(ctx, v->value, v->bits, V_FLOAT, 0);
 
     fprintf(ctx->f, "%%%d = load double, double* %%%d, align 8\n",
             res->reg, v->reg);
     return res;
 }
 
-struct value *gen_load(struct gen_context *ctx, struct value *v, int reg)
+struct value *gen_load(struct gen_context *ctx, struct value *v)
 {
     if (v == NULL)
-        ERR("Value not found for: %d", reg);
+        ERR("Can't load null!");
     if (v->type == V_INT)
         return gen_load_int(ctx, v);
     else if (v->type == V_FLOAT)
@@ -226,7 +226,7 @@ struct value *gen_bits(struct gen_context *ctx, struct value *v1, struct value *
     if (bits1 > bits2)
         return v1;
 
-    struct value *res = new_inst_value(ctx, 0, bits2, V_INT);
+    struct value *res = new_inst_value(ctx, 0, bits2, V_INT, v1->sign || v2->sign);
     if (v2->sign) {
         fprintf(ctx->f, "%%%d = sext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
@@ -237,27 +237,34 @@ struct value *gen_bits(struct gen_context *ctx, struct value *v1, struct value *
     return res;
 }
 
+enum var_type get_and_cast(struct gen_context *ctx, struct value **v1, struct value **v2)
+{
+    *v1 = gen_load(ctx, *v1);
+    *v2 = gen_load(ctx, *v2);
+
+    enum var_type restype = resolve_type((*v1)->type, (*v2)->type);
+    *v1 = gen_cast(ctx, *v1, restype);
+    *v2 = gen_cast(ctx, *v2, restype);
+
+    if (restype == V_INT) {
+        *v1 = gen_bits(ctx, *v1, *v2);
+        *v2 = gen_bits(ctx, *v2, *v1);
+    }
+
+    return restype;
+}
+
 int gen_add(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
     struct value *v2 = find_value(ctx, b);
-    v1 = gen_load(ctx, v1, a);
-    v2 = gen_load(ctx, v2, b);
-
-    enum var_type restype = resolve_type(v1->type, v2->type);
-    v1 = gen_cast(ctx, v1, restype);
-    v2 = gen_cast(ctx, v2, restype);
-
-    struct value *res;
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct value *res = new_inst_value(ctx, 0, v1->bits, restype, v1->sign || v2->sign);
 
     if (restype == V_INT) {
-        v1 = gen_bits(ctx, v1, v2);
-        v2 = gen_bits(ctx, v2, v1);
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = add i%d %%%d, %%%d\n",
             res->reg, v1->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = fadd double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
@@ -269,23 +276,13 @@ int gen_sub(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
     struct value *v2 = find_value(ctx, b);
-    v1 = gen_load(ctx, v1, a);
-    v2 = gen_load(ctx, v2, b);
-
-    enum var_type restype = resolve_type(v1->type, v2->type);
-    v1 = gen_cast(ctx, v1, restype);
-    v2 = gen_cast(ctx, v2, restype);
-
-    struct value *res;
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct value *res = new_inst_value(ctx, 0, v1->bits, restype, v1->sign || v2->sign);
 
     if (restype == V_INT) {
-        v1 = gen_bits(ctx, v1, v2);
-        v2 = gen_bits(ctx, v2, v1);
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
             res->reg, v1->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = fsub double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
@@ -297,23 +294,13 @@ int gen_mul(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
     struct value *v2 = find_value(ctx, b);
-    v1 = gen_load(ctx, v1, a);
-    v2 = gen_load(ctx, v2, b);
-
-    enum var_type restype = resolve_type(v1->type, v2->type);
-    v1 = gen_cast(ctx, v1, restype);
-    v2 = gen_cast(ctx, v2, restype);
-
-    struct value *res;
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct value *res = new_inst_value(ctx, 0, v1->bits, restype, v1->sign || v2->sign);
 
     if (restype == V_INT) {
-        v1 = gen_bits(ctx, v1, v2);
-        v2 = gen_bits(ctx, v2, v1);
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = mul i%d %%%d, %%%d\n",
             res->reg, v1->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = fmul double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
@@ -325,19 +312,10 @@ int gen_div(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
     struct value *v2 = find_value(ctx, b);
-    v1 = gen_load(ctx, v1, a);
-    v2 = gen_load(ctx, v2, b);
-
-    enum var_type restype = resolve_type(v1->type, v2->type);
-    v1 = gen_cast(ctx, v1, restype);
-    v2 = gen_cast(ctx, v2, restype);
-
-    struct value *res;
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct value *res = new_inst_value(ctx, 0, v1->bits, restype, v1->sign || v2->sign);
 
     if (restype == V_INT) {
-        v1 = gen_bits(ctx, v1, v2);
-        v2 = gen_bits(ctx, v2, v1);
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         if (v1->sign || v2->sign) {
             fprintf(ctx->f, "%%%d = sdiv i%d %%%d, %%%d\n",
                 res->reg, v1->bits, v1->reg, v2->reg);
@@ -346,7 +324,6 @@ int gen_div(struct gen_context *ctx, int a, int b)
                 res->reg, v1->bits, v1->reg, v2->reg);
         }
     } else if (restype == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = fdiv double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
@@ -358,19 +335,10 @@ int gen_mod(struct gen_context *ctx, int a, int b)
 {
     struct value *v1 = find_value(ctx, a);
     struct value *v2 = find_value(ctx, b);
-    v1 = gen_load(ctx, v1, a);
-    v2 = gen_load(ctx, v2, b);
-
-    enum var_type restype = resolve_type(v1->type, v2->type);
-    v1 = gen_cast(ctx, v1, restype);
-    v2 = gen_cast(ctx, v2, restype);
-
-    struct value *res;
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct value *res = new_inst_value(ctx, 0, v1->bits, restype, v1->sign || v2->sign);
 
     if (restype == V_INT) {
-        v1 = gen_bits(ctx, v1, v2);
-        v2 = gen_bits(ctx, v2, v1);
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         if (v1->sign && v2->sign) {
             fprintf(ctx->f, "%%%d = srem i%d %%%d, %%%d\n",
                 res->reg, v1->bits, v1->reg, v2->reg);
@@ -379,7 +347,6 @@ int gen_mod(struct gen_context *ctx, int a, int b)
                 res->reg, v1->bits, v1->reg, v2->reg);
         }
     } else if (restype == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v1->bits, restype);
         fprintf(ctx->f, "%%%d = frem double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
@@ -392,18 +359,18 @@ int gen_negate(struct gen_context *ctx, int a)
     struct value *v = find_value(ctx, a);
     struct value *res;
 
-    v = gen_load(ctx, v, a);
+    v = gen_load(ctx, v);
     if (v->type == V_INT) {
         int zeroreg = gen_store_int_lit(ctx, 0);
         struct value *zero = find_value(ctx, zeroreg);
-        zero = gen_load(ctx, zero, zeroreg);
+        zero = gen_load(ctx, zero);
         zero = gen_bits(ctx, zero, v);
 
-        res = new_inst_value(ctx, 0, v->bits, v->type);
+        res = new_inst_value(ctx, 0, v->bits, v->type, 1);
         fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
             res->reg, v->bits, zero->reg, v->reg);
     } else if (v->type == V_FLOAT) {
-        res = new_inst_value(ctx, 0, v->bits, v->type);
+        res = new_inst_value(ctx, 0, v->bits, v->type, 0);
         fprintf(ctx->f, "%%%d = fneg double %%%d\n",
             res->reg, v->reg);
     } else
