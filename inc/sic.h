@@ -27,6 +27,7 @@ enum var_type {
     exit(1); \
 }
 
+const char *type_str(enum var_type t);
 int determine_size(literalnum value);
 
 #endif

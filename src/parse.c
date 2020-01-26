@@ -8,7 +8,9 @@ static const char *nodestr[] = {
     "IDENTIFIER",
     "-",
     "INT_LIT", "DEC_LIT",
-    "ASSIGN", "GLUE", "TYPE"
+    "ASSIGN", "GLUE", "TYPE",
+    "DECLARATION",
+    "LIST"
 };
 
 const char *node_str(struct node *n)
@@ -177,26 +179,22 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
     //TODO type_qualifier, storage_class_specifier
     if (type == NULL)
         return type;
-    printf("type? %p == %d, bits %d\n", (void*)type, type->type, type->bits);
 
     struct node *res = NULL;
     while (1) {
         res = declaration_specifiers(f, token);
-        printf("res? %p\n", (void*)res);
         if (res == NULL)
             break;
         res = make_node(A_GLUE, type, res);
     }
     if (!res)
         res = type;
-    printf("fres? %p\n", (void*)res);
     return res;
 }
 
 struct node *direct_declarator(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
-    printf("token? %s\n", token_str(token));
     if (token->token == T_IDENTIFIER) {
         res = make_node(A_IDENTIFIER, NULL, NULL);
         res->value_string = token->value_string;
@@ -238,13 +236,11 @@ struct node *initializer(struct scanfile *f, struct token *token)
 struct node *init_declarator(struct scanfile *f, struct token *token)
 {
     struct node *res = declarator(f, token);
-    printf("DECLr %p\n", (void*)res);
     if (!res)
         return NULL;
     if (token->token == T_EQ) {
         scan(f, token);
         struct node *tmp = initializer(f, token);
-        printf("INITs %p\n", (void*)tmp);
         res = make_node(A_ASSIGN, res, tmp);
     }
 
@@ -261,14 +257,23 @@ struct node *init_declarator_list(struct scanfile *f, struct token *token)
 struct node *declaration(struct scanfile *f, struct token *token)
 {
     struct node *res = declaration_specifiers(f, token);
-    printf("DECPEC %p\n", (void*)res);
     if (!res)
         return NULL;
 
     struct node *decl = init_declarator_list(f, token);
-    printf("DECL2 %p %s\n", (void*)decl, token_str(token));
     if (decl)
-        res = make_node(A_GLUE, res, decl);
+        res = make_node(A_DECLARATION, res, decl);
+#if 0
+    else {
+        match(f, token, T_IDENTIFIER, "identifier");
+
+        struct node *tmp = make_node(A_IDENTIFIER, NULL, NULL);
+        tmp->value_string = token->value_string;
+        res = make_node(A_DECLARATION, res, tmp);
+
+        scan(f, token);
+    }
+#endif
 
     semi(f, token);
     return res;
@@ -327,9 +332,7 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
         scan(f, token);
 
         right = cast_expression(f, token);
-        printf("MULr: %p\n", (void *)right);
         left = make_node(oper(type), left, right);
-        printf("MULl: %p\n", (void *)left);
 
         if (token->token == EOF)
             break;
@@ -361,16 +364,9 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
             break;
         scan(f, token);
 
-        printf("ADD0: p: %s n: %s\n", token_val_str(type), token_str(token));
 
         right = multiplicative_expression(f, token);
-        printf("ADDr: %p n: %s\n", (void *)right, token_str(token));
-        /*
-        if (token->token != T_PLUS && token->token != T_SLASH)
-            break;
-            */
         left = make_node(oper(type), left, right);
-        printf("ADDl: %p\n", (void *)left);
 
         if (token->token == T_EOF)
             break;
@@ -391,7 +387,6 @@ struct node *expression(struct scanfile *f, struct token *token)
 struct node *expression_statement(struct scanfile *f, struct token *token)
 {
     struct node *res = expression(f, token);
-    printf("ex1\n");
     if (res)
         semi(f, token);
     return res;
@@ -432,20 +427,25 @@ struct node *external_declaration(struct scanfile *f, struct token *token)
     return NULL;
 }
 
-
 struct node *translation_unit(struct scanfile *f, struct token *token)
 {
-    struct node *res = external_declaration(f, token);
+    struct node *decl = external_declaration(f, token);
     if (!res)
         return NULL;
+    struct node *res = make_node(A_LIST, decl, NULL);
+    struct node *val = res;
 
-    printf("TU\n");
     while (1) {
         struct node *tmp = translation_unit(f, token);
-        printf("TU1: %p\n", (void*)tmp);
+        if (!tmp)
+            break;
+        va = make_node(A_LIST, res, tmp);
+    /*
+        struct node *tmp = translation_unit(f, token);
         if (!tmp)
             break;
         res = make_node(A_GLUE, res, tmp);
+    */
     }
     return res;
 }

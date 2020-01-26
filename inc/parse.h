@@ -9,7 +9,9 @@ enum nodetype {
     A_IDENTIFIER,
     A_NEGATE,
     A_INT_LIT, A_DEC_LIT,
-    A_ASSIGN, A_GLUE, A_TYPE
+    A_ASSIGN, A_GLUE, A_TYPE,
+    A_DECLARATION,
+    A_LIST
 };
 
 struct node {

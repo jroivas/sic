@@ -1,6 +1,17 @@
 #include "sic.h"
 #include "parse.h"
 
+static const char *typestr[] = {
+    "void", "int", "float", "fixed"
+};
+
+const char *type_str(enum var_type t)
+{
+    FATAL(t >= sizeof(typestr) / sizeof (char*),
+            "Node string table overflow with %d", t);
+    return typestr[t];
+}
+
 int determine_size_bytes(literalnum value)
 {
     if (value < 0x100)
@@ -58,13 +69,16 @@ void __node_walk(struct node *node, int depth)
             printf("GLUE");
             break;
         case A_TYPE:
-            printf("TYPE");
+            printf("TYPE %s", type_str(node->type));
             break;
         case A_IDENTIFIER:
-            printf("IDENTIFIER");
+            printf("IDENTIFIER %s", node->value_string);
             break;
         case A_ASSIGN:
             printf("ASSIGN");
+            break;
+        case A_DECLARATION:
+            printf("DECLARATION");
             break;
         default:
             ERR("Unknown node: %s", node_str(node));
