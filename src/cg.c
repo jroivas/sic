@@ -411,7 +411,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             printf("Got clue\n");
             break;
         default:
-            ERR("Unknown node: %s", node_str(node));
+            ERR("Unknown node in code gen: %s", node_str(node));
     }
     return 0;
 }

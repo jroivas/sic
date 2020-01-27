@@ -29,17 +29,12 @@ int determine_size(literalnum value)
     return determine_size_bytes(value) * 8;
 }
 
-void __node_walk(struct node *node, int depth)
+void __node_walk(struct node *node, int depth, char arm)
 {
     if (node == NULL)
         return;
 
-    if (node->left)
-        __node_walk(node->left, depth + 1);
-    if (node->right)
-        __node_walk(node->right, depth + 1);
-
-    printf("%*s", depth * 2, "");
+    printf("%c %*s", arm, depth * 2, "");
     switch (node->node) {
         case A_ADD:
             printf("+");
@@ -68,6 +63,9 @@ void __node_walk(struct node *node, int depth)
         case A_GLUE:
             printf("GLUE");
             break;
+        case A_LIST:
+            printf("LIST");
+            break;
         case A_TYPE:
             printf("TYPE %s", type_str(node->type));
             break;
@@ -81,12 +79,17 @@ void __node_walk(struct node *node, int depth)
             printf("DECLARATION");
             break;
         default:
-            ERR("Unknown node: %s", node_str(node));
+            ERR("Unknown node while walking: %s", node_str(node));
     }
     printf("\n");
+
+    if (node->left)
+        __node_walk(node->left, depth + 1, 'L');
+    if (node->right)
+        __node_walk(node->right, depth + 1, 'R');
 }
 
 void node_walk(struct node *node)
 {
-    __node_walk(node, 0);
+    __node_walk(node, 0, '>');
 }

@@ -68,18 +68,27 @@ static int skip(struct scanfile *f)
     return c;
 }
 
-void match(struct scanfile *f, struct token *t, enum tokentype token, const char *expect)
+int accept(struct scanfile *f, struct token *t, enum tokentype token)
 {
-    if (t->token == token)
+    if (t->token == token) {
         scan(f, t);
-    else
-        ERR("Expected %s on line %d", expect, f->line);
+        return 1;
+    }
+    return 0;
+}
 
+int expect(struct scanfile *f, struct token *t, enum tokentype token, const char *expect)
+{
+    if (accept(f, t, token))
+       return 1;
+
+    ERR("Expected %s on line %d", expect, f->line);
+    return 0;
 }
 
 void semi(struct scanfile *f, struct token *t)
 {
-    match(f, t, T_SEMI, ";");
+    expect(f, t, T_SEMI, ";");
 }
 
 static void putback(struct scanfile *f, int c)
@@ -131,13 +140,6 @@ char *scan_identifier(struct scanfile *f, int c)
     putback(f, c);
     return buf;
 }
-#if 0
-void return_token(struct scanfile *f, struct token *t)
-{
-    memcpy(&f->peek, t, sizeof(struct token));
-    t->token = T_INVALID;
-}
-#endif
 
 int scan(struct scanfile *f, struct token *t)
 {

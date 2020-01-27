@@ -27,7 +27,8 @@ struct scanfile {
 };
 
 int scan(struct scanfile *f, struct token *t);
-void match(struct scanfile *f, struct token *t, enum tokentype token, const char *expect);
+int accept(struct scanfile *f, struct token *t, enum tokentype token);
+int expect(struct scanfile *f, struct token *t, enum tokentype token, const char *expect);
 void semi(struct scanfile *f, struct token *t);
 int peek(struct scanfile *f, struct token **t);
 

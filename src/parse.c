@@ -143,13 +143,12 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_IDENTIFIER:
             res = make_node(A_IDENTIFIER, NULL, NULL);
             res->value_string = token->value_string;
-            scan(f, token);
             break;
         default:
             ERR("Unexpected token: %s", token_str(token));
     }
-
     scan(f, token);
+
     return res;
 }
 
@@ -284,31 +283,21 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
     // TODO
     return primary_expression(f, token);
 }
+
 struct node *cast_expression(struct scanfile *f, struct token *token);
 
 struct node *unary_expression(struct scanfile *f, struct token *token)
 {
     struct node *left;
-    enum tokentype type;
 
-    type = token->token;
-    switch (type) {
-            case T_PLUS:
-                scan(f, token);
-                return cast_expression(f, token);
-            case T_MINUS:
-                scan(f, token);
-                left = cast_expression(f, token);
-                return make_node(A_NEGATE, left, NULL);
-            default:
-                break;
+    if (accept(f, token, T_PLUS)) {
+        return cast_expression(f, token);
+    } else if (accept(f, token, T_MINUS)) {
+        left = cast_expression(f, token);
+        return make_node(A_NEGATE, left, NULL);
     }
 
     left = postfix_expression(f, token);
-    if (token->token == T_EOF)
-        return left;
-
-
     return left;
 }
 
@@ -329,13 +318,10 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
 
     type = token->token;
     while (type == T_STAR || type == T_SLASH || type == T_MOD) {
-        scan(f, token);
-
+        if (!scan(f, token))
+            ERR("Couldn't scan next in multiplicative_expression");
         right = cast_expression(f, token);
         left = make_node(oper(type), left, right);
-
-        if (token->token == EOF)
-            break;
         type = token->token;
     }
 
@@ -352,24 +338,11 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
         return left;
 
     type = token->token;
-    while (1) {
-        if (type == T_SEMI)
-            break;
+    while (type == T_PLUS || type == T_MINUS) {
         if (!scan(f, token))
-            break;
-
-        struct token *tmp;
-        peek(f, &tmp);
-        if (tmp->token == T_SEMI || tmp->token == T_EOF)
-            break;
-        scan(f, token);
-
-
+            ERR("Couldn't scan next in additive_expression");
         right = multiplicative_expression(f, token);
         left = make_node(oper(type), left, right);
-
-        if (token->token == T_EOF)
-            break;
         type = token->token;
     }
     return left;
@@ -405,11 +378,13 @@ struct node *statement_list(struct scanfile *f, struct token *token)
         struct node *tmp = statement(f, token);
         if (!tmp)
             break;
-        tmp = make_node(A_GLUE, tmp, NULL);
+        tmp = make_node(A_LIST, tmp, NULL);
         if (res == NULL)
             res = tmp;
-        else
+        else {
+            FATAL(prev->right, "Compiler error!")
             prev->right = tmp;
+        }
         prev = tmp;
     }
     return res;
@@ -430,22 +405,19 @@ struct node *external_declaration(struct scanfile *f, struct token *token)
 struct node *translation_unit(struct scanfile *f, struct token *token)
 {
     struct node *decl = external_declaration(f, token);
-    if (!res)
+    if (!decl)
         return NULL;
-    struct node *res = make_node(A_LIST, decl, NULL);
-    struct node *val = res;
+    struct node *res = decl;
 
     while (1) {
         struct node *tmp = translation_unit(f, token);
         if (!tmp)
             break;
-        va = make_node(A_LIST, res, tmp);
-    /*
-        struct node *tmp = translation_unit(f, token);
-        if (!tmp)
-            break;
+        /*
+         * GLUE and LIST work alike, however LIST is always a list,
+         * GLUE can be anything
+         */
         res = make_node(A_GLUE, res, tmp);
-    */
     }
     return res;
 }
