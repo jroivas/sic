@@ -29,6 +29,23 @@ int determine_size(literalnum value)
     return determine_size_bytes(value) * 8;
 }
 
+unsigned long djb2(const unsigned char *str)
+{
+    unsigned long hash = 5381;
+    unsigned long c;
+
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c;
+    }
+
+    return hash;
+}
+
+hashtype hash(const char *str)
+{
+    return djb2((const unsigned char*)str);
+}
+
 void __node_walk(struct node *node, int depth, char arm)
 {
     if (node == NULL)

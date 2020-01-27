@@ -204,17 +204,17 @@ Fixed point precision contains two parts: integral and fraction.
 It's possible to select precision for both of them separately.
 From integral part one bit is reserved for sign flag.
 Syntax for fixed number types is `fixed<a,b>`
-where a integral bytes and b is fraction bytes:
+where `a` is max meaningful digits for integral part,
+and `b` is max meaningful digits for fraction part.
 
-- fixed<2,4>: 2 bytes for integral, 4 bytes for fraction, 6 bytes total, allowing max 32768.4294967295 and minimum -32767.4294967295
-- fixed<2,2>: 2 bytes for integral, 2 bytes for fraction, 4 bytes total, allowing max 32768.65535 and minimum -32767.65535
-- fixed<10,1>: 10 bytes for integral, 1 byte for fraction, 11 bytes total, allowing max 604462909807314587353088.255 and minimum -604462909807314587353087.255
+- fixed<2,4>: 2 digits for integral, 4 digits for fraction allowing -99.9999 to 99.9999
+- fixed<2,2>: 2 digits for integral, 2 digits for fraction allowing -99.99 to 99.99
+- fixed<10,1>: 10 digts for integral, 1 digit for fraction allowing -9999999999.9 to 9999999999.9
 
 One can use plain `fixed` but it's in most cases suboptimal.
-Compiler tries to determine maximum values for both sides,
-but sometimes that's just impossible.
+Compiler tries to determine maximum value, but sometimes that's just impossible.
 On these cases plain `fixed` can be exteneded to bigger precision.
-Unfortunately that's expensive and compiler is unable to produce optimal code.
+Unfortunately that might be expensive and compiler is unable to produce optimal code.
 It's always recommended to define precisions for fixed types.
 
 On can perform operations on different sized fixed numbers with certain constraints.
@@ -223,7 +223,7 @@ Compiler takes bigger integral and fraction parts and uses that as result type.
 
 For example:
 
-    fixed<10,1> a = 123456789.55;
+    fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
 
     // Prints fixed<10,9>
@@ -231,19 +231,19 @@ For example:
 
 Similar way if storing the result to new fixed point number, reserved precision must be bigger:
 
-    fixed<10,1> a = 123456789.55;
+    fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
 
     fixed<10,9>  c = a + b;
     fixed<11,11> d = a + b;
-    fixed<5,4> f = a + b;  // Compiler failure
+    fixed<5,4>   f = a + b;  // Compiler failure
 
-Fixed sized numbers are most effective on max 64bit (8 byte) values, but are not limited to that.
-One just need to keep in mind, that compiler can generate wy much more optimal code if both values
-are max 8 bytes. Otherwise it might need to rely on bigint feature, which means performance hit.
-Systems supporting efficient 128 bit integer handling can be efficient till 16 byte values.
-This cannot be ensured, thus 64bit is the safe limit.
-
+Fixed numbers are most effective when the whole are fits in a 64 bit number, but are not limited to that.
+One just need to keep in mind, that compiler can generate way much more optimal code if the numbers does not
+exceed certaing limits.
+Otherwise it might need to rely on bigint feature, which means most time performance hit.
+Systems supporting efficient 128 bit integer handling can be way much more efficient on bigger values.
+Compilers may produce quite optimal code to 128 bit, even on systems supporting max 64 bit numbers.
 
 
 # Built-in string

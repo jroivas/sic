@@ -5,6 +5,8 @@
 #include <stdlib.h>
 
 typedef unsigned long long literalnum;
+typedef unsigned long hashtype;
+
 static const int MAX_STR_LEN = 512;
 #define DEBUG 0
 
@@ -29,5 +31,6 @@ enum var_type {
 
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);
+hashtype hash(const char *str);
 
 #endif

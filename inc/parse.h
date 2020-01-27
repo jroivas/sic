@@ -19,7 +19,7 @@ struct node {
     enum var_type type;
     int bits;
 
-    char *value_string;
+    const char *value_string;
     literalnum value;
     literalnum fraction;
 

@@ -121,11 +121,12 @@ struct node *make_leaf(enum nodetype node, struct token *t)
     return n;
 }
 
-struct node *make_type(enum nodetype node, struct token *t, enum var_type type, int bits)
+struct node *make_type(enum nodetype node, struct token *t, enum var_type type, int bits, const char *name)
 {
     struct node *n = make_node(node, NULL, NULL);
     n->type = type;
     n->bits = bits;
+    n->value_string = name;
     return n;
 }
 
@@ -159,11 +160,11 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         return res;
 
     if (strcmp(token->value_string, "void") == 0)
-        res = make_type(A_TYPE, token, V_VOID, 0);
+        res = make_type(A_TYPE, token, V_VOID, 0, token->value_string);
     else if (strcmp(token->value_string, "int") == 0)
-        res = make_type(A_TYPE, token, V_INT, 32);
+        res = make_type(A_TYPE, token, V_INT, 32, token->value_string);
     else if (strcmp(token->value_string, "char") == 0)
-        res = make_type(A_TYPE, token, V_INT, 8);
+        res = make_type(A_TYPE, token, V_INT, 8, token->value_string);
     // FIXME More types
 
     if (res)

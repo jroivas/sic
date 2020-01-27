@@ -1,5 +1,6 @@
 #include "gc.h"
 #include "parse.h"
+#include <string.h>
 
 struct value {
     int reg;
@@ -13,13 +14,33 @@ struct value {
     struct value *next;
 };
 
+struct type {
+    int id;
+    enum var_type type;
+    int bits;
+    const char *name;
+    hashtype name_hash;
+    struct type *ref;
+    struct type *next;
+};
+
+struct variable {
+    struct type *type;
+    const char *name;
+    hashtype name_hash;
+    struct variable *next;
+};
+
 struct gen_context {
     FILE *f;
     int regnum;
-    struct value *values;
     int type;
+    int type_cnt;
     int safe;
     char *name;
+    struct value *values;
+    struct type *types;
+    struct variable *variables;
 };
 
 static const char *varstr[] = {
@@ -41,15 +62,60 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
+struct type *find_type(struct type *first, const char *name)
+{
+    struct type *res = first;
+    FATAL(!name, "No type name provided!");
+    hashtype h = hash(name);
+    while (res) {
+        if (res->name_hash == h && strcmp(res->name, name) == 0)
+            return res;
+        res = res->next;
+    }
+    return NULL;
+}
+
+struct type *init_type(const char *name, enum var_type t, int bits)
+{
+    struct type *res = calloc(1, sizeof(struct type));
+
+    res->type = t;
+    res->bits = bits;
+    res->name = name;
+    res->name_hash = hash(name);
+
+    return res;
+}
+
+void register_type(struct gen_context *ctx, struct type *type)
+{
+    struct type *t = find_type(ctx->types, type->name);
+    FATAL(t, "Type already registered: %s", type->name);
+
+    type->id = ++ctx->type_cnt;
+    type->next = ctx->types;
+    ctx->types = type;
+}
+
+void register_builtin_types(struct gen_context *ctx)
+{
+    register_type(ctx, init_type("void", V_VOID, 0));
+    register_type(ctx, init_type("int", V_INT, 32));
+    register_type(ctx, init_type("float", V_FLOAT, 64));
+}
+
 struct gen_context *init(FILE *outfile)
 {
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
     res->regnum = 1;
     res->values = NULL;
+    res->types = NULL;
+    res->variables = NULL;
     res->type = V_VOID;
     res->safe = 1;
     res->name = "__global_context";
+    register_builtin_types(res);
     return res;
 }
 
@@ -378,6 +444,16 @@ int gen_negate(struct gen_context *ctx, int a)
     return res->reg;
 }
 
+int gen_type(struct gen_context *ctx, struct node *node)
+{
+    struct type *t = find_type(ctx->types, node->value_string);
+    if (t == NULL)
+        ERR("Couldn't find type: %s", node->value_string);
+
+    // Reference types as negative
+    return -t->type;
+}
+
 int gen_recursive(struct gen_context *ctx, struct node *node)
 {
     int resleft = 0, resright = 0;
@@ -414,6 +490,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             if (resleft)
                 return resleft;
             break;
+        case A_TYPE:
+            return gen_type(ctx, node);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }
