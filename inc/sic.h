@@ -9,6 +9,7 @@ typedef unsigned long hashtype;
 
 static const int MAX_STR_LEN = 512;
 #define DEBUG 0
+#define REF_CTX(X) (-(X))
 
 enum var_type {
     V_VOID, V_INT, V_FLOAT, V_FIXED

@@ -25,6 +25,7 @@ struct type {
 };
 
 struct variable {
+    int id;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -33,9 +34,9 @@ struct variable {
 
 struct gen_context {
     FILE *f;
+    int ids;
     int regnum;
     int type;
-    int type_cnt;
     int safe;
     char *name;
     struct value *values;
@@ -75,6 +76,19 @@ struct type *find_type(struct type *first, const char *name)
     return NULL;
 }
 
+struct variable *find_variable(struct variable *first, const char *name)
+{
+    struct variable *res = first;
+    FATAL(!name, "No variable name provided!");
+    hashtype h = hash(name);
+    while (res) {
+        if (res->name_hash == h && strcmp(res->name, name) == 0)
+            return res;
+        res = res->next;
+    }
+    return NULL;
+}
+
 struct type *init_type(const char *name, enum var_type t, int bits)
 {
     struct type *res = calloc(1, sizeof(struct type));
@@ -87,14 +101,35 @@ struct type *init_type(const char *name, enum var_type t, int bits)
     return res;
 }
 
+struct variable *init_variable(const char *name, struct type *t)
+{
+    struct variable *res = calloc(1, sizeof(struct variable));
+
+    res->type = t;
+    res->name = name;
+    res->name_hash = hash(name);
+
+    return res;
+}
+
 void register_type(struct gen_context *ctx, struct type *type)
 {
     struct type *t = find_type(ctx->types, type->name);
     FATAL(t, "Type already registered: %s", type->name);
 
-    type->id = ++ctx->type_cnt;
+    type->id = ++ctx->ids;
     type->next = ctx->types;
     ctx->types = type;
+}
+
+void register_variable(struct gen_context *ctx, struct variable *var)
+{
+    struct variable *v = find_variable(ctx->variables, var->name);
+    FATAL(v, "Variable already registered: %s", var->name);
+
+    var->id = ++ctx->ids;
+    var->next = ctx->variables;
+    ctx->variables = var;
 }
 
 void register_builtin_types(struct gen_context *ctx)
@@ -450,8 +485,18 @@ int gen_type(struct gen_context *ctx, struct node *node)
     if (t == NULL)
         ERR("Couldn't find type: %s", node->value_string);
 
-    // Reference types as negative
-    return -t->type;
+    return REF_CTX(t->id);
+}
+
+int gen_identifier(struct gen_context *ctx, struct node *node)
+{
+    struct variable *var = find_variable(ctx->variables, node->value_string);
+    if (var == NULL) {
+        // We don't know yet the type
+        var = init_variable(node->value_string, NULL);
+        register_variable(ctx, var);
+    }
+    return REF_CTX(var->id);
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node)
@@ -492,6 +537,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             break;
         case A_TYPE:
             return gen_type(ctx, node);
+        case A_IDENTIFIER:
+            return gen_identifier(ctx, node);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }
