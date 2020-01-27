@@ -382,7 +382,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
 {
     int resleft = 0, resright = 0;
     if (node == NULL)
-        return 1;
+        return 0;
 
     if (node->left)
         resleft = gen_recursive(ctx, node->left);
@@ -407,8 +407,12 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_DEC_LIT:
             // FIXME Double for now
             return gen_store_double(ctx, node);
+        case A_LIST:
         case A_GLUE:
-            printf("Got clue\n");
+            if (resright)
+                return resright;
+            if (resleft)
+                return resleft;
             break;
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
@@ -446,6 +450,7 @@ int codegen(FILE *outfile, struct node *node)
 
     gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
+    printf("res %d\n", res);
     gen_post(ctx, node, res);
 
     return res;
