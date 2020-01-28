@@ -194,8 +194,22 @@ struct variable *new_variable(struct gen_context *ctx,
     if (type == V_FLOAT)
         sign = 1;
     res->reg = ctx->regnum++;
+
+    // If bits == 0 and we have a pendign type, use it
+    if (bits == 0 && ctx->pending_type) {
+        type = ctx->pending_type->type;
+        bits = ctx->pending_type->bits;
+        sign = ctx->pending_type->sign;
+    } else if (bits == 0) {
+        if (type == V_FLOAT)
+            bits = 64;
+        else
+            // Default to 32
+            bits = 32;
+    }
     res->type = find_type_by(ctx->types, type, bits, sign);
     res->next = ctx->variables;
+    FATAL(!res->type, "Didn't find type!");
 
     ctx->variables = res;
 

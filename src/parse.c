@@ -111,10 +111,8 @@ struct node *make_leaf(enum nodetype node, struct token *t)
 #endif
         n->value = t->value;
         n->type = V_INT;
-        n->bits = determine_size(t->value);
-        /* Minimum 32 bits on literals */
-        if (n->bits < 32)
-            n->bits = 32;
+        // Width be determined later on
+        n->bits = 0;
     } else if (t->token == T_DEC_LIT) {
 #if DEBUG
         printf("  DEC: %llu.%llu\n", t->value, t->fraction);
@@ -160,7 +158,8 @@ struct node *type_resolve(struct node *node, int d)
         bits = 32;
     }
     res->bits = bits;
-    // Typespec sign is reversed of type
+    // Typesign marks unsigned, and default is signed
+    // so reverse it
     res->sign = !sign;
     res->type = type;
     return res;
