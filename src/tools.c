@@ -72,10 +72,10 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("%%");
             break;
         case A_INT_LIT:
-            printf("%llu", node->value);
+            printf("INT: %llu, %d bits %s", node->value, node->bits, node->sign ? "signed" : "unsigned");
             break;
         case A_DEC_LIT:
-            printf("%llu.%llu", node->value, node->fraction);
+            printf("DECIMAL: %llu.%llu", node->value, node->fraction);
             break;
         case A_GLUE:
             printf("GLUE");
@@ -84,7 +84,9 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("LIST");
             break;
         case A_TYPE:
-            printf("TYPE %s", type_str(node->type));
+            printf("TYPE %s %d %s, %s", type_str(node->type),
+                node->bits, node->sign ? "signed" : "unsigned",
+                node->value_string);
             break;
         case A_IDENTIFIER:
             printf("IDENTIFIER %s", node->value_string);
@@ -94,6 +96,11 @@ void __node_walk(struct node *node, int depth, char arm)
             break;
         case A_DECLARATION:
             printf("DECLARATION");
+            break;
+        case A_TYPESPEC:
+            printf("TYPESPEC %s %d %s, %s", type_str(node->type),
+                node->bits, node->sign ? "signed" : "unsigned",
+                node->value_string);
             break;
         default:
             ERR("Unknown node while walking: %s", node_str(node));

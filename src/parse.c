@@ -8,7 +8,7 @@ static const char *nodestr[] = {
     "IDENTIFIER",
     "-",
     "INT_LIT", "DEC_LIT",
-    "ASSIGN", "GLUE", "TYPE",
+    "ASSIGN", "GLUE", "TYPE", "TYPESPEC",
     "DECLARATION",
     "LIST"
 };
@@ -42,6 +42,8 @@ enum var_type resolve_var_type(struct node *n)
 {
     enum var_type v1 = V_VOID;
     enum var_type v2 = V_VOID;
+    int b1 = 0;
+    int b2 = 0;
     int s1 = 0;
     int s2 = 0;
 
@@ -50,14 +52,16 @@ enum var_type resolve_var_type(struct node *n)
             v1 = resolve_var_type(n->left);
         else
             v1 = n->left->type;
-        s1 = n->left->bits;
+        b1 = n->left->bits;
+        s1 = n->left->sign;
     }
     if (n->right) {
         if (n->right->type == V_VOID)
             v2 = resolve_var_type(n->right);
         else
             v2 = n->right->type;
-        s2 = n->right->bits;
+        b2 = n->right->bits;
+        s2 = n->right->sign;
     }
 
     if (v1 == V_VOID && v2 != V_VOID)
@@ -65,11 +69,14 @@ enum var_type resolve_var_type(struct node *n)
     if (v1 == V_INT && v2 == V_FLOAT)
         v1 = v2;
 
+    if (b1 < b2)
+        b1 = b2;
     if (s1 < s2)
         s1 = s2;
 
     n->type = v1;
-    n->bits = s1;
+    n->bits = b1;
+    n->sign = s1;
     return v1;
 }
 
@@ -121,13 +128,42 @@ struct node *make_leaf(enum nodetype node, struct token *t)
     return n;
 }
 
-struct node *make_type(enum nodetype node, struct token *t, enum var_type type, int bits, const char *name)
+struct node *make_type(enum nodetype node, struct token *t, enum var_type type, int bits, int sign, const char *name)
 {
     struct node *n = make_node(node, NULL, NULL);
     n->type = type;
     n->bits = bits;
+    n->sign = sign;
     n->value_string = name;
     return n;
+}
+
+struct node *make_type_spec(struct token *t, enum var_type type, int bits, int sign, const char *name)
+{
+    struct node *n = make_node(A_TYPESPEC, NULL, NULL);
+    n->type = type;
+    n->bits = bits;
+    n->sign = sign;
+    n->value_string = name;
+    return n;
+}
+
+struct node *type_resolve(struct node *node, int d)
+{
+    struct node *res = make_node(A_TYPE, NULL, NULL);
+    enum var_type type = node->type;
+    int bits = node->bits;
+    int sign = node->sign;
+
+    if (type == V_INT && bits == 0) {
+        // Default for 32 bits
+        bits = 32;
+    }
+    res->bits = bits;
+    // Typespec sign is reversed of type
+    res->sign = !sign;
+    res->type = type;
+    return res;
 }
 
 struct node *primary_expression(struct scanfile *f, struct token *token)
@@ -159,12 +195,35 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
     if (token->token != T_IDENTIFIER)
         return res;
 
+#if 0
     if (strcmp(token->value_string, "void") == 0)
-        res = make_type(A_TYPE, token, V_VOID, 0, token->value_string);
-    else if (strcmp(token->value_string, "int") == 0)
-        res = make_type(A_TYPE, token, V_INT, 32, token->value_string);
+        res = make_type(A_TYPE, token, V_VOID, 0, 0, token->value_string);
     else if (strcmp(token->value_string, "char") == 0)
-        res = make_type(A_TYPE, token, V_INT, 8, token->value_string);
+        res = make_type(A_TYPE, token, V_INT, 8, 1, token->value_string);
+    else if (strcmp(token->value_string, "int") == 0)
+        res = make_type(A_TYPE, token, V_INT, 32, 1, token->value_string);
+    else if (strcmp(token->value_string, "unsigned") == 0)
+        res = make_type(A_TYPE, token, V_INT, 32, 0, token->value_string);
+    else if (strcmp(token->value_string, "short") == 0)
+        res = make_type(A_TYPE, token, V_INT, 16, 1, token->value_string);
+    else if (strcmp(token->value_string, "long") == 0)
+        res = make_type(A_TYPE, token, V_INT, 64, 1, token->value_string);
+#else
+    if (strcmp(token->value_string, "void") == 0)
+        res = make_type_spec(token, V_VOID, 0, 0, token->value_string);
+    else if (strcmp(token->value_string, "char") == 0)
+        res = make_type_spec(token, V_INT, 8, 0, token->value_string);
+    else if (strcmp(token->value_string, "int") == 0)
+        res = make_type_spec(token, V_INT, 0, 0, token->value_string);
+    else if (strcmp(token->value_string, "unsigned") == 0)
+        res = make_type_spec( token, V_INT, 0, 1, token->value_string);
+    else if (strcmp(token->value_string, "signed") == 0)
+        res = make_type_spec( token, V_INT, 0, 0, token->value_string);
+    else if (strcmp(token->value_string, "short") == 0)
+        res = make_type_spec(token, V_INT, 16, 0, token->value_string);
+    else if (strcmp(token->value_string, "long") == 0)
+        res = make_type_spec(token, V_INT, 64, 0, token->value_string);
+#endif
     // FIXME More types
 
     if (res)
@@ -182,10 +241,10 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 
     struct node *res = NULL;
     while (1) {
-        res = declaration_specifiers(f, token);
-        if (res == NULL)
+        struct node *tmp =declaration_specifiers(f, token);
+        if (tmp == NULL)
             break;
-        res = make_node(A_GLUE, type, res);
+        res = make_node(A_GLUE, type, tmp);
     }
     if (!res)
         res = type;
@@ -259,6 +318,7 @@ struct node *declaration(struct scanfile *f, struct token *token)
     struct node *res = declaration_specifiers(f, token);
     if (!res)
         return NULL;
+    res = type_resolve(res, 0);
 
     struct node *decl = init_declarator_list(f, token);
     if (decl)

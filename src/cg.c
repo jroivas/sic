@@ -54,7 +54,7 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
-struct type *find_type(struct type *first, const char *name)
+struct type *find_type_by_name(struct type *first, const char *name)
 {
     struct type *res = first;
     FATAL(!name, "No type name provided!");
@@ -119,7 +119,8 @@ struct variable *init_variable(const char *name, struct type *t)
 
 void register_type(struct gen_context *ctx, struct type *type)
 {
-    struct type *t = find_type(ctx->types, type->name);
+    //struct type *t = find_type(ctx->types, type->name);
+    struct type *t = find_type_by(ctx->types, type->type, type->bits, type->sign);
     FATAL(t, "Type already registered: %s", type->name);
 
     type->id = ++ctx->ids;
@@ -140,8 +141,20 @@ void register_variable(struct gen_context *ctx, struct variable *var)
 void register_builtin_types(struct gen_context *ctx)
 {
     register_type(ctx, init_type("void", V_VOID, 0, 0));
+
+    register_type(ctx, init_type("char", V_INT, 8, 1));
+    register_type(ctx, init_type("unsigned char", V_INT, 8, 0));
+
+    register_type(ctx, init_type("short", V_INT, 16, 1));
+    register_type(ctx, init_type("unsigned short", V_INT, 16, 0));
+
+    //register_type(ctx, init_type("unsigned", V_INT, 32, 0));
     register_type(ctx, init_type("int", V_INT, 32, 1));
-    register_type(ctx, init_type("unsigned", V_INT, 32, 0));
+    register_type(ctx, init_type("unsigned int", V_INT, 32, 0));
+
+    register_type(ctx, init_type("long", V_INT, 64, 1));
+    register_type(ctx, init_type("unsigned long", V_INT, 64, 0));
+
     register_type(ctx, init_type("float", V_FLOAT, 64, 1));
 }
 
@@ -485,7 +498,8 @@ int gen_negate(struct gen_context *ctx, int a)
 
 int gen_type(struct gen_context *ctx, struct node *node)
 {
-    struct type *t = find_type(ctx->types, node->value_string);
+    //struct type *t = find_type(ctx->types, node->value_string);
+    struct type *t = find_type_by(ctx->types, node->type, node->bits, node->sign);
     if (t == NULL)
         ERR("Couldn't find type: %s", node->value_string);
 
@@ -631,7 +645,6 @@ int codegen(FILE *outfile, struct node *node)
 
     gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
-    printf("res %d\n", res);
     gen_post(ctx, node, res);
 
     return res;

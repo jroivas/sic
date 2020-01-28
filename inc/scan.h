@@ -26,6 +26,8 @@ struct scanfile {
     struct token peek;
 };
 
+void open_input_file(struct scanfile *f, const char *name);
+void close_input_file(struct scanfile *f);
 int scan(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int expect(struct scanfile *f, struct token *t, enum tokentype token, const char *expect);

@@ -12,6 +12,18 @@ static const char *tokenstr[] = {
     "SEMI", "EOF"
 };
 
+void open_input_file(struct scanfile *f, const char *name)
+{
+    memset(f, 0, sizeof(struct scanfile));
+    f->infile = fopen(name, "r");
+    f->line = 1;
+}
+
+void close_input_file(struct scanfile *f)
+{
+    fclose(f->infile);
+}
+
 const char *token_val_str(enum tokentype t)
 {
     FATAL(t >= sizeof(tokenstr) / sizeof (char*),

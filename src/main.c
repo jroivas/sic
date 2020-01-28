@@ -24,8 +24,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    memset(&f, 0, sizeof(f));
-    f.infile = fopen(argv[1], "r");
+    open_input_file(&f, argv[1]);
     if (!f.infile)
         ERR("Can't open file: %s", argv[1]);
 
@@ -33,6 +32,7 @@ int main(int argc, char **argv)
         ERR("Error while parsing %s", argv[1]);
 
     node = parse(&f, &token);
+    close_input_file(&f);
     node_walk(node);
 
     snprintf(outname, 255, "%s.ir", argv[1]);

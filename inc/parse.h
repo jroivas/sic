@@ -9,7 +9,7 @@ enum nodetype {
     A_IDENTIFIER,
     A_NEGATE,
     A_INT_LIT, A_DEC_LIT,
-    A_ASSIGN, A_GLUE, A_TYPE,
+    A_ASSIGN, A_GLUE, A_TYPE, A_TYPESPEC,
     A_DECLARATION,
     A_LIST
 };
@@ -18,6 +18,7 @@ struct node {
     enum nodetype node;
     enum var_type type;
     int bits;
+    int sign;
 
     const char *value_string;
     literalnum value;
