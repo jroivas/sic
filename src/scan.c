@@ -7,6 +7,7 @@ static const char *tokenstr[] = {
     "<INVALID>",
     "+", "-", "*", "/", "%",
     "=",
+    "KEYWORD",
     "IDENTIFIER",
     "INT_LIT", "DEC_LIT",
     "(", ")",
@@ -156,6 +157,16 @@ char *scan_identifier(struct scanfile *f, int c)
     return buf;
 }
 
+int keyword(struct token *t)
+{
+    const char *v = t->value_string;
+    if (!v)
+        return 0;
+    if (strcmp(v, "return") == 0)
+        return 1;
+    return 0;
+}
+
 int scan(struct scanfile *f, struct token *t)
 {
     int c = skip(f);
@@ -216,7 +227,10 @@ int scan(struct scanfile *f, struct token *t)
                 ok = 1;
             } else if (!ok && (isalpha(c) || c == '_')) {
                 t->value_string = scan_identifier(f, c);
-                t->token = T_IDENTIFIER;
+                if (keyword(t))
+                    t->token = T_KEYWORD;
+                else
+                    t->token = T_IDENTIFIER;
                 ok = 1;
             } else {
                 putback(f, c);
@@ -236,6 +250,13 @@ void save_point(struct scanfile *f, struct token *t)
     if (pos > 0)
         pos--;
     f->save_point[f->savecnt++] = pos;
+}
+
+void remove_save_point(struct scanfile *f, struct token *t)
+{
+    FATAL(!f->savecnt, "No save points to remove");
+    (void)t;
+    --f->savecnt;
 }
 
 void load_point(struct scanfile *f, struct token *t)

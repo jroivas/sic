@@ -12,6 +12,8 @@ enum nodetype {
     A_ASSIGN, A_GLUE, A_TYPE, A_TYPESPEC,
     A_DECLARATION,
     A_PARAMS,
+    A_FUNCTION,
+    A_RETURN,
     A_LIST
 };
 

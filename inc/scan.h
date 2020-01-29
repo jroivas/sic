@@ -7,6 +7,7 @@ enum tokentype {
     T_INVALID,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
     T_EQ,
+    T_KEYWORD,
     T_IDENTIFIER,
     T_INT_LIT, T_DEC_LIT,
     T_ROUND_OPEN, T_ROUND_CLOSE,
@@ -39,6 +40,7 @@ int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int expect(struct scanfile *f, struct token *t, enum tokentype token, const char *expect);
 void semi(struct scanfile *f, struct token *t);
 void save_point(struct scanfile *f, struct token *t);
+void remove_save_point(struct scanfile *f, struct token *t);
 void load_point(struct scanfile *f, struct token *t);
 
 const char *token_val_str(enum tokentype t);

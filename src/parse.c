@@ -11,6 +11,8 @@ static const char *nodestr[] = {
     "ASSIGN", "GLUE", "TYPE", "TYPESPEC",
     "DECLARATION",
     "PARAMS",
+    "FUNCTION",
+    "RETURN",
     "LIST"
 };
 
@@ -181,6 +183,10 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
             res = make_node(A_IDENTIFIER, NULL, NULL);
             res->value_string = token->value_string;
             break;
+        case T_KEYWORD:
+            return NULL;
+        case T_CURLY_CLOSE:
+            return NULL;
         default:
             ERR("Unexpected token: %s", token_str(token));
     }
@@ -241,7 +247,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 
     struct node *res = NULL;
     while (1) {
-        struct node *tmp =declaration_specifiers(f, token);
+        struct node *tmp = declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
         res = make_node(A_GLUE, type, tmp);
@@ -263,7 +269,8 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
     if (token->token == T_ROUND_OPEN) {
         scan(f, token);
         struct node *decl = declarator(f, token);
-        res = make_node(A_GLUE, res, decl);
+        if (decl)
+            res = make_node(A_GLUE, res, decl);
         expect(f, token, T_ROUND_CLOSE, ")");
     }
     if (res) {
@@ -319,6 +326,8 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
     if (token->token == T_EQ) {
         scan(f, token);
         struct node *tmp = initializer(f, token);
+        if (!tmp)
+            return NULL;
         res = make_node(A_ASSIGN, res, tmp);
     }
 
@@ -390,6 +399,8 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         return cast_expression(f, token);
     } else if (accept(f, token, T_MINUS)) {
         left = cast_expression(f, token);
+        if (!left)
+            ERR("Invalid cast!");
         return make_node(A_NEGATE, left, NULL);
     }
 
@@ -417,6 +428,8 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
         if (!scan(f, token))
             ERR("Couldn't scan next in multiplicative_expression");
         right = cast_expression(f, token);
+        if (!right)
+            return NULL;
         left = make_node(oper(type), left, right);
         type = token->token;
     }
@@ -438,6 +451,8 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
         if (!scan(f, token))
             ERR("Couldn't scan next in additive_expression");
         right = multiplicative_expression(f, token);
+        if (!right)
+            return NULL;
         left = make_node(oper(type), left, right);
         type = token->token;
     }
@@ -448,8 +463,9 @@ struct node *expression(struct scanfile *f, struct token *token)
 {
     if (token->token == T_EOF)
         return NULL;
-
-    return additive_expression(f, token);
+    struct node *res = NULL;
+    res = additive_expression(f, token);
+    return res;
     //assignment_expression(f);
 }
 
@@ -461,9 +477,34 @@ struct node *expression_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *jump_statement(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (token->token != T_KEYWORD)
+        return NULL;
+    if (strcmp(token->value_string, "return") == 0) {
+        scan(f, token);
+        res = expression(f, token);
+        res = make_node(A_RETURN, res, NULL);
+    }
+    if (res)
+        semi(f, token);
+    return res;
+}
+
 struct node *statement(struct scanfile *f, struct token *token)
 {
-    return expression_statement(f, token);
+    struct node *res = NULL;
+    save_point(f, token);
+    res = expression_statement(f, token);
+    if (res) {
+        remove_save_point(f, token);
+        return res;
+    }
+    load_point(f, token);
+    res = jump_statement(f, token);
+
+    return res;
 }
 
 struct node *statement_list(struct scanfile *f, struct token *token)
@@ -508,15 +549,19 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *spec = declaration_specifiers(f, token);
     if (!spec)
         return NULL;
+    spec = type_resolve(spec, 0);
     struct node *decl = declarator(f, token);
     if (!decl)
         ERR("Invalid function definition");
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         // If no compound, this is most probably variable decls
+        // This is handled by save points.
         return NULL;
-        //ERR("No compound");
     }
+
+    res = make_node(A_FUNCTION, decl, comp);
+    res = make_node(A_FUNCTION, spec, res);
 
     return res;
 }
@@ -526,13 +571,19 @@ struct node *external_declaration(struct scanfile *f, struct token *token)
     struct node *res;
     save_point(f, token);
     res = function_definition(f, token);
-    if (res)
+    if (res) {
+        remove_save_point(f, token);
         return res;
+    }
 
     load_point(f, token);
+    save_point(f, token);
     res = declaration(f, token);
-    if (res)
+    if (res) {
+        remove_save_point(f, token);
         return res;
+    }
+    load_point(f, token);
 
     res = statement_list(f, token);
     return res;

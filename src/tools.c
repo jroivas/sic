@@ -94,6 +94,12 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ASSIGN:
             printf("ASSIGN");
             break;
+        case A_FUNCTION:
+            printf("FUNCTION");
+            break;
+        case A_RETURN:
+            printf("RETURN");
+            break;
         case A_DECLARATION:
             printf("DECLARATION");
             break;
