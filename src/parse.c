@@ -10,6 +10,7 @@ static const char *nodestr[] = {
     "INT_LIT", "DEC_LIT",
     "ASSIGN", "GLUE", "TYPE", "TYPESPEC",
     "DECLARATION",
+    "PARAMS",
     "LIST"
 };
 
@@ -250,6 +251,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *declarator(struct scanfile *f, struct token *token);
 struct node *direct_declarator(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -257,6 +259,24 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
         res = make_node(A_IDENTIFIER, NULL, NULL);
         res->value_string = token->value_string;
         scan(f, token);
+    }
+    if (token->token == T_ROUND_OPEN) {
+        scan(f, token);
+        struct node *decl = declarator(f, token);
+        res = make_node(A_GLUE, res, decl);
+        expect(f, token, T_ROUND_CLOSE, ")");
+    }
+    if (res) {
+        //if (token->token == T_SQUARE_OPEN) {
+        //}
+        if (token->token == T_ROUND_OPEN) {
+            scan(f, token);
+            // TODO parameter_type_list
+            // TODO identifier_list
+            res = make_node(A_PARAMS, res, NULL);
+            expect(f, token, T_ROUND_CLOSE, ")");
+        }
+
     }
     // TODO other cases
     return res;
@@ -466,16 +486,56 @@ struct node *statement_list(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *compound_statement(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (token->token != T_CURLY_OPEN)
+        return NULL;
+    scan(f, token);
+
+    res = statement_list(f, token);
+    if (!res) {
+        // TODO other cases
+    }
+
+    expect(f, token, T_CURLY_CLOSE, "}");
+    return res;
+}
+
+struct node *function_definition(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    struct node *spec = declaration_specifiers(f, token);
+    if (!spec)
+        return NULL;
+    struct node *decl = declarator(f, token);
+    if (!decl)
+        ERR("Invalid function definition");
+    struct node *comp = compound_statement(f, token);
+    if (!comp) {
+        // If no compound, this is most probably variable decls
+        return NULL;
+        //ERR("No compound");
+    }
+
+    return res;
+}
+
 struct node *external_declaration(struct scanfile *f, struct token *token)
 {
-    struct node *res = declaration(f, token);
+    struct node *res;
+    save_point(f, token);
+    res = function_definition(f, token);
     if (res)
         return res;
+
+    load_point(f, token);
+    res = declaration(f, token);
+    if (res)
+        return res;
+
     res = statement_list(f, token);
-    if (res)
-        return res;
-    //TODO function_declaration
-    return NULL;
+    return res;
 }
 
 struct node *translation_unit(struct scanfile *f, struct token *token)
@@ -498,8 +558,10 @@ struct node *translation_unit(struct scanfile *f, struct token *token)
     return res;
 }
 
-struct node *parse(struct scanfile *f, struct token *token)
+struct node *parse(struct scanfile *f)
 {
-    //return statement_list(f, token);
-    return translation_unit(f, token);
+    struct token token;
+    memset(&token, 0, sizeof(struct token));
+    scan(f, &token);
+    return translation_unit(f, &token);
 }

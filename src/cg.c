@@ -148,7 +148,6 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, init_type("short", V_INT, 16, 1));
     register_type(ctx, init_type("unsigned short", V_INT, 16, 0));
 
-    //register_type(ctx, init_type("unsigned", V_INT, 32, 0));
     register_type(ctx, init_type("int", V_INT, 32, 1));
     register_type(ctx, init_type("unsigned int", V_INT, 32, 0));
 
@@ -655,6 +654,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
 
 int codegen(FILE *outfile, struct node *node)
 {
+    FATAL(!node, "Didn't get a node!");
     struct gen_context *ctx = init(outfile);
     int res;
 

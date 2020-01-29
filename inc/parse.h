@@ -11,6 +11,7 @@ enum nodetype {
     A_INT_LIT, A_DEC_LIT,
     A_ASSIGN, A_GLUE, A_TYPE, A_TYPESPEC,
     A_DECLARATION,
+    A_PARAMS,
     A_LIST
 };
 
@@ -28,7 +29,7 @@ struct node {
     struct node *right;
 };
 
-struct node *parse(struct scanfile *f, struct token *token);
+struct node *parse(struct scanfile *f);
 extern void node_walk(struct node *node);
 const char *node_str(struct node *n);
 

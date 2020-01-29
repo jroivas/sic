@@ -9,6 +9,8 @@ static const char *tokenstr[] = {
     "=",
     "IDENTIFIER",
     "INT_LIT", "DEC_LIT",
+    "(", ")",
+    "{", "}",
     ",", "SEMI", "EOF"
 };
 
@@ -67,6 +69,7 @@ static int next(struct scanfile *f)
             f->line++;
     }
 
+    //printf("Scanned: %c (%d)\n", c, c);
     return c;
 }
 
@@ -159,12 +162,6 @@ int scan(struct scanfile *f, struct token *t)
     int ok = 0;
     memset(t, 0, sizeof(struct token));
 
-    if (f->peek.token != T_INVALID) {
-        memcpy(t, &f->peek, sizeof(struct token));
-        f->peek.token = T_INVALID;
-        return 1;
-    }
-
     switch (c) {
         case EOF:
             t->token = T_EOF;
@@ -193,6 +190,18 @@ int scan(struct scanfile *f, struct token *t)
         case ',':
             t->token = T_COMMA;
             break;
+        case '(':
+            t->token = T_ROUND_OPEN;
+            break;
+        case ')':
+            t->token = T_ROUND_CLOSE;
+            break;
+        case '{':
+            t->token = T_CURLY_OPEN;
+            break;
+        case '}':
+            t->token = T_CURLY_CLOSE;
+            break;
         default:
             if (isdigit(c)) {
                 t->token = T_INT_LIT;
@@ -218,9 +227,21 @@ int scan(struct scanfile *f, struct token *t)
     return 1;
 }
 
-int peek(struct scanfile *f, struct token **t)
+void save_point(struct scanfile *f, struct token *t)
 {
-    int res = scan(f, &f->peek);
-    *t = &f->peek;
-    return res;
+    FATAL(f->savecnt + 1 >= SCANFILE_SAVE_MAX,
+            "Maximum save points reached");
+    memcpy(&f->save_token[f->savecnt], t, sizeof(*t));
+    long pos = ftell(f->infile);
+    if (pos > 0)
+        pos--;
+    f->save_point[f->savecnt++] = pos;
+}
+
+void load_point(struct scanfile *f, struct token *t)
+{
+    FATAL(!f->savecnt, "No save points to load");
+    f->putback = 0;
+    fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
+    memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
 }

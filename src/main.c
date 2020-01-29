@@ -14,7 +14,6 @@ int main(int argc, char **argv)
 {
     int res = 0;
     struct scanfile f;
-    struct token token;
     struct node *node;
     FILE *outfile;
     char outname[256];
@@ -28,10 +27,7 @@ int main(int argc, char **argv)
     if (!f.infile)
         ERR("Can't open file: %s", argv[1]);
 
-    if (!scan(&f, &token))
-        ERR("Error while parsing %s", argv[1]);
-
-    node = parse(&f, &token);
+    node = parse(&f);
     close_input_file(&f);
     node_walk(node);
 
