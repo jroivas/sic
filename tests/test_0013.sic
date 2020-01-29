@@ -1,0 +1,2 @@
+short int a = 2, b = 4, c;
+int d = 40;

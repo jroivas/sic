@@ -1,0 +1,9 @@
+int a = 1;
+unsigned b = 2;
+unsigned int c = 3;
+short d = 4;
+unsigned short e = 5;
+long f = 6;
+unsigned long g = 7;
+char h = 8;
+unsigned char i = 9;

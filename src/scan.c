@@ -9,7 +9,7 @@ static const char *tokenstr[] = {
     "=",
     "IDENTIFIER",
     "INT_LIT", "DEC_LIT",
-    "SEMI", "EOF"
+    ",", "SEMI", "EOF"
 };
 
 void open_input_file(struct scanfile *f, const char *name)
@@ -189,6 +189,9 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case ';':
             t->token = T_SEMI;
+            break;
+        case ',':
+            t->token = T_COMMA;
             break;
         default:
             if (isdigit(c)) {

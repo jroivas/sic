@@ -206,6 +206,7 @@ struct variable *new_variable(struct gen_context *ctx,
         else
             // Default to 32
             bits = 32;
+        sign = 1;
     }
     res->type = find_type_by(ctx->types, type, bits, sign);
     res->next = ctx->variables;

@@ -9,7 +9,7 @@ enum tokentype {
     T_EQ,
     T_IDENTIFIER,
     T_INT_LIT, T_DEC_LIT,
-    T_SEMI, T_EOF
+    T_COMMA, T_SEMI, T_EOF
 };
 
 struct token {

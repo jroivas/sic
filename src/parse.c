@@ -307,8 +307,24 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
 
 struct node *init_declarator_list(struct scanfile *f, struct token *token)
 {
-    struct node *res = init_declarator(f, token);
-    //TODO
+    struct node *res = NULL;
+    struct node *prev = NULL;
+    while (1) {
+        struct node *tmp = init_declarator(f, token);
+        if (!tmp)
+            break;
+        tmp = make_node(A_LIST, tmp, NULL);
+        if (res == NULL)
+            res = tmp;
+        else {
+            FATAL(prev->right, "Compiler error!")
+            prev->right = tmp;
+        }
+        prev = tmp;
+        if (token->token != T_COMMA)
+            break;
+        scan(f, token);
+    }
     return res;
 }
 
