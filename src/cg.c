@@ -29,10 +29,11 @@ struct gen_context {
     int regnum;
     int type;
     int safe;
-    char *name;
+    const char *name;
     struct type *pending_type;
     struct type *types;
     struct variable *variables;
+    struct gen_context *parent;
 };
 
 static const char *varstr[] = {
@@ -157,7 +158,7 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, init_type("float", V_FLOAT, 64, 1));
 }
 
-struct gen_context *init(FILE *outfile)
+struct gen_context *init_ctx(FILE *outfile)
 {
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
@@ -180,6 +181,8 @@ struct variable *find_variable(struct gen_context *ctx, int reg)
             return val;
         val = val->next;
     }
+    if (ctx->parent)
+        return find_variable(ctx->parent, reg);
     return NULL;
 }
 
@@ -566,6 +569,124 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     return dst->reg;
 }
 
+void gen_pre(struct gen_context *ctx, struct node *node)
+{
+    char *tmp;
+    const char *type = var_str(node->type, node->bits, &tmp);
+    fprintf(ctx->f, "define dso_local %s @%s() #0 {\n",
+            type, ctx->name);
+    if (tmp)
+        free(tmp);
+}
+
+void gen_post(struct gen_context *ctx, struct node *node, int res)
+{
+#if 0
+    if (node->type != V_VOID) {
+        char *tmp;
+        struct variable *var = find_variable(ctx, res);
+        FATAL(!var, "Invalid return variable: %d", res);
+        if (!var->direct) {
+            struct variable *tmp = gen_load(ctx, var);
+            res = tmp->reg;
+        }
+
+        const char *type = var_str(node->type, node->bits, &tmp);
+        fprintf(ctx->f, "ret %s %%%d\n", type, res);
+        if (tmp)
+            free(tmp);
+    }
+#endif
+    (void)node;
+    (void)res;
+    fprintf(ctx->f, "}\n");
+}
+
+
+int gen_recursive(struct gen_context *ctx, struct node *node);
+int gen_function(struct gen_context *ctx, struct node *node)
+{
+    struct gen_context *func_ctx = init_ctx(ctx->f);
+    func_ctx->parent = ctx;
+
+    FATAL(!node->left, "Missing function definition");
+
+    int func_proto = gen_recursive(func_ctx, node->left);
+
+    struct node *r = node->right;
+    FATAL(!r, "Function body missing");
+    struct node *name = r->left;
+    FATAL(!name, "Function name missing");
+    FATAL(name->node != A_IDENTIFIER, "Faulty function name");
+    func_ctx->name = name->value_string;
+
+    // Need tod find from parent context
+    struct variable *v = find_variable(ctx, -func_proto);
+    FATAL(!v, "No proto variable");
+    FATAL(!v->type, "No proto type");
+    printf("v: %d %d\n", v->type->type, v->type->bits);
+
+    gen_pre(func_ctx, node->left);
+
+    int res = gen_recursive(func_ctx, node->right);
+    printf("proto: %d, res: %d\n", func_proto, res);
+
+    gen_post(func_ctx, NULL, res);
+
+    return 0;
+}
+
+#if 0
+int gen_function(struct gen_context *ctx, struct node *node, int left, int right)
+{
+    printf("Func %d or %d\n", left, right);
+    return 0;
+}
+#endif
+
+int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
+{
+    if (!left && !right)
+        return 0;
+    int res = 0;
+    struct variable *var;
+    if (right)
+        var = find_variable(ctx, right);
+    else
+        var = find_variable(ctx, left);
+
+    if (!var->direct) {
+        struct variable *tmp = gen_load(ctx, var);
+        res = tmp->reg;
+    } else
+        res = var->reg;
+
+    char *tmp;
+    const char *type = var_str(var->type->type, var->type->bits, &tmp);
+    fprintf(ctx->f, "ret %s %%%d\n", type, res);
+    if (tmp)
+        free(tmp);
+
+    return res;
+#if 0
+    if (node->type != V_VOID) {
+        char *tmp;
+        struct variable *var = find_variable(ctx, res);
+        FATAL(!var, "Invalid return variable: %d", res);
+        if (!var->direct) {
+            struct variable *tmp = gen_load(ctx, var);
+            res = tmp->reg;
+        }
+
+        const char *type = var_str(node->type, node->bits, &tmp);
+        fprintf(ctx->f, "ret %s %%%d\n", type, res);
+        if (tmp)
+            free(tmp);
+    }
+    fprintf(ctx->f, "}\n");
+#endif
+}
+
 int gen_declaration(struct gen_context *ctx, struct node *node, int left, int right)
 {
     FATAL(left >= 0, "Invalid type definition in declaration");
@@ -579,6 +700,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node == NULL)
         return 0;
 
+    if (node->node == A_FUNCTION)
+        return gen_function(ctx, node);
     if (node->left)
         resleft = gen_recursive(ctx, node->left);
     if (node->right)
@@ -613,6 +736,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_type(ctx, node);
         case A_IDENTIFIER:
             return gen_identifier(ctx, node);
+        //case A_FUNCTION:
+            //return gen_function(ctx, node, resleft, resright);
+        case A_RETURN:
+            return gen_return(ctx, node, resleft, resright);
         case A_ASSIGN:
             return gen_assign(ctx, node, resleft, resright);
         case A_DECLARATION:
@@ -623,39 +750,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
-void gen_pre(struct gen_context *ctx, struct node *node)
-{
-    char *tmp;
-    const char *type = var_str(node->type, node->bits, &tmp);
-    fprintf(ctx->f, "define dso_local %s @%s() #0 {\n",
-            type, ctx->name);
-    if (tmp)
-        free(tmp);
-}
-
-void gen_post(struct gen_context *ctx, struct node *node, int res)
-{
-    if (node->type != V_VOID) {
-        char *tmp;
-        struct variable *var = find_variable(ctx, res);
-        FATAL(!var, "Invalid return variable: %d", res);
-        if (!var->direct) {
-            struct variable *tmp = gen_load(ctx, var);
-            res = tmp->reg;
-        }
-
-        const char *type = var_str(node->type, node->bits, &tmp);
-        fprintf(ctx->f, "ret %s %%%d\n", type, res);
-        if (tmp)
-            free(tmp);
-    }
-    fprintf(ctx->f, "}\n");
-}
-
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node!");
-    struct gen_context *ctx = init(outfile);
+    struct gen_context *ctx = init_ctx(outfile);
     int res;
 
     gen_pre(ctx, node);

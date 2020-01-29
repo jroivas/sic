@@ -560,7 +560,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
         return NULL;
     }
 
-    res = make_node(A_FUNCTION, decl, comp);
+    res = make_node(A_GLUE, decl, comp);
     res = make_node(A_FUNCTION, spec, res);
 
     return res;
