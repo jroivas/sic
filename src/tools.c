@@ -43,6 +43,8 @@ unsigned long djb2(const unsigned char *str)
 
 hashtype hash(const char *str)
 {
+    if (!str)
+        return 0;
     return djb2((const unsigned char*)str);
 }
 

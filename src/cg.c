@@ -55,6 +55,7 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
+#if 0
 struct type *find_type_by_name(struct type *first, const char *name)
 {
     struct type *res = first;
@@ -67,15 +68,18 @@ struct type *find_type_by_name(struct type *first, const char *name)
     }
     return NULL;
 }
+#endif
 
-struct type *find_type_by(struct type *first, enum var_type type, int bits, int sign)
+struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign)
 {
-    struct type *res = first;
+    struct type *res = ctx->types;
     while (res) {
         if (res->type == type && res->bits == bits && res->sign == sign)
             return res;
         res = res->next;
     }
+    if (ctx->parent)
+        return find_type_by(ctx->parent, type, bits, sign);
     return NULL;
 }
 
@@ -92,11 +96,26 @@ struct type *init_type(const char *name, enum var_type t, int bits, int sign)
     return res;
 }
 
-struct variable *find_variable_by_name(struct variable *first, const char *name)
+struct variable *find_variable(struct gen_context *ctx, int reg)
+{
+    struct variable *val = ctx->variables;
+    while (val != NULL) {
+        if (val->reg == reg)
+            return val;
+        val = val->next;
+    }
+#if 0
+    if (ctx->parent)
+        return find_variable(ctx->parent, reg);
+#endif
+    return NULL;
+}
+
+struct variable *find_variable_by_name(struct gen_context *ctx, const char *name)
 {
     if (name == NULL)
         return NULL;
-    struct variable *res = first;
+    struct variable *res = ctx->variables;
     FATAL(!name, "No variable name provided!");
     hashtype h = hash(name);
     while (res) {
@@ -104,6 +123,8 @@ struct variable *find_variable_by_name(struct variable *first, const char *name)
             return res;
         res = res->next;
     }
+    if (ctx->parent)
+        return find_variable_by_name(ctx->parent, name);
     return NULL;
 }
 
@@ -120,8 +141,7 @@ struct variable *init_variable(const char *name, struct type *t)
 
 void register_type(struct gen_context *ctx, struct type *type)
 {
-    //struct type *t = find_type(ctx->types, type->name);
-    struct type *t = find_type_by(ctx->types, type->type, type->bits, type->sign);
+    struct type *t = find_type_by(ctx, type->type, type->bits, type->sign);
     FATAL(t, "Type already registered: %s", type->name);
 
     type->id = ++ctx->ids;
@@ -131,7 +151,7 @@ void register_type(struct gen_context *ctx, struct type *type)
 
 void register_variable(struct gen_context *ctx, struct variable *var)
 {
-    struct variable *v = find_variable_by_name(ctx->variables, var->name);
+    struct variable *v = find_variable_by_name(ctx, var->name);
     FATAL(v, "Variable already registered: %s", var->name);
 
     var->id = ++ctx->ids;
@@ -158,7 +178,7 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, init_type("float", V_FLOAT, 64, 1));
 }
 
-struct gen_context *init_ctx(FILE *outfile)
+struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 {
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
@@ -169,25 +189,14 @@ struct gen_context *init_ctx(FILE *outfile)
     res->type = V_VOID;
     res->safe = 1;
     res->name = "__global_context";
-    register_builtin_types(res);
+    res->parent = parent;
+    if (!parent)
+        register_builtin_types(res);
     return res;
 }
 
-struct variable *find_variable(struct gen_context *ctx, int reg)
-{
-    struct variable *val = ctx->variables;
-    while (val != NULL) {
-        if (val->reg == reg)
-            return val;
-        val = val->next;
-    }
-    if (ctx->parent)
-        return find_variable(ctx->parent, reg);
-    return NULL;
-}
-
 struct variable *new_variable(struct gen_context *ctx,
-        enum var_type type, int bits, int sign)
+        const char *name, enum var_type type, int bits, int sign)
 {
     struct variable *res = calloc(1, sizeof(struct variable));
 
@@ -210,7 +219,9 @@ struct variable *new_variable(struct gen_context *ctx,
             bits = 32;
         sign = 1;
     }
-    res->type = find_type_by(ctx->types, type, bits, sign);
+    res->name = name;
+    res->name_hash = hash(name);
+    res->type = find_type_by(ctx, type, bits, sign);
     res->next = ctx->variables;
     FATAL(!res->type, "Didn't find type!");
 
@@ -222,7 +233,7 @@ struct variable *new_variable(struct gen_context *ctx,
 struct variable *new_inst_variable(struct gen_context *ctx,
         enum var_type type, int bits, int sign)
 {
-    struct variable *res = new_variable(ctx, type, bits, sign);
+    struct variable *res = new_variable(ctx, NULL, type, bits, sign);
     res->direct = 1;
     return res;
 }
@@ -247,7 +258,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, enum var_
 
     struct variable *val;
     if (target == V_FLOAT && v->type->type == V_INT) {
-        val = new_variable(ctx, V_FLOAT, v->type->bits, 1);
+        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1);
         fprintf(ctx->f, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->type->bits, v->reg);
         val->direct = 1;
@@ -276,7 +287,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, V_INT, n->bits, n->value < 0);
+    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
@@ -286,7 +297,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 
 int gen_store_int_lit(struct gen_context *ctx, literalnum value)
 {
-    struct variable *val = new_variable(ctx, V_INT, 32, value < 0);
+    struct variable *val = new_variable(ctx, NULL, V_INT, 32, value < 0);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
     fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
@@ -303,7 +314,7 @@ char *double_str(literalnum value, literalnum frac)
 
 int gen_store_double(struct gen_context *ctx, struct node *n)
 {
-    struct variable *val = new_variable(ctx, V_FLOAT, n->bits, 1);
+    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1);
     gen_allocate_double(ctx, val->reg);
 
     char *tmp = double_str(n->value, n->fraction);
@@ -317,7 +328,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, V_INT, v->type->bits, 0);
+    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0);
 
     fprintf(ctx->f, "%%%d = load i%d, i%d* %%%d, align 4\n",
             res->reg, res->type->bits, res->type->bits, v->reg);
@@ -328,7 +339,7 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, V_FLOAT, v->type->bits, 1);
+    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1);
 
     fprintf(ctx->f, "%%%d = load double, double* %%%d, align 8\n",
             res->reg, v->reg);
@@ -515,8 +526,7 @@ int gen_negate(struct gen_context *ctx, int a)
 
 int gen_type(struct gen_context *ctx, struct node *node)
 {
-    //struct type *t = find_type(ctx->types, node->value_string);
-    struct type *t = find_type_by(ctx->types, node->type, node->bits, node->sign);
+    struct type *t = find_type_by(ctx, node->type, node->bits, node->sign);
     if (t == NULL)
         ERR("Couldn't find type: %s", node->value_string);
 
@@ -527,7 +537,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
-    struct variable *var = find_variable_by_name(ctx->variables, node->value_string);
+    struct variable *var = find_variable_by_name(ctx, node->value_string);
     int res;
     if (var == NULL) {
         // Utilize pending type from previous type def
@@ -535,11 +545,11 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         struct type *t = ctx->pending_type;
         switch (t->type) {
             case V_INT:
-                var = new_variable(ctx, V_INT, t->bits, 0);
+                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0);
                 res = gen_allocate_int(ctx, var->reg, var->type->bits);
                 break;
             case V_FLOAT:
-                var = new_variable(ctx, V_FLOAT, t->bits, 1);
+                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1);
                 res = gen_allocate_double(ctx, var->reg);
                 break;
             default:
@@ -606,8 +616,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
 int gen_recursive(struct gen_context *ctx, struct node *node);
 int gen_function(struct gen_context *ctx, struct node *node)
 {
-    struct gen_context *func_ctx = init_ctx(ctx->f);
-    func_ctx->parent = ctx;
+    struct gen_context *func_ctx = init_ctx(ctx->f, ctx);
 
     FATAL(!node->left, "Missing function definition");
 
@@ -624,25 +633,15 @@ int gen_function(struct gen_context *ctx, struct node *node)
     struct variable *v = find_variable(ctx, -func_proto);
     FATAL(!v, "No proto variable");
     FATAL(!v->type, "No proto type");
-    printf("v: %d %d\n", v->type->type, v->type->bits);
 
     gen_pre(func_ctx, node->left);
 
     int res = gen_recursive(func_ctx, node->right);
-    printf("proto: %d, res: %d\n", func_proto, res);
 
     gen_post(func_ctx, NULL, res);
 
     return 0;
 }
-
-#if 0
-int gen_function(struct gen_context *ctx, struct node *node, int left, int right)
-{
-    printf("Func %d or %d\n", left, right);
-    return 0;
-}
-#endif
 
 int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
 {
@@ -753,9 +752,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node!");
-    struct gen_context *ctx = init_ctx(outfile);
+    struct gen_context *ctx = init_ctx(outfile, NULL);
     int res;
 
+    //FIXME globals
     gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
     gen_post(ctx, node, res);
