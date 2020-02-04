@@ -1,5 +1,6 @@
 #include "gc.h"
 #include "parse.h"
+#include "buffer.h"
 #include <string.h>
 
 struct type {
@@ -17,6 +18,7 @@ struct variable {
     int id;
     int reg;
     int direct;
+    int global;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -29,11 +31,15 @@ struct gen_context {
     int regnum;
     int type;
     int safe;
+    int global;
     const char *name;
     struct type *pending_type;
     struct type *types;
     struct variable *variables;
+    struct variable *globals;
     struct gen_context *parent;
+    struct buffer *init;
+    struct buffer *data;
 };
 
 static const char *varstr[] = {
@@ -54,6 +60,8 @@ const char *var_str(enum var_type v, int size, char **r)
 
     return varstr[v];
 }
+
+#define REGP(X) (X->global) ? "@G" : "%"
 
 #if 0
 struct type *find_type_by_name(struct type *first, const char *name)
@@ -225,6 +233,7 @@ struct variable *new_variable(struct gen_context *ctx,
     res->next = ctx->variables;
     FATAL(!res->type, "Didn't find type!");
 
+    // FIXME ctx->globals
     ctx->variables = res;
 
     return res;
@@ -272,8 +281,13 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, enum var_
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 {
     // TODO Fix align
-    fprintf(ctx->f, "%%%d = alloca i%d, align 4\n",
-        reg, bits);
+    if (ctx->global) {
+        fprintf(ctx->f, "%s%d = global i%d 0, align 4\n",
+            "@G", reg, bits);
+    } else {
+        fprintf(ctx->f, "%%%d = alloca i%d, align 4\n",
+            reg, bits);
+    }
     return reg;
 }
 
@@ -288,10 +302,11 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0);
+    val->global = ctx->global;
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
-    fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
-            val->type->bits, n->value, val->type->bits, val->reg);
+    fprintf(ctx->f, "store i%d %llu, i%d* %s%d, align 4\n",
+            val->type->bits, n->value, val->type->bits, REGP(val), val->reg);
     return val->reg;
 }
 
@@ -300,8 +315,13 @@ int gen_store_int_lit(struct gen_context *ctx, literalnum value)
     struct variable *val = new_variable(ctx, NULL, V_INT, 32, value < 0);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
-    fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
-            val->type->bits, value, val->type->bits, val->reg);
+    if (val->global) {
+        fprintf(ctx->f, "@%d = global i%d %lld, align 4\n",
+                val->reg, val->type->bits, value);
+    } else {
+        fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
+                val->type->bits, value, val->type->bits, val->reg);
+    }
     return val->reg;
 }
 
@@ -330,8 +350,8 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
         return v;
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0);
 
-    fprintf(ctx->f, "%%%d = load i%d, i%d* %%%d, align 4\n",
-            res->reg, res->type->bits, res->type->bits, v->reg);
+    fprintf(ctx->f, "%%%d = load i%d, i%d* %c%d, align 4\n",
+            res->reg, res->type->bits, res->type->bits, v->global ? '@' : '%', v->reg);
     return res;
 }
 
@@ -380,9 +400,9 @@ struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct v
 
 enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct variable **v2)
 {
-    FATAL(!*v1, "Can't load v1");
+    FATAL(!*v1, "Can't load v1 in cast");
     *v1 = gen_load(ctx, *v1);
-    FATAL(!*v2, "Can't load v2");
+    FATAL(!*v2, "Can't load v2 in cast");
     *v2 = gen_load(ctx, *v2);
 
     enum var_type restype = resolve_type((*v1)->type->type, (*v2)->type->type);
@@ -546,10 +566,12 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         switch (t->type) {
             case V_INT:
                 var = new_variable(ctx, node->value_string, V_INT, t->bits, 0);
+                var->global = ctx->global;
                 res = gen_allocate_int(ctx, var->reg, var->type->bits);
                 break;
             case V_FLOAT:
                 var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1);
+                var->global = ctx->global;
                 res = gen_allocate_double(ctx, var->reg);
                 break;
             default:
@@ -754,11 +776,13 @@ int codegen(FILE *outfile, struct node *node)
     FATAL(!node, "Didn't get a node!");
     struct gen_context *ctx = init_ctx(outfile, NULL);
     int res;
+    ctx->global = 1;
 
-    //FIXME globals
-    gen_pre(ctx, node);
+    // TODO Content buffers to mix initializers and global code
+    // FIXME globals
+    //gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
-    gen_post(ctx, node, res);
+    //gen_post(ctx, node, res);
 
     return res;
 }

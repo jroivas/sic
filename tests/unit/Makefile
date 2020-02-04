@@ -1,0 +1,20 @@
+SRCS := $(wildcard test_*.c)
+OBJS := $(addsuffix .o,$(basename $(SRCS)))
+TARGETS := $(basename $(SRCS))
+CFLAGS := -I../../inc $(CFLAGS)
+
+test: runtest
+	./runtest
+
+buffer.o: ../../src/buffer.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+test.o: test.c test.h
+
+runtest: test.o $(OBJS) buffer.o
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
+
+%.o : %.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+.PHONY: test runtest

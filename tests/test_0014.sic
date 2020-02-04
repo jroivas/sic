@@ -1,5 +1,7 @@
 int a = 2;
-int b = 40;
+int b;
+int c = 40;
+int d = 39 + 3;
 
 int main()
 {
