@@ -37,13 +37,18 @@ struct gen_context {
     int safe;
     int global;
     const char *name;
+    struct node *node;
+
     struct type *pending_type;
     struct type *types;
+
     struct variable *variables;
     struct variable *globals;
+
     struct gen_context *parent;
     struct gen_context *child;
     struct gen_context *next;
+
     struct buffer *pre;
     struct buffer *init;
     struct buffer *data;
@@ -90,9 +95,6 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
 {
     struct type *res = ctx->types;
     while (res) {
-        //if (res->type == type && (type == V_VOID || (res->bits == bits && res->sign == sign)))
-        if (type == V_VOID)
-            printf("VV: %d == %d, %d == %d\n", res->bits, bits, res->sign, sign);
         if (res->type == type && res->bits == bits && res->sign == sign)
             return res;
         res = res->next;
@@ -251,6 +253,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->parent = parent;
     res->child = NULL;
     res->next = NULL;
+    res->node = NULL;
 
     res->pre = buffer_init();
     res->init = buffer_init();
@@ -517,7 +520,6 @@ int gen_add(struct gen_context *ctx, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
-    printf("AA %p %p, %d %d\n", (void*)v1, (void*)v2, a, b);
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
@@ -756,11 +758,34 @@ int gen_function(struct gen_context *ctx, struct node *node)
     gen_pre(func_ctx, node->left);
 
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
+        struct node *node = ctx->node;
+        if (node && node->type != V_VOID) {
+            struct variable *ret = new_inst_variable(func_ctx, V_INT, 32, 1);
+#if 0
+            struct variable *ret = new_inst_variable(func_ctx, V_VOID, 0, 0);
+            char *tmp;
+            struct variable *var = find_variable(ctx, res);
+            FATAL(!var, "Invalid return variable: %d", res);
+            if (!var->direct) {
+                struct variable *tmp = gen_load(ctx, var);
+                res = tmp->reg;
+            }
+
+            const char *type = var_str(node->type, node->bits, &tmp);
+            buffer_write(func_ctx->data, "%%%d = call %s @%s()\n", ret->reg, type, ctx->name);
+            buffer_write(func_ctx->data, "ret %s %%%d \n", type, ret->reg);
+            if (tmp)
+                free(tmp);
+#endif
+            //FIXME i32
+            buffer_write(func_ctx->init, "%%%d = call i32 @%s()\n", ret->reg, ctx->name);
+        } else {
 #if 0
         struct variable *global_res = new_inst_variable(func_ctx, V_VOID, 0, 0);
         buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
 #endif
-        buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
+            buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
+        }
     }
 
     int res = gen_recursive(func_ctx, node->right);
@@ -879,7 +904,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
-int fake_main(struct gen_context *ctx, struct node *node, int res)
+struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int res)
 {
     struct gen_context *main_ctx = init_ctx(ctx->f, ctx);
     main_ctx->name = "main";
@@ -908,7 +933,7 @@ int fake_main(struct gen_context *ctx, struct node *node, int res)
 
     main_ctx->next = ctx->child;
     ctx->child = main_ctx;
-    return res;
+    return main_ctx;
 }
 
 int codegen(FILE *outfile, struct node *node)
@@ -919,14 +944,17 @@ int codegen(FILE *outfile, struct node *node)
     int got_main = 0;
 
     ctx->global = 1;
+    ctx->node = node;
 
     gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
     gen_post(ctx, node, res);
 
-    if (!got_main)
-        fake_main(ctx, node, res);
     output_res(ctx, &got_main);
+    if (!got_main) {
+        struct gen_context *main_ctx = fake_main(ctx, node, res);
+        output_ctx(main_ctx);
+    }
 
     return res;
 }
