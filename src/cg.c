@@ -60,6 +60,8 @@ const char *var_str(enum var_type v, int size, char **r)
             "Variable type string table overflow with %d", v);
     if (v == V_INT && size != 32) {
         char *tmp = calloc(1, 8);
+        if (size == 0)
+            size = 32;
         snprintf(tmp, 8, "i%d", size);
         *r = tmp;
         return tmp;
@@ -273,14 +275,16 @@ void output_ctx(struct gen_context *ctx)
     fprintf(ctx->f, "; Post\n%s\n", buffer_read(ctx->post));
 }
 
-void output_res(struct gen_context *ctx)
+void output_res(struct gen_context *ctx, int *got_main)
 {
     struct gen_context *child = ctx->child;
 
     // Global
+    if (strcmp(ctx->name, "main") == 0)
+        *got_main = 1;
     output_ctx(ctx);
     while (child) {
-        output_res(child);
+        output_res(child, got_main);
         child = child->next;
     }
 }
@@ -697,7 +701,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 void gen_pre(struct gen_context *ctx, struct node *node)
 {
     char *tmp = NULL;
-    const char *type = ctx->global ? "void " : var_str(node->type, node->bits, &tmp);
+    const char *type = var_str(node->type, node->bits, &tmp);
     buffer_write(ctx->pre, "define dso_local %s @%s() #0 {\n",
             type, ctx->name);
     if (tmp)
@@ -706,8 +710,7 @@ void gen_pre(struct gen_context *ctx, struct node *node)
 
 void gen_post(struct gen_context *ctx, struct node *node, int res)
 {
-#if 0
-    if (node->type != V_VOID) {
+    if (node && node->type != V_VOID) {
         char *tmp;
         struct variable *var = find_variable(ctx, res);
         FATAL(!var, "Invalid return variable: %d", res);
@@ -717,15 +720,10 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
         }
 
         const char *type = var_str(node->type, node->bits, &tmp);
-        fprintf(ctx->f, "ret %s %%%d\n", type, res);
+        buffer_write(ctx->post, "ret %s %%%d\n", type, res);
         if (tmp)
             free(tmp);
     }
-#endif
-    (void)node;
-    (void)res;
-    if (ctx->global)
-        buffer_write(ctx->post, "ret void\n");
     buffer_write(ctx->post, "}\n");
 }
 
@@ -881,20 +879,54 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+int fake_main(struct gen_context *ctx, struct node *node, int res)
+{
+    struct gen_context *main_ctx = init_ctx(ctx->f, ctx);
+    main_ctx->name = "main";
+
+    gen_pre(main_ctx, node);
+    if (node && node->type != V_VOID) {
+        struct variable *ret = new_inst_variable(main_ctx, V_VOID, 0, 0);
+        char *tmp;
+        struct variable *var = find_variable(ctx, res);
+        FATAL(!var, "Invalid return variable: %d", res);
+        if (!var->direct) {
+            struct variable *tmp = gen_load(ctx, var);
+            res = tmp->reg;
+        }
+
+        const char *type = var_str(node->type, node->bits, &tmp);
+        buffer_write(main_ctx->data, "%%%d = call %s @%s()\n", ret->reg, type, ctx->name);
+        buffer_write(main_ctx->data, "ret %s %%%d \n", type, ret->reg);
+        if (tmp)
+            free(tmp);
+    } else {
+        buffer_write(main_ctx->data, "call void @%s()\n", ctx->name);
+        buffer_write(main_ctx->data, "ret i32 0 \n");
+    }
+    gen_post(main_ctx, NULL, res);
+
+    main_ctx->next = ctx->child;
+    ctx->child = main_ctx;
+    return res;
+}
+
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node!");
     struct gen_context *ctx = init_ctx(outfile, NULL);
     int res;
+    int got_main = 0;
+
     ctx->global = 1;
 
-    // TODO Content buffers to mix initializers and global code
-    // FIXME globals
     gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
     gen_post(ctx, node, res);
 
-    output_res(ctx);
+    if (!got_main)
+        fake_main(ctx, node, res);
+    output_res(ctx, &got_main);
 
     return res;
 }

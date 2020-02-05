@@ -247,8 +247,10 @@ void save_point(struct scanfile *f, struct token *t)
             "Maximum save points reached");
     memcpy(&f->save_token[f->savecnt], t, sizeof(*t));
     long pos = ftell(f->infile);
+#if 0
     if (pos > 0)
         pos--;
+#endif
     f->save_point[f->savecnt++] = pos;
 }
 
