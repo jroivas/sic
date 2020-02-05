@@ -95,6 +95,10 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
 {
     struct type *res = ctx->types;
     while (res) {
+#if DEBUG
+        if (res->type == type)
+            printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
+#endif
         if (res->type == type && res->bits == bits && res->sign == sign)
             return res;
         res = res->next;
@@ -311,10 +315,12 @@ struct variable *new_variable(struct gen_context *ctx,
         type = ctx->pending_type->type;
         bits = ctx->pending_type->bits;
         sign = ctx->pending_type->sign;
+        printf("Pending\n");
     } else if (type == V_VOID) {
         bits = 0;
         sign = 0;
-    } else if (bits == 0) {
+    } else if (bits == 0 || type == V_FLOAT) {
+        // TODO Fix float bits
         if (type == V_FLOAT)
             bits = 64;
         else
@@ -325,6 +331,7 @@ struct variable *new_variable(struct gen_context *ctx,
     res->name = name;
     res->name_hash = hash(name);
     res->type = find_type_by(ctx, type, bits, sign);
+    FATAL(!res->type, "Didn't find type!");
     res->global = global;
     if (res->global) {
         res->next = ctx->globals;
@@ -333,7 +340,6 @@ struct variable *new_variable(struct gen_context *ctx,
         res->next = ctx->variables;
         ctx->variables = res;
     }
-    FATAL(!res->type, "Didn't find type!");
 
 
     return res;
@@ -393,7 +399,13 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 
 int gen_allocate_double(struct gen_context *ctx, int reg)
 {
-    buffer_write(ctx->init, "%%%d = alloca double, align 8\n", reg);
+    if (ctx->global) {
+        buffer_write(ctx->init, "%s%d = global double 0.0, align 8\n",
+            "@G", reg);
+    } else {
+        buffer_write(ctx->init, "%s%d = alloca double, align 8\n",
+            ctx->global ? "@G" : "%%", reg);
+    }
     return reg;
 }
 
@@ -438,8 +450,8 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 
     char *tmp = double_str(n->value, n->fraction);
 
-    buffer_write(ctx->data, "store double %s, double* %%%d, align 8\n",
-            tmp, val->reg);
+    buffer_write(ctx->data, "store double %s, double* %s%d, align 8\n",
+            tmp, REGP(val), val->reg);
     return val->reg;
 }
 
@@ -460,8 +472,8 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
         return v;
     struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
 
-    buffer_write(ctx->data, "%%%d = load double, double* %%%d, align 8\n",
-            res->reg, v->reg);
+    buffer_write(ctx->data, "%%%d = load double, double* %s%d, align 8\n",
+            res->reg, REGP(v), v->reg);
     return res;
 }
 
