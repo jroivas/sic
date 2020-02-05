@@ -6,6 +6,7 @@ struct buffer;
 struct buffer *buffer_init(void);
 int buffer_append(struct buffer *, const char *str);
 int buffer_appendln(struct buffer *, const char *str);
+int buffer_write(struct buffer *, const char *fmt, ...);
 const char *buffer_read(struct buffer *);
 void buffer_del(struct buffer *);
 

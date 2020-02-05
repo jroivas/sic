@@ -5,5 +5,5 @@ int d = 39 + 3;
 
 int main()
 {
-    return a + b;
+    return a + c;
 }

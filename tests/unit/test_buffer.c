@@ -45,11 +45,27 @@ int test3()
     return 0;
 }
 
+int test4()
+{
+    struct buffer *b = buffer_init();
+
+    ASSERT(b);
+
+    int l = buffer_write(b, "test3: Wrote %d items on %s\n", 42, "tmp");
+
+    ASSERT(l == 29);
+    ASSERT(strcmp(buffer_read(b), "test3: Wrote 42 items on tmp\n") == 0);
+
+    buffer_del(b);
+    return 0;
+}
+
 int test_buffer()
 {
     TEST(test1);
     TEST(test2);
     TEST(test3);
+    TEST(test4);
 
     return 0;
 }

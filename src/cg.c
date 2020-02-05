@@ -3,6 +3,9 @@
 #include "buffer.h"
 #include <string.h>
 
+#define GLOBAL_START 0x10000
+#define REGP(X) (X->global) ? "@G" : "%"
+
 struct type {
     int id;
     enum var_type type;
@@ -29,6 +32,7 @@ struct gen_context {
     FILE *f;
     int ids;
     int regnum;
+    int regnum_global;
     int type;
     int safe;
     int global;
@@ -38,8 +42,12 @@ struct gen_context {
     struct variable *variables;
     struct variable *globals;
     struct gen_context *parent;
+    struct gen_context *child;
+    struct gen_context *next;
+    struct buffer *pre;
     struct buffer *init;
     struct buffer *data;
+    struct buffer *post;
 };
 
 static const char *varstr[] = {
@@ -61,8 +69,6 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
-#define REGP(X) (X->global) ? "@G" : "%"
-
 #if 0
 struct type *find_type_by_name(struct type *first, const char *name)
 {
@@ -82,6 +88,9 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
 {
     struct type *res = ctx->types;
     while (res) {
+        //if (res->type == type && (type == V_VOID || (res->bits == bits && res->sign == sign)))
+        if (type == V_VOID)
+            printf("VV: %d == %d, %d == %d\n", res->bits, bits, res->sign, sign);
         if (res->type == type && res->bits == bits && res->sign == sign)
             return res;
         res = res->next;
@@ -104,18 +113,51 @@ struct type *init_type(const char *name, enum var_type t, int bits, int sign)
     return res;
 }
 
+struct variable *find_global_variable(struct gen_context *ctx, int reg)
+{
+    struct variable *val = ctx->globals;
+    while (val != NULL) {
+        if (val->reg == reg)
+            return val;
+        val = val->next;
+    }
+    if (ctx->parent)
+        return find_global_variable(ctx->parent, reg);
+    return NULL;
+}
+
 struct variable *find_variable(struct gen_context *ctx, int reg)
 {
+    if (reg > 0 && reg >= GLOBAL_START)
+        return find_global_variable(ctx, reg);
     struct variable *val = ctx->variables;
     while (val != NULL) {
         if (val->reg == reg)
             return val;
         val = val->next;
     }
-#if 0
+    //FXIME globals
+#if 1
     if (ctx->parent)
         return find_variable(ctx->parent, reg);
 #endif
+    return NULL;
+}
+
+struct variable *find_global_variable_by_name(struct gen_context *ctx, const char *name)
+{
+    if (name == NULL)
+        return NULL;
+    struct variable *res = ctx->globals;
+    FATAL(!name, "No variable name provided!");
+    hashtype h = hash(name);
+    while (res) {
+        if (res->name_hash == h && strcmp(res->name, name) == 0)
+            return res;
+        res = res->next;
+    }
+    if (ctx->parent)
+        return find_global_variable_by_name(ctx->parent, name);
     return NULL;
 }
 
@@ -133,7 +175,7 @@ struct variable *find_variable_by_name(struct gen_context *ctx, const char *name
     }
     if (ctx->parent)
         return find_variable_by_name(ctx->parent, name);
-    return NULL;
+    return find_global_variable_by_name(ctx, name);
 }
 
 struct variable *init_variable(const char *name, struct type *t)
@@ -163,8 +205,13 @@ void register_variable(struct gen_context *ctx, struct variable *var)
     FATAL(v, "Variable already registered: %s", var->name);
 
     var->id = ++ctx->ids;
-    var->next = ctx->variables;
-    ctx->variables = var;
+    if (var->global) {
+        var->next = ctx->globals;
+        ctx->globals = var;
+    } else {
+        var->next = ctx->variables;
+        ctx->variables = var;
+    }
 }
 
 void register_builtin_types(struct gen_context *ctx)
@@ -191,20 +238,55 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
     res->regnum = 1;
+    res->regnum_global = GLOBAL_START;
     res->pending_type = NULL;
     res->types = NULL;
     res->variables = NULL;
+    res->globals = NULL;
     res->type = V_VOID;
     res->safe = 1;
     res->name = "__global_context";
     res->parent = parent;
+    res->child = NULL;
+    res->next = NULL;
+
+    res->pre = buffer_init();
+    res->init = buffer_init();
+    res->data = buffer_init();
+    res->post = buffer_init();
+
     if (!parent)
         register_builtin_types(res);
     return res;
 }
 
+void output_ctx(struct gen_context *ctx)
+{
+    if (ctx->global) {
+        fprintf(ctx->f, "; Init\n%s\n", buffer_read(ctx->init));
+        fprintf(ctx->f, "; Pre\n%s\n", buffer_read(ctx->pre));
+    } else {
+        fprintf(ctx->f, "; Pre\n%s\n", buffer_read(ctx->pre));
+        fprintf(ctx->f, "; Init\n%s\n", buffer_read(ctx->init));
+    }
+    fprintf(ctx->f, "; Data\n%s\n", buffer_read(ctx->data));
+    fprintf(ctx->f, "; Post\n%s\n", buffer_read(ctx->post));
+}
+
+void output_res(struct gen_context *ctx)
+{
+    struct gen_context *child = ctx->child;
+
+    // Global
+    output_ctx(ctx);
+    while (child) {
+        output_res(child);
+        child = child->next;
+    }
+}
+
 struct variable *new_variable(struct gen_context *ctx,
-        const char *name, enum var_type type, int bits, int sign)
+        const char *name, enum var_type type, int bits, int sign, int global)
 {
     struct variable *res = calloc(1, sizeof(struct variable));
 
@@ -212,13 +294,19 @@ struct variable *new_variable(struct gen_context *ctx,
     // Float and fixed are always signed
     if (type == V_FLOAT)
         sign = 1;
-    res->reg = ctx->regnum++;
+    if (global)
+        res->reg = ctx->regnum_global++;
+    else
+        res->reg = ctx->regnum++;
 
     // If bits == 0 and we have a pendign type, use it
     if (bits == 0 && ctx->pending_type) {
         type = ctx->pending_type->type;
         bits = ctx->pending_type->bits;
         sign = ctx->pending_type->sign;
+    } else if (type == V_VOID) {
+        bits = 0;
+        sign = 0;
     } else if (bits == 0) {
         if (type == V_FLOAT)
             bits = 64;
@@ -230,11 +318,16 @@ struct variable *new_variable(struct gen_context *ctx,
     res->name = name;
     res->name_hash = hash(name);
     res->type = find_type_by(ctx, type, bits, sign);
-    res->next = ctx->variables;
+    res->global = global;
+    if (res->global) {
+        res->next = ctx->globals;
+        ctx->globals = res;
+    } else {
+        res->next = ctx->variables;
+        ctx->variables = res;
+    }
     FATAL(!res->type, "Didn't find type!");
 
-    // FIXME ctx->globals
-    ctx->variables = res;
 
     return res;
 }
@@ -242,7 +335,7 @@ struct variable *new_variable(struct gen_context *ctx,
 struct variable *new_inst_variable(struct gen_context *ctx,
         enum var_type type, int bits, int sign)
 {
-    struct variable *res = new_variable(ctx, NULL, type, bits, sign);
+    struct variable *res = new_variable(ctx, NULL, type, bits, sign, 0);
     res->direct = 1;
     return res;
 }
@@ -267,8 +360,8 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, enum var_
 
     struct variable *val;
     if (target == V_FLOAT && v->type->type == V_INT) {
-        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1);
-        fprintf(ctx->f, "%%%d = sitofp i%d %%%d to double\n",
+        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
+        buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->type->bits, v->reg);
         val->direct = 1;
     } else
@@ -282,10 +375,10 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 {
     // TODO Fix align
     if (ctx->global) {
-        fprintf(ctx->f, "%s%d = global i%d 0, align 4\n",
+        buffer_write(ctx->init, "%s%d = global i%d 0, align 4\n",
             "@G", reg, bits);
     } else {
-        fprintf(ctx->f, "%%%d = alloca i%d, align 4\n",
+        buffer_write(ctx->init, "%%%d = alloca i%d, align 4\n",
             reg, bits);
     }
     return reg;
@@ -293,7 +386,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 
 int gen_allocate_double(struct gen_context *ctx, int reg)
 {
-    fprintf(ctx->f, "%%%d = alloca double, align 8\n", reg);
+    buffer_write(ctx->init, "%%%d = alloca double, align 8\n", reg);
     return reg;
 }
 
@@ -301,25 +394,24 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0);
-    val->global = ctx->global;
+    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, ctx->global);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
-    fprintf(ctx->f, "store i%d %llu, i%d* %s%d, align 4\n",
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align 4\n",
             val->type->bits, n->value, val->type->bits, REGP(val), val->reg);
     return val->reg;
 }
 
 int gen_store_int_lit(struct gen_context *ctx, literalnum value)
 {
-    struct variable *val = new_variable(ctx, NULL, V_INT, 32, value < 0);
+    struct variable *val = new_variable(ctx, NULL, V_INT, 32, value < 0, ctx->global);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
     if (val->global) {
-        fprintf(ctx->f, "@%d = global i%d %lld, align 4\n",
+        buffer_write(ctx->init, "@G%d = global i%d %lld, align 4\n",
                 val->reg, val->type->bits, value);
     } else {
-        fprintf(ctx->f, "store i%d %llu, i%d* %%%d, align 4\n",
+        buffer_write(ctx->data, "store i%d %llu, i%d* %%%d, align 4\n",
                 val->type->bits, value, val->type->bits, val->reg);
     }
     return val->reg;
@@ -334,12 +426,12 @@ char *double_str(literalnum value, literalnum frac)
 
 int gen_store_double(struct gen_context *ctx, struct node *n)
 {
-    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1);
+    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, ctx->global);
     gen_allocate_double(ctx, val->reg);
 
     char *tmp = double_str(n->value, n->fraction);
 
-    fprintf(ctx->f, "store double %s, double* %%%d, align 8\n",
+    buffer_write(ctx->data, "store double %s, double* %%%d, align 8\n",
             tmp, val->reg);
     return val->reg;
 }
@@ -348,10 +440,10 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0);
+    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0);
 
-    fprintf(ctx->f, "%%%d = load i%d, i%d* %c%d, align 4\n",
-            res->reg, res->type->bits, res->type->bits, v->global ? '@' : '%', v->reg);
+    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align 4\n",
+            res->reg, res->type->bits, res->type->bits, REGP(v), v->reg);
     return res;
 }
 
@@ -359,9 +451,9 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1);
+    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
 
-    fprintf(ctx->f, "%%%d = load double, double* %%%d, align 8\n",
+    buffer_write(ctx->data, "%%%d = load double, double* %%%d, align 8\n",
             res->reg, v->reg);
     return res;
 }
@@ -389,10 +481,10 @@ struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct v
 
     struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || v2->type->sign);
     if (v2->type->sign) {
-        fprintf(ctx->f, "%%%d = sext i%d %%%d to i%d\n",
+        buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     } else {
-        fprintf(ctx->f, "%%%d = zext i%d %%%d to i%d\n",
+        buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     }
     return res;
@@ -421,14 +513,15 @@ int gen_add(struct gen_context *ctx, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
+    printf("AA %p %p, %d %d\n", (void*)v1, (void*)v2, a, b);
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (restype == V_INT) {
-        fprintf(ctx->f, "%%%d = add i%d %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = add i%d %%%d, %%%d\n",
             res->reg, v1->type->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        fprintf(ctx->f, "%%%d = fadd double %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = fadd double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
         ERR("Invalid type: %d", restype);
@@ -443,10 +536,10 @@ int gen_sub(struct gen_context *ctx, int a, int b)
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (restype == V_INT) {
-        fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = sub i%d %%%d, %%%d\n",
             res->reg, v1->type->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        fprintf(ctx->f, "%%%d = fsub double %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = fsub double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
         ERR("Invalid type: %d", restype);
@@ -461,10 +554,10 @@ int gen_mul(struct gen_context *ctx, int a, int b)
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (restype == V_INT) {
-        fprintf(ctx->f, "%%%d = mul i%d %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = mul i%d %%%d, %%%d\n",
             res->reg, v1->type->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
-        fprintf(ctx->f, "%%%d = fmul double %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = fmul double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
         ERR("Invalid type: %d", restype);
@@ -480,14 +573,14 @@ int gen_div(struct gen_context *ctx, int a, int b)
 
     if (restype == V_INT) {
         if (v1->type->sign || v2->type->sign) {
-            fprintf(ctx->f, "%%%d = sdiv i%d %%%d, %%%d\n",
+            buffer_write(ctx->data, "%%%d = sdiv i%d %%%d, %%%d\n",
                 res->reg, v1->type->bits, v1->reg, v2->reg);
         } else {
-            fprintf(ctx->f, "%%%d = udiv i%d %%%d, %%%d\n",
+            buffer_write(ctx->data, "%%%d = udiv i%d %%%d, %%%d\n",
                 res->reg, v1->type->bits, v1->reg, v2->reg);
         }
     } else if (restype == V_FLOAT) {
-        fprintf(ctx->f, "%%%d = fdiv double %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = fdiv double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
         ERR("Invalid type: %d", restype);
@@ -503,14 +596,14 @@ int gen_mod(struct gen_context *ctx, int a, int b)
 
     if (restype == V_INT) {
         if (v1->type->sign && v2->type->sign) {
-            fprintf(ctx->f, "%%%d = srem i%d %%%d, %%%d\n",
+            buffer_write(ctx->data, "%%%d = srem i%d %%%d, %%%d\n",
                 res->reg, v1->type->bits, v1->reg, v2->reg);
         } else {
-            fprintf(ctx->f, "%%%d = urem i%d %%%d, %%%d\n",
+            buffer_write(ctx->data, "%%%d = urem i%d %%%d, %%%d\n",
                 res->reg, v1->type->bits, v1->reg, v2->reg);
         }
     } else if (restype == V_FLOAT) {
-        fprintf(ctx->f, "%%%d = frem double %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = frem double %%%d, %%%d\n",
             res->reg, v1->reg, v2->reg);
     } else
         ERR("Invalid type: %d", restype);
@@ -532,11 +625,11 @@ int gen_negate(struct gen_context *ctx, int a)
         zero = gen_bits(ctx, zero, v);
 
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
-        fprintf(ctx->f, "%%%d = sub i%d %%%d, %%%d\n",
+        buffer_write(ctx->data, "%%%d = sub i%d %%%d, %%%d\n",
             res->reg, v->type->bits, zero->reg, v->reg);
     } else if (v->type->type == V_FLOAT) {
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
-        fprintf(ctx->f, "%%%d = fneg double %%%d\n",
+        buffer_write(ctx->data, "%%%d = fneg double %%%d\n",
             res->reg, v->reg);
     } else
         ERR("Invalid type of %d: %d", a, v->type->type);
@@ -565,12 +658,12 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         struct type *t = ctx->pending_type;
         switch (t->type) {
             case V_INT:
-                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0);
+                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, ctx->global);
                 var->global = ctx->global;
                 res = gen_allocate_int(ctx, var->reg, var->type->bits);
                 break;
             case V_FLOAT:
-                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1);
+                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ctx->global);
                 var->global = ctx->global;
                 res = gen_allocate_double(ctx, var->reg);
                 break;
@@ -586,16 +679,16 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
 int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
     struct variable *src_val = find_variable(ctx, right);
-    FATAL(!src_val, "Can't assign from zero");
+    FATAL(!src_val, "Can't assign from zero: %d", right);
     struct variable *src = gen_load(ctx, src_val);
     struct variable *dst = find_variable(ctx, left);
 
     FATAL(!src, "No source in assign")
-    FATAL(!dst, "No dest in assign")
+    FATAL(!dst, "No dest in assign: %d", left)
 
     if (src->type->type == V_INT) {
-        fprintf(ctx->f, "store i%d %%%d, i%d* %%%d, align 4\n",
-                src->type->bits, src->reg, dst->type->bits, dst->reg);
+        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align 4\n",
+                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg);
     } else
         ERR("Invalid assign");
     return dst->reg;
@@ -603,9 +696,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 
 void gen_pre(struct gen_context *ctx, struct node *node)
 {
-    char *tmp;
-    const char *type = var_str(node->type, node->bits, &tmp);
-    fprintf(ctx->f, "define dso_local %s @%s() #0 {\n",
+    char *tmp = NULL;
+    const char *type = ctx->global ? "void " : var_str(node->type, node->bits, &tmp);
+    buffer_write(ctx->pre, "define dso_local %s @%s() #0 {\n",
             type, ctx->name);
     if (tmp)
         free(tmp);
@@ -631,7 +724,9 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
 #endif
     (void)node;
     (void)res;
-    fprintf(ctx->f, "}\n");
+    if (ctx->global)
+        buffer_write(ctx->post, "ret void\n");
+    buffer_write(ctx->post, "}\n");
 }
 
 
@@ -652,15 +747,30 @@ int gen_function(struct gen_context *ctx, struct node *node)
     func_ctx->name = name->value_string;
 
     // Need tod find from parent context
-    struct variable *v = find_variable(ctx, -func_proto);
-    FATAL(!v, "No proto variable");
+#if 0
+
+    FATAL(!v, "No proto variable: %d", func_proto);
     FATAL(!v->type, "No proto type");
+#else
+    (void)func_proto;
+#endif
 
     gen_pre(func_ctx, node->left);
+
+    if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
+#if 0
+        struct variable *global_res = new_inst_variable(func_ctx, V_VOID, 0, 0);
+        buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
+#endif
+        buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
+    }
 
     int res = gen_recursive(func_ctx, node->right);
 
     gen_post(func_ctx, NULL, res);
+
+    func_ctx->next = ctx->child;
+    ctx->child = func_ctx;
 
     return 0;
 }
@@ -684,7 +794,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
 
     char *tmp;
     const char *type = var_str(var->type->type, var->type->bits, &tmp);
-    fprintf(ctx->f, "ret %s %%%d\n", type, res);
+    buffer_write(ctx->data, "ret %s %%%d\n", type, res);
     if (tmp)
         free(tmp);
 
@@ -780,9 +890,11 @@ int codegen(FILE *outfile, struct node *node)
 
     // TODO Content buffers to mix initializers and global code
     // FIXME globals
-    //gen_pre(ctx, node);
+    gen_pre(ctx, node);
     res = gen_recursive(ctx, node);
-    //gen_post(ctx, node, res);
+    gen_post(ctx, node, res);
+
+    output_res(ctx);
 
     return res;
 }

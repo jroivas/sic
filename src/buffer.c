@@ -1,11 +1,16 @@
+#include "sic.h"
 #include "buffer.h"
 #include <stdlib.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 struct buffer {
     char *data;
     size_t size;
 };
+
+static const unsigned MAX_FMT_LEN = 4096;
 
 struct buffer *buffer_init(void)
 {
@@ -30,9 +35,25 @@ int buffer_appendln(struct buffer *buf, const char *str)
     return res;
 }
 
+int buffer_write(struct buffer *buf, const char *fmt, ...)
+{
+    char *tmp = calloc(1, MAX_FMT_LEN);
+    int cnt = 0;
+
+    va_list argp;
+    va_start(argp, fmt);
+
+    cnt = vsnprintf(tmp, MAX_FMT_LEN - 1, fmt, argp);
+    FATAL(cnt == MAX_FMT_LEN - 1, "Too long string written to buffer: %d", cnt);
+    buffer_append(buf, tmp);
+    free(tmp);
+
+    return cnt;
+}
+
 const char *buffer_read(struct buffer *buf)
 {
-    return buf->data;
+    return buf->data ? buf->data : "";
 }
 
 void buffer_del(struct buffer *buf)

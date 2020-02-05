@@ -1,7 +1,7 @@
 SRCS := $(wildcard test_*.c)
 OBJS := $(addsuffix .o,$(basename $(SRCS)))
 TARGETS := $(basename $(SRCS))
-CFLAGS := -I../../inc $(CFLAGS)
+CFLAGS := -std=c99 -I../../inc $(CFLAGS)
 
 test: runtest
 	./runtest
