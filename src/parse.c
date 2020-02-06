@@ -443,7 +443,6 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
     enum tokentype type;
 
     left = multiplicative_expression(f, token);
-    node_walk(left);
     if (token->token == T_EOF)
         return left;
 
@@ -457,7 +456,6 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
         left = make_node(oper(type), left, right);
         type = token->token;
     }
-    node_walk(left);
     return left;
 }
 

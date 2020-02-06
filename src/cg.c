@@ -315,7 +315,6 @@ struct variable *new_variable(struct gen_context *ctx,
         type = ctx->pending_type->type;
         bits = ctx->pending_type->bits;
         sign = ctx->pending_type->sign;
-        printf("Pending\n");
     } else if (type == V_VOID) {
         bits = 0;
         sign = 0;
