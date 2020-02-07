@@ -9,13 +9,16 @@ build/sic: build $(INC_FILES) $(SRC_FILES)
 test: build/sic
 	CC=build/sic tests/runtest.sh build
 
+testllvm: build/sic
+	CC=build/sic tests/runtest.sh build llvm
+
 testc:
 	CC=$(CC) tests/runtest.sh build
 
 tests: test
 
 runtest: build/sic
-	build/sic tests/test_$(TEST).sic
+	build/sic --dump-tree tests/test_"$(TEST).sic"
 	cat tests/test_$(TEST).sic.ir
 
 build:
