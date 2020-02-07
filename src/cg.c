@@ -635,18 +635,12 @@ int gen_negate(struct gen_context *ctx, int a)
     FATAL(!v, "Can't negate zero");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
-        int zeroreg = gen_store_int_lit(ctx, 0);
-        struct variable *zero = find_variable(ctx, zeroreg);
-        FATAL(!zero, "Can't load zero");
-        zero = gen_load(ctx, zero);
-        zero = gen_bits(ctx, zero, v);
-
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
-        buffer_write(ctx->data, "%%%d = sub i%d %%%d, %%%d\n",
-            res->reg, v->type->bits, zero->reg, v->reg);
+        buffer_write(ctx->data, "%%%d = sub i%d 0, %%%d\n",
+            res->reg, v->type->bits, v->reg);
     } else if (v->type->type == V_FLOAT) {
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
-        buffer_write(ctx->data, "%%%d = fneg double %%%d\n",
+        buffer_write(ctx->data, "%%%d = fsub double 0.0, %%%d\n",
             res->reg, v->reg);
     } else
         ERR("Invalid type of %d: %d", a, v->type->type);

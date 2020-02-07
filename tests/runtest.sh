@@ -30,7 +30,7 @@ while read test; do
             echo "--- FAILED: llc"
             continue
         fi
-        if ! gcc "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin"; then
+        if ! gcc "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin" -lm; then
             echo "--- FAILED: link"
             continue
         fi
