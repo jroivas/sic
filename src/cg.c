@@ -108,6 +108,17 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
     return NULL;
 }
 
+int same_type(struct type *a, struct type *b)
+{
+    if (a->type == V_VOID && b->type == V_VOID)
+        return 1;
+    if (a->type != b->type)
+        return 0;
+    if (a->type == V_FLOAT)
+        return 1;
+    return a->bits == b->bits && a->sign == b->sign;
+}
+
 struct type *init_type(const char *name, enum var_type t, int bits, int sign)
 {
     struct type *res = calloc(1, sizeof(struct type));
@@ -144,11 +155,8 @@ struct variable *find_variable(struct gen_context *ctx, int reg)
             return val;
         val = val->next;
     }
-    //FXIME globals
-#if 1
     if (ctx->parent)
         return find_variable(ctx->parent, reg);
-#endif
     return NULL;
 }
 
@@ -488,17 +496,17 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
     ERR("Invalid type: %d", v->type->type);
 }
 
-struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct variable *v2)
+struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int bits2, int sign2)
 {
     int bits1 = v1->type->bits;
-    int bits2 = v2->type->bits;
     if (bits1 == bits2)
         return v1;
     if (bits1 > bits2)
         return v1;
 
-    struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || v2->type->sign);
-    if (v2->type->sign) {
+    FATAL(v1->global, "Can't cast from global");
+    struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
+    if (sign2) {
         buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     } else {
@@ -506,6 +514,11 @@ struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct v
             res->reg, bits1, v1->reg, bits2);
     }
     return res;
+}
+
+struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct variable *v2)
+{
+    return gen_bits_cast(ctx, v1, v2->type->bits, v2->type->sign);
 }
 
 enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct variable **v2)
@@ -722,11 +735,18 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
         struct variable *var = find_variable(ctx, res);
         FATAL(!var, "Invalid return variable: %d", res);
         if (!var->direct) {
-            struct variable *tmp = gen_load(ctx, var);
-            res = tmp->reg;
+            var = gen_load(ctx, var);
+            FATAL(!var, "Invalid indirect return variable: %d", res);
+            res = var->reg;
+        }
+        if (node->type != var->type->type || node->bits != var->type->bits) {
+            enum var_type restype = resolve_type(node->type, var->type->type);
+            var = gen_cast(ctx, var, restype);
+            var = gen_bits_cast(ctx, var, node->bits, 0);
+            res = var->reg;
         }
 
-        const char *type = var_str(node->type, node->bits, &tmp);
+        const char *type = var_str(var->type->type, var->type->bits, &tmp);
         buffer_write(ctx->post, "ret %s %%%d\n", type, res);
         if (tmp)
             free(tmp);
