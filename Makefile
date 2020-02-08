@@ -13,7 +13,7 @@ testllvm: build/sic
 	CC=build/sic tests/runtest.sh build llvm
 
 testc:
-	CC=$(CC) tests/runtest.sh build
+	CC="$(CC) -c -x c" tests/runtest.sh build
 
 tests: test
 
