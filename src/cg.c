@@ -99,7 +99,7 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
         if (res->type == type)
             printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
 #endif
-        if (res->type == type && res->bits == bits && res->sign == sign)
+        if (res->type == type && (res->bits == bits || bits == 0) && res->sign == sign)
             return res;
         res = res->next;
     }
@@ -371,22 +371,42 @@ enum var_type resolve_type(enum var_type a, enum var_type b)
     ERR("Unsupported cast: %d <-> %d", a, b);
 }
 
-struct variable *gen_cast(struct gen_context *ctx, struct variable *v, enum var_type target)
+struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct type *target, int force)
 {
-    if (v == NULL)
-        ERR("Invalid cast!");
-    if (v->type->type == target)
+    FATAL(!v, "Invalid cast!");
+    FATAL(!target, "No target type");
+    if (!force && v->type->type == target->type)
         return v;
 
-    struct variable *val;
-    if (target == V_FLOAT && v->type->type == V_INT) {
+    struct variable *val = NULL;
+    if (target->type == V_FLOAT && v->type->type == V_INT) {
+        buffer_write(ctx->data, "; b\n");
         val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
         buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->type->bits, v->reg);
         val->direct = 1;
-    } else
+    } else if (!force) {
         ERR("Invalid cast for %d, %d -> %d",
-            v->reg, v->type->type, target);
+            v->reg, v->type->type, target->type);
+    } else {
+        if (target->type == V_INT && v->type->type == V_FLOAT) {
+            val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
+            if (target->sign) {
+                buffer_write(ctx->data, "%%%d = fptosi double %%%d to i%d\n",
+                    val->reg, v->reg, target->bits);
+            } else {
+                buffer_write(ctx->data, "%%%d = fptoui double %%%d to i%d\n",
+                    val->reg, v->reg, target->bits);
+            }
+        } else if (target->type == V_INT && v->type->type == V_INT) {
+            if (target->bits == v->type->bits)
+                return v;
+            val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
+            buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
+                val->reg, v->type->bits, v->reg, target->bits);
+        }
+    }
+    FATAL(!val, "Cast failed: %d -> %d, %d", v->type->type, target->type, force);
 
     return val;
 }
@@ -529,8 +549,10 @@ enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct
     *v2 = gen_load(ctx, *v2);
 
     enum var_type restype = resolve_type((*v1)->type->type, (*v2)->type->type);
-    *v1 = gen_cast(ctx, *v1, restype);
-    *v2 = gen_cast(ctx, *v2, restype);
+    struct type *target = find_type_by(ctx, restype, 0, 1);
+    FATAL(!target, "No target in cast");
+    *v1 = gen_cast(ctx, *v1, target, 0);
+    *v2 = gen_cast(ctx, *v2, target, 0);
 
     if (restype == V_INT) {
         *v1 = gen_bits(ctx, *v1, *v2);
@@ -741,8 +763,10 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
         }
         if (node->type != var->type->type || node->bits != var->type->bits) {
             enum var_type restype = resolve_type(node->type, var->type->type);
-            var = gen_cast(ctx, var, restype);
-            var = gen_bits_cast(ctx, var, node->bits, 0);
+            struct type *target = find_type_by(ctx, restype, 0, 1);
+            FATAL(!target, "No target in post");
+            var = gen_cast(ctx, var, target, 0);
+            var = gen_bits_cast(ctx, var, node->bits, 1);
             res = var->reg;
         }
 
@@ -933,21 +957,35 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
 {
     struct gen_context *main_ctx = init_ctx(ctx->f, ctx);
     main_ctx->name = "main";
+    struct node main_node;
+    main_node.type = V_INT;
+    main_node.bits = 32;
 
-    gen_pre(main_ctx, node);
+    gen_pre(main_ctx, &main_node);
     if (node && node->type != V_VOID) {
-        struct variable *ret = new_inst_variable(main_ctx, V_VOID, 0, 0);
         char *tmp;
         struct variable *var = find_variable(ctx, res);
         FATAL(!var, "Invalid return variable: %d", res);
         if (!var->direct) {
-            struct variable *tmp = gen_load(ctx, var);
-            res = tmp->reg;
+            var = gen_load(ctx, var);
+            FATAL(!var, "Invalid indirect return variable: %d", res);
+            res = var->reg;
         }
+        struct variable *ret = new_inst_variable(main_ctx, var->type->type, var->type->bits, var->type->sign);
 
         const char *type = var_str(node->type, node->bits, &tmp);
         buffer_write(main_ctx->data, "%%%d = call %s @%s()\n", ret->reg, type, ctx->name);
-        buffer_write(main_ctx->data, "ret %s %%%d \n", type, ret->reg);
+        // TODO FIXME Hacks for type solving
+        if (node->type != var->type->type || node->bits != var->type->bits) {
+            struct type *target = find_type_by(main_ctx, V_INT, 32, 1);
+            FATAL(!target, "No tarkget in global main");
+            buffer_write(main_ctx->data, "; bits %d , %d\n", node->bits, ret->type->bits);
+            if (node->bits > 0)
+                ret->type->bits = node->bits;
+            ret = gen_cast(main_ctx, ret, target, 1);
+            ret = gen_bits_cast(main_ctx, ret, target->bits, 1);
+        }
+        buffer_write(main_ctx->data, "ret i32 %%%d \n", ret->reg);
         if (tmp)
             free(tmp);
     } else {
