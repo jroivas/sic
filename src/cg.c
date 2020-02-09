@@ -431,7 +431,7 @@ int gen_allocate_double(struct gen_context *ctx, int reg)
             "@G", reg);
     } else {
         buffer_write(ctx->init, "%s%d = alloca double, align 8\n",
-            ctx->global ? "@G" : "%%", reg);
+            ctx->global ? "@G" : "%", reg);
     }
     return reg;
 }
@@ -687,7 +687,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = find_type_by(ctx, node->type, node->bits, node->sign);
     if (t == NULL)
-        ERR("Couldn't find type: %s", node->value_string);
+        ERR("Couldn't find type: %s (%s, bits %d, %s", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
 
     ctx->pending_type = t;
 
@@ -735,6 +735,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     if (src->type->type == V_INT) {
         buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align 4\n",
                 src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg);
+    } else if (src->type->type == V_FLOAT) {
+        buffer_write(ctx->data, "store double %%%d, double* %s%d, align 8\n",
+                src->reg, REGP(dst), dst->reg);
     } else
         ERR("Invalid assign");
     return dst->reg;
@@ -755,7 +758,8 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
     if (node && node->type != V_VOID) {
         char *tmp;
         struct variable *var = find_variable(ctx, res);
-        FATAL(!var, "Invalid return variable: %d", res);
+        if (!var) return;
+        FATAL(!var, "Invalid return variable (post): %d", res);
         if (!var->direct) {
             var = gen_load(ctx, var);
             FATAL(!var, "Invalid indirect return variable: %d", res);
@@ -965,7 +969,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
     if (node && node->type != V_VOID) {
         char *tmp;
         struct variable *var = find_variable(ctx, res);
-        FATAL(!var, "Invalid return variable: %d", res);
+        FATAL(!var, "Invalid return variable (fake): %d", res);
         if (!var->direct) {
             var = gen_load(ctx, var);
             FATAL(!var, "Invalid indirect return variable: %d", res);

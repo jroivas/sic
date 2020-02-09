@@ -1,6 +1,9 @@
 #include "parse.h"
 #include <string.h>
 
+#define PARSE_SIGNED   0
+#define PARSE_UNSIGNED 1
+
 struct node *additive_expression(struct scanfile *f, struct token *token);
 
 static const char *nodestr[] = {
@@ -57,6 +60,7 @@ enum var_type resolve_var_type(struct node *n)
             v1 = n->left->type;
         b1 = n->left->bits;
         s1 = n->left->sign;
+        //printf("LEFT GOT: %d %d %d, %s\n", v1, b1, s1, node_str(n->left));
     }
     if (n->right) {
         if (n->right->type == V_VOID)
@@ -79,6 +83,7 @@ enum var_type resolve_var_type(struct node *n)
 
     n->type = v1;
     n->bits = b1;
+    //printf("SIGN: v1 %d, bits %d,  %d, %d -> %d @%s\n", v1, b1, s1, s2, n->sign, node_str(n));
     n->sign = s1;
     return v1;
 }
@@ -201,35 +206,22 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
     if (token->token != T_IDENTIFIER)
         return res;
 
-#if 0
     if (strcmp(token->value_string, "void") == 0)
-        res = make_type(A_TYPE, token, V_VOID, 0, 0, token->value_string);
+        res = make_type_spec(token, V_VOID, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "char") == 0)
-        res = make_type(A_TYPE, token, V_INT, 8, 1, token->value_string);
+        res = make_type_spec(token, V_INT, 8, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "int") == 0)
-        res = make_type(A_TYPE, token, V_INT, 32, 1, token->value_string);
+        res = make_type_spec(token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "unsigned") == 0)
-        res = make_type(A_TYPE, token, V_INT, 32, 0, token->value_string);
-    else if (strcmp(token->value_string, "short") == 0)
-        res = make_type(A_TYPE, token, V_INT, 16, 1, token->value_string);
-    else if (strcmp(token->value_string, "long") == 0)
-        res = make_type(A_TYPE, token, V_INT, 64, 1, token->value_string);
-#else
-    if (strcmp(token->value_string, "void") == 0)
-        res = make_type_spec(token, V_VOID, 0, 0, token->value_string);
-    else if (strcmp(token->value_string, "char") == 0)
-        res = make_type_spec(token, V_INT, 8, 0, token->value_string);
-    else if (strcmp(token->value_string, "int") == 0)
-        res = make_type_spec(token, V_INT, 0, 0, token->value_string);
-    else if (strcmp(token->value_string, "unsigned") == 0)
-        res = make_type_spec( token, V_INT, 0, 1, token->value_string);
+        res = make_type_spec( token, V_INT, 0, PARSE_UNSIGNED, token->value_string);
     else if (strcmp(token->value_string, "signed") == 0)
-        res = make_type_spec( token, V_INT, 0, 0, token->value_string);
+        res = make_type_spec( token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "short") == 0)
-        res = make_type_spec(token, V_INT, 16, 0, token->value_string);
+        res = make_type_spec(token, V_INT, 16, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "long") == 0)
-        res = make_type_spec(token, V_INT, 64, 0, token->value_string);
-#endif
+        res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "double") == 0)
+        res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
     // FIXME More types
 
     if (res)
@@ -527,12 +519,35 @@ struct node *statement_list(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *declaration_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    struct node *prev = NULL;
+    while (1) {
+        struct node *tmp = declaration(f, token);
+        if (!tmp)
+            break;
+        tmp = make_node(A_LIST, tmp, NULL);
+        if (res == NULL)
+            res = tmp;
+        else {
+            FATAL(prev->right, "Compiler error!")
+            prev->right = tmp;
+        }
+        prev = tmp;
+    }
+    return res;
+}
+
 struct node *compound_statement(struct scanfile *f, struct token *token)
 {
+    struct node *decl = NULL;
     struct node *res = NULL;
     if (token->token != T_CURLY_OPEN)
         return NULL;
     scan(f, token);
+
+    decl = declaration_list(f, token);
 
     res = statement_list(f, token);
     if (!res) {
@@ -540,6 +555,8 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     }
 
     expect(f, token, T_CURLY_CLOSE, "}");
+    if (decl)
+        res = make_node(A_GLUE, decl, res);
     return res;
 }
 
