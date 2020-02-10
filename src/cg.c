@@ -59,6 +59,13 @@ static const char *varstr[] = {
     "void", "i32", "double", "invalid"
 };
 
+char *stype_str(struct type *t)
+{
+    char *tmp = calloc(256, sizeof(char));
+    snprintf(tmp, 255, "%s, %d bits, %ssigned", type_str(t->type), t->bits, t->sign ? "" : "un");
+    return tmp;
+}
+
 const char *var_str(enum var_type v, int size, char **r)
 {
     FATAL(v >= sizeof(varstr) / sizeof (char*),
@@ -392,6 +399,8 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     FATAL(!target, "No target type");
     if (!force && v->type->type == target->type)
         return v;
+    if (target->bits == 0)
+        target->bits = 32;
 
     struct variable *val = NULL;
     if (target->type == V_FLOAT && v->type->type == V_INT) {
@@ -414,12 +423,14 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
                     val->reg, v->reg, target->bits);
             }
         } else if (target->type == V_INT && v->type->type == V_INT) {
-            if (target->bits == v->type->bits)
+            if (target->bits >= v->type->bits)
                 return v;
             val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
                 val->reg, v->type->bits, v->reg, target->bits);
         }
+        else if (v->type->type == target->type)
+            return v;
     }
     FATAL(!val, "Cast failed: %d -> %d, %d", v->type->type, target->type, force);
 
@@ -450,30 +461,35 @@ int gen_allocate_double(struct gen_context *ctx, int reg)
     return reg;
 }
 
-int gen_store_int(struct gen_context *ctx, struct node *n)
+int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, ctx->global);
     gen_allocate_int(ctx, val->reg, val->type->bits);
-
-    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d\n",
-            val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits));
+    n->reg = val->reg;
     return val->reg;
 }
 
-int gen_store_int_lit(struct gen_context *ctx, literalnum value)
+int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
 {
-    struct variable *val = new_variable(ctx, NULL, V_INT, 32, value < 0, ctx->global);
-    gen_allocate_int(ctx, val->reg, val->type->bits);
+    if (!n)
+        ERR("No valid node given!");
+    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, ctx->global);
+    gen_allocate_double(ctx, val->reg);
+    n->reg = val->reg;
+    return val->reg;
+}
 
-    if (val->global) {
-        buffer_write(ctx->init, "@G%d = global i%d %lld, align %d\n",
-                val->reg, val->type->bits, value, align(val->type->bits));
-    } else {
-        buffer_write(ctx->data, "store i%d %llu, i%d* %%%d, align %d\n",
-                val->type->bits, value, val->type->bits, val->reg, align(val->type->bits));
-    }
+int gen_store_int(struct gen_context *ctx, struct node *n)
+{
+    if (!n)
+        ERR("No valid node given!");
+    FATAL(!n->reg, "No register allocated!");
+    struct variable *val = find_variable(ctx, n->reg);
+
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d\n",
+            val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits));
     return val->reg;
 }
 
@@ -486,8 +502,8 @@ char *double_str(literalnum value, literalnum frac)
 
 int gen_store_double(struct gen_context *ctx, struct node *n)
 {
-    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, ctx->global);
-    gen_allocate_double(ctx, val->reg);
+    FATAL(!n->reg, "No register allocated!");
+    struct variable *val = find_variable(ctx, n->reg);
 
     char *tmp = double_str(n->value, n->fraction);
 
@@ -736,6 +752,13 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
     return res;
 }
 
+int get_identifier(struct gen_context *ctx, struct node *node)
+{
+    struct variable *var = find_variable_by_name(ctx, node->value_string);
+    FATAL(!var, "Variable not found: %s", node->value_string);
+    return var->reg;
+}
+
 int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
     struct variable *src_val = find_variable(ctx, right);
@@ -767,23 +790,21 @@ void gen_pre(struct gen_context *ctx, struct node *node)
         free(tmp);
 }
 
-void gen_post(struct gen_context *ctx, struct node *node, int res)
+void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *target)
 {
-    if (node && node->type != V_VOID) {
+    if (target && target->type != V_VOID) {
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
         if (var) {
-            FATAL(!var, "Invalid return variable (post): %d", res);
+            buffer_write(ctx->post, "; TGET1: %s --> %s\n", stype_str(var->type), stype_str(target));
             if (!var->direct) {
                 var = gen_load(ctx, var);
                 FATAL(!var, "Invalid indirect return variable: %d", res);
                 res = var->reg;
             }
-            if (node->type != var->type->type || node->bits != var->type->bits) {
-                enum var_type restype = resolve_type(node->type, var->type->type);
-                struct type *target = find_type_by(ctx, restype, 0, 1);
-                FATAL(!target, "No target in post");
-                var = gen_cast(ctx, var, target, 0);
+            buffer_write(ctx->post, "; TGET2: %s --> %s\n", stype_str(var->type), stype_str(target));
+            if (target->type != var->type->type || target->bits != var->type->bits) {
+                var = gen_cast(ctx, var, target, 1);
                 var = gen_bits_cast(ctx, var, node->bits, 1);
                 res = var->reg;
             }
@@ -796,10 +817,43 @@ void gen_post(struct gen_context *ctx, struct node *node, int res)
         if (tmp)
             free(tmp);
     }
+#if 0
+    if (node && node->type != V_VOID) {
+        char *tmp = NULL;
+        struct variable *var = find_variable(ctx, res);
+        if (var) {
+            FATAL(!var, "Invalid return variable (post): %d", res);
+            if (!var->direct) {
+                var = gen_load(ctx, var);
+                FATAL(!var, "Invalid indirect return variable: %d", res);
+                res = var->reg;
+            }
+            if (node->type != var->type->type || node->bits != var->type->bits) {
+                //enum var_type restype = resolve_type(node->type, var->type->type);
+                //enum var_type restype = node->type;
+
+                //struct type *target = find_type_by(ctx, restype, 0, 1);
+                FATAL(!target, "No target in post");
+                var = gen_cast(ctx, var, target, 0);
+                var = gen_bits_cast(ctx, var, node->bits, 1);
+                printf("cast to: %d %d %d\n", var->type->type, var->type->bits, var->type->sign);
+                res = var->reg;
+            }
+            const char *type = var_str(var->type->type, var->type->bits, &tmp);
+            buffer_write(ctx->post, "ret %s %%%d\n", type, res);
+        } else {
+            const char *type = var_str(node->type, node->bits, &tmp);
+            buffer_write(ctx->post, "ret %s 0\n", type, res);
+        }
+        if (tmp)
+            free(tmp);
+    }
+#endif
     buffer_write(ctx->post, "}\n");
 }
 
 
+int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_recursive(struct gen_context *ctx, struct node *node);
 int gen_function(struct gen_context *ctx, struct node *node)
 {
@@ -827,9 +881,20 @@ int gen_function(struct gen_context *ctx, struct node *node)
 
     gen_pre(func_ctx, node->left);
 
+    struct node *func_node = NULL;
+    struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
-        struct node *node = ctx->node;
-        if (node && node->type != V_VOID) {
+        func_node = ctx->node;
+        if (func_node && func_node->type != V_VOID) {
+            /*
+            func_node = calloc(1, sizeof(struct node));
+            func_node->type = V_INT;
+            func_node->bits = 32;
+            func_node->sign = 1;
+            */
+            target->type = V_INT;
+            target->bits = 32;
+            target->sign = 1;
             struct variable *ret = new_inst_variable(func_ctx, V_INT, 32, 1);
 #if 0
             struct variable *ret = new_inst_variable(func_ctx, V_VOID, 0, 0);
@@ -855,12 +920,21 @@ int gen_function(struct gen_context *ctx, struct node *node)
         buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
 #endif
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
+            /*
+            func_node->type = V_VOID;
+            func_node->bits = 0;
+            func_node->sign = 0;
+            */
+            target->type = V_VOID;
+            target->bits = 0;
+            target->sign = 0;
         }
     }
 
-    int res = gen_recursive(func_ctx, node->right);
+    int res = gen_recursive_allocs(func_ctx, node->right);
+    res = gen_recursive(func_ctx, node->right);
 
-    gen_post(func_ctx, NULL, res);
+    gen_post(func_ctx, func_node, res, target);
 
     func_ctx->next = ctx->child;
     ctx->child = func_ctx;
@@ -892,23 +966,6 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
         free(tmp);
 
     return res;
-#if 0
-    if (node->type != V_VOID) {
-        char *tmp;
-        struct variable *var = find_variable(ctx, res);
-        FATAL(!var, "Invalid return variable: %d", res);
-        if (!var->direct) {
-            struct variable *tmp = gen_load(ctx, var);
-            res = tmp->reg;
-        }
-
-        const char *type = var_str(node->type, node->bits, &tmp);
-        fprintf(ctx->f, "ret %s %%%d\n", type, res);
-        if (tmp)
-            free(tmp);
-    }
-    fprintf(ctx->f, "}\n");
-#endif
 }
 
 int gen_declaration(struct gen_context *ctx, struct node *node, int left, int right)
@@ -916,6 +973,34 @@ int gen_declaration(struct gen_context *ctx, struct node *node, int left, int ri
     FATAL(left >= 0, "Invalid type definition in declaration");
     ctx->pending_type = NULL;
     return right;
+}
+
+// First pass to scan types and alloc
+int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
+{
+    if (node == NULL)
+        return 0;
+
+    if (node->node == A_FUNCTION)
+        return 0;
+    if (node->left)
+        gen_recursive_allocs(ctx, node->left);
+    if (node->right)
+        gen_recursive_allocs(ctx, node->right);
+
+    switch (node->node) {
+        case A_TYPE:
+            return gen_type(ctx, node);
+        case A_IDENTIFIER:
+            return gen_identifier(ctx, node);
+        case A_INT_LIT:
+            return gen_prepare_store_int(ctx, node);
+        case A_DEC_LIT:
+            return gen_prepare_store_double(ctx, node);
+        default:
+            return 0;
+    }
+    return 0;
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node)
@@ -947,7 +1032,6 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_INT_LIT:
             return gen_store_int(ctx, node);
         case A_DEC_LIT:
-            // FIXME Double for now
             return gen_store_double(ctx, node);
         case A_LIST:
         case A_GLUE:
@@ -959,9 +1043,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_TYPE:
             return gen_type(ctx, node);
         case A_IDENTIFIER:
-            return gen_identifier(ctx, node);
-        //case A_FUNCTION:
-            //return gen_function(ctx, node, resleft, resright);
+            return get_identifier(ctx, node);
         case A_RETURN:
             return gen_return(ctx, node, resleft, resright);
         case A_ASSIGN:
@@ -1013,11 +1095,65 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
         buffer_write(main_ctx->data, "call void @%s()\n", ctx->name);
         buffer_write(main_ctx->data, "ret i32 0 \n");
     }
-    gen_post(main_ctx, NULL, res);
+#if 0
+    struct type *target = calloc(1, sizeof(struct type));
+    target->type = V_INT;
+    target->bits = 32;
+    target->sign = 1;
+#endif
+    gen_post(main_ctx, NULL, res, NULL);
 
     main_ctx->next = ctx->child;
     ctx->child = main_ctx;
     return main_ctx;
+}
+
+struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg)
+{
+    struct type *res = calloc(1, sizeof(struct type));
+    int got = 0;
+    if (node && node->type != V_VOID) {
+#if 0
+        struct variable *var = find_variable(ctx, reg);
+        if (var) {
+            if (!var->direct) {
+                var = gen_load(ctx, var);
+                FATAL(!var, "Invalid indirect return variable: %d", reg);
+            }
+#if 0
+            if (node->type != var->type->type || node->bits != var->type->bits) {
+                enum var_type restype = resolve_type(node->type, var->type->type);
+                struct type *target = find_type_by(ctx, restype, 0, 1);
+                var = gen_cast(ctx, var, target, 0);
+                var = gen_bits_cast(ctx, var, node->bits, 1);
+            }
+#endif
+            if (res->type == node->type && res->bits >= node->bits) {
+                res->type = var->type->type;
+                res->bits = var->type->bits;
+                res->sign = var->type->sign;
+            } else {
+                res->type = node->type;
+                res->bits = node->bits;
+                res->sign = node->sign;
+            }
+            got = 1;
+        }
+#else
+        res->type = node->type;
+        res->bits = node->bits;
+        res->sign = node->sign;
+        buffer_write(ctx->post, "; FF %s\n", stype_str(res));
+        got = 1;
+#endif
+
+    }
+    if (!got) {
+        res->type = V_INT;
+        res->bits = 32;
+        res->sign = 1;
+    }
+    return res;
 }
 
 int codegen(FILE *outfile, struct node *node)
@@ -1031,8 +1167,11 @@ int codegen(FILE *outfile, struct node *node)
     ctx->node = node;
 
     gen_pre(ctx, node);
+    res = gen_recursive_allocs(ctx, node);
     res = gen_recursive(ctx, node);
-    gen_post(ctx, node, res);
+    struct type *target = resolve_return_type(ctx, node, res);
+    buffer_write(ctx->post, "; F2 %s\n", stype_str(target));
+    gen_post(ctx, node, res, target);
 
     output_res(ctx, &got_main);
     if (!got_main) {

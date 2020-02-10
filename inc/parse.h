@@ -22,6 +22,7 @@ struct node {
     enum var_type type;
     int bits;
     int sign;
+    int reg;
 
     const char *value_string;
     literalnum value;
