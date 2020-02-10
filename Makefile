@@ -18,8 +18,8 @@ testc:
 tests: test
 
 runtest: build/sic
-	build/sic --dump-tree tests/test_"$(TEST).sic"
-	cat tests/test_$(TEST).sic.ir
+	build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
+	cat build/test_$(TEST).sic.ir
 
 build:
 	mkdir -p build

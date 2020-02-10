@@ -76,6 +76,21 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
+int align(int bits)
+{
+    if (bits == 0)
+        return 4;
+    if (bits >= 128)
+        return 16;
+    if (bits >= 64)
+        return 8;
+    if (bits >= 32)
+        return 4;
+    if (bits >= 16)
+        return 2;
+    return 1;
+}
+
 #if 0
 struct type *find_type_by_name(struct type *first, const char *name)
 {
@@ -413,13 +428,12 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
 
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 {
-    // TODO Fix align
     if (ctx->global) {
-        buffer_write(ctx->init, "%s%d = global i%d 0, align 4\n",
-            "@G", reg, bits);
+        buffer_write(ctx->init, "%s%d = global i%d 0, align %d\n",
+            "@G", reg, bits, align(bits));
     } else {
-        buffer_write(ctx->init, "%%%d = alloca i%d, align 4\n",
-            reg, bits);
+        buffer_write(ctx->init, "%%%d = alloca i%d, align %d\n",
+            reg, bits, align(bits));
     }
     return reg;
 }
@@ -427,11 +441,11 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
 int gen_allocate_double(struct gen_context *ctx, int reg)
 {
     if (ctx->global) {
-        buffer_write(ctx->init, "%s%d = global double 0.0, align 8\n",
-            "@G", reg);
+        buffer_write(ctx->init, "%s%d = global double 0.0, align %d\n",
+            "@G", reg, align(64));
     } else {
-        buffer_write(ctx->init, "%s%d = alloca double, align 8\n",
-            ctx->global ? "@G" : "%", reg);
+        buffer_write(ctx->init, "%s%d = alloca double, align %d\n",
+            ctx->global ? "@G" : "%", reg, align(64));
     }
     return reg;
 }
@@ -443,8 +457,8 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
     struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, ctx->global);
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
-    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align 4\n",
-            val->type->bits, n->value, val->type->bits, REGP(val), val->reg);
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d\n",
+            val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits));
     return val->reg;
 }
 
@@ -454,11 +468,11 @@ int gen_store_int_lit(struct gen_context *ctx, literalnum value)
     gen_allocate_int(ctx, val->reg, val->type->bits);
 
     if (val->global) {
-        buffer_write(ctx->init, "@G%d = global i%d %lld, align 4\n",
-                val->reg, val->type->bits, value);
+        buffer_write(ctx->init, "@G%d = global i%d %lld, align %d\n",
+                val->reg, val->type->bits, value, align(val->type->bits));
     } else {
-        buffer_write(ctx->data, "store i%d %llu, i%d* %%%d, align 4\n",
-                val->type->bits, value, val->type->bits, val->reg);
+        buffer_write(ctx->data, "store i%d %llu, i%d* %%%d, align %d\n",
+                val->type->bits, value, val->type->bits, val->reg, align(val->type->bits));
     }
     return val->reg;
 }
@@ -477,8 +491,8 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 
     char *tmp = double_str(n->value, n->fraction);
 
-    buffer_write(ctx->data, "store double %s, double* %s%d, align 8\n",
-            tmp, REGP(val), val->reg);
+    buffer_write(ctx->data, "store double %s, double* %s%d, align %d\n",
+            tmp, REGP(val), val->reg, align(val->type->bits));
     return val->reg;
 }
 
@@ -488,8 +502,8 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
         return v;
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0);
 
-    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align 4\n",
-            res->reg, res->type->bits, res->type->bits, REGP(v), v->reg);
+    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d\n",
+            res->reg, res->type->bits, res->type->bits, REGP(v), v->reg, align(res->type->bits));
     return res;
 }
 
@@ -499,8 +513,8 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
         return v;
     struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
 
-    buffer_write(ctx->data, "%%%d = load double, double* %s%d, align 8\n",
-            res->reg, REGP(v), v->reg);
+    buffer_write(ctx->data, "%%%d = load double, double* %s%d, align %d\n",
+            res->reg, REGP(v), v->reg, align(v->type->bits));
     return res;
 }
 
@@ -733,11 +747,11 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     FATAL(!dst, "No dest in assign: %d", left)
 
     if (src->type->type == V_INT) {
-        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align 4\n",
-                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg);
+        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
+                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "store double %%%d, double* %s%d, align 8\n",
-                src->reg, REGP(dst), dst->reg);
+        buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
+                src->reg, REGP(dst), dst->reg, align(dst->type->bits));
     } else
         ERR("Invalid assign");
     return dst->reg;
