@@ -770,26 +770,29 @@ void gen_pre(struct gen_context *ctx, struct node *node)
 void gen_post(struct gen_context *ctx, struct node *node, int res)
 {
     if (node && node->type != V_VOID) {
-        char *tmp;
+        char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
-        if (!var) return;
-        FATAL(!var, "Invalid return variable (post): %d", res);
-        if (!var->direct) {
-            var = gen_load(ctx, var);
-            FATAL(!var, "Invalid indirect return variable: %d", res);
-            res = var->reg;
+        if (var) {
+            FATAL(!var, "Invalid return variable (post): %d", res);
+            if (!var->direct) {
+                var = gen_load(ctx, var);
+                FATAL(!var, "Invalid indirect return variable: %d", res);
+                res = var->reg;
+            }
+            if (node->type != var->type->type || node->bits != var->type->bits) {
+                enum var_type restype = resolve_type(node->type, var->type->type);
+                struct type *target = find_type_by(ctx, restype, 0, 1);
+                FATAL(!target, "No target in post");
+                var = gen_cast(ctx, var, target, 0);
+                var = gen_bits_cast(ctx, var, node->bits, 1);
+                res = var->reg;
+            }
+            const char *type = var_str(var->type->type, var->type->bits, &tmp);
+            buffer_write(ctx->post, "ret %s %%%d\n", type, res);
+        } else {
+            const char *type = var_str(node->type, node->bits, &tmp);
+            buffer_write(ctx->post, "ret %s 0\n", type, res);
         }
-        if (node->type != var->type->type || node->bits != var->type->bits) {
-            enum var_type restype = resolve_type(node->type, var->type->type);
-            struct type *target = find_type_by(ctx, restype, 0, 1);
-            FATAL(!target, "No target in post");
-            var = gen_cast(ctx, var, target, 0);
-            var = gen_bits_cast(ctx, var, node->bits, 1);
-            res = var->reg;
-        }
-
-        const char *type = var_str(var->type->type, var->type->bits, &tmp);
-        buffer_write(ctx->post, "ret %s %%%d\n", type, res);
         if (tmp)
             free(tmp);
     }
