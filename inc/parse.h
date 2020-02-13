@@ -10,11 +10,12 @@ enum nodetype {
     A_NEGATE,
     A_INT_LIT, A_DEC_LIT,
     A_ASSIGN, A_GLUE,
-    A_TYPE, A_TYPESPEC, A_TYPEQUAL,
+    A_TYPE, A_TYPESPEC, A_TYPE_QUAL,
     A_DECLARATION,
     A_PARAMS,
     A_FUNCTION,
     A_RETURN,
+    A_POINTER,
     A_LIST
 };
 
@@ -24,6 +25,7 @@ struct node {
     int bits;
     int sign;
     int reg;
+    int is_const;
 
     const char *value_string;
     literalnum value;

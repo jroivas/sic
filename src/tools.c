@@ -86,8 +86,9 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("LIST");
             break;
         case A_TYPE:
-            printf("TYPE %s %d %s, %s", type_str(node->type),
+            printf("TYPE %s %d %s, %s%s", type_str(node->type),
                 node->bits, node->sign ? "signed" : "unsigned",
+                node->is_const ? "const " : "",
                 node->value_string);
             break;
         case A_IDENTIFIER:
@@ -105,10 +106,16 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_DECLARATION:
             printf("DECLARATION");
             break;
+        case A_POINTER:
+            printf("POINTER");
+            break;
         case A_TYPESPEC:
             printf("TYPESPEC %s %d %s, %s", type_str(node->type),
                 node->bits, node->sign ? "signed" : "unsigned",
                 node->value_string);
+            break;
+        case A_TYPE_QUAL:
+            printf("TYPEQUAL %s", node->value_string);
             break;
         default:
             ERR("Unknown node while walking: %s", node_str(node));

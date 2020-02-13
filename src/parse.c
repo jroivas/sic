@@ -11,11 +11,12 @@ static const char *nodestr[] = {
     "IDENTIFIER",
     "-",
     "INT_LIT", "DEC_LIT",
-    "ASSIGN", "GLUE", "TYPE", "TYPESPEC", "TYPEQUAL",
+    "ASSIGN", "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
     "DECLARATION",
     "PARAMS",
     "FUNCTION",
     "RETURN",
+    "POINTER",
     "LIST"
 };
 
@@ -156,9 +157,25 @@ struct node *make_type_spec(struct token *t, enum var_type type, int bits, int s
 
 struct node *make_type_qual(const char *name)
 {
-    struct node *n = make_node(A_TYPEQUAL, NULL, NULL);
+    struct node *n = make_node(A_TYPE_QUAL, NULL, NULL);
     n->value_string = name;
     return n;
+}
+
+int scan_const(struct node *node)
+{
+    int res = 0;
+    if (node == NULL)
+        return res;
+    if (scan_const(node->left))
+        res = 1;
+    if (scan_const(node->right))
+        res = 1;
+    if (node->node == A_TYPE_QUAL) {
+        if (strcmp(node->value_string, "const") == 0)
+            res = 1;
+    }
+    return res;
 }
 
 struct node *type_resolve(struct node *node, int d)
@@ -177,6 +194,7 @@ struct node *type_resolve(struct node *node, int d)
     // so reverse it
     res->sign = !sign;
     res->type = type;
+    res->is_const = scan_const(node);
     return res;
 }
 
@@ -264,14 +282,14 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
     }
 
     struct node *res = NULL;
+    res = type;
     while (1) {
         struct node *tmp = declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
-        res = make_node(A_GLUE, type, tmp);
+        res = make_node(A_GLUE, res, tmp);
     }
-    if (!res)
-        res = type;
+
     return res;
 }
 
@@ -307,10 +325,25 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *pointer(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (token->token == T_STAR) {
+        res =  make_node(A_POINTER, NULL, NULL);
+        scan(f, token);
+    }
+
+    return res;
+}
+
 struct node *declarator(struct scanfile *f, struct token *token)
 {
-    // TODO pointer
+    struct node *ptr = pointer(f, token);
     struct node *res = direct_declarator(f, token);
+    if (ptr) {
+        ptr->left = res;
+        res = ptr;
+    }
     return res;
 }
 
