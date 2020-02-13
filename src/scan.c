@@ -50,6 +50,9 @@ char *token_dump(struct token *t)
         case T_DEC_LIT:
             snprintf(tmp, MAX_LEN, "%s (%llu.%llu)", token_str(t), t->value, t->fraction);
             break;
+        case T_IDENTIFIER:
+            snprintf(tmp, MAX_LEN, "%s (%s)", token_str(t), t->value_string);
+            break;
         default:
             snprintf(tmp, MAX_LEN, "%s", token_str(t));
             break;
@@ -98,7 +101,7 @@ int expect(struct scanfile *f, struct token *t, enum tokentype token, const char
     if (accept(f, t, token))
        return 1;
 
-    ERR("Expected %s on line %d", expect, f->line);
+    ERR("Expected %s on line %d, got %s instead", expect, f->line, token_dump(t));
     return 0;
 }
 

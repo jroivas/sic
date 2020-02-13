@@ -11,7 +11,7 @@ static const char *nodestr[] = {
     "IDENTIFIER",
     "-",
     "INT_LIT", "DEC_LIT",
-    "ASSIGN", "GLUE", "TYPE", "TYPESPEC",
+    "ASSIGN", "GLUE", "TYPE", "TYPESPEC", "TYPEQUAL",
     "DECLARATION",
     "PARAMS",
     "FUNCTION",
@@ -154,6 +154,13 @@ struct node *make_type_spec(struct token *t, enum var_type type, int bits, int s
     return n;
 }
 
+struct node *make_type_qual(const char *name)
+{
+    struct node *n = make_node(A_TYPEQUAL, NULL, NULL);
+    n->value_string = name;
+    return n;
+}
+
 struct node *type_resolve(struct node *node, int d)
 {
     struct node *res = make_node(A_TYPE, NULL, NULL);
@@ -230,12 +237,31 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *type_qualifier(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    if (token->token != T_IDENTIFIER)
+        return res;
+
+    if (strcmp(token->value_string, "const") == 0 || strcmp(token->value_string, "volatile") == 0) {
+        res = make_type_qual(token->value_string);
+        scan(f, token);
+    }
+
+    return res;
+}
+
 struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 {
     struct node *type = type_specifier(f, token);
-    //TODO type_qualifier, storage_class_specifier
-    if (type == NULL)
-        return type;
+    //TODO storage_class_specifier
+    if (type == NULL) {
+        type = type_qualifier(f, token);
+
+        if (type == NULL)
+            return type;
+    }
 
     struct node *res = NULL;
     while (1) {

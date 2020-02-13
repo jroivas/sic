@@ -302,14 +302,14 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 void output_ctx(struct gen_context *ctx)
 {
     if (ctx->global) {
-        fprintf(ctx->f, "; Init\n%s\n", buffer_read(ctx->init));
-        fprintf(ctx->f, "; Pre\n%s\n", buffer_read(ctx->pre));
+        fprintf(ctx->f, "; Init - %s\n%s\n", ctx->name, buffer_read(ctx->init));
+        fprintf(ctx->f, "; Pre - %s\n%s\n", ctx->name, buffer_read(ctx->pre));
     } else {
-        fprintf(ctx->f, "; Pre\n%s\n", buffer_read(ctx->pre));
-        fprintf(ctx->f, "; Init\n%s\n", buffer_read(ctx->init));
+        fprintf(ctx->f, "; Pre - %s\n%s\n", ctx->name, buffer_read(ctx->pre));
+        fprintf(ctx->f, "; Init - %s\n%s\n", ctx->name, buffer_read(ctx->init));
     }
-    fprintf(ctx->f, "; Data\n%s\n", buffer_read(ctx->data));
-    fprintf(ctx->f, "; Post\n%s\n", buffer_read(ctx->post));
+    fprintf(ctx->f, "; Data - %s\n%s\n", ctx->name, buffer_read(ctx->data));
+    fprintf(ctx->f, "; Post - %s\n%s\n", ctx->name, buffer_read(ctx->post));
 }
 
 void output_res(struct gen_context *ctx, int *got_main)
