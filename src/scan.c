@@ -10,6 +10,7 @@ static const char *tokenstr[] = {
     "KEYWORD",
     "IDENTIFIER",
     "INT_LIT", "DEC_LIT",
+    "STR_LIT",
     "(", ")",
     "{", "}",
     ",", "SEMI", "EOF"
@@ -145,12 +146,32 @@ literalnum scan_number(struct scanfile *f, int c)
     return res;
 }
 
+char *scan_string(struct scanfile *f, int c, char end_char)
+{
+    char *buf = calloc(1, MAX_STR_LEN);
+    char *ptr = buf;
+    int escape = 0;
+
+    while (ptr - buf < MAX_STR_LEN - 2) {
+        *ptr = c;
+        ptr++;
+        c = next(f);
+        if (escape && c == end_char)
+            ;
+        else if (c == end_char)
+            break;
+        // TODO: Check escape validity
+        escape = (!escape && c == '\\');
+    }
+    return buf;
+}
+
 char *scan_identifier(struct scanfile *f, int c)
 {
     char *buf = calloc(1, MAX_STR_LEN);
     char *ptr = buf;
     while (isalpha(c) || isdigit(c) || c == '_') {
-        if (ptr - buf - 1 >= MAX_STR_LEN)
+        if (ptr - buf >= MAX_STR_LEN - 1)
             ERR("Identifier too long: %s", buf);
         *ptr = c;
         ptr++;
@@ -215,6 +236,11 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '}':
             t->token = T_CURLY_CLOSE;
+            break;
+        case '"':
+            c = next(f);
+            t->token = T_STR_LIT;
+            t->value_string = scan_string(f, c, '"');
             break;
         default:
             if (isdigit(c)) {

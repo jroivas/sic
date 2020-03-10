@@ -2,7 +2,7 @@
 #include "parse.h"
 
 static const char *typestr[] = {
-    "void", "int", "float", "fixed", "pointer"
+    "void", "int", "float", "fixed", "str"
 };
 
 const char *type_str(enum var_type t)
@@ -90,6 +90,9 @@ void __node_walk(struct node *node, int depth, char arm)
             break;
         case A_DEC_LIT:
             printf("DECIMAL: %llu.%llu", node->value, node->fraction);
+            break;
+        case A_STR_LIT:
+            printf("STRING: %s", node->value_string);
             break;
         case A_GLUE:
             printf("GLUE");

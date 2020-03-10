@@ -10,6 +10,7 @@ enum tokentype {
     T_KEYWORD,
     T_IDENTIFIER,
     T_INT_LIT, T_DEC_LIT,
+    T_STR_LIT,
     T_ROUND_OPEN, T_ROUND_CLOSE,
     T_CURLY_OPEN, T_CURLY_CLOSE,
     T_COMMA, T_SEMI, T_EOF

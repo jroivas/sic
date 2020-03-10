@@ -9,6 +9,7 @@ enum nodetype {
     A_IDENTIFIER,
     A_NEGATE,
     A_INT_LIT, A_DEC_LIT,
+    A_STR_LIT,
     A_ASSIGN, A_GLUE,
     A_TYPE, A_TYPESPEC, A_TYPE_QUAL,
     A_DECLARATION,

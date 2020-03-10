@@ -11,6 +11,7 @@ static const char *nodestr[] = {
     "IDENTIFIER",
     "-",
     "INT_LIT", "DEC_LIT",
+    "STR_LIT",
     "ASSIGN", "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
     "DECLARATION",
     "PARAMS",
@@ -158,6 +159,10 @@ struct node *make_leaf(enum nodetype node, struct token *t)
         n->fraction = t->fraction;
         n->bits = 8;
         n->type = V_FLOAT;
+    } else if (t->token == T_STR_LIT) {
+        n->value_string = t->value_string;
+        n->bits = 0;
+        n->type = V_STR;
     } else
         ERR("Invalid leaf: %s", node_str(n));
     return n;
@@ -239,6 +244,9 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
             break;
         case T_DEC_LIT:
             res = make_leaf(A_DEC_LIT, token);
+            break;
+        case T_STR_LIT:
+            res = make_leaf(A_STR_LIT, token);
             break;
         case T_IDENTIFIER:
             res = make_node(A_IDENTIFIER, NULL, NULL);
