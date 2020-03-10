@@ -53,39 +53,67 @@ enum var_type resolve_var_type(struct node *n)
     int b2 = 0;
     int s1 = 0;
     int s2 = 0;
+    int ptr1 = 0;
+    int ptr2 = 0;
+    if (!n)
+        return V_VOID;
 
     if (n->left) {
+#if 1
         if (n->left->type == V_VOID)
             v1 = resolve_var_type(n->left);
         else
             v1 = n->left->type;
+#else
+        v1 = resolve_var_type(n->left);
+#endif
         b1 = n->left->bits;
         s1 = n->left->sign;
-        //printf("LEFT GOT: %d %d %d, %s\n", v1, b1, s1, node_str(n->left));
+        ptr1 = n->left->ptr;
     }
     if (n->right) {
+#if 1
         if (n->right->type == V_VOID)
             v2 = resolve_var_type(n->right);
         else
             v2 = n->right->type;
+#else
+        v2 = resolve_var_type(n->right);
+#endif
         b2 = n->right->bits;
         s2 = n->right->sign;
+        ptr2 = n->right->ptr;
     }
 
     if (v1 == V_VOID && v2 != V_VOID)
         v1 = v2;
     if (v1 == V_INT && v2 == V_FLOAT)
         v1 = v2;
+    if (v1 == V_VOID && n->type != V_VOID)
+        v1 = n->type;
+    if (v1 == V_INT && n->type == V_FLOAT)
+        v1 = n->type;
 
     if (b1 < b2)
         b1 = b2;
+    if (b1 < n->bits)
+        b1 = n->bits;
+
     if (s1 < s2)
         s1 = s2;
+    if (s1 < s2)
+        s1 = n->sign;
+
+    if (ptr1 < ptr2)
+        ptr1 = ptr2;
+    if (ptr1 < n->ptr)
+        ptr1 = n->ptr;
 
     n->type = v1;
     n->bits = b1;
     //printf("SIGN: v1 %d, bits %d,  %d, %d -> %d @%s\n", v1, b1, s1, s2, n->sign, node_str(n));
     n->sign = s1;
+    n->ptr = ptr1;
     return v1;
 }
 
@@ -182,8 +210,10 @@ struct node *type_resolve(struct node *node, int d)
 {
     struct node *res = make_node(A_TYPE, NULL, NULL);
     enum var_type type = node->type;
+    type = resolve_var_type(node);
     int bits = node->bits;
     int sign = node->sign;
+    int ptr = node->ptr;
 
     if (type == V_INT && bits == 0) {
         // Default for 32 bits
@@ -194,6 +224,7 @@ struct node *type_resolve(struct node *node, int d)
     // so reverse it
     res->sign = !sign;
     res->type = type;
+    res->ptr = ptr;
     res->is_const = scan_const(node);
     return res;
 }
@@ -328,8 +359,12 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
 struct node *pointer(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
-    if (token->token == T_STAR) {
-        res =  make_node(A_POINTER, NULL, NULL);
+    while (token->token == T_STAR) {
+        if (!res)
+            res = make_node(A_POINTER, NULL, NULL);
+        if (!res)
+            break;
+        res->ptr++;
         scan(f, token);
     }
 

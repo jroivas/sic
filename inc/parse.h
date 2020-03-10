@@ -26,6 +26,7 @@ struct node {
     int sign;
     int reg;
     int is_const;
+    int ptr;
 
     const char *value_string;
     literalnum value;

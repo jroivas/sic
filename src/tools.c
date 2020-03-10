@@ -2,7 +2,7 @@
 #include "parse.h"
 
 static const char *typestr[] = {
-    "void", "int", "float", "fixed"
+    "void", "int", "float", "fixed", "pointer"
 };
 
 const char *type_str(enum var_type t)
@@ -22,6 +22,18 @@ int determine_size_bytes(literalnum value)
         return 4;
     // FIXME 128
     return 8;
+}
+
+char *get_stars(int cnt)
+{
+        char *tmp = NULL;
+        if (cnt <= 0)
+            return tmp;
+
+        tmp = calloc(cnt + 1, 1);
+        for (int i = 0; i < cnt; i++)
+            tmp[i] = '*';
+        return tmp;
 }
 
 int determine_size(literalnum value)
@@ -86,7 +98,10 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("LIST");
             break;
         case A_TYPE:
-            printf("TYPE %s %d %s, %s%s", type_str(node->type),
+            printf("TYPE %s%*s (%d) %d %s, %s%s", type_str(node->type),
+                node->ptr ? node->ptr : 0,
+                node->ptr ? "*" : "",
+                node->ptr,
                 node->bits, node->sign ? "signed" : "unsigned",
                 node->is_const ? "const " : "",
                 node->value_string);
@@ -107,7 +122,7 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("DECLARATION");
             break;
         case A_POINTER:
-            printf("POINTER");
+            printf("POINTER: %d", node->ptr);
             break;
         case A_TYPESPEC:
             printf("TYPESPEC %s %d %s, %s", type_str(node->type),

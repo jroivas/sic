@@ -33,5 +33,6 @@ enum var_type {
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);
 hashtype hash(const char *str);
+char *get_stars(int cnt);
 
 #endif

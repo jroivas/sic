@@ -22,6 +22,7 @@ struct variable {
     int reg;
     int direct;
     int global;
+    int ptr;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -36,6 +37,7 @@ struct gen_context {
     int type;
     int safe;
     int global;
+    int pending_ptr;
     const char *name;
     struct node *node;
 
@@ -327,7 +329,7 @@ void output_res(struct gen_context *ctx, int *got_main)
 }
 
 struct variable *new_variable(struct gen_context *ctx,
-        const char *name, enum var_type type, int bits, int sign, int global)
+        const char *name, enum var_type type, int bits, int sign, int ptr, int global)
 {
     struct variable *res = calloc(1, sizeof(struct variable));
 
@@ -357,6 +359,7 @@ struct variable *new_variable(struct gen_context *ctx,
             bits = 32;
         sign = 1;
     }
+    res->ptr = ptr;
     res->name = name;
     res->name_hash = hash(name);
     res->type = find_type_by(ctx, type, bits, sign);
@@ -370,14 +373,13 @@ struct variable *new_variable(struct gen_context *ctx,
         ctx->variables = res;
     }
 
-
     return res;
 }
 
 struct variable *new_inst_variable(struct gen_context *ctx,
         enum var_type type, int bits, int sign)
 {
-    struct variable *res = new_variable(ctx, NULL, type, bits, sign, 0);
+    struct variable *res = new_variable(ctx, NULL, type, bits, sign, 0, 0);
     res->direct = 1;
     return res;
 }
@@ -405,7 +407,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     struct variable *val = NULL;
     if (target->type == V_FLOAT && v->type->type == V_INT) {
         buffer_write(ctx->data, "; b\n");
-        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
+        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0);
         buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->type->bits, v->reg);
         val->direct = 1;
@@ -437,14 +439,18 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     return val;
 }
 
-int gen_allocate_int(struct gen_context *ctx, int reg, int bits)
+int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr)
 {
     if (ctx->global) {
+        FATAL(ptr, "Global pointer not supported");
         buffer_write(ctx->init, "%s%d = global i%d 0, align %d\n",
             "@G", reg, bits, align(bits));
     } else {
-        buffer_write(ctx->init, "%%%d = alloca i%d, align %d\n",
-            reg, bits, align(bits));
+        char *tmp = get_stars(ptr);
+        buffer_write(ctx->init, "%%%d = alloca i%d%s, align %d\n",
+            reg, bits, ptr ? tmp : "", align(bits));
+        if (tmp)
+            free(tmp);
     }
     return reg;
 }
@@ -465,8 +471,8 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, ctx->global);
-    gen_allocate_int(ctx, val->reg, val->type->bits);
+    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, ctx->global);
+    gen_allocate_int(ctx, val->reg, val->type->bits, 0);
     n->reg = val->reg;
     return val->reg;
 }
@@ -475,7 +481,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, ctx->global);
+    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, ctx->global);
     gen_allocate_double(ctx, val->reg);
     n->reg = val->reg;
     return val->reg;
@@ -516,10 +522,27 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0);
+    struct variable *prev = NULL;
+    int reg = v->reg;
+
+    for (int i = v->ptr; i > 0; i--) {
+        char *tmp = get_stars(i);
+        prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
+        buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d\n",
+                prev->reg, prev->type->bits,
+                tmp ? tmp : "", 
+                prev->type->bits,
+                tmp ? tmp : "", 
+                REGP(v), reg, align(prev->type->bits));
+        if (tmp)
+            free(tmp);
+        reg = prev->reg;
+    }
+    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
 
     buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d\n",
-            res->reg, res->type->bits, res->type->bits, REGP(v), v->reg, align(res->type->bits));
+            res->reg, res->type->bits, res->type->bits,
+            REGP(v), reg, align(res->type->bits));
     return res;
 }
 
@@ -527,7 +550,7 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0);
+    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0);
 
     buffer_write(ctx->data, "%%%d = load double, double* %s%d, align %d\n",
             res->reg, REGP(v), v->reg, align(v->type->bits));
@@ -724,6 +747,21 @@ int gen_type(struct gen_context *ctx, struct node *node)
     return REF_CTX(t->id);
 }
 
+int gen_pointer(struct gen_context *ctx, struct node *node)
+{
+    if (ctx->pending_ptr)
+        ERR("Unexpected pointer while handling pointer");
+    ctx->pending_ptr = node->ptr;
+    return 0;
+}
+
+int gen_use_ptr(struct gen_context *ctx)
+{
+    int res = ctx->pending_ptr;
+    ctx->pending_ptr = 0;
+    return res;
+}
+
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *var = find_variable_by_name(ctx, node->value_string);
@@ -734,17 +772,17 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         struct type *t = ctx->pending_type;
         switch (t->type) {
             case V_INT:
-                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, ctx->global);
+                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, gen_use_ptr(ctx), ctx->global);
                 var->global = ctx->global;
-                res = gen_allocate_int(ctx, var->reg, var->type->bits);
+                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr);
                 break;
             case V_FLOAT:
-                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ctx->global);
+                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, gen_use_ptr(ctx), ctx->global);
                 var->global = ctx->global;
                 res = gen_allocate_double(ctx, var->reg);
                 break;
             default:
-                ERR("Invalid type for variable: %s", type_str(var->type->type));
+                ERR("Invalid type for variable: %s", type_str(t->type));
                 break;
         }
     } else
@@ -755,7 +793,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
 int get_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *var = find_variable_by_name(ctx, node->value_string);
-    FATAL(!var, "Variable not found: %s", node->value_string);
+    FATAL(!var, "Variable not found in get_identitifier: %s", node->value_string);
     return var->reg;
 }
 
@@ -983,23 +1021,31 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 
     if (node->node == A_FUNCTION)
         return 0;
+
+    switch (node->node) {
+        case A_TYPE:
+            gen_type(ctx, node);
+            break;
+        case A_POINTER:
+            gen_pointer(ctx, node);
+            break;
+        case A_IDENTIFIER:
+            gen_identifier(ctx, node);
+            break;
+        case A_INT_LIT:
+            gen_prepare_store_int(ctx, node);
+            break;
+        case A_DEC_LIT:
+            gen_prepare_store_double(ctx, node);
+            break;
+        default:
+            break;
+    }
+
     if (node->left)
         gen_recursive_allocs(ctx, node->left);
     if (node->right)
         gen_recursive_allocs(ctx, node->right);
-
-    switch (node->node) {
-        case A_TYPE:
-            return gen_type(ctx, node);
-        case A_IDENTIFIER:
-            return gen_identifier(ctx, node);
-        case A_INT_LIT:
-            return gen_prepare_store_int(ctx, node);
-        case A_DEC_LIT:
-            return gen_prepare_store_double(ctx, node);
-        default:
-            return 0;
-    }
     return 0;
 }
 
@@ -1042,6 +1088,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             break;
         case A_TYPE:
             return gen_type(ctx, node);
+        case A_POINTER:
+            //return gen_pointer(ctx, node);
+            return resleft;
         case A_IDENTIFIER:
             return get_identifier(ctx, node);
         case A_RETURN:
