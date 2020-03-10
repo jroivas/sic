@@ -4,6 +4,7 @@
 #include <string.h>
 
 #define GLOBAL_START 0x10000
+#define STR_START 0x40000
 #define REGP(X) (X->global) ? "@G" : "%"
 
 struct type {
@@ -38,6 +39,7 @@ struct gen_context {
     int safe;
     int global;
     int pending_ptr;
+    int strs;
     const char *name;
     struct node *node;
 
@@ -171,6 +173,8 @@ struct variable *find_global_variable(struct gen_context *ctx, int reg)
 
 struct variable *find_variable(struct gen_context *ctx, int reg)
 {
+    if (reg >= STR_START)
+        return NULL;
     if (reg > 0 && reg >= GLOBAL_START)
         return find_global_variable(ctx, reg);
     struct variable *val = ctx->variables;
@@ -290,6 +294,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->child = NULL;
     res->next = NULL;
     res->node = NULL;
+    res->strs = 0;
 
     res->pre = buffer_init();
     res->init = buffer_init();
@@ -477,6 +482,23 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
+int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
+{
+    if (!n)
+        ERR("No valid node given!");
+    struct gen_context *glob = ctx;
+    while (glob && !glob->global && glob->parent)
+        glob = glob->parent;
+    FATAL(!glob || !glob->global, "No global context found!");
+    glob->strs++;
+    buffer_write(glob->init, "@.str.%d = private unnamed_addr "
+        "constant [%u x i8] c\"%s\\00\", align 1\n",
+        glob->strs, strlen(n->value_string) + 1,
+        n->value_string);
+    n->strnum = glob->strs;
+    return 0;
+}
+
 int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
 {
     if (!n)
@@ -516,6 +538,21 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
     buffer_write(ctx->data, "store double %s, double* %s%d, align %d\n",
             tmp, REGP(val), val->reg, align(val->type->bits));
     return val->reg;
+}
+
+int gen_store_string(struct gen_context *ctx, struct node *n)
+{
+    FATAL(!n->strnum, "No string allocated!");
+#if 0
+    struct variable *val = find_variable(ctx, n->reg);
+
+    char *tmp = double_str(n->value, n->fraction);
+
+    buffer_write(ctx->data, "store double %s, double* %s%d, align %d\n",
+            tmp, REGP(val), val->reg, align(val->type->bits));
+    return val->reg;
+#endif
+    return STR_START + n->strnum;
 }
 
 struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
@@ -797,8 +834,24 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     return var->reg;
 }
 
+int gen_assign_str(struct gen_context *ctx, struct node *node, int left, int right)
+{
+    // FIXME Store string literals in global variables
+    int strlen = 5;
+    struct variable *dst = find_variable(ctx, left);
+    FATAL(!dst, "No dest in assign: %d", left)
+
+    buffer_write(ctx->data, "store i8* getelementptr inbounds "
+        "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
+        "i8** %%%d, align 8\n",
+        strlen, strlen, right - STR_START, dst->reg);
+    return dst->reg;
+}
+
 int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
+    if (right >= STR_START)
+        return gen_assign_str(ctx, node, left, right);
     struct variable *src_val = find_variable(ctx, right);
     FATAL(!src_val, "Can't assign from zero: %d", right);
     struct variable *src = gen_load(ctx, src_val);
@@ -1038,6 +1091,9 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         case A_DEC_LIT:
             gen_prepare_store_double(ctx, node);
             break;
+        case A_STR_LIT:
+            gen_prepare_store_str(ctx, node);
+            break;
         default:
             break;
     }
@@ -1079,6 +1135,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_store_int(ctx, node);
         case A_DEC_LIT:
             return gen_store_double(ctx, node);
+        case A_STR_LIT:
+            return gen_store_string(ctx, node);
         case A_LIST:
         case A_GLUE:
             if (resright)
