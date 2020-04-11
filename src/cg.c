@@ -24,6 +24,7 @@ struct variable {
     int direct;
     int global;
     int ptr;
+    int strlen;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -117,6 +118,19 @@ struct type *find_type_by_name(struct type *first, const char *name)
 }
 #endif
 
+int same_type(struct type *a, struct type *b)
+{
+    if (a->type == V_VOID && b->type == V_VOID)
+        return 1;
+    if (a->type == V_STR && b->type == V_STR)
+        return 1;
+    if (a->type != b->type)
+        return 0;
+    if (a->type == V_FLOAT)
+        return 1;
+    return a->bits == b->bits && a->sign == b->sign;
+}
+
 struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign)
 {
     struct type *res = ctx->types;
@@ -125,24 +139,13 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
         if (res->type == type)
             printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
 #endif
-        if (res->type == type && (res->bits == bits || bits == 0) && res->sign == sign)
+        if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign)
             return res;
         res = res->next;
     }
     if (ctx->parent)
         return find_type_by(ctx->parent, type, bits, sign);
     return NULL;
-}
-
-int same_type(struct type *a, struct type *b)
-{
-    if (a->type == V_VOID && b->type == V_VOID)
-        return 1;
-    if (a->type != b->type)
-        return 0;
-    if (a->type == V_FLOAT)
-        return 1;
-    return a->bits == b->bits && a->sign == b->sign;
 }
 
 struct type *init_type(const char *name, enum var_type t, int bits, int sign)
@@ -275,6 +278,8 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, init_type("unsigned long", V_INT, 64, 0));
 
     register_type(ctx, init_type("float", V_FLOAT, 64, 1));
+
+    register_type(ctx, init_type("strgin", V_STR, 0, 0));
 }
 
 struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
@@ -486,6 +491,8 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
+#if 0
+
     struct gen_context *glob = ctx;
     while (glob && !glob->global && glob->parent)
         glob = glob->parent;
@@ -496,7 +503,20 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
         glob->strs, strlen(n->value_string) + 1,
         n->value_string);
     n->strnum = glob->strs;
-    return 0;
+#endif
+    struct gen_context *glob = ctx;
+    while (glob && !glob->global && glob->parent)
+        glob = glob->parent;
+    FATAL(!glob || !glob->global, "No global context found!");
+
+    int slen = strlen(n->value_string) + 1;
+    struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 1);
+
+    buffer_write(glob->init, "@.str.%d = private unnamed_addr "
+        "constant [%u x i8] c\"%s\\00\", align 1\n",
+        val->reg, slen, n->value_string);
+
+    return val->reg;
 }
 
 int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
@@ -542,7 +562,9 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 
 int gen_store_string(struct gen_context *ctx, struct node *n)
 {
-    FATAL(!n->strnum, "No string allocated!");
+    struct variable *val = find_variable(ctx, n->reg);
+    FATAL(!val, "No string allocated! %d", n->reg);
+    //FATAL(!n->strnum, "No string allocated!");
 #if 0
     struct variable *val = find_variable(ctx, n->reg);
 
