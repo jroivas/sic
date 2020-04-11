@@ -1,4 +1,4 @@
-#include "gc.h"
+#include "cg.h"
 #include "parse.h"
 #include "buffer.h"
 #include <string.h>
