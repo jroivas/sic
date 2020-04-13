@@ -516,6 +516,7 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
         "constant [%u x i8] c\"%s\\00\", align 1\n",
         val->reg, slen, n->value_string);
 
+    n->reg = val->reg;
     return val->reg;
 }
 
