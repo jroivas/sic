@@ -21,10 +21,16 @@ runtest: build/sic
 	build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
 	cat build/test_$(TEST).sic.ir
 
+runllvmtest: runtest
+	llvm-as build/test_$(TEST).sic.ir
+	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
+	gcc build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
+	build/test_$(TEST).ir.bin || true
+
 build:
 	mkdir -p build
 
 clean:
 	rm -rf build
 
-.PHONY: test builddir clean
+.PHONY: test builddir clean runtest runllvmtest

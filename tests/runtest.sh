@@ -23,7 +23,7 @@ while read test; do
     ${CC} $test -o "$outfolder/$base.ir"
     if [ "$llvm" -eq 1 ]; then
         if ! llvm-as "$outfolder/$base.ir"; then
-            echo "--- FAILED: llvm-a"
+            echo "--- FAILED: llvm-as"
             continue
         fi
         if ! llc -O0 -relocation-model=pic -filetype=obj "$outfolder/$base.ir.bc" -o "$outfolder/$base.ir.o"; then
