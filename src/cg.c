@@ -4,7 +4,6 @@
 #include <string.h>
 
 #define GLOBAL_START 0x10000
-#define STR_START 0x40000
 #define REGP(X) (X->global) ? "@G" : "%"
 
 struct type {
@@ -25,6 +24,7 @@ struct variable {
     int global;
     int ptr;
     int strlen;
+    int bits;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -176,8 +176,6 @@ struct variable *find_global_variable(struct gen_context *ctx, int reg)
 
 struct variable *find_variable(struct gen_context *ctx, int reg)
 {
-    if (reg >= STR_START)
-        return NULL;
     if (reg > 0 && reg >= GLOBAL_START)
         return find_global_variable(ctx, reg);
     struct variable *val = ctx->variables;
@@ -360,7 +358,7 @@ struct variable *new_variable(struct gen_context *ctx,
     } else if (type == V_VOID) {
         bits = 0;
         sign = 0;
-    } else if (bits == 0 || type == V_FLOAT) {
+    } else if (type != V_STR && (bits == 0 || type == V_FLOAT)) {
         // TODO Fix float bits
         if (type == V_FLOAT)
             bits = 64;
@@ -373,6 +371,7 @@ struct variable *new_variable(struct gen_context *ctx,
     res->name = name;
     res->name_hash = hash(name);
     res->type = find_type_by(ctx, type, bits, sign);
+    res->bits = bits;
     FATAL(!res->type, "Didn't find type!");
     res->global = global;
     if (res->global) {
@@ -565,17 +564,7 @@ int gen_store_string(struct gen_context *ctx, struct node *n)
 {
     struct variable *val = find_variable(ctx, n->reg);
     FATAL(!val, "No string allocated! %d", n->reg);
-    //FATAL(!n->strnum, "No string allocated!");
-#if 0
-    struct variable *val = find_variable(ctx, n->reg);
-
-    char *tmp = double_str(n->value, n->fraction);
-
-    buffer_write(ctx->data, "store double %s, double* %s%d, align %d\n",
-            tmp, REGP(val), val->reg, align(val->type->bits));
     return val->reg;
-#endif
-    return STR_START + n->strnum;
 }
 
 struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
@@ -617,6 +606,20 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
     return res;
 }
 
+struct variable *gen_load_str(struct gen_context *ctx, struct variable *v)
+{
+    return v;
+#if 0
+    if (v->direct)
+        return v;
+    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0);
+
+    buffer_write(ctx->data, "%%%d = load double, double* %s%d, align %d\n",
+            res->reg, REGP(v), v->reg, align(v->type->bits));
+    return res;
+#endif
+}
+
 struct variable *gen_load(struct gen_context *ctx, struct variable *v)
 {
     if (v == NULL)
@@ -625,6 +628,8 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
         return gen_load_int(ctx, v);
     else if (v->type->type == V_FLOAT)
         return gen_load_float(ctx, v);
+    else if (v->type->type == V_STR)
+        return gen_load_str(ctx, v);
 
     ERR("Invalid type: %d", v->type->type);
 }
@@ -857,26 +862,10 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     return var->reg;
 }
 
-int gen_assign_str(struct gen_context *ctx, struct node *node, int left, int right)
-{
-    // FIXME Store string literals in global variables
-    int strlen = 5;
-    struct variable *dst = find_variable(ctx, left);
-    FATAL(!dst, "No dest in assign: %d", left)
-
-    buffer_write(ctx->data, "store i8* getelementptr inbounds "
-        "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
-        "i8** %%%d, align 8\n",
-        strlen, strlen, right - STR_START, dst->reg);
-    return dst->reg;
-}
-
 int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
-    if (right >= STR_START)
-        return gen_assign_str(ctx, node, left, right);
     struct variable *src_val = find_variable(ctx, right);
-    FATAL(!src_val, "Can't assign from zero: %d", right);
+    FATAL(!src_val, "Can't assign from zero: %d to %d", right, left);
     struct variable *src = gen_load(ctx, src_val);
     struct variable *dst = find_variable(ctx, left);
 
@@ -889,6 +878,11 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     } else if (src->type->type == V_FLOAT) {
         buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
                 src->reg, REGP(dst), dst->reg, align(dst->type->bits));
+    } else if (src->type->type == V_STR) {
+	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
+		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
+		"i8** %%%d, align 8\n",
+		src_val->bits, src_val->bits, src->reg, dst->reg);
     } else
         ERR("Invalid assign");
     return dst->reg;

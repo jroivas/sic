@@ -17,14 +17,14 @@ enum var_type {
 
 
 #define ERR(...) { \
-    fprintf(stderr, "ERROR: ");\
+    fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
     exit(1); \
 }
 
 #define FATAL(check, ...) if (check) { \
-    fprintf(stderr, "FATAL Compiler error: ");\
+    fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr,  __VA_ARGS__);\
     fprintf(stderr, "\n");\
     exit(1); \
