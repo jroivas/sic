@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 if [ $# -lt 1 ]; then
     echo "Usage: $0 build_folder [llvm]"
@@ -30,7 +30,7 @@ while read test; do
             echo "--- FAILED: llc"
             continue
         fi
-        if ! gcc "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin" -lm; then
+        if ! ${HOSTCC} "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin" -lm; then
             echo "--- FAILED: link"
             continue
         fi

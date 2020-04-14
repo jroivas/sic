@@ -7,13 +7,13 @@ build/sic: build $(INC_FILES) $(SRC_FILES)
 	$(CC) $(CFLAGS) -o build/sic $(SRC_FILES)
 
 test: build/sic
-	CC=build/sic tests/runtest.sh build
+	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build
 
 testllvm: build/sic
-	CC=build/sic tests/runtest.sh build llvm
+	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build llvm
 
 testc:
-	CC="$(CC) -c -x c" tests/runtest.sh build
+	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/runtest.sh build
 
 tests: test
 
@@ -24,7 +24,7 @@ runtest: build/sic
 runllvmtest: runtest
 	llvm-as build/test_$(TEST).sic.ir
 	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
-	gcc build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
+	$(CC) build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
 	build/test_$(TEST).ir.bin || true
 
 build:
