@@ -2,6 +2,7 @@
 
 extern int test_buffer();
 extern int test_scan();
+extern int test_parse();
 
 #define TEST(X) if (X) { ++failed; printf("Test failed: %s\n", #X); }
 

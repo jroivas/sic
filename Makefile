@@ -1,10 +1,13 @@
 INC_FILES := inc/*.h
 SRC_FILES := src/*.c
 #SRC_FILES = src/main.c src/scan.c src/parse.c
-CFLAGS = -std=c99 -Wall -Werror -pedantic -O3 -Iinc/
+CFLAGS = -std=c99 -Wall -Werror -pedantic -O3 -fPIC -Iinc/
 
-build/sic: build $(INC_FILES) $(SRC_FILES)
-	$(CC) $(CFLAGS) -o build/sic $(SRC_FILES)
+build/sic: build build/libsic.so
+	$(CC) $(CFLAGS) -o build/sic main.c build/libsic.so
+
+build/libsic.so: $(INC_FILES) $(SRC_FILES)
+	$(CC) $(CFLAGS) -shared -o build/libsic.so $(SRC_FILES)
 
 test: build/sic unittest
 	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build

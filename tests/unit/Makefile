@@ -3,24 +3,24 @@ OBJS := $(addsuffix .o,$(basename $(SRCS)))
 TARGETS := $(basename $(SRCS))
 CFLAGS := -std=c99 -I../../inc $(CFLAGS)
 
-test: runtest
-	./runtest
+all: test
 
-buffer.o: ../../src/buffer.c
-	$(CC) -c $(CFLAGS) $< -o $@
+test: runtest libsic.so
+	LD_LIBRARY_PATH=. ./runtest
 
-scan.o: ../../src/scan.c
-	$(CC) -c $(CFLAGS) $< -o $@
-
-parse.o: ../../src/parse.c
-	$(CC) -c $(CFLAGS) $< -o $@
+libsic.so:
+	make -C ../.. build/libsic.so
+	cp -f ../../build/libsic.so .
 
 test.o: test.c test.h
 
-runtest: test.o $(OBJS) buffer.o scan.o parse.o
+runtest: test.o $(OBJS) libsic.so
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
 
 %.o : %.c
 	$(CC) -c $(CFLAGS) $< -o $@
 
-.PHONY: test runtest
+clean:
+	rm -f runtest libsic.so *.o
+
+.PHONY: test runtest libsic.so
