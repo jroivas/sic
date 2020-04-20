@@ -9,9 +9,12 @@ test: runtest
 buffer.o: ../../src/buffer.c
 	$(CC) -c $(CFLAGS) $< -o $@
 
+scan.o: ../../src/scan.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
 test.o: test.c test.h
 
-runtest: test.o $(OBJS) buffer.o
+runtest: test.o $(OBJS) buffer.o scan.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
 
 %.o : %.c

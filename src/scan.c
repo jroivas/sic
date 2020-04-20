@@ -13,7 +13,9 @@ static const char *tokenstr[] = {
     "STR_LIT",
     "(", ")",
     "{", "}",
-    ",", "SEMI", "EOF"
+    ",", "SEMI",
+    "&",
+    "EOF"
 };
 
 void open_input_file(struct scanfile *f, const char *name)

@@ -6,7 +6,7 @@ CFLAGS = -std=c99 -Wall -Werror -pedantic -O3 -Iinc/
 build/sic: build $(INC_FILES) $(SRC_FILES)
 	$(CC) $(CFLAGS) -o build/sic $(SRC_FILES)
 
-test: build/sic
+test: build/sic unittest
 	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build
 
 testllvm: build/sic
@@ -17,15 +17,18 @@ testc:
 
 tests: test
 
-runtest: build/sic
+buildtest: build/sic
 	build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
 	cat build/test_$(TEST).sic.ir
 
-runllvmtest: runtest
+runtest: buildtest
 	llvm-as build/test_$(TEST).sic.ir
 	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
 	$(CC) build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
 	build/test_$(TEST).ir.bin || true
+
+unittest:
+	make -C tests/unit
 
 build:
 	mkdir -p build
@@ -33,4 +36,4 @@ build:
 clean:
 	rm -rf build
 
-.PHONY: test builddir clean runtest runllvmtest
+.PHONY: test builddir clean runtest buildtest

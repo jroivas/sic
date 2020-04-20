@@ -2,7 +2,7 @@
 #include "buffer.h"
 #include <string.h>
 
-int test1()
+static int test1()
 {
     struct buffer *b = buffer_init();
 
@@ -12,7 +12,7 @@ int test1()
     return 0;
 }
 
-int test2()
+static int test2()
 {
     struct buffer *b = buffer_init();
 
@@ -28,7 +28,7 @@ int test2()
     return 0;
 }
 
-int test3()
+static int test3()
 {
     struct buffer *b = buffer_init();
 
@@ -45,7 +45,7 @@ int test3()
     return 0;
 }
 
-int test4()
+static int test4()
 {
     struct buffer *b = buffer_init();
 
