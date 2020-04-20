@@ -11,6 +11,7 @@ int main()
 
     TEST(test_buffer());
     TEST(test_scan());
+    TEST(test_parse());
 
     if (!failed)
         printf("Tests passed\n");

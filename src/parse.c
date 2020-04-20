@@ -21,11 +21,16 @@ static const char *nodestr[] = {
     "LIST"
 };
 
+const char *node_type_str(enum nodetype t)
+{
+    FATAL(t >= sizeof(nodestr) / sizeof (char*),
+            "Node string table overflow with %d", t);
+    return nodestr[t];
+}
+
 const char *node_str(struct node *n)
 {
-    FATAL(n->node >= sizeof(nodestr) / sizeof (char*),
-            "Node string table overflow with %d", n->node);
-    return nodestr[n->node];
+    return node_type_str(n->node);
 }
 
 enum nodetype oper(enum tokentype t)

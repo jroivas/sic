@@ -12,9 +12,12 @@ buffer.o: ../../src/buffer.c
 scan.o: ../../src/scan.c
 	$(CC) -c $(CFLAGS) $< -o $@
 
+parse.o: ../../src/parse.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
 test.o: test.c test.h
 
-runtest: test.o $(OBJS) buffer.o scan.o
+runtest: test.o $(OBJS) buffer.o scan.o parse.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
 
 %.o : %.c
