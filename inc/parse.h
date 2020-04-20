@@ -17,6 +17,7 @@ enum nodetype {
     A_FUNCTION,
     A_RETURN,
     A_POINTER,
+    A_ADDR,
     A_LIST
 };
 

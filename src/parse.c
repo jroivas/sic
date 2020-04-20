@@ -18,6 +18,7 @@ static const char *nodestr[] = {
     "FUNCTION",
     "RETURN",
     "POINTER",
+    "ADDR",
     "LIST"
 };
 
@@ -501,6 +502,13 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         if (!left)
             ERR("Invalid cast!");
         return make_node(A_NEGATE, left, NULL);
+    } else if (accept(f, token, T_AMP)) {
+        left = cast_expression(f, token);
+        if (!left)
+            ERR("Required lvalue for unary '&' operator");
+        if (left->node != A_IDENTIFIER)
+            ERR("Expected identifier lvalue for unary '&' operator");
+        left->node = A_ADDR;
     }
 
     left = postfix_expression(f, token);

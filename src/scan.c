@@ -212,6 +212,9 @@ int scan(struct scanfile *f, struct token *t)
         case '*':
             t->token = T_STAR;
             break;
+        case '&':
+            t->token = T_AMP;
+            break;
         case '/':
             t->token = T_SLASH;
             break;
