@@ -574,6 +574,21 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     struct variable *prev = NULL;
     int reg = v->reg;
 
+    if (v->ptr) {
+        char *tmp = get_stars(v->ptr);
+        prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
+        buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d\n",
+                prev->reg, prev->type->bits,
+                tmp ? tmp : "",
+                prev->type->bits,
+                tmp ? tmp : "",
+                REGP(v), reg, align(prev->type->bits));
+        prev->ptr = v->ptr;
+        if (tmp)
+            free(tmp);
+        return prev;
+    }
+#if 0
     for (int i = v->ptr; i > 0; i--) {
         char *tmp = get_stars(i);
         prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
@@ -587,11 +602,13 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
             free(tmp);
         reg = prev->reg;
     }
+#endif
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
 
     buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d\n",
             res->reg, res->type->bits, res->type->bits,
             REGP(v), reg, align(res->type->bits));
+    res->ptr = v->ptr;
     return res;
 }
 
@@ -835,14 +852,20 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         // Utilize pending type from previous type def
         FATAL(!ctx->pending_type, "Can't determine type of variable %s", node->value_string);
         struct type *t = ctx->pending_type;
+        int ptrval = 0;
         switch (t->type) {
             case V_INT:
-                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, gen_use_ptr(ctx), ctx->global);
+                ptrval = gen_use_ptr(ctx);
+                node->ptr = ptrval;
+                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, ptrval, ctx->global);
                 var->global = ctx->global;
                 res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr);
+                printf("1RES: %d %d, ptr %d\n", res, var->reg, var->ptr);
                 break;
             case V_FLOAT:
-                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, gen_use_ptr(ctx), ctx->global);
+                ptrval = gen_use_ptr(ctx);
+                node->ptr = ptrval;
+                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, ctx->global);
                 var->global = ctx->global;
                 res = gen_allocate_double(ctx, var->reg);
                 break;
@@ -871,6 +894,17 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 
     FATAL(!src, "No source in assign")
     FATAL(!dst, "No dest in assign: %d", left)
+
+    if (src->ptr) {
+        char *tmp = get_stars(src->ptr);
+
+        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d\n",
+                src->type->bits, tmp ? tmp : "", src->reg,
+                dst->type->bits, tmp ? tmp : "",
+                REGP(dst), dst->reg,
+                align(dst->type->bits));
+        return dst->reg;
+    }
 
     if (src->type->type == V_INT) {
         buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",

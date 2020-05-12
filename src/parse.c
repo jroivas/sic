@@ -508,7 +508,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             ERR("Required lvalue for unary '&' operator");
         if (left->node != A_IDENTIFIER)
             ERR("Expected identifier lvalue for unary '&' operator");
-        left->node = A_ADDR;
+        return make_node(A_ADDR, left, NULL);
     }
 
     left = postfix_expression(f, token);
