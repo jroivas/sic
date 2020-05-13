@@ -5,6 +5,7 @@
 static int test1()
 {
     ASSERT(strcmp(token_val_str(T_EOF), "EOF") == 0);
+    return 0;
 }
 
 int test_scan()

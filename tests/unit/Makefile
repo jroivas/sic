@@ -14,7 +14,8 @@ libsic.so:
 
 test.o: test.c test.h
 
-runtest: test.o $(OBJS) libsic.so
+#runtest: test.o $(OBJS) libsic.so
+runtest: test.o $(SRCS) libsic.so
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@
 
 %.o : %.c
