@@ -62,6 +62,8 @@ enum var_type resolve_var_type(struct node *n)
     int s2 = 0;
     int ptr1 = 0;
     int ptr2 = 0;
+    int addr1 = 0;
+    int addr2 = 0;
     if (!n)
         return V_VOID;
 
@@ -77,6 +79,7 @@ enum var_type resolve_var_type(struct node *n)
         b1 = n->left->bits;
         s1 = n->left->sign;
         ptr1 = n->left->ptr;
+        addr1 = n->left->addr;
     }
     if (n->right) {
 #if 1
@@ -90,6 +93,7 @@ enum var_type resolve_var_type(struct node *n)
         b2 = n->right->bits;
         s2 = n->right->sign;
         ptr2 = n->right->ptr;
+        addr2 = n->right->addr;
     }
 
     if (v1 == V_VOID && v2 != V_VOID)
@@ -116,11 +120,17 @@ enum var_type resolve_var_type(struct node *n)
     if (ptr1 < n->ptr)
         ptr1 = n->ptr;
 
+    if (addr1 < addr2)
+        addr1 = addr2;
+    if (addr1 < n->addr)
+        addr1 = n->addr;
+
     n->type = v1;
     n->bits = b1;
     //printf("SIGN: v1 %d, bits %d,  %d, %d -> %d @%s\n", v1, b1, s1, s2, n->sign, node_str(n));
     n->sign = s1;
     n->ptr = ptr1;
+    n->addr = addr1;
     return v1;
 }
 
@@ -225,6 +235,7 @@ struct node *type_resolve(struct node *node, int d)
     int bits = node->bits;
     int sign = node->sign;
     int ptr = node->ptr;
+    int addr = node->addr;
 
     if (type == V_INT && bits == 0) {
         // Default for 32 bits
@@ -236,6 +247,7 @@ struct node *type_resolve(struct node *node, int d)
     res->sign = !sign;
     res->type = type;
     res->ptr = ptr;
+    res->addr = addr;
     res->is_const = scan_const(node);
     return res;
 }
@@ -503,12 +515,17 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             ERR("Invalid cast!");
         return make_node(A_NEGATE, left, NULL);
     } else if (accept(f, token, T_AMP)) {
+        int addr = 1;
+        while (accept(f, token, T_AMP))
+            addr += 1;
         left = cast_expression(f, token);
         if (!left)
             ERR("Required lvalue for unary '&' operator");
         if (left->node != A_IDENTIFIER)
             ERR("Expected identifier lvalue for unary '&' operator");
-        return make_node(A_ADDR, left, NULL);
+        left = make_node(A_ADDR, left, NULL);
+        left->addr = addr;
+        return left;
     }
 
     left = postfix_expression(f, token);

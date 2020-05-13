@@ -29,6 +29,7 @@ struct node {
     int reg;
     int is_const;
     int ptr;
+    int addr;
     int strnum;
 
     const char *value_string;

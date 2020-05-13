@@ -127,6 +127,9 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_POINTER:
             printf("POINTER: %d", node->ptr);
             break;
+        case A_ADDR:
+            printf("ADDR: %d", node->addr);
+            break;
         case A_TYPESPEC:
             printf("TYPESPEC %s %d %s, %s", type_str(node->type),
                 node->bits, node->sign ? "signed" : "unsigned",
