@@ -41,7 +41,6 @@ struct gen_context {
     int safe;
     int global;
     int pending_ptr;
-    int pending_addr;
     int strs;
     const char *name;
     struct node *node;
@@ -467,7 +466,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     return val;
 }
 
-int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr)
+int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int code_alloc)
 {
     if (ctx->global) {
         FATAL(ptr, "Global pointer not supported");
@@ -475,7 +474,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr)
             "@G", reg, bits, align(bits));
     } else {
         char *tmp = get_stars(ptr);
-        buffer_write(ctx->init, "%%%d = alloca i%d%s, align %d\n",
+        buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca i%d%s, align %d\n",
             reg, bits, ptr ? tmp : "", align(bits));
         if (tmp)
             free(tmp);
@@ -500,7 +499,7 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
-    gen_allocate_int(ctx, val->reg, val->type->bits, 0);
+    gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0);
     n->reg = val->reg;
     return val->reg;
 }
@@ -586,14 +585,6 @@ int gen_store_string(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
-int gen_use_addr(struct gen_context *ctx)
-{
-    int res = ctx->pending_addr;
-    ctx->pending_addr = 0;
-    return res;
-}
-
-
 struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
@@ -601,9 +592,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     struct variable *prev = NULL;
     int reg = v->reg;
 
-    printf("AA: %d: %d, %d\n", reg, v->addr, ctx->pending_addr);
     if (v->ptr || v->addr) {
-        //int addrval = gen_use_addr(ctx);
         char *tmp = get_stars(v->ptr);
         prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0, 0);
         buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d ; %d\n",
@@ -868,14 +857,6 @@ int gen_pointer(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
-int gen_addr(struct gen_context *ctx, struct node *node)
-{
-    if (ctx->pending_addr)
-        ERR("Unexpected address while handling address ref");
-    ctx->pending_addr = node->addr;
-    return 0;
-}
-
 int gen_use_ptr(struct gen_context *ctx)
 {
     int res = ctx->pending_ptr;
@@ -896,18 +877,15 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         switch (t->type) {
             case V_INT:
                 ptrval = gen_use_ptr(ctx);
-                addrval = gen_use_addr(ctx);
                 node->ptr = ptrval;
                 node->addr = addrval;
                 var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, ptrval, addrval, ctx->global);
                 var->global = ctx->global;
                 var->addr = addrval;
-                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr);
-                printf("1RES: %d %d, ptr %d, addr %d\n", res, var->reg, var->ptr, var->addr);
+                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 0);
                 break;
             case V_FLOAT:
                 ptrval = gen_use_ptr(ctx);
-                addrval = gen_use_addr(ctx);
                 node->ptr = ptrval;
                 node->addr = addrval;
                 var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
@@ -919,18 +897,56 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 break;
         }
     } else
-        res = var->reg;
+            res = var->reg;
     return res;
+}
+
+int gen_addr(struct gen_context *ctx, struct node *node, int reg)
+{
+    if (node->addr) {
+        struct variable *var = find_variable(ctx, reg);
+        FATAL(!var, "No variable to take address from!");
+
+        char *dst = get_stars(var->ptr + node->addr + 1);
+        char *src = get_stars(var->ptr + 1);
+        struct variable *res = new_variable(ctx,
+            NULL,
+            var->type->type,
+            var->type->bits, var->type->sign,
+            var->ptr + node->addr,
+            0, 0);
+
+        gen_allocate_int(ctx, res->reg, res->type->bits, res->ptr, 1);
+        if (var->type->type == V_INT) {
+            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s %s%d, align %d\n",
+                res->type->bits,
+                src ? src : "",
+                reg,
+                res->type->bits,
+                dst ? dst : "",
+                REGP(res),
+                res->reg, align(res->type->bits)
+                );
+        } else if (var->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "store double %s %%%d, %s %s%d, align %d\n",
+                src ? src : "",
+                reg,
+                dst ? dst : "",
+                REGP(res),
+                res->reg, align(res->type->bits)
+                );
+        } else
+            ERR("Invalid type: %d", res->type->type);
+
+        return res->reg;
+    }
+    return reg;
 }
 
 int get_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *var = find_variable_by_name(ctx, node->value_string);
     FATAL(!var, "Variable not found in get_identitifier: %s", node->value_string);
-/*
-    var->addr = gen_use_addr(ctx);
-    node->addr = var->addr;
-*/
     return var->reg;
 }
 
@@ -945,9 +961,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     FATAL(!dst, "No dest in assign: %d", left)
 
     if (src->ptr || src->addr) {
-        char *tmp = get_stars(src->ptr + src->addr);
+        char *tmp = get_stars(src->ptr);
 
-        dump_variables(ctx);
+        //dump_variables(ctx);
         buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d\n",
                 src->type->bits, tmp ? tmp : "", src->reg,
                 dst->type->bits, tmp ? tmp : "",
@@ -1183,11 +1199,6 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         case A_POINTER:
             gen_pointer(ctx, node);
             break;
-#if 0
-        case A_ADDR:
-            gen_addr(ctx, node);
-            break;
-#endif
         case A_IDENTIFIER:
             gen_identifier(ctx, node);
             break;
@@ -1256,18 +1267,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             //return gen_pointer(ctx, node);
             return resleft;
         case A_ADDR:
-            gen_addr(ctx, node);
-#if 0
-            {
-                struct variable *v = find_variable(ctx, resleft);
-                if (v && node->addr) {
-                    struct variable *n = new_variable(ctx, NULL, V_INT, v->type->bits, 0, v->ptr, node->addr, 0);
-                    //v->addr = node->addr;
-                    return n->reg;
-                }
-            }
-#endif
-            return resleft;
+            return gen_addr(ctx, node, resleft);
         case A_IDENTIFIER:
             return get_identifier(ctx, node);
         case A_RETURN:
