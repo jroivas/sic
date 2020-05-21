@@ -5,6 +5,9 @@
 #define PARSE_UNSIGNED 1
 
 struct node *additive_expression(struct scanfile *f, struct token *token);
+struct node *compound_statement(struct scanfile *f, struct token *token);
+struct node *statement(struct scanfile *f, struct token *token);
+
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
@@ -19,6 +22,8 @@ static const char *nodestr[] = {
     "RETURN",
     "POINTER",
     "ADDR",
+    "IF",
+    "ELSE",
     "LIST"
 };
 
@@ -616,9 +621,48 @@ struct node *jump_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *selection_statement(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    struct node *body = NULL;
+
+    if (token->token != T_KEYWORD)
+        return NULL;
+
+    if (accept_keyword(f, token, K_IF)) {
+        expect(f, token, T_ROUND_OPEN, "(");
+
+        res = expression(f, token);
+
+        expect(f, token, T_ROUND_CLOSE, ")");
+
+        body = statement(f, token);
+
+        // TODO else
+        res = make_node(A_IF, res, body);
+    }
+
+    // TODO: if ..
+    // TODO: if .. else ..
+    // TODO: switch ...
+
+    return res;
+}
+
 struct node *statement(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+
+    // TODO: labeled_statement
+
+    save_point(f, token);
+    res = compound_statement(f, token);
+    if (res) {
+        remove_save_point(f, token);
+        return res;
+    }
+    load_point(f, token);
+
     save_point(f, token);
     res = expression_statement(f, token);
     if (res) {
@@ -626,6 +670,12 @@ struct node *statement(struct scanfile *f, struct token *token)
         return res;
     }
     load_point(f, token);
+
+    res = selection_statement(f, token);
+    if (res)
+        return res;
+    // TODO: iteration_statement
+
     res = jump_statement(f, token);
 
     return res;
@@ -675,6 +725,7 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
 {
     struct node *decl = NULL;
     struct node *res = NULL;
+
     if (token->token != T_CURLY_OPEN)
         return NULL;
     scan(f, token);

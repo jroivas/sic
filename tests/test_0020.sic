@@ -4,7 +4,12 @@ int main()
     double b;
     char *p;
 
-    assert(a == 0);
-    assert(b == 0.0);
-    assert(p == NULL);
+    if (a)
+        return 1;
+    if (b)
+        return 2;
+    if (p)
+        return 3;
+
+    return 0;
 }

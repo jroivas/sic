@@ -99,12 +99,12 @@ int accept(struct scanfile *f, struct token *t, enum tokentype token)
     return 0;
 }
 
-int expect(struct scanfile *f, struct token *t, enum tokentype token, const char *expect)
+int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword)
 {
-    if (accept(f, t, token))
-       return 1;
-
-    ERR("Expected %s on line %d, got %s instead", expect, f->line, token_dump(t));
+    if (t->token == T_KEYWORD && t->keyword == keyword) {
+        scan(f, t);
+        return 1;
+    }
     return 0;
 }
 
@@ -186,11 +186,23 @@ char *scan_identifier(struct scanfile *f, int c)
 int keyword(struct token *t)
 {
     const char *v = t->value_string;
+    int res = 0;
+
     if (!v)
-        return 0;
-    if (strcmp(v, "return") == 0)
-        return 1;
-    return 0;
+        return res;
+
+    if (strcmp(v, "return") == 0) {
+        res = 1;
+        t->keyword = K_RETURN;
+    } else if (strcmp(v, "if") == 0) {
+        res = 1;
+        t->keyword = K_IF;
+    } else if (strcmp(v, "else") == 0) {
+        res = 1;
+        t->keyword = K_ELSE;
+    }
+
+    return res;
 }
 
 int scan(struct scanfile *f, struct token *t)

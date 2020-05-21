@@ -68,22 +68,19 @@ void __node_walk(struct node *node, int depth, char arm)
     printf("%c %*s", arm, depth * 2, "");
     switch (node->node) {
         case A_ADD:
-            printf("+");
-            break;
         case A_MINUS:
-            printf("-");
-            break;
+        case A_IF:
         case A_NEGATE:
-            printf("NEGATE");
-            break;
         case A_MUL:
-            printf("*");
-            break;
         case A_DIV:
-            printf("/");
-            break;
         case A_MOD:
-            printf("%%");
+        case A_GLUE:
+        case A_LIST:
+        case A_ASSIGN:
+        case A_FUNCTION:
+        case A_RETURN:
+        case A_DECLARATION:
+            printf("%s", node_str(node));
             break;
         case A_INT_LIT:
             printf("INT: %llu, %d bits %s", node->value, node->bits, node->sign ? "signed" : "unsigned");
@@ -93,12 +90,6 @@ void __node_walk(struct node *node, int depth, char arm)
             break;
         case A_STR_LIT:
             printf("STRING: %s", node->value_string);
-            break;
-        case A_GLUE:
-            printf("GLUE");
-            break;
-        case A_LIST:
-            printf("LIST");
             break;
         case A_TYPE:
             printf("TYPE %s%*s (%d) %d %s, %s%s", type_str(node->type),
@@ -111,18 +102,6 @@ void __node_walk(struct node *node, int depth, char arm)
             break;
         case A_IDENTIFIER:
             printf("IDENTIFIER %s", node->value_string);
-            break;
-        case A_ASSIGN:
-            printf("ASSIGN");
-            break;
-        case A_FUNCTION:
-            printf("FUNCTION");
-            break;
-        case A_RETURN:
-            printf("RETURN");
-            break;
-        case A_DECLARATION:
-            printf("DECLARATION");
             break;
         case A_POINTER:
             printf("POINTER: %d", node->ptr);

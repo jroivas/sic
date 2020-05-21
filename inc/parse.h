@@ -18,6 +18,8 @@ enum nodetype {
     A_RETURN,
     A_POINTER,
     A_ADDR,
+    A_IF,
+    A_ELSE,
     A_LIST
 };
 
