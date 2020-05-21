@@ -124,6 +124,8 @@ void __node_walk(struct node *node, int depth, char arm)
 
     if (node->left)
         __node_walk(node->left, depth + 1, 'L');
+    if (node->mid)
+        __node_walk(node->mid, depth + 1, 'M');
     if (node->right)
         __node_walk(node->right, depth + 1, 'R');
 }

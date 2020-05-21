@@ -39,6 +39,7 @@ struct node {
     literalnum fraction;
 
     struct node *left;
+    struct node *mid;
     struct node *right;
 };
 

@@ -1183,6 +1183,12 @@ int gen_declaration(struct gen_context *ctx, struct node *node, int left, int ri
     return right;
 }
 
+int gen_if(struct gen_context *ctx, struct node *node)
+{
+    // If has cluase on left
+    return 0;
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -1228,13 +1234,19 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node == NULL)
         return 0;
 
+    /* Special cases */
     if (node->node == A_FUNCTION)
         return gen_function(ctx, node);
+    if (node->node == A_IF)
+        return gen_if(ctx, node);
+
+    /* Recurse first to get children solved */
     if (node->left)
         resleft = gen_recursive(ctx, node->left);
     if (node->right)
         resright = gen_recursive(ctx, node->right);
 
+    /* Then generate this node */
     switch (node->node) {
         case A_ADD:
             return gen_add(ctx, resleft, resright);
