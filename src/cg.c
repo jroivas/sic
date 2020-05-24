@@ -478,25 +478,29 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int co
         char *tmp = get_stars(ptr);
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca i%d%s, align %d\n",
             reg, bits, ptr ? tmp : "", align(bits));
-        if (ptr)
-            buffer_write(code_alloc ? ctx->data : ctx->init,
-                "store i%d%s null, i%d%s* %%%d, align %d\n",
-                bits, tmp, bits, tmp, reg, align(bits)
-                );
+        buffer_write(code_alloc ? ctx->data : ctx->init,
+            "store i%d%s %s, i%d%s* %%%d, align %d\n",
+            bits, ptr ? tmp : "" , ptr ? "null" : "0", bits, ptr ? tmp : "", reg, align(bits)
+            );
         if (tmp)
             free(tmp);
     }
     return reg;
 }
 
-int gen_allocate_double(struct gen_context *ctx, int reg)
+int gen_allocate_double(struct gen_context *ctx, int reg, int ptr, int code_alloc)
 {
     if (ctx->global) {
         buffer_write(ctx->init, "%s%d = global double 0.0, align %d\n",
             "@G", reg, align(64));
     } else {
-        buffer_write(ctx->init, "%s%d = alloca double, align %d\n",
-            ctx->global ? "@G" : "%", reg, align(64));
+        char *tmp = get_stars(ptr);
+        buffer_write(ctx->init, "%s%d = alloca double%s, align %d\n",
+            ctx->global ? "@G" : "%", reg, ptr ? tmp : "", align(64));
+        buffer_write(code_alloc ? ctx->data : ctx->init,
+            "store double%s %s, double%s* %%%d, align %d\n",
+            ptr ? tmp : "" , ptr ? "null" : "0.0", ptr ? tmp : "", reg, align(64)
+            );
     }
     return reg;
 }
@@ -549,7 +553,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, 0, ctx->global);
-    gen_allocate_double(ctx, val->reg);
+    gen_allocate_double(ctx, val->reg, 0, 0);
     n->reg = val->reg;
     return val->reg;
 }
@@ -897,7 +901,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 node->addr = addrval;
                 var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
                 var->global = ctx->global;
-                res = gen_allocate_double(ctx, var->reg);
+                res = gen_allocate_double(ctx, var->reg, var->ptr, 0);
                 break;
             default:
                 ERR("Invalid type for variable: %s", type_str(t->type));

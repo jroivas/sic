@@ -2,6 +2,7 @@ int main()
 {
     int a;
     double b;
+    double *b2;
     char *p;
     char *pp;
 
