@@ -1194,7 +1194,7 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
     FATAL(!var, "Invalid variable for bool comparison");
 
     if (var->ptr) {
-
+        buffer_write(ctx->data, "; GG %d -> %d\n", var->ptr, src->ptr);
         struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
         char *stars = get_stars(var->ptr);
 
@@ -1225,6 +1225,11 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
     return -1;
 }
 
+int gen_reserve_label(struct gen_context *ctx)
+{
+    return ctx->regnum++;
+}
+
 int gen_if(struct gen_context *ctx, struct node *node)
 {
     // Conditional clause on left
@@ -1233,8 +1238,59 @@ int gen_if(struct gen_context *ctx, struct node *node)
     int cond_reg = gen_recursive(ctx, node->left);
     struct variable *cond = find_variable(ctx, cond_reg);
 
-    int res = gen_cmp_bool(ctx, cond);
-    buffer_write(ctx->data, "; cmp %d\n ", res);
+    int cmp_reg = gen_cmp_bool(ctx, cond);
+
+    // br i1 %8, label %9, label %10, !dbg !28
+    // br i1 %16, label %17, label %18, !dbg !36
+    // ; <label>:10:
+
+    struct buffer *cmpblock = buffer_init();
+    struct buffer *ifblock = buffer_init();
+    struct buffer *tmp = ctx->data;
+
+#if 1
+    ctx->data = cmpblock;
+    int label1 = gen_reserve_label(ctx);
+    buffer_write(cmpblock, "; <label>:%d:\n ", label1);
+    if (node->mid)
+        gen_recursive(ctx, node->mid);
+
+    ctx->data = ifblock;
+    int label2 = gen_reserve_label(ctx);
+    buffer_write(ifblock, "; <label>:%d:\n ", label2);
+    if (node->right)
+        gen_recursive(ctx, node->right);
+
+    int label3 = gen_reserve_label(ctx);
+    buffer_write(ifblock, "; <label>:%d:\n ", label3);
+#endif
+#if 0
+    ctx->data = cmpblock;
+    int label1 = gen_reserve_label(ctx);
+    buffer_write(cmpblock, "; <label>:%d:\n ", label1);
+    if (node->right)
+        gen_recursive(ctx, node->right);
+
+    ctx->data = ifblock;
+    int label2 = gen_reserve_label(ctx);
+    buffer_write(ifblock, "; <label>:%d:\n ", label2);
+    if (node->mid)
+        gen_recursive(ctx, node->mid);
+
+    int label3 = gen_reserve_label(ctx);
+    buffer_write(ifblock, "; <label>:%d:\n ", label3);
+
+#endif
+
+    ctx->data = tmp;
+    buffer_write(ctx->data, "br i1 %%%d, label %%%d, label %%%d\n",
+        cmp_reg, label1, label2);
+    buffer_append(ctx->data, buffer_read(cmpblock));
+    buffer_write(ctx->data, "br label %%%d\n ", label3);
+    buffer_append(ctx->data, buffer_read(ifblock));
+
+    buffer_del(cmpblock);
+    buffer_del(ifblock);
 
     return 0;
 }
@@ -1273,6 +1329,8 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 
     if (node->left)
         gen_recursive_allocs(ctx, node->left);
+    if (node->mid)
+        gen_recursive_allocs(ctx, node->mid);
     if (node->right)
         gen_recursive_allocs(ctx, node->right);
     return 0;

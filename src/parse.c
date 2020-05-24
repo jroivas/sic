@@ -150,7 +150,7 @@ struct node *make_node(enum nodetype node, struct node *left,
     res->left = left;
     res->mid = mid;
     res->right = right;
-    if (left != NULL || right != NULL)
+    if (left != NULL || mid != NULL || right != NULL)
         res->type = resolve_var_type(res);
     else
         res->type = V_VOID;
