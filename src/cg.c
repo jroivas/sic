@@ -614,6 +614,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
                 REGP(v), reg, align(prev->type->bits), v->addr);
         prev->ptr = v->ptr;
         prev->addr = v->addr;
+        prev->direct = 1;
         if (tmp)
             free(tmp);
         return prev;
@@ -640,6 +641,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
             REGP(v), reg, align(res->type->bits));
     res->ptr = v->ptr;
     res->addr = v->addr;
+    res->direct = 1;
     return res;
 }
 
@@ -651,6 +653,7 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 
     buffer_write(ctx->data, "%%%d = load double, double* %s%d, align %d\n",
             res->reg, REGP(v), v->reg, align(v->type->bits));
+    res->direct = 1;
     return res;
 }
 
