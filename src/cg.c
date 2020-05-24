@@ -1011,20 +1011,18 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
         if (var) {
-            buffer_write(ctx->post, "; TGET1: %s --> %s\n", stype_str(var->type), stype_str(target));
             if (!var->direct) {
                 var = gen_load(ctx, var);
                 FATAL(!var, "Invalid indirect return variable: %d", res);
                 res = var->reg;
             }
-            buffer_write(ctx->post, "; TGET2: %s --> %s\n", stype_str(var->type), stype_str(target));
             if (target->type != var->type->type || target->bits != var->type->bits) {
                 var = gen_cast(ctx, var, target, 1);
                 var = gen_bits_cast(ctx, var, node->bits, 1);
                 res = var->reg;
             }
             const char *type = var_str(var->type->type, var->type->bits, &tmp);
-            buffer_write(ctx->post, "ret %s %%%d ;RET1\n", type, res);
+            buffer_write(ctx->post, "ret %s %%%d ; RET1\n", type, res);
         } else {
             const char *type = var_str(node->type, node->bits, &tmp);
             buffer_write(ctx->post, "ret %s 0 ; RET2\n", type, res);
@@ -1199,7 +1197,6 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
     FATAL(!var, "Invalid variable for bool comparison");
 
     if (var->ptr) {
-        buffer_write(ctx->data, "; GG %d -> %d\n", var->ptr, src->ptr);
         struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
         char *stars = get_stars(var->ptr);
 
@@ -1245,53 +1242,30 @@ int gen_if(struct gen_context *ctx, struct node *node)
 
     int cmp_reg = gen_cmp_bool(ctx, cond);
 
-    // br i1 %8, label %9, label %10, !dbg !28
-    // br i1 %16, label %17, label %18, !dbg !36
-    // ; <label>:10:
-
     struct buffer *cmpblock = buffer_init();
     struct buffer *ifblock = buffer_init();
     struct buffer *tmp = ctx->data;
 
-#if 1
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
-    buffer_write(cmpblock, "; <label>:%d:\n ", label1);
+    buffer_write(cmpblock, "; <label>:%d:\n", label1);
     if (node->mid)
         gen_recursive(ctx, node->mid);
 
     ctx->data = ifblock;
     int label2 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n ", label2);
+    buffer_write(ifblock, "; <label>:%d:\n", label2);
     if (node->right)
         gen_recursive(ctx, node->right);
 
     int label3 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n ", label3);
-#endif
-#if 0
-    ctx->data = cmpblock;
-    int label1 = gen_reserve_label(ctx);
-    buffer_write(cmpblock, "; <label>:%d:\n ", label1);
-    if (node->right)
-        gen_recursive(ctx, node->right);
-
-    ctx->data = ifblock;
-    int label2 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n ", label2);
-    if (node->mid)
-        gen_recursive(ctx, node->mid);
-
-    int label3 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n ", label3);
-
-#endif
+    buffer_write(ifblock, "; <label>:%d:\n", label3);
 
     ctx->data = tmp;
     buffer_write(ctx->data, "br i1 %%%d, label %%%d, label %%%d\n",
         cmp_reg, label1, label2);
     buffer_append(ctx->data, buffer_read(cmpblock));
-    buffer_write(ctx->data, "br label %%%d\n ", label3);
+    buffer_write(ctx->data, "br label %%%d\n", label3);
     buffer_append(ctx->data, buffer_read(ifblock));
 
     buffer_del(cmpblock);

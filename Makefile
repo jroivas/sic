@@ -28,7 +28,7 @@ runtest: buildtest
 	llvm-as build/test_$(TEST).sic.ir
 	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
 	$(CC) build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
-	build/test_$(TEST).ir.bin || true
+	build/test_$(TEST).ir.bin ; echo $$? || true
 
 unittest:
 	make -C tests/unit
