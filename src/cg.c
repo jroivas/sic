@@ -478,6 +478,11 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int co
         char *tmp = get_stars(ptr);
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca i%d%s, align %d\n",
             reg, bits, ptr ? tmp : "", align(bits));
+        if (ptr)
+            buffer_write(code_alloc ? ctx->data : ctx->init,
+                "store i%d%s null, i%d%s* %%%d, align %d\n",
+                bits, tmp, bits, tmp, reg, align(bits)
+                );
         if (tmp)
             free(tmp);
     }

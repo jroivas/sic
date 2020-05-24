@@ -3,6 +3,7 @@ int main()
     int a;
     double b;
     char *p;
+    char *pp;
 
     if (a)
         return 1;
@@ -10,6 +11,8 @@ int main()
         return 2;
     if (p)
         return 3;
+    if (pp)
+        return 4;
 
     return 0;
 }
