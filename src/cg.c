@@ -65,6 +65,8 @@ static const char *varstr[] = {
     "void", "i32", "double", "invalid"
 };
 
+struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
+
 char *stype_str(struct type *t)
 {
     char *tmp = calloc(256, sizeof(char));
@@ -1017,10 +1019,10 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
                 res = var->reg;
             }
             const char *type = var_str(var->type->type, var->type->bits, &tmp);
-            buffer_write(ctx->post, "ret %s %%%d\n", type, res);
+            buffer_write(ctx->post, "ret %s %%%d ;RET1\n", type, res);
         } else {
             const char *type = var_str(node->type, node->bits, &tmp);
-            buffer_write(ctx->post, "ret %s 0\n", type, res);
+            buffer_write(ctx->post, "ret %s 0 ; RET2\n", type, res);
         }
         if (tmp)
             free(tmp);
@@ -1156,22 +1158,25 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
         return 0;
     int res = 0;
     struct variable *var;
+    struct type *target = resolve_return_type(ctx, ctx->node, res);
     if (right)
         var = find_variable(ctx, right);
     else
         var = find_variable(ctx, left);
 
     if (!var->direct) {
-        struct variable *tmp = gen_load(ctx, var);
-        res = tmp->reg;
-    } else
+        var = gen_load(ctx, var);
+        FATAL(!var, "Invalid indirect return variable: %d", res);
         res = var->reg;
-
+    }
+    if (target->type != var->type->type || target->bits != var->type->bits) {
+        var = gen_cast(ctx, var, target, 1);
+        var = gen_bits_cast(ctx, var, target->bits, 1);
+        res = var->reg;
+    }
     char *tmp;
     const char *type = var_str(var->type->type, var->type->bits, &tmp);
-    buffer_write(ctx->data, "ret %s %%%d\n", type, res);
-    if (tmp)
-        free(tmp);
+    buffer_write(ctx->data, "ret %s %%%d ; RET3\n", type, res);
 
     return res;
 }
@@ -1183,9 +1188,54 @@ int gen_declaration(struct gen_context *ctx, struct node *node, int left, int ri
     return right;
 }
 
+int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
+{
+    struct variable *var = gen_load(ctx, src);
+    FATAL(!var, "Invalid variable for bool comparison");
+
+    if (var->ptr) {
+
+        struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+        char *stars = get_stars(var->ptr);
+
+        buffer_write(ctx->data, "%%%d = icmp ne i%d%s %%%d, null\n",
+            res->reg, res->type->bits,
+            stars,
+            var->reg);
+        return res->reg;
+    } else if (var->type->type == V_INT) {
+        struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+
+        buffer_write(ctx->data, "%%%d = icmp ne i%d %%%d, 0\n",
+            res->reg, res->type->bits,
+            var->reg);
+        return res->reg;
+    } else if (var->type->type == V_FLOAT) {
+        struct variable *res = new_inst_variable(ctx, V_FLOAT, var->type->bits, var->type->sign);
+
+        buffer_write(ctx->data, "%%%d = fcmp une double %%%d, "
+            "0.000000e+00\n",
+            res->reg,
+            var->reg);
+        return res->reg;
+    }
+
+    ERR("Invalid cmp to bool");
+
+    return -1;
+}
+
 int gen_if(struct gen_context *ctx, struct node *node)
 {
-    // If has cluase on left
+    // Conditional clause on left
+    FATAL(!node->left, "No conditional in if");
+
+    int cond_reg = gen_recursive(ctx, node->left);
+    struct variable *cond = find_variable(ctx, cond_reg);
+
+    int res = gen_cmp_bool(ctx, cond);
+    buffer_write(ctx->data, "; cmp %d\n ", res);
+
     return 0;
 }
 
