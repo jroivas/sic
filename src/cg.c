@@ -37,6 +37,7 @@ struct gen_context {
     int ids;
     int regnum;
     int labels;
+    int last_label;
     int rets;
     int regnum_global;
     int type;
@@ -308,6 +309,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->f = outfile;
     res->regnum = 1;
     res->labels = 1;
+    res->last_label = 0;
     res->rets = 0;
     res->regnum_global = GLOBAL_START;
     res->pending_type = NULL;
@@ -1262,7 +1264,6 @@ int gen_if(struct gen_context *ctx, struct node *node)
 
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
-    //buffer_write(cmpblock, "L%d: ; <label>:%d:\n", label1, label1);
     buffer_write(cmpblock, "L%d: \n", label1);
     if (node->mid) {
         int rets = ctx->rets;
@@ -1273,31 +1274,38 @@ int gen_if(struct gen_context *ctx, struct node *node)
     if (inc) {
         buffer_write(ctx->data, "; inc2\n");
         ctx->regnum++;
-        inc = 0;
     }
 
     ctx->data = ifblock;
     int label2 = gen_reserve_label(ctx);
-    //buffer_write(ifblock, "L%d: ; <label>:%d:\n", label2, label2);
     buffer_write(ifblock, "L%d: \n", label2);
     if (node->right) {
-        int rets = ctx->rets;
+        //int rets = ctx->rets;
         gen_recursive(ctx, node->right);
-        inc = rets < ctx->rets;
+        //inc = rets < ctx->rets;
+    } else {
+        ctx->last_label = label2;
     }
     /*
         buffer_write(ifblock, "%%nop = add i1 0, 0\n");
     */
 
-    int label3 = gen_reserve_label(ctx);
-    //buffer_write(ifblock, "L%d: ; <label>:%d:\n", label3, label3);
-    buffer_write(ifblock, "L%d: \n", label3);
+    int label3 = ctx->last_label;
+    if (!label3) {
+        label3 = gen_reserve_label(ctx);
+        buffer_write(ifblock, "L%d: \n", label3);
+        ctx->last_label = label3;
+    }
 
     ctx->data = tmp;
     buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         cmp_reg, label1, label2);
     buffer_append(ctx->data, buffer_read(cmpblock));
-    buffer_write(ctx->data, "br label %%L%d\n", label3);
+    if (label2 != label3) {
+        buffer_write(ctx->data, "br label %%L%d\n", label3);
+    } else if (inc) {
+        ctx->regnum--;
+    }
     buffer_append(ctx->data, buffer_read(ifblock));
 
     buffer_del(cmpblock);
@@ -1372,22 +1380,31 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     /* Then generate this node */
     switch (node->node) {
         case A_ADD:
+            ctx->last_label = 0;
             return gen_add(ctx, resleft, resright);
         case A_MINUS:
+            ctx->last_label = 0;
             return gen_sub(ctx, resleft, resright);
         case A_NEGATE:
+            ctx->last_label = 0;
             return gen_negate(ctx, resleft);
         case A_MUL:
+            ctx->last_label = 0;
             return gen_mul(ctx, resleft, resright);
         case A_DIV:
+            ctx->last_label = 0;
             return gen_div(ctx, resleft, resright);
         case A_MOD:
+            ctx->last_label = 0;
             return gen_mod(ctx, resleft, resright);
         case A_INT_LIT:
+            ctx->last_label = 0;
             return gen_store_int(ctx, node);
         case A_DEC_LIT:
+            ctx->last_label = 0;
             return gen_store_double(ctx, node);
         case A_STR_LIT:
+            ctx->last_label = 0;
             return gen_store_string(ctx, node);
         case A_LIST:
         case A_GLUE:
@@ -1402,12 +1419,16 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             //return gen_pointer(ctx, node);
             return resleft;
         case A_ADDR:
+            ctx->last_label = 0;
             return gen_addr(ctx, node, resleft);
         case A_IDENTIFIER:
+            ctx->last_label = 0;
             return get_identifier(ctx, node);
         case A_RETURN:
+            ctx->last_label = 0;
             return gen_return(ctx, node, resleft, resright);
         case A_ASSIGN:
+            ctx->last_label = 0;
             return gen_assign(ctx, node, resleft, resright);
         case A_DECLARATION:
             return gen_declaration(ctx, node, resleft, resright);
