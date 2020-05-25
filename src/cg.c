@@ -36,6 +36,8 @@ struct gen_context {
     FILE *f;
     int ids;
     int regnum;
+    int labels;
+    int rets;
     int regnum_global;
     int type;
     int safe;
@@ -66,6 +68,7 @@ static const char *varstr[] = {
 };
 
 struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
+int gen_reserve_label(struct gen_context *ctx);
 
 char *stype_str(struct type *t)
 {
@@ -304,6 +307,8 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
     res->regnum = 1;
+    res->labels = 1;
+    res->rets = 0;
     res->regnum_global = GLOBAL_START;
     res->pending_type = NULL;
     res->types = NULL;
@@ -1187,6 +1192,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     char *tmp;
     const char *type = var_str(var->type->type, var->type->bits, &tmp);
     buffer_write(ctx->data, "ret %s %%%d ; RET3\n", type, res);
+    ctx->rets++;
 
     return res;
 }
@@ -1236,7 +1242,7 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
 
 int gen_reserve_label(struct gen_context *ctx)
 {
-    return ctx->regnum++;
+    return ctx->labels++;
 }
 
 int gen_if(struct gen_context *ctx, struct node *node)
@@ -1252,31 +1258,54 @@ int gen_if(struct gen_context *ctx, struct node *node)
     struct buffer *cmpblock = buffer_init();
     struct buffer *ifblock = buffer_init();
     struct buffer *tmp = ctx->data;
+    int inc = 0;
 
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
-    buffer_write(cmpblock, "; <label>:%d:\n", label1);
-    if (node->mid)
+    //buffer_write(cmpblock, "L%d: ; <label>:%d:\n", label1, label1);
+    buffer_write(cmpblock, "L%d: \n", label1);
+    if (node->mid) {
+        int rets = ctx->rets;
         gen_recursive(ctx, node->mid);
+        inc = rets < ctx->rets;
+    }
+    /* Hack to handle "unnamed" and unreachable branch */
+    if (inc) {
+        buffer_write(ctx->data, "; inc2\n");
+        ctx->regnum++;
+        inc = 0;
+    }
 
     ctx->data = ifblock;
     int label2 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n", label2);
-    if (node->right)
+    //buffer_write(ifblock, "L%d: ; <label>:%d:\n", label2, label2);
+    buffer_write(ifblock, "L%d: \n", label2);
+    if (node->right) {
+        int rets = ctx->rets;
         gen_recursive(ctx, node->right);
+        inc = rets < ctx->rets;
+    }
+    /*
+        buffer_write(ifblock, "%%nop = add i1 0, 0\n");
+    */
 
     int label3 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "; <label>:%d:\n", label3);
+    //buffer_write(ifblock, "L%d: ; <label>:%d:\n", label3, label3);
+    buffer_write(ifblock, "L%d: \n", label3);
 
     ctx->data = tmp;
-    buffer_write(ctx->data, "br i1 %%%d, label %%%d, label %%%d\n",
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         cmp_reg, label1, label2);
     buffer_append(ctx->data, buffer_read(cmpblock));
-    buffer_write(ctx->data, "br label %%%d\n", label3);
+    buffer_write(ctx->data, "br label %%L%d\n", label3);
     buffer_append(ctx->data, buffer_read(ifblock));
 
     buffer_del(cmpblock);
     buffer_del(ifblock);
+    if (inc) {
+        buffer_write(ctx->data, "; incs\n");
+        //ctx->regnum++;
+    }
 
     return 0;
 }
