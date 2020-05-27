@@ -1,11 +1,11 @@
 int main()
 {
-    int a;
+    int a = 0;
     double b;
     double *b2;
     char *p;
     char *pp;
-    int num = 0;
+    int num = 4;
 
     if (a) {
         num = num + 1;

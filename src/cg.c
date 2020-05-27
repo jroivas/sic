@@ -1261,39 +1261,39 @@ int gen_if(struct gen_context *ctx, struct node *node)
     struct buffer *ifblock = buffer_init();
     struct buffer *tmp = ctx->data;
     int inc = 0;
+    int inc2 = 0;
 
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
-    buffer_write(cmpblock, "L%d: \n", label1);
+    buffer_write(cmpblock, "L%d:\n", label1);
     if (node->mid) {
         int rets = ctx->rets;
         gen_recursive(ctx, node->mid);
         inc = rets < ctx->rets;
     }
     /* Hack to handle "unnamed" and unreachable branch */
-    if (inc) {
-        buffer_write(ctx->data, "; inc2\n");
+    if (inc)
         ctx->regnum++;
-    }
 
     ctx->data = ifblock;
     int label2 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "L%d: \n", label2);
+    buffer_write(ifblock, "L%d:\n", label2);
     if (node->right) {
-        //int rets = ctx->rets;
+        int rets = ctx->rets;
         gen_recursive(ctx, node->right);
-        //inc = rets < ctx->rets;
+        inc2 = rets < ctx->rets;
     } else {
         ctx->last_label = label2;
     }
-    /*
-        buffer_write(ifblock, "%%nop = add i1 0, 0\n");
-    */
 
     int label3 = ctx->last_label;
     if (!label3) {
         label3 = gen_reserve_label(ctx);
-        buffer_write(ifblock, "L%d: \n", label3);
+        /* There was return on previous branch, need to inc */
+        if (inc2)
+            ctx->regnum++;
+        buffer_write(ifblock, "br label %%L%d\n", label3);
+        buffer_write(ifblock, "L%d:\n", label3);
         ctx->last_label = label3;
     }
 
@@ -1310,10 +1310,6 @@ int gen_if(struct gen_context *ctx, struct node *node)
 
     buffer_del(cmpblock);
     buffer_del(ifblock);
-    if (inc) {
-        buffer_write(ctx->data, "; incs\n");
-        //ctx->regnum++;
-    }
 
     return 0;
 }
