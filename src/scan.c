@@ -7,6 +7,7 @@ static const char *tokenstr[] = {
     "<INVALID>",
     "+", "-", "*", "/", "%",
     "=",
+    "!",
     "KEYWORD",
     "IDENTIFIER",
     "INT_LIT", "DEC_LIT",
@@ -230,6 +231,9 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '=':
             t->token = T_EQ;
+            break;
+        case '!':
+            t->token = T_EXCLAM;
             break;
         case ';':
             t->token = T_SEMI;

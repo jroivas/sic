@@ -8,6 +8,7 @@ enum tokentype {
     T_INVALID,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
     T_EQ,
+    T_EXCLAM,
     T_KEYWORD,
     T_IDENTIFIER,
     T_INT_LIT, T_DEC_LIT,

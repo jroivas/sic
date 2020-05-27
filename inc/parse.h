@@ -20,6 +20,8 @@ enum nodetype {
     A_ADDR,
     A_IF,
     A_ELSE,
+    A_EQ_OP,
+    A_NE_OP,
     A_LIST
 };
 

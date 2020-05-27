@@ -25,6 +25,8 @@ static const char *nodestr[] = {
     "ADDR",
     "IF",
     "ELSE",
+    "==",
+    "!=",
     "LIST"
 };
 
@@ -415,9 +417,75 @@ struct node *declarator(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *shift_expression(struct scanfile *f, struct token *token)
+{
+    return additive_expression(f, token);
+}
+
+struct node *relational_expression(struct scanfile *f, struct token *token)
+{
+    return shift_expression(f, token);
+}
+
+struct node *equality_expression(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    res = relational_expression(f, token);
+
+    if (token->token == T_EXCLAM) {
+        save_point(f, token);
+        scan(f, token);
+        if (token->token == T_EQ) {
+            remove_save_point(f, token);
+            scan(f, token);
+            struct node *tmp = relational_expression(f, token);
+            return make_node(A_NE_OP, res, NULL, tmp);
+        }
+        load_point(f, token);
+    } else if (token->token == T_EQ) {
+        save_point(f, token);
+        scan(f, token);
+        if (token->token == T_EQ) {
+            remove_save_point(f, token);
+            scan(f, token);
+            struct node *tmp = relational_expression(f, token);
+            return make_node(A_EQ_OP, res, NULL, tmp);
+        }
+        load_point(f, token);
+    }
+
+    return res;
+}
+
+struct node *and_expression(struct scanfile *f, struct token *token)
+{
+    return equality_expression(f, token);
+}
+
+struct node *exclusive_or_expression(struct scanfile *f, struct token *token)
+{
+    return and_expression(f, token);
+}
+
+struct node *inclusive_or_expression(struct scanfile *f, struct token *token)
+{
+    return exclusive_or_expression(f, token);
+}
+
+struct node *logical_and_expression(struct scanfile *f, struct token *token)
+{
+    return inclusive_or_expression(f, token);
+}
+
+struct node *logical_or_expression(struct scanfile *f, struct token *token)
+{
+    return logical_and_expression(f, token);
+}
+
 struct node *conditional_expression(struct scanfile *f, struct token *token)
 {
-    struct node *res = additive_expression(f, token);
+    struct node *res = logical_or_expression(f, token);
 
     // TODO ternary
     return res;
@@ -436,13 +504,10 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
     }
 
     int op = 0;
-    switch (token->token) {
-        case T_EQ:
-            op = 1;
-            break;
-        default:
-            load_point(f, token);
-    }
+    if (token->token == T_EQ)
+        op = 1;
+    else
+        load_point(f, token);
     if (op) {
         remove_save_point(f, token);
         scan(f, token);
