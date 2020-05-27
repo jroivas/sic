@@ -34,8 +34,8 @@ struct token {
     literalnum fraction;
 };
 
-// Max 10 save points
-#define SCANFILE_SAVE_MAX 10
+// Max 32 save points, adjust when compiler comes more compilicated
+#define SCANFILE_SAVE_MAX 32
 struct scanfile {
     FILE *infile;
     int line;
@@ -50,7 +50,6 @@ void close_input_file(struct scanfile *f);
 int scan(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword);
-void semi(struct scanfile *f, struct token *t);
 void save_point(struct scanfile *f, struct token *t);
 void remove_save_point(struct scanfile *f, struct token *t);
 void load_point(struct scanfile *f, struct token *t);
@@ -72,4 +71,5 @@ static inline int expect_err(struct scanfile *f,
     accept(f, t, token) ? 1 : \
         expect_err(f, t, e, __FILE__, __LINE__)
 
+#define semi(f, t) expect(f, t, T_SEMI, ";")
 #endif

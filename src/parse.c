@@ -7,6 +7,7 @@
 struct node *additive_expression(struct scanfile *f, struct token *token);
 struct node *compound_statement(struct scanfile *f, struct token *token);
 struct node *statement(struct scanfile *f, struct token *token);
+struct node *unary_expression(struct scanfile *f, struct token *token);
 
 
 static const char *nodestr[] = {
@@ -424,8 +425,35 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
 
 struct node *assignment_expression(struct scanfile *f, struct token *token)
 {
+    struct node *res;
+
     // FIXME unary_expression assignment_operator
-    return conditional_expression(f, token);
+    save_point(f, token);
+    struct node *unary = unary_expression(f, token);
+    if (!unary) {
+        load_point(f, token);
+        return NULL;
+    }
+
+    int op = 0;
+    switch (token->token) {
+        case T_EQ:
+            op = 1;
+            break;
+        default:
+            load_point(f, token);
+    }
+    if (op) {
+        remove_save_point(f, token);
+        scan(f, token);
+        struct node *expr = assignment_expression(f, token);
+        res = make_node(A_ASSIGN, unary, NULL, expr);
+        return res;
+    }
+
+    res = conditional_expression(f, token);
+
+    return res;
 }
 
 struct node *initializer(struct scanfile *f, struct token *token)
@@ -438,14 +466,16 @@ struct node *initializer(struct scanfile *f, struct token *token)
 
 struct node *init_declarator(struct scanfile *f, struct token *token)
 {
+    save_point(f, token);
     struct node *res = declarator(f, token);
     if (!res)
         return NULL;
-    if (token->token == T_EQ) {
-        scan(f, token);
+    if (accept(f, token, T_EQ)) {
         struct node *tmp = initializer(f, token);
-        if (!tmp)
+        if (!tmp) {
+            ERR("Expected initializer afrer '='");
             return NULL;
+        }
         res = make_node(A_ASSIGN, res, NULL, tmp);
     }
 
@@ -468,9 +498,8 @@ struct node *init_declarator_list(struct scanfile *f, struct token *token)
             prev->right = tmp;
         }
         prev = tmp;
-        if (token->token != T_COMMA)
+        if (!accept(f, token, T_COMMA))
             break;
-        scan(f, token);
     }
     return res;
 }
@@ -533,7 +562,6 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         left->addr = addr;
         return left;
     }
-
     left = postfix_expression(f, token);
     return left;
 }
@@ -573,6 +601,8 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
     enum tokentype type;
 
     left = multiplicative_expression(f, token);
+    if (!left)
+        return NULL;
     if (token->token == T_EOF)
         return left;
 
@@ -594,9 +624,8 @@ struct node *expression(struct scanfile *f, struct token *token)
     if (token->token == T_EOF)
         return NULL;
     struct node *res = NULL;
-    res = additive_expression(f, token);
+    res = assignment_expression(f, token);
     return res;
-    //assignment_expression(f);
 }
 
 struct node *expression_statement(struct scanfile *f, struct token *token)

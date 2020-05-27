@@ -108,11 +108,6 @@ int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keywor
     return 0;
 }
 
-void semi(struct scanfile *f, struct token *t)
-{
-    expect(f, t, T_SEMI, ";");
-}
-
 static void putback(struct scanfile *f, int c)
 {
     f->putback = c;
@@ -284,6 +279,7 @@ int scan(struct scanfile *f, struct token *t)
             if (!ok)
                 ERR("Invalid token: %c", c);
     }
+    //printf("*** Scan res: %s\n", token_dump(t));
     return 1;
 }
 
@@ -293,10 +289,10 @@ void save_point(struct scanfile *f, struct token *t)
             "Maximum save points reached");
     memcpy(&f->save_token[f->savecnt], t, sizeof(*t));
     long pos = ftell(f->infile);
-#if 0
-    if (pos > 0)
+    // If we have putback need to decrement pos.
+    if (f->putback && pos)
         pos--;
-#endif
+
     f->save_point[f->savecnt++] = pos;
 }
 
