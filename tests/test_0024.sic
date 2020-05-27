@@ -1,0 +1,17 @@
+int main()
+{
+    int a;
+    double b;
+    double *b2;
+    char *p;
+    char *pp;
+    int num = 0;
+
+    if (a) {
+        num = num + 1;
+    } else {
+        num = num + 100;
+    }
+
+    return num;
+}
