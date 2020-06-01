@@ -27,6 +27,7 @@ static const char *nodestr[] = {
     "ELSE",
     "==",
     "!=",
+    "NULL",
     "LIST"
 };
 
@@ -188,6 +189,11 @@ struct node *make_leaf(enum nodetype node, struct token *t)
         n->value_string = t->value_string;
         n->bits = 0;
         n->type = V_STR;
+    } else if (t->token == T_NULL) {
+        n->value = 0;
+        n->type = V_NULL;
+        // Width be determined later on
+        n->bits = 0;
     } else
         ERR("Invalid leaf: %s", node_str(n));
     return n;
@@ -278,6 +284,9 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_IDENTIFIER:
             res = make_node(A_IDENTIFIER, NULL, NULL, NULL);
             res->value_string = token->value_string;
+            break;
+        case T_NULL:
+            res = make_leaf(A_NULL, token);
             break;
         case T_KEYWORD:
             return NULL;
@@ -503,18 +512,14 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
         return NULL;
     }
 
-    int op = 0;
-    if (token->token == T_EQ)
-        op = 1;
-    else
-        load_point(f, token);
-    if (op) {
+    if (token->token == T_EQ) {
         remove_save_point(f, token);
         scan(f, token);
         struct node *expr = assignment_expression(f, token);
         res = make_node(A_ASSIGN, unary, NULL, expr);
         return res;
-    }
+    } else
+        load_point(f, token);
 
     res = conditional_expression(f, token);
 

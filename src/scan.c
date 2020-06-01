@@ -16,6 +16,7 @@ static const char *tokenstr[] = {
     "{", "}",
     ",", "SEMI",
     "&",
+    "NULL",
     "EOF"
 };
 
@@ -274,6 +275,8 @@ int scan(struct scanfile *f, struct token *t)
                 t->value_string = scan_identifier(f, c);
                 if (keyword(t))
                     t->token = T_KEYWORD;
+                else if (strcmp(t->value_string, "NULL") == 0)
+                    t->token = T_NULL;
                 else
                     t->token = T_IDENTIFIER;
                 ok = 1;

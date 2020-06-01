@@ -22,6 +22,7 @@ enum nodetype {
     A_ELSE,
     A_EQ_OP,
     A_NE_OP,
+    A_NULL,
     A_LIST
 };
 

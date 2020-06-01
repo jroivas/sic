@@ -45,6 +45,8 @@ struct gen_context {
     int global;
     int pending_ptr;
     int strs;
+    int null_var;
+    int is_decl;
     const char *name;
     struct node *node;
 
@@ -65,7 +67,7 @@ struct gen_context {
 };
 
 static const char *varstr[] = {
-    "void", "i32", "double", "invalid"
+    "void", "null", "i32", "double", "invalid"
 };
 
 struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
@@ -286,6 +288,8 @@ void register_builtin_types(struct gen_context *ctx)
 {
     register_type(ctx, init_type("void", V_VOID, 0, 0));
 
+    register_type(ctx, init_type("bool", V_INT, 1, 0));
+
     register_type(ctx, init_type("char", V_INT, 8, 1));
     register_type(ctx, init_type("unsigned char", V_INT, 8, 0));
 
@@ -332,6 +336,19 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 
     if (!parent)
         register_builtin_types(res);
+
+#if 1
+    if (!parent) {
+        struct type *null_type = init_type("nulltype", V_NULL, 0, 0);
+        register_type(res, null_type);
+        struct variable *null_var = init_variable("NULL", null_type);
+
+        register_variable(res, null_var);
+        res->null_var = null_var->reg;
+    } else {
+        res->null_var = parent->null_var;
+    }
+#endif
     return res;
 }
 
@@ -469,7 +486,18 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
         }
         else if (v->type->type == target->type)
             return v;
+        else if (v->type->type == V_NULL && target->type == V_INT) {
+#if 0
+            val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
+            //buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
+            buffer_write(ctx->data, "store i%d 0, i%d* %%%d; CAST NULL\n",
+                    val->type->bits, val->type->bits, val->reg);
+            val->direct = 1;
+#endif
+            return NULL;
+        }
     }
+
     FATAL(!val, "Cast failed: %d -> %d, %d", v->type->type, target->type, force);
 
     return val;
@@ -688,6 +716,8 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
         return gen_load_float(ctx, v);
     else if (v->type->type == V_STR)
         return gen_load_str(ctx, v);
+    else if (v->type->type == V_NULL)
+        return v;
 
     ERR("Invalid type: %d", v->type->type);
 }
@@ -838,6 +868,78 @@ int gen_mod(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
+int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    FATAL(!v1, "No cmp1 var");
+    FATAL(!v2, "No cmp2 var");
+    v1 = gen_load(ctx, v1);
+    v2 = gen_load(ctx, v2);
+/*
+    struct variable *res = find_variable(ctx, b);
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+
+    res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+*/
+    //struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+
+    FATAL(!v1, "No cmp1 var");
+    FATAL(!v2, "No cmp2 var");
+
+    if (v1->type->type == V_INT && v2->type->type == V_INT) {
+        if (v1->type->bits == v2->type->bits);
+        else if (v1->type->bits > v2->type->bits)
+            v2 = gen_bits_cast(ctx, v2, v1->bits, 1);
+        else
+            v1 = gen_bits_cast(ctx, v1, v2->bits, 1);
+
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        char *stars1 = get_stars(v1->ptr);
+        const char *op = node->node == A_EQ_OP ? "eq" : "ne";
+        buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, "
+            "%%%d\n",
+            res->reg, op,
+            v1->type->bits, stars1 ? stars1 : "", v1->reg,
+            v2->reg);
+
+        return res->reg;
+    }
+    else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        char *stars1 = get_stars(v1->ptr);
+        const char *op = node->node == A_EQ_OP ? "oeq" : "une";
+        buffer_write(ctx->data, "%%%d = fcmp %s double %%%d%s, "
+            "%%%d\n",
+            res->reg, op,
+            v1->reg, stars1 ? stars1 : "",
+            v2->reg);
+
+        return res->reg;
+    }
+    else if ((v1->type->type == V_INT && v2->type->type == V_NULL ) || (v1->type->type == V_NULL && v2->type->type == V_INT)) {
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        if (v1->type->type == V_NULL)
+            v1 = v2;
+
+        FATAL(!v1->ptr, "Comparing non-pointer to NULL: %d, %d", v1->ptr, v2->ptr);
+
+        char *stars1 = get_stars(v1->ptr);
+        const char *op = node->node == A_EQ_OP ? "eq" : "ne";
+        buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, null\n",
+            res->reg, op,
+            v1->type->bits, stars1 ? stars1 : "", v1->reg);
+        return res->reg;
+    }
+
+    ERR("Invalid EQ: %s != %s", type_str(v1->type->type), type_str(v2->type->type));
+/*
+    printf("EQ: %d %s %d\n",
+        a, node->node == A_EQ_OP ? "==" : "!=", b);
+*/
+    return 0;
+}
+
 int gen_negate(struct gen_context *ctx, int a)
 {
     struct variable *v = find_variable(ctx, a);
@@ -873,7 +975,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 int gen_pointer(struct gen_context *ctx, struct node *node)
 {
     if (ctx->pending_ptr)
-        ERR("Unexpected pointer while handling pointer");
+        ERR("Unexpected pointer while handling pointer: %d", ctx->pending_ptr);
     ctx->pending_ptr = node->ptr;
     return 0;
 }
@@ -917,8 +1019,10 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 ERR("Invalid type for variable: %s", type_str(t->type));
                 break;
         }
-    } else
+    } else {
+            FATAL(ctx->is_decl >= 100 && ctx->is_decl < 102, "Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
             res = var->reg;
+    }
     return res;
 }
 
@@ -1024,7 +1128,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
     if (target && target->type != V_VOID) {
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
-        if (var) {
+        if (var && var->type->type != V_NULL) {
             if (!var->direct) {
                 var = gen_load(ctx, var);
                 FATAL(!var, "Invalid indirect return variable: %d", res);
@@ -1032,6 +1136,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
             }
             if (target->type != var->type->type || target->bits != var->type->bits) {
                 var = gen_cast(ctx, var, target, 1);
+                FATAL(!var, "Invalid cast");
                 var = gen_bits_cast(ctx, var, node->bits, 1);
                 res = var->reg;
             }
@@ -1181,6 +1286,8 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     else
         var = find_variable(ctx, left);
 
+    res = var->reg;
+
     if (!var->direct) {
         var = gen_load(ctx, var);
         FATAL(!var, "Invalid indirect return variable: %d", res);
@@ -1188,6 +1295,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     }
     if (target->type != var->type->type || target->bits != var->type->bits) {
         var = gen_cast(ctx, var, target, 1);
+        FATAL(!var, "Invalid cast");
         var = gen_bits_cast(ctx, var, target->bits, 1);
         res = var->reg;
     }
@@ -1235,6 +1343,8 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
             res->reg,
             var->reg);
         return res->reg;
+    } else if (var->type->type == V_NULL) {
+        printf("NULL CMP\n");
     }
 
     ERR("Invalid cmp to bool");
@@ -1342,16 +1452,28 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         case A_STR_LIT:
             gen_prepare_store_str(ctx, node);
             break;
+        case A_DECLARATION:
+            ctx->is_decl = 100;
+            break;
+        case A_ASSIGN:
+            /* If It's declaration, and assign increase is_decl since we're declaring a variable. */
+            if (ctx->is_decl)
+                ctx->is_decl++;
         default:
             break;
     }
 
     if (node->left)
         gen_recursive_allocs(ctx, node->left);
+    /* After handling left side of assign we need to stop checking for variables since right side can't be declaration */
+    if (node->node == A_ASSIGN)
+            ctx->is_decl++;
     if (node->mid)
         gen_recursive_allocs(ctx, node->mid);
     if (node->right)
         gen_recursive_allocs(ctx, node->right);
+    if (node->node == A_DECLARATION)
+        ctx->is_decl = 0;
     return 0;
 }
 
@@ -1393,6 +1515,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_MOD:
             ctx->last_label = 0;
             return gen_mod(ctx, resleft, resright);
+        case A_EQ_OP:
+        case A_NE_OP:
+            ctx->last_label = 0;
+            return gen_eq(ctx, node, resleft, resright);
         case A_INT_LIT:
             ctx->last_label = 0;
             return gen_store_int(ctx, node);
@@ -1428,6 +1554,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_assign(ctx, node, resleft, resright);
         case A_DECLARATION:
             return gen_declaration(ctx, node, resleft, resright);
+        case A_NULL:
+            return ctx->null_var;
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }
@@ -1464,7 +1592,8 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
             if (node->bits > 0)
                 ret->type->bits = node->bits;
             ret = gen_cast(main_ctx, ret, target, 1);
-            ret = gen_bits_cast(main_ctx, ret, target->bits, 1);
+            if (ret)
+                ret = gen_bits_cast(main_ctx, ret, target->bits, 1);
         }
         buffer_write(main_ctx->data, "ret i32 %%%d \n", ret->reg);
         if (tmp)
@@ -1548,7 +1677,7 @@ int codegen(FILE *outfile, struct node *node)
     res = gen_recursive_allocs(ctx, node);
     res = gen_recursive(ctx, node);
     struct type *target = resolve_return_type(ctx, node, res);
-    buffer_write(ctx->post, "; F2 %s\n", stype_str(target));
+    buffer_write(ctx->post, "; F2 %s, %d\n", stype_str(target), target->type);
     gen_post(ctx, node, res, target);
 
     output_res(ctx, &got_main);

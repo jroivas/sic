@@ -17,6 +17,7 @@ enum tokentype {
     T_CURLY_OPEN, T_CURLY_CLOSE,
     T_COMMA, T_SEMI,
     T_AMP,
+    T_NULL,
     T_EOF
 };
 

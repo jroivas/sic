@@ -2,7 +2,7 @@
 #include "parse.h"
 
 static const char *typestr[] = {
-    "void", "int", "float", "fixed", "str"
+    "void", "NULL", "int", "float", "fixed", "str"
 };
 
 const char *type_str(enum var_type t)
@@ -82,6 +82,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_EQ_OP:
         case A_NE_OP:
         case A_DECLARATION:
+        case A_NULL:
             printf("%s", node_str(node));
             break;
         case A_INT_LIT:
