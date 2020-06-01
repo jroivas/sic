@@ -1,0 +1,15 @@
+int main()
+{
+    int a;
+    double b;
+    char *c;
+
+    if (a != 0)
+        return 1;
+    if (b != 0.0)
+        return 2;
+    if (c != NULL)
+        return 3;
+
+    return 0;
+}
