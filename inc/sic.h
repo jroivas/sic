@@ -21,7 +21,6 @@ enum var_type {
     fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
-    stack_trace();\
     exit(1); \
 }
 

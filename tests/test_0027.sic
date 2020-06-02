@@ -1,0 +1,10 @@
+int globalVar;
+void test()
+{
+    int a;
+}
+void main()
+{
+    test();
+    globalVar = 10;
+}
