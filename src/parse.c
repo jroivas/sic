@@ -136,7 +136,7 @@ enum var_type resolve_var_type(struct node *n)
 
     n->type = v1;
     n->bits = b1;
-    //printf("SIGN: v1 %d, bits %d,  %d, %d -> %d @%s\n", v1, b1, s1, s2, n->sign, node_str(n));
+    //printf("SIGN: type %d, bits %d,  %d, %d -> %d @%s %s\n", v1, b1, s1, s2, n->sign, node_str(n), n->value_string);
     n->sign = s1;
     n->ptr = ptr1;
     n->addr = addr1;

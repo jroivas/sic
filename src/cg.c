@@ -49,6 +49,7 @@ struct gen_context {
     int is_decl;
     const char *name;
     struct node *node;
+    struct node *main_type;
 
     struct type *pending_type;
     struct type *types;
@@ -511,6 +512,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int co
             "@G", reg, bits, align(bits));
     } else {
         char *tmp = get_stars(ptr);
+        FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca i%d%s, align %d\n",
             reg, bits, ptr ? tmp : "", align(bits));
         buffer_write(code_alloc ? ctx->data : ctx->init,
@@ -545,6 +547,13 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
+    /*
+     * It might be we haven't been able to determine bits so far.
+     * However we need to have it now since alloc will need bits
+     * or it will fail otherwise.
+     */
+    if (val->type->bits == 0)
+        val->type->bits = 32;
     gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0);
     n->reg = val->reg;
     return val->reg;
@@ -717,6 +726,8 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
     else if (v->type->type == V_STR)
         return gen_load_str(ctx, v);
     else if (v->type->type == V_NULL)
+        return v;
+    else if (v->type->type == V_VOID)
         return v;
 
     ERR("Invalid type: %d", v->type->type);
@@ -1071,6 +1082,8 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
 int get_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *var = find_variable_by_name(ctx, node->value_string);
+    if (!var)
+        return 0;
     FATAL(!var, "Variable not found in get_identitifier: %s", node->value_string);
     return var->reg;
 }
@@ -1108,6 +1121,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
 		"i8** %%%d, align 8\n",
 		src_val->bits, src_val->bits, src->reg, dst->reg);
+    } else if (src->type->type == V_VOID) {
+        // TODO Void pointer
+        return 0;
     } else
         ERR("Invalid assign");
     return dst->reg;
@@ -1116,7 +1132,11 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 void gen_pre(struct gen_context *ctx, struct node *node)
 {
     char *tmp = NULL;
-    const char *type = var_str(node->type, node->bits, &tmp);
+    const char *type = NULL;
+    if (ctx->main_type)
+        type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
+    else
+        type = var_str(node->type, node->bits, &tmp);
     buffer_write(ctx->pre, "define dso_local %s @%s() #0 {\n",
             type, ctx->name);
     if (tmp)
@@ -1148,6 +1168,8 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         }
         if (tmp)
             free(tmp);
+    } else {
+            buffer_write(ctx->post, "ret void ; RET4\n");
     }
 #if 0
     if (node && node->type != V_VOID) {
@@ -1201,6 +1223,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     FATAL(!name, "Function name missing");
     FATAL(name->node != A_IDENTIFIER, "Faulty function name");
     func_ctx->name = name->value_string;
+    struct node *functype = node->left;
 
     // Need tod find from parent context
 #if 0
@@ -1217,7 +1240,10 @@ int gen_function(struct gen_context *ctx, struct node *node)
     struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
         func_node = ctx->node;
-        if (func_node && func_node->type != V_VOID) {
+        buffer_write(func_ctx->init, "; PLAA\n");
+        if (func_node && functype->type != V_VOID) {
+            buffer_write(func_ctx->init, "; PLAA1, %d\n",
+                func_node->type);
             /*
             func_node = calloc(1, sizeof(struct node));
             func_node->type = V_INT;
@@ -1247,11 +1273,13 @@ int gen_function(struct gen_context *ctx, struct node *node)
             //FIXME i32
             buffer_write(func_ctx->init, "%%%d = call i32 @%s()\n", ret->reg, ctx->name);
         } else {
+            buffer_write(func_ctx->init, "; PLAA2\n");
 #if 0
         struct variable *global_res = new_inst_variable(func_ctx, V_VOID, 0, 0);
         buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
 #endif
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
+            buffer_write(func_ctx->init, "; PLAA2.2\n");
             /*
             func_node->type = V_VOID;
             func_node->bits = 0;
@@ -1263,8 +1291,14 @@ int gen_function(struct gen_context *ctx, struct node *node)
         }
     }
 
-    int res = gen_recursive_allocs(func_ctx, node->right);
-    res = gen_recursive(func_ctx, node->right);
+    struct node *body = NULL;
+    FATAL(node->right->node != A_GLUE, "Invalid function");
+
+    body = node->right->right;
+    FATAL(!body, "Invalid function body");
+
+    int res = gen_recursive_allocs(func_ctx, body);
+    res = gen_recursive(func_ctx, body);
 
     gen_post(func_ctx, func_node, res, target);
 
@@ -1619,7 +1653,19 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
 {
     struct type *res = calloc(1, sizeof(struct type));
     int got = 0;
-    if (node && node->type != V_VOID) {
+    if (ctx->main_type) {
+        if (ctx->main_type->type == V_VOID) {
+            res->type = V_VOID;
+            buffer_write(ctx->post, "; FV %s\n", stype_str(res));
+            got = 1;
+        } else {
+            res->type = ctx->main_type->type;
+            res->bits = ctx->main_type->bits;
+            res->sign = ctx->main_type->sign;
+            buffer_write(ctx->post, "; FM %s\n", stype_str(res));
+            got = 1;
+        }
+    } else if (node && node->type != V_VOID) {
 #if 0
         struct variable *var = find_variable(ctx, reg);
         if (var) {
@@ -1663,6 +1709,23 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
     return res;
 }
 
+struct node *find_main_type(struct node *node)
+{
+    if (node->node == A_FUNCTION) {
+        if (node->right && node->right->left) {
+            if (strcmp(node->right->left->value_string, "main") == 0) {
+                return node->left;
+            }
+        }
+    }
+    struct node *res = NULL;
+    if (node->right)
+        res = find_main_type(node->right);
+    if (!res && node->left)
+        res = find_main_type(node->left);
+    return res;
+}
+
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node!");
@@ -1672,6 +1735,7 @@ int codegen(FILE *outfile, struct node *node)
 
     ctx->global = 1;
     ctx->node = node;
+    ctx->main_type = find_main_type(node);
 
     gen_pre(ctx, node);
     res = gen_recursive_allocs(ctx, node);

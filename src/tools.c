@@ -1,5 +1,6 @@
 #include "sic.h"
 #include "parse.h"
+#include <execinfo.h>
 
 static const char *typestr[] = {
     "void", "NULL", "int", "float", "fixed", "str"
@@ -136,4 +137,20 @@ void __node_walk(struct node *node, int depth, char arm)
 void node_walk(struct node *node)
 {
     __node_walk(node, 0, '>');
+}
+
+void stack_trace(void)
+{
+    void *array[STACK_TRACE_SIZE];
+    char **strings;
+    size_t size;
+
+    size = backtrace(array, STACK_TRACE_SIZE);
+    strings = backtrace_symbols(array, size);
+
+    printf("Call trace:\n");
+    for (size_t i = 0; i < size; i++)
+        printf("  %s\n", strings[i]);
+
+    free(strings);
 }
