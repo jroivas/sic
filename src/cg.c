@@ -1240,10 +1240,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
         func_node = ctx->node;
-        buffer_write(func_ctx->init, "; PLAA\n");
         if (func_node && functype->type != V_VOID) {
-            buffer_write(func_ctx->init, "; PLAA1, %d\n",
-                func_node->type);
             /*
             func_node = calloc(1, sizeof(struct node));
             func_node->type = V_INT;
@@ -1273,13 +1270,11 @@ int gen_function(struct gen_context *ctx, struct node *node)
             //FIXME i32
             buffer_write(func_ctx->init, "%%%d = call i32 @%s()\n", ret->reg, ctx->name);
         } else {
-            buffer_write(func_ctx->init, "; PLAA2\n");
 #if 0
         struct variable *global_res = new_inst_variable(func_ctx, V_VOID, 0, 0);
         buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
 #endif
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
-            buffer_write(func_ctx->init, "; PLAA2.2\n");
             /*
             func_node->type = V_VOID;
             func_node->bits = 0;

@@ -1,10 +1,12 @@
 int globalVar;
-void test()
+
+int test()
 {
-    int a;
+    int a = 5;
+    return a + 3;
 }
-void main()
+
+int main()
 {
-    test();
-    globalVar = 10;
+    return test();
 }

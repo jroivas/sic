@@ -83,6 +83,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_EQ_OP:
         case A_NE_OP:
         case A_DECLARATION:
+        case A_FUNC_CALL:
         case A_NULL:
             printf("%s", node_str(node));
             break;

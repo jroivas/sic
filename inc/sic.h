@@ -16,13 +16,16 @@ enum var_type {
     V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR
 };
 
-
-#define ERR(...) { \
+#define ERR_FULL(trace, ...) { \
     fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
+    if (trace) stack_trace();\
     exit(1); \
 }
+
+#define ERR(...) ERR_FULL(0, __VA_ARGS__)
+#define ERR_TRACE(...) ERR_FULL(1, __VA_ARGS__)
 
 #define FATAL(check, ...) if (check) { \
     fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__);\

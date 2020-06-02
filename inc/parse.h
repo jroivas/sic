@@ -23,6 +23,7 @@ enum nodetype {
     A_EQ_OP,
     A_NE_OP,
     A_NULL,
+    A_FUNC_CALL,
     A_LIST
 };
 

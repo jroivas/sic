@@ -28,6 +28,7 @@ static const char *nodestr[] = {
     "==",
     "!=",
     "NULL",
+    "FUNC_CALL",
     "LIST"
 };
 
@@ -293,7 +294,8 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_CURLY_CLOSE:
             return NULL;
         default:
-            ERR("Unexpected token: %s", token_str(token));
+            return res;
+            //ERR_TRACE("Unexpected token: %s", token_str(token));
     }
     scan(f, token);
 
@@ -600,10 +602,44 @@ struct node *declaration(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *argument_expression_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    struct node *prev = NULL;
+
+    while (1) {
+        struct node *tmp = assignment_expression(f, token);
+        if (!tmp)
+            break;
+        tmp = make_node(A_LIST, tmp, NULL, NULL);
+        if (res == NULL)
+            res = tmp;
+        else {
+            FATAL(prev->right, "Compiler error!")
+            prev->right = tmp;
+        }
+        prev = tmp;
+        if (!accept(f, token, T_COMMA))
+            break;
+    }
+    return res;
+}
+
 struct node *postfix_expression(struct scanfile *f, struct token *token)
 {
-    // TODO
-    return primary_expression(f, token);
+    struct node *res = primary_expression(f, token);
+
+    if (!res)
+        return NULL;
+
+    if (accept(f, token, T_ROUND_OPEN)) {
+        struct node *args = argument_expression_list(f, token);
+
+        res = make_node(A_FUNC_CALL, res, NULL, args);
+        expect(f, token, T_ROUND_CLOSE, ")");
+    }
+
+    return res;
 }
 
 struct node *cast_expression(struct scanfile *f, struct token *token);
