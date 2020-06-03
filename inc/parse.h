@@ -24,6 +24,10 @@ enum nodetype {
     A_NE_OP,
     A_NULL,
     A_FUNC_CALL,
+    A_POSTINC,
+    A_PREINC,
+    A_POSTDEC,
+    A_PREDEC,
     A_LIST
 };
 

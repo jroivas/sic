@@ -641,6 +641,12 @@ int gen_store_string(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
+#if 0
+int gen_store_var(struct gen_context *ctx, struct variable *dst, struct varible *src)
+{
+}
+#endif
+
 struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
@@ -1484,6 +1490,44 @@ int gen_if(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+int gen_post_op(struct gen_context *ctx, struct node *node, int a)
+{
+    struct variable *orig = find_variable(ctx, a);
+    struct variable *var = gen_load(ctx, orig);
+
+    FATAL(!var, "No postinc/postdec variable");
+
+    struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
+
+    if (node->node == A_POSTINC) {
+        if (res->type->type == V_INT) {
+            buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
+                res->reg, var->type->bits, var->reg);
+            buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
+                res->type->bits, res->reg,  var->type->bits, REGP(var), orig->reg, align(var->type->bits));
+        } else if (res->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "%%%d = fadd double %%%d, 1.000000e+00\n",
+                res->reg, var->reg);
+            buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
+                res->reg, REGP(var), orig->reg, align(var->type->bits));
+        } else ERR_TRACE("Invalid type: %d", node->type);
+    } else {
+        if (res->type->type == V_INT) {
+            buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
+                res->reg, var->type->bits, var->reg);
+            buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
+                res->type->bits, res->reg,  var->type->bits, REGP(var), orig->reg, align(var->type->bits));
+        } else if (res->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "%%%d = fsub double %%%d, 1.0e+00\n",
+                res->reg, var->reg);
+            buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
+                res->reg, REGP(var), orig->reg, align(var->type->bits));
+        } else ERR_TRACE("Invalid type");
+    }
+
+    return res->reg;
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -1618,6 +1662,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return ctx->null_var;
         case A_FUNC_CALL:
             return gen_func_call(ctx, node, resleft, resright);
+        case A_POSTINC:
+        case A_POSTDEC:
+            return gen_post_op(ctx, node, resleft);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }

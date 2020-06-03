@@ -29,6 +29,10 @@ static const char *nodestr[] = {
     "!=",
     "NULL",
     "FUNC_CALL",
+    "POSTINC",
+    "POSTDEC",
+    "PREINC",
+    "PREDEC",
     "LIST"
 };
 
@@ -637,6 +641,26 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
 
         res = make_node(A_FUNC_CALL, res, NULL, args);
         expect(f, token, T_ROUND_CLOSE, ")");
+    } else if (token->token == T_PLUS) {
+        save_point(f, token);
+        scan(f, token);
+        if (!accept(f, token, T_PLUS)) {
+            load_point(f, token);
+            return res;
+        }
+        remove_save_point(f, token);
+        res = make_node(A_POSTINC, res, NULL, NULL);
+        return res;
+    } else if (token->token == T_MINUS) {
+        save_point(f, token);
+        scan(f, token);
+        if (!accept(f, token, T_MINUS)) {
+            load_point(f, token);
+            return res;
+        }
+        remove_save_point(f, token);
+        res = make_node(A_POSTDEC, res, NULL, NULL);
+        return res;
     }
 
     return res;
