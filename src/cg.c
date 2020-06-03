@@ -188,6 +188,7 @@ struct variable *find_variable(struct gen_context *ctx, int reg)
 {
     if (reg > 0 && reg >= GLOBAL_START)
         return find_global_variable(ctx, reg);
+
     struct variable *val = ctx->variables;
     while (val != NULL) {
         if (val->reg == reg)
@@ -972,6 +973,30 @@ int gen_negate(struct gen_context *ctx, int a)
     return res->reg;
 }
 
+int gen_func_call(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    struct variable *func = find_variable(ctx, a);
+    struct variable *params = b != 0 ? find_variable(ctx, b) : NULL;
+    struct variable *res;
+    const char *paramstr;
+
+    FATAL(!func, "Invalid function to call");
+    //res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
+    res = new_inst_variable(ctx, V_INT, 32, 1);
+    if (params)
+        paramstr = params->name;
+    else
+        paramstr = NULL;
+
+    buffer_write(ctx->data, "%%%d = call i%d @%s(%s); FUNCCALL\n",
+        res->reg,
+        32,
+        func->name,
+        paramstr ? paramstr : "");
+
+    return res->reg;
+}
+
 int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = find_type_by(ctx, node->type, node->bits, node->sign);
@@ -1143,8 +1168,11 @@ void gen_pre(struct gen_context *ctx, struct node *node)
         free(tmp);
 }
 
-void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *target)
+void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *target, struct node *functype)
 {
+    if (!target && functype)
+        target = find_type_by(ctx, functype->type, functype->bits, functype->sign);
+
     if (target && target->type != V_VOID) {
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
@@ -1157,19 +1185,23 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
             if (target->type != var->type->type || target->bits != var->type->bits) {
                 var = gen_cast(ctx, var, target, 1);
                 FATAL(!var, "Invalid cast");
-                var = gen_bits_cast(ctx, var, node->bits, 1);
+                var = gen_bits_cast(ctx, var, node ? node->bits : target->bits, 1);
                 res = var->reg;
             }
             const char *type = var_str(var->type->type, var->type->bits, &tmp);
             buffer_write(ctx->post, "ret %s %%%d ; RET1\n", type, res);
+            ctx->rets++;
         } else {
             const char *type = var_str(node->type, node->bits, &tmp);
             buffer_write(ctx->post, "ret %s 0 ; RET2\n", type, res);
+            ctx->rets++;
         }
         if (tmp)
             free(tmp);
     } else {
-            buffer_write(ctx->post, "ret void ; RET4\n");
+        stack_trace();
+        buffer_write(ctx->post, "ret void ; RET4\n");
+        ctx->rets++;
     }
 #if 0
     if (node && node->type != V_VOID) {
@@ -1235,7 +1267,6 @@ int gen_function(struct gen_context *ctx, struct node *node)
 #endif
 
     gen_pre(func_ctx, node->left);
-
     struct node *func_node = NULL;
     struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
@@ -1295,7 +1326,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     int res = gen_recursive_allocs(func_ctx, body);
     res = gen_recursive(func_ctx, body);
 
-    gen_post(func_ctx, func_node, res, target);
+    gen_post(func_ctx, func_node, res, NULL, functype);
 
     func_ctx->next = ctx->child;
     ctx->child = func_ctx;
@@ -1585,6 +1616,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_declaration(ctx, node, resleft, resright);
         case A_NULL:
             return ctx->null_var;
+        case A_FUNC_CALL:
+            return gen_func_call(ctx, node, resleft, resright);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }
@@ -1594,8 +1627,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
 struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int res)
 {
     struct gen_context *main_ctx = init_ctx(ctx->f, ctx);
-    main_ctx->name = "main";
     struct node main_node;
+
+    main_ctx->name = "main";
     main_node.type = V_INT;
     main_node.bits = 32;
 
@@ -1624,7 +1658,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
             if (ret)
                 ret = gen_bits_cast(main_ctx, ret, target->bits, 1);
         }
-        buffer_write(main_ctx->data, "ret i32 %%%d \n", ret->reg);
+        buffer_write(main_ctx->data, "ret i32 %%%d ; faked\n", ret->reg);
         if (tmp)
             free(tmp);
     } else {
@@ -1637,7 +1671,16 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
     target->bits = 32;
     target->sign = 1;
 #endif
-    gen_post(main_ctx, NULL, res, NULL);
+#if 0
+    if (!target)
+        target = find_type_by(main_ctx, V_INT, 32, 1);
+    FATAL(!target, "No int32");
+    int rets = main_ctx->rets;
+    gen_post(main_ctx, NULL, res, target, NULL);
+    if (rets != main_ctx->rets)
+        main_ctx->regnum++;
+#endif
+    buffer_write(main_ctx->post, "}\n");
 
     main_ctx->next = ctx->child;
     ctx->child = main_ctx;
@@ -1737,7 +1780,7 @@ int codegen(FILE *outfile, struct node *node)
     res = gen_recursive(ctx, node);
     struct type *target = resolve_return_type(ctx, node, res);
     buffer_write(ctx->post, "; F2 %s, %d\n", stype_str(target), target->type);
-    gen_post(ctx, node, res, target);
+    gen_post(ctx, node, res, target, ctx->main_type);
 
     output_res(ctx, &got_main);
     if (!got_main) {
