@@ -762,7 +762,9 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
 
     FATAL(v1->global, "Can't cast from global");
     struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
-    if (sign2) {
+    /* We can't sign extend 1 bit */
+    if (sign2 && bits1 > 1) {
+        stack_trace();
         buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     } else {
@@ -1174,15 +1176,6 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 
 int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
-#if 0
-    struct variable *src_val = find_variable(ctx, right);
-    FATAL(!src_val, "Can't assign from zero: %d to %d", right, left);
-    //struct variable *src = gen_load(ctx, src_val);
-    struct variable *dst = find_variable(ctx, left);
-
-    //FATAL(!src, "No source in assign")
-    FATAL(!dst, "No dest in assign: %d", left)
-#endif
     struct variable *dst = find_variable(ctx, left);
     struct variable *src_val = NULL;
 
@@ -1198,36 +1191,6 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
 
     int res = gen_store_var(ctx, dst, src_val);
     return res;
-#if 0
-    if (src->ptr || src->addr) {
-        char *tmp = get_stars(src->ptr);
-
-        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d\n",
-                src->type->bits, tmp ? tmp : "", src->reg,
-                dst->type->bits, tmp ? tmp : "",
-                REGP(dst), dst->reg,
-                align(dst->type->bits));
-        return dst->reg;
-    }
-
-    if (src->type->type == V_INT) {
-        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
-                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
-    } else if (src->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
-                src->reg, REGP(dst), dst->reg, align(dst->type->bits));
-    } else if (src->type->type == V_STR) {
-	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
-		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
-		"i8** %%%d, align 8\n",
-		src_val->bits, src_val->bits, src->reg, dst->reg);
-    } else if (src->type->type == V_VOID) {
-        // TODO Void pointer
-        return 0;
-    } else
-        ERR("Invalid assign");
-    return dst->reg;
-#endif
 }
 
 void gen_pre(struct gen_context *ctx, struct node *node)
@@ -1455,25 +1418,21 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
     struct variable *var = gen_load(ctx, src);
     FATAL(!var, "Invalid variable for bool comparison");
 
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     if (var->ptr) {
-        struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
         char *stars = get_stars(var->ptr);
 
         buffer_write(ctx->data, "%%%d = icmp ne i%d%s %%%d, null\n",
-            res->reg, res->type->bits,
+            res->reg, var->type->bits,
             stars,
             var->reg);
         return res->reg;
     } else if (var->type->type == V_INT) {
-        struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
-
         buffer_write(ctx->data, "%%%d = icmp ne i%d %%%d, 0\n",
-            res->reg, res->type->bits,
+            res->reg, var->type->bits,
             var->reg);
         return res->reg;
     } else if (var->type->type == V_FLOAT) {
-        struct variable *res = new_inst_variable(ctx, V_FLOAT, var->type->bits, var->type->sign);
-
         buffer_write(ctx->data, "%%%d = fcmp une double %%%d, "
             "0.000000e+00\n",
             res->reg,
