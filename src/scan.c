@@ -6,6 +6,10 @@
 static const char *tokenstr[] = {
     "<INVALID>",
     "+", "-", "*", "/", "%",
+    "<<", ">>", "&", "|", "^",
+    "++", "--",
+    "&&", "||",
+    "<", ">",
     "=",
     "==",
     "!",
@@ -216,9 +220,19 @@ int scan(struct scanfile *f, struct token *t)
             return 0;
         case '+':
             t->token = T_PLUS;
+            c = next(f);
+            if (c == '+')
+                t->token = T_PLUSPLUS;
+            else
+                putback(f, c);
             break;
         case '-':
             t->token = T_MINUS;
+            c = next(f);
+            if (c == '-')
+                t->token = T_MINUSMINUS;
+            else
+                putback(f, c);
             break;
         case '*':
             t->token = T_STAR;
@@ -266,6 +280,22 @@ int scan(struct scanfile *f, struct token *t)
         case '}':
             t->token = T_CURLY_CLOSE;
             break;
+        case '<':
+            t->token = T_LT;
+            c = next(f);
+            if (c == '<')
+                t->token = T_LEFT;
+            else
+                putback(f, c);
+            break;
+        case '>':
+            t->token = T_GT;
+            c = next(f);
+            if (c == '>')
+                t->token = T_RIGHT;
+            else
+                putback(f, c);
+            break;
         case '"':
             c = next(f);
             t->token = T_STR_LIT;
@@ -312,6 +342,7 @@ void save_point(struct scanfile *f, struct token *t)
     if (f->putback && pos)
         pos--;
 
+    printf("++Save\n");
     f->save_point[f->savecnt++] = pos;
 }
 
@@ -320,11 +351,13 @@ void remove_save_point(struct scanfile *f, struct token *t)
     FATAL(!f->savecnt, "No save points to remove");
     (void)t;
     --f->savecnt;
+    printf("==Remove\n");
 }
 
 void load_point(struct scanfile *f, struct token *t)
 {
     FATAL(!f->savecnt, "No save points to load");
+    printf("--Restore\n");
     f->putback = 0;
     fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));

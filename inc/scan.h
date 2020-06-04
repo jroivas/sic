@@ -7,6 +7,10 @@
 enum tokentype {
     T_INVALID,
     T_PLUS, T_MINUS, T_STAR, T_SLASH, T_MOD,
+    T_LEFT, T_RIGHT, T_AND, T_OR, T_XOR,
+    T_PLUSPLUS, T_MINUSMINUS,
+    T_LOG_AND, T_LOG_OR,
+    T_LT, T_GT,
     T_EQ,
     T_EQ_EQ,
     T_EXCLAM,

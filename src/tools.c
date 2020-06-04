@@ -83,6 +83,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_MUL_ASSIGN:
         case A_DIV_ASSIGN:
         case A_MOD_ASSIGN:
+        case A_LEFT_ASSIGN:
+        case A_RIGHT_ASSIGN:
         case A_FUNCTION:
         case A_RETURN:
         case A_EQ_OP:
@@ -94,6 +96,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_POSTDEC:
         case A_PREINC:
         case A_PREDEC:
+        case A_LEFT:
+        case A_RIGHT:
             printf("%s", node_str(node));
             break;
         case A_INT_LIT:

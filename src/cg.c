@@ -764,7 +764,6 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
     struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
     /* We can't sign extend 1 bit */
     if (sign2 && bits1 > 1) {
-        stack_trace();
         buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     } else {
@@ -899,6 +898,23 @@ int gen_mod(struct gen_context *ctx, int a, int b)
         ERR("Invalid type: %d", restype);
     return res->reg;
 }
+
+int gen_shift(struct gen_context *ctx, enum nodetype type, int a, int b)
+{
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
+
+    if (restype == V_INT) {
+        buffer_write(ctx->data, "%%%d = %s i%d %%%d, %%%d\n",
+            res->reg, type == A_LEFT ? "shl" : "ashr",
+            v1->type->bits, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type for shift: %d", restype);
+    return res->reg;
+}
+
 
 int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
 {
@@ -1194,6 +1210,12 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     } else if (node->node == A_MOD_ASSIGN) {
         int tmp = gen_mod(ctx, left, right);
         src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_LEFT_ASSIGN) {
+        int tmp = gen_shift(ctx, A_LEFT, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_RIGHT_ASSIGN) {
+        int tmp = gen_shift(ctx, A_RIGHT, left, right);
+        src_val = find_variable(ctx, tmp);
     }
     FATAL(!src_val, "Invalid assign op");
 
@@ -1246,7 +1268,6 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         if (tmp)
             free(tmp);
     } else {
-        stack_trace();
         buffer_write(ctx->post, "ret void ; RET4\n");
         ctx->rets++;
     }
@@ -1682,6 +1703,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_MOD:
             ctx->last_label = 0;
             return gen_mod(ctx, resleft, resright);
+        case A_RIGHT:
+        case A_LEFT:
+            ctx->last_label = 0;
+            return gen_shift(ctx, node->node, resleft, resright);
         case A_EQ_OP:
         case A_NE_OP:
             ctx->last_label = 0;
@@ -1724,6 +1749,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_MUL_ASSIGN:
         case A_DIV_ASSIGN:
         case A_MOD_ASSIGN:
+        case A_LEFT_ASSIGN:
+        case A_RIGHT_ASSIGN:
             ctx->last_label = 0;
             return gen_op_assign(ctx, node, resleft, resright);
         case A_DECLARATION:

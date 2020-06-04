@@ -6,6 +6,8 @@
 
 enum nodetype {
     A_ADD, A_MINUS, A_MUL, A_DIV, A_MOD,
+    A_LEFT, A_RIGHT, A_AND, A_OR, A_XOR,
+    A_LOG_AND, A_LOG_OR,
     A_IDENTIFIER,
     A_NEGATE,
     A_INT_LIT, A_DEC_LIT,
@@ -16,6 +18,11 @@ enum nodetype {
     A_MUL_ASSIGN,
     A_DIV_ASSIGN,
     A_MOD_ASSIGN,
+    A_LEFT_ASSIGN,
+    A_RIGHT_ASSIGN,
+    A_AND_ASSIGN,
+    A_OR_ASSIGN,
+    A_XOR_ASSIGN,
     A_GLUE,
     A_TYPE, A_TYPESPEC, A_TYPE_QUAL,
     A_DECLARATION,
