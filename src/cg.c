@@ -461,7 +461,6 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
 
     struct variable *val = NULL;
     if (target->type == V_FLOAT && v->type->type == V_INT) {
-        buffer_write(ctx->data, "; b\n");
         val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0, 0);
         buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
                 val->reg, v->type->bits, v->reg);
@@ -1173,6 +1172,64 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     return dst->reg;
 }
 
+int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int right)
+{
+#if 0
+    struct variable *src_val = find_variable(ctx, right);
+    FATAL(!src_val, "Can't assign from zero: %d to %d", right, left);
+    //struct variable *src = gen_load(ctx, src_val);
+    struct variable *dst = find_variable(ctx, left);
+
+    //FATAL(!src, "No source in assign")
+    FATAL(!dst, "No dest in assign: %d", left)
+#endif
+    struct variable *dst = find_variable(ctx, left);
+    struct variable *src_val = NULL;
+
+    if (node->node == A_ADD_ASSIGN) {
+        int tmp = gen_add(ctx, left, right);
+        src_val = find_variable(ctx, tmp);
+    }
+    if (node->node == A_SUB_ASSIGN) {
+        int tmp = gen_sub(ctx, left, right);
+        src_val = find_variable(ctx, tmp);
+    }
+    FATAL(!src_val, "Invalid assign op");
+
+    int res = gen_store_var(ctx, dst, src_val);
+    return res;
+#if 0
+    if (src->ptr || src->addr) {
+        char *tmp = get_stars(src->ptr);
+
+        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d\n",
+                src->type->bits, tmp ? tmp : "", src->reg,
+                dst->type->bits, tmp ? tmp : "",
+                REGP(dst), dst->reg,
+                align(dst->type->bits));
+        return dst->reg;
+    }
+
+    if (src->type->type == V_INT) {
+        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
+                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
+    } else if (src->type->type == V_FLOAT) {
+        buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
+                src->reg, REGP(dst), dst->reg, align(dst->type->bits));
+    } else if (src->type->type == V_STR) {
+	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
+		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
+		"i8** %%%d, align 8\n",
+		src_val->bits, src_val->bits, src->reg, dst->reg);
+    } else if (src->type->type == V_VOID) {
+        // TODO Void pointer
+        return 0;
+    } else
+        ERR("Invalid assign");
+    return dst->reg;
+#endif
+}
+
 void gen_pre(struct gen_context *ctx, struct node *node)
 {
     char *tmp = NULL;
@@ -1695,9 +1752,14 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_ASSIGN:
             ctx->last_label = 0;
             return gen_assign(ctx, node, resleft, resright);
+        case A_ADD_ASSIGN:
+        case A_SUB_ASSIGN:
+            ctx->last_label = 0;
+            return gen_op_assign(ctx, node, resleft, resright);
         case A_DECLARATION:
             return gen_declaration(ctx, node, resleft, resright);
         case A_NULL:
+            ctx->last_label = 0;
             return ctx->null_var;
         case A_FUNC_CALL:
             return gen_func_call(ctx, node, resleft, resright);

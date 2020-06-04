@@ -78,6 +78,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_GLUE:
         case A_LIST:
         case A_ASSIGN:
+        case A_ADD_ASSIGN:
+        case A_SUB_ASSIGN:
         case A_FUNCTION:
         case A_RETURN:
         case A_EQ_OP:

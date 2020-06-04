@@ -16,7 +16,10 @@ static const char *nodestr[] = {
     "-",
     "INT_LIT", "DEC_LIT",
     "STR_LIT",
-    "ASSIGN", "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
+    "ASSIGN",
+    "+=",
+    "-=",
+    "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
     "DECLARATION",
     "PARAMS",
     "FUNCTION",
@@ -447,7 +450,6 @@ struct node *equality_expression(struct scanfile *f, struct token *token)
     struct node *res = NULL;
 
     res = relational_expression(f, token);
-    printf("A: %s\n", token_str(token));
 
     if (accept(f, token, T_EQ_NE)) {
         struct node *tmp = relational_expression(f, token);
@@ -496,6 +498,7 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
 struct node *assignment_expression(struct scanfile *f, struct token *token)
 {
     struct node *res;
+    enum tokentype pending = T_INVALID;
 
     // FIXME unary_expression assignment_operator
     save_point(f, token);
@@ -505,12 +508,23 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
         return NULL;
     }
 
+    if (accept(f, token, T_PLUS))
+        pending = T_PLUS;
+    else if (accept(f, token, T_MINUS))
+        pending = T_MINUS;
+
     if (token->token == T_EQ) {
+        enum nodetype nodetype = A_ASSIGN;
+        if (pending == T_PLUS)
+            nodetype = A_ADD_ASSIGN;
+        else if (pending == T_MINUS)
+            nodetype = A_SUB_ASSIGN;
         scan(f, token);
-        if (token->token != T_EQ) {
+
+        if (pending != T_INVALID || token->token != T_EQ) {
             remove_save_point(f, token);
             struct node *expr = assignment_expression(f, token);
-            res = make_node(A_ASSIGN, unary, NULL, expr);
+            res = make_node(nodetype, unary, NULL, expr);
             return res;
         } else
             load_point(f, token);
