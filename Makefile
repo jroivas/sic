@@ -10,24 +10,26 @@ build/libsic.so: $(INC_FILES) $(SRC_FILES)
 	$(CC) $(CFLAGS) -shared -o build/libsic.so $(SRC_FILES)
 
 test: build/sic unittest
-	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build
+	CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build
 
-testllvm: build/sic
-	CC=build/sic HOSTCC=$(CC) tests/runtest.sh build llvm
+testsic: build/sic
+	CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build llvm
 
 testc:
-	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/runtest.sh build
+	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/compiletest.sh build
 
 tests: test
 
-buildtest: build/sic
+compiletest: build/sic
 	build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
 	cat build/test_$(TEST).sic.ir
 
-runtest: buildtest
+buildtest: compiletest
 	llvm-as build/test_$(TEST).sic.ir
 	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
 	$(CC) build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
+
+runtest: buildtest
 	build/test_$(TEST).ir.bin ; echo $$? || true
 
 unittest:
@@ -39,4 +41,24 @@ build:
 clean:
 	rm -rf build
 
-.PHONY: test builddir clean runtest buildtest
+testall: test testsic
+
+all: build/sic
+
+help:
+	@echo "SIC - Slighty Improved C"
+	@echo ""
+	@echo "make targets:"
+	@echo " help             This help"
+	@echo " test             Compilation with sic and unittest"
+	@echo " unittest         Run unit tests"
+	@echo " compiletest      Test compile with sic, define TEST env"
+	@echo " buildtest        Test build one test with sic, define TEST env"
+	@echo " runtest          Test build and run one test with sic, define TEST env"
+	@echo " testsic          Test build all with sic"
+	@echo " testc            Test build all with $$CC"
+	@echo " testall          Test all sic related"
+	@echo ""
+	@echo "Env variable TEST should contain test number, eg. 0012"
+
+.PHONY: help test clean runtest buildtest compiletest testsic testc unittest testall all
