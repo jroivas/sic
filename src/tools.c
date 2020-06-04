@@ -85,6 +85,12 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_MOD_ASSIGN:
         case A_LEFT_ASSIGN:
         case A_RIGHT_ASSIGN:
+        case A_AND_ASSIGN:
+        case A_OR_ASSIGN:
+        case A_XOR_ASSIGN:
+        case A_AND:
+        case A_OR:
+        case A_XOR:
         case A_FUNCTION:
         case A_RETURN:
         case A_EQ_OP:

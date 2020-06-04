@@ -915,6 +915,37 @@ int gen_shift(struct gen_context *ctx, enum nodetype type, int a, int b)
     return res->reg;
 }
 
+int gen_inclusive(struct gen_context *ctx, enum nodetype type, int a, int b)
+{
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
+
+    if (restype == V_INT) {
+        const char *op;
+
+        switch (type) {
+            case A_OR:
+                op = "or";
+                break;
+            case A_XOR:
+                op = "xor";
+                break;
+            case A_AND:
+                op = "and";
+                break;
+            default:
+                ERR("Invalid inclusive operator: %d", type);
+        }
+
+        buffer_write(ctx->data, "%%%d = %s i%d %%%d, %%%d\n",
+            res->reg, op,
+            v1->type->bits, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type for inclusive operation: %d", restype);
+    return res->reg;
+}
 
 int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
 {
@@ -1215,6 +1246,15 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_RIGHT_ASSIGN) {
         int tmp = gen_shift(ctx, A_RIGHT, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_OR_ASSIGN) {
+        int tmp = gen_inclusive(ctx, A_OR, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_XOR_ASSIGN) {
+        int tmp = gen_inclusive(ctx, A_XOR, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_AND_ASSIGN) {
+        int tmp = gen_inclusive(ctx, A_AND, left, right);
         src_val = find_variable(ctx, tmp);
     }
     FATAL(!src_val, "Invalid assign op");
@@ -1707,6 +1747,11 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_LEFT:
             ctx->last_label = 0;
             return gen_shift(ctx, node->node, resleft, resright);
+        case A_OR:
+        case A_XOR:
+        case A_AND:
+            ctx->last_label = 0;
+            return gen_inclusive(ctx, node->node, resleft, resright);
         case A_EQ_OP:
         case A_NE_OP:
             ctx->last_label = 0;
@@ -1751,6 +1796,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_MOD_ASSIGN:
         case A_LEFT_ASSIGN:
         case A_RIGHT_ASSIGN:
+        case A_AND_ASSIGN:
+        case A_OR_ASSIGN:
+        case A_XOR_ASSIGN:
             ctx->last_label = 0;
             return gen_op_assign(ctx, node, resleft, resright);
         case A_DECLARATION:

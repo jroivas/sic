@@ -6,7 +6,7 @@
 static const char *tokenstr[] = {
     "<INVALID>",
     "+", "-", "*", "/", "%",
-    "<<", ">>", "&", "|", "^",
+    "<<", ">>", "|", "^",
     "++", "--",
     "&&", "||",
     "<", ">",
@@ -239,6 +239,11 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '&':
             t->token = T_AMP;
+            c = next(f);
+            if (c == '&')
+                t->token = T_LOG_AND;
+            else
+                putback(f, c);
             break;
         case '/':
             t->token = T_SLASH;
@@ -261,6 +266,17 @@ int scan(struct scanfile *f, struct token *t)
                t->token = T_EQ_NE;
             else
                 putback(f, c);
+            break;
+        case '|':
+            t->token = T_OR;
+            c = next(f);
+            if (c == '|')
+                t->token = T_LOG_OR;
+            else
+                putback(f, c);
+            break;
+        case '^':
+            t->token = T_XOR;
             break;
         case ';':
             t->token = T_SEMI;
@@ -342,7 +358,6 @@ void save_point(struct scanfile *f, struct token *t)
     if (f->putback && pos)
         pos--;
 
-    printf("++Save\n");
     f->save_point[f->savecnt++] = pos;
 }
 
@@ -351,13 +366,11 @@ void remove_save_point(struct scanfile *f, struct token *t)
     FATAL(!f->savecnt, "No save points to remove");
     (void)t;
     --f->savecnt;
-    printf("==Remove\n");
 }
 
 void load_point(struct scanfile *f, struct token *t)
 {
     FATAL(!f->savecnt, "No save points to load");
-    printf("--Restore\n");
     f->putback = 0;
     fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));

@@ -488,17 +488,42 @@ struct node *and_expression(struct scanfile *f, struct token *token)
 
 struct node *exclusive_or_expression(struct scanfile *f, struct token *token)
 {
-    return and_expression(f, token);
+    struct node *res = and_expression(f, token);
+    if (!res)
+        return res;
+
+    if (accept(f, token, T_XOR)) {
+        struct node *tmp = and_expression(f, token);
+        FATAL(!tmp, "Right side missing on XOR");
+        res = make_node(A_XOR, res, NULL, tmp);
+    }
+    return res;
 }
 
 struct node *inclusive_or_expression(struct scanfile *f, struct token *token)
 {
-    return exclusive_or_expression(f, token);
+    struct node *res = exclusive_or_expression(f, token);
+    if (!res)
+        return res;
+
+    if (accept(f, token, T_OR)) {
+        struct node *tmp = exclusive_or_expression(f, token);
+        FATAL(!tmp, "Right side missing on OR");
+        res = make_node(A_OR, res, NULL, tmp);
+    }
+    return res;
 }
 
 struct node *logical_and_expression(struct scanfile *f, struct token *token)
 {
-    return inclusive_or_expression(f, token);
+    struct node *res = inclusive_or_expression(f, token);
+
+    if (accept(f, token, T_AMP)) {
+        struct node *tmp = inclusive_or_expression(f, token);
+        FATAL(!tmp, "Right side missing on AND");
+        res = make_node(A_AND, res, NULL, tmp);
+    }
+    return res;
 }
 
 struct node *logical_or_expression(struct scanfile *f, struct token *token)
@@ -541,6 +566,12 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
         nodetype = A_LEFT_ASSIGN;
     else if (accept(f, token, T_RIGHT))
         nodetype = A_RIGHT_ASSIGN;
+    else if (accept(f, token, T_AMP))
+        nodetype = A_AND_ASSIGN;
+    else if (accept(f, token, T_OR))
+        nodetype = A_OR_ASSIGN;
+    else if (accept(f, token, T_XOR))
+        nodetype = A_XOR_ASSIGN;
 
     if (token->token == T_EQ) {
         scan(f, token);
