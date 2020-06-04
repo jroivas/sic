@@ -1182,9 +1182,17 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     if (node->node == A_ADD_ASSIGN) {
         int tmp = gen_add(ctx, left, right);
         src_val = find_variable(ctx, tmp);
-    }
-    if (node->node == A_SUB_ASSIGN) {
+    } else if (node->node == A_SUB_ASSIGN) {
         int tmp = gen_sub(ctx, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_MUL_ASSIGN) {
+        int tmp = gen_mul(ctx, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_DIV_ASSIGN) {
+        int tmp = gen_div(ctx, left, right);
+        src_val = find_variable(ctx, tmp);
+    } else if (node->node == A_MOD_ASSIGN) {
+        int tmp = gen_mod(ctx, left, right);
         src_val = find_variable(ctx, tmp);
     }
     FATAL(!src_val, "Invalid assign op");
@@ -1713,6 +1721,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_assign(ctx, node, resleft, resright);
         case A_ADD_ASSIGN:
         case A_SUB_ASSIGN:
+        case A_MUL_ASSIGN:
+        case A_DIV_ASSIGN:
+        case A_MOD_ASSIGN:
             ctx->last_label = 0;
             return gen_op_assign(ctx, node, resleft, resright);
         case A_DECLARATION:

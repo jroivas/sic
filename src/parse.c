@@ -19,6 +19,9 @@ static const char *nodestr[] = {
     "ASSIGN",
     "+=",
     "-=",
+    "*=",
+    "/=",
+    "%=",
     "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
     "DECLARATION",
     "PARAMS",
@@ -498,7 +501,7 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
 struct node *assignment_expression(struct scanfile *f, struct token *token)
 {
     struct node *res;
-    enum tokentype pending = T_INVALID;
+    enum nodetype nodetype = A_ASSIGN;
 
     // FIXME unary_expression assignment_operator
     save_point(f, token);
@@ -509,19 +512,19 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
     }
 
     if (accept(f, token, T_PLUS))
-        pending = T_PLUS;
+        nodetype = A_ADD_ASSIGN;
     else if (accept(f, token, T_MINUS))
-        pending = T_MINUS;
+        nodetype = A_SUB_ASSIGN;
+    else if (accept(f, token, T_STAR))
+        nodetype = A_MUL_ASSIGN;
+    else if (accept(f, token, T_SLASH))
+        nodetype = A_DIV_ASSIGN;
+    else if (accept(f, token, T_MOD))
+        nodetype = A_MOD_ASSIGN;
 
     if (token->token == T_EQ) {
-        enum nodetype nodetype = A_ASSIGN;
-        if (pending == T_PLUS)
-            nodetype = A_ADD_ASSIGN;
-        else if (pending == T_MINUS)
-            nodetype = A_SUB_ASSIGN;
         scan(f, token);
-
-        if (pending != T_INVALID || token->token != T_EQ) {
+        if (nodetype != A_ASSIGN || token->token != T_EQ) {
             remove_save_point(f, token);
             struct node *expr = assignment_expression(f, token);
             res = make_node(nodetype, unary, NULL, expr);
