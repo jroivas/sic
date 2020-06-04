@@ -30,8 +30,8 @@ static const char *nodestr[] = {
     "NULL",
     "FUNC_CALL",
     "POSTINC",
-    "POSTDEC",
     "PREINC",
+    "POSTDEC",
     "PREDEC",
     "LIST"
 };
@@ -447,27 +447,14 @@ struct node *equality_expression(struct scanfile *f, struct token *token)
     struct node *res = NULL;
 
     res = relational_expression(f, token);
+    printf("A: %s\n", token_str(token));
 
-    if (token->token == T_EXCLAM) {
-        save_point(f, token);
-        scan(f, token);
-        if (token->token == T_EQ) {
-            remove_save_point(f, token);
-            scan(f, token);
-            struct node *tmp = relational_expression(f, token);
-            return make_node(A_NE_OP, res, NULL, tmp);
-        }
-        load_point(f, token);
-    } else if (token->token == T_EQ) {
-        save_point(f, token);
-        scan(f, token);
-        if (token->token == T_EQ) {
-            remove_save_point(f, token);
-            scan(f, token);
-            struct node *tmp = relational_expression(f, token);
-            return make_node(A_EQ_OP, res, NULL, tmp);
-        }
-        load_point(f, token);
+    if (accept(f, token, T_EQ_NE)) {
+        struct node *tmp = relational_expression(f, token);
+        return make_node(A_NE_OP, res, NULL, tmp);
+    } else if (accept(f, token, T_EQ_EQ)) {
+        struct node *tmp = relational_expression(f, token);
+        return make_node(A_EQ_OP, res, NULL, tmp);
     }
 
     return res;
@@ -519,11 +506,14 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
     }
 
     if (token->token == T_EQ) {
-        remove_save_point(f, token);
         scan(f, token);
-        struct node *expr = assignment_expression(f, token);
-        res = make_node(A_ASSIGN, unary, NULL, expr);
-        return res;
+        if (token->token != T_EQ) {
+            remove_save_point(f, token);
+            struct node *expr = assignment_expression(f, token);
+            res = make_node(A_ASSIGN, unary, NULL, expr);
+            return res;
+        } else
+            load_point(f, token);
     } else
         load_point(f, token);
 
@@ -673,8 +663,20 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
     struct node *left;
 
     if (accept(f, token, T_PLUS)) {
+        if (accept(f, token, T_PLUS)) {
+            left = unary_expression(f, token);
+            FATAL(!left, "Invalid preinc");
+            left = make_node(A_PREINC, left, NULL, NULL);
+            return left;
+        }
         return cast_expression(f, token);
     } else if (accept(f, token, T_MINUS)) {
+        if (accept(f, token, T_MINUS)) {
+            left = unary_expression(f, token);
+            FATAL(!left, "Invalid preinc");
+            left = make_node(A_PREDEC, left, NULL, NULL);
+            return left;
+        }
         left = cast_expression(f, token);
         if (!left)
             ERR("Invalid cast!");

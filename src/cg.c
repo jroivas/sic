@@ -395,8 +395,8 @@ struct variable *new_variable(struct gen_context *ctx,
     else
         res->reg = ctx->regnum++;
 
-    // If bits == 0 and we have a pendign type, use it
-    if (bits == 0 && ctx->pending_type) {
+    // If bits == 0 and we have a pendign type which matches requested type, use it
+    if (bits == 0 && ctx->pending_type && ctx->pending_type->type == type) {
         type = ctx->pending_type->type;
         bits = ctx->pending_type->bits;
         sign = ctx->pending_type->sign;
@@ -1211,7 +1211,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
             buffer_write(ctx->post, "ret %s %%%d ; RET1\n", type, res);
             ctx->rets++;
         } else {
-            const char *type = var_str(node->type, node->bits, &tmp);
+            const char *type = var_str(functype->type, functype->bits, &tmp);
             buffer_write(ctx->post, "ret %s 0 ; RET2\n", type, res);
             ctx->rets++;
         }
@@ -1503,6 +1503,38 @@ int gen_if(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
+{
+    struct variable *orig = find_variable(ctx, a);
+    struct variable *var = gen_load(ctx, orig);
+
+    FATAL(!var, "No postinc/postdec variable");
+
+    struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
+
+    if (node->node == A_PREINC) {
+        if (res->type->type == V_INT) {
+            buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
+                res->reg, var->type->bits, var->reg);
+        } else if (res->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "%%%d = fadd double %%%d, 1.000000e+00\n",
+                res->reg, var->reg);
+        } else ERR_TRACE("Invalid type: %d", node->type);
+        gen_store_var(ctx, orig, res);
+    } else if (node->node == A_PREDEC) {
+        if (res->type->type == V_INT) {
+            buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
+                res->reg, var->type->bits, var->reg);
+        } else if (res->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "%%%d = fsub double %%%d, 1.0e+00\n",
+                res->reg, var->reg);
+        } else ERR_TRACE("Invalid type");
+        gen_store_var(ctx, orig, res);
+    } else FATAL(1, "Invalid pre op");
+
+    return res->reg;
+}
+
 int gen_post_op(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *orig = find_variable(ctx, a);
@@ -1521,7 +1553,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type: %d", node->type);
         gen_store_var(ctx, orig, res);
-    } else {
+    } else if (node->node == A_POSTDEC) {
         if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
                 res->reg, var->type->bits, var->reg);
@@ -1530,9 +1562,9 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type");
         gen_store_var(ctx, orig, res);
-    }
+    } else FATAL(1, "Invalid post op");
 
-    return res->reg;
+    return var->reg;
 }
 
 // First pass to scan types and alloc
@@ -1669,6 +1701,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return ctx->null_var;
         case A_FUNC_CALL:
             return gen_func_call(ctx, node, resleft, resright);
+        case A_PREINC:
+        case A_PREDEC:
+            return gen_pre_op(ctx, node, resleft);
         case A_POSTINC:
         case A_POSTDEC:
             return gen_post_op(ctx, node, resleft);
