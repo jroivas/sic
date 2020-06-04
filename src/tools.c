@@ -72,6 +72,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_MINUS:
         case A_IF:
         case A_NEGATE:
+        case A_NOT:
         case A_MUL:
         case A_DIV:
         case A_MOD:
@@ -90,6 +91,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_XOR_ASSIGN:
         case A_AND:
         case A_OR:
+        case A_LOG_AND:
+        case A_LOG_OR:
         case A_XOR:
         case A_FUNCTION:
         case A_RETURN:

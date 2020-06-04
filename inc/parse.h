@@ -10,6 +10,7 @@ enum nodetype {
     A_LOG_AND, A_LOG_OR,
     A_IDENTIFIER,
     A_NEGATE,
+    A_NOT,
     A_INT_LIT, A_DEC_LIT,
     A_STR_LIT,
     A_ASSIGN,

@@ -738,7 +738,9 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
 {
     if (v == NULL)
         ERR("Can't load null!");
-    if (v->type->type == V_INT)
+    if (v->direct)
+        return v;
+    else if (v->type->type == V_INT)
         return gen_load_int(ctx, v);
     else if (v->type->type == V_FLOAT)
         return gen_load_float(ctx, v);
@@ -947,6 +949,156 @@ int gen_inclusive(struct gen_context *ctx, enum nodetype type, int a, int b)
     return res->reg;
 }
 
+int gen_bool_cast(struct gen_context *ctx, struct variable *var)
+{
+    var = gen_load(ctx, var);
+    FATAL(!var, "Didn't get variable");
+
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+
+    if (var->type->type == V_INT) {
+        buffer_write(ctx->data, "%%%d = icmp ne i%d %%%d, 0\n",
+            res->reg, var->type->bits, var->reg);
+    } else
+        ERR("Invalid type for bool cast: %d", var->type->type);
+
+
+    return res->reg;
+}
+
+int gen_recursive(struct gen_context *ctx, struct node *node);
+int gen_exclusive(struct gen_context *ctx, struct node *node)
+{
+    FATAL(!node->left, "Exclusive or/and no left hand tree");
+    FATAL(!node->right, "Exclusive or/and no right hand tree");
+
+    struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
+    buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
+        real_res->reg);
+
+    int a = gen_recursive(ctx, node->left);
+    struct variable *v1 = find_variable(ctx, a);
+    int src1 = gen_bool_cast(ctx, v1);
+    //int and = node->node == A_LOG_AND;
+
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
+        res->reg, src1);
+
+    // TODO: OR handling
+    struct buffer *and_ok = buffer_init();
+    //struct buffer *second = buffer_init();
+
+    int label1 = gen_reserve_label(ctx);
+    struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(and_ok, "L%d:\n", label1);
+    buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
+        res3->reg, src1);
+    //and ? "and" : "or",
+
+    struct buffer *tmp = ctx->data;
+    ctx->data = and_ok;
+    int b = gen_recursive(ctx, node->right);
+    struct variable *v2 = find_variable(ctx, b);
+    int src2 = gen_bool_cast(ctx, v2);
+    struct variable *res2 = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
+        res2->reg, src2);
+    ctx->data = tmp;
+    
+
+    int label2 = gen_reserve_label(ctx);
+    int label3 = gen_reserve_label(ctx);
+    //buffer_append(ctx->data, first);
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+        res->reg, label1, label3);
+    buffer_append(ctx->data, buffer_read(and_ok));
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+        res2->reg, label2, label3);
+    buffer_write(ctx->data, "L%d:\n", label2);
+    //struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
+        real_res->reg);
+    int label4 = gen_reserve_label(ctx);
+    buffer_write(ctx->data, "br label %%L%d\n",
+        label4);
+    /*
+    buffer_write(ctx->data, "%%%d = and i1 %%%d, %%%d\n",
+        res3->reg, res->reg, res2->reg);
+    */
+
+    buffer_write(ctx->data, "L%d:\n", label3);
+    buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
+        real_res->reg);
+    buffer_write(ctx->data, "br label %%L%d\n",
+        label4);
+    buffer_write(ctx->data, "L%d:\n", label4);
+    //buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
+        //res4->reg, src1);
+    return real_res->reg;
+#if 0
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+
+    int src1 = gen_bool_cast(ctx, v1);
+    int src2 = gen_bool_cast(ctx, v2);
+
+    const char *op;
+
+    switch (type) {
+        case A_LOG_OR:
+            op = "or";
+            break;
+        case A_LOG_AND:
+            op = "and";
+            break;
+        default:
+            ERR("Invalid exclusive operator: %d", type);
+    }
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
+        res->reg, op, src1, src2);
+    
+
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(ctx->data, "%%%d = %s i1 %%%d, %%%d ; EXCL\n",
+        res->reg, op, src1, src2);
+
+    return res->reg;
+#endif
+    
+
+#if 0
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    enum var_type restype = get_and_cast(ctx, &v1, &v2);
+    struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
+
+    struct type *target = find_type_by(ctx, V_INT, 1, 0);
+
+    if (restype == V_INT) {
+        const char *op;
+
+        switch (type) {
+            case A_LOG_OR:
+                op = "or";
+                break;
+            case A_LOG_AND:
+                op = "and";
+                break;
+            default:
+                ERR("Invalid inclusive operator: %d", type);
+        }
+
+        buffer_write(ctx->data, "%%%d = %s i%d %%%d, %%%d\n",
+            res->reg, op,
+            v1->type->bits, v1->reg, v2->reg);
+    } else
+        ERR("Invalid type for inclusive operation: %d", restype);
+    return res->reg;
+#endif
+}
+
 int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
@@ -1037,6 +1189,32 @@ int gen_negate(struct gen_context *ctx, int a)
     } else
         ERR("Invalid type of %d: %d", a, v->type->type);
 
+    return res->reg;
+}
+
+int gen_not(struct gen_context *ctx, int a)
+{
+    struct variable *v = find_variable(ctx, a);
+    struct variable *tmp;
+    struct variable *res;
+
+    FATAL(!v, "Can't not zero");
+    v = gen_load(ctx, v);
+    if (v->type->type == V_INT) {
+        tmp = new_inst_variable(ctx, v->type->type, 1, 0);
+        buffer_write(ctx->data, "%%%d = icmp ne i%d %%%d, 0\n",
+            tmp->reg, v->type->bits, v->reg);
+    } else if (v->type->type == V_FLOAT) {
+        tmp = new_inst_variable(ctx, v->type->type, 1, 0);
+        buffer_write(ctx->data, "%%%d = fcmp ne double %%%d, 0.0\n",
+            tmp->reg, v->reg);
+    } else
+        ERR("Invalid type of %d: %d", a, v->type->type);
+
+    res = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(ctx->data, "%%%d = xor i%d %%%d, true\n",
+        res->reg, tmp->type->bits, tmp->reg);
+//%14 = xor i1 %13, true,
     return res->reg;
 }
 
@@ -1716,6 +1894,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_function(ctx, node);
     if (node->node == A_IF)
         return gen_if(ctx, node);
+    if (node->node == A_LOG_OR || node->node == A_LOG_AND)
+        return gen_exclusive(ctx, node);
 
     /* Recurse first to get children solved */
     if (node->left)
@@ -1734,6 +1914,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_NEGATE:
             ctx->last_label = 0;
             return gen_negate(ctx, resleft);
+        case A_NOT:
+            ctx->last_label = 0;
+            return gen_not(ctx, resleft);
         case A_MUL:
             ctx->last_label = 0;
             return gen_mul(ctx, resleft, resright);
@@ -1752,6 +1935,11 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_AND:
             ctx->last_label = 0;
             return gen_inclusive(ctx, node->node, resleft, resright);
+        case A_LOG_OR:
+        case A_LOG_AND:
+            //ctx->last_label = 0;
+            //return gen_exclusive(ctx, node->node, resleft, resright);
+            ERR("Should not get here");
         case A_EQ_OP:
         case A_NE_OP:
             ctx->last_label = 0;

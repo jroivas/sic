@@ -8,6 +8,7 @@ struct node *additive_expression(struct scanfile *f, struct token *token);
 struct node *compound_statement(struct scanfile *f, struct token *token);
 struct node *statement(struct scanfile *f, struct token *token);
 struct node *unary_expression(struct scanfile *f, struct token *token);
+struct node *expression(struct scanfile *f, struct token *token);
 
 
 static const char *nodestr[] = {
@@ -15,7 +16,8 @@ static const char *nodestr[] = {
     "<<", ">>", "&", "|", "^",
     "&&", "||",
     "IDENTIFIER",
-    "-",
+    "NEGATE",
+    "NOT",
     "INT_LIT", "DEC_LIT",
     "STR_LIT",
     "ASSIGN",
@@ -310,6 +312,11 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
             return NULL;
         case T_CURLY_CLOSE:
             return NULL;
+        case T_ROUND_OPEN:
+            scan(f, token);
+            res = expression(f, token);
+            expect(f, token, T_ROUND_CLOSE, ")");
+            return res;
         default:
             return res;
             //ERR_TRACE("Unexpected token: %s", token_str(token));
@@ -483,7 +490,14 @@ struct node *equality_expression(struct scanfile *f, struct token *token)
 
 struct node *and_expression(struct scanfile *f, struct token *token)
 {
-    return equality_expression(f, token);
+    struct node *res = equality_expression(f, token);
+
+    if (accept(f, token, T_AMP)) {
+        struct node *tmp = equality_expression(f, token);
+        FATAL(!tmp, "Right side missing on AND");
+        res = make_node(A_AND, res, NULL, tmp);
+    }
+    return res;
 }
 
 struct node *exclusive_or_expression(struct scanfile *f, struct token *token)
@@ -517,18 +531,30 @@ struct node *inclusive_or_expression(struct scanfile *f, struct token *token)
 struct node *logical_and_expression(struct scanfile *f, struct token *token)
 {
     struct node *res = inclusive_or_expression(f, token);
+    if (!res)
+        return res;
 
-    if (accept(f, token, T_AMP)) {
+    if (accept(f, token, T_LOG_AND)) {
+        node_walk(res);
         struct node *tmp = inclusive_or_expression(f, token);
-        FATAL(!tmp, "Right side missing on AND");
-        res = make_node(A_AND, res, NULL, tmp);
+        FATAL(!tmp, "Right side missing on logical AND");
+        res = make_node(A_LOG_AND, res, NULL, tmp);
     }
     return res;
 }
 
 struct node *logical_or_expression(struct scanfile *f, struct token *token)
 {
-    return logical_and_expression(f, token);
+    struct node *res = logical_and_expression(f, token);
+    if (!res)
+        return res;
+
+    if (accept(f, token, T_LOG_OR)) {
+        struct node *tmp = logical_and_expression(f, token);
+        FATAL(!tmp, "Right side missing on logical OR");
+        res = make_node(A_LOG_OR, res, NULL, tmp);
+    }
+    return res;
 }
 
 struct node *conditional_expression(struct scanfile *f, struct token *token)
@@ -587,6 +613,7 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
 
     res = conditional_expression(f, token);
 
+    node_walk(res);
     return res;
 }
 
@@ -723,6 +750,11 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         if (!left)
             ERR("Invalid cast!");
         return make_node(A_NEGATE, left, NULL, NULL);
+    } else if (accept(f, token, T_EXCLAM)) {
+        left = cast_expression(f, token);
+        if (!left)
+            ERR("Invalid cast!");
+        return make_node(A_NOT, left, NULL, NULL);
     } else if (accept(f, token, T_PLUSPLUS)) {
         left = unary_expression(f, token);
         FATAL(!left, "Invalid preinc");
