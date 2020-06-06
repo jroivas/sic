@@ -917,7 +917,7 @@ int gen_shift(struct gen_context *ctx, enum nodetype type, int a, int b)
     return res->reg;
 }
 
-int gen_inclusive(struct gen_context *ctx, enum nodetype type, int a, int b)
+int gen_bitwise(struct gen_context *ctx, enum nodetype type, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -967,7 +967,7 @@ int gen_bool_cast(struct gen_context *ctx, struct variable *var)
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node);
-int gen_exclusive_and(struct gen_context *ctx, struct node *node)
+int gen_logical_and(struct gen_context *ctx, struct node *node)
 {
     FATAL(!node->left, "Exclusive or/and no left hand tree");
     FATAL(!node->right, "Exclusive or/and no right hand tree");
@@ -1028,7 +1028,7 @@ int gen_exclusive_and(struct gen_context *ctx, struct node *node)
     return real_res->reg;
 }
 
-int gen_exclusive_or(struct gen_context *ctx, struct node *node)
+int gen_logical_or(struct gen_context *ctx, struct node *node)
 {
     FATAL(!node->left, "Exclusive or/and no left hand tree");
     FATAL(!node->right, "Exclusive or/and no right hand tree");
@@ -1413,13 +1413,13 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
         int tmp = gen_shift(ctx, A_RIGHT, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_OR_ASSIGN) {
-        int tmp = gen_inclusive(ctx, A_OR, left, right);
+        int tmp = gen_bitwise(ctx, A_OR, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_XOR_ASSIGN) {
-        int tmp = gen_inclusive(ctx, A_XOR, left, right);
+        int tmp = gen_bitwise(ctx, A_XOR, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_AND_ASSIGN) {
-        int tmp = gen_inclusive(ctx, A_AND, left, right);
+        int tmp = gen_bitwise(ctx, A_AND, left, right);
         src_val = find_variable(ctx, tmp);
     }
     FATAL(!src_val, "Invalid assign op");
@@ -1884,9 +1884,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node->node == A_IF)
         return gen_if(ctx, node);
     if (node->node == A_LOG_AND)
-        return gen_exclusive_and(ctx, node);
+        return gen_logical_and(ctx, node);
     if (node->node == A_LOG_OR)
-        return gen_exclusive_or(ctx, node);
+        return gen_logical_or(ctx, node);
 
     /* Recurse first to get children solved */
     if (node->left)
@@ -1925,7 +1925,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_XOR:
         case A_AND:
             ctx->last_label = 0;
-            return gen_inclusive(ctx, node->node, resleft, resright);
+            return gen_bitwise(ctx, node->node, resleft, resright);
         case A_LOG_OR:
         case A_LOG_AND:
             //ctx->last_label = 0;
