@@ -107,6 +107,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_PREDEC:
         case A_LEFT:
         case A_RIGHT:
+        case A_TILDE:
             printf("%s", node_str(node));
             break;
         case A_INT_LIT:

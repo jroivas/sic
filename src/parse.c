@@ -48,6 +48,7 @@ static const char *nodestr[] = {
     "PREINC",
     "POSTDEC",
     "PREDEC",
+    "~",
     "LIST"
 };
 
@@ -753,6 +754,11 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         if (!left)
             ERR("Invalid cast!");
         return make_node(A_NOT, left, NULL, NULL);
+    } else if (accept(f, token, T_TILDE)) {
+        left = cast_expression(f, token);
+        if (!left)
+            ERR("Invalid cast!");
+        return make_node(A_TILDE, left, NULL, NULL);
     } else if (accept(f, token, T_PLUSPLUS)) {
         left = unary_expression(f, token);
         FATAL(!left, "Invalid preinc");

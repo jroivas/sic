@@ -24,6 +24,7 @@ enum tokentype {
     T_COMMA, T_SEMI,
     T_AMP,
     T_NULL,
+    T_TILDE,
     T_EOF
 };
 

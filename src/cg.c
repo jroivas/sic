@@ -1163,7 +1163,7 @@ int gen_negate(struct gen_context *ctx, int a)
     struct variable *v = find_variable(ctx, a);
     struct variable *res;
 
-    FATAL(!v, "Can't negate zero");
+    FATAL(!v, "Invalid variable in negate");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
@@ -1179,13 +1179,30 @@ int gen_negate(struct gen_context *ctx, int a)
     return res->reg;
 }
 
+int gen_tilde(struct gen_context *ctx, int a)
+{
+    struct variable *v = find_variable(ctx, a);
+    struct variable *res;
+
+    FATAL(!v, "Invalid variable in tilde op");
+    v = gen_load(ctx, v);
+    if (v->type->type == V_INT) {
+        res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
+        buffer_write(ctx->data, "%%%d = xor i%d -1, %%%d\n",
+            res->reg, v->type->bits, v->reg);
+    } else
+        ERR("Invalid type for unary tilde %d: %d", a, v->type->type);
+
+    return res->reg;
+}
+
 int gen_not(struct gen_context *ctx, int a)
 {
     struct variable *v = find_variable(ctx, a);
     struct variable *tmp;
     struct variable *res;
 
-    FATAL(!v, "Can't not zero");
+    FATAL(!v, "Invalid variable in not");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
         tmp = new_inst_variable(ctx, v->type->type, 1, 0);
@@ -1905,6 +1922,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_NEGATE:
             ctx->last_label = 0;
             return gen_negate(ctx, resleft);
+        case A_TILDE:
+            ctx->last_label = 0;
+            return gen_tilde(ctx, resleft);
         case A_NOT:
             ctx->last_label = 0;
             return gen_not(ctx, resleft);
