@@ -493,7 +493,7 @@ struct node *and_expression(struct scanfile *f, struct token *token)
     struct node *res = equality_expression(f, token);
 
     if (accept(f, token, T_AMP)) {
-        struct node *tmp = equality_expression(f, token);
+        struct node *tmp = and_expression(f, token);
         FATAL(!tmp, "Right side missing on AND");
         res = make_node(A_AND, res, NULL, tmp);
     }
@@ -507,7 +507,7 @@ struct node *exclusive_or_expression(struct scanfile *f, struct token *token)
         return res;
 
     if (accept(f, token, T_XOR)) {
-        struct node *tmp = and_expression(f, token);
+        struct node *tmp = exclusive_or_expression(f, token);
         FATAL(!tmp, "Right side missing on XOR");
         res = make_node(A_XOR, res, NULL, tmp);
     }
@@ -521,7 +521,7 @@ struct node *inclusive_or_expression(struct scanfile *f, struct token *token)
         return res;
 
     if (accept(f, token, T_OR)) {
-        struct node *tmp = exclusive_or_expression(f, token);
+        struct node *tmp = inclusive_or_expression(f, token);
         FATAL(!tmp, "Right side missing on OR");
         res = make_node(A_OR, res, NULL, tmp);
     }
@@ -535,7 +535,7 @@ struct node *logical_and_expression(struct scanfile *f, struct token *token)
         return res;
 
     if (accept(f, token, T_LOG_AND)) {
-        struct node *tmp = inclusive_or_expression(f, token);
+        struct node *tmp = logical_and_expression(f, token);
         FATAL(!tmp, "Right side missing on logical AND");
         res = make_node(A_LOG_AND, res, NULL, tmp);
     }
@@ -549,7 +549,7 @@ struct node *logical_or_expression(struct scanfile *f, struct token *token)
         return res;
 
     if (accept(f, token, T_LOG_OR)) {
-        struct node *tmp = logical_and_expression(f, token);
+        struct node *tmp = logical_or_expression(f, token);
         FATAL(!tmp, "Right side missing on logical OR");
         res = make_node(A_LOG_OR, res, NULL, tmp);
     }
