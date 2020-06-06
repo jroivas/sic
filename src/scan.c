@@ -247,6 +247,29 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '/':
             t->token = T_SLASH;
+            c = next(f);
+            if (c == '/') {
+                // This is comment until end of line
+                while (c != '\n' && c != '\r') {
+                    c = next(f);
+                }
+                // Scan next
+                return scan(f, t);
+            } else if (c == '*') {
+                do {
+                    int trigger;
+
+                    c = next(f);
+                    trigger = c == '*';
+                    if (trigger) {
+                        c = next(f);
+                        if (c == '/')
+                            break;
+                    }
+                } while (c != EOF);
+                return scan(f, t);
+            } else
+                putback(f, c);
             break;
         case '%':
             t->token = T_MOD;
