@@ -535,7 +535,6 @@ struct node *logical_and_expression(struct scanfile *f, struct token *token)
         return res;
 
     if (accept(f, token, T_LOG_AND)) {
-        node_walk(res);
         struct node *tmp = inclusive_or_expression(f, token);
         FATAL(!tmp, "Right side missing on logical AND");
         res = make_node(A_LOG_AND, res, NULL, tmp);
@@ -613,7 +612,6 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
 
     res = conditional_expression(f, token);
 
-    node_walk(res);
     return res;
 }
 

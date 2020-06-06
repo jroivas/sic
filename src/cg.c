@@ -967,7 +967,7 @@ int gen_bool_cast(struct gen_context *ctx, struct variable *var)
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node);
-int gen_exclusive(struct gen_context *ctx, struct node *node)
+int gen_exclusive_and(struct gen_context *ctx, struct node *node)
 {
     FATAL(!node->left, "Exclusive or/and no left hand tree");
     FATAL(!node->right, "Exclusive or/and no right hand tree");
@@ -987,14 +987,12 @@ int gen_exclusive(struct gen_context *ctx, struct node *node)
 
     // TODO: OR handling
     struct buffer *and_ok = buffer_init();
-    //struct buffer *second = buffer_init();
 
     int label1 = gen_reserve_label(ctx);
     struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
     buffer_write(and_ok, "L%d:\n", label1);
     buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
         res3->reg, src1);
-    //and ? "and" : "or",
 
     struct buffer *tmp = ctx->data;
     ctx->data = and_ok;
@@ -1009,23 +1007,17 @@ int gen_exclusive(struct gen_context *ctx, struct node *node)
 
     int label2 = gen_reserve_label(ctx);
     int label3 = gen_reserve_label(ctx);
-    //buffer_append(ctx->data, first);
     buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         res->reg, label1, label3);
     buffer_append(ctx->data, buffer_read(and_ok));
     buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         res2->reg, label2, label3);
     buffer_write(ctx->data, "L%d:\n", label2);
-    //struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
     buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
         real_res->reg);
     int label4 = gen_reserve_label(ctx);
     buffer_write(ctx->data, "br label %%L%d\n",
         label4);
-    /*
-    buffer_write(ctx->data, "%%%d = and i1 %%%d, %%%d\n",
-        res3->reg, res->reg, res2->reg);
-    */
 
     buffer_write(ctx->data, "L%d:\n", label3);
     buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
@@ -1033,70 +1025,65 @@ int gen_exclusive(struct gen_context *ctx, struct node *node)
     buffer_write(ctx->data, "br label %%L%d\n",
         label4);
     buffer_write(ctx->data, "L%d:\n", label4);
-    //buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
-        //res4->reg, src1);
     return real_res->reg;
-#if 0
+}
+
+int gen_exclusive_or(struct gen_context *ctx, struct node *node)
+{
+    FATAL(!node->left, "Exclusive or/and no left hand tree");
+    FATAL(!node->right, "Exclusive or/and no right hand tree");
+
+    struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
+    buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
+        real_res->reg);
+
+    int a = gen_recursive(ctx, node->left);
     struct variable *v1 = find_variable(ctx, a);
-    struct variable *v2 = find_variable(ctx, b);
-
     int src1 = gen_bool_cast(ctx, v1);
-    int src2 = gen_bool_cast(ctx, v2);
 
-    const char *op;
-
-    switch (type) {
-        case A_LOG_OR:
-            op = "or";
-            break;
-        case A_LOG_AND:
-            op = "and";
-            break;
-        default:
-            ERR("Invalid exclusive operator: %d", type);
-    }
     struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
-        res->reg, op, src1, src2);
-    
+        res->reg, src1);
 
-    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
-    buffer_write(ctx->data, "%%%d = %s i1 %%%d, %%%d ; EXCL\n",
-        res->reg, op, src1, src2);
+    struct buffer *or_notok = buffer_init();
 
-    return res->reg;
-#endif
-    
+    int label1 = gen_reserve_label(ctx);
+    struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(or_notok, "L%d:\n", label1);
+    buffer_write(or_notok, "%%%d = icmp eq i1 %%%d, 1\n",
+        res3->reg, src1);
 
-#if 0
-    struct variable *v1 = find_variable(ctx, a);
+    struct buffer *tmp = ctx->data;
+    ctx->data = or_notok;
+    int b = gen_recursive(ctx, node->right);
     struct variable *v2 = find_variable(ctx, b);
-    enum var_type restype = get_and_cast(ctx, &v1, &v2);
-    struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
+    int src2 = gen_bool_cast(ctx, v2);
+    struct variable *res2 = new_inst_variable(ctx, V_INT, 1, 0);
+    buffer_write(or_notok, "%%%d = icmp eq i1 %%%d, 1\n",
+        res2->reg, src2);
+    ctx->data = tmp;
 
-    struct type *target = find_type_by(ctx, V_INT, 1, 0);
+    int label2 = gen_reserve_label(ctx);
+    int label3 = gen_reserve_label(ctx);
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+        res->reg, label3, label1);
+    buffer_append(ctx->data, buffer_read(or_notok));
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+        res2->reg, label3, label2);
+    buffer_write(ctx->data, "L%d:\n", label2);
+    buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
+        real_res->reg);
+    int label4 = gen_reserve_label(ctx);
+    buffer_write(ctx->data, "br label %%L%d\n",
+        label4);
 
-    if (restype == V_INT) {
-        const char *op;
-
-        switch (type) {
-            case A_LOG_OR:
-                op = "or";
-                break;
-            case A_LOG_AND:
-                op = "and";
-                break;
-            default:
-                ERR("Invalid inclusive operator: %d", type);
-        }
-
-        buffer_write(ctx->data, "%%%d = %s i%d %%%d, %%%d\n",
-            res->reg, op,
-            v1->type->bits, v1->reg, v2->reg);
-    } else
-        ERR("Invalid type for inclusive operation: %d", restype);
-    return res->reg;
-#endif
+    buffer_write(ctx->data, "L%d: ; LL || 3\n", label3);
+    buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
+        real_res->reg);
+    buffer_write(ctx->data, "br label %%L%d\n",
+        label4);
+    buffer_write(ctx->data, "L%d: ; LL || 4\n", label4);
+    return real_res->reg;
 }
 
 int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
@@ -1729,7 +1716,9 @@ int gen_if(struct gen_context *ctx, struct node *node)
 
     ctx->data = ifblock;
     int label2 = gen_reserve_label(ctx);
-    buffer_write(ifblock, "L%d:\n", label2);
+    if (!inc && !node->right)
+        buffer_write(ifblock, "br label %%L%d ; extra1\n", label2);
+    buffer_write(ifblock, "L%d: ; LL IF 2\n", label2);
     if (node->right) {
         int rets = ctx->rets;
         gen_recursive(ctx, node->right);
@@ -1894,8 +1883,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_function(ctx, node);
     if (node->node == A_IF)
         return gen_if(ctx, node);
-    if (node->node == A_LOG_OR || node->node == A_LOG_AND)
-        return gen_exclusive(ctx, node);
+    if (node->node == A_LOG_AND)
+        return gen_exclusive_and(ctx, node);
+    if (node->node == A_LOG_OR)
+        return gen_exclusive_or(ctx, node);
 
     /* Recurse first to get children solved */
     if (node->left)
