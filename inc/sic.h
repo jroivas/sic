@@ -16,6 +16,12 @@ enum var_type {
     V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR
 };
 
+#define WARN(...) { \
+    fprintf(stderr, "WARNING: ");\
+    fprintf(stderr, __VA_ARGS__);\
+    fprintf(stderr, "\n");\
+}
+
 #define ERR_FULL(trace, ...) { \
     fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\

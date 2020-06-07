@@ -668,7 +668,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 
     if (v->ptr || v->addr) {
         char *tmp = get_stars(v->ptr);
-        prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0, 0);
+        prev = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
         buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d ; %d\n",
                 prev->reg, prev->type->bits,
                 tmp ? tmp : "",
@@ -697,7 +697,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
         reg = prev->reg;
     }
 #endif
-    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0, 0);
+    struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
 
     buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d\n",
             res->reg, res->type->bits, res->type->bits,
@@ -1256,6 +1256,43 @@ int gen_type(struct gen_context *ctx, struct node *node)
     return REF_CTX(t->id);
 }
 
+int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    // Pending type should be where we're casting to
+    struct variable *orig = find_variable(ctx, b);
+    struct variable *var = gen_load(ctx, orig);
+    struct variable *res = NULL;
+
+    FATAL(!var, "Invalid cast source");
+    struct type *target = ctx->pending_type;
+    if (target->type == var->type->type) {
+        res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
+        if (var->ptr) {
+            char *stars = get_stars(var->ptr);
+            buffer_write(ctx->data, "%%%d = ptrtoint i%d%s %%%d to i%d\n",
+                res->reg, var->bits, stars, var->reg, target->bits);
+            free(stars);
+        } else if (target->bits > var->type->bits) {
+            if (target->sign || var->type->sign)
+                buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
+                    res->reg, var->bits, var->reg, target->bits);
+            else
+                buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
+                    res->reg, var->bits, var->reg, target->bits);
+        } else {
+            // This is truncate so warn
+            WARN("Truncating from %d bits to %d bits, this may result lost of precision\n", var->bits, target->bits);
+            buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
+                res->reg, var->bits, var->reg, target->bits);
+        }
+    }
+
+    ctx->pending_type = NULL;
+    if (!res)
+        return b;
+    return res->reg;
+}
+
 int gen_pointer(struct gen_context *ctx, struct node *node)
 {
     if (ctx->pending_ptr)
@@ -1286,7 +1323,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 ptrval = gen_use_ptr(ctx);
                 node->ptr = ptrval;
                 node->addr = addrval;
-                var = new_variable(ctx, node->value_string, V_INT, t->bits, 0, ptrval, addrval, ctx->global);
+                var = new_variable(ctx, node->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
                 var->global = ctx->global;
                 var->addr = addrval;
                 res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 0);
@@ -1970,6 +2007,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             break;
         case A_TYPE:
             return gen_type(ctx, node);
+        case A_CAST:
+            return gen_cast_to(ctx, node, resleft, resright);
         case A_POINTER:
             //return gen_pointer(ctx, node);
             return resleft;
