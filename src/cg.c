@@ -1265,7 +1265,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
 
     FATAL(!var, "Invalid cast source");
     struct type *target = ctx->pending_type;
-    if (target->type == var->type->type) {
+    if (var->type->type == V_INT && target->type == var->type->type) {
         res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
         if (var->ptr) {
             char *stars = get_stars(var->ptr);
@@ -1285,11 +1285,27 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
             buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
                 res->reg, var->bits, var->reg, target->bits);
         }
-    }
+    } else if (var->type->type == V_INT && target->type == V_FLOAT) {
+        res = new_inst_variable(ctx, V_FLOAT, target->bits, target->sign);
+        if (var->type->sign)
+            buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to %s\n",
+                res->reg, var->bits, var->reg, target->bits == 64 ? "double" : "float");
+        else
+            buffer_write(ctx->data, "%%%d = uitofp i%d %%%d to %s\n",
+                res->reg, var->bits, var->reg, target->bits == 64 ? "double" : "float");
+    } else if (var->type->type == V_FLOAT && target->type == V_INT) {
+        res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
+        if (target->sign)
+            buffer_write(ctx->data, "%%%d = fptosi %s %%%d to i%d\n",
+                res->reg, var->type->bits == 64 ? "double" : "float", var->reg, target->bits);
+        else
+            buffer_write(ctx->data, "%%%d = fptoui %s %%%d to i%d\n",
+                res->reg, var->type->bits == 64 ? "double" : "float", var->reg, target->bits);
+    } else
+        ERR("Invalid cast");
 
     ctx->pending_type = NULL;
-    if (!res)
-        return b;
+    FATAL(!res, "Invalid cast");
     return res->reg;
 }
 

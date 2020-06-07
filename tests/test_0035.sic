@@ -3,11 +3,18 @@ int main()
     int a = -1;
     int *b = &a;
     unsigned long c;
+    double d;
 
     c = (unsigned long)a;
     c = (unsigned long)b;
     a = (int)c;
     c = (unsigned long)a;
+
+    d = (double)c;
+    d = (double)a;
+
+    c = (unsigned long)d;
+    a = (int)d;
 
     return c;
 }
