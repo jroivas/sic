@@ -1,0 +1,10 @@
+int main()
+{
+    int a = 0;
+    int *b = &a;
+    unsigned long c;
+
+    c = (unsigned long)b;
+
+    return c;
+}

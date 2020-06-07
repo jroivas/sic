@@ -43,6 +43,7 @@ enum nodetype {
     A_POSTDEC,
     A_PREDEC,
     A_TILDE,
+    A_CAST,
     A_LIST
 };
 

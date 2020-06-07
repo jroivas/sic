@@ -1218,7 +1218,6 @@ int gen_not(struct gen_context *ctx, int a)
     res = new_inst_variable(ctx, V_INT, 1, 0);
     buffer_write(ctx->data, "%%%d = xor i%d %%%d, true\n",
         res->reg, tmp->type->bits, tmp->reg);
-//%14 = xor i1 %13, true,
     return res->reg;
 }
 
@@ -1948,8 +1947,6 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_bitwise(ctx, node->node, resleft, resright);
         case A_LOG_OR:
         case A_LOG_AND:
-            //ctx->last_label = 0;
-            //return gen_exclusive(ctx, node->node, resleft, resright);
             ERR("Should not get here");
         case A_EQ_OP:
         case A_NE_OP:

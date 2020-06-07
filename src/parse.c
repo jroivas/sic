@@ -49,6 +49,7 @@ static const char *nodestr[] = {
     "POSTDEC",
     "PREDEC",
     "~",
+    "CAST",
     "LIST"
 };
 
@@ -314,13 +315,17 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_CURLY_CLOSE:
             return NULL;
         case T_ROUND_OPEN:
+            save_point(f, token);
             scan(f, token);
             res = expression(f, token);
-            expect(f, token, T_ROUND_CLOSE, ")");
+            if (!(accept(f, token, T_ROUND_CLOSE))) {
+                load_point(f, token);
+                return NULL;
+            }
+            remove_save_point(f, token);
             return res;
         default:
             return res;
-            //ERR_TRACE("Unexpected token: %s", token_str(token));
     }
     scan(f, token);
 
@@ -570,12 +575,12 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
     struct node *res;
     enum nodetype nodetype = A_ASSIGN;
 
-    // FIXME unary_expression assignment_operator
     save_point(f, token);
     struct node *unary = unary_expression(f, token);
     if (!unary) {
         load_point(f, token);
-        return NULL;
+        res = conditional_expression(f, token);
+        return res;
     }
 
     if (accept(f, token, T_PLUS))
@@ -606,10 +611,10 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
             struct node *expr = assignment_expression(f, token);
             res = make_node(nodetype, unary, NULL, expr);
             return res;
-        } else
-            load_point(f, token);
-    } else
-        load_point(f, token);
+        }
+        //load_point(f, token);
+    }
+    load_point(f, token);
 
     res = conditional_expression(f, token);
 
@@ -786,9 +791,53 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
     return left;
 }
 
+struct node *specifier_qualifier_list(struct scanfile *f, struct token *token)
+{
+    struct node *type = type_specifier(f, token);
+
+    if (type == NULL)
+        type = type_qualifier(f, token);
+
+    if (type == NULL)
+        return NULL;
+
+    struct node *rest = specifier_qualifier_list(f, token);
+    if (rest)
+        return make_node(A_LIST, type, NULL, rest);
+
+    return type;
+}
+
+struct node *abstract_declarator(struct scanfile *f, struct token *token)
+{
+    return NULL;
+}
+
+struct node *type_name(struct scanfile *f, struct token *token)
+{
+    struct node *res = specifier_qualifier_list(f, token);
+    if (!res)
+        return res;
+
+    struct node *rest = abstract_declarator(f, token);
+    if (rest)
+        res = make_node(A_LIST, res, NULL, rest);
+
+    return res;
+}
+
 struct node *cast_expression(struct scanfile *f, struct token *token)
 {
-    // TODO
+    if (accept(f, token, T_ROUND_OPEN)) {
+        struct node *cast_to = type_name(f, token);
+        FATAL(!cast_to, "No cast type name");
+        cast_to = type_resolve(cast_to, 0);
+        expect(f, token, T_ROUND_CLOSE, ")");
+        struct node *src = cast_expression(f, token);
+        FATAL(!src, "No cast source");
+        return make_node(A_CAST, cast_to, NULL, src);
+    }
+
     return unary_expression(f, token);
 }
 
@@ -903,8 +952,6 @@ struct node *selection_statement(struct scanfile *f, struct token *token)
 
     res = if_statement(f, token);
 
-    // TODO: if ..
-    // TODO: if .. else ..
     // TODO: switch ...
 
     return res;
