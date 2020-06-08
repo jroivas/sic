@@ -34,7 +34,10 @@ enum keyword_type {
     K_NONE,
     K_RETURN,
     K_IF,
-    K_ELSE
+    K_ELSE,
+    K_WHILE,
+    K_DO,
+    K_FOR
 };
 
 struct token {

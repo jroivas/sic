@@ -1960,6 +1960,50 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     return ternary ? res->reg : 0;
 }
 
+int gen_while(struct gen_context *ctx, struct node *node)
+{
+    int looplabel = gen_reserve_label(ctx);
+    int cmplabel = gen_reserve_label(ctx);
+    int outlabel = gen_reserve_label(ctx);
+    struct buffer *tmp = ctx->data;
+
+    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
+    buffer_write(ctx->data, "L%d:\n", looplabel);
+
+    if (node->right)
+        gen_recursive(ctx, node->right);
+
+    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
+    buffer_write(ctx->data, "L%d:\n", cmplabel);
+
+    FATAL(!node->left, "No compare block in while");
+    int cmp_reg = gen_recursive(ctx, node->left);
+    //int cmp_reg = gen_cmp_bool(ctx, cond);
+    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+        cmp_reg, looplabel, outlabel);
+#if 0
+    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
+    buffer_write(ctx->data, "L%d:\n", loop);
+
+    ctx->data = cmpblock;
+    int label1 = gen_reserve_label(ctx);
+    buffer_write(cmpblock, "L%d:\n", label1);
+    if (node->mid) {
+        int rets = ctx->rets;
+        ifret = gen_recursive(ctx, node->mid);
+        inc = rets < ctx->rets;
+    } else
+        FATAL(ternary, "Ternary missing true block!");
+
+    buffer_write(ctx->data, "br label %%L%d\n", loop);
+#endif
+    buffer_write(ctx->data, "L%d:\n", outlabel);
+
+    ctx->data = tmp;
+
+    return 0;
+}
+
 int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *orig = find_variable(ctx, a);
@@ -2094,6 +2138,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_logical_and(ctx, node);
     if (node->node == A_LOG_OR)
         return gen_logical_or(ctx, node);
+    if (node->node == A_WHILE)
+        return gen_while(ctx, node);
 
     /* Recurse first to get children solved */
     if (node->left)

@@ -54,6 +54,7 @@ static const char *nodestr[] = {
     "PREDEC",
     "~",
     "CAST",
+    "WHILE",
     "LIST"
 };
 
@@ -755,6 +756,7 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
     if (!res)
         return NULL;
 
+    // TODO  "[..]", pointers, elements, etc.
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *args = argument_expression_list(f, token);
 
@@ -994,6 +996,25 @@ struct node *selection_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *iteration_statement(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    if (token->token != T_KEYWORD)
+        return NULL;
+
+    if (accept_keyword(f, token, K_WHILE)) {
+        expect(f, token, T_ROUND_OPEN, "(");
+        res = expression(f, token);
+        expect(f, token, T_ROUND_CLOSE, ")");
+
+        struct node *body = statement(f, token);
+        res = make_node(A_WHILE, res, NULL, body);
+    }
+
+    return res;
+}
+
 struct node *statement(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -1019,7 +1040,10 @@ struct node *statement(struct scanfile *f, struct token *token)
     res = selection_statement(f, token);
     if (res)
         return res;
-    // TODO: iteration_statement
+
+    res = iteration_statement(f, token);
+    if (res)
+        return res;
 
     res = jump_statement(f, token);
 
@@ -1076,13 +1100,9 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     scan(f, token);
 
     decl = declaration_list(f, token);
-
     res = statement_list(f, token);
-    if (!res) {
-        // TODO other cases
-    }
-
     expect(f, token, T_CURLY_CLOSE, "}");
+
     if (decl)
         res = make_node(A_GLUE, decl, NULL, res);
     return res;

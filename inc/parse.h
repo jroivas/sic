@@ -48,6 +48,7 @@ enum nodetype {
     A_PREDEC,
     A_TILDE,
     A_CAST,
+    A_WHILE,
     A_LIST
 };
 

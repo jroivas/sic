@@ -206,6 +206,15 @@ int keyword(struct token *t)
     } else if (strcmp(v, "else") == 0) {
         res = 1;
         t->keyword = K_ELSE;
+    } else if (strcmp(v, "while") == 0) {
+        res = 1;
+        t->keyword = K_WHILE;
+    } else if (strcmp(v, "do") == 0) {
+        res = 1;
+        t->keyword = K_DO;
+    } else if (strcmp(v, "for") == 0) {
+        res = 1;
+        t->keyword = K_FOR;
     }
 
     return res;
