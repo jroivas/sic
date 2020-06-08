@@ -1,0 +1,30 @@
+int main()
+{
+    int i;
+    int res = 0;
+
+    for (i = 0; i < 10; i++) {
+        res += i;
+    }
+    if (i != 10)
+        return 1;
+    if (res != 45)
+        return 2;
+
+    for (int j = 0; j < 42; j++) {
+        res += j;
+        i++;
+    }
+/* TODO: This should complain since j should be calid only
+    inside for loop.
+
+    if (j != 42)
+        return 42;
+*/
+    if (i != 52)
+        return 3;
+    if (res != 906)
+        return 4;
+
+    return 0;
+}

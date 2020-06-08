@@ -1023,6 +1023,27 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
         expect(f, token, T_ROUND_CLOSE, ")");
         res = make_node(A_DO, res, NULL, body);
         semi(f, token);
+    } else if (accept_keyword(f, token, K_FOR)) {
+        expect(f, token, T_ROUND_OPEN, "(");
+        save_point(f, token);
+        struct node *init = expression_statement(f, token);
+        if (!init) {
+            load_point(f, token);
+            init = declaration(f, token);
+        } else
+            remove_save_point(f, token);
+        FATAL(!init, "Missing FOR initializer");
+        struct node *comp = expression_statement(f, token);
+        FATAL(!init, "Missing FOR test");
+
+        struct node *post = NULL;
+        if (token->token != T_ROUND_CLOSE)
+            post = expression(f, token);
+        expect(f, token, T_ROUND_CLOSE, ")");
+
+        struct node *body = statement(f, token);
+        init = make_node(A_GLUE, init, NULL, post);
+        res = make_node(A_FOR, comp, init, body);
     }
 
     return res;

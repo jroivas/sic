@@ -1458,7 +1458,10 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 break;
         }
     } else {
+            // TODO FIXME Faulty check
+#if 0
             FATAL(ctx->is_decl >= 100 && ctx->is_decl < 102, "Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
+#endif
             res = var->reg;
     }
     return res;
@@ -1967,7 +1970,13 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
     int outlabel = gen_reserve_label(ctx);
     struct buffer *tmp = ctx->data;
 
-    if (do_while)
+    if (do_while == 2) {
+        node_walk(node);
+        FATAL(!node->mid || node->mid->node != A_GLUE, "Invalid for loop");
+        if (node->mid->left)
+            gen_recursive(ctx, node->mid->left);
+        buffer_write(ctx->data, "br label %%L%d\n", looplabel);
+    } else if (do_while == 1)
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
     else
         buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
@@ -1982,6 +1991,10 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
     buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     buffer_write(ctx->data, "L%d:\n", cmplabel);
 
+    if (do_while == 2) {
+        if (node->mid->right)
+            gen_recursive(ctx, node->mid->right);
+    }
     FATAL(!node->left, "No compare block in while");
     int cond_reg = gen_recursive(ctx, node->left);
     struct variable *cond = find_variable(ctx, cond_reg);
@@ -2134,6 +2147,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_while(ctx, node, 0);
     if (node->node == A_DO)
         return gen_while(ctx, node, 1);
+    if (node->node == A_FOR)
+        return gen_while(ctx, node, 2);
 
     /* Recurse first to get children solved */
     if (node->left)
