@@ -71,6 +71,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ADD:
         case A_MINUS:
         case A_IF:
+        case A_TERNARY:
         case A_NEGATE:
         case A_NOT:
         case A_MUL:

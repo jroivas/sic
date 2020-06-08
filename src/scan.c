@@ -24,6 +24,8 @@ static const char *tokenstr[] = {
     "&",
     "NULL",
     "~",
+    "?",
+    ":",
     "EOF"
 };
 
@@ -322,6 +324,12 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '~':
             t->token = T_TILDE;
+            break;
+        case '?':
+            t->token = T_QUESTION;
+            break;
+        case ':':
+            t->token = T_COLON;
             break;
         case '<':
             t->token = T_LT;

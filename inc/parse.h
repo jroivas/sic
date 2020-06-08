@@ -33,7 +33,7 @@ enum nodetype {
     A_POINTER,
     A_ADDR,
     A_IF,
-    A_ELSE,
+    A_TERNARY,
     A_EQ_OP,
     A_NE_OP,
     A_LT,

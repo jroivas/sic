@@ -39,7 +39,7 @@ static const char *nodestr[] = {
     "POINTER",
     "ADDR",
     "IF",
-    "ELSE",
+    "TERNARY",
     "==",
     "!=",
     "<",
@@ -588,7 +588,15 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
 {
     struct node *res = logical_or_expression(f, token);
 
-    // TODO ternary
+    // Ternary operator
+    if (accept(f, token, T_QUESTION)) {
+        struct node *exp = expression(f, token);
+        if (!accept(f, token, T_COLON))
+            ERR("Expected ':' in ternary operation");
+        struct node *cond = conditional_expression(f, token);
+        res = make_node(A_TERNARY, res, exp, cond);
+    }
+
     return res;
 }
 
@@ -850,15 +858,22 @@ struct node *type_name(struct scanfile *f, struct token *token)
 
 struct node *cast_expression(struct scanfile *f, struct token *token)
 {
+    save_point(f, token);
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *cast_to = type_name(f, token);
-        FATAL(!cast_to, "No cast type name");
-        cast_to = type_resolve(cast_to, 0);
-        expect(f, token, T_ROUND_CLOSE, ")");
-        struct node *src = cast_expression(f, token);
-        FATAL(!src, "No cast source");
-        return make_node(A_CAST, cast_to, NULL, src);
-    }
+        if (!cast_to) {
+            load_point(f, token);
+        } else {
+            remove_save_point(f, token);
+            //FATAL(!cast_to, "No cast type name");
+            cast_to = type_resolve(cast_to, 0);
+            expect(f, token, T_ROUND_CLOSE, ")");
+            struct node *src = cast_expression(f, token);
+            FATAL(!src, "No cast source");
+            return make_node(A_CAST, cast_to, NULL, src);
+        }
+    } else
+        remove_save_point(f, token);
 
     return unary_expression(f, token);
 }

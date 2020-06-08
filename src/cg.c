@@ -645,7 +645,7 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
     FATAL(!dst, "Invalid store destination");
     FATAL(!src, "Invalid store source");
 
-    //char *tmp = get_stars(dst); // FIXME
+    //char *stars = get_stars(dst->ptr); // FIXME
     if (dst->type->type != src->type->type)
         ERR("Source should be same type");
 
@@ -1551,8 +1551,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     } else if (src->type->type == V_VOID) {
         // TODO Void pointer
         return 0;
-    } else
-        ERR("Invalid assign");
+    } else {
+        ERR("Invalid assign: %d from %d", left, right);
+    }
     return dst->reg;
 }
 
@@ -1856,7 +1857,7 @@ int gen_reserve_label(struct gen_context *ctx)
     return ctx->labels++;
 }
 
-int gen_if(struct gen_context *ctx, struct node *node)
+int gen_if(struct gen_context *ctx, struct node *node, int ternary)
 {
     // Conditional clause on left
     FATAL(!node->left, "No conditional in if");
@@ -1871,15 +1872,37 @@ int gen_if(struct gen_context *ctx, struct node *node)
     struct buffer *tmp = ctx->data;
     int inc = 0;
     int inc2 = 0;
+    struct variable *res = NULL;
+    int ifret = 0;
 
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
     buffer_write(cmpblock, "L%d:\n", label1);
     if (node->mid) {
         int rets = ctx->rets;
-        gen_recursive(ctx, node->mid);
+        ifret = gen_recursive(ctx, node->mid);
         inc = rets < ctx->rets;
+    } else
+        FATAL(ternary, "Ternary missing true block!");
+
+    /* Handle ternary return value */
+    ctx->data = tmp;
+    if (ternary) {
+        struct variable *tres = find_variable(ctx, ifret);
+        FATAL(!tres, "Ternary return type invalid");
+        buffer_write(cmpblock, "; TENARY TRUE\n");
+        res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->ptr, tres->addr, 0);
+        gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 1);
+
+        ctx->data = cmpblock;
+        tres = gen_cast(ctx, tres, res->type, 1);
+        FATAL(!tres, "Invalid cast");
+        tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
+        FATAL(!tres, "Invalid bit cast");
+
+        gen_assign(ctx, NULL,  res->reg, tres->reg);
     }
+
     /* Hack to handle "unnamed" and unreachable branch */
     if (inc)
         ctx->regnum++;
@@ -1891,9 +1914,21 @@ int gen_if(struct gen_context *ctx, struct node *node)
     buffer_write(ifblock, "L%d: ; LL IF 2\n", label2);
     if (node->right) {
         int rets = ctx->rets;
-        gen_recursive(ctx, node->right);
+        ifret = gen_recursive(ctx, node->right);
         inc2 = rets < ctx->rets;
+        if (ternary) {
+            struct variable *tres = find_variable(ctx, ifret);
+            buffer_write(cmpblock, "; TENARY FALSE\n");
+            FATAL(!tres, "Ternary return type invalid");
+            FATAL(!res, "Invalid ternary");
+            tres = gen_cast(ctx, tres, res->type, 1);
+            FATAL(!tres, "Invalid cast");
+            tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
+            FATAL(!tres, "Invalid bit cast");
+            gen_assign(ctx, NULL,  res->reg, tres->reg);
+        }
     } else {
+        FATAL(ternary, "Ternary missing false block!");
         ctx->last_label = label2;
     }
 
@@ -1907,8 +1942,8 @@ int gen_if(struct gen_context *ctx, struct node *node)
         buffer_write(ifblock, "L%d:\n", label3);
         ctx->last_label = label3;
     }
-
     ctx->data = tmp;
+
     buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         cmp_reg, label1, label2);
     buffer_append(ctx->data, buffer_read(cmpblock));
@@ -1922,7 +1957,7 @@ int gen_if(struct gen_context *ctx, struct node *node)
     buffer_del(cmpblock);
     buffer_del(ifblock);
 
-    return 0;
+    return ternary ? res->reg : 0;
 }
 
 int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
@@ -2052,7 +2087,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node->node == A_FUNCTION)
         return gen_function(ctx, node);
     if (node->node == A_IF)
-        return gen_if(ctx, node);
+        return gen_if(ctx, node, 0);
+    if (node->node == A_TERNARY)
+        return gen_if(ctx, node, 1);
     if (node->node == A_LOG_AND)
         return gen_logical_and(ctx, node);
     if (node->node == A_LOG_OR)

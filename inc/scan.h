@@ -25,6 +25,8 @@ enum tokentype {
     T_AMP,
     T_NULL,
     T_TILDE,
+    T_QUESTION,
+    T_COLON,
     T_EOF
 };
 
@@ -44,7 +46,7 @@ struct token {
 };
 
 // Max 32 save points, adjust when compiler comes more compilicated
-#define SCANFILE_SAVE_MAX 32
+#define SCANFILE_SAVE_MAX 64
 struct scanfile {
     FILE *infile;
     int line;
