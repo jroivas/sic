@@ -1,6 +1,5 @@
 int main()
 {
-    //int tst[42];
     int tst = 0;
     int i;
 
@@ -19,6 +18,9 @@ int main()
     }
     if (tst != 25)
         return 2;
+
+    while (0)
+        return 3;
 
     return 0;
 }
