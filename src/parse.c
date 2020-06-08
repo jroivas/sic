@@ -42,6 +42,10 @@ static const char *nodestr[] = {
     "ELSE",
     "==",
     "!=",
+    "<",
+    ">",
+    "<=",
+    ">=",
     "NULL",
     "FUNC_CALL",
     "POSTINC",
@@ -474,7 +478,25 @@ struct node *shift_expression(struct scanfile *f, struct token *token)
 
 struct node *relational_expression(struct scanfile *f, struct token *token)
 {
-    return shift_expression(f, token);
+    struct node *res = shift_expression(f, token);
+    if (accept(f, token, T_LT)) {
+        enum nodetype type = A_LT;
+        if (accept(f, token, T_EQ))
+            type = A_LT_EQ;
+        
+        struct node *right = relational_expression(f, token);
+        FATAL(!right, "Invalid relational expression");
+        return make_node(type, res, NULL, right);
+    } else if (accept(f, token, T_GT)) {
+        enum nodetype type = A_GT;
+        if (accept(f, token, T_EQ))
+            type = A_GT_EQ;
+        
+        struct node *right = relational_expression(f, token);
+        FATAL(!right, "Invalid relational expression");
+        return make_node(type, res, NULL, right);
+    }
+    return res;
 }
 
 struct node *equality_expression(struct scanfile *f, struct token *token)

@@ -98,6 +98,10 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_RETURN:
         case A_EQ_OP:
         case A_NE_OP:
+        case A_LT:
+        case A_GT:
+        case A_LT_EQ:
+        case A_GT_EQ:
         case A_DECLARATION:
         case A_FUNC_CALL:
         case A_NULL:

@@ -1158,6 +1158,107 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
     return 0;
 }
 
+int gen_lt_gt(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    FATAL(!v1, "No cmp1 var");
+    FATAL(!v2, "No cmp2 var");
+    v1 = gen_load(ctx, v1);
+    v2 = gen_load(ctx, v2);
+
+    FATAL(!v1, "No cmp1 var");
+    FATAL(!v2, "No cmp2 var");
+
+    if (v1->type->type == V_INT && v2->type->type == V_INT) {
+        if (v1->type->bits == v2->type->bits);
+        else if (v1->type->bits > v2->type->bits)
+            v2 = gen_bits_cast(ctx, v2, v1->bits, 1);
+        else
+            v1 = gen_bits_cast(ctx, v1, v2->bits, 1);
+
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        char *stars1 = get_stars(v1->ptr);
+        const char *op;
+        int unsig = !v1->type->sign || !v2->type->sign;
+        switch (node->node) {
+            case A_LT:
+                op = unsig ? "ult": "slt";
+                break;
+            case A_GT:
+                op = unsig ? "ugt": "sgt";
+                break;
+            case A_LT_EQ:
+                op = unsig ? "ule": "sle";
+                break;
+            case A_GT_EQ:
+                op = unsig ? "uge": "sge";
+                break;
+            default:
+                ERR("Invalid operator: %d\n", node->node);
+        }
+        buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, "
+            "%%%d\n",
+            res->reg, op,
+            v1->type->bits, stars1 ? stars1 : "", v1->reg,
+            v2->reg);
+
+        return res->reg;
+    }
+    else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        char *stars1 = get_stars(v1->ptr);
+        const char *op;
+        int ordered = 1;
+        switch (node->node) {
+            case A_LT:
+                op = ordered ? "olt": "ult";
+                break;
+            case A_GT:
+                op = ordered ? "ogt": "ugt";
+                break;
+            case A_LT_EQ:
+                op = ordered ? "ole": "ule";
+                break;
+            case A_GT_EQ:
+                op = ordered ? "oge": "uge";
+                break;
+            default:
+                ERR("Invalid operator: %d\n", node->node);
+        }
+        buffer_write(ctx->data, "%%%d = fcmp %s double %%%d%s, "
+            "%%%d\n",
+            res->reg, op,
+            v1->reg, stars1 ? stars1 : "",
+            v2->reg);
+
+        return res->reg;
+    }
+#if 0
+    else if ((v1->type->type == V_INT && v2->type->type == V_NULL ) || (v1->type->type == V_NULL && v2->type->type == V_INT)) {
+        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        if (v1->type->type == V_NULL)
+            v1 = v2;
+
+        FATAL(!v1->ptr, "Comparing non-pointer to NULL: %d, %d", v1->ptr, v2->ptr);
+
+        char *stars1 = get_stars(v1->ptr);
+        const char *op = node->node == A_EQ_OP ? "eq" : "ne";
+        buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, null\n",
+            res->reg, op,
+            v1->type->bits, stars1 ? stars1 : "", v1->reg);
+        return res->reg;
+    }
+#endif
+
+    ERR("Invalid comparison: %s != %s", type_str(v1->type->type), type_str(v2->type->type));
+/*
+    printf("EQ: %d %s %d\n",
+        a, node->node == A_EQ_OP ? "==" : "!=", b);
+*/
+    return 0;
+}
+
 int gen_negate(struct gen_context *ctx, int a)
 {
     struct variable *v = find_variable(ctx, a);
@@ -2005,6 +2106,12 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_NE_OP:
             ctx->last_label = 0;
             return gen_eq(ctx, node, resleft, resright);
+        case A_LT:
+        case A_GT:
+        case A_LT_EQ:
+        case A_GT_EQ:
+            ctx->last_label = 0;
+            return gen_lt_gt(ctx, node, resleft, resright);
         case A_INT_LIT:
             ctx->last_label = 0;
             return gen_store_int(ctx, node);
