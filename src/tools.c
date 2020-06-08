@@ -115,6 +115,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_TILDE:
         case A_CAST:
         case A_WHILE:
+        case A_DO:
+        case A_FOR:
             printf("%s", node_str(node));
             break;
         case A_INT_LIT:

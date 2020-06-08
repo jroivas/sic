@@ -49,6 +49,8 @@ enum nodetype {
     A_TILDE,
     A_CAST,
     A_WHILE,
+    A_DO,
+    A_FOR,
     A_LIST
 };
 

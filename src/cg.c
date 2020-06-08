@@ -1960,14 +1960,17 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     return ternary ? res->reg : 0;
 }
 
-int gen_while(struct gen_context *ctx, struct node *node)
+int gen_while(struct gen_context *ctx, struct node *node, int do_while)
 {
     int looplabel = gen_reserve_label(ctx);
     int cmplabel = gen_reserve_label(ctx);
     int outlabel = gen_reserve_label(ctx);
     struct buffer *tmp = ctx->data;
 
-    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
+    if (do_while)
+        buffer_write(ctx->data, "br label %%L%d\n", looplabel);
+    else
+        buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     buffer_write(ctx->data, "L%d:\n", looplabel);
 
     int rets = ctx->rets;
@@ -2128,7 +2131,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node->node == A_LOG_OR)
         return gen_logical_or(ctx, node);
     if (node->node == A_WHILE)
-        return gen_while(ctx, node);
+        return gen_while(ctx, node, 0);
+    if (node->node == A_DO)
+        return gen_while(ctx, node, 1);
 
     /* Recurse first to get children solved */
     if (node->left)

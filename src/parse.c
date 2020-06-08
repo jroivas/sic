@@ -55,6 +55,8 @@ static const char *nodestr[] = {
     "~",
     "CAST",
     "WHILE",
+    "DO",
+    "FOR",
     "LIST"
 };
 
@@ -938,9 +940,12 @@ struct node *expression(struct scanfile *f, struct token *token)
 
 struct node *expression_statement(struct scanfile *f, struct token *token)
 {
+    while (accept(f, token, T_SEMI))
+        scan(f, token);
+
     struct node *res = expression(f, token);
-    if (res)
-        semi(f, token);
+    if (res && !accept(f, token, T_SEMI))
+        return NULL;
     return res;
 }
 
@@ -1010,6 +1015,14 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
 
         struct node *body = statement(f, token);
         res = make_node(A_WHILE, res, NULL, body);
+    } else if (accept_keyword(f, token, K_DO)) {
+        struct node *body = statement(f, token);
+        FATAL(!accept_keyword(f, token, K_WHILE), "Do missing while");
+        expect(f, token, T_ROUND_OPEN, "(");
+        res = expression(f, token);
+        expect(f, token, T_ROUND_CLOSE, ")");
+        res = make_node(A_DO, res, NULL, body);
+        semi(f, token);
     }
 
     return res;
@@ -1057,6 +1070,8 @@ struct node *statement_list(struct scanfile *f, struct token *token)
     while (1) {
         struct node *tmp = statement(f, token);
         if (!tmp)
+            tmp = declaration(f, token);
+        if (!tmp)
             break;
         tmp = make_node(A_LIST, tmp, NULL, NULL);
         if (res == NULL)
@@ -1097,6 +1112,7 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
 
     if (token->token != T_CURLY_OPEN)
         return NULL;
+
     scan(f, token);
 
     decl = declaration_list(f, token);
