@@ -32,6 +32,8 @@ struct variable {
      * marking dynamic array, or non-initializes one
      */
     int array;
+    /* Initial value of the variable */
+    literalnum value;
     struct type *type;
     const char *name;
     hashtype name_hash;
@@ -62,6 +64,7 @@ struct gen_context {
 
     struct variable *variables;
     struct variable *globals;
+    struct variable *last_ident;
 
     struct gen_context *parent;
     struct gen_context *child;
@@ -568,6 +571,11 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
      */
     if (val->type->bits == 0)
         val->type->bits = 32;
+    buffer_write(ctx->init, "; Int literal: %d\n", n->value);
+    if (ctx->is_decl >= 100 && ctx->last_ident) {
+        ctx->last_ident->value = n->value;
+    }
+    val->value = n->value;
     gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0, 0);
     n->reg = val->reg;
     return val->reg;
@@ -598,6 +606,7 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
     int slen = strlen(n->value_string) + 1;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
 
+    buffer_write(ctx->init, "; String literal: %s\n", n->value_string);
     buffer_write(glob->init, "@.str.%d = private unnamed_addr "
         "constant [%u x i8] c\"%s\\00\", align 1\n",
         val->reg, slen, n->value_string);
@@ -611,6 +620,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
     struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, 0, ctx->global);
+    buffer_write(ctx->init, "; Double literal: %f\n", n->value);
     gen_allocate_double(ctx, val->reg, 0, 0);
     n->reg = val->reg;
     return val->reg;
@@ -624,9 +634,10 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
     
     FATAL(!n->reg, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
+    val->value = n->value;
 
-    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d\n",
-            val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits));
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; %lld\n",
+            val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits), val->value);
     return val->reg;
 }
 
@@ -720,6 +731,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
             REGP(v), reg, align(res->type->bits));
     res->ptr = v->ptr;
     res->addr = v->addr;
+    res->value = v->value;
     res->direct = 1;
     return res;
 }
@@ -788,6 +800,7 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
         buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
             res->reg, bits1, v1->reg, bits2);
     }
+    res->value = v1->value;
     return res;
 }
 
@@ -1431,6 +1444,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         struct type *t = ctx->pending_type;
         int ptrval = 0;
         int addrval = 0;
+        buffer_write(ctx->init, "; Variable: %s\n", node->value_string);
         switch (t->type) {
             case V_INT:
                 ptrval = gen_use_ptr(ctx);
@@ -1453,6 +1467,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 ERR("Invalid type for variable: %s", type_str(t->type));
                 break;
         }
+        ctx->last_ident = var;
     } else {
             // TODO FIXME Faulty check
 #if 0
@@ -1494,12 +1509,16 @@ int gen_index(struct gen_context *ctx, struct node *node)
 
     // We assume now direct value
     int idx_value = node->right->value;
-    FATAL(!idx_value, "Invalid array init");
+    if (idx_value == 0) {
+        idx_value = idx->value;
+        FATAL(!idx_value, "Invalid array init");
+    }
 
     struct type *t = ctx->pending_type;
     int ptrval = 0;
     int addrval = 0;
     int res;
+    buffer_write(ctx->init, "; Variable: %s\n", ident->value_string);
     switch (t->type) {
         case V_INT:
             ptrval = gen_use_ptr(ctx);

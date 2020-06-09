@@ -1,10 +1,8 @@
 int main()
 {
     int arr[10];
-/*
     int c = 5;
     int arr2[c];
-*/
 
     arr[0] = 1;
 
@@ -20,6 +18,16 @@ int main()
         return 3;
     if (arr[8] != 16)
         return 4;
+
+    for (int i = 0; i < c; i++)
+        arr2[i] = (i << 1) * i;
+
+    if (arr2[c - 1] != 32)
+        return 5;
+    if (arr2[2] != 8)
+        return 6;
+    if (arr2[0] != 0)
+        return 7;
 
     return 0;
 }
