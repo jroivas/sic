@@ -522,7 +522,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
         char *tmp = get_stars(ptr);
         FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca [%d x i%d%s], align %d\n",
-            reg, array, bits, ptr ? tmp : "", align(bits));
+            reg, array, bits, ptr ? tmp : "", 16);
         // TODO Initialize array with zeros
     } else {
         char *tmp = get_stars(ptr);
@@ -1480,7 +1480,22 @@ int gen_index(struct gen_context *ctx, struct node *node)
 
     FATAL(var, "Variable already assigned");
     FATAL(!ctx->pending_type, "Can't determine type of variable %s", ident->value_string);
-    
+    gen_recursive_allocs(ctx, node->right);
+    /*
+     * TODO This should ensure we have right index in alloc. Note that
+     * this also means we do not support dynamic arrays for now.
+     * Generating dynamic array would mean alloc/realloc from heap
+     * instead of stack, so postponing it.
+     */
+    int idx_reg = gen_recursive(ctx, node->right);
+    struct variable *idx = find_variable(ctx, idx_reg);
+    FATAL(!idx, "Invalid index");
+    FATAL(idx->type->type != V_INT, "Invalid index, should be int");
+
+    // We assume now direct value
+    int idx_value = node->right->value;
+    FATAL(!idx_value, "Invalid array init");
+
     struct type *t = ctx->pending_type;
     int ptrval = 0;
     int addrval = 0;
@@ -1493,8 +1508,8 @@ int gen_index(struct gen_context *ctx, struct node *node)
             var = new_variable(ctx, ident->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
             var->global = ctx->global;
             var->addr = addrval;
-            var->array = -1;
-            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 1, 0);
+            var->array = idx_value;
+            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0);
             break;
         case V_FLOAT:
             ptrval = gen_use_ptr(ctx);
@@ -1502,14 +1517,13 @@ int gen_index(struct gen_context *ctx, struct node *node)
             ident->ptr = node->addr = addrval;
             var = new_variable(ctx, ident->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
             var->global = ctx->global;
-            var->array = -1;
+            var->array = idx_value;
             res = gen_allocate_double(ctx, var->reg, var->ptr, 0);
             break;
         default:
             ERR("Invalid type for variable: %s", type_str(t->type));
             break;
     }
-    gen_recursive_allocs(ctx, node->right);
     printf("Gnerated indx: %d for %s\n", res, ident->value_string);
     return res;
 }
@@ -1538,15 +1552,13 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     idx = gen_cast(ctx, idx, &idx_target, 1);
     idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
 
-    //struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
-    struct variable *res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+    struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
 
-    buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %%%d, align %d\n",
+    buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %%%d ; ptr %d\n",
             res->reg, var->array, res->type->bits, var->array, res->type->bits,
-            idx->reg, 16);
-    //%13 = getelementptr inbounds [10 x i32], [10 x i32]* %2, i64 0, i64 %12, !dbg !34
+            var->reg,
+            idx->reg, res->ptr);
 
-    printf("GT INDEX: %d\n", res->reg);
     return res->reg;
 }
 
