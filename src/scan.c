@@ -20,6 +20,7 @@ static const char *tokenstr[] = {
     "STR_LIT",
     "(", ")",
     "{", "}",
+    "[", "]",
     ",", "SEMI",
     "&",
     "NULL",
@@ -330,6 +331,12 @@ int scan(struct scanfile *f, struct token *t)
             break;
         case '}':
             t->token = T_CURLY_CLOSE;
+            break;
+        case '[':
+            t->token = T_SQUARE_OPEN;
+            break;
+        case ']':
+            t->token = T_SQUARE_CLOSE;
             break;
         case '~':
             t->token = T_TILDE;

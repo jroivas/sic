@@ -8,6 +8,7 @@ struct node *additive_expression(struct scanfile *f, struct token *token);
 struct node *compound_statement(struct scanfile *f, struct token *token);
 struct node *statement(struct scanfile *f, struct token *token);
 struct node *unary_expression(struct scanfile *f, struct token *token);
+struct node *constant_expression(struct scanfile *f, struct token *token);
 struct node *expression(struct scanfile *f, struct token *token);
 
 
@@ -57,6 +58,7 @@ static const char *nodestr[] = {
     "WHILE",
     "DO",
     "FOR",
+    "INDEX",
     "LIST"
 };
 
@@ -416,13 +418,17 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
         res->value_string = token->value_string;
         scan(f, token);
     }
-    if (token->token == T_ROUND_OPEN) {
-        scan(f, token);
+    if (accept(f, token, T_ROUND_OPEN)) {
         struct node *decl = declarator(f, token);
         if (decl)
             res = make_node(A_GLUE, res, NULL, decl);
         expect(f, token, T_ROUND_CLOSE, ")");
+    } else if (accept(f, token, T_SQUARE_OPEN)) {
+        struct node *index = constant_expression(f, token);
+        expect(f, token, T_SQUARE_CLOSE, "]");
+        res = make_node(A_INDEX, res, NULL, index);
     }
+    // TODO Rest of cases
     if (res) {
         //if (token->token == T_SQUARE_OPEN) {
         //}
@@ -602,6 +608,10 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
 
     return res;
 }
+struct node *constant_expression(struct scanfile *f, struct token *token)
+{
+    return conditional_expression(f, token);
+}
 
 struct node *assignment_expression(struct scanfile *f, struct token *token)
 {
@@ -764,6 +774,10 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
 
         res = make_node(A_FUNC_CALL, res, NULL, args);
         expect(f, token, T_ROUND_CLOSE, ")");
+    } else if (accept(f, token, T_SQUARE_OPEN)) {
+        struct node *index = expression(f, token);
+        expect(f, token, T_SQUARE_CLOSE, "]");
+        res = make_node(A_INDEX, res, NULL, index);
     } else if (accept(f, token, T_PLUSPLUS)) {
         res = make_node(A_POSTINC, res, NULL, NULL);
         return res;

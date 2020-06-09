@@ -21,6 +21,7 @@ enum tokentype {
     T_STR_LIT,
     T_ROUND_OPEN, T_ROUND_CLOSE,
     T_CURLY_OPEN, T_CURLY_CLOSE,
+    T_SQUARE_OPEN, T_SQUARE_CLOSE,
     T_COMMA, T_SEMI,
     T_AMP,
     T_NULL,

@@ -51,6 +51,7 @@ enum nodetype {
     A_WHILE,
     A_DO,
     A_FOR,
+    A_INDEX,
     A_LIST
 };
 
