@@ -55,5 +55,11 @@ int main()
     if (arr[arr2[arr[1]] / 2] != 8)
         return 14;
 
+    arr[arr2[arr[1]] / 2] = 9;
+    if (arr[4] == 8)
+        return 15;
+    if (arr[4] != 9)
+        return 16;
+
     return 0;
 }

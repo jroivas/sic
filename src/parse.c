@@ -10,6 +10,7 @@ struct node *statement(struct scanfile *f, struct token *token);
 struct node *unary_expression(struct scanfile *f, struct token *token);
 struct node *constant_expression(struct scanfile *f, struct token *token);
 struct node *expression(struct scanfile *f, struct token *token);
+struct node *declarator(struct scanfile *f, struct token *token);
 
 
 static const char *nodestr[] = {
@@ -409,35 +410,88 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
     return res;
 }
 
-struct node *declarator(struct scanfile *f, struct token *token);
+struct node *parameter_declaration(struct scanfile *f, struct token *token)
+{
+    struct node *spec = declaration_specifiers(f, token);
+    if (!spec)
+        return NULL;
+
+    struct node *decl = declarator(f, token);
+#if 0
+    struct node *decl = abstract_declarator(f, token);
+#endif
+    if (decl)
+        return make_node(A_LIST, spec, NULL, decl);
+
+    return spec;
+}
+
+struct node *parameter_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = parameter_declaration(f, token);
+    while (accept(f, token, T_COMMA)) {
+        struct node *tmp = parameter_declaration(f, token);
+        if (!tmp)
+            break;
+        res = make_node(A_LIST, res, NULL, tmp);
+    }
+    return res;
+}
+
+struct node *parameter_type_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = parameter_list(f, token);
+    return res;
+}
+
+struct node *identifier_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    while(accept(f, token, T_IDENTIFIER)) {
+        struct node *tmp = make_node(A_IDENTIFIER, NULL, NULL, NULL);
+        tmp->value_string = token->value_string;
+        if (!res)
+            tmp = res;
+        else
+            res = make_node(A_LIST, res, NULL, tmp);
+        if (token->token != T_COMMA)
+            break;
+        scan(f, token);
+    }
+    return res;
+}
+
 struct node *direct_declarator(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+    save_point(f, token);
     if (token->token == T_IDENTIFIER) {
         res = make_node(A_IDENTIFIER, NULL, NULL, NULL);
         res->value_string = token->value_string;
         scan(f, token);
     }
-    if (accept(f, token, T_ROUND_OPEN)) {
+    else if (accept(f, token, T_ROUND_OPEN)) {
         struct node *decl = declarator(f, token);
         if (decl)
             res = make_node(A_GLUE, res, NULL, decl);
-        expect(f, token, T_ROUND_CLOSE, ")");
-    } else if (accept(f, token, T_SQUARE_OPEN)) {
-        struct node *index = constant_expression(f, token);
-        expect(f, token, T_SQUARE_CLOSE, "]");
-        res = make_node(A_INDEX, res, NULL, index);
+        if (!accept(f, token, T_ROUND_CLOSE)) {
+            load_point(f, token);
+            return NULL;
+        }
     }
+    remove_save_point(f, token);
     // TODO Rest of cases
     if (res) {
-        //if (token->token == T_SQUARE_OPEN) {
-        //}
-        if (token->token == T_ROUND_OPEN) {
-            scan(f, token);
-            // TODO parameter_type_list
-            // TODO identifier_list
-            res = make_node(A_PARAMS, res, NULL, NULL);
+        if (accept(f, token, T_ROUND_OPEN)) {
+            struct node *params = parameter_type_list(f, token);
+            if (!params)
+                params = identifier_list(f, token);
+            res->right = params;
             expect(f, token, T_ROUND_CLOSE, ")");
+        } else if (accept(f, token, T_SQUARE_OPEN)) {
+            struct node *index = constant_expression(f, token);
+            expect(f, token, T_SQUARE_CLOSE, "]");
+            res = make_node(A_INDEX, res, NULL, index);
         }
 
     }

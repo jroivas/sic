@@ -2514,8 +2514,14 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
 
 struct node *find_main_type(struct node *node)
 {
+    FATAL(!node, "Finding from invalid node");
     if (node->node == A_FUNCTION) {
         if (node->right && node->right->left) {
+            if (!node->right->left->value_string) {
+                printf("Invalid left in function\n");
+                return NULL;
+                //node_walk(node->right);
+            }
             if (strcmp(node->right->left->value_string, "main") == 0) {
                 return node->left;
             }
