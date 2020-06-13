@@ -1901,7 +1901,7 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
 
     //buffer_append(allocs, buffer_read(params));
     const char *tmp = buffer_read(params);
-    int tmplen = strlen(tmp);
+    int tmplen = strlen(tmp) + 1;
     char *res = calloc(1, tmplen);
     res = strncpy(res, tmp, tmplen);
     buffer_del(params);
