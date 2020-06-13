@@ -1391,13 +1391,24 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
     FATAL(!func, "Invalid function to call");
     paramstr = gen_call_params(ctx, node->right);
-    res = new_inst_variable(ctx, V_INT, 32, 1);
+    //printf("RES: %s %d != %d\n", func->name, node->type, func->type->type);
+    if (func->type->type == V_INT) {
+        res = new_inst_variable(ctx, V_INT, func->type->bits, 1);
 
-    buffer_write(ctx->data, "%%%d = call i%d @%s(%s); FUNCCALL\n",
-        res->reg,
-        32,
-        func->name,
-        paramstr ? paramstr : "");
+        buffer_write(ctx->data, "%%%d = call i%d @%s(%s); FUNCCALL\n",
+            res->reg,
+            func->type->bits,
+            func->name,
+            paramstr ? paramstr : "");
+    } else if (func->type->type == V_FLOAT) {
+        res = new_inst_variable(ctx, V_FLOAT, func->type->bits, 1);
+
+        buffer_write(ctx->data, "%%%d = call double @%s(%s); FUNCCALL\n",
+            res->reg,
+            func->name,
+            paramstr ? paramstr : "");
+    } else
+        ERR("Invalid function return type");
 
     if (paramstr)
         free(paramstr);
@@ -1593,7 +1604,6 @@ int gen_index(struct gen_context *ctx, struct node *node)
             ERR("Invalid type for variable: %s", type_str(t->type));
             break;
     }
-    printf("Gnerated indx: %d for %s\n", res, ident->value_string);
     return res;
 }
 
@@ -1911,11 +1921,6 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
 
     char *params = NULL;
     // Global context can't have params
-#if 0
-    if (!ctx->global)
-        params = gen_func_params(ctx, node->left);
-#endif
-    printf("AA: %s, %d -> %s\n", ctx->name, node->type, type);
     if (!ctx->global && func_node)
         params = gen_func_params(ctx, func_node);
 
@@ -1948,12 +1953,21 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
                 var = gen_bits_cast(ctx, var, node ? node->bits : target->bits, 1);
                 res = var->reg;
             }
-            const char *type = var_str(var->type->type, var->type->bits, &tmp);
-            buffer_write(ctx->post, "ret %s %%%d ; RET1\n", type, res);
+            if (target->type == V_INT) {
+                buffer_write(ctx->post, "ret i%d %%%d ; RET1\n", target->bits, res);
+            } else if (target->type == V_FLOAT) {
+                buffer_write(ctx->post, "ret double %%%d ; RET1\n", res);
+            } else
+                ERR("Invalid return type");
+            
             ctx->rets++;
         } else {
-            const char *type = var_str(functype->type, functype->bits, &tmp);
-            buffer_write(ctx->post, "ret %s 0 ; RET2\n", type, res);
+            if (target->type == V_INT) {
+                buffer_write(ctx->data, "ret i%d 0 ; RET2\n", target->bits, res);
+            } else if (target->type == V_FLOAT) {
+                buffer_write(ctx->data, "ret double 0.0 ; RET2\n", res);
+            } else
+                ERR("Invalid return type");
             ctx->rets++;
         }
         if (tmp)
@@ -1962,38 +1976,6 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         buffer_write(ctx->post, "ret void ; RET4\n");
         ctx->rets++;
     }
-#if 0
-    if (node && node->type != V_VOID) {
-        char *tmp = NULL;
-        struct variable *var = find_variable(ctx, res);
-        if (var) {
-            FATAL(!var, "Invalid return variable (post): %d", res);
-            if (!var->direct) {
-                var = gen_load(ctx, var);
-                FATAL(!var, "Invalid indirect return variable: %d", res);
-                res = var->reg;
-            }
-            if (node->type != var->type->type || node->bits != var->type->bits) {
-                //enum var_type restype = resolve_type(node->type, var->type->type);
-                //enum var_type restype = node->type;
-
-                //struct type *target = find_type_by(ctx, restype, 0, 1);
-                FATAL(!target, "No target in post");
-                var = gen_cast(ctx, var, target, 0);
-                var = gen_bits_cast(ctx, var, node->bits, 1);
-                printf("cast to: %d %d %d\n", var->type->type, var->type->bits, var->type->sign);
-                res = var->reg;
-            }
-            const char *type = var_str(var->type->type, var->type->bits, &tmp);
-            buffer_write(ctx->post, "ret %s %%%d\n", type, res);
-        } else {
-            const char *type = var_str(node->type, node->bits, &tmp);
-            buffer_write(ctx->post, "ret %s 0\n", type, res);
-        }
-        if (tmp)
-            free(tmp);
-    }
-#endif
     buffer_write(ctx->post, "}\n");
 }
 
@@ -2081,6 +2063,9 @@ int gen_function(struct gen_context *ctx, struct node *node)
     body = node->right->right;
     FATAL(!body, "Invalid function body");
 
+    // Need to tell return type
+    if (func_ctx->main_type == NULL)
+        func_ctx->main_type = functype;
     int res = gen_recursive_allocs(func_ctx, body);
     res = gen_recursive(func_ctx, body);
 
@@ -2117,9 +2102,12 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
         var = gen_bits_cast(ctx, var, target->bits, 1);
         res = var->reg;
     }
-    char *tmp;
-    const char *type = var_str(var->type->type, var->type->bits, &tmp);
-    buffer_write(ctx->data, "ret %s %%%d ; RET3\n", type, res);
+    if (target->type == V_INT) {
+        buffer_write(ctx->data, "ret i%d %%%d ; RET3\n", target->bits, res);
+    } else if (target->type == V_FLOAT) {
+        buffer_write(ctx->data, "ret double %%%d ; RET3\n", res);
+    } else
+        ERR("Invalid return type");
     ctx->rets++;
 
     return res;
@@ -2658,13 +2646,11 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
     if (ctx->main_type) {
         if (ctx->main_type->type == V_VOID) {
             res->type = V_VOID;
-            buffer_write(ctx->post, "; FV %s\n", stype_str(res));
             got = 1;
         } else {
             res->type = ctx->main_type->type;
             res->bits = ctx->main_type->bits;
             res->sign = ctx->main_type->sign;
-            buffer_write(ctx->post, "; FM %s\n", stype_str(res));
             got = 1;
         }
     } else if (node && node->type != V_VOID) {

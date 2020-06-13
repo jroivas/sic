@@ -32,5 +32,13 @@ int main()
     if (tmpd != 7.5)
         return 5;
 
+    tmp = sum(26, add5(10));
+    if (tmp != 42)
+        return 6;
+
+    tmp = sum(add5(add5(16)), add5(10));
+    if (tmp != 42)
+        return 7;
+
     return 0;
 }
