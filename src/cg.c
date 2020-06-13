@@ -1374,9 +1374,9 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
     }
 
     const char *tmp = buffer_read(params);
-    int tmplen = strlen(tmp);
+    int tmplen = strlen(tmp) + 1;
     char *res = calloc(1, tmplen);
-    res = strncpy(res, tmp, tmplen);
+    res = memcpy(res, tmp, tmplen);
     buffer_del(params);
     return res;
 }
@@ -1903,7 +1903,7 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
     const char *tmp = buffer_read(params);
     int tmplen = strlen(tmp) + 1;
     char *res = calloc(1, tmplen);
-    res = strncpy(res, tmp, tmplen);
+    res = memcpy(res, tmp, tmplen);
     buffer_del(params);
     buffer_append(ctx->init, buffer_read(allocs));
     buffer_del(allocs);
