@@ -5,6 +5,7 @@
 
 #define GLOBAL_START 0x10000
 #define REGP(X) (X->global) ? "@G" : "%"
+static const char *global_ctx_name = "__global_context";
 
 struct type {
     int id;
@@ -335,7 +336,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->globals = NULL;
     res->type = V_VOID;
     res->safe = 1;
-    res->name = "__global_context";
+    res->name = global_ctx_name;
     res->parent = parent;
     res->child = NULL;
     res->next = NULL;
@@ -1331,26 +1332,75 @@ int gen_not(struct gen_context *ctx, int a)
     return res->reg;
 }
 
-int gen_func_call(struct gen_context *ctx, struct node *node, int a, int b)
+char *gen_call_params(struct gen_context *ctx, struct node *node)
 {
-    struct variable *func = find_variable(ctx, a);
-    struct variable *params = b != 0 ? find_variable(ctx, b) : NULL;
+    if (!node)
+        return NULL;
+
+    FATAL(node->node != A_LIST, "Parameters is not list");
+
+    struct buffer *params = buffer_init();
+    int paramcnt = 0;
+    while (node->node == A_LIST) {
+        int r = gen_recursive(ctx, node->left);
+        FATAL(!r, "Expected parameter for function call");
+
+        struct variable *par = find_variable(ctx, r);
+        par = gen_load(ctx, par);
+        FATAL(!par, "Invalid parameter for function call");
+        char *stars = get_stars(par->ptr);
+
+        paramcnt++;
+        switch (par->type->type) {
+            case V_INT:
+                buffer_write(params, "%si%d%s %%%d",
+                    paramcnt > 1 ? ", " : "",
+                    par->type->bits,
+                    stars ? stars : "",
+                    par->reg);
+                break;
+            case V_FLOAT:
+                buffer_write(params, "%sdouble%s %%%d",
+                    paramcnt > 1 ? ", " : "",
+                    stars ? stars : "",
+                    par->reg);
+                break;
+            default:
+                ERR("Invalid parameter type: %d", par->type->type);
+        }
+        if (node->right == NULL)
+            break;
+        node = node->right;
+    }
+
+    const char *tmp = buffer_read(params);
+    int tmplen = strlen(tmp);
+    char *res = calloc(1, tmplen);
+    res = strncpy(res, tmp, tmplen);
+    buffer_del(params);
+    return res;
+}
+
+int gen_func_call(struct gen_context *ctx, struct node *node)
+{
+    int func_name_reg = gen_recursive(ctx, node->left);
+    struct variable *func = find_variable(ctx, func_name_reg);
+    //struct variable *params = b != 0 ? find_variable(ctx, b) : NULL;
     struct variable *res;
-    const char *paramstr;
+    char *paramstr;
 
     FATAL(!func, "Invalid function to call");
-    //res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
+    paramstr = gen_call_params(ctx, node->right);
     res = new_inst_variable(ctx, V_INT, 32, 1);
-    if (params)
-        paramstr = params->name;
-    else
-        paramstr = NULL;
 
     buffer_write(ctx->data, "%%%d = call i%d @%s(%s); FUNCCALL\n",
         res->reg,
         32,
         func->name,
         paramstr ? paramstr : "");
+
+    if (paramstr)
+        free(paramstr);
 
     return res->reg;
 }
@@ -1716,7 +1766,141 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     return res;
 }
 
-void gen_pre(struct gen_context *ctx, struct node *node)
+char *gen_func_params(struct gen_context *ctx, struct node *orig)
+{
+    if (!orig)
+        return NULL;
+
+    struct node *node = orig->right;
+    FATAL(!node, "Invalid function");
+
+    node = node->left;
+    FATAL(!node, "Invalid function, no name");
+
+    node = node->right;
+    //FATAL(!node, "Invalid function, no parameters");*/
+    if (!node)
+        return NULL;
+
+    FATAL(node->node != A_LIST, "Parameters is not list");
+
+    struct node *paramnode = node;
+
+    struct buffer *allocs = buffer_init();
+    struct buffer *params = buffer_init();
+    int paramcnt = 0;
+    while (node->node == A_LIST) {
+        struct node *pval = node;
+        if (node->right && node->right->node == A_LIST)
+            pval = node->left;
+
+        struct node *ptype = pval->left;
+        FATAL(!ptype, "Invalid parameter");
+        FATAL(ptype->node != A_TYPE, "Invalid parameter type");
+
+        char *stars = get_stars(ptype->ptr);
+        paramcnt++;
+        if (ptype->type == V_INT) {
+                buffer_write(params, "%si%d%s",
+                    paramcnt > 1 ? ", " : "",
+                    ptype->bits,
+                    stars ? stars : "");
+        } else if (ptype->type == V_FLOAT) {
+                buffer_write(params, "%sdouble%s",
+                    paramcnt > 1 ? ", " : "",
+                    stars ? stars : "");
+        } else
+            ERR("Invalid parameter type");
+
+        node = node->right;
+    }
+
+    node = paramnode;
+    int parami = 0;
+    ctx->regnum += paramcnt;
+    while (node->node == A_LIST) {
+        struct node *pval = node;
+        if (node->right && node->right->node == A_LIST)
+            pval = node->left;
+
+        struct node *ptype = pval->left;
+        struct node *pname = pval->right;
+
+        char *stars = get_stars(ptype->ptr);
+        if (ptype->type == V_INT) {
+                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+                FATAL(!res, "Couldn't generate res");
+                buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
+                    res->reg,
+                    ptype->bits,
+                    stars ? stars : "",
+                    align(ptype->bits));
+                buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d\n",
+                    ptype->bits,
+                    stars ? stars : "",
+                    parami,
+                    ptype->bits,
+                    stars ? stars : "",
+                    res->reg,
+                    align(ptype->bits));
+        } else if (ptype->type == V_FLOAT) {
+                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+                FATAL(!res, "Couldn't generate res");
+
+                buffer_write(allocs, "%%%d = alloca double%s, align %d\n",
+                    res->reg,
+                    stars ? stars : "",
+                    align(ptype->bits));
+                buffer_write(allocs, "store double%s %%%d, double%s* %%%d, align %d\n",
+                    stars ? stars : "",
+                    parami,
+                    stars ? stars : "",
+                    res->reg,
+                    align(ptype->bits));
+        }
+        parami++;
+
+        node = node->right;
+    }
+#if 0
+        char *stars = get_stars(par->ptr + 1);
+
+        paramcnt++;
+        switch (par->type->type) {
+            case V_INT:
+                buffer_write(params, "%si%d%s %%%d",
+                    paramcnt > 1 ? ", " : "",
+                    par->type->bits,
+                    stars ? stars : "",
+                    r);
+                break;
+            case V_FLOAT:
+                buffer_write(params, "%s double%s %%%d",
+                    paramcnt > 1 ? ", " : "",
+                    stars ? stars : "",
+                    r);
+                break;
+            default:
+                ERR("Invalid parameter type: %d", par->type->type);
+        }
+        if (node->right == NULL && node->right->node == A_LIST)
+            break;
+        node = node->right;
+    }
+#endif
+
+    //buffer_append(allocs, buffer_read(params));
+    const char *tmp = buffer_read(params);
+    int tmplen = strlen(tmp);
+    char *res = calloc(1, tmplen);
+    res = strncpy(res, tmp, tmplen);
+    buffer_del(params);
+    buffer_append(ctx->init, buffer_read(allocs));
+    buffer_del(allocs);
+    return res;
+}
+
+void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
 {
     char *tmp = NULL;
     const char *type = NULL;
@@ -1724,8 +1908,22 @@ void gen_pre(struct gen_context *ctx, struct node *node)
         type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
     else
         type = var_str(node->type, node->bits, &tmp);
-    buffer_write(ctx->pre, "define dso_local %s @%s() #0 {\n",
-            type, ctx->name);
+
+    char *params = NULL;
+    // Global context can't have params
+#if 0
+    if (!ctx->global)
+        params = gen_func_params(ctx, node->left);
+#endif
+    printf("AA: %s, %d -> %s\n", ctx->name, node->type, type);
+    if (!ctx->global && func_node)
+        params = gen_func_params(ctx, func_node);
+
+    buffer_write(ctx->pre, "define dso_local %s @%s(%s) #0 {\n",
+            type, ctx->name,
+            params ? params : "");
+    if (params)
+        free(params);
     if (tmp)
         free(tmp);
 }
@@ -1799,7 +1997,6 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
     buffer_write(ctx->post, "}\n");
 }
 
-
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_recursive(struct gen_context *ctx, struct node *node);
 int gen_function(struct gen_context *ctx, struct node *node)
@@ -1827,7 +2024,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     (void)func_proto;
 #endif
 
-    gen_pre(func_ctx, node->left);
+    gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
     struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
@@ -2251,6 +2448,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     /* Special cases */
     if (node->node == A_FUNCTION)
         return gen_function(ctx, node);
+    if (node->node == A_FUNC_CALL)
+        return gen_func_call(ctx, node);
     if (node->node == A_IF)
         return gen_if(ctx, node, 0);
     if (node->node == A_TERNARY)
@@ -2375,8 +2574,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_NULL:
             ctx->last_label = 0;
             return ctx->null_var;
-        case A_FUNC_CALL:
-            return gen_func_call(ctx, node, resleft, resright);
+        //case A_FUNC_CALL:
+        //    return gen_func_call(ctx, node, resleft, resright);
         case A_PREINC:
         case A_PREDEC:
             return gen_pre_op(ctx, node, resleft);
@@ -2398,7 +2597,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
     main_node.type = V_INT;
     main_node.bits = 32;
 
-    gen_pre(main_ctx, &main_node);
+    gen_pre(main_ctx, &main_node, NULL);
     if (node && node->type != V_VOID) {
         char *tmp;
         struct variable *var = find_variable(ctx, res);
@@ -2546,7 +2745,7 @@ int codegen(FILE *outfile, struct node *node)
     ctx->node = node;
     ctx->main_type = find_main_type(node);
 
-    gen_pre(ctx, node);
+    gen_pre(ctx, node, node);
     res = gen_recursive_allocs(ctx, node);
     res = gen_recursive(ctx, node);
     struct type *target = resolve_return_type(ctx, node, res);

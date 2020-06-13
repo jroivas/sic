@@ -58,5 +58,7 @@ const char *buffer_read(struct buffer *buf)
 
 void buffer_del(struct buffer *buf)
 {
+    if (buf->data)
+        free(buf->data);
     free(buf);
 }

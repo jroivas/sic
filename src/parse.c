@@ -397,6 +397,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
         if (type == NULL)
             return type;
     }
+    type = type_resolve(type, 0);
 
     struct node *res = NULL;
     res = type;
@@ -1230,6 +1231,8 @@ struct node *function_definition(struct scanfile *f, struct token *token)
         return NULL;
     }
 
+
+    //decl = type_resolve(decl, 0);
     res = make_node(A_GLUE, decl, NULL, comp);
     res = make_node(A_FUNCTION, spec, NULL, res);
 
