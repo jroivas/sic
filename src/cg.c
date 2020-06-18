@@ -725,9 +725,20 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
         reg = prev->reg;
     }
 #endif
+    if (v->array) {
+        struct variable *tmp = new_variable(ctx,
+            NULL,
+            v->type->type,
+            v->type->bits, v->type->sign,
+            v->ptr + 1,
+            0, 0);
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 0\n",
+                tmp->reg, v->array, v->type->bits, v->array, v->type->bits, v->reg);
+        return tmp;
+    }
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
 
-    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d\n",
+    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d; load int\n",
             res->reg, res->type->bits, res->type->bits,
             REGP(v), reg, align(res->type->bits));
     res->ptr = v->ptr;
@@ -1170,7 +1181,7 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         if (v1->type->type == V_NULL)
             v1 = v2;
 
-        FATAL(!v1->ptr, "Comparing non-pointer to NULL: %d, %d", v1->ptr, v2->ptr);
+        //FATAL(!v1->ptr && !v1->array, "Comparing non-pointer to NULL: %d, %d, %d", v1->ptr, v2->ptr, v1->array);
 
         char *stars1 = get_stars(v1->ptr);
         const char *op = node->node == A_EQ_OP ? "eq" : "ne";
@@ -1386,7 +1397,7 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     int func_name_reg = gen_recursive(ctx, node->left);
     struct variable *func = find_variable(ctx, func_name_reg);
     //struct variable *params = b != 0 ? find_variable(ctx, b) : NULL;
-    struct variable *res;
+    struct variable *res = NULL;
     char *paramstr;
 
     FATAL(!func, "Invalid function to call");
@@ -1407,13 +1418,17 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
             res->reg,
             func->name,
             paramstr ? paramstr : "");
+    } else if (func->type->type == V_VOID) {
+        buffer_write(ctx->data, "call void @%s(%s); FUNCCALL\n",
+            func->name,
+            paramstr ? paramstr : "");
     } else
         ERR("Invalid function return type");
 
     if (paramstr)
         free(paramstr);
 
-    return res->reg;
+    return res ? res->reg : 0;
 }
 
 int gen_type(struct gen_context *ctx, struct node *node)
@@ -1683,6 +1698,37 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
     return reg;
 }
 
+int gen_dereference(struct gen_context *ctx, struct node *node, int reg)
+{
+    struct variable *var = find_variable(ctx, reg);
+    FATAL(!var, "Can't find dereference variable");
+    FATAL(!var->ptr, "Dereference variable is not pointer");
+
+    char *src = get_stars(var->ptr);
+    struct variable *res = new_variable(ctx,
+        NULL,
+        var->type->type,
+        var->type->bits, var->type->sign,
+        var->ptr,
+        0, 0);
+    if (var->type->type == V_INT) {
+        if (var->ptr)
+            res->ptr--;
+        buffer_write(ctx->data, "%%%d = load i%d%s, i%d%s* %%%d, align %d ; DEREF\n",
+            res->reg,
+            res->type->bits,
+            src ? src : "",
+            res->type->bits,
+            src ? src : "",
+            var->reg,
+            align(res->type->bits)
+            );
+    } else
+        ERR("Invalid type for deference");
+
+    return res->reg;
+}
+
 int get_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *var = find_variable_by_name(ctx, node->value_string);
@@ -1805,8 +1851,16 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
             pval = node->left;
 
         struct node *ptype = pval->left;
+        struct node *pname = pval->right;
         FATAL(!ptype, "Invalid parameter");
         FATAL(ptype->node != A_TYPE, "Invalid parameter type");
+        // TODO: parse types properly, now just shortcutting
+        int pointer = 0;
+        while (pname && pname->node == A_POINTER) {
+            pointer++;
+            pname = pname->left;
+        }
+        ptype->ptr += pointer;
 
         char *stars = get_stars(ptype->ptr);
         paramcnt++;
@@ -1835,6 +1889,9 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
 
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
+        // TODO: parse types properly, now just shortcutting
+        while (pname && pname->node == A_POINTER)
+            pname = pname->left;
 
         char *stars = get_stars(ptype->ptr);
         if (ptype->type == V_INT) {
@@ -2005,6 +2062,14 @@ int gen_function(struct gen_context *ctx, struct node *node)
 #else
     (void)func_proto;
 #endif
+
+    // Register function globally
+
+    struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
+    FATAL(func_var, "Function name already in use: %s", func_ctx->name);
+
+    func_var = new_variable(ctx, func_ctx->name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
+    (void)func_var;
 
     gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
@@ -2545,6 +2610,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_ASSIGN:
             ctx->last_label = 0;
             return gen_assign(ctx, node, resleft, resright);
+        case A_DEREFERENCE:
+            ctx->last_label = 0;
+            return gen_dereference(ctx, node, resleft);
         case A_ADD_ASSIGN:
         case A_SUB_ASSIGN:
         case A_MUL_ASSIGN:

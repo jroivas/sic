@@ -32,6 +32,7 @@ enum nodetype {
     A_RETURN,
     A_POINTER,
     A_ADDR,
+    A_DEREFERENCE,
     A_IF,
     A_TERNARY,
     A_EQ_OP,

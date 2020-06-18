@@ -10,6 +10,7 @@ struct node *statement(struct scanfile *f, struct token *token);
 struct node *unary_expression(struct scanfile *f, struct token *token);
 struct node *constant_expression(struct scanfile *f, struct token *token);
 struct node *expression(struct scanfile *f, struct token *token);
+struct node *abstract_declarator(struct scanfile *f, struct token *token);
 struct node *declarator(struct scanfile *f, struct token *token);
 
 
@@ -40,6 +41,7 @@ static const char *nodestr[] = {
     "RETURN",
     "POINTER",
     "ADDR",
+    "DEREFERENCE",
     "IF",
     "TERNARY",
     "==",
@@ -387,6 +389,22 @@ struct node *type_qualifier(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *type_qualifier_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    struct node *tmp = NULL;
+
+    do {
+        tmp = type_qualifier(f, token);
+        if (!res && tmp)
+            res = tmp;
+        else if (res && tmp)
+            res = make_node(A_LIST, res, NULL, tmp);
+    } while (tmp);
+
+    return res;
+}
+
 struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 {
     struct node *type = type_specifier(f, token);
@@ -418,9 +436,8 @@ struct node *parameter_declaration(struct scanfile *f, struct token *token)
         return NULL;
 
     struct node *decl = declarator(f, token);
-#if 0
-    struct node *decl = abstract_declarator(f, token);
-#endif
+    if (!decl)
+        decl = abstract_declarator(f, token);
     if (decl)
         return make_node(A_LIST, spec, NULL, decl);
 
@@ -504,12 +521,20 @@ struct node *pointer(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
     while (token->token == T_STAR) {
-        if (!res)
-            res = make_node(A_POINTER, NULL, NULL, NULL);
-        if (!res)
-            break;
-        res->ptr++;
-        scan(f, token);
+        struct node *qual = type_qualifier_list(f, token);
+        if (qual) {
+            if (res)
+                res->right = qual;
+            else
+                res = make_node(A_POINTER, qual, NULL, NULL);
+        } else {
+            if (!res)
+                res = make_node(A_POINTER, NULL, NULL, NULL);
+            if (!res)
+                break;
+            res->ptr++;
+            scan(f, token);
+        }
     }
 
     return res;
@@ -736,7 +761,7 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
     if (accept(f, token, T_EQ)) {
         struct node *tmp = initializer(f, token);
         if (!tmp) {
-            ERR("Expected initializer afrer '='");
+            ERR("Expected initializer after '='");
             return NULL;
         }
         res = make_node(A_ASSIGN, res, NULL, tmp);
@@ -769,9 +794,12 @@ struct node *init_declarator_list(struct scanfile *f, struct token *token)
 
 struct node *declaration(struct scanfile *f, struct token *token)
 {
+    save_point(f, token);
     struct node *res = declaration_specifiers(f, token);
-    if (!res)
+    if (!res) {
+        remove_save_point(f, token);
         return NULL;
+    }
     res = type_resolve(res, 0);
 
     struct node *decl = init_declarator_list(f, token);
@@ -789,7 +817,12 @@ struct node *declaration(struct scanfile *f, struct token *token)
     }
 #endif
 
-    semi(f, token);
+    if (!accept(f, token, T_SEMI)) {
+        load_point(f, token);
+        return NULL;
+    }
+    //semi(f, token);
+    remove_save_point(f, token);
     return res;
 }
 
@@ -877,6 +910,14 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         FATAL(!left, "Invalid preinc");
         left = make_node(A_PREDEC, left, NULL, NULL);
         return left;
+    } else if (accept(f, token, T_STAR)) {
+        left = cast_expression(f, token);
+        if (!left)
+            ERR("Required lvalue for unary '*' operator");
+        if (left->node != A_IDENTIFIER)
+            ERR("Expected identifier lvalue for unary '*' operator");
+        left = make_node(A_DEREFERENCE, left, NULL, NULL);
+        return left;
     } else if (accept(f, token, T_AMP)) {
         int addr = 1;
         while (accept(f, token, T_AMP))
@@ -911,9 +952,22 @@ struct node *specifier_qualifier_list(struct scanfile *f, struct token *token)
     return type;
 }
 
+struct node *direct_abstract_declarator(struct scanfile *f, struct token *token)
+{
+    // TODO
+    return NULL;
+}
+
 struct node *abstract_declarator(struct scanfile *f, struct token *token)
 {
-    return NULL;
+    struct node *res = pointer(f, token);
+    struct node *dir = direct_abstract_declarator(f, token);
+    if (res && dir)
+        res = make_node(A_LIST, res, NULL, dir);
+    else if (!res)
+        res = dir;
+
+    return res;
 }
 
 struct node *type_name(struct scanfile *f, struct token *token)
@@ -957,7 +1011,7 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
     enum tokentype type;
 
     left = cast_expression(f, token);
-    if (token->token == T_EOF)
+    if (!left || token->token == T_EOF)
         return left;
 
     type = token->token;
@@ -1209,8 +1263,8 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     res = statement_list(f, token);
     expect(f, token, T_CURLY_CLOSE, "}");
 
-    if (decl)
-        res = make_node(A_GLUE, decl, NULL, res);
+    // We parsed body, always return it
+    res = make_node(A_GLUE, decl, NULL, res);
     return res;
 }
 
