@@ -141,7 +141,7 @@ void __node_walk(struct node *node, int depth, char arm)
                 node->value_string);
             break;
         case A_IDENTIFIER:
-            printf("IDENTIFIER %s", node->value_string);
+            printf("IDENTIFIER %s (intvalue %lld)", node->value_string, node->value);
             break;
         case A_POINTER:
             printf("POINTER: %d", node->ptr);
@@ -189,4 +189,15 @@ void stack_trace(void)
         printf("  %s\n", strings[i]);
 
     free(strings);
+}
+
+char *int_to_str(literalnum val)
+{
+    // FIXME
+    int max_size = 64;
+    char *res = calloc(1, max_size);
+
+    snprintf(res, max_size - 1, "%lld", val);
+
+    return res;
 }

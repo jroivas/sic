@@ -46,5 +46,6 @@ int determine_size(literalnum value);
 hashtype hash(const char *str);
 char *get_stars(int cnt);
 void stack_trace(void);
+char *int_to_str(literalnum val);
 
 #endif

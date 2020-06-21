@@ -56,6 +56,7 @@ struct gen_context {
     int strs;
     int null_var;
     int is_decl;
+    int debug;
     const char *name;
     struct node *node;
     struct node *main_type;
@@ -516,7 +517,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     return val;
 }
 
-int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc)
+int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, int val)
 {
     if (ctx->global) {
         FATAL(ptr, "Global pointer not supported");
@@ -530,13 +531,16 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
         // TODO Initialize array with zeros
     } else {
         char *tmp = get_stars(ptr);
+        char *vals = NULL;
         FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca i%d%s, align %d\n",
             reg, bits, ptr ? tmp : "", align(bits));
+        vals = int_to_str(val);
         buffer_write(code_alloc ? ctx->data : ctx->init,
-            "store i%d%s %s, i%d%s* %%%d, align %d\n",
-            bits, ptr ? tmp : "" , ptr ? "null" : "0", bits, ptr ? tmp : "", reg, align(bits)
+            "store i%d%s %s, i%d%s* %%%d, align %d ; allocate_int %lld\n",
+            bits, ptr ? tmp : "" , ptr ? "null" : vals, bits, ptr ? tmp : "", reg, align(bits), val
             );
+        free(vals);
         if (tmp)
             free(tmp);
     }
@@ -573,11 +577,15 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
     if (val->type->bits == 0)
         val->type->bits = 32;
     buffer_write(ctx->init, "; Int literal: %d\n", n->value);
+#if 0
+    // FIXME, causes issue
     if (ctx->is_decl >= 100 && ctx->last_ident) {
+        printf("Last ident val to %lld, %p\n", n->value, (void*)ctx->last_ident);
         ctx->last_ident->value = n->value;
     }
+#endif
     val->value = n->value;
-    gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0, 0);
+    gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0, 0, n->value);
     n->reg = val->reg;
     return val->reg;
 }
@@ -631,13 +639,14 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    if (!n->reg) node_walk(n);
+    if (!n->reg)
+        node_walk(n);
     
     FATAL(!n->reg, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
     val->value = n->value;
 
-    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; %lld\n",
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; store_int %lld\n",
             val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits), val->value);
     return val->reg;
 }
@@ -678,7 +687,7 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
         ERR("Source should be same type");
 
     if (dst->type->type == V_INT) {
-        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d\n",
+        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d ; store_var\n",
             src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else if (dst->type->type == V_FLOAT) {
         buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
@@ -738,12 +747,13 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     }
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
 
-    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d; load int\n",
+    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d; load_int\n",
             res->reg, res->type->bits, res->type->bits,
             REGP(v), reg, align(res->type->bits));
     res->ptr = v->ptr;
     res->addr = v->addr;
     res->value = v->value;
+    //stack_trace();
     res->direct = 1;
     return res;
 }
@@ -850,6 +860,7 @@ int gen_add(struct gen_context *ctx, int a, int b)
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (restype == V_INT) {
+        res->value = v1->value + v2->value;
         buffer_write(ctx->data, "%%%d = add i%d %%%d, %%%d\n",
             res->reg, v1->type->bits, v1->reg, v2->reg);
     } else if (restype == V_FLOAT) {
@@ -1529,7 +1540,8 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 var = new_variable(ctx, node->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
                 var->global = ctx->global;
                 var->addr = addrval;
-                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 0, 0);
+                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 0, 0, node->value);
+                var->value = node->value;
                 break;
             case V_FLOAT:
                 ptrval = gen_use_ptr(ctx);
@@ -1564,7 +1576,7 @@ int gen_index(struct gen_context *ctx, struct node *node)
 
     // FIXME
     if (ctx->is_decl < 100) {
-        FATAL(!var, "Can't find variable in non-declr: %d\n", ctx->is_decl);
+        FATAL(!var, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
         gen_recursive_allocs(ctx, node->right);
         return var->reg;
     }
@@ -1578,10 +1590,19 @@ int gen_index(struct gen_context *ctx, struct node *node)
      * Generating dynamic array would mean alloc/realloc from heap
      * instead of stack, so postponing it.
      */
+    struct buffer *tmpdata = buffer_init();
+    struct buffer *tmp = ctx->data;
+    ctx->data = tmpdata;
+
+    //ctx->debug = 1;
     int idx_reg = gen_recursive(ctx, node->right);
+    //ctx->debug = 0;
     struct variable *idx = find_variable(ctx, idx_reg);
     FATAL(!idx, "Invalid index");
     FATAL(idx->type->type != V_INT, "Invalid index, should be int");
+    ctx->data = tmp;
+    buffer_append(ctx->init, buffer_read(tmpdata));
+    buffer_del(tmpdata);
 
     // We assume now direct value
     int idx_value = node->right->value;
@@ -1604,7 +1625,7 @@ int gen_index(struct gen_context *ctx, struct node *node)
             var->global = ctx->global;
             var->addr = addrval;
             var->array = idx_value;
-            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0);
+            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0, node->value);
             break;
         case V_FLOAT:
             ptrval = gen_use_ptr(ctx);
@@ -1671,9 +1692,9 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
             var->ptr + node->addr,
             0, 0);
 
-        gen_allocate_int(ctx, res->reg, res->type->bits, res->ptr, 0, 1);
+        gen_allocate_int(ctx, res->reg, res->type->bits, res->ptr, 0, 1, node->value);
         if (var->type->type == V_INT) {
-            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s %s%d, align %d\n",
+            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s %s%d, align %d ; gen_addr\n",
                 res->type->bits,
                 src ? src : "",
                 reg,
@@ -1752,7 +1773,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
         char *tmp = get_stars(src->ptr);
 
         //dump_variables(ctx);
-        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d\n",
+        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign\n",
                 src->type->bits, tmp ? tmp : "", src->reg,
                 dst->type->bits, tmp ? tmp : "",
                 REGP(dst), dst->reg,
@@ -2259,7 +2280,7 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         FATAL(!tres, "Ternary return type invalid");
         buffer_write(cmpblock, "; TENARY TRUE\n");
         res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->ptr, tres->addr, 0);
-        gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1);
+        gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1, 0);
 
         ctx->data = cmpblock;
         tres = gen_cast(ctx, tres, res->type, 1);
@@ -2414,6 +2435,10 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
     if (node->node == A_POSTINC) {
+#if 0
+        if (res->ptr) {
+        } else
+#endif
         if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
                 res->reg, var->type->bits, var->reg);
@@ -2445,6 +2470,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
     if (node->node == A_FUNCTION)
         return 0;
 
+    int res = 0;
     switch (node->node) {
         case A_TYPE:
             gen_type(ctx, node);
@@ -2453,19 +2479,19 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             gen_pointer(ctx, node);
             break;
         case A_INDEX:
-            gen_index(ctx, node);
+            res = gen_index(ctx, node);
             break;
         case A_IDENTIFIER:
-            gen_identifier(ctx, node);
+            res = gen_identifier(ctx, node);
             break;
         case A_INT_LIT:
-            gen_prepare_store_int(ctx, node);
+            res = gen_prepare_store_int(ctx, node);
             break;
         case A_DEC_LIT:
-            gen_prepare_store_double(ctx, node);
+            res = gen_prepare_store_double(ctx, node);
             break;
         case A_STR_LIT:
-            gen_prepare_store_str(ctx, node);
+            res = gen_prepare_store_str(ctx, node);
             break;
         case A_DECLARATION:
             ctx->is_decl = 100;
@@ -2478,18 +2504,30 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             break;
     }
 
+    int left = 0;
+    int right = 0;
+
     if (node->node != A_INDEX && node->left)
-        gen_recursive_allocs(ctx, node->left);
+        left = gen_recursive_allocs(ctx, node->left);
     /* After handling left side of assign we need to stop checking for variables since right side can't be declaration */
     if (node->node == A_ASSIGN)
             ctx->is_decl++;
     if (node->mid)
         gen_recursive_allocs(ctx, node->mid);
     if (node->right)
-        gen_recursive_allocs(ctx, node->right);
+        right = gen_recursive_allocs(ctx, node->right);
     if (node->node == A_DECLARATION)
         ctx->is_decl = 0;
-    return 0;
+    if (node->node == A_ASSIGN && left > 0 && right > 0) {
+        /* Need to handle assign values */
+        struct variable *v1 = find_variable(ctx, left);
+        struct variable *v2 = find_variable(ctx, right);
+        FATAL(!v1, "Invalid assign lvalue");
+        FATAL(!v2, "Invalid assign rvalue");
+        v1->value = v2->value;
+    }
+
+    return res;
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node)
@@ -2523,6 +2561,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         resleft = gen_recursive(ctx, node->left);
     if (node->right)
         resright = gen_recursive(ctx, node->right);
+
+    if (ctx && ctx->debug)
+        printf("DEBUG: gen_recursive(), node %s, left %d, right %d\n", node_str(node), resleft, resright);
 
     /* Then generate this node */
     switch (node->node) {
@@ -2773,7 +2814,6 @@ struct node *find_main_type(struct node *node)
             if (!node->right->left->value_string) {
                 printf("Invalid left in function\n");
                 return NULL;
-                //node_walk(node->right);
             }
             if (strcmp(node->right->left->value_string, "main") == 0) {
                 return node->left;

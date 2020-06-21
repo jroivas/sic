@@ -11,19 +11,35 @@ int first(int *arr)
     return res;
 }
 
+int last(int *arr)
+{
+    int last = 0;
+    if (!arr)
+        return last;
+    while (*arr != 0) {
+        last = *arr;
+        arr++;
+    }
+    return last;
+}
+
 int main()
 {
     int n = 10;
-    int val[n];
+    int val[n + 1];
 
     tmp();
 
     for (int i = 0; i < n; i++)
         val[i] = i + 2;
 
+    val[n] = 0;
     
     if (first(val) != 2)
         return 1;
+
+    if (last(val) != 11)
+        return 2;
 
     return 0;
 }
