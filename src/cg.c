@@ -27,6 +27,7 @@ struct variable {
     int addr;
     int strlen;
     int bits;
+    int func;
     /*
      * If this is bigger than 0 it's array of "array" elements.
      * In case this is less than 0, it's size is still unknown
@@ -1441,7 +1442,6 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     FATAL(!func, "Invalid function to call");
     paramstr = gen_call_params(ctx, node->right);
     //printf("RES: %s %d != %d\n", func->name, node->type, func->type->type);
-    //printf("FC1: %s, %d, %d, reg %d\n", func->name, func->type->type, func->type->bits, func->reg);
     if (func->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func->type->bits, 1);
 
@@ -1551,9 +1551,19 @@ int gen_use_ptr(struct gen_context *ctx)
 
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
+    struct variable *all_var = find_variable_by_name(ctx, node->value_string);
     struct variable *var = find_variable_by_name_scope(ctx, node->value_string, 0);
     int res;
     if (var == NULL) {
+        if (all_var) {
+            /*
+             * We have global variable but not local, thus if
+             * this is declaration we can override it,
+             * otherwise just return the global reference.
+             */
+            if (ctx->is_decl < 100)
+                return all_var->reg;
+        }
         // Utilize pending type from previous type def
         FATAL(!ctx->pending_type, "Can't determine type of variable %s", node->value_string);
         struct type *t = ctx->pending_type;
@@ -2115,11 +2125,8 @@ int gen_function(struct gen_context *ctx, struct node *node)
     // Register function globally
 
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
-    FATAL(func_var, "Function name already in use: %s", func_ctx->name);
-
-    func_var = new_variable(ctx, func_ctx->name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
-    //printf("DD: %s, %d, %d, reg %d\n", func_ctx->name, func_var->type->type, func_var->type->bits, func_var->reg);
-    (void)func_var;
+    FATAL(!func_var, "Function not found: %s", func_ctx->name);
+    FATAL(!func_var->func, "Function variable already in use: %s", func_ctx->name);
 
     gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
@@ -2471,7 +2478,6 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
     if (node->node == A_POSTINC) {
-        buffer_write(ctx->data, "; PTR1\n");
         if (var->ptr) {
             if (var->array) {
             buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 1 ; ptr %d\n",
@@ -2504,6 +2510,37 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
     } else FATAL(1, "Invalid post op");
 
     return var->reg;
+}
+
+void gen_alloc_func(struct gen_context *ctx, struct node *node)
+{
+    struct node *r = node->right;
+    FATAL(!r, "Function body missing");
+    struct node *name = r->left;
+    FATAL(!name, "Function name missing");
+    const char *func_name = name->value_string;
+    struct node *functype = node->left;
+
+    struct variable *func_var = find_variable_by_name(ctx, func_name);
+    FATAL(func_var, "Function name already in use: %s", func_name);
+
+    func_var = new_variable(ctx, func_name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
+    func_var->func = 1;
+}
+
+// Scan all functions
+void gen_scan_functions(struct gen_context *ctx, struct node *node)
+{
+    if (node == NULL)
+        return;
+
+    if (node->node == A_FUNCTION)
+        gen_alloc_func(ctx, node);
+
+    if (node->left)
+        gen_scan_functions(ctx, node->left);
+    if (node->right)
+        gen_scan_functions(ctx, node->right);
 }
 
 // First pass to scan types and alloc
@@ -2883,6 +2920,8 @@ int codegen(FILE *outfile, struct node *node)
     ctx->global = 1;
     ctx->node = node;
     ctx->main_type = find_main_type(node);
+
+    gen_scan_functions(ctx, node);
 
     gen_pre(ctx, node, node);
     res = gen_recursive_allocs(ctx, node);
