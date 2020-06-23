@@ -71,5 +71,17 @@ int main()
     if (*ptr != 7)
         return 6;
 
+    --ptr;
+    if (*ptr != 6)
+        return 7;
+
+    ptr--;
+    if (*ptr != 5)
+        return 8;
+
+    ptr -= 2;
+    if (*ptr != 3)
+        return 9;
+
     return 0;
 }
