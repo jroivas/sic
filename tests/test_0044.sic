@@ -23,6 +23,19 @@ int last(int *arr)
     return last;
 }
 
+int cnt(int *arr)
+{
+    int cnt = 0;
+    if (!arr)
+        return cnt;
+    while (*arr != 0) {
+        ++arr;
+        ++cnt;
+    }
+
+    return cnt;
+}
+
 int main()
 {
     int n = 10;
@@ -40,6 +53,23 @@ int main()
 
     if (last(val) != 11)
         return 2;
+
+    int cnt_items = cnt(val);
+    if (cnt_items != n)
+        return 3;
+
+    int *ptr = val;
+    ptr += 2;
+    if (*ptr != 4)
+        return 4;
+
+    ptr = ptr + 2;
+    if (*ptr != 6)
+        return 5;
+
+    ptr = 1 + ptr;
+    if (*ptr != 7)
+        return 6;
 
     return 0;
 }

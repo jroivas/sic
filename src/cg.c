@@ -877,10 +877,36 @@ int gen_add(struct gen_context *ctx, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
+    struct variable *idx = NULL;
+    if (v1->ptr || v2->ptr) {
+        // Support: a = 1 + a
+        if (v2->ptr && !v1->ptr) {
+            struct variable *tmp = v1;
+            v1 = v2;
+            v2 = tmp;
+        }
+        struct type idx_target;
+        idx_target.type = V_INT;
+        idx_target.bits = 64;
+        idx_target.sign = 0;
+        idx = gen_load(ctx, v2);
+        idx = gen_cast(ctx, idx, &idx_target, 1);
+        idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
+    }
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
-    if (restype == V_INT) {
+    if (v1->ptr) {
+        FATAL(!idx, "Invalid index on add to ptr");
+        if (v1->array) {
+            buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; add array val\n",
+                res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
+        } else  {
+            buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %%%d ; add array ptr val\n",
+                res->reg, res->type->bits, res->type->bits, v1->reg, idx->reg);
+        }
+        res->ptr = v1->ptr;
+    } else if (restype == V_INT) {
         res->value = v1->value + v2->value;
         buffer_write(ctx->data, "%%%d = add i%d %%%d, %%%d\n",
             res->reg, v1->type->bits, v1->reg, v2->reg);
@@ -2446,7 +2472,16 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
     if (node->node == A_PREINC) {
-        if (res->type->type == V_INT) {
+        if (var->ptr) {
+            if (var->array) {
+                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 1 ; preinc arr\n",
+                    res->reg, var->array, res->type->bits, var->array, res->type->bits, var->reg, var->ptr);
+            } else  {
+                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 1 ; preinc arr ptr\n",
+                    res->reg, res->type->bits, res->type->bits, var->reg);
+            }
+            res->ptr = var->ptr;
+        } else if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
                 res->reg, var->type->bits, var->reg);
         } else if (res->type->type == V_FLOAT) {
@@ -2480,14 +2515,12 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
     if (node->node == A_POSTINC) {
         if (var->ptr) {
             if (var->array) {
-            buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 1 ; ptr %d\n",
+                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 1 ; postinc arr\n",
                     res->reg, var->array, res->type->bits, var->array, res->type->bits,
-                    var->reg, var->ptr);
+                    var->reg);
             } else  {
-                // %12 = getelementptr inbounds i32, i32* %11, i32 1
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 1 ; ptr %d\n",
-                        res->reg, res->type->bits, res->type->bits,
-                        var->reg, var->ptr);
+                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 1 ; postinc arr ptr\n",
+                    res->reg, res->type->bits, res->type->bits, var->reg);
             }
             res->ptr = var->ptr;
         } else if (res->type->type == V_INT) {
