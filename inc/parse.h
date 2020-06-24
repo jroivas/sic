@@ -71,6 +71,10 @@ struct node {
     literalnum value;
     literalnum fraction;
 
+    const char *filename;
+    int line;
+    int linepos;
+
     struct node *left;
     struct node *mid;
     struct node *right;

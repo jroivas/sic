@@ -53,7 +53,9 @@ struct token {
 #define SCANFILE_SAVE_MAX 64
 struct scanfile {
     FILE *infile;
+    const char *filename;
     int line;
+    int linepos;
     int putback;
     int savecnt;
     long save_point[SCANFILE_SAVE_MAX];

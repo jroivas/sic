@@ -34,6 +34,7 @@ void open_input_file(struct scanfile *f, const char *name)
 {
     memset(f, 0, sizeof(struct scanfile));
     f->infile = fopen(name, "r");
+    f->filename = name;
     f->line = 1;
 }
 
@@ -82,10 +83,14 @@ static int next(struct scanfile *f)
     if (f->putback) {
         c = f->putback;
         f->putback = 0;
+        f->linepos++;
     } else {
         c = fgetc(f->infile);
-        if (c == '\n')
+        f->linepos++;
+        if (c == '\n') {
             f->line++;
+            f->linepos = 0;
+        }
     }
 
     //printf("Scanned: %c (%d)\n", c, c);
@@ -123,6 +128,7 @@ int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keywor
 static void putback(struct scanfile *f, int c)
 {
     f->putback = c;
+    f->linepos--;
 }
 
 literalnum scan_number(struct scanfile *f, int c)
