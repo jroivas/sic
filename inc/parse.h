@@ -70,6 +70,7 @@ struct node {
     const char *value_string;
     literalnum value;
     literalnum fraction;
+    struct token *token;
 
     const char *filename;
     int line;

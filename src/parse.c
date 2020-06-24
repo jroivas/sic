@@ -177,7 +177,7 @@ enum var_type resolve_var_type(struct node *n)
     return v1;
 }
 
-struct node *make_node(struct scanfile *f, enum nodetype node, struct node *left, struct node *mid, struct node *right)
+struct node *make_node(struct token *t, enum nodetype node, struct node *left, struct node *mid, struct node *right)
 {
     struct node *res = calloc(1, sizeof(struct node));
     if (res == NULL)
@@ -187,23 +187,27 @@ struct node *make_node(struct scanfile *f, enum nodetype node, struct node *left
     res->left = left;
     res->mid = mid;
     res->right = right;
-    res->line = f->line;
-    res->linepos = f->linepos;
-    res->filename = f->filename;
+
+    res->filename = t->filename;
+    res->line = t->line;
+    res->linepos = t->linepos;
+    res->token = t;
+
     if (left != NULL || mid != NULL || right != NULL)
         res->type = resolve_var_type(res);
     else
         res->type = V_VOID;
 #if DEBUG
     printf("MAKE: %d, %s\n", node, node_str(res));
+    //printf("MAKE: %d, %s (val %lld) in %s:%d@%d\n", node, node_str(res), t->value, res->filename, res->line, res->linepos);
 #endif
 
     return res;
 }
 
-struct node *make_leaf(struct scanfile *f, enum nodetype node, struct token *t)
+struct node *make_leaf(struct token *t, enum nodetype node)
 {
-    struct node *n = make_node(f, node, NULL, NULL, NULL);
+    struct node *n = make_node(t, node, NULL, NULL, NULL);
 
     if (t->token == T_INT_LIT) {
 #if DEBUG
@@ -235,9 +239,9 @@ struct node *make_leaf(struct scanfile *f, enum nodetype node, struct token *t)
     return n;
 }
 
-struct node *make_type(struct scanfile *f, enum nodetype node, struct token *t, enum var_type type, int bits, int sign, const char *name)
+struct node *make_type(struct token *t, enum nodetype node, enum var_type type, int bits, int sign, const char *name)
 {
-    struct node *n = make_node(f, node, NULL, NULL, NULL);
+    struct node *n = make_node(t, node, NULL, NULL, NULL);
     n->type = type;
     n->bits = bits;
     n->sign = sign;
@@ -245,9 +249,9 @@ struct node *make_type(struct scanfile *f, enum nodetype node, struct token *t, 
     return n;
 }
 
-struct node *make_type_spec(struct scanfile *f, struct token *t, enum var_type type, int bits, int sign, const char *name)
+struct node *make_type_spec(struct token *t, enum var_type type, int bits, int sign, const char *name)
 {
-    struct node *n = make_node(f, A_TYPESPEC, NULL, NULL, NULL);
+    struct node *n = make_node(t, A_TYPESPEC, NULL, NULL, NULL);
     n->type = type;
     n->bits = bits;
     n->sign = sign;
@@ -255,9 +259,9 @@ struct node *make_type_spec(struct scanfile *f, struct token *t, enum var_type t
     return n;
 }
 
-struct node *make_type_qual(struct scanfile *f, const char *name)
+struct node *make_type_qual(struct token *t, const char *name)
 {
-    struct node *n = make_node(f, A_TYPE_QUAL, NULL, NULL, NULL);
+    struct node *n = make_node(t, A_TYPE_QUAL, NULL, NULL, NULL);
     n->value_string = name;
     return n;
 }
@@ -278,9 +282,9 @@ int scan_const(struct node *node)
     return res;
 }
 
-struct node *type_resolve(struct scanfile *f, struct node *node, int d)
+struct node *type_resolve(struct token *t, struct node *node, int d)
 {
-    struct node *res = make_node(f, A_TYPE, NULL, NULL, NULL);
+    struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
     enum var_type type = node->type;
     type = resolve_var_type(node);
     int bits = node->bits;
@@ -309,20 +313,20 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
 
     switch (token->token) {
         case T_INT_LIT:
-            res = make_leaf(f, A_INT_LIT, token);
+            res = make_leaf(token, A_INT_LIT);
             break;
         case T_DEC_LIT:
-            res = make_leaf(f, A_DEC_LIT, token);
+            res = make_leaf(token, A_DEC_LIT);
             break;
         case T_STR_LIT:
-            res = make_leaf(f, A_STR_LIT, token);
+            res = make_leaf(token, A_STR_LIT);
             break;
         case T_IDENTIFIER:
-            res = make_node(f, A_IDENTIFIER, NULL, NULL, NULL);
+            res = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
             res->value_string = token->value_string;
             break;
         case T_NULL:
-            res = make_leaf(f, A_NULL, token);
+            res = make_leaf(token, A_NULL);
             break;
         case T_KEYWORD:
             return NULL;
@@ -353,21 +357,21 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         return res;
 
     if (strcmp(token->value_string, "void") == 0)
-        res = make_type_spec(f, token, V_VOID, 0, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_VOID, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "char") == 0)
-        res = make_type_spec(f, token, V_INT, 8, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 8, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "int") == 0)
-        res = make_type_spec(f, token, V_INT, 0, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "unsigned") == 0)
-        res = make_type_spec(f, token, V_INT, 0, PARSE_UNSIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 0, PARSE_UNSIGNED, token->value_string);
     else if (strcmp(token->value_string, "signed") == 0)
-        res = make_type_spec(f, token, V_INT, 0, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "short") == 0)
-        res = make_type_spec(f, token, V_INT, 16, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 16, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "long") == 0)
-        res = make_type_spec(f, token, V_INT, 64, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "double") == 0)
-        res = make_type_spec(f, token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
+        res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
     // FIXME More types
 
     if (res)
@@ -384,7 +388,7 @@ struct node *type_qualifier(struct scanfile *f, struct token *token)
         return res;
 
     if (strcmp(token->value_string, "const") == 0 || strcmp(token->value_string, "volatile") == 0) {
-        res = make_type_qual(f, token->value_string);
+        res = make_type_qual(token, token->value_string);
         scan(f, token);
     }
 
@@ -401,7 +405,7 @@ struct node *type_qualifier_list(struct scanfile *f, struct token *token)
         if (!res && tmp)
             res = tmp;
         else if (res && tmp)
-            res = make_node(f, A_LIST, res, NULL, tmp);
+            res = make_node(token, A_LIST, res, NULL, tmp);
     } while (tmp);
 
     return res;
@@ -417,7 +421,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
         if (type == NULL)
             return type;
     }
-    type = type_resolve(f, type, 0);
+    type = type_resolve(token, type, 0);
 
     struct node *res = NULL;
     res = type;
@@ -425,7 +429,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
         struct node *tmp = declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
-        res = make_node(f, A_GLUE, res, NULL, tmp);
+        res = make_node(token, A_GLUE, res, NULL, tmp);
     }
 
     return res;
@@ -441,7 +445,7 @@ struct node *parameter_declaration(struct scanfile *f, struct token *token)
     if (!decl)
         decl = abstract_declarator(f, token);
     if (decl)
-        return make_node(f, A_LIST, spec, NULL, decl);
+        return make_node(token, A_LIST, spec, NULL, decl);
 
     return spec;
 }
@@ -453,7 +457,7 @@ struct node *parameter_list(struct scanfile *f, struct token *token)
         struct node *tmp = parameter_declaration(f, token);
         if (!tmp)
             break;
-        res = make_node(f, A_LIST, res, NULL, tmp);
+        res = make_node(token, A_LIST, res, NULL, tmp);
     }
     return res;
 }
@@ -468,12 +472,12 @@ struct node *identifier_list(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
     while(accept(f, token, T_IDENTIFIER)) {
-        struct node *tmp = make_node(f, A_IDENTIFIER, NULL, NULL, NULL);
+        struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
         tmp->value_string = token->value_string;
         if (!res)
             tmp = res;
         else
-            res = make_node(f, A_LIST, res, NULL, tmp);
+            res = make_node(token, A_LIST, res, NULL, tmp);
         if (token->token != T_COMMA)
             break;
         scan(f, token);
@@ -486,14 +490,14 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
     struct node *res = NULL;
     save_point(f, token);
     if (token->token == T_IDENTIFIER) {
-        res = make_node(f, A_IDENTIFIER, NULL, NULL, NULL);
+        res = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
         res->value_string = token->value_string;
         scan(f, token);
     }
     else if (accept(f, token, T_ROUND_OPEN)) {
         struct node *decl = declarator(f, token);
         if (decl)
-            res = make_node(f, A_GLUE, res, NULL, decl);
+            res = make_node(token, A_GLUE, res, NULL, decl);
         if (!accept(f, token, T_ROUND_CLOSE)) {
             load_point(f, token);
             return NULL;
@@ -511,7 +515,7 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
         } else if (accept(f, token, T_SQUARE_OPEN)) {
             struct node *index = constant_expression(f, token);
             expect(f, token, T_SQUARE_CLOSE, "]");
-            res = make_node(f, A_INDEX, res, NULL, index);
+            res = make_node(token, A_INDEX, res, NULL, index);
         }
 
     }
@@ -528,10 +532,10 @@ struct node *pointer(struct scanfile *f, struct token *token)
             if (res)
                 res->right = qual;
             else
-                res = make_node(f, A_POINTER, qual, NULL, NULL);
+                res = make_node(token, A_POINTER, qual, NULL, NULL);
         } else {
             if (!res)
-                res = make_node(f, A_POINTER, NULL, NULL, NULL);
+                res = make_node(token, A_POINTER, NULL, NULL, NULL);
             if (!res)
                 break;
             res->ptr++;
@@ -559,10 +563,10 @@ struct node *shift_expression(struct scanfile *f, struct token *token)
 
     if (accept(f, token, T_LEFT)) {
         struct node *tmp = shift_expression(f, token);
-        res = make_node(f, A_LEFT, res, NULL, tmp);
+        res = make_node(token, A_LEFT, res, NULL, tmp);
     } else if (accept(f, token, T_RIGHT)) {
         struct node *tmp = shift_expression(f, token);
-        res = make_node(f, A_RIGHT, res, NULL, tmp);
+        res = make_node(token, A_RIGHT, res, NULL, tmp);
     }
     return res;
 }
@@ -577,7 +581,7 @@ struct node *relational_expression(struct scanfile *f, struct token *token)
         
         struct node *right = relational_expression(f, token);
         FATAL(!right, "Invalid relational expression");
-        return make_node(f, type, res, NULL, right);
+        return make_node(token, type, res, NULL, right);
     } else if (accept(f, token, T_GT)) {
         enum nodetype type = A_GT;
         if (accept(f, token, T_EQ))
@@ -585,7 +589,7 @@ struct node *relational_expression(struct scanfile *f, struct token *token)
         
         struct node *right = relational_expression(f, token);
         FATAL(!right, "Invalid relational expression");
-        return make_node(f, type, res, NULL, right);
+        return make_node(token, type, res, NULL, right);
     }
     return res;
 }
@@ -598,10 +602,10 @@ struct node *equality_expression(struct scanfile *f, struct token *token)
 
     if (accept(f, token, T_EQ_NE)) {
         struct node *tmp = relational_expression(f, token);
-        return make_node(f, A_NE_OP, res, NULL, tmp);
+        return make_node(token, A_NE_OP, res, NULL, tmp);
     } else if (accept(f, token, T_EQ_EQ)) {
         struct node *tmp = relational_expression(f, token);
-        return make_node(f, A_EQ_OP, res, NULL, tmp);
+        return make_node(token, A_EQ_OP, res, NULL, tmp);
     }
 
     return res;
@@ -614,7 +618,7 @@ struct node *and_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_AMP)) {
         struct node *tmp = and_expression(f, token);
         FATAL(!tmp, "Right side missing on AND");
-        res = make_node(f, A_AND, res, NULL, tmp);
+        res = make_node(token, A_AND, res, NULL, tmp);
     }
     return res;
 }
@@ -628,7 +632,7 @@ struct node *exclusive_or_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_XOR)) {
         struct node *tmp = exclusive_or_expression(f, token);
         FATAL(!tmp, "Right side missing on XOR");
-        res = make_node(f, A_XOR, res, NULL, tmp);
+        res = make_node(token, A_XOR, res, NULL, tmp);
     }
     return res;
 }
@@ -642,7 +646,7 @@ struct node *inclusive_or_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_OR)) {
         struct node *tmp = inclusive_or_expression(f, token);
         FATAL(!tmp, "Right side missing on OR");
-        res = make_node(f, A_OR, res, NULL, tmp);
+        res = make_node(token, A_OR, res, NULL, tmp);
     }
     return res;
 }
@@ -656,7 +660,7 @@ struct node *logical_and_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_LOG_AND)) {
         struct node *tmp = logical_and_expression(f, token);
         FATAL(!tmp, "Right side missing on logical AND");
-        res = make_node(f, A_LOG_AND, res, NULL, tmp);
+        res = make_node(token, A_LOG_AND, res, NULL, tmp);
     }
     return res;
 }
@@ -670,7 +674,7 @@ struct node *logical_or_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_LOG_OR)) {
         struct node *tmp = logical_or_expression(f, token);
         FATAL(!tmp, "Right side missing on logical OR");
-        res = make_node(f, A_LOG_OR, res, NULL, tmp);
+        res = make_node(token, A_LOG_OR, res, NULL, tmp);
     }
     return res;
 }
@@ -685,7 +689,7 @@ struct node *conditional_expression(struct scanfile *f, struct token *token)
         if (!accept(f, token, T_COLON))
             ERR("Expected ':' in ternary operation");
         struct node *cond = conditional_expression(f, token);
-        res = make_node(f, A_TERNARY, res, exp, cond);
+        res = make_node(token, A_TERNARY, res, exp, cond);
     }
 
     return res;
@@ -734,7 +738,7 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
         if (nodetype != A_ASSIGN || token->token != T_EQ) {
             remove_save_point(f, token);
             struct node *expr = assignment_expression(f, token);
-            res = make_node(f, nodetype, unary, NULL, expr);
+            res = make_node(token, nodetype, unary, NULL, expr);
             return res;
         }
         //load_point(f, token);
@@ -766,7 +770,7 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
             ERR("Expected initializer after '='");
             return NULL;
         }
-        res = make_node(f, A_ASSIGN, res, NULL, tmp);
+        res = make_node(token, A_ASSIGN, res, NULL, tmp);
     }
 
     return res;
@@ -780,7 +784,7 @@ struct node *init_declarator_list(struct scanfile *f, struct token *token)
         struct node *tmp = init_declarator(f, token);
         if (!tmp)
             break;
-        tmp = make_node(f, A_LIST, tmp, NULL, NULL);
+        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
         if (res == NULL)
             res = tmp;
         else {
@@ -802,18 +806,18 @@ struct node *declaration(struct scanfile *f, struct token *token)
         remove_save_point(f, token);
         return NULL;
     }
-    res = type_resolve(f, res, 0);
+    res = type_resolve(token, res, 0);
 
     struct node *decl = init_declarator_list(f, token);
     if (decl)
-        res = make_node(f, A_DECLARATION, res, NULL, decl);
+        res = make_node(token, A_DECLARATION, res, NULL, decl);
 #if 0
     else {
         match(f, token, T_IDENTIFIER, "identifier");
 
-        struct node *tmp = make_node(f, A_IDENTIFIER, NULL, NULL);
+        struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL);
         tmp->value_string = token->value_string;
-        res = make_node(f, A_DECLARATION, res, tmp);
+        res = make_node(token, A_DECLARATION, res, tmp);
 
         scan(f, token);
     }
@@ -837,7 +841,7 @@ struct node *argument_expression_list(struct scanfile *f, struct token *token)
         struct node *tmp = assignment_expression(f, token);
         if (!tmp)
             break;
-        tmp = make_node(f, A_LIST, tmp, NULL, NULL);
+        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
         if (res == NULL)
             res = tmp;
         else {
@@ -862,17 +866,17 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *args = argument_expression_list(f, token);
 
-        res = make_node(f, A_FUNC_CALL, res, NULL, args);
+        res = make_node(token, A_FUNC_CALL, res, NULL, args);
         expect(f, token, T_ROUND_CLOSE, ")");
     } else if (accept(f, token, T_SQUARE_OPEN)) {
         struct node *index = expression(f, token);
         expect(f, token, T_SQUARE_CLOSE, "]");
-        res = make_node(f, A_INDEX, res, NULL, index);
+        res = make_node(token, A_INDEX, res, NULL, index);
     } else if (accept(f, token, T_PLUSPLUS)) {
-        res = make_node(f, A_POSTINC, res, NULL, NULL);
+        res = make_node(token, A_POSTINC, res, NULL, NULL);
         return res;
     } else if (accept(f, token, T_MINUSMINUS)) {
-        res = make_node(f, A_POSTDEC, res, NULL, NULL);
+        res = make_node(token, A_POSTDEC, res, NULL, NULL);
         return res;
     }
 
@@ -891,26 +895,26 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         left = cast_expression(f, token);
         if (!left)
             ERR("Invalid cast!");
-        return make_node(f, A_NEGATE, left, NULL, NULL);
+        return make_node(token, A_NEGATE, left, NULL, NULL);
     } else if (accept(f, token, T_EXCLAM)) {
         left = cast_expression(f, token);
         if (!left)
             ERR("Invalid cast!");
-        return make_node(f, A_NOT, left, NULL, NULL);
+        return make_node(token, A_NOT, left, NULL, NULL);
     } else if (accept(f, token, T_TILDE)) {
         left = cast_expression(f, token);
         if (!left)
             ERR("Invalid cast!");
-        return make_node(f, A_TILDE, left, NULL, NULL);
+        return make_node(token, A_TILDE, left, NULL, NULL);
     } else if (accept(f, token, T_PLUSPLUS)) {
         left = unary_expression(f, token);
         FATAL(!left, "Invalid preinc");
-        left = make_node(f, A_PREINC, left, NULL, NULL);
+        left = make_node(token, A_PREINC, left, NULL, NULL);
         return left;
     } else if (accept(f, token, T_MINUSMINUS)) {
         left = unary_expression(f, token);
         FATAL(!left, "Invalid preinc");
-        left = make_node(f, A_PREDEC, left, NULL, NULL);
+        left = make_node(token, A_PREDEC, left, NULL, NULL);
         return left;
     } else if (accept(f, token, T_STAR)) {
         left = cast_expression(f, token);
@@ -918,7 +922,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             ERR("Required lvalue for unary '*' operator");
         if (left->node != A_IDENTIFIER)
             ERR("Expected identifier lvalue for unary '*' operator");
-        left = make_node(f, A_DEREFERENCE, left, NULL, NULL);
+        left = make_node(token, A_DEREFERENCE, left, NULL, NULL);
         return left;
     } else if (accept(f, token, T_AMP)) {
         int addr = 1;
@@ -929,7 +933,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             ERR("Required lvalue for unary '&' operator");
         if (left->node != A_IDENTIFIER)
             ERR("Expected identifier lvalue for unary '&' operator");
-        left = make_node(f, A_ADDR, left, NULL, NULL);
+        left = make_node(token, A_ADDR, left, NULL, NULL);
         left->addr = addr;
         return left;
     }
@@ -949,7 +953,7 @@ struct node *specifier_qualifier_list(struct scanfile *f, struct token *token)
 
     struct node *rest = specifier_qualifier_list(f, token);
     if (rest)
-        return make_node(f, A_LIST, type, NULL, rest);
+        return make_node(token, A_LIST, type, NULL, rest);
 
     return type;
 }
@@ -965,7 +969,7 @@ struct node *abstract_declarator(struct scanfile *f, struct token *token)
     struct node *res = pointer(f, token);
     struct node *dir = direct_abstract_declarator(f, token);
     if (res && dir)
-        res = make_node(f, A_LIST, res, NULL, dir);
+        res = make_node(token, A_LIST, res, NULL, dir);
     else if (!res)
         res = dir;
 
@@ -980,7 +984,7 @@ struct node *type_name(struct scanfile *f, struct token *token)
 
     struct node *rest = abstract_declarator(f, token);
     if (rest)
-        res = make_node(f, A_LIST, res, NULL, rest);
+        res = make_node(token, A_LIST, res, NULL, rest);
 
     return res;
 }
@@ -995,11 +999,11 @@ struct node *cast_expression(struct scanfile *f, struct token *token)
         } else {
             remove_save_point(f, token);
             //FATAL(!cast_to, "No cast type name");
-            cast_to = type_resolve(f, cast_to, 0);
+            cast_to = type_resolve(token, cast_to, 0);
             expect(f, token, T_ROUND_CLOSE, ")");
             struct node *src = cast_expression(f, token);
             FATAL(!src, "No cast source");
-            return make_node(f, A_CAST, cast_to, NULL, src);
+            return make_node(token, A_CAST, cast_to, NULL, src);
         }
     } else
         remove_save_point(f, token);
@@ -1023,7 +1027,7 @@ struct node *multiplicative_expression(struct scanfile *f, struct token *token)
         right = cast_expression(f, token);
         if (!right)
             return NULL;
-        left = make_node(f, oper(type), left, NULL, right);
+        left = make_node(token, oper(type), left, NULL, right);
         type = token->token;
     }
 
@@ -1048,7 +1052,7 @@ struct node *additive_expression(struct scanfile *f, struct token *token)
         right = multiplicative_expression(f, token);
         if (!right)
             return NULL;
-        left = make_node(f, oper(type), left, NULL, right);
+        left = make_node(token, oper(type), left, NULL, right);
         type = token->token;
     }
     return left;
@@ -1082,7 +1086,7 @@ struct node *jump_statement(struct scanfile *f, struct token *token)
     if (strcmp(token->value_string, "return") == 0) {
         scan(f, token);
         res = expression(f, token);
-        res = make_node(f, A_RETURN, res, NULL, NULL);
+        res = make_node(token, A_RETURN, res, NULL, NULL);
     }
     if (res)
         semi(f, token);
@@ -1109,7 +1113,7 @@ struct node *if_statement(struct scanfile *f, struct token *token)
     if (accept_keyword(f, token, K_ELSE))
         false_ast = statement(f, token);
 
-    return make_node(f, A_IF, cond, true_ast, false_ast);
+    return make_node(token, A_IF, cond, true_ast, false_ast);
 }
 
 struct node *selection_statement(struct scanfile *f, struct token *token)
@@ -1139,14 +1143,14 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
         expect(f, token, T_ROUND_CLOSE, ")");
 
         struct node *body = statement(f, token);
-        res = make_node(f, A_WHILE, res, NULL, body);
+        res = make_node(token, A_WHILE, res, NULL, body);
     } else if (accept_keyword(f, token, K_DO)) {
         struct node *body = statement(f, token);
         FATAL(!accept_keyword(f, token, K_WHILE), "Do missing while");
         expect(f, token, T_ROUND_OPEN, "(");
         res = expression(f, token);
         expect(f, token, T_ROUND_CLOSE, ")");
-        res = make_node(f, A_DO, res, NULL, body);
+        res = make_node(token, A_DO, res, NULL, body);
         semi(f, token);
     } else if (accept_keyword(f, token, K_FOR)) {
         expect(f, token, T_ROUND_OPEN, "(");
@@ -1167,8 +1171,8 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
         expect(f, token, T_ROUND_CLOSE, ")");
 
         struct node *body = statement(f, token);
-        init = make_node(f, A_GLUE, init, NULL, post);
-        res = make_node(f, A_FOR, comp, init, body);
+        init = make_node(token, A_GLUE, init, NULL, post);
+        res = make_node(token, A_FOR, comp, init, body);
     }
 
     return res;
@@ -1219,7 +1223,7 @@ struct node *statement_list(struct scanfile *f, struct token *token)
             tmp = declaration(f, token);
         if (!tmp)
             break;
-        tmp = make_node(f, A_LIST, tmp, NULL, NULL);
+        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
         if (res == NULL)
             res = tmp;
         else {
@@ -1239,7 +1243,7 @@ struct node *declaration_list(struct scanfile *f, struct token *token)
         struct node *tmp = declaration(f, token);
         if (!tmp)
             break;
-        tmp = make_node(f, A_LIST, tmp, NULL, NULL);
+        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
         if (res == NULL)
             res = tmp;
         else {
@@ -1266,7 +1270,7 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     expect(f, token, T_CURLY_CLOSE, "}");
 
     // We parsed body, always return it
-    res = make_node(f, A_GLUE, decl, NULL, res);
+    res = make_node(token, A_GLUE, decl, NULL, res);
     return res;
 }
 
@@ -1276,7 +1280,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *spec = declaration_specifiers(f, token);
     if (!spec)
         return NULL;
-    spec = type_resolve(f, spec, 0);
+    spec = type_resolve(token, spec, 0);
     struct node *decl = declarator(f, token);
     if (!decl)
         ERR("Invalid function definition");
@@ -1288,9 +1292,9 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     }
 
 
-    //decl = type_resolve(f, decl, 0);
-    res = make_node(f, A_GLUE, decl, NULL, comp);
-    res = make_node(f, A_FUNCTION, spec, NULL, res);
+    //decl = type_resolve(token, decl, 0);
+    res = make_node(token, A_GLUE, decl, NULL, comp);
+    res = make_node(token, A_FUNCTION, spec, NULL, res);
 
     return res;
 }
@@ -1333,7 +1337,7 @@ struct node *translation_unit(struct scanfile *f, struct token *token)
          * GLUE and LIST work alike, however LIST is always a list,
          * GLUE can be anything
          */
-        res = make_node(f, A_GLUE, res, NULL, tmp);
+        res = make_node(token, A_GLUE, res, NULL, tmp);
     }
     return res;
 }

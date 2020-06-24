@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <execinfo.h>
 
 typedef unsigned long long literalnum;
 typedef unsigned long hashtype;
@@ -33,19 +34,26 @@ enum var_type {
 #define ERR(...) ERR_FULL(0, __VA_ARGS__)
 #define ERR_TRACE(...) ERR_FULL(1, __VA_ARGS__)
 
-#define FATAL(check, ...) if (check) { \
-    fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__);\
+void stack_trace(void);
+#include "parse.h"
+#define FATALN(_node, check, ...) if (check) { \
+    if (_node) \
+        fprintf(stderr, "FATAL Compiler error in %s at %d, %s@%d,%d: ", __FILE__, __LINE__, \
+        ((struct node*)_node)->filename, ((struct node*)_node)->line, ((struct node*)_node)->linepos);\
+    else fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr,  __VA_ARGS__);\
     fprintf(stderr, "\n");\
     stack_trace();\
     exit(1); \
 }
 
+#define FATAL(check, ...) FATALN(NULL, check, __VA_ARGS__)
+
+
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);
 hashtype hash(const char *str);
 char *get_stars(int cnt);
-void stack_trace(void);
 char *int_to_str(literalnum val);
 
 #endif

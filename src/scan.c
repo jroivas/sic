@@ -93,7 +93,7 @@ static int next(struct scanfile *f)
         }
     }
 
-    //printf("Scanned: %c (%d)\n", c, c);
+    printf("Scanned: %c (%d) at %d@%d\n", c, c, f->line, f->linepos);
     return c;
 }
 
@@ -227,11 +227,20 @@ int keyword(struct token *t)
     return res;
 }
 
+void token_set(struct scanfile *f, struct token *t)
+{
+    t->filename = f->filename;
+    t->line = f->line;
+    t->linepos = f->linepos;
+}
+
 int scan(struct scanfile *f, struct token *t)
 {
     int c = skip(f);
     int ok = 0;
     memset(t, 0, sizeof(struct token));
+
+    token_set(f, t);
 
     switch (c) {
         case EOF:
@@ -401,7 +410,8 @@ int scan(struct scanfile *f, struct token *t)
             if (!ok)
                 ERR("Invalid token: %c", c);
     }
-    //printf("*** Scan res: %s\n", token_dump(t));
+
+    //printf("*** Scan res: %s from %d:%d\n", token_dump(t), t->line, t->linepos);
     return 1;
 }
 
@@ -431,4 +441,10 @@ void load_point(struct scanfile *f, struct token *t)
     f->putback = 0;
     fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
+    /*
+     * Need to restore these as well in order to keep
+     * track of position.
+     */
+    f->line = t->line;
+    f->linepos = t->linepos;
 }

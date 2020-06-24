@@ -874,7 +874,7 @@ enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct
     return restype;
 }
 
-int gen_add(struct gen_context *ctx, int a, int b)
+int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -898,7 +898,7 @@ int gen_add(struct gen_context *ctx, int a, int b)
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (v1->ptr) {
-        FATAL(!idx, "Invalid index on add to ptr");
+        FATALN(node, !idx, "Invalid index on add to ptr");
         if (v1->array) {
             buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; add array val\n",
                 res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
@@ -1900,7 +1900,7 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     struct variable *src_val = NULL;
 
     if (node->node == A_ADD_ASSIGN) {
-        int tmp = gen_add(ctx, left, right);
+        int tmp = gen_add(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_SUB_ASSIGN) {
         int tmp = gen_sub(ctx, left, right);
@@ -2735,7 +2735,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return get_index(ctx, node, resleft, resright);
         case A_ADD:
             ctx->last_label = 0;
-            return gen_add(ctx, resleft, resright);
+            return gen_add(ctx, node, resleft, resright);
         case A_MINUS:
             ctx->last_label = 0;
             return gen_sub(ctx, resleft, resright);

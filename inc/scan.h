@@ -47,6 +47,10 @@ struct token {
     char *value_string;
     literalnum value;
     literalnum fraction;
+
+    const char *filename;
+    int line;
+    int linepos;
 };
 
 // Max 32 save points, adjust when compiler comes more compilicated
