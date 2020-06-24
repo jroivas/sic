@@ -93,7 +93,7 @@ static int next(struct scanfile *f)
         }
     }
 
-    printf("Scanned: %c (%d) at %d@%d\n", c, c, f->line, f->linepos);
+    //printf("Scanned: %c (%d) at %d@%d\n", c, c, f->line, f->linepos);
     return c;
 }
 

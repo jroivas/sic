@@ -879,9 +879,9 @@ int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
     struct variable *idx = NULL;
-    if (v1->ptr || v2->ptr) {
+    if (v1->array || v1->ptr || v2->ptr) {
         // Support: a = 1 + a
-        if (v2->ptr && !v1->ptr) {
+        if (v2->ptr && !v1->ptr && !v1->array) {
             struct variable *tmp = v1;
             v1 = v2;
             v2 = tmp;
