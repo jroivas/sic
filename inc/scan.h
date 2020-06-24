@@ -82,8 +82,8 @@ char *token_dump(struct token *t);
 static inline int expect_err(struct scanfile *f,
     struct token *t, const char *e, const char *file, int line)
 {
-    ERR("Expected %s on line %d, got %s instead at %s:%d",
-        e, f->line, token_dump(t),
+    ERR("Expected %s on %s:%d,%d, got %s instead at %s:%d",
+        e, t->filename, t->line, t->linepos, token_dump(t),
         file, line);
     return 1;
 }

@@ -91,5 +91,9 @@ int main()
     if (*ptr != 11)
         return 11;
 
+    ptr = val - 1 + 2;
+    if (*ptr != 3)
+        return 12;
+
     return 0;
 }

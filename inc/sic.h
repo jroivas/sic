@@ -36,9 +36,9 @@ enum var_type {
 
 void stack_trace(void);
 #include "parse.h"
-#define FATALN(_node, check, ...) if (check) { \
+#define FATALN(check, _node, ...) if (check) { \
     if (_node) \
-        fprintf(stderr, "FATAL Compiler error in %s at %d, %s@%d,%d: ", __FILE__, __LINE__, \
+        fprintf(stderr, "FATAL Compiler error in %s at %d, %s:%d,%d: ", __FILE__, __LINE__, \
         ((struct node*)_node)->filename, ((struct node*)_node)->line, ((struct node*)_node)->linepos);\
     else fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr,  __VA_ARGS__);\
@@ -47,7 +47,7 @@ void stack_trace(void);
     exit(1); \
 }
 
-#define FATAL(check, ...) FATALN(NULL, check, __VA_ARGS__)
+#define FATAL(check, ...) FATALN(check, NULL, __VA_ARGS__)
 
 
 const char *type_str(enum var_type t);

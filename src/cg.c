@@ -86,7 +86,7 @@ static const char *varstr[] = {
 struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
 int gen_reserve_label(struct gen_context *ctx);
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
-int gen_negate(struct gen_context *ctx, int a);
+int gen_negate(struct gen_context *ctx, struct node *node, int a);
 
 
 char *stype_str(struct type *t)
@@ -626,7 +626,7 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
     struct gen_context *glob = ctx;
     while (glob && !glob->global && glob->parent)
         glob = glob->parent;
-    FATAL(!glob || !glob->global, "No global context found!");
+    FATALN(!glob || !glob->global, n, "No global context found!");
 
     int slen = strlen(n->value_string) + 1;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
@@ -658,7 +658,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
     if (!n->reg)
         node_walk(n);
     
-    FATAL(!n->reg, "No register allocated!");
+    FATALN(!n->reg, n, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
     val->value = n->value;
 
@@ -676,7 +676,7 @@ char *double_str(literalnum value, literalnum frac)
 
 int gen_store_double(struct gen_context *ctx, struct node *n)
 {
-    FATAL(!n->reg, "No register allocated!");
+    FATALN(!n->reg, n, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
 
     char *tmp = double_str(n->value, n->fraction);
@@ -689,7 +689,7 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 int gen_store_string(struct gen_context *ctx, struct node *n)
 {
     struct variable *val = find_variable(ctx, n->reg);
-    FATAL(!val, "No string allocated! %d", n->reg);
+    FATALN(!val, n, "No string allocated! %d", n->reg);
     return val->reg;
 }
 
@@ -898,7 +898,7 @@ int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (v1->ptr) {
-        FATALN(node, !idx, "Invalid index on add to ptr");
+        FATALN(!idx, node, "Invalid index on add to ptr");
         if (v1->array) {
             buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; add array val\n",
                 res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
@@ -919,14 +919,14 @@ int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
     return res->reg;
 }
 
-int gen_sub(struct gen_context *ctx, int a, int b)
+int gen_sub(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
     struct variable *idx = NULL;
-    if (v1->ptr || v2->ptr) {
+    if (v1->array || v1->ptr || v2->ptr) {
         // Support: a = 1 - a
-        if (v2->ptr && !v1->ptr) {
+        if (v2->ptr && !v1->ptr && !v1->array) {
             struct variable *tmp = v1;
             v1 = v2;
             v2 = tmp;
@@ -938,14 +938,14 @@ int gen_sub(struct gen_context *ctx, int a, int b)
         idx = gen_load(ctx, v2);
         idx = gen_cast(ctx, idx, &idx_target, 1);
         idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
-        int idx_neg = gen_negate(ctx, idx->reg);
+        int idx_neg = gen_negate(ctx, node, idx->reg);
         idx = find_variable(ctx, idx_neg);
     }
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
     if (v1->ptr) {
-        FATAL(!idx, "Invalid index on add to ptr");
+        FATALN(!idx, node, "Invalid index on add to ptr");
         if (v1->array) {
             buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; sub array val\n",
                 res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
@@ -965,7 +965,7 @@ int gen_sub(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
-int gen_mul(struct gen_context *ctx, int a, int b)
+int gen_mul(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -983,7 +983,7 @@ int gen_mul(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
-int gen_div(struct gen_context *ctx, int a, int b)
+int gen_div(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -1006,7 +1006,7 @@ int gen_div(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
-int gen_mod(struct gen_context *ctx, int a, int b)
+int gen_mod(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -1029,7 +1029,7 @@ int gen_mod(struct gen_context *ctx, int a, int b)
     return res->reg;
 }
 
-int gen_shift(struct gen_context *ctx, enum nodetype type, int a, int b)
+int gen_shift(struct gen_context *ctx, struct node *node, enum nodetype type, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -1045,7 +1045,7 @@ int gen_shift(struct gen_context *ctx, enum nodetype type, int a, int b)
     return res->reg;
 }
 
-int gen_bitwise(struct gen_context *ctx, enum nodetype type, int a, int b)
+int gen_bitwise(struct gen_context *ctx, struct node *node, enum nodetype type, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
@@ -1097,8 +1097,8 @@ int gen_bool_cast(struct gen_context *ctx, struct variable *var)
 int gen_recursive(struct gen_context *ctx, struct node *node);
 int gen_logical_and(struct gen_context *ctx, struct node *node)
 {
-    FATAL(!node->left, "Exclusive or/and no left hand tree");
-    FATAL(!node->right, "Exclusive or/and no right hand tree");
+    FATALN(!node->left, node, "Exclusive or/and no left hand tree");
+    FATALN(!node->right, node, "Exclusive or/and no right hand tree");
 
     struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
     buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
@@ -1158,8 +1158,8 @@ int gen_logical_and(struct gen_context *ctx, struct node *node)
 
 int gen_logical_or(struct gen_context *ctx, struct node *node)
 {
-    FATAL(!node->left, "Exclusive or/and no left hand tree");
-    FATAL(!node->right, "Exclusive or/and no right hand tree");
+    FATALN(!node->left, node, "Exclusive or/and no left hand tree");
+    FATALN(!node->right, node, "Exclusive or/and no right hand tree");
 
     struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
     buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
@@ -1218,8 +1218,8 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
-    FATAL(!v1, "No cmp1 var");
-    FATAL(!v2, "No cmp2 var");
+    FATALN(!v1, node, "No cmp1 var");
+    FATALN(!v2, node, "No cmp2 var");
     v1 = gen_load(ctx, v1);
     v2 = gen_load(ctx, v2);
 /*
@@ -1230,8 +1230,8 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
 */
     //struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
 
-    FATAL(!v1, "No cmp1 var");
-    FATAL(!v2, "No cmp2 var");
+    FATALN(!v1, node, "No cmp1 var");
+    FATALN(!v2, node, "No cmp2 var");
 
     if (v1->type->type == V_INT && v2->type->type == V_INT) {
         if (v1->type->bits == v2->type->bits);
@@ -1290,13 +1290,13 @@ int gen_lt_gt(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
-    FATAL(!v1, "No cmp1 var");
-    FATAL(!v2, "No cmp2 var");
+    FATALN(!v1, node, "No cmp1 var");
+    FATALN(!v2, node, "No cmp2 var");
     v1 = gen_load(ctx, v1);
     v2 = gen_load(ctx, v2);
 
-    FATAL(!v1, "No cmp1 var");
-    FATAL(!v2, "No cmp2 var");
+    FATALN(!v1, node, "No cmp1 var");
+    FATALN(!v2, node, "No cmp2 var");
 
     if (v1->type->type == V_INT && v2->type->type == V_INT) {
         if (v1->type->bits == v2->type->bits);
@@ -1367,12 +1367,12 @@ int gen_lt_gt(struct gen_context *ctx, struct node *node, int a, int b)
     return 0;
 }
 
-int gen_negate(struct gen_context *ctx, int a)
+int gen_negate(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *v = find_variable(ctx, a);
     struct variable *res;
 
-    FATAL(!v, "Invalid variable in negate");
+    FATALN(!v, node, "Invalid variable in negate");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
@@ -1388,12 +1388,12 @@ int gen_negate(struct gen_context *ctx, int a)
     return res->reg;
 }
 
-int gen_tilde(struct gen_context *ctx, int a)
+int gen_tilde(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *v = find_variable(ctx, a);
     struct variable *res;
 
-    FATAL(!v, "Invalid variable in tilde op");
+    FATALN(!v, node, "Invalid variable in tilde op");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
         res = new_inst_variable(ctx, v->type->type, v->type->bits, 1);
@@ -1405,13 +1405,13 @@ int gen_tilde(struct gen_context *ctx, int a)
     return res->reg;
 }
 
-int gen_not(struct gen_context *ctx, int a)
+int gen_not(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *v = find_variable(ctx, a);
     struct variable *tmp;
     struct variable *res;
 
-    FATAL(!v, "Invalid variable in not");
+    FATALN(!v, node, "Invalid variable in not");
     v = gen_load(ctx, v);
     if (v->type->type == V_INT) {
         if (v->ptr) {
@@ -1442,17 +1442,17 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
     if (!node)
         return NULL;
 
-    FATAL(node->node != A_LIST, "Parameters is not list");
+    FATALN(node->node != A_LIST, node, "Parameters is not list");
 
     struct buffer *params = buffer_init();
     int paramcnt = 0;
     while (node->node == A_LIST) {
         int r = gen_recursive(ctx, node->left);
-        FATAL(!r, "Expected parameter for function call");
+        FATALN(!r, node, "Expected parameter for function call");
 
         struct variable *par = find_variable(ctx, r);
         par = gen_load(ctx, par);
-        FATAL(!par, "Invalid parameter for function call");
+        FATALN(!par, node, "Invalid parameter for function call");
         char *stars = get_stars(par->ptr);
 
         paramcnt++;
@@ -1494,7 +1494,7 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     struct variable *res = NULL;
     char *paramstr;
 
-    FATAL(!func, "Invalid function to call");
+    FATALN(!func, node, "Invalid function to call");
     paramstr = gen_call_params(ctx, node->right);
     //printf("RES: %s %d != %d\n", func->name, node->type, func->type->type);
     if (func->type->type == V_INT) {
@@ -1543,7 +1543,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     struct variable *var = gen_load(ctx, orig);
     struct variable *res = NULL;
 
-    FATAL(!var, "Invalid cast source");
+    FATALN(!var, node, "Invalid cast source");
     struct type *target = ctx->pending_type;
     if (var->type->type == V_INT && target->type == var->type->type) {
         res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
@@ -1585,7 +1585,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
         ERR("Invalid cast");
 
     ctx->pending_type = NULL;
-    FATAL(!res, "Invalid cast");
+    FATALN(!res, node, "Invalid cast");
     return res->reg;
 }
 
@@ -1620,7 +1620,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 return all_var->reg;
         }
         // Utilize pending type from previous type def
-        FATAL(!ctx->pending_type, "Can't determine type of variable %s", node->value_string);
+        FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", node->value_string);
         struct type *t = ctx->pending_type;
         int ptrval = 0;
         int addrval = 0;
@@ -1664,18 +1664,18 @@ int gen_index(struct gen_context *ctx, struct node *node)
     struct node *ident = node->left;
     //struct node *idx = node->right;
 
-    FATAL(!ident, "Invalid index without identifier");
+    FATALN(!ident, node, "Invalid index without identifier");
     struct variable *var = find_variable_by_name(ctx, ident->value_string);
 
     // FIXME
     if (ctx->is_decl < 100) {
-        FATAL(!var, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
+        FATALN(!var, node, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
         gen_recursive_allocs(ctx, node->right);
         return var->reg;
     }
 
-    FATAL(var, "Variable already assigned");
-    FATAL(!ctx->pending_type, "Can't determine type of variable %s", ident->value_string);
+    FATALN(var, node, "Variable already assigned");
+    FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", ident->value_string);
     gen_recursive_allocs(ctx, node->right);
     /*
      * TODO This should ensure we have right index in alloc. Note that
@@ -1691,8 +1691,8 @@ int gen_index(struct gen_context *ctx, struct node *node)
     int idx_reg = gen_recursive(ctx, node->right);
     //ctx->debug = 0;
     struct variable *idx = find_variable(ctx, idx_reg);
-    FATAL(!idx, "Invalid index");
-    FATAL(idx->type->type != V_INT, "Invalid index, should be int");
+    FATALN(!idx, node, "Invalid index");
+    FATALN(idx->type->type != V_INT, node, "Invalid index, should be int");
     ctx->data = tmp;
     buffer_append(ctx->init, buffer_read(tmpdata));
     buffer_del(tmpdata);
@@ -1701,7 +1701,7 @@ int gen_index(struct gen_context *ctx, struct node *node)
     int idx_value = node->right->value;
     if (idx_value == 0) {
         idx_value = idx->value;
-        FATAL(!idx_value, "Invalid array init");
+        FATALN(!idx_value, node->right, "Invalid array init");
     }
 
     struct type *t = ctx->pending_type;
@@ -1740,8 +1740,8 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct node *ident = node->left;
 
-    FATAL(!ident, "Invalid index without identifier");
-    FATAL(!node->right, "Invalid index without index");
+    FATALN(!ident, node, "Invalid index without identifier");
+    FATALN(!node->right, node, "Invalid index without index");
 
     //struct variable *var = find_variable_by_name(ctx, ident->value_string);
     struct variable *var = find_variable(ctx, a);
@@ -1749,7 +1749,7 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
 
     //struct variable *idx = find_variable(ctx, idx_reg);
     struct variable *idx = find_variable(ctx, b);
-    FATAL(!idx, "Missing index");
+    FATALN(!idx, node, "Missing index");
 
     struct type idx_target;
     idx_target.type = V_INT;
@@ -1774,7 +1774,7 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
 {
     if (node->addr) {
         struct variable *var = find_variable(ctx, reg);
-        FATAL(!var, "No variable to take address from!");
+        FATALN(!var, node, "No variable to take address from!");
 
         char *dst = get_stars(var->ptr + node->addr + 1);
         char *src = get_stars(var->ptr + 1);
@@ -1815,8 +1815,8 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
 int gen_dereference(struct gen_context *ctx, struct node *node, int reg)
 {
     struct variable *var = find_variable(ctx, reg);
-    FATAL(!var, "Can't find dereference variable");
-    FATAL(!var->ptr, "Dereference variable is not pointer");
+    FATALN(!var, node, "Can't find dereference variable");
+    FATALN(!var->ptr, node, "Dereference variable is not pointer");
 
     char *src = get_stars(var->ptr);
     struct variable *res = new_variable(ctx,
@@ -1848,19 +1848,19 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     struct variable *var = find_variable_by_name(ctx, node->value_string);
     if (!var)
         return 0;
-    FATAL(!var, "Variable not found in get_identitifier: %s", node->value_string);
+    FATALN(!var, node, "Variable not found in get_identitifier: %s", node->value_string);
     return var->reg;
 }
 
 int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 {
     struct variable *src_val = find_variable(ctx, right);
-    FATAL(!src_val, "Can't assign from zero: %d to %d", right, left);
+    FATALN(!src_val, node, "Can't assign from zero: %d to %d", right, left);
     struct variable *src = gen_load(ctx, src_val);
     struct variable *dst = find_variable(ctx, left);
 
-    FATAL(!src, "No source in assign")
-    FATAL(!dst, "No dest in assign: %d", left)
+    FATALN(!src, node, "No source in assign")
+    FATALN(!dst, node, "No dest in assign: %d", left)
 
     if (src->ptr || src->addr) {
         char *tmp = get_stars(src->ptr);
@@ -1903,34 +1903,34 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
         int tmp = gen_add(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_SUB_ASSIGN) {
-        int tmp = gen_sub(ctx, left, right);
+        int tmp = gen_sub(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_MUL_ASSIGN) {
-        int tmp = gen_mul(ctx, left, right);
+        int tmp = gen_mul(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_DIV_ASSIGN) {
-        int tmp = gen_div(ctx, left, right);
+        int tmp = gen_div(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_MOD_ASSIGN) {
-        int tmp = gen_mod(ctx, left, right);
+        int tmp = gen_mod(ctx, node, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_LEFT_ASSIGN) {
-        int tmp = gen_shift(ctx, A_LEFT, left, right);
+        int tmp = gen_shift(ctx, node, A_LEFT, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_RIGHT_ASSIGN) {
-        int tmp = gen_shift(ctx, A_RIGHT, left, right);
+        int tmp = gen_shift(ctx, node, A_RIGHT, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_OR_ASSIGN) {
-        int tmp = gen_bitwise(ctx, A_OR, left, right);
+        int tmp = gen_bitwise(ctx, node, A_OR, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_XOR_ASSIGN) {
-        int tmp = gen_bitwise(ctx, A_XOR, left, right);
+        int tmp = gen_bitwise(ctx, node, A_XOR, left, right);
         src_val = find_variable(ctx, tmp);
     } else if (node->node == A_AND_ASSIGN) {
-        int tmp = gen_bitwise(ctx, A_AND, left, right);
+        int tmp = gen_bitwise(ctx, node, A_AND, left, right);
         src_val = find_variable(ctx, tmp);
     }
-    FATAL(!src_val, "Invalid assign op");
+    FATALN(!src_val, node, "Invalid assign op");
 
     int res = gen_store_var(ctx, dst, src_val);
     return res;
@@ -1942,17 +1942,17 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
         return NULL;
 
     struct node *node = orig->right;
-    FATAL(!node, "Invalid function");
+    FATALN(!node, orig, "Invalid function");
 
     node = node->left;
-    FATAL(!node, "Invalid function, no name");
+    FATALN(!node, node, "Invalid function, no name");
 
     node = node->right;
     //FATAL(!node, "Invalid function, no parameters");*/
     if (!node)
         return NULL;
 
-    FATAL(node->node != A_LIST, "Parameters is not list");
+    FATALN(node->node != A_LIST, node, "Parameters is not list");
 
     struct node *paramnode = node;
 
@@ -1966,8 +1966,8 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
 
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
-        FATAL(!ptype, "Invalid parameter");
-        FATAL(ptype->node != A_TYPE, "Invalid parameter type");
+        FATALN(!ptype, pval, "Invalid parameter");
+        FATALN(ptype->node != A_TYPE, ptype, "Invalid parameter type");
         // TODO: parse types properly, now just shortcutting
         int pointer = 0;
         while (pname && pname->node == A_POINTER) {
@@ -2010,7 +2010,7 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
         char *stars = get_stars(ptype->ptr);
         if (ptype->type == V_INT) {
                 struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
-                FATAL(!res, "Couldn't generate res");
+                FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
                     res->reg,
                     ptype->bits,
@@ -2026,7 +2026,7 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
                     align(ptype->bits));
         } else if (ptype->type == V_FLOAT) {
                 struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
-                FATAL(!res, "Couldn't generate res");
+                FATALN(!res, pname, "Couldn't generate res");
 
                 buffer_write(allocs, "%%%d = alloca double%s, align %d\n",
                     res->reg,
@@ -2115,12 +2115,12 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         if (var && var->type->type != V_NULL) {
             if (!var->direct) {
                 var = gen_load(ctx, var);
-                FATAL(!var, "Invalid indirect return variable: %d", res);
+                FATALN(!var, node, "Invalid indirect return variable: %d", res);
                 res = var->reg;
             }
             if (target->type != var->type->type || target->bits != var->type->bits) {
                 var = gen_cast(ctx, var, target, 1);
-                FATAL(!var, "Invalid cast");
+                FATALN(!var, node, "Invalid cast");
                 var = gen_bits_cast(ctx, var, node ? node->bits : target->bits, 1);
                 res = var->reg;
             }
@@ -2156,15 +2156,15 @@ int gen_function(struct gen_context *ctx, struct node *node)
 {
     struct gen_context *func_ctx = init_ctx(ctx->f, ctx);
 
-    FATAL(!node->left, "Missing function definition");
+    FATALN(!node->left, node, "Missing function definition");
 
     int func_proto = gen_recursive(func_ctx, node->left);
 
     struct node *r = node->right;
-    FATAL(!r, "Function body missing");
+    FATALN(!r, node, "Function body missing");
     struct node *name = r->left;
-    FATAL(!name, "Function name missing");
-    FATAL(name->node != A_IDENTIFIER, "Faulty function name");
+    FATALN(!name, r, "Function name missing");
+    FATALN(name->node != A_IDENTIFIER, r, "Faulty function name");
     func_ctx->name = name->value_string;
     struct node *functype = node->left;
 
@@ -2180,8 +2180,8 @@ int gen_function(struct gen_context *ctx, struct node *node)
     // Register function globally
 
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
-    FATAL(!func_var, "Function not found: %s", func_ctx->name);
-    FATAL(!func_var->func, "Function variable already in use: %s", func_ctx->name);
+    FATALN(!func_var, node, "Function not found: %s", func_ctx->name);
+    FATALN(!func_var->func, node, "Function variable already in use: %s", func_ctx->name);
 
     gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
@@ -2235,10 +2235,10 @@ int gen_function(struct gen_context *ctx, struct node *node)
     }
 
     struct node *body = NULL;
-    FATAL(node->right->node != A_GLUE, "Invalid function");
+    FATALN(node->right->node != A_GLUE, node->right, "Invalid function");
 
     body = node->right->right;
-    FATAL(!body, "Invalid function body");
+    FATALN(!body, node->right, "Invalid function body");
 
     // Need to tell return type
     if (func_ctx->main_type == NULL)
@@ -2272,12 +2272,12 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
 
     if (!var->direct) {
         var = gen_load(ctx, var);
-        FATAL(!var, "Invalid indirect return variable: %d", res);
+        FATALN(!var, node, "Invalid indirect return variable: %d", res);
         res = var->reg;
     }
     if (target->type != var->type->type || target->bits != var->type->bits) {
         var = gen_cast(ctx, var, target, 1);
-        FATAL(!var, "Invalid cast");
+        FATALN(!var, node, "Invalid cast");
         var = gen_bits_cast(ctx, var, target->bits, 1);
         res = var->reg;
     }
@@ -2294,7 +2294,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
 
 int gen_declaration(struct gen_context *ctx, struct node *node, int left, int right)
 {
-    FATAL(left >= 0, "Invalid type definition in declaration");
+    FATALN(left >= 0, node, "Invalid type definition in declaration");
     ctx->pending_type = NULL;
     return right;
 }
@@ -2341,7 +2341,7 @@ int gen_reserve_label(struct gen_context *ctx)
 int gen_if(struct gen_context *ctx, struct node *node, int ternary)
 {
     // Conditional clause on left
-    FATAL(!node->left, "No conditional in if");
+    FATALN(!node->left, node, "No conditional in if");
     buffer_write(ctx->data, "; if begin\n");
 
     int cond_reg = gen_recursive(ctx, node->left);
@@ -2367,22 +2367,22 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         ifret = gen_recursive(ctx, node->mid);
         inc = rets < ctx->rets;
     } else
-        FATAL(ternary, "Ternary missing true block!");
+        FATALN(ternary, node, "Ternary missing true block!");
 
     /* Handle ternary return value */
     ctx->data = tmp;
     if (ternary) {
         struct variable *tres = find_variable(ctx, ifret);
-        FATAL(!tres, "Ternary return type invalid");
+        FATALN(!tres, node, "Ternary return type invalid");
         buffer_write(cmpblock, "; TENARY TRUE\n");
         res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->ptr, tres->addr, 0);
         gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1, 0);
 
         ctx->data = cmpblock;
         tres = gen_cast(ctx, tres, res->type, 1);
-        FATAL(!tres, "Invalid cast");
+        FATALN(!tres, node->mid, "Invalid cast");
         tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
-        FATAL(!tres, "Invalid bit cast");
+        FATALN(!tres, node->mid, "Invalid bit cast");
 
         gen_assign(ctx, NULL,  res->reg, tres->reg);
     }
@@ -2403,16 +2403,16 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         if (ternary) {
             struct variable *tres = find_variable(ctx, ifret);
             buffer_write(cmpblock, "; TENARY FALSE\n");
-            FATAL(!tres, "Ternary return type invalid");
-            FATAL(!res, "Invalid ternary");
+            FATALN(!tres, node->right, "Ternary return type invalid");
+            FATALN(!res, node->right, "Invalid ternary");
             tres = gen_cast(ctx, tres, res->type, 1);
-            FATAL(!tres, "Invalid cast");
+            FATALN(!tres, node->right, "Invalid cast");
             tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
-            FATAL(!tres, "Invalid bit cast");
+            FATALN(!tres, node->right, "Invalid bit cast");
             gen_assign(ctx, NULL,  res->reg, tres->reg);
         }
     } else {
-        FATAL(ternary, "Ternary missing false block!");
+        FATALN(ternary, node, "Ternary missing false block!");
         ctx->last_label = label2;
     }
 
@@ -2454,7 +2454,7 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
     struct buffer *tmp = ctx->data;
 
     if (do_while == 2) {
-        FATAL(!node->mid || node->mid->node != A_GLUE, "Invalid for loop");
+        FATALN(!node->mid || node->mid->node != A_GLUE, node, "Invalid for loop");
         if (node->mid->left)
             gen_recursive(ctx, node->mid->left);
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
@@ -2477,7 +2477,7 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
         if (node->mid->right)
             gen_recursive(ctx, node->mid->right);
     }
-    FATAL(!node->left, "No compare block in while");
+    FATALN(!node->left, node, "No compare block in while");
     int cond_reg = gen_recursive(ctx, node->left);
     struct variable *cond = find_variable(ctx, cond_reg);
     int cmp_reg = gen_cmp_bool(ctx, cond);
@@ -2496,7 +2496,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
     struct variable *orig = find_variable(ctx, a);
     struct variable *var = gen_load(ctx, orig);
 
-    FATAL(!var, "No postinc/postdec variable");
+    FATALN(!var, node, "No postinc/postdec variable");
 
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
@@ -2536,7 +2536,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type");
         gen_store_var(ctx, orig, res);
-    } else FATAL(1, "Invalid pre op");
+    } else FATALN(1, node, "Invalid pre op");
 
     return res->reg;
 }
@@ -2546,7 +2546,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
     struct variable *orig = find_variable(ctx, a);
     struct variable *var = gen_load(ctx, orig);
 
-    FATAL(!var, "No postinc/postdec variable");
+    FATALN(!var, node, "No postinc/postdec variable");
 
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
@@ -2588,7 +2588,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type");
         gen_store_var(ctx, orig, res);
-    } else FATAL(1, "Invalid post op");
+    } else FATALN(1, node, "Invalid post op");
 
     return var->reg;
 }
@@ -2596,14 +2596,14 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
 void gen_alloc_func(struct gen_context *ctx, struct node *node)
 {
     struct node *r = node->right;
-    FATAL(!r, "Function body missing");
+    FATALN(!r, node, "Function body missing");
     struct node *name = r->left;
-    FATAL(!name, "Function name missing");
+    FATALN(!name, node, "Function name missing");
     const char *func_name = name->value_string;
     struct node *functype = node->left;
 
     struct variable *func_var = find_variable_by_name(ctx, func_name);
-    FATAL(func_var, "Function name already in use: %s", func_name);
+    FATALN(func_var, node, "Function name already in use: %s", func_name);
 
     func_var = new_variable(ctx, func_name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
     func_var->func = 1;
@@ -2685,8 +2685,8 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         /* Need to handle assign values */
         struct variable *v1 = find_variable(ctx, left);
         struct variable *v2 = find_variable(ctx, right);
-        FATAL(!v1, "Invalid assign lvalue");
-        FATAL(!v2, "Invalid assign rvalue");
+        FATALN(!v1, node, "Invalid assign lvalue");
+        FATALN(!v2, node, "Invalid assign rvalue");
         v1->value = v2->value;
     }
 
@@ -2738,34 +2738,34 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_add(ctx, node, resleft, resright);
         case A_MINUS:
             ctx->last_label = 0;
-            return gen_sub(ctx, resleft, resright);
+            return gen_sub(ctx, node, resleft, resright);
         case A_NEGATE:
             ctx->last_label = 0;
-            return gen_negate(ctx, resleft);
+            return gen_negate(ctx, node, resleft);
         case A_TILDE:
             ctx->last_label = 0;
-            return gen_tilde(ctx, resleft);
+            return gen_tilde(ctx, node, resleft);
         case A_NOT:
             ctx->last_label = 0;
-            return gen_not(ctx, resleft);
+            return gen_not(ctx, node, resleft);
         case A_MUL:
             ctx->last_label = 0;
-            return gen_mul(ctx, resleft, resright);
+            return gen_mul(ctx, node, resleft, resright);
         case A_DIV:
             ctx->last_label = 0;
-            return gen_div(ctx, resleft, resright);
+            return gen_div(ctx, node, resleft, resright);
         case A_MOD:
             ctx->last_label = 0;
-            return gen_mod(ctx, resleft, resright);
+            return gen_mod(ctx, node, resleft, resright);
         case A_RIGHT:
         case A_LEFT:
             ctx->last_label = 0;
-            return gen_shift(ctx, node->node, resleft, resright);
+            return gen_shift(ctx, node, node->node, resleft, resright);
         case A_OR:
         case A_XOR:
         case A_AND:
             ctx->last_label = 0;
-            return gen_bitwise(ctx, node->node, resleft, resright);
+            return gen_bitwise(ctx, node, node->node, resleft, resright);
         case A_LOG_OR:
         case A_LOG_AND:
             ERR("Should not get here");
@@ -2861,10 +2861,10 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
     if (node && node->type != V_VOID) {
         char *tmp;
         struct variable *var = find_variable(ctx, res);
-        FATAL(!var, "Invalid return variable (fake): %d", res);
+        FATALN(!var, node, "Invalid return variable (fake): %d", res);
         if (!var->direct) {
             var = gen_load(ctx, var);
-            FATAL(!var, "Invalid indirect return variable: %d", res);
+            FATALN(!var, node, "Invalid indirect return variable: %d", res);
             res = var->reg;
         }
         struct variable *ret = new_inst_variable(main_ctx, var->type->type, var->type->bits, var->type->sign);
@@ -2874,7 +2874,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
         // TODO FIXME Hacks for type solving
         if (node->type != var->type->type || node->bits != var->type->bits) {
             struct type *target = find_type_by(main_ctx, V_INT, 32, 1);
-            FATAL(!target, "No tarkget in global main");
+            FATALN(!target, node, "No tarkget in global main");
             buffer_write(main_ctx->data, "; bits %d , %d\n", node->bits, ret->type->bits);
             if (node->bits > 0)
                 ret->type->bits = node->bits;
