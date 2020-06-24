@@ -4,5 +4,8 @@ int main()
 
     num = num + 5;
 
-    return num;
+    if (num == 5)
+        return 0;
+
+    return 1;
 }

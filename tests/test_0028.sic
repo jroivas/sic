@@ -7,14 +7,14 @@ int main()
     a++;
     c = ++a;
     if (c != a)
-        return -1;
+        return 1;
     a--;
     a++;
     ++a;
     --a;
     c = a++;
     if (c == a)
-        return -2;
+        return 2;
 
     b++;
     b++;
@@ -24,8 +24,11 @@ int main()
     --b;
     b++;
     if (b != 3.0)
-        return -3;
+        return 3;
 
-    return a;
+    if (a != 3)
+        return 4;
+
+    return 0;
 }
 

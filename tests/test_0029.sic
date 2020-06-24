@@ -11,16 +11,17 @@ int main()
     b -= 10;
 
     if (a != 9)
-        return -1;
+        return 1;
 
     if (b != -6.0)
-        return -2;
+        return 2;
 
     a *= 6;
     a /= 3;
     a %= 11;
 
-    return a == 7;
+    if (a != 7)
+        return 3;
+
+    return 0;
 }
-
-

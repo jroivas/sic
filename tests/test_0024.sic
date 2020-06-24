@@ -13,5 +13,8 @@ int main()
         num = num + 100;
     }
 
-    return num;
+    if (num == 104)
+        return 0;
+
+    return 1;
 }

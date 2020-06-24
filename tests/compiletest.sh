@@ -34,8 +34,18 @@ while read test; do
             echo "--- FAILED: link"
             continue
         fi
+        expected_res=0
+        if [ -f "$test.res" ]; then
+            expected_res=$(cat "$test.res")
+        fi
         "$outfolder/$base.ir.bin"
-        echo "+++ Success, return $?"
+        res=$? 
+        if [ "${res}" -eq "${expected_res}" ]; then 
+            echo "+++ Success, return $res"
+        else
+            echo "--- FAILED, return $res"
+            continue
+        fi
     fi
     success=$((success+1))
 done <<<$(ls $MYDIR/*.sic)

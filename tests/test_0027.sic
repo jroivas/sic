@@ -8,5 +8,5 @@ int test()
 
 int main()
 {
-    return test();
+    return test() != 8;
 }
