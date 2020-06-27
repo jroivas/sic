@@ -7,6 +7,16 @@
 #define REGP(X) (X->global) ? "@G" : "%"
 static const char *global_ctx_name = "__global_context";
 
+enum logical_op_type {
+    LOGICAL_AND,
+    LOGICAL_OR
+};
+
+enum vartype {
+    VAR_NORMAL,
+    VAR_DIRECT
+};
+
 struct type {
     int id;
     enum var_type type;
@@ -463,6 +473,21 @@ struct variable *new_inst_variable(struct gen_context *ctx,
 {
     struct variable *res = new_variable(ctx, NULL, type, bits, sign, 0, 0, 0);
     res->direct = 1;
+    return res;
+}
+
+struct variable *new_bool(struct gen_context *ctx, enum vartype direct)
+{
+    if (direct == VAR_DIRECT)
+        return new_inst_variable(ctx, V_INT, 1, 0);
+    return new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
+}
+
+struct variable *new_bool_alloc(struct gen_context *ctx, enum vartype direct)
+{
+    struct variable *res = new_bool(ctx, direct);
+    buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
+        res->reg);
     return res;
 }
 
@@ -1085,27 +1110,25 @@ int gen_bool_cast(struct gen_context *ctx, struct variable *var)
 }
 
 int gen_recursive(struct gen_context *ctx, struct node *node);
-int gen_logical_and(struct gen_context *ctx, struct node *node)
+int gen_logical_op(struct gen_context *ctx, struct node *node, enum logical_op_type op)
 {
     FATALN(!node->left, node, "Exclusive or/and no left hand tree");
     FATALN(!node->right, node, "Exclusive or/and no right hand tree");
 
-    struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
-    buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
-        real_res->reg);
+    struct variable *real_res = new_bool_alloc(ctx, VAR_NORMAL);
 
     int a = gen_recursive(ctx, node->left);
     struct variable *v1 = find_variable(ctx, a);
     int src1 = gen_bool_cast(ctx, v1);
 
-    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    struct variable *res = new_bool(ctx, VAR_DIRECT);
     buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
         res->reg, src1);
 
     struct buffer *and_ok = buffer_init();
 
     int label1 = gen_reserve_label(ctx);
-    struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
+    struct variable *res3 = new_bool(ctx, VAR_DIRECT);
     buffer_write(and_ok, "L%d:\n", label1);
     buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
         res3->reg, src1);
@@ -1115,91 +1138,58 @@ int gen_logical_and(struct gen_context *ctx, struct node *node)
     int b = gen_recursive(ctx, node->right);
     struct variable *v2 = find_variable(ctx, b);
     int src2 = gen_bool_cast(ctx, v2);
-    struct variable *res2 = new_inst_variable(ctx, V_INT, 1, 0);
+    struct variable *res2 = new_bool(ctx, VAR_DIRECT);
     buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
         res2->reg, src2);
     ctx->data = tmp;
     
-
     int label2 = gen_reserve_label(ctx);
     int label3 = gen_reserve_label(ctx);
-    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
-        res->reg, label1, label3);
+    if (op == LOGICAL_OR)
+        buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+            res->reg, label3, label1);
+    else
+        buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+            res->reg, label1, label3);
     buffer_append(ctx->data, buffer_read(and_ok));
-    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
-        res2->reg, label2, label3);
+    if (op == LOGICAL_OR)
+        buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+            res2->reg, label3, label2);
+    else
+        buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+            res2->reg, label2, label3);
     buffer_write(ctx->data, "L%d:\n", label2);
-    buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
-        real_res->reg);
+    if (op == LOGICAL_OR)
+        buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
+            real_res->reg);
+    else
+        buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
+            real_res->reg);
     int label4 = gen_reserve_label(ctx);
     buffer_write(ctx->data, "br label %%L%d\n",
         label4);
 
     buffer_write(ctx->data, "L%d:\n", label3);
-    buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
-        real_res->reg);
+    if (op == LOGICAL_OR)
+        buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
+            real_res->reg);
+    else
+        buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
+            real_res->reg);
     buffer_write(ctx->data, "br label %%L%d\n",
         label4);
     buffer_write(ctx->data, "L%d:\n", label4);
     return real_res->reg;
 }
 
+int gen_logical_and(struct gen_context *ctx, struct node *node)
+{
+    return gen_logical_op(ctx, node, LOGICAL_AND);
+}
+
 int gen_logical_or(struct gen_context *ctx, struct node *node)
 {
-    FATALN(!node->left, node, "Exclusive or/and no left hand tree");
-    FATALN(!node->right, node, "Exclusive or/and no right hand tree");
-
-    struct variable *real_res = new_variable(ctx, NULL, V_INT, 1, 0, 0, 0, 0);
-    buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
-        real_res->reg);
-
-    int a = gen_recursive(ctx, node->left);
-    struct variable *v1 = find_variable(ctx, a);
-    int src1 = gen_bool_cast(ctx, v1);
-
-    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
-    buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
-        res->reg, src1);
-
-    struct buffer *or_notok = buffer_init();
-
-    int label1 = gen_reserve_label(ctx);
-    struct variable *res3 = new_inst_variable(ctx, V_INT, 1, 0);
-    buffer_write(or_notok, "L%d:\n", label1);
-    buffer_write(or_notok, "%%%d = icmp eq i1 %%%d, 1\n",
-        res3->reg, src1);
-
-    struct buffer *tmp = ctx->data;
-    ctx->data = or_notok;
-    int b = gen_recursive(ctx, node->right);
-    struct variable *v2 = find_variable(ctx, b);
-    int src2 = gen_bool_cast(ctx, v2);
-    struct variable *res2 = new_inst_variable(ctx, V_INT, 1, 0);
-    buffer_write(or_notok, "%%%d = icmp eq i1 %%%d, 1\n",
-        res2->reg, src2);
-    ctx->data = tmp;
-
-    int label2 = gen_reserve_label(ctx);
-    int label3 = gen_reserve_label(ctx);
-    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
-        res->reg, label3, label1);
-    buffer_append(ctx->data, buffer_read(or_notok));
-    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
-        res2->reg, label3, label2);
-    buffer_write(ctx->data, "L%d:\n", label2);
-    buffer_write(ctx->data, "store i1 0, i1 *%%%d\n",
-        real_res->reg);
-    int label4 = gen_reserve_label(ctx);
-    buffer_write(ctx->data, "br label %%L%d\n",
-        label4);
-
-    buffer_write(ctx->data, "L%d: ; LL || 3\n", label3);
-    buffer_write(ctx->data, "store i1 1, i1 *%%%d\n",
-        real_res->reg);
-    buffer_write(ctx->data, "br label %%L%d\n",
-        label4);
-    buffer_write(ctx->data, "L%d: ; LL || 4\n", label4);
-    return real_res->reg;
+    return gen_logical_op(ctx, node, LOGICAL_OR);
 }
 
 int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)

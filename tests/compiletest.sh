@@ -23,15 +23,15 @@ while read test; do
     ${CC} $test -o "$outfolder/$base.ir"
     if [ "$llvm" -eq 1 ]; then
         if ! llvm-as "$outfolder/$base.ir"; then
-            echo "--- FAILED: llvm-as"
+            echo "FAILED: llvm-as"
             continue
         fi
         if ! llc -O0 -relocation-model=pic -filetype=obj "$outfolder/$base.ir.bc" -o "$outfolder/$base.ir.o"; then
-            echo "--- FAILED: llc"
+            echo "FAILED: llc"
             continue
         fi
         if ! ${HOSTCC} "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin" -lm; then
-            echo "--- FAILED: link"
+            echo "FAILED: link"
             continue
         fi
         expected_res=0
@@ -43,7 +43,7 @@ while read test; do
         if [ "${res}" -eq "${expected_res}" ]; then 
             echo "+++ Success, return $res"
         else
-            echo "--- FAILED, return $res"
+            echo "FAILED, return $res"
             continue
         fi
     fi
