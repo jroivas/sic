@@ -361,7 +361,6 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     if (!parent)
         register_builtin_types(res);
 
-#if 1
     if (!parent) {
         struct type *null_type = init_type("nulltype", V_NULL, 0, 0);
         register_type(res, null_type);
@@ -372,7 +371,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     } else {
         res->null_var = parent->null_var;
     }
-#endif
+
     return res;
 }
 
@@ -416,7 +415,6 @@ struct variable *new_variable(struct gen_context *ctx,
         res->reg = ctx->regnum_global++;
     else
         res->reg = ctx->regnum++;
-
 
 #if 0
     if (global) {
@@ -665,19 +663,7 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-#if 0
 
-    struct gen_context *glob = ctx;
-    while (glob && !glob->global && glob->parent)
-        glob = glob->parent;
-    FATAL(!glob || !glob->global, "No global context found!");
-    glob->strs++;
-    buffer_write(glob->init, "@.str.%d = private unnamed_addr "
-        "constant [%u x i8] c\"%s\\00\", align 1\n",
-        glob->strs, strlen(n->value_string) + 1,
-        n->value_string);
-    n->strnum = glob->strs;
-#endif
     struct gen_context *glob = ctx;
     while (glob && !glob->global && glob->parent)
         glob = glob->parent;
@@ -757,15 +743,9 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
         ERR("Source should be same type");
 
     if (dst->type->type == V_INT) {
-#if 1
         char *stars = get_stars(dst->ptr); // FIXME
         buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; store_var\n",
             src->type->bits, stars ? stars : "", src->reg, dst->type->bits, stars ? stars : "", REGP(dst), dst->reg, align(dst->type->bits));
-#else
-        char *stars = NULL;
-        buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; store_var\n",
-            src->type->bits, stars ? stars : "", src->reg, dst->type->bits, stars ? stars : "", REGP(dst), dst->reg, align(dst->type->bits));
-#endif
     } else if (dst->type->type == V_FLOAT) {
         buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
             src->reg, REGP(src), dst->reg, align(dst->type->bits));
@@ -796,21 +776,6 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
             free(tmp);
         return prev;
     }
-#if 0
-    for (int i = v->ptr; i > 0; i--) {
-        char *tmp = get_stars(i);
-        prev = new_variable(ctx, NULL, V_INT, v->type->bits, 0, 0, 0);
-        buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d\n",
-                prev->reg, prev->type->bits,
-                tmp ? tmp : "", 
-                prev->type->bits,
-                tmp ? tmp : "", 
-                REGP(v), reg, align(prev->type->bits));
-        if (tmp)
-            free(tmp);
-        reg = prev->reg;
-    }
-#endif
     if (v->array) {
         struct variable *tmp = new_variable(ctx,
             NULL,
@@ -830,7 +795,6 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     res->ptr = v->ptr;
     res->addr = v->addr;
     res->value = v->value;
-    //stack_trace();
     res->direct = 1;
     return res;
 }
@@ -849,6 +813,7 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 
 struct variable *gen_load_str(struct gen_context *ctx, struct variable *v)
 {
+    // TODO
     return v;
 #if 0
     if (v->direct)
@@ -1132,13 +1097,11 @@ int gen_logical_and(struct gen_context *ctx, struct node *node)
     int a = gen_recursive(ctx, node->left);
     struct variable *v1 = find_variable(ctx, a);
     int src1 = gen_bool_cast(ctx, v1);
-    //int and = node->node == A_LOG_AND;
 
     struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     buffer_write(ctx->data, "%%%d = icmp eq i1 %%%d, 1\n",
         res->reg, src1);
 
-    // TODO: OR handling
     struct buffer *and_ok = buffer_init();
 
     int label1 = gen_reserve_label(ctx);
@@ -1247,13 +1210,6 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(!v2, node, "No cmp2 var");
     v1 = gen_load(ctx, v1);
     v2 = gen_load(ctx, v2);
-/*
-    struct variable *res = find_variable(ctx, b);
-    enum var_type restype = get_and_cast(ctx, &v1, &v2);
-
-    res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
-*/
-    //struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
 
     FATALN(!v1, node, "No cmp1 var");
     FATALN(!v2, node, "No cmp2 var");
@@ -1293,8 +1249,6 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         if (v1->type->type == V_NULL)
             v1 = v2;
 
-        //FATAL(!v1->ptr && !v1->array, "Comparing non-pointer to NULL: %d, %d, %d", v1->ptr, v2->ptr, v1->array);
-
         char *stars1 = get_stars(v1->ptr);
         const char *op = node->node == A_EQ_OP ? "eq" : "ne";
         buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, null\n",
@@ -1304,10 +1258,6 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
     }
 
     ERR("Invalid EQ: %s != %s", type_str(v1->type->type), type_str(v2->type->type));
-/*
-    printf("EQ: %d %s %d\n",
-        a, node->node == A_EQ_OP ? "==" : "!=", b);
-*/
     return 0;
 }
 
@@ -1515,13 +1465,11 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 {
     int func_name_reg = gen_recursive(ctx, node->left);
     struct variable *func = find_variable(ctx, func_name_reg);
-    //struct variable *params = b != 0 ? find_variable(ctx, b) : NULL;
     struct variable *res = NULL;
     char *paramstr;
 
     FATALN(!func, node, "Invalid function to call");
     paramstr = gen_call_params(ctx, node->right);
-    //printf("RES: %s %d != %d\n", func->name, node->type, func->type->type);
     if (func->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func->type->bits, 1);
 
@@ -1888,7 +1836,6 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     if (src->ptr || src->addr) {
         char *tmp = get_stars(src->ptr);
 
-        //dump_variables(ctx);
         buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr\n",
                 src->type->bits, tmp ? tmp : "", src->reg,
                 dst->type->bits, tmp ? tmp : "",
@@ -1971,7 +1918,6 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
     FATALN(!node, node, "Invalid function, no name");
 
     node = node->right;
-    //FATAL(!node, "Invalid function, no parameters");*/
     if (!node)
         return NULL;
 
@@ -2066,34 +2012,6 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
 
         node = node->right;
     }
-#if 0
-        char *stars = get_stars(par->ptr + 1);
-
-        paramcnt++;
-        switch (par->type->type) {
-            case V_INT:
-                buffer_write(params, "%si%d%s %%%d",
-                    paramcnt > 1 ? ", " : "",
-                    par->type->bits,
-                    stars ? stars : "",
-                    r);
-                break;
-            case V_FLOAT:
-                buffer_write(params, "%s double%s %%%d",
-                    paramcnt > 1 ? ", " : "",
-                    stars ? stars : "",
-                    r);
-                break;
-            default:
-                ERR("Invalid parameter type: %d", par->type->type);
-        }
-        if (node->right == NULL && node->right->node == A_LIST)
-            break;
-        node = node->right;
-    }
-#endif
-
-    //buffer_append(allocs, buffer_read(params));
     const char *tmp = buffer_read(params);
     int tmplen = strlen(tmp) + 1;
     char *res = calloc(1, tmplen);
@@ -2213,35 +2131,11 @@ int gen_function(struct gen_context *ctx, struct node *node)
             target->bits = 32;
             target->sign = 1;
             struct variable *ret = new_inst_variable(func_ctx, V_INT, 32, 1);
-#if 0
-            struct variable *ret = new_inst_variable(func_ctx, V_VOID, 0, 0);
-            char *tmp;
-            struct variable *var = find_variable(ctx, res);
-            FATAL(!var, "Invalid return variable: %d", res);
-            if (!var->direct) {
-                struct variable *tmp = gen_load(ctx, var);
-                res = tmp->reg;
-            }
 
-            const char *type = var_str(node->type, node->bits, &tmp);
-            buffer_write(func_ctx->data, "%%%d = call %s @%s()\n", ret->reg, type, ctx->name);
-            buffer_write(func_ctx->data, "ret %s %%%d \n", type, ret->reg);
-            if (tmp)
-                free(tmp);
-#endif
             //FIXME i32
             buffer_write(func_ctx->init, "%%%d = call i32 @%s()\n", ret->reg, ctx->name);
         } else {
-#if 0
-        struct variable *global_res = new_inst_variable(func_ctx, V_VOID, 0, 0);
-        buffer_write(func_ctx->init, "%%%d = invoke void %s()\n", global_res->reg, ctx->name);
-#endif
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
-            /*
-            func_node->type = V_VOID;
-            func_node->bits = 0;
-            func_node->sign = 0;
-            */
             target->type = V_VOID;
             target->bits = 0;
             target->sign = 0;
@@ -2833,8 +2727,6 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_NULL:
             ctx->last_label = 0;
             return ctx->null_var;
-        //case A_FUNC_CALL:
-        //    return gen_func_call(ctx, node, resleft, resright);
         case A_PREINC:
         case A_PREDEC:
             return gen_pre_op(ctx, node, resleft);
@@ -2886,21 +2778,6 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
         buffer_write(main_ctx->data, "call void @%s()\n", ctx->name);
         buffer_write(main_ctx->data, "ret i32 0 \n");
     }
-#if 0
-    struct type *target = calloc(1, sizeof(struct type));
-    target->type = V_INT;
-    target->bits = 32;
-    target->sign = 1;
-#endif
-#if 0
-    if (!target)
-        target = find_type_by(main_ctx, V_INT, 32, 1);
-    FATAL(!target, "No int32");
-    int rets = main_ctx->rets;
-    gen_post(main_ctx, NULL, res, target, NULL);
-    if (rets != main_ctx->rets)
-        main_ctx->regnum++;
-#endif
     buffer_write(main_ctx->post, "}\n");
 
     main_ctx->next = ctx->child;
@@ -2923,40 +2800,11 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
             got = 1;
         }
     } else if (node && node->type != V_VOID) {
-#if 0
-        struct variable *var = find_variable(ctx, reg);
-        if (var) {
-            if (!var->direct) {
-                var = gen_load(ctx, var);
-                FATAL(!var, "Invalid indirect return variable: %d", reg);
-            }
-#if 0
-            if (node->type != var->type->type || node->bits != var->type->bits) {
-                enum var_type restype = resolve_type(node->type, var->type->type);
-                struct type *target = find_type_by(ctx, restype, 0, 1);
-                var = gen_cast(ctx, var, target, 0);
-                var = gen_bits_cast(ctx, var, node->bits, 1);
-            }
-#endif
-            if (res->type == node->type && res->bits >= node->bits) {
-                res->type = var->type->type;
-                res->bits = var->type->bits;
-                res->sign = var->type->sign;
-            } else {
-                res->type = node->type;
-                res->bits = node->bits;
-                res->sign = node->sign;
-            }
-            got = 1;
-        }
-#else
         res->type = node->type;
         res->bits = node->bits;
         res->sign = node->sign;
         buffer_write(ctx->post, "; FF %s\n", stype_str(res));
         got = 1;
-#endif
-
     }
     if (!got) {
         res->type = V_INT;
