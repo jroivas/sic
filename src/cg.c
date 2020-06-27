@@ -786,7 +786,7 @@ struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, s
     if (var->array) {
         buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %s%d ; GG1\n",
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
-    } else  {
+    } else {
         buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; GG2\n",
             res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
     }
@@ -801,7 +801,7 @@ struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *v
     if (var->array) {
         buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; GG3\n",
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
-    } else  {
+    } else {
         buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 0, i64 %s%d ; GG4\n",
             res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
     }
@@ -921,25 +921,36 @@ enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct
     return restype;
 }
 
-int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
+struct variable *gen_fix_ptr_index(struct gen_context *ctx, struct node *node, struct variable **v1, struct variable **v2, int negate)
 {
-    struct variable *v1 = find_variable(ctx, a);
-    struct variable *v2 = find_variable(ctx, b);
-    struct variable *idx = NULL;
-    if (v1->array || v1->ptr || v2->ptr) {
-        // Support: a = 1 + a
-        if (v2->ptr && !v1->ptr && !v1->array) {
-            struct variable *tmp = v1;
-            v1 = v2;
-            v2 = tmp;
+    if ((*v1)->array || (*v1)->ptr || (*v2)->ptr) {
+         struct variable *idx;
+
+        if ((*v2)->ptr && !(*v1)->ptr && !(*v1)->array) {
+            struct variable *tmp = *v1;
+            *v1 = *v2;
+            *v2 = tmp;
         }
         struct type idx_target;
         idx_target.type = V_INT;
         idx_target.bits = 64;
         idx_target.sign = 0;
 
-        idx = load_and_cast_to(ctx, v2, &idx_target);
+        idx = load_and_cast_to(ctx, *v2, &idx_target);
+        if (negate) {
+            int idx_neg = gen_negate(ctx, node, idx->reg);
+            idx = find_variable(ctx, idx_neg);
+        }
+        return idx;
     }
+    return NULL;
+}
+
+int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    struct variable *v1 = find_variable(ctx, a);
+    struct variable *v2 = find_variable(ctx, b);
+    struct variable *idx = gen_fix_ptr_index(ctx, node, &v1, &v2, 0);
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
@@ -963,22 +974,7 @@ int gen_sub(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *v1 = find_variable(ctx, a);
     struct variable *v2 = find_variable(ctx, b);
-    struct variable *idx = NULL;
-    if (v1->array || v1->ptr || v2->ptr) {
-        // Support: a = 1 - a
-        if (v2->ptr && !v1->ptr && !v1->array) {
-            struct variable *tmp = v1;
-            v1 = v2;
-            v2 = tmp;
-        }
-        struct type idx_target;
-        idx_target.type = V_INT;
-        idx_target.bits = 64;
-        idx_target.sign = 0;
-        idx = load_and_cast_to(ctx, v2, &idx_target);
-        int idx_neg = gen_negate(ctx, node, idx->reg);
-        idx = find_variable(ctx, idx_neg);
-    }
+    struct variable *idx = gen_fix_ptr_index(ctx, node, &v1, &v2, 1);
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
 
@@ -1723,11 +1719,7 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(!ident, node, "Invalid index without identifier");
     FATALN(!node->right, node, "Invalid index without index");
 
-    //struct variable *var = find_variable_by_name(ctx, ident->value_string);
     struct variable *var = find_variable(ctx, a);
-    //int idx_reg = gen_recursive(ctx, node->right);
-
-    //struct variable *idx = find_variable(ctx, idx_reg);
     struct variable *idx = find_variable(ctx, b);
     FATALN(!idx, node, "Missing index");
 
