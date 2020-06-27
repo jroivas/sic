@@ -778,6 +778,36 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
     return 0;
 }
 
+struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, struct variable *res, struct variable *idx_var, int index)
+{
+    if (idx_var)
+        index = idx_var->reg;
+
+    if (var->array) {
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %s%d ; GG1\n",
+            res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
+    } else  {
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; GG2\n",
+            res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
+    }
+    return res;
+}
+
+struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *var, struct variable *res, struct variable *idx_var, int index)
+{
+    if (idx_var)
+        index = idx_var->reg;
+
+    if (var->array) {
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; GG3\n",
+            res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
+    } else  {
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 0, i64 %s%d ; GG4\n",
+            res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
+    }
+    return res;
+}
+
 struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
@@ -808,8 +838,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
             v->type->bits, v->type->sign,
             v->ptr + 1,
             0, 0);
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 0\n",
-                tmp->reg, v->array, v->type->bits, v->array, v->type->bits, v->reg);
+        tmp = gen_access_ptr_item(ctx, v, tmp, NULL, 0);
         return tmp;
     }
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
@@ -916,13 +945,7 @@ int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
 
     if (v1->ptr) {
         FATALN(!idx, node, "Invalid index on add to ptr");
-        if (v1->array) {
-            buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; add array val\n",
-                res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
-        } else  {
-            buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %%%d ; add array ptr val\n",
-                res->reg, res->type->bits, res->type->bits, v1->reg, idx->reg);
-        }
+        gen_access_ptr(ctx, v1, res, idx, 0);
         res->ptr = v1->ptr;
     } else if (restype == V_INT) {
         res->value = v1->value + v2->value;
@@ -961,13 +984,7 @@ int gen_sub(struct gen_context *ctx, struct node *node, int a, int b)
 
     if (v1->ptr) {
         FATALN(!idx, node, "Invalid index on add to ptr");
-        if (v1->array) {
-            buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %%%d; sub array val\n",
-                res->reg, v1->array, v1->type->bits, v1->array, res->type->bits, v1->reg, idx->reg);
-        } else  {
-            buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %%%d ; sub array ptr val\n",
-                res->reg, res->type->bits, res->type->bits, v1->reg, idx->reg);
-        }
+        gen_access_ptr(ctx, v1, res, idx, 0);
         res->ptr = v1->ptr;
     } else if (restype == V_INT) {
         buffer_write(ctx->data, "%%%d = sub i%d %%%d, %%%d\n",
@@ -1722,11 +1739,7 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     idx = load_and_cast_to(ctx, idx, &idx_target);
 
     struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
-
-    buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %%%d ; ptr %d\n",
-            res->reg, var->array, res->type->bits, var->array, res->type->bits,
-            var->reg,
-            idx->reg, res->ptr);
+    res = gen_access_ptr_item(ctx, var, res, idx, 0);
 
     return res->reg;
 }
@@ -2385,13 +2398,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
 
     if (node->node == A_PREINC) {
         if (var->ptr) {
-            if (var->array) {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 1 ; preinc arr\n",
-                    res->reg, var->array, res->type->bits, var->array, res->type->bits, var->reg, var->ptr);
-            } else  {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 1 ; preinc arr ptr\n",
-                    res->reg, res->type->bits, res->type->bits, var->reg);
-            }
+            res = gen_access_ptr(ctx, var, res, NULL, 1);
             res->ptr = var->ptr;
         } else if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
@@ -2403,13 +2410,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
         gen_store_var(ctx, orig, res);
     } else if (node->node == A_PREDEC) {
         if (var->ptr) {
-            if (var->array) {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 -1 ; predec arr\n",
-                    res->reg, var->array, res->type->bits, var->array, res->type->bits, var->reg, var->ptr);
-            } else  {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 -1 ; predec arr ptr\n",
-                    res->reg, res->type->bits, res->type->bits, var->reg);
-            }
+            res = gen_access_ptr(ctx, var, res, NULL, -1);
             res->ptr = var->ptr;
         } else if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
@@ -2435,14 +2436,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
 
     if (node->node == A_POSTINC) {
         if (var->ptr) {
-            if (var->array) {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 1 ; postinc arr\n",
-                    res->reg, var->array, res->type->bits, var->array, res->type->bits,
-                    var->reg);
-            } else  {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 1 ; postinc arr ptr\n",
-                    res->reg, res->type->bits, res->type->bits, var->reg);
-            }
+            res = gen_access_ptr(ctx, var, res, NULL, 1);
             res->ptr = var->ptr;
         } else if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
@@ -2454,14 +2448,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
         gen_store_var(ctx, orig, res);
     } else if (node->node == A_POSTDEC) {
         if (var->ptr) {
-            if (var->array) {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 -1 ; postdec arr\n",
-                    res->reg, var->array, res->type->bits, var->array, res->type->bits,
-                    var->reg);
-            } else  {
-                buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 -1 ; postdec arr ptr\n",
-                    res->reg, res->type->bits, res->type->bits, var->reg);
-            }
+            res = gen_access_ptr(ctx, var, res, NULL, -1);
             res->ptr = var->ptr;
         } else if (res->type->type == V_INT) {
             buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
