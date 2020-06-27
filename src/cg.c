@@ -87,7 +87,7 @@ struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int
 int gen_reserve_label(struct gen_context *ctx);
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_negate(struct gen_context *ctx, struct node *node, int a);
-
+struct variable *gen_load(struct gen_context *ctx, struct variable *v);
 
 char *stype_str(struct type *t)
 {
@@ -533,6 +533,61 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
     return val;
 }
 
+struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int bits2, int sign2)
+{
+    int bits1 = v1->type->bits;
+    if (bits1 == bits2)
+        return v1;
+    if (bits1 > bits2)
+        return v1;
+
+    FATAL(v1->global, "Can't cast from global");
+    struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
+    /* We can't sign extend 1 bit */
+    if (sign2 && bits1 > 1) {
+        buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
+            res->reg, bits1, v1->reg, bits2);
+    } else {
+        buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
+            res->reg, bits1, v1->reg, bits2);
+    }
+    res->value = v1->value;
+    return res;
+}
+
+struct variable *var_cast_to(struct gen_context *ctx, struct variable *src, struct type *target)
+{
+    struct variable *dst = src;
+
+    FATAL(!src, "Cast source not defined");
+    FATAL(!target, "Cast target not defined");
+
+    if (target->type != dst->type->type || target->bits != dst->type->bits) {
+        dst = gen_cast(ctx, dst, target, 1);
+        FATAL(!dst, "Cast failed");
+        dst = gen_bits_cast(ctx, dst, target->bits, 1);
+        FATAL(!dst, "Bit cast failed");
+    }
+
+    return dst;
+}
+
+struct variable *load_and_cast_to(struct gen_context *ctx, struct variable *src, struct type *target)
+{
+    FATAL(!src, "Cast source not defined");
+    FATAL(!target, "Cast target not defined");
+
+    if (!src->direct)
+        src = gen_load(ctx, src);
+
+    return var_cast_to(ctx, src, target);
+}
+
+struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct variable *v2)
+{
+    return gen_bits_cast(ctx, v1, v2->type->bits, v2->type->sign);
+}
+
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, int val)
 {
     if (ctx->global) {
@@ -826,33 +881,6 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
     ERR("Invalid type: %d", v->type->type);
 }
 
-struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int bits2, int sign2)
-{
-    int bits1 = v1->type->bits;
-    if (bits1 == bits2)
-        return v1;
-    if (bits1 > bits2)
-        return v1;
-
-    FATAL(v1->global, "Can't cast from global");
-    struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
-    /* We can't sign extend 1 bit */
-    if (sign2 && bits1 > 1) {
-        buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
-            res->reg, bits1, v1->reg, bits2);
-    } else {
-        buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
-            res->reg, bits1, v1->reg, bits2);
-    }
-    res->value = v1->value;
-    return res;
-}
-
-struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct variable *v2)
-{
-    return gen_bits_cast(ctx, v1, v2->type->bits, v2->type->sign);
-}
-
 enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct variable **v2)
 {
     FATAL(!*v1, "Can't load v1 in cast");
@@ -890,9 +918,8 @@ int gen_add(struct gen_context *ctx, struct node *node, int a, int b)
         idx_target.type = V_INT;
         idx_target.bits = 64;
         idx_target.sign = 0;
-        idx = gen_load(ctx, v2);
-        idx = gen_cast(ctx, idx, &idx_target, 1);
-        idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
+
+        idx = load_and_cast_to(ctx, v2, &idx_target);
     }
     enum var_type restype = get_and_cast(ctx, &v1, &v2);
     struct variable *res = new_inst_variable(ctx, restype, v1->type->bits, v1->type->sign || v2->type->sign);
@@ -935,9 +962,7 @@ int gen_sub(struct gen_context *ctx, struct node *node, int a, int b)
         idx_target.type = V_INT;
         idx_target.bits = 64;
         idx_target.sign = 0;
-        idx = gen_load(ctx, v2);
-        idx = gen_cast(ctx, idx, &idx_target, 1);
-        idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
+        idx = load_and_cast_to(ctx, v2, &idx_target);
         int idx_neg = gen_negate(ctx, node, idx->reg);
         idx = find_variable(ctx, idx_neg);
     }
@@ -1756,9 +1781,7 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     idx_target.bits = 64;
     idx_target.sign = 0;
 
-    idx = gen_load(ctx, idx);
-    idx = gen_cast(ctx, idx, &idx_target, 1);
-    idx = gen_bits_cast(ctx, idx, idx_target.bits, 1);
+    idx = load_and_cast_to(ctx, idx, &idx_target);
 
     struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
 
@@ -2113,17 +2136,8 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
         if (var && var->type->type != V_NULL) {
-            if (!var->direct) {
-                var = gen_load(ctx, var);
-                FATALN(!var, node, "Invalid indirect return variable: %d", res);
-                res = var->reg;
-            }
-            if (target->type != var->type->type || target->bits != var->type->bits) {
-                var = gen_cast(ctx, var, target, 1);
-                FATALN(!var, node, "Invalid cast");
-                var = gen_bits_cast(ctx, var, node ? node->bits : target->bits, 1);
-                res = var->reg;
-            }
+            var = load_and_cast_to(ctx, var, target);
+            res = var->reg;
             if (target->type == V_INT) {
                 buffer_write(ctx->post, "ret i%d %%%d ; RET1\n", target->bits, res);
             } else if (target->type == V_FLOAT) {
@@ -2268,19 +2282,9 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     else
         var = find_variable(ctx, left);
 
+    var = load_and_cast_to(ctx, var, target);
     res = var->reg;
 
-    if (!var->direct) {
-        var = gen_load(ctx, var);
-        FATALN(!var, node, "Invalid indirect return variable: %d", res);
-        res = var->reg;
-    }
-    if (target->type != var->type->type || target->bits != var->type->bits) {
-        var = gen_cast(ctx, var, target, 1);
-        FATALN(!var, node, "Invalid cast");
-        var = gen_bits_cast(ctx, var, target->bits, 1);
-        res = var->reg;
-    }
     if (target->type == V_INT) {
         buffer_write(ctx->data, "ret i%d %%%d ; RET3\n", target->bits, res);
     } else if (target->type == V_FLOAT) {
@@ -2379,10 +2383,7 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1, 0);
 
         ctx->data = cmpblock;
-        tres = gen_cast(ctx, tres, res->type, 1);
-        FATALN(!tres, node->mid, "Invalid cast");
-        tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
-        FATALN(!tres, node->mid, "Invalid bit cast");
+        tres = var_cast_to(ctx, tres, res->type);
 
         gen_assign(ctx, NULL,  res->reg, tres->reg);
     }
@@ -2405,10 +2406,8 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
             buffer_write(cmpblock, "; TENARY FALSE\n");
             FATALN(!tres, node->right, "Ternary return type invalid");
             FATALN(!res, node->right, "Invalid ternary");
-            tres = gen_cast(ctx, tres, res->type, 1);
-            FATALN(!tres, node->right, "Invalid cast");
-            tres = gen_bits_cast(ctx, tres, res->type->bits, 1);
-            FATALN(!tres, node->right, "Invalid bit cast");
+
+            tres = var_cast_to(ctx, tres, res->type);
             gen_assign(ctx, NULL,  res->reg, tres->reg);
         }
     } else {
@@ -2878,9 +2877,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
             buffer_write(main_ctx->data, "; bits %d , %d\n", node->bits, ret->type->bits);
             if (node->bits > 0)
                 ret->type->bits = node->bits;
-            ret = gen_cast(main_ctx, ret, target, 1);
-            if (ret)
-                ret = gen_bits_cast(main_ctx, ret, target->bits, 1);
+            ret = var_cast_to(main_ctx, ret, target);
         }
         buffer_write(main_ctx->data, "ret i32 %%%d ; faked\n", ret->reg);
         if (tmp)
