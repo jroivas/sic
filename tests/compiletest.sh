@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -eu
+
 if [ $# -lt 1 ]; then
     echo "Usage: $0 build_folder [llvm]"
     exit 1
@@ -14,9 +16,8 @@ if [ $# -ge 2 ]; then
     fi
 fi
 
-tests=0
-success=0
-while read test; do
+dotest()
+{
     base=$(basename $test .sic)
     echo "*** $base"
     tests=$((tests+1))
@@ -24,31 +25,50 @@ while read test; do
     if [ "$llvm" -eq 1 ]; then
         if ! llvm-as "$outfolder/$base.ir"; then
             echo "FAILED: llvm-as"
-            continue
+            return 1
         fi
         if ! llc -O0 -relocation-model=pic -filetype=obj "$outfolder/$base.ir.bc" -o "$outfolder/$base.ir.o"; then
             echo "FAILED: llc"
-            continue
+            return 1
         fi
         if ! ${HOSTCC} "$outfolder/$base.ir.o" -o "$outfolder/$base.ir.bin" -lm; then
             echo "FAILED: link"
-            continue
+            return 1
         fi
         expected_res=0
         if [ -f "$test.res" ]; then
             expected_res=$(cat "$test.res")
         fi
         "$outfolder/$base.ir.bin"
-        res=$? 
-        if [ "${res}" -eq "${expected_res}" ]; then 
+        res=$?
+        if [ "${res}" -eq "${expected_res}" ]; then
             echo "+++ Success, return $res"
         else
             echo "FAILED, return $res"
-            continue
+            return 1
         fi
     fi
-    success=$((success+1))
-done <<<$(ls $MYDIR/*.sic)
+    return 0
+}
+
+tests=0
+success=0
+VERS=${BASH_VERSINFO[0]}
+if [ $VERS -ge 4 ]; then
+    while read test; do
+        if ! dotest; then
+            continue
+        fi
+        success=$((success+1))
+    done <<<$(ls $MYDIR/*.sic)
+else
+    for test in $(ls $MYDIR/*.sic); do
+        if ! dotest; then
+            continue
+        fi
+        success=$((success+1))
+    done
+fi
 
 failed=$((tests-success))
 echo "*** Passed ${success}/${tests} (failed ${failed})"
