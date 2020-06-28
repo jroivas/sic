@@ -12,7 +12,7 @@ struct buffer {
     size_t alloc_size;
 };
 
-static const unsigned BUFFER_EXTEND_SIZE = 32;
+static const unsigned BUFFER_EXTEND_SIZE = 256;
 static const unsigned MAX_FMT_LEN = 4096;
 
 struct buffer *buffer_init(void)
