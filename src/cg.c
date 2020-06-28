@@ -2114,14 +2114,12 @@ int gen_function(struct gen_context *ctx, struct node *node)
 #endif
 
     // Register function globally
-
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
     FATALN(!func_var, node, "Function not found: %s", func_ctx->name);
     FATALN(!func_var->func, node, "Function variable already in use: %s", func_ctx->name);
 
     gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
-    //struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
         func_node = ctx->node;
         if (func_node && functype->type != V_VOID) {
@@ -2370,7 +2368,7 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
     return 0;
 }
 
-int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
+int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *orig = find_variable(ctx, a);
     struct variable *var = gen_load(ctx, orig);
@@ -2379,7 +2377,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
 
     struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
 
-    if (node->node == A_PREINC) {
+    if (node->node == A_PREINC || node->node == A_POSTINC) {
         if (var->ptr) {
             res = gen_access_ptr(ctx, var, res, NULL, 1);
             res->ptr = var->ptr;
@@ -2391,7 +2389,7 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type: %d", node->type);
         gen_store_var(ctx, orig, res);
-    } else if (node->node == A_PREDEC) {
+    } else if (node->node == A_PREDEC || node->node == A_POSTDEC) {
         if (var->ptr) {
             res = gen_access_ptr(ctx, var, res, NULL, -1);
             res->ptr = var->ptr;
@@ -2403,49 +2401,9 @@ int gen_pre_op(struct gen_context *ctx, struct node *node, int a)
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type");
         gen_store_var(ctx, orig, res);
-    } else FATALN(1, node, "Invalid pre op");
+    } else FATALN(1, node, "Invalid pre/post op");
 
-    return res->reg;
-}
-
-int gen_post_op(struct gen_context *ctx, struct node *node, int a)
-{
-    struct variable *orig = find_variable(ctx, a);
-    struct variable *var = gen_load(ctx, orig);
-
-    FATALN(!var, node, "No postinc/postdec variable");
-
-    struct variable *res = new_inst_variable(ctx, var->type->type, var->type->bits, var->type->sign);
-
-    if (node->node == A_POSTINC) {
-        if (var->ptr) {
-            res = gen_access_ptr(ctx, var, res, NULL, 1);
-            res->ptr = var->ptr;
-        } else if (res->type->type == V_INT) {
-            buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
-                res->reg, var->type->bits, var->reg);
-        } else if (res->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "%%%d = fadd double %%%d, 1.000000e+00\n",
-                res->reg, var->reg);
-        } else ERR_TRACE("Invalid type: %d", node->type);
-
-        gen_store_var(ctx, orig, res);
-    } else if (node->node == A_POSTDEC) {
-        if (var->ptr) {
-            res = gen_access_ptr(ctx, var, res, NULL, -1);
-            res->ptr = var->ptr;
-        } else if (res->type->type == V_INT) {
-            buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
-                res->reg, var->type->bits, var->reg);
-        } else if (res->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "%%%d = fsub double %%%d, 1.0e+00\n",
-                res->reg, var->reg);
-        } else ERR_TRACE("Invalid type");
-
-        gen_store_var(ctx, orig, res);
-    } else FATALN(1, node, "Invalid post op");
-
-    return var->reg;
+    return (node->node == A_POSTINC || node->node == A_POSTDEC) ? var->reg : res->reg;
 }
 
 void gen_alloc_func(struct gen_context *ctx, struct node *node)
@@ -2691,10 +2649,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return ctx->null_var;
         case A_PREINC:
         case A_PREDEC:
-            return gen_pre_op(ctx, node, resleft);
         case A_POSTINC:
         case A_POSTDEC:
-            return gen_post_op(ctx, node, resleft);
+            return gen_pre_post_op(ctx, node, resleft);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }
