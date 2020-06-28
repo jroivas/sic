@@ -3,7 +3,7 @@
 #include "buffer.h"
 #include <string.h>
 
-#define GLOBAL_START 0x10000
+#define GLOBAL_START 0x100000
 #define REGP(X) (X->global) ? "@G" : "%"
 static const char *global_ctx_name = "__global_context";
 
@@ -159,6 +159,7 @@ struct type *find_type_by_name(struct type *first, const char *name)
 }
 #endif
 
+#if 0
 int same_type(struct type *a, struct type *b)
 {
     if (a->type == V_VOID && b->type == V_VOID)
@@ -171,6 +172,7 @@ int same_type(struct type *a, struct type *b)
         return 1;
     return a->bits == b->bits && a->sign == b->sign;
 }
+#endif
 
 struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign)
 {
@@ -189,17 +191,21 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
     return NULL;
 }
 
-struct type *init_type(const char *name, enum var_type t, int bits, int sign)
+void register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign)
 {
-    struct type *res = calloc(1, sizeof(struct type));
+    struct type *t = find_type_by(ctx, type, bits, sign);
+    FATAL(t, "Type already registered: %s", name);
 
-    res->type = t;
-    res->bits = bits;
-    res->name = name;
-    res->sign = sign;
-    res->name_hash = hash(name);
+    t = calloc(1, sizeof(struct type));
+    t->type = type;
+    t->bits = bits;
+    t->name = name;
+    t->sign = sign;
+    t->name_hash = hash(name);
 
-    return res;
+    t->id = ++ctx->ids;
+    t->next = ctx->types;
+    ctx->types = t;
 }
 
 struct variable *find_global_variable(struct gen_context *ctx, int reg)
@@ -299,16 +305,6 @@ struct variable *init_variable(const char *name, struct type *t)
     return res;
 }
 
-void register_type(struct gen_context *ctx, struct type *type)
-{
-    struct type *t = find_type_by(ctx, type->type, type->bits, type->sign);
-    FATAL(t, "Type already registered: %s", type->name);
-
-    type->id = ++ctx->ids;
-    type->next = ctx->types;
-    ctx->types = type;
-}
-
 void register_variable(struct gen_context *ctx, struct variable *var)
 {
     struct variable *v = find_variable_by_name(ctx, var->name);
@@ -326,6 +322,7 @@ void register_variable(struct gen_context *ctx, struct variable *var)
 
 void register_builtin_types(struct gen_context *ctx)
 {
+#if 0
     register_type(ctx, init_type("void", V_VOID, 0, 0));
 
     register_type(ctx, init_type("bool", V_INT, 1, 0));
@@ -345,6 +342,27 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, init_type("float", V_FLOAT, 64, 1));
 
     register_type(ctx, init_type("strgin", V_STR, 0, 0));
+#else
+    register_type(ctx, "void", V_VOID, 0, 0);
+
+    register_type(ctx, "bool", V_INT, 1, 0);
+
+    register_type(ctx, "char", V_INT, 8, 1);
+    register_type(ctx, "unsigned char", V_INT, 8, 0);
+
+    register_type(ctx, "short", V_INT, 16, 1);
+    register_type(ctx, "unsigned short", V_INT, 16, 0);
+
+    register_type(ctx, "int", V_INT, 32, 1);
+    register_type(ctx, "unsigned int", V_INT, 32, 0);
+
+    register_type(ctx, "long", V_INT, 64, 1);
+    register_type(ctx, "unsigned long", V_INT, 64, 0);
+
+    register_type(ctx, "float", V_FLOAT, 64, 1);
+
+    register_type(ctx, "strgin", V_STR, 0, 0);
+#endif
 }
 
 struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
@@ -378,8 +396,10 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
         register_builtin_types(res);
 
     if (!parent) {
-        struct type *null_type = init_type("nulltype", V_NULL, 0, 0);
-        register_type(res, null_type);
+        // Register singleton NULL variable to global context
+        register_type(res, "nulltype", V_NULL, 0, 0);
+        struct type *null_type = find_type_by(res, V_NULL, 0, 0);
+        FATAL(!null_type, "Couldn't find NULL type");
         struct variable *null_var = init_variable("NULL", null_type);
 
         register_variable(res, null_var);
