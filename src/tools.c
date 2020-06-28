@@ -201,3 +201,14 @@ char *int_to_str(literalnum val)
 
     return res;
 }
+
+char *double_to_str(literalnum val)
+{
+    // FIXME
+    int max_size = 64;
+    char *res = calloc(1, max_size);
+
+    snprintf(res, max_size - 1, "%lf", (double)val);
+
+    return res;
+}

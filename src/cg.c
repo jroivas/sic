@@ -44,6 +44,9 @@ struct variable {
     int strlen;
     int bits;
     int func;
+    int constant;
+    int literal;
+    int assigned;
     /*
      * If this is bigger than 0 it's array of "array" elements.
      * In case this is less than 0, it's size is still unknown
@@ -234,6 +237,22 @@ struct variable *find_variable(struct gen_context *ctx, int reg)
     }
     if (ctx->parent)
         return find_variable(ctx->parent, reg);
+    return NULL;
+}
+
+struct variable *find_literal(struct gen_context *ctx, enum var_type type, int bits, int sign, literalnum value)
+{
+    struct variable *val = ctx->variables;
+    while (val != NULL) {
+        /* AAA printf("Finding: %d, type %d == %d, bits %d == %d, sign %d == %d, value %lld == %lld\n",
+            val->literal, val->type->type, type, val->type->bits, bits, val->type->sign, sign, val->value, value);
+            */
+        if (val->literal && val->type->type == type && (bits == 0 || val->type->bits == 0 || val->type->bits == bits) && val->value == value)
+            return val;
+        val = val->next;
+    }
+    if (ctx->parent)
+        return find_literal(ctx->parent, type, bits, sign, value);
     return NULL;
 }
 
@@ -637,7 +656,7 @@ struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct v
     return gen_bits_cast(ctx, v1, v2->type->bits, v2->type->sign);
 }
 
-int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, int val)
+int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, literalnum val)
 {
     if (ctx->global) {
         FATAL(ptr, "Global pointer not supported");
@@ -667,19 +686,24 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
     return reg;
 }
 
-int gen_allocate_double(struct gen_context *ctx, int reg, int ptr, int code_alloc)
+int gen_allocate_double(struct gen_context *ctx, int reg, int ptr, int code_alloc, literalnum val)
 {
     if (ctx->global) {
         buffer_write(ctx->init, "%s%d = global double 0.0, align %d\n",
             "@G", reg, align(64));
     } else {
         char *tmp = get_stars(ptr);
+        char *vals = NULL;
         buffer_write(ctx->init, "%s%d = alloca double%s, align %d\n",
             ctx->global ? "@G" : "%", reg, ptr ? tmp : "", align(64));
+        vals = double_to_str(val);
         buffer_write(code_alloc ? ctx->data : ctx->init,
-            "store double%s %s, double%s* %%%d, align %d\n",
-            ptr ? tmp : "" , ptr ? "null" : "0.0", ptr ? tmp : "", reg, align(64)
+            "store double%s %s, double%s* %%%d, align %d ; allocate_double %s\n",
+            ptr ? tmp : "" , ptr ? "null" : vals, ptr ? tmp : "", reg, align(64)
             );
+        free(vals);
+        if (tmp)
+            free(tmp);
     }
     return reg;
 }
@@ -688,7 +712,14 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
         ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
+    struct variable *val = find_literal(ctx, V_INT, n->bits, n->value < 0, n->value);
+    if (val) {
+        //printf("FOUND LITERAL: %d\n", val->reg);
+        n->reg = val->reg;
+        return val->reg;
+    }
+    val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
+    //printf("NEW LITERAL: %d INT, bits %d, sign %d, value %lld\n", val->reg, n->bits, n->value < 0, n->value);
     /*
      * It might be we haven't been able to determine bits so far.
      * However we need to have it now since alloc will need bits
@@ -705,7 +736,31 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
     }
 #endif
     val->value = n->value;
+    val->literal = 1;
+    if (!ctx->global)
+        val->assigned = 1;
     gen_allocate_int(ctx, val->reg, val->type->bits, 0, 0, 0, n->value);
+    n->reg = val->reg;
+    return val->reg;
+}
+
+int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
+{
+    if (!n)
+        ERR("No valid node given!");
+    struct variable *val = find_literal(ctx, V_FLOAT, n->bits, 0, n->value);
+    if (val) {
+        n->reg = val->reg;
+        return val->reg;
+    }
+    val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, 0, ctx->global);
+
+    buffer_write(ctx->init, "; Double literal: %f\n", n->value);
+    val->value = n->value;
+    val->literal = 1;
+    if (!ctx->global)
+        val->assigned = 1;
+    gen_allocate_double(ctx, val->reg, 0, 0, n->value);
     n->reg = val->reg;
     return val->reg;
 }
@@ -732,17 +787,6 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
-int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
-{
-    if (!n)
-        ERR("No valid node given!");
-    struct variable *val = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, 0, ctx->global);
-    buffer_write(ctx->init, "; Double literal: %f\n", n->value);
-    gen_allocate_double(ctx, val->reg, 0, 0);
-    n->reg = val->reg;
-    return val->reg;
-}
-
 int gen_store_int(struct gen_context *ctx, struct node *n)
 {
     if (!n)
@@ -750,8 +794,10 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
     if (!n->reg)
         node_walk(n);
 
-    FATALN(!n->reg, n, "No register allocated!");
+    FATALN(!n->reg, n, "No register allocated");
     struct variable *val = find_variable(ctx, n->reg);
+    if (val->assigned)
+        return val->reg;
     val->value = n->value;
 
     buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; store_int %lld\n",
@@ -770,6 +816,8 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 {
     FATALN(!n->reg, n, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
+    if (val->assigned)
+        return val->reg;
 
     char *tmp = double_str(n->value, n->fraction);
 
@@ -1643,7 +1691,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
                 node->addr = addrval;
                 var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
                 var->global = ctx->global;
-                res = gen_allocate_double(ctx, var->reg, var->ptr, 0);
+                res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
                 break;
             default:
                 ERR("Invalid type for variable: %s", type_str(t->type));
@@ -1728,7 +1776,7 @@ int gen_index(struct gen_context *ctx, struct node *node)
             var = new_variable(ctx, ident->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
             var->global = ctx->global;
             var->array = idx_value;
-            res = gen_allocate_double(ctx, var->reg, var->ptr, 0);
+            res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
             break;
         default:
             ERR("Invalid type for variable: %s", type_str(t->type));

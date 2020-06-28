@@ -55,5 +55,6 @@ int determine_size(literalnum value);
 hashtype hash(const char *str);
 char *get_stars(int cnt);
 char *int_to_str(literalnum val);
+char *double_to_str(literalnum val);
 
 #endif
