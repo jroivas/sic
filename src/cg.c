@@ -1653,6 +1653,43 @@ int gen_use_ptr(struct gen_context *ctx)
     return res;
 }
 
+int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
+{
+    struct variable *var = NULL;
+    struct type *t = ctx->pending_type;
+    int ptrval = 0;
+    int addrval = 0;
+    int res = 0;
+
+    buffer_write(ctx->init, "; Variable: %s\n", node->value_string);
+    switch (t->type) {
+        case V_INT:
+            ptrval = gen_use_ptr(ctx);
+            node->ptr = ptrval;
+            node->addr = addrval;
+            var = new_variable(ctx, node->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
+            var->global = ctx->global;
+            var->addr = addrval;
+            var->array = idx_value;
+            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0, node->value);
+            break;
+        case V_FLOAT:
+            ptrval = gen_use_ptr(ctx);
+            node->ptr = ptrval;
+            node->addr = addrval;
+            var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
+            var->global = ctx->global;
+            var->array = idx_value;
+            res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
+            break;
+        default:
+            ERR("Invalid type for variable: %s", type_str(t->type));
+            break;
+    }
+
+    return res;
+}
+
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *all_var = find_variable_by_name(ctx, node->value_string);
@@ -1670,34 +1707,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
         }
         // Utilize pending type from previous type def
         FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", node->value_string);
-        struct type *t = ctx->pending_type;
-        int ptrval = 0;
-        int addrval = 0;
-        buffer_write(ctx->init, "; Variable: %s\n", node->value_string);
-        switch (t->type) {
-            case V_INT:
-                ptrval = gen_use_ptr(ctx);
-                node->ptr = ptrval;
-                node->addr = addrval;
-                var = new_variable(ctx, node->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
-                var->global = ctx->global;
-                var->addr = addrval;
-                res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, 0, 0, node->value);
-                var->value = node->value;
-                break;
-            case V_FLOAT:
-                ptrval = gen_use_ptr(ctx);
-                node->ptr = ptrval;
-                node->addr = addrval;
-                var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
-                var->global = ctx->global;
-                res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
-                break;
-            default:
-                ERR("Invalid type for variable: %s", type_str(t->type));
-                break;
-        }
-        ctx->last_ident = var;
+        res = gen_init_var(ctx, node, 0);
     } else {
             // TODO FIXME Faulty check
 #if 0
@@ -1753,35 +1763,9 @@ int gen_index(struct gen_context *ctx, struct node *node)
         FATALN(!idx_value, node->right, "Invalid array init");
     }
 
-    struct type *t = ctx->pending_type;
-    int ptrval = 0;
-    int addrval = 0;
-    int res;
-    buffer_write(ctx->init, "; Variable: %s\n", ident->value_string);
-    switch (t->type) {
-        case V_INT:
-            ptrval = gen_use_ptr(ctx);
-            ident->ptr = node->ptr = ptrval;
-            ident->ptr = node->addr = addrval;
-            var = new_variable(ctx, ident->value_string, V_INT, t->bits, t->sign, ptrval, addrval, ctx->global);
-            var->global = ctx->global;
-            var->addr = addrval;
-            var->array = idx_value;
-            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0, node->value);
-            break;
-        case V_FLOAT:
-            ptrval = gen_use_ptr(ctx);
-            ident->ptr = node->ptr = ptrval;
-            ident->ptr = node->addr = addrval;
-            var = new_variable(ctx, ident->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
-            var->global = ctx->global;
-            var->array = idx_value;
-            res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
-            break;
-        default:
-            ERR("Invalid type for variable: %s", type_str(t->type));
-            break;
-    }
+    int res = gen_init_var(ctx, ident, idx_value);
+    node->ptr = ident->ptr;
+    node->addr = ident->addr;
     return res;
 }
 
