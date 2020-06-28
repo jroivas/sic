@@ -17,6 +17,12 @@ enum vartype {
     VAR_DIRECT
 };
 
+enum looptype {
+    LOOP_WHILE,
+    LOOP_DO,
+    LOOP_FOR
+};
+
 struct type {
     int id;
     enum var_type type;
@@ -723,7 +729,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
         ERR("No valid node given!");
     if (!n->reg)
         node_walk(n);
-    
+
     FATALN(!n->reg, n, "No register allocated!");
     struct variable *val = find_variable(ctx, n->reg);
     val->value = n->value;
@@ -1110,7 +1116,7 @@ int gen_bool_cast(struct gen_context *ctx, struct variable *var)
     var = gen_load(ctx, var);
     FATAL(!var, "Didn't get variable");
 
-    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    struct variable *res = new_bool(ctx, VAR_DIRECT);
 
     if (var->type->type == V_INT) {
         buffer_write(ctx->data, "%%%d = icmp ne i%d %%%d, 0\n",
@@ -1155,7 +1161,7 @@ int gen_logical_op(struct gen_context *ctx, struct node *node, enum logical_op_t
     buffer_write(and_ok, "%%%d = icmp eq i1 %%%d, 1\n",
         res2->reg, src2);
     ctx->data = tmp;
-    
+
     int label2 = gen_reserve_label(ctx);
     int label3 = gen_reserve_label(ctx);
     if (op == LOGICAL_OR)
@@ -1224,7 +1230,7 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         else
             v1 = gen_bits_cast(ctx, v1, v2->bits, 1);
 
-        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
         char *stars1 = get_stars(v1->ptr);
         const char *op = node->node == A_EQ_OP ? "eq" : "ne";
         buffer_write(ctx->data, "%%%d = icmp %s i%d%s %%%d, "
@@ -1234,9 +1240,8 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
             v2->reg);
 
         return res->reg;
-    }
-    else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
-        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    } else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
         char *stars1 = get_stars(v1->ptr);
         const char *op = node->node == A_EQ_OP ? "oeq" : "une";
         buffer_write(ctx->data, "%%%d = fcmp %s double %%%d%s, "
@@ -1248,7 +1253,7 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         return res->reg;
     }
     else if ((v1->type->type == V_INT && v2->type->type == V_NULL ) || (v1->type->type == V_NULL && v2->type->type == V_INT)) {
-        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
         if (v1->type->type == V_NULL)
             v1 = v2;
 
@@ -1283,7 +1288,7 @@ int gen_lt_gt(struct gen_context *ctx, struct node *node, int a, int b)
         else
             v1 = gen_bits_cast(ctx, v1, v2->bits, 1);
 
-        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
         char *stars1 = get_stars(v1->ptr);
         const char *op;
         int unsig = !v1->type->sign || !v2->type->sign;
@@ -1312,7 +1317,7 @@ int gen_lt_gt(struct gen_context *ctx, struct node *node, int a, int b)
         return res->reg;
     }
     else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
-        struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
         char *stars1 = get_stars(v1->ptr);
         const char *op;
         int ordered = 1;
@@ -1409,7 +1414,7 @@ int gen_not(struct gen_context *ctx, struct node *node, int a)
     } else
         ERR("Invalid type of %d: %d", a, v->type->type);
 
-    res = new_inst_variable(ctx, V_INT, 1, 0);
+    res = new_bool(ctx, VAR_DIRECT);
     buffer_write(ctx->data, "%%%d = xor i%d %%%d, true\n",
         res->reg, tmp->type->bits, tmp->reg);
     return res->reg;
@@ -2023,6 +2028,8 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
     const char *type = NULL;
     if (ctx->main_type)
         type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
+    else if (strcmp(ctx->name, "main") == 0 && node->type == V_VOID)
+        type = var_str(V_INT, 32, &tmp);
     else
         type = var_str(node->type, node->bits, &tmp);
 
@@ -2045,7 +2052,9 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
     if (!target && functype)
         target = find_type_by(ctx, functype->type, functype->bits, functype->sign);
 
-    if (target && target->type != V_VOID) {
+    if (strcmp(ctx->name, "main") == 0 && functype->type == V_VOID) {
+            buffer_write(ctx->data, "ret i32 0 ; RET5\n");
+    } else if (target && target->type != V_VOID) {
         char *tmp = NULL;
         struct variable *var = find_variable(ctx, res);
         if (var && var->type->type != V_NULL) {
@@ -2057,7 +2066,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
                 buffer_write(ctx->post, "ret double %%%d ; RET1\n", res);
             } else
                 ERR("Invalid return type");
-            
+
             ctx->rets++;
         } else {
             if (target->type == V_INT) {
@@ -2112,29 +2121,15 @@ int gen_function(struct gen_context *ctx, struct node *node)
 
     gen_pre(func_ctx, node->left, node);
     struct node *func_node = NULL;
-    struct type *target = calloc(1, sizeof(struct type));
+    //struct type *target = calloc(1, sizeof(struct type));
     if (ctx->global && strcmp(func_ctx->name, "main") == 0) {
         func_node = ctx->node;
         if (func_node && functype->type != V_VOID) {
-            /*
-            func_node = calloc(1, sizeof(struct node));
-            func_node->type = V_INT;
-            func_node->bits = 32;
-            func_node->sign = 1;
-            */
-            target->type = V_INT;
-            target->bits = 32;
-            target->sign = 1;
             struct variable *ret = new_inst_variable(func_ctx, V_INT, 32, 1);
-
-            //FIXME i32
+            //FIXME proper return type
             buffer_write(func_ctx->init, "%%%d = call i32 @%s()\n", ret->reg, ctx->name);
-        } else {
+        } else
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
-            target->type = V_VOID;
-            target->bits = 0;
-            target->sign = 0;
-        }
     }
 
     struct node *body = NULL;
@@ -2197,7 +2192,7 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
     struct variable *var = gen_load(ctx, src);
     FATAL(!var, "Invalid variable for bool comparison");
 
-    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    struct variable *res = new_bool(ctx, VAR_DIRECT);
     if (var->ptr) {
         char *stars = get_stars(var->ptr);
 
@@ -2218,7 +2213,7 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
             var->reg);
         return res->reg;
     } else if (var->type->type == V_NULL) {
-        printf("NULL CMP\n");
+        ERR("NULL CMP\n");
     }
 
     ERR("Invalid cmp to bool");
@@ -2249,7 +2244,6 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     int inc2 = 0;
     struct variable *res = NULL;
     int ifret = 0;
-
 
     buffer_write(ctx->data, "; if branches\n");
     ctx->data = cmpblock;
@@ -2334,19 +2328,18 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     return ternary ? res->reg : 0;
 }
 
-int gen_while(struct gen_context *ctx, struct node *node, int do_while)
+int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype)
 {
     int looplabel = gen_reserve_label(ctx);
     int cmplabel = gen_reserve_label(ctx);
     int outlabel = gen_reserve_label(ctx);
-    struct buffer *tmp = ctx->data;
 
-    if (do_while == 2) {
+    if (looptype == LOOP_FOR) {
         FATALN(!node->mid || node->mid->node != A_GLUE, node, "Invalid for loop");
         if (node->mid->left)
             gen_recursive(ctx, node->mid->left);
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
-    } else if (do_while == 1)
+    } else if (looptype == LOOP_DO)
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
     else
         buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
@@ -2361,7 +2354,7 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
     buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     buffer_write(ctx->data, "L%d:\n", cmplabel);
 
-    if (do_while == 2) {
+    if (looptype == LOOP_FOR) {
         if (node->mid->right)
             gen_recursive(ctx, node->mid->right);
     }
@@ -2373,8 +2366,6 @@ int gen_while(struct gen_context *ctx, struct node *node, int do_while)
     buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
         cmp_reg, looplabel, outlabel);
     buffer_write(ctx->data, "L%d:\n", outlabel);
-
-    ctx->data = tmp;
 
     return 0;
 }
@@ -2437,6 +2428,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
             buffer_write(ctx->data, "%%%d = fadd double %%%d, 1.000000e+00\n",
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type: %d", node->type);
+
         gen_store_var(ctx, orig, res);
     } else if (node->node == A_POSTDEC) {
         if (var->ptr) {
@@ -2449,6 +2441,7 @@ int gen_post_op(struct gen_context *ctx, struct node *node, int a)
             buffer_write(ctx->data, "%%%d = fsub double %%%d, 1.0e+00\n",
                 res->reg, var->reg);
         } else ERR_TRACE("Invalid type");
+
         gen_store_var(ctx, orig, res);
     } else FATALN(1, node, "Invalid post op");
 
@@ -2575,11 +2568,11 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     if (node->node == A_LOG_OR)
         return gen_logical_or(ctx, node);
     if (node->node == A_WHILE)
-        return gen_while(ctx, node, 0);
+        return gen_while(ctx, node, LOOP_WHILE);
     if (node->node == A_DO)
-        return gen_while(ctx, node, 1);
+        return gen_while(ctx, node, LOOP_DO);
     if (node->node == A_FOR)
-        return gen_while(ctx, node, 2);
+        return gen_while(ctx, node, LOOP_FOR);
 
     /* Recurse first to get children solved */
     if (node->left)
