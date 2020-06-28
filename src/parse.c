@@ -304,6 +304,8 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     res->ptr = ptr;
     res->addr = addr;
     res->is_const = scan_const(node);
+
+    node_free(node);
     return res;
 }
 
@@ -337,6 +339,7 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
             scan(f, token);
             res = expression(f, token);
             if (!(accept(f, token, T_ROUND_CLOSE))) {
+                node_free(res);
                 load_point(f, token);
                 return NULL;
             }
@@ -423,8 +426,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
     }
     type = type_resolve(token, type, 0);
 
-    struct node *res = NULL;
-    res = type;
+    struct node *res = type;
     while (1) {
         struct node *tmp = declaration_specifiers(f, token);
         if (tmp == NULL)
@@ -499,6 +501,7 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
         if (decl)
             res = make_node(token, A_GLUE, res, NULL, decl);
         if (!accept(f, token, T_ROUND_CLOSE)) {
+            node_free(res);
             load_point(f, token);
             return NULL;
         }
@@ -701,7 +704,7 @@ struct node *constant_expression(struct scanfile *f, struct token *token)
 
 struct node *assignment_expression(struct scanfile *f, struct token *token)
 {
-    struct node *res;
+    struct node *res = NULL;
     enum nodetype nodetype = A_ASSIGN;
 
     save_point(f, token);
@@ -824,6 +827,7 @@ struct node *declaration(struct scanfile *f, struct token *token)
 #endif
 
     if (!accept(f, token, T_SEMI)) {
+        node_free(res);
         load_point(f, token);
         return NULL;
     }
@@ -1308,8 +1312,8 @@ struct node *external_declaration(struct scanfile *f, struct token *token)
         remove_save_point(f, token);
         return res;
     }
-
     load_point(f, token);
+
     save_point(f, token);
     res = declaration(f, token);
     if (res) {

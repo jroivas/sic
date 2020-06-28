@@ -5,11 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
+
 struct buffer {
     char *data;
     size_t size;
+    size_t alloc_size;
 };
 
+static const unsigned BUFFER_EXTEND_SIZE = 32;
 static const unsigned MAX_FMT_LEN = 4096;
 
 struct buffer *buffer_init(void)
@@ -21,7 +24,14 @@ int buffer_append(struct buffer *buf, const char *str)
 {
     size_t len = strlen(str);
     size_t newsize = len + buf->size;
-    buf->data = realloc(buf->data, newsize + 1);
+
+    if (buf->alloc_size < newsize + 1) {
+        while (buf->alloc_size < newsize + 1)
+            buf->alloc_size += BUFFER_EXTEND_SIZE;
+
+        buf->data = realloc(buf->data, buf->alloc_size);
+    }
+
     memcpy(buf->data + buf->size, str, len);
     buf->size = newsize;
     buf->data[buf->size] = 0;
@@ -37,7 +47,7 @@ int buffer_appendln(struct buffer *buf, const char *str)
 
 int buffer_write(struct buffer *buf, const char *fmt, ...)
 {
-    char *tmp = calloc(1, MAX_FMT_LEN);
+    char tmp[MAX_FMT_LEN];
     int cnt = 0;
 
     va_list argp;
@@ -46,7 +56,7 @@ int buffer_write(struct buffer *buf, const char *fmt, ...)
     cnt = vsnprintf(tmp, MAX_FMT_LEN - 1, fmt, argp);
     FATAL(cnt == MAX_FMT_LEN - 1, "Too long string written to buffer: %d", cnt);
     buffer_append(buf, tmp);
-    free(tmp);
+    va_end(argp);
 
     return cnt;
 }

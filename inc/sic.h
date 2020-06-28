@@ -28,7 +28,7 @@ enum var_type {
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
     if (trace) stack_trace();\
-    exit(1); \
+    exit(EXIT_FAILURE); \
 }
 
 #define ERR(...) ERR_FULL(0, __VA_ARGS__)
@@ -44,7 +44,7 @@ void stack_trace(void);
     fprintf(stderr,  __VA_ARGS__);\
     fprintf(stderr, "\n");\
     stack_trace();\
-    exit(1); \
+    exit(EXIT_FAILURE); \
 }
 
 #define FATAL(check, ...) FATALN(check, NULL, __VA_ARGS__)

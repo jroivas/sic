@@ -2226,6 +2226,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     } else
         ERR("Invalid return type");
     ctx->rets++;
+    free(target);
 
     return res;
 }
@@ -2832,6 +2833,7 @@ int codegen(FILE *outfile, struct node *node)
         struct gen_context *main_ctx = fake_main(ctx, node, res);
         output_ctx(main_ctx);
     }
+    free(target);
 
     return res;
 }
