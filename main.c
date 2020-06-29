@@ -4,6 +4,7 @@
 #include "scan.h"
 #include "parse.h"
 #include "cg.h"
+#include "str.h"
 
 static void usage(char *cname)
 {
@@ -61,6 +62,7 @@ int main(int argc, char **argv)
     fclose(outfile);
 
     node_free(node);
+    str_free_all();
 
     return res;
 }

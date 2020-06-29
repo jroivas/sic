@@ -8,7 +8,7 @@
 typedef unsigned long long literalnum;
 typedef unsigned long hashtype;
 
-static const int MAX_STR_LEN = 512;
+#define MAX_STR_LEN 512
 #define STACK_TRACE_SIZE 25
 #define DEBUG 0
 #define REF_CTX(X) (-(X))

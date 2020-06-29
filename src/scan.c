@@ -1,5 +1,6 @@
 #include "sic.h"
 #include "scan.h"
+#include "str.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -163,7 +164,7 @@ literalnum scan_number(struct scanfile *f, int c)
 
 char *scan_string(struct scanfile *f, int c, char end_char)
 {
-    char *buf = calloc(1, MAX_STR_LEN);
+    char *buf = str_alloc();
     char *ptr = buf;
     int escape = 0;
 
@@ -183,7 +184,7 @@ char *scan_string(struct scanfile *f, int c, char end_char)
 
 char *scan_identifier(struct scanfile *f, int c)
 {
-    char *buf = calloc(1, MAX_STR_LEN);
+    char *buf = str_alloc();
     char *ptr = buf;
     while (isalpha(c) || isdigit(c) || c == '_') {
         if (ptr - buf >= MAX_STR_LEN - 1)

@@ -183,13 +183,6 @@ void node_free(struct node *node)
     node_free(node->left);
     node_free(node->mid);
     node_free(node->right);
-#if 0
-    // FIXME create string handler and free properly
-    if (node->value_string) {
-        free((char*)node->value_string);
-        node->value_string = NULL;
-    }
-#endif
 
     free(node);
 }
