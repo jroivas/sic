@@ -1,0 +1,47 @@
+int main()
+{
+    int a = 5;
+    char b = 2;
+    unsigned long c = 3;
+    int *d = &a;
+    double e = 1.0;
+    int f[10];
+
+    if (sizeof(int) != 4)
+        return 1;
+
+    if (sizeof(a) != 4)
+        return 2;
+
+    if (sizeof(char) != 1)
+        return 3;
+
+    if (sizeof(b) != 1)
+        return 4;
+
+    if (sizeof(long) != 8)
+        return 5;
+
+    if (sizeof(c) != 8)
+        return 6;
+
+/*
+    // TODO Pointer types
+    if (sizeof(int *) != 8)
+        return 7;
+*/
+
+    if (sizeof(d) != 8)
+        return 8;
+
+    if (sizeof(e) != 8)
+        return 9;
+
+    if (sizeof(b + a) != 4)
+        return 10;
+
+    if (sizeof(f) != 40)
+        return 11;
+
+    return 0;
+}
