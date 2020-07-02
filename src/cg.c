@@ -2869,7 +2869,9 @@ int codegen(FILE *outfile, struct node *node)
     res = gen_recursive(ctx, node);
 
     struct type *target = resolve_return_type(ctx, node, res);
-    buffer_write(ctx->post, "; F2 %s, %d\n", stype_str(target), target->type);
+    char *stype = stype_str(target);
+    buffer_write(ctx->post, "; F2 %s, %d\n", stype, target->type);
+    free(stype);
     gen_post(ctx, node, res, target, ctx->main_type);
 
     output_res(ctx, &got_main);
