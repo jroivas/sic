@@ -38,7 +38,8 @@ enum keyword_type {
     K_ELSE,
     K_WHILE,
     K_DO,
-    K_FOR
+    K_FOR,
+    K_SIZEOF
 };
 
 struct token {

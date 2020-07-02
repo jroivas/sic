@@ -120,6 +120,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_INDEX:
         case A_PARAMS:
         case A_DEREFERENCE:
+        case A_SIZEOF:
             printf("%s", node_str(node));
             break;
         case A_INT_LIT:

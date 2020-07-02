@@ -70,6 +70,9 @@ char *token_dump(struct token *t)
         case T_IDENTIFIER:
             snprintf(tmp, MAX_LEN, "%s (%s)", token_str(t), t->value_string);
             break;
+        case T_KEYWORD:
+            snprintf(tmp, MAX_LEN, "%s (%s)", token_str(t), t->value_string);
+            break;
         default:
             snprintf(tmp, MAX_LEN, "%s", token_str(t));
             break;
@@ -223,6 +226,9 @@ int keyword(struct token *t)
     } else if (strcmp(v, "for") == 0) {
         res = 1;
         t->keyword = K_FOR;
+    } else if (strcmp(v, "sizeof") == 0) {
+        res = 1;
+        t->keyword = K_SIZEOF;
     }
 
     return res;
@@ -274,6 +280,13 @@ int scan(struct scanfile *f, struct token *t)
             else
                 putback(f, c);
             break;
+        case '#':
+            // This is preprocessor directive, so ignore till end of line
+            while (c != '\n' && c != '\r') {
+                c = next(f);
+            }
+            // Scan next
+            return scan(f, t);
         case '/':
             t->token = T_SLASH;
             c = next(f);
@@ -426,6 +439,10 @@ void save_point(struct scanfile *f, struct token *t)
     if (f->putback && pos)
         pos--;
 
+#if 0
+    printf("Saved: %d,%d token %s\n", t->line, t->linepos, token_dump(t));
+    stack_trace();
+#endif
     f->save_point[f->savecnt++] = pos;
 }
 
@@ -434,6 +451,11 @@ void remove_save_point(struct scanfile *f, struct token *t)
     FATAL(!f->savecnt, "No save points to remove");
     (void)t;
     --f->savecnt;
+#if 0
+    struct token *tmp = &f->save_token[f->savecnt];
+    printf("Remove: %d,%d from %d,%d token %s\n", tmp->line, tmp->linepos, f->line, f->linepos, token_dump(t));
+    stack_trace();
+#endif
 }
 
 void load_point(struct scanfile *f, struct token *t)
@@ -442,6 +464,10 @@ void load_point(struct scanfile *f, struct token *t)
     f->putback = 0;
     fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
+#if 0
+    printf("Loaded: %d,%d from %d,%d token %s\n", t->line, t->linepos, f->line, f->linepos, token_dump(t));
+    stack_trace();
+#endif
     /*
      * Need to restore these as well in order to keep
      * track of position.

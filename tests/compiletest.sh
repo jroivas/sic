@@ -21,7 +21,10 @@ dotest()
     base=$(basename $test .sic)
     echo "*** $base"
     tests=$((tests+1))
-    ${CC} $test -o "$outfolder/$base.ir"
+    if ! ${CC} $test -o "$outfolder/$base.ir" ; then
+        echo "FAILED: ${CC} compile"
+        return 1
+    fi
     if [ "$llvm" -eq 1 ]; then
         if ! llvm-as "$outfolder/$base.ir"; then
             echo "FAILED: llvm-as"

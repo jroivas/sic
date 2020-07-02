@@ -9,7 +9,7 @@ typedef unsigned long long literalnum;
 typedef unsigned long hashtype;
 
 #define MAX_STR_LEN 512
-#define STACK_TRACE_SIZE 25
+#define STACK_TRACE_SIZE 64
 #define DEBUG 0
 #define REF_CTX(X) (-(X))
 

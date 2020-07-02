@@ -53,6 +53,7 @@ enum nodetype {
     A_DO,
     A_FOR,
     A_INDEX,
+    A_SIZEOF,
     A_LIST
 };
 

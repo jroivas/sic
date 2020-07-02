@@ -201,6 +201,19 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
     return NULL;
 }
 
+struct type *find_type_by_id(struct gen_context *ctx, int id)
+{
+    struct type *res = ctx->types;
+    while (res) {
+        if (res->id == id)
+            return res;
+        res = res->next;
+    }
+    if (ctx->parent)
+        return find_type_by_id(ctx->parent, id);
+    return NULL;
+}
+
 void register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign)
 {
     struct type *t = find_type_by(ctx, type, bits, sign);
@@ -1732,6 +1745,39 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     return res;
 }
 
+int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
+{
+    struct variable *var = find_variable(ctx, left);
+    struct type *type;
+
+    if (left >= 0) {
+        FATALN(!var, node, "Didn't get variable for sizeof: %d", left);
+        type = var->type;
+    } else
+        type = find_type_by_id(ctx, REF_CTX(left));
+    FATALN(!type, node, "Didn't get type for sizeof");
+
+    struct variable *res = new_variable(ctx, NULL, V_INT, 32, 1, 0, 0, 0);
+    buffer_write(ctx->data, "%%%d = alloca i%d, align %d\n",
+        res->reg,
+        res->type->bits,
+        align(res->type->bits));
+
+    if (var && (var->array)) {
+            buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
+                var->array * type->bits / 8, res->reg, align(res->type->bits));
+    } else if (var && (var->ptr || var->addr)) {
+            buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
+                8, res->reg, align(res->type->bits));
+    } else if (type->type == V_INT || type->type == V_FLOAT) {
+            buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
+                type->bits / 8, res->reg, align(res->type->bits));
+    } else
+        ERR("Invalid variable for sizeof");
+
+    return res->reg;
+}
+
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *all_var = find_variable_by_name(ctx, node->value_string);
@@ -2748,6 +2794,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_DEREFERENCE:
             ctx->last_label = 0;
             return gen_dereference(ctx, node, resleft);
+        case A_SIZEOF:
+            ctx->last_label = 0;
+            return gen_sizeof(ctx, node, resleft);
         case A_ADD_ASSIGN:
         case A_SUB_ASSIGN:
         case A_MUL_ASSIGN:
