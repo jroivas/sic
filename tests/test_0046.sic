@@ -1,0 +1,25 @@
+int main()
+{
+    int val = 5;
+    int *ptr = NULL;
+
+    if ((val = 6) != 6)
+        return 1;
+
+    if (val != 6)
+        return 2;
+
+    if (ptr != NULL)
+        return 3;
+
+    if ((ptr = &val) == NULL)
+        return 4;
+
+    if (ptr == NULL)
+        return 5;
+
+    if (*ptr != 6)
+        return 6;
+
+    return 0;
+}

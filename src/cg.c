@@ -1923,6 +1923,19 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
             free(stars);
         return dst->reg;
     }
+    if (dst->ptr && right == ctx->null_var) {
+        char *stars = get_stars(dst->ptr);
+        if (dst->type->type == V_INT) {
+            buffer_write(ctx->data, "store i%d%s null, i%d%s* %s%d, align %d\n",
+                dst->type->bits, stars,
+                dst->type->bits, stars,
+                REGP(dst), dst->reg, align(dst->type->bits));
+        } else
+            ERR("Invalid assign from null");
+        if (stars)
+            free(stars);
+       return dst->reg;
+    }
 
     if (src->type->type == V_INT) {
         buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d ; gen_assign\n",
