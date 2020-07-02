@@ -23,6 +23,12 @@ enum looptype {
     LOOP_FOR
 };
 
+enum cast_opts {
+    CAST_NORMAL = 0,
+    CAST_FORCE = 1,
+    CAST_FLATTEN_PTR = 2,
+};
+
 struct type {
     int id;
     enum var_type type;
@@ -112,6 +118,7 @@ char *stype_str(struct type *t)
 {
     char *tmp = calloc(256, sizeof(char));
     snprintf(tmp, 255, "%s, %d bits, %ssigned", type_str(t->type), t->bits, t->sign ? "" : "un");
+    tmp[255] = 0;
     return tmp;
 }
 
@@ -610,6 +617,7 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
         return v1;
 
     FATAL(v1->global, "Can't cast from global");
+    FATAL(v1->ptr, "Can't extend pointer bits");
     struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
     /* We can't sign extend 1 bit */
     if (sign2 && bits1 > 1) {
@@ -622,6 +630,7 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
     res->value = v1->value;
     return res;
 }
+int gen_dereference(struct gen_context *ctx, struct node *node, int reg);
 
 struct variable *var_cast_to(struct gen_context *ctx, struct variable *src, struct type *target)
 {
@@ -640,11 +649,24 @@ struct variable *var_cast_to(struct gen_context *ctx, struct variable *src, stru
     return dst;
 }
 
-struct variable *load_and_cast_to(struct gen_context *ctx, struct variable *src, struct type *target)
+struct variable *load_and_cast_to(struct gen_context *ctx, struct variable *src, struct type *target, int cast_flags)
 {
     FATAL(!src, "Cast source not defined");
     FATAL(!target, "Cast target not defined");
 
+    if ((cast_flags & CAST_FLATTEN_PTR) && src->ptr) {
+        if (src->type->type == V_INT) {
+            struct variable *res = NULL;
+            char *stars = get_stars(src->ptr);
+
+            res = new_inst_variable(ctx, V_INT, target->bits, src->type->sign);
+            buffer_write(ctx->data, "%%%d = ptrtoint i%d%s* %%%d to i%d\n",
+                res->reg, src->type->bits, stars, src->reg, target->bits);
+            if (stars)
+                free(stars);
+            src = res;
+        }
+    }
     if (!src->direct)
         src = gen_load(ctx, src);
 
@@ -1014,7 +1036,7 @@ struct variable *gen_fix_ptr_index(struct gen_context *ctx, struct node *node, s
         idx_target.bits = 64;
         idx_target.sign = 0;
 
-        idx = load_and_cast_to(ctx, *v2, &idx_target);
+        idx = load_and_cast_to(ctx, *v2, &idx_target, CAST_NORMAL);
         if (negate) {
             int idx_neg = gen_negate(ctx, node, idx->reg);
             idx = find_variable(ctx, idx_neg);
@@ -1805,7 +1827,7 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     idx_target.bits = 64;
     idx_target.sign = 0;
 
-    idx = load_and_cast_to(ctx, idx, &idx_target);
+    idx = load_and_cast_to(ctx, idx, &idx_target, CAST_NORMAL);
 
     struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
     res = gen_access_ptr_item(ctx, var, res, idx, 0);
@@ -2154,7 +2176,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
     } else if (target && target->type != V_VOID) {
         struct variable *var = find_variable(ctx, res);
         if (var && var->type->type != V_NULL) {
-            var = load_and_cast_to(ctx, var, target);
+            var = load_and_cast_to(ctx, var, target, CAST_FLATTEN_PTR);
             res = var->reg;
             if (target->type == V_INT) {
                 buffer_write(ctx->post, "ret i%d %%%d ; RET1\n", target->bits, res);
@@ -2257,7 +2279,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     else
         var = find_variable(ctx, left);
 
-    var = load_and_cast_to(ctx, var, target);
+    var = load_and_cast_to(ctx, var, target, CAST_NORMAL);
     res = var->reg;
 
     if (target->type == V_INT) {
