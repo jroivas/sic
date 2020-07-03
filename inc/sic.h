@@ -49,6 +49,15 @@ void stack_trace(void);
 
 #define FATAL(check, ...) FATALN(check, NULL, __VA_ARGS__)
 
+#define PTR_TO(x, v) do {\
+    if (x != NULL) {\
+    if (v > 0xf) ERR("Invalid pointer");\
+    FATAL(((unsigned long)x & 0xf) != 0, "Invalid align");\
+    x = (void*)((unsigned long)x | v);\
+    }\
+} while(0);
+#define PTR_VAL(x) (void *)((unsigned long)x & ~0xf)
+#define PTR_GET(x) ((unsigned long)x & 0xf)
 
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);
