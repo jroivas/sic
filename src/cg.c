@@ -34,6 +34,8 @@ struct type {
     enum var_type type;
     int bits;
     int sign;
+    int ptr;
+
     const char *name;
     hashtype name_hash;
     struct type *ref;
@@ -184,7 +186,7 @@ int same_type(struct type *a, struct type *b)
 }
 #endif
 
-struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign)
+struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr)
 {
     struct type *res = ctx->types;
     while (res) {
@@ -192,12 +194,12 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
         if (res->type == type)
             printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
 #endif
-        if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign)
+        if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr)
             return res;
         res = res->next;
     }
     if (ctx->parent)
-        return find_type_by(ctx->parent, type, bits, sign);
+        return find_type_by(ctx->parent, type, bits, sign, ptr);
     return NULL;
 }
 
@@ -214,9 +216,9 @@ struct type *find_type_by_id(struct gen_context *ctx, int id)
     return NULL;
 }
 
-void register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign)
+struct type *register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr)
 {
-    struct type *t = find_type_by(ctx, type, bits, sign);
+    struct type *t = find_type_by(ctx, type, bits, sign, ptr);
     FATAL(t, "Type already registered: %s", name);
 
     t = calloc(1, sizeof(struct type));
@@ -224,11 +226,23 @@ void register_type(struct gen_context *ctx, const char *name, enum var_type type
     t->bits = bits;
     t->name = name;
     t->sign = sign;
+    t->ptr = ptr;
     t->name_hash = hash(name);
 
     t->id = ++ctx->ids;
     t->next = ctx->types;
     ctx->types = t;
+
+    return t;
+}
+
+struct type *type_wrap(struct gen_context *ctx, struct type *src)
+{
+    struct type *res = find_type_by(ctx, src->type, src->bits, src->sign, src->ptr + 1);
+    if (res)
+        return res;
+
+    return register_type(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
 }
 
 struct variable *find_global_variable(struct gen_context *ctx, int reg)
@@ -361,47 +375,25 @@ void register_variable(struct gen_context *ctx, struct variable *var)
 
 void register_builtin_types(struct gen_context *ctx)
 {
-#if 0
-    register_type(ctx, init_type("void", V_VOID, 0, 0));
+    register_type(ctx, "void", V_VOID, 0, 0, 0);
 
-    register_type(ctx, init_type("bool", V_INT, 1, 0));
+    register_type(ctx, "bool", V_INT, 1, 0, 0);
 
-    register_type(ctx, init_type("char", V_INT, 8, 1));
-    register_type(ctx, init_type("unsigned char", V_INT, 8, 0));
+    register_type(ctx, "char", V_INT, 8, 1, 0);
+    register_type(ctx, "unsigned char", V_INT, 8, 0, 0);
 
-    register_type(ctx, init_type("short", V_INT, 16, 1));
-    register_type(ctx, init_type("unsigned short", V_INT, 16, 0));
+    register_type(ctx, "short", V_INT, 16, 1, 0);
+    register_type(ctx, "unsigned short", V_INT, 16, 0, 0);
 
-    register_type(ctx, init_type("int", V_INT, 32, 1));
-    register_type(ctx, init_type("unsigned int", V_INT, 32, 0));
+    register_type(ctx, "int", V_INT, 32, 1, 0);
+    register_type(ctx, "unsigned int", V_INT, 32, 0, 0);
 
-    register_type(ctx, init_type("long", V_INT, 64, 1));
-    register_type(ctx, init_type("unsigned long", V_INT, 64, 0));
+    register_type(ctx, "long", V_INT, 64, 1, 0);
+    register_type(ctx, "unsigned long", V_INT, 64, 0, 0);
 
-    register_type(ctx, init_type("float", V_FLOAT, 64, 1));
+    register_type(ctx, "float", V_FLOAT, 64, 1, 0);
 
-    register_type(ctx, init_type("strgin", V_STR, 0, 0));
-#else
-    register_type(ctx, "void", V_VOID, 0, 0);
-
-    register_type(ctx, "bool", V_INT, 1, 0);
-
-    register_type(ctx, "char", V_INT, 8, 1);
-    register_type(ctx, "unsigned char", V_INT, 8, 0);
-
-    register_type(ctx, "short", V_INT, 16, 1);
-    register_type(ctx, "unsigned short", V_INT, 16, 0);
-
-    register_type(ctx, "int", V_INT, 32, 1);
-    register_type(ctx, "unsigned int", V_INT, 32, 0);
-
-    register_type(ctx, "long", V_INT, 64, 1);
-    register_type(ctx, "unsigned long", V_INT, 64, 0);
-
-    register_type(ctx, "float", V_FLOAT, 64, 1);
-
-    register_type(ctx, "strgin", V_STR, 0, 0);
-#endif
+    register_type(ctx, "strgin", V_STR, 0, 0, 0);
 }
 
 struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
@@ -436,8 +428,8 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 
     if (!parent) {
         // Register singleton NULL variable to global context
-        register_type(res, "nulltype", V_NULL, 0, 0);
-        struct type *null_type = find_type_by(res, V_NULL, 0, 0);
+        register_type(res, "nulltype", V_NULL, 0, 0, 0);
+        struct type *null_type = find_type_by(res, V_NULL, 0, 0, 0);
         FATAL(!null_type, "Couldn't find NULL type");
         struct variable *null_var = init_variable("NULL", null_type);
 
@@ -498,11 +490,11 @@ struct variable *new_variable(struct gen_context *ctx,
     }
 #endif
     // If bits == 0 and we have a pendign type which matches requested type, use it
-    struct type *pending_type = PTR_VAL(ctx->pending_type);
-    if (bits == 0 && pending_type && pending_type->type == type) {
-        type = pending_type->type;
-        bits = pending_type->bits;
-        sign = pending_type->sign;
+    if (bits == 0 && ctx->pending_type && ctx->pending_type->type == type) {
+        type = ctx->pending_type->type;
+        bits = ctx->pending_type->bits;
+        sign = ctx->pending_type->sign;
+        //ptr = ctx->pending_type->ptr;
     } else if (type == V_VOID) {
         bits = 0;
         sign = 0;
@@ -519,7 +511,7 @@ struct variable *new_variable(struct gen_context *ctx,
     res->addr = addr;
     res->name = name;
     res->name_hash = hash(name);
-    res->type = find_type_by(ctx, type, bits, sign);
+    res->type = find_type_by(ctx, type, bits, sign, 0);
     res->bits = bits;
     FATAL(!res->type, "Didn't find type!");
     res->global = global;
@@ -929,12 +921,12 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     if (v->ptr || v->addr) {
         char *stars = get_stars(v->ptr);
         prev = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
-        buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d ; gen_load_int %d, %d\n",
+        buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d ; gen_load_int %d, %d, %d\n",
                 prev->reg, prev->type->bits,
                 stars ? stars : "",
                 prev->type->bits,
                 stars ? stars : "",
-                REGP(v), reg, align(prev->type->bits), v->ptr, v->addr);
+                REGP(v), reg, align(prev->type->bits), v->ptr, v->addr, v->reg);
         prev->ptr = v->ptr;
         prev->addr = v->addr;
         prev->direct = 1;
@@ -1043,7 +1035,7 @@ enum var_type get_and_cast(struct gen_context *ctx, struct variable **v1, struct
     *v2 = gen_load(ctx, *v2);
 
     enum var_type restype = resolve_type((*v1)->type->type, (*v2)->type->type);
-    struct type *target = find_type_by(ctx, restype, 0, 1);
+    struct type *target = find_type_by(ctx, restype, 0, 1, 0);
     FATAL(!target, "No target in cast");
     *v1 = gen_cast(ctx, *v1, target, 0);
     *v2 = gen_cast(ctx, *v2, target, 0);
@@ -1652,12 +1644,13 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
 int gen_type(struct gen_context *ctx, struct node *node)
 {
-    struct type *t = find_type_by(ctx, node->type, node->bits, node->sign);
+    struct type *t = find_type_by(ctx, node->type, node->bits, node->sign, 0);
     if (t == NULL)
         ERR("Couldn't find type: %s (%s, bits %d, %s", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
 
-    if (node->ptr)
-        PTR_TO(t, node->ptr);
+    int ptrval = node->ptr;
+    while (ptrval--)
+        t = type_wrap(ctx, t);
     ctx->pending_type = t;
 
     return REF_CTX(t->id);
@@ -1671,8 +1664,8 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     struct variable *res = NULL;
 
     FATALN(!var, node, "Invalid cast source");
-    struct type *target = PTR_VAL(ctx->pending_type);
-    int ptrval = PTR_GET(ctx->pending_type);
+    struct type *target = ctx->pending_type;
+    int ptrval = ctx->pending_type->ptr;
     if (var->type->type == V_INT && target->type == var->type->type) {
         res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
         if (var->ptr) {
@@ -1757,7 +1750,7 @@ int gen_use_ptr(struct gen_context *ctx)
 int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
 {
     struct variable *var = NULL;
-    struct type *t = PTR_VAL(ctx->pending_type);
+    struct type *t = ctx->pending_type;
     int ptrval = 0;
     int addrval = 0;
     int res = 0;
@@ -1812,7 +1805,8 @@ int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
     if (var && (var->array)) {
             buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
                 var->array * type->bits / 8, res->reg, align(res->type->bits));
-    } else if (var && (var->ptr || var->addr)) {
+    } else if (type->ptr || (var && (var->ptr || var->addr))) {
+            // FIXME ptr size hardcoded
             buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
                 8, res->reg, align(res->type->bits));
     } else if (type->type == V_INT || type->type == V_FLOAT) {
@@ -2286,7 +2280,7 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
 void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *target, struct node *functype)
 {
     if (!target && functype)
-        target = find_type_by(ctx, functype->type, functype->bits, functype->sign);
+        target = find_type_by(ctx, functype->type, functype->bits, functype->sign, 0);
 
     if (strcmp(ctx->name, "main") == 0 && functype->type == V_VOID) {
             buffer_write(ctx->data, "ret i32 0 ; RET5\n");
@@ -2921,7 +2915,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
         buffer_write(main_ctx->data, "%%%d = call %s @%s()\n", ret->reg, type, ctx->name);
         // TODO FIXME Hacks for type solving
         if (node->type != var->type->type || node->bits != var->type->bits) {
-            struct type *target = find_type_by(main_ctx, V_INT, 32, 1);
+            struct type *target = find_type_by(main_ctx, V_INT, 32, 1, 0);
             FATALN(!target, node, "No tarkget in global main");
             buffer_write(main_ctx->data, "; bits %d , %d\n", node->bits, ret->type->bits);
             if (node->bits > 0)
