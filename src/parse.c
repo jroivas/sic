@@ -64,6 +64,8 @@ static const char *nodestr[] = {
     "FOR",
     "INDEX",
     "SIZEOF",
+    "STRUCT",
+    "UNION",
     "LIST"
 };
 
@@ -361,9 +363,138 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handler handler, enum comma_type comma, int force_list)
+{
+    struct node *res = NULL;
+#if 1
+    int first = 1;
+    
+    while (1) {
+        if (!first) {
+            if (accept(f, token, T_COMMA)) {
+                FATALN(comma == COMMA_NONE, res, "Expected no comma, got one");
+            } else if (comma == COMMA_MANDATORY)
+                break;
+                //FATALN(comma == COMMA_MANDATORY, res, "Expected comma, didn't get one");
+        }
+        struct node *tmp = handler(f, token);
+        if (!tmp)
+            break;
+        first = 0;
+        if (!res) {
+            if (force_list)
+                res = make_node(token, A_LIST, tmp, NULL, NULL);
+            else
+                res = tmp;
+        } else
+            res = make_node(token, A_LIST, res, NULL, tmp);
+    }
+#else
+    struct node *prev = NULL;
+    int first = 1;
+    
+    while (1) {
+        if (!first) {
+            if (accept(f, token, T_COMMA)) {
+                FATALN(comma == COMMA_NONE, res, "Expected no comma, got one");
+            } else if (comma == COMMA_MANDATORY)
+                break;
+                //FATALN(comma == COMMA_MANDATORY, res, "Expected comma, didn't get one");
+        }
+        struct node *tmp = handler(f, token);
+        if (!tmp)
+            break;
+        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
+        first = 0;
+        if (!res)
+            res = tmp;
+        else
+            prev->right = tmp;
+        prev = tmp;
+    }
+#endif
+    return res;
+}
+
+struct node *struct_declarator(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    res = declarator(f, token);
+    // TODO bitfields
+#if 0
+    if (accept(f, token, T_COLON)) {
+        struct node *tmp = NULL;
+        tmp = constant_expression(f, token);
+        if (!res)
+            res = tmp;
+        else
+            res->right = tmp;
+    }
+#endif
+    return res;
+}
+
+struct node *struct_declarator_list(struct scanfile *f, struct token *token)
+{
+    return iter_list(f, token, struct_declarator, COMMA_MANDATORY, 0);
+}
+
+
+struct node *specifier_qualifier_list(struct scanfile *f, struct token *token);
+struct node *struct_declaration(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    res = specifier_qualifier_list(f, token);
+    if (!res)
+        return res;
+
+    res->right = struct_declarator_list(f, token);
+    semi(f, token);
+
+    return res;
+}
+
+struct node *struct_declaration_list(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    res = iter_list(f, token, struct_declaration, COMMA_NONE, 0);
+    //node_walk(res);
+    return res;
+}
+
+struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    if (accept_keyword(f, token, K_STRUCT)) {
+        res = make_node(token, A_STRUCT, NULL, NULL, NULL);
+    } else if (accept_keyword(f, token, K_UNION)) {
+        res = make_node(token, A_UNION, NULL, NULL, NULL);
+    } else
+        return NULL;
+
+    if (token->token == T_IDENTIFIER) {
+        struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+        tmp->value_string = token->value_string;
+        scan(f, token);
+        res->left = tmp;
+    }
+
+    if (accept(f, token, T_CURLY_OPEN)) {
+        res->right = struct_declaration_list(f, token);
+        expect(f, token, T_CURLY_CLOSE, "}");
+    }
+
+    return res;
+}
+
 struct node *type_specifier(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+    if (token->token == T_KEYWORD && (token->keyword == K_STRUCT || token->keyword == K_STRUCT))
+        return struct_or_union_specifier(f, token);
     if (token->token != T_IDENTIFIER)
         return res;
 
@@ -383,6 +514,7 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "double") == 0)
         res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
+
     // FIXME More types
 
     if (res)
@@ -408,18 +540,7 @@ struct node *type_qualifier(struct scanfile *f, struct token *token)
 
 struct node *type_qualifier_list(struct scanfile *f, struct token *token)
 {
-    struct node *res = NULL;
-    struct node *tmp = NULL;
-
-    do {
-        tmp = type_qualifier(f, token);
-        if (!res && tmp)
-            res = tmp;
-        else if (res && tmp)
-            res = make_node(token, A_LIST, res, NULL, tmp);
-    } while (tmp);
-
-    return res;
+    return iter_list(f, token, type_qualifier, COMMA_NONE, 0);
 }
 
 struct node *declaration_specifiers(struct scanfile *f, struct token *token)
@@ -462,19 +583,13 @@ struct node *parameter_declaration(struct scanfile *f, struct token *token)
 
 struct node *parameter_list(struct scanfile *f, struct token *token)
 {
-    struct node *res = parameter_declaration(f, token);
-    while (accept(f, token, T_COMMA)) {
-        struct node *tmp = parameter_declaration(f, token);
-        if (!tmp)
-            break;
-        res = make_node(token, A_LIST, res, NULL, tmp);
-    }
-    return res;
+    return iter_list(f, token, parameter_declaration, COMMA_MANDATORY, 0);
 }
 
 struct node *parameter_type_list(struct scanfile *f, struct token *token)
 {
     struct node *res = parameter_list(f, token);
+    // TODO ellipsis
     return res;
 }
 
@@ -804,24 +919,7 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
 
 struct node *init_declarator_list(struct scanfile *f, struct token *token)
 {
-    struct node *res = NULL;
-    struct node *prev = NULL;
-    while (1) {
-        struct node *tmp = init_declarator(f, token);
-        if (!tmp)
-            break;
-        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
-        if (res == NULL)
-            res = tmp;
-        else {
-            FATAL(prev->right, "Compiler error!")
-            prev->right = tmp;
-        }
-        prev = tmp;
-        if (!accept(f, token, T_COMMA))
-            break;
-    }
-    return res;
+    return iter_list(f, token, init_declarator, COMMA_MANDATORY, 0);
 }
 
 struct node *declaration(struct scanfile *f, struct token *token)
@@ -861,6 +959,8 @@ struct node *declaration(struct scanfile *f, struct token *token)
 
 struct node *argument_expression_list(struct scanfile *f, struct token *token)
 {
+    // FIXME: Make to use iter_list
+#if 1
     struct node *res = NULL;
     struct node *prev = NULL;
 
@@ -880,6 +980,10 @@ struct node *argument_expression_list(struct scanfile *f, struct token *token)
             break;
     }
     return res;
+
+#else
+    return iter_list(f, token, assignment_expression, COMMA_MANDATORY, 1);
+#endif
 }
 
 struct node *postfix_expression(struct scanfile *f, struct token *token)
@@ -1304,22 +1408,7 @@ struct node *statement_list(struct scanfile *f, struct token *token)
 
 struct node *declaration_list(struct scanfile *f, struct token *token)
 {
-    struct node *res = NULL;
-    struct node *prev = NULL;
-    while (1) {
-        struct node *tmp = declaration(f, token);
-        if (!tmp)
-            break;
-        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
-        if (res == NULL)
-            res = tmp;
-        else {
-            FATAL(prev->right, "Compiler error!")
-            prev->right = tmp;
-        }
-        prev = tmp;
-    }
-    return res;
+    return iter_list(f, token, declaration, COMMA_NONE, 0);
 }
 
 struct node *compound_statement(struct scanfile *f, struct token *token)
@@ -1416,5 +1505,7 @@ struct node *parse(struct scanfile *f)
     struct token token;
     memset(&token, 0, sizeof(struct token));
     scan(f, &token);
-    return translation_unit(f, &token);
+    struct node *res = translation_unit(f, &token);
+    FATAL(!res, "Can't parse source, didn't detect token: %s", token_dump(&token));
+    return res;
 }

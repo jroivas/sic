@@ -39,6 +39,8 @@ enum keyword_type {
     K_WHILE,
     K_DO,
     K_FOR,
+    K_STRUCT,
+    K_UNION,
     K_SIZEOF
 };
 

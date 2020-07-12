@@ -25,7 +25,6 @@ int main()
     if (sizeof(c) != 8)
         return 6;
 
-    // TODO Pointer types
     if (sizeof(int *) != 8)
         return 7;
 

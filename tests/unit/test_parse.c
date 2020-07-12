@@ -8,9 +8,15 @@ static int test1()
     return 0;
 }
 
+static int test_list_parse()
+{
+    return 0;
+}
+
 int test_parse()
 {
     TEST(test1);
+    TEST(test_list_parse);
 
     return 0;
 }

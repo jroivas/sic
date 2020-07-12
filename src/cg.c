@@ -2137,7 +2137,7 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
         FATALN(!ptype, pval, "Invalid parameter");
-        FATALN(ptype->node != A_TYPE, ptype, "Invalid parameter type");
+        FATALN(ptype->node != A_TYPE, pval, "Invalid parameter type");
         // TODO: parse types properly, now just shortcutting
         int pointer = 0;
         while (pname && pname->node == A_POINTER) {
@@ -2989,7 +2989,7 @@ struct node *find_main_type(struct node *node)
 
 int codegen(FILE *outfile, struct node *node)
 {
-    FATAL(!node, "Didn't get a node!");
+    FATAL(!node, "Didn't get a node, most probably parse error!");
     struct gen_context *ctx = init_ctx(outfile, NULL);
     int res;
     int got_main = 0;

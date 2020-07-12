@@ -54,6 +54,8 @@ enum nodetype {
     A_FOR,
     A_INDEX,
     A_SIZEOF,
+    A_STRUCT,
+    A_UNION,
     A_LIST
 };
 
@@ -82,10 +84,20 @@ struct node {
     struct node *right;
 };
 
+
 struct node *parse(struct scanfile *f);
 extern void node_walk(struct node *node);
 extern void node_free(struct node *node);
 const char *node_type_str(enum nodetype t);
 const char *node_str(struct node *n);
+
+enum comma_type {
+    COMMA_NONE,
+    COMMA_OPT,
+    COMMA_MANDATORY
+};
+
+typedef struct node *(*list_iter_handler)(struct scanfile *f, struct token *token);
+struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handler handler, enum comma_type comma, int force_list);
 
 #endif
