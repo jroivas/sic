@@ -339,9 +339,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     if (node->node == A_STRUCT || node->node == A_UNION) {
         // FIXME
         struct node *name = node->left;
-
         FATALN(!name, node, "Struct has no name");
-        printf("Resolving union/struct: %s\n", name->value_string);
 
         struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
         if (node->node == A_STRUCT)

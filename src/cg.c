@@ -40,6 +40,9 @@ struct type {
     hashtype name_hash;
     struct type *ref;
     struct type *next;
+
+    int itemcnt;
+    struct type **items;
 };
 
 struct variable {
@@ -186,7 +189,7 @@ int same_type(struct type *a, struct type *b)
 }
 #endif
 
-struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr)
+struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr, const char *name)
 {
     struct type *res = ctx->types;
     while (res) {
@@ -194,13 +197,20 @@ struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits,
         if (res->type == type)
             printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
 #endif
+        if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
+            return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr)
             return res;
         res = res->next;
     }
     if (ctx->parent)
-        return find_type_by(ctx->parent, type, bits, sign, ptr);
+        return __find_type_by(ctx->parent, type, bits, sign, ptr, name);
     return NULL;
+}
+
+struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr)
+{
+    return __find_type_by(ctx, type, bits, sign, ptr, NULL);
 }
 
 struct type *find_type_by_id(struct gen_context *ctx, int id)
@@ -234,6 +244,39 @@ struct type *register_type(struct gen_context *ctx, const char *name, enum var_t
     ctx->types = t;
 
     return t;
+}
+
+void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node)
+{
+    struct node *tmp = node;
+    int first = 1;
+
+    do {
+        if (tmp->left) {
+            struct node *l = tmp->left;
+            struct type *t = __find_type_by(ctx, l->type, l->bits, l->sign, l->ptr, l->value_string);
+            FATALN(!t, l, "Invalid type definition");
+            type->itemcnt++;
+
+            if (!first)
+                buffer_write(ctx->init, ", ");
+            first = 0;
+            if (t->type == V_INT) {
+                buffer_write(ctx->init, "i%d", (t->bits ? t->bits : 32));
+            } else if (t->type == V_FLOAT) {
+                buffer_write(ctx->init, "double");
+            } else
+                ERR("Unsupported type: %s", type_str(t->type));
+
+            if (type->items == NULL)
+                type->items = calloc(type->itemcnt, sizeof(struct type *));
+            else
+                type->items = realloc(type->items, type->itemcnt * sizeof(struct type *));
+            type->items[type->itemcnt - 1] = t;
+        }
+        tmp = tmp->right;
+    } while (tmp);
+
 }
 
 struct type *type_wrap(struct gen_context *ctx, struct type *src)
@@ -1645,8 +1688,24 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = find_type_by(ctx, node->type, node->bits, node->sign, 0);
-    if (t == NULL)
-        ERR("Couldn't find type: %s (%s, bits %d, %s)", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
+
+    if (!t && node->type == V_STRUCT) {
+        struct gen_context *global_ctx = ctx;
+
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+
+        // We have most probably struct definition
+        t = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+
+        // FIXME This is a hack for now
+        buffer_write(global_ctx->init, "%%struct.%s = type { ",
+            node->value_string);
+        complete_struct_type(global_ctx, t, node->right);
+
+        buffer_write(global_ctx->init, " }\n");
+    }
+    FATALN(!t, node, "Couldn't find type: %s (%s, bits %d, %s)", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
 
     int ptrval = node->ptr;
     while (ptrval--)
@@ -1775,6 +1834,10 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var->global = ctx->global;
             var->array = idx_value;
             res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
+            break;
+        case V_STRUCT:
+            var = new_variable(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global);
+            buffer_write(ctx->init, "%%%d = alloca %%struct.%s, align 8\n", var->reg, t->name);
             break;
         default:
             ERR("Invalid type for variable: %s", type_str(t->type));
