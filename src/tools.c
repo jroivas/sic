@@ -3,7 +3,7 @@
 #include <execinfo.h>
 
 static const char *typestr[] = {
-    "void", "NULL", "int", "float", "fixed", "str"
+    "void", "NULL", "int", "float", "fixed", "str", "struct", "union"
 };
 
 const char *type_str(enum var_type t)
@@ -120,6 +120,8 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_INDEX:
         case A_PARAMS:
         case A_DEREFERENCE:
+        case A_STRUCT:
+        case A_UNION:
         case A_SIZEOF:
             printf("%s", node_str(node));
             break;

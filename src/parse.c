@@ -192,10 +192,12 @@ struct node *make_node(struct token *t, enum nodetype node, struct node *left, s
     res->mid = mid;
     res->right = right;
 
-    res->filename = t->filename;
-    res->line = t->line;
-    res->linepos = t->linepos;
-    res->token = t;
+    if (t) {
+        res->filename = t->filename;
+        res->line = t->line;
+        res->linepos = t->linepos;
+        res->token = t;
+    }
 
     if (left != NULL || mid != NULL || right != NULL)
         res->type = resolve_var_type(res);
@@ -286,8 +288,80 @@ int scan_const(struct node *node)
     return res;
 }
 
+struct node *type_resolve(struct token *t, struct node *node, int d);
+
+int __parse_struct(struct node *res, struct node *node, int pos)
+{
+    if (!node)
+        return 0;
+
+    int bits = 0;
+    int extra = 0;
+
+    if (node->node == A_TYPESPEC) {
+        if (node->bits == 0)
+            bits = 32;
+        else
+            bits = node->bits;
+
+        /*
+         * In case of non-packed, do alignment
+         * TODO: packed structs
+         */
+        while (bits >= 32 && (pos + bits + extra) % 32 != 0)
+            extra++;
+
+        struct node *tmp = res;
+        while (tmp->right)
+            tmp = tmp->right;
+        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
+        tmp->right->left = type_resolve(NULL, node, 0);
+    }
+
+    // TODO: Union
+    bits += extra;
+
+    if (node->left)
+        bits +=  __parse_struct(res, node->left, bits);
+    if (node->right)
+        bits +=  __parse_struct(res, node->right, bits);
+
+    return bits;
+}
+
+int parse_struct(struct node *res, struct node *node)
+{
+    return __parse_struct(res, node->right, 0);
+}
+
 struct node *type_resolve(struct token *t, struct node *node, int d)
 {
+    if (node->node == A_STRUCT || node->node == A_UNION) {
+        // FIXME
+        struct node *name = node->left;
+
+        FATALN(!name, node, "Struct has no name");
+        printf("Resolving union/struct: %s\n", name->value_string);
+
+        struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
+        if (node->node == A_STRUCT)
+            res->type = V_STRUCT;
+        else
+            res->type = V_UNION;
+
+        res->value_string = name->value_string;
+        res->ptr = node->ptr;
+        res->addr = node->addr;
+
+        res->bits = parse_struct(res, node);
+
+        res = type_resolve(NULL, res, 0);
+
+        return res;
+    }
+
+    if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION))
+        return node;
     struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
     enum var_type type = node->type;
     type = resolve_var_type(node);
@@ -450,7 +524,11 @@ struct node *struct_declaration(struct scanfile *f, struct token *token)
     if (!res)
         return res;
 
-    res->right = struct_declarator_list(f, token);
+    struct node *tmp = res;
+    while (tmp->right != NULL)
+        tmp = tmp->right;
+
+    tmp->right = struct_declarator_list(f, token);
     semi(f, token);
 
     return res;
@@ -460,7 +538,6 @@ struct node *struct_declaration_list(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
     res = iter_list(f, token, struct_declaration, COMMA_NONE, 0);
-    //node_walk(res);
     return res;
 }
 
@@ -486,6 +563,10 @@ struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
         res->right = struct_declaration_list(f, token);
         expect(f, token, T_CURLY_CLOSE, "}");
     }
+#if 0
+    node_walk(res);
+    stack_trace();
+#endif
 
     return res;
 }
@@ -927,14 +1008,15 @@ struct node *declaration(struct scanfile *f, struct token *token)
     save_point(f, token);
     struct node *res = declaration_specifiers(f, token);
     if (!res) {
-        remove_save_point(f, token);
+        load_point(f, token);
         return NULL;
     }
     res = type_resolve(token, res, 0);
 
     struct node *decl = init_declarator_list(f, token);
-    if (decl)
+    if (decl) {
         res = make_node(token, A_DECLARATION, res, NULL, decl);
+    }
 #if 0
     else {
         match(f, token, T_IDENTIFIER, "identifier");
@@ -952,7 +1034,6 @@ struct node *declaration(struct scanfile *f, struct token *token)
         load_point(f, token);
         return NULL;
     }
-    //semi(f, token);
     remove_save_point(f, token);
     return res;
 }
@@ -1421,10 +1502,6 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
 
     decl = declaration_list(f, token);
     res = statement_list(f, token);
-    if (token->token != T_CURLY_CLOSE) {
-        printf("Token now: %s\n", token_dump(token));
-        node_walk(res);
-    }
     expect(f, token, T_CURLY_CLOSE, "}");
 
     // We parsed body, always return it
@@ -1441,7 +1518,12 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     spec = type_resolve(token, spec, 0);
     struct node *decl = declarator(f, token);
     if (!decl)
+        return NULL;
+    //FATALN(!decl, spec, "Invalid function definition");
+#if 0
+    if (!decl)
         ERR("Invalid function definition");
+#endif
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         // If no compound, this is most probably variable decls
@@ -1460,6 +1542,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
 struct node *external_declaration(struct scanfile *f, struct token *token)
 {
     struct node *res;
+
     save_point(f, token);
     res = function_definition(f, token);
     if (res) {

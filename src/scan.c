@@ -447,7 +447,7 @@ void save_point(struct scanfile *f, struct token *t)
 
 #if 0
     printf("Saved: %d,%d token %s\n", t->line, t->linepos, token_dump(t));
-    stack_trace();
+    //stack_trace();
 #endif
     f->save_point[f->savecnt++] = pos;
 }
@@ -460,7 +460,7 @@ void remove_save_point(struct scanfile *f, struct token *t)
 #if 0
     struct token *tmp = &f->save_token[f->savecnt];
     printf("Remove: %d,%d from %d,%d token %s\n", tmp->line, tmp->linepos, f->line, f->linepos, token_dump(t));
-    stack_trace();
+    //stack_trace();
 #endif
 }
 
@@ -472,7 +472,7 @@ void load_point(struct scanfile *f, struct token *t)
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
 #if 0
     printf("Loaded: %d,%d from %d,%d token %s\n", t->line, t->linepos, f->line, f->linepos, token_dump(t));
-    stack_trace();
+    //stack_trace();
 #endif
     /*
      * Need to restore these as well in order to keep

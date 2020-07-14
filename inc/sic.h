@@ -14,7 +14,7 @@ typedef unsigned long hashtype;
 #define REF_CTX(X) (-(X))
 
 enum var_type {
-    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR
+    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR, V_STRUCT, V_UNION
 };
 
 #define WARN(...) { \
@@ -38,9 +38,9 @@ void stack_trace(void);
 #include "parse.h"
 #define FATALN(check, _node, ...) { if (check) { \
     if (_node) { \
+        node_walk(_node);\
         fprintf(stderr, "FATAL Compiler error in %s at %d, %s:%d,%d: ", __FILE__, __LINE__, \
         ((struct node*)_node)->filename, ((struct node*)_node)->line, ((struct node*)_node)->linepos);\
-        node_walk(_node);\
     } else { fprintf(stderr, "FATAL Compiler error in %s at %d: ", __FILE__, __LINE__); } \
     fprintf(stderr,  __VA_ARGS__);\
     fprintf(stderr, "\n");\

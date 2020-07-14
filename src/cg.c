@@ -1646,7 +1646,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = find_type_by(ctx, node->type, node->bits, node->sign, 0);
     if (t == NULL)
-        ERR("Couldn't find type: %s (%s, bits %d, %s", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
+        ERR("Couldn't find type: %s (%s, bits %d, %s)", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
 
     int ptrval = node->ptr;
     while (ptrval--)
