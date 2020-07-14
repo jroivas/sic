@@ -1,0 +1,28 @@
+struct values
+{
+    int a;
+    char b;
+    long c;
+};
+
+int main()
+{
+    struct values v;
+
+/*
+    v.a = 10;
+    v.b = 20;
+    v.c = 30;
+
+    if (v.a != 10)
+        return 1;
+
+    if (v.b != 20)
+        return 2;
+
+    if (v.b != 30)
+        return 3;
+*/
+
+    return 0;
+}
