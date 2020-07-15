@@ -28,6 +28,7 @@ static const char *tokenstr[] = {
     "~",
     "?",
     ":",
+    ".",
     "EOF"
 };
 
@@ -412,8 +413,14 @@ int scan(struct scanfile *f, struct token *t)
             }
             if (c == '.') {
                 c = next(f);
-                t->token = T_DEC_LIT;
-                t->fraction = scan_number(f, c);
+                if (isdigit(c) || c == ' ') {
+                    t->token = T_DEC_LIT;
+                    t->fraction = scan_number(f, c);
+                } else {
+                    // Next is not number so just make dot token
+                    putback(f, c);
+                    t->token = T_DOT;
+                }
                 ok = 1;
             } else if (!ok && (isalpha(c) || c == '_')) {
                 t->value_string = scan_identifier(f, c);

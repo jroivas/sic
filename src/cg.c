@@ -41,8 +41,14 @@ struct type {
     struct type *ref;
     struct type *next;
 
+    /* Struct/union items */
     int itemcnt;
-    struct type **items;
+    struct type_item *items;
+};
+
+struct type_item {
+    struct type *item;
+    const char *name;
 };
 
 struct variable {
@@ -268,15 +274,34 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
 
+
             if (type->items == NULL)
-                type->items = calloc(type->itemcnt, sizeof(struct type *));
+                type->items = calloc(type->itemcnt, sizeof(struct type_item));
             else
-                type->items = realloc(type->items, type->itemcnt * sizeof(struct type *));
-            type->items[type->itemcnt - 1] = t;
+                type->items = realloc(type->items, type->itemcnt * sizeof(struct type_item));
+            type->items[type->itemcnt - 1].item = t;
+            FATALN(!l->value_string, l, "Nameless struct value");
+            type->items[type->itemcnt - 1].name = l->value_string;
         }
         tmp = tmp->right;
     } while (tmp);
 
+}
+
+int struct_get_by_name(struct type *type, const char *name, struct type **res)
+{
+    FATAL(!type, "No struct type");
+    FATAL(!name, "Can't access empty from struct");
+
+    for (int i = 0; i < type->itemcnt; i++) {
+        FATAL(!type->items[i].name, "Struct element has no name");
+        if (strcmp(type->items[i].name, name) == 0) {
+            if (res)
+                *res = type->items[i].item;
+            return i;
+        }
+    }
+    return -1;
 }
 
 struct type *type_wrap(struct gen_context *ctx, struct type *src)
@@ -930,10 +955,10 @@ struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, s
         index = idx_var->reg;
 
     if (var->array) {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %s%d ; GG1\n",
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 %s%d ; gen_access_ptr array\n",
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
     } else {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; GG2\n",
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; gen_access_ptr\n",
             res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
     }
     return res;
@@ -1960,6 +1985,7 @@ int gen_index(struct gen_context *ctx, struct node *node)
     return res;
 }
 
+
 int get_index(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct node *ident = node->left;
@@ -1982,6 +2008,33 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     res = gen_access_ptr_item(ctx, var, res, idx, 0);
 
     return res->reg;
+}
+
+int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
+{
+    struct variable *var = find_variable(ctx, a);
+    struct variable *idx = find_variable(ctx, b);
+    FATALN(!var, node, "Missing variable");
+    FATALN(!idx, node, "Missing index");
+
+    FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct");
+    struct type *access_type = NULL;
+    int index_num = struct_get_by_name(var->type, idx->name, &access_type);
+    FATALN(index_num < 0, node, "Couldn't find from struct: %s", idx->name);
+    FATALN(!access_type, node, "Can't find type of %s from struct", idx->name);
+
+    struct variable *ret = NULL;
+
+    if (access_type->type == V_INT) {
+        ret = new_variable(ctx, NULL, V_INT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
+        FATALN(!ret, node, "Can't create return variable");
+
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds %%struct.%s, %%struct.%s* %%%d, i32 0, i32 %d; %d\n", 
+            ret->reg, var->type->name, var->type->name, var->reg, index_num, access_type->bits);
+    } else
+        ERR("Can't access %s from struct", type_str(access_type->type));
+
+    return ret->reg;
 }
 
 int gen_addr(struct gen_context *ctx, struct node *node, int reg)
@@ -2109,8 +2162,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     }
 
     if (src->type->type == V_INT) {
-        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d ; gen_assign %d %d\n",
-                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits), dst->type->type, dst->ptr);
+        src = load_and_cast_to(ctx, src, dst->type, CAST_NORMAL);
+        buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d ; gen_assign\n",
+                src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_FLOAT) {
         buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
                 src->reg, REGP(dst), dst->reg, align(dst->type->bits));
@@ -2838,6 +2892,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_INDEX:
             ctx->last_label = 0;
             return get_index(ctx, node, resleft, resright);
+        case A_ACCESS:
+            ctx->last_label = 0;
+            return gen_access(ctx, node, resleft, resright);
         case A_ADD:
             ctx->last_label = 0;
             return gen_add(ctx, node, resleft, resright);

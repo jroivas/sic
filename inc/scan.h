@@ -28,6 +28,7 @@ enum tokentype {
     T_TILDE,
     T_QUESTION,
     T_COLON,
+    T_DOT,
     T_EOF
 };
 

@@ -8,9 +8,10 @@ struct values
 int main()
 {
     struct values v;
+    char b;
 
-/*
     v.a = 10;
+    b = 20;
     v.b = 20;
     v.c = 30;
 
@@ -20,9 +21,8 @@ int main()
     if (v.b != 20)
         return 2;
 
-    if (v.b != 30)
+    if (v.c != 30)
         return 3;
-*/
 
     return 0;
 }

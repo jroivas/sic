@@ -66,6 +66,7 @@ static const char *nodestr[] = {
     "SIZEOF",
     "STRUCT",
     "UNION",
+    "ACCESS",
     "LIST"
 };
 
@@ -316,6 +317,9 @@ int __parse_struct(struct node *res, struct node *node, int pos)
             tmp = tmp->right;
         tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
         tmp->right->left = type_resolve(NULL, node, 0);
+        // Solve name of the element
+        if (node->right)
+            tmp->right->left->value_string = node->right->value_string;
     }
 
     // TODO: Union
@@ -1088,6 +1092,15 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
     } else if (accept(f, token, T_MINUSMINUS)) {
         res = make_node(token, A_POSTDEC, res, NULL, NULL);
         return res;
+    } else if (accept(f, token, T_DOT)) {
+        if (token->token != T_IDENTIFIER)
+            ERR("Invalid element access after dot");
+        struct node *post = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+        post->value_string = token->value_string;
+        scan(f, token);
+
+        res = make_node(token, A_ACCESS, res, NULL, post);
+        return res;
     }
 
     return res;
@@ -1104,7 +1117,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
     } else if (accept(f, token, T_MINUS)) {
         left = cast_expression(f, token);
         if (!left)
-            ERR("Invalid cast!");
+            ERR("Invalid cast: %s", token_dump(token));
         return make_node(token, A_NEGATE, left, NULL, NULL);
     } else if (accept(f, token, T_EXCLAM)) {
         left = cast_expression(f, token);
