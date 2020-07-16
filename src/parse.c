@@ -302,10 +302,16 @@ int __parse_struct(struct node *res, struct node *node, int pos)
     int extra = 0;
 
     if (node->node == A_TYPE_LIST) {
-        if (node->bits == 0)
+        struct node *tmp = res;
+        while (tmp->right)
+            tmp = tmp->right;
+        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
+        tmp->right->left = type_resolve(NULL, node, 0);
+
+        if (tmp->right->bits == 0 && tmp->right->left->type != V_STRUCT && tmp->right->left->type != V_UNION)
             bits = 32;
         else
-            bits = node->bits;
+            bits = tmp->right->bits;
 
         /*
          * In case of non-packed, do alignment
@@ -314,11 +320,6 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         while (bits >= 32 && (pos + bits + extra) % 64 != 0)
             extra++;
 
-        struct node *tmp = res;
-        while (tmp->right)
-            tmp = tmp->right;
-        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
-        tmp->right->left = type_resolve(NULL, node, 0);
         // Solve name of the element
         struct node *namenode = node->right;
         while (namenode->right)
@@ -358,6 +359,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
             res->type = V_UNION;
 
         res->value_string = name->value_string;
+        res->type_name = name->value_string;
         res->ptr = node->ptr;
         res->addr = node->addr;
 
@@ -1083,30 +1085,30 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
         return NULL;
 
     // TODO  "[..]", pointers, elements, etc.
-    if (accept(f, token, T_ROUND_OPEN)) {
-        struct node *args = argument_expression_list(f, token);
+    while (1) {
+        if (accept(f, token, T_ROUND_OPEN)) {
+            struct node *args = argument_expression_list(f, token);
 
-        res = make_node(token, A_FUNC_CALL, res, NULL, args);
-        expect(f, token, T_ROUND_CLOSE, ")");
-    } else if (accept(f, token, T_SQUARE_OPEN)) {
-        struct node *index = expression(f, token);
-        expect(f, token, T_SQUARE_CLOSE, "]");
-        res = make_node(token, A_INDEX, res, NULL, index);
-    } else if (accept(f, token, T_PLUSPLUS)) {
-        res = make_node(token, A_POSTINC, res, NULL, NULL);
-        return res;
-    } else if (accept(f, token, T_MINUSMINUS)) {
-        res = make_node(token, A_POSTDEC, res, NULL, NULL);
-        return res;
-    } else if (accept(f, token, T_DOT)) {
-        if (token->token != T_IDENTIFIER)
-            ERR("Invalid element access after dot");
-        struct node *post = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
-        post->value_string = token->value_string;
-        scan(f, token);
+            res = make_node(token, A_FUNC_CALL, res, NULL, args);
+            expect(f, token, T_ROUND_CLOSE, ")");
+        } else if (accept(f, token, T_SQUARE_OPEN)) {
+            struct node *index = expression(f, token);
+            expect(f, token, T_SQUARE_CLOSE, "]");
+            res = make_node(token, A_INDEX, res, NULL, index);
+        } else if (accept(f, token, T_PLUSPLUS)) {
+            res = make_node(token, A_POSTINC, res, NULL, NULL);
+        } else if (accept(f, token, T_MINUSMINUS)) {
+            res = make_node(token, A_POSTDEC, res, NULL, NULL);
+        } else if (accept(f, token, T_DOT)) {
+            if (token->token != T_IDENTIFIER)
+                ERR("Invalid element access after dot");
+            struct node *post = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+            post->value_string = token->value_string;
+            scan(f, token);
 
-        res = make_node(token, A_ACCESS, res, NULL, post);
-        return res;
+            res = make_node(token, A_ACCESS, res, NULL, post);
+        } else
+            break;
     }
 
     return res;

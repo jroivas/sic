@@ -37,6 +37,7 @@ struct type {
     int ptr;
 
     const char *name;
+    const char *type_name;
     hashtype name_hash;
     struct type *ref;
     struct type *next;
@@ -205,8 +206,12 @@ struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bit
 #endif
         if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
             return res;
-        if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr)
-            return res;
+        if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
+            if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
+                return res;
+            else if (res->type != V_STRUCT)
+                return res;
+        }
         res = res->next;
     }
     if (ctx->parent)
@@ -260,8 +265,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     do {
         if (tmp->left) {
             struct node *l = tmp->left;
-            struct type *t = __find_type_by(ctx, l->type, l->bits, l->sign, l->ptr, l->value_string);
-            FATALN(!t, l, "Invalid type definition");
+            struct type *t = __find_type_by(ctx, l->type, l->bits, l->sign, l->ptr, l->type_name);
+            FATALN(!t, l, "Invalid type definition: %s", type_str(l->type));
             type->itemcnt++;
 
             if (!first)
@@ -271,6 +276,17 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 buffer_write(ctx->init, "i%d", (t->bits ? t->bits : 32));
             } else if (t->type == V_FLOAT) {
                 buffer_write(ctx->init, "double");
+            } else if (t->type == V_STRUCT) {
+                /*
+                 * We need to resolve the size of struct now in
+                 * order to make sizeof and other things working.
+                 * This is needed because at parse time we do not
+                 * have reference to the struct this is referring
+                 * so we just mark 0 as size.
+                 */
+                type->bits += t->bits;
+                printf("Type %s size now: %d, from %d\n", type->type_name, type->bits, t->bits);
+                buffer_write(ctx->init, "%%struct.%s", l->type_name);
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
 
@@ -537,8 +553,7 @@ void output_res(struct gen_context *ctx, int *got_main)
     }
 }
 
-struct variable *new_variable(struct gen_context *ctx,
-        const char *name, enum var_type type, int bits, int sign, int ptr, int addr, int global)
+struct variable *new_variable_struct(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr, int addr, int global, const char *type_name)
 {
     struct variable *res = calloc(1, sizeof(struct variable));
 
@@ -562,6 +577,7 @@ struct variable *new_variable(struct gen_context *ctx,
         type = ctx->pending_type->type;
         bits = ctx->pending_type->bits;
         sign = ctx->pending_type->sign;
+        type_name = ctx->pending_type->type_name;
         //ptr = ctx->pending_type->ptr;
     } else if (type == V_VOID) {
         bits = 0;
@@ -579,9 +595,9 @@ struct variable *new_variable(struct gen_context *ctx,
     res->addr = addr;
     res->name = name;
     res->name_hash = hash(name);
-    res->type = find_type_by(ctx, type, bits, sign, 0);
     res->bits = bits;
-    FATAL(!res->type, "Didn't find type!");
+    res->type = __find_type_by(ctx, type, bits, sign, 0, type_name);
+    FATAL(!res->type, "Didn't find type: %s, %d bits, %s", type_str(type), bits, type_name);
     res->global = global;
     if (res->global) {
         res->next = ctx->globals;
@@ -592,6 +608,11 @@ struct variable *new_variable(struct gen_context *ctx,
     }
 
     return res;
+}
+
+struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr, int addr, int global)
+{
+    return new_variable_struct(ctx, name, type, bits, sign, ptr, addr, global, NULL);
 }
 
 struct variable *new_inst_variable(struct gen_context *ctx,
@@ -1712,7 +1733,7 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
 int gen_type(struct gen_context *ctx, struct node *node)
 {
-    struct type *t = find_type_by(ctx, node->type, node->bits, node->sign, 0);
+    struct type *t = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
 
     if (!t && node->type == V_STRUCT) {
         struct gen_context *global_ctx = ctx;
@@ -1722,6 +1743,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 
         // We have most probably struct definition
         t = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        t->type_name = node->value_string;
 
         // FIXME This is a hack for now
         buffer_write(global_ctx->init, "%%struct.%s = type { ",
@@ -1861,8 +1883,9 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
             break;
         case V_STRUCT:
-            var = new_variable(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global);
+            var = new_variable_struct(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
             buffer_write(ctx->init, "%%%d = alloca %%struct.%s, align 8\n", var->reg, t->name);
+            res = var->reg;
             break;
         default:
             ERR("Invalid type for variable: %s", type_str(t->type));
@@ -2020,7 +2043,12 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(!var, node, "Missing variable");
     FATALN(!idx, node, "Missing index");
 
-    FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct");
+#if 0
+    node_walk(node);
+    printf("\n%s\n", buffer_read(ctx->init));
+    printf("\n%s\n", buffer_read(ctx->data));
+#endif
+    FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct: %s", type_str(var->type->type));
     struct type *access_type = NULL;
     int index_num = struct_get_by_name(var->type, idx->name, &access_type);
     FATALN(index_num < 0, node, "Couldn't find from struct: %s", idx->name);
@@ -2032,6 +2060,8 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
         ret = new_variable(ctx, NULL, V_INT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
     } else if (access_type->type == V_FLOAT) {
         ret = new_variable(ctx, NULL, V_FLOAT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
+    } else if (access_type->type == V_STRUCT) {
+        ret = new_variable_struct(ctx, NULL, V_STRUCT, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
     } else
         ERR("Can't access %s from struct", type_str(access_type->type));
 

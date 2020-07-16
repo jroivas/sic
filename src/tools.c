@@ -137,13 +137,14 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("STRING: %s", node->value_string);
             break;
         case A_TYPE:
-            printf("TYPE %s%*s (%d) %d %s, %s%s", type_str(node->type),
+            printf("TYPE %s%*s (%d) %d %s, %s%s %s", type_str(node->type),
                 node->ptr ? node->ptr : 0,
                 node->ptr ? "*" : "",
                 node->ptr,
                 node->bits, node->sign ? "signed" : "unsigned",
                 node->is_const ? "const " : "",
-                node->value_string);
+                node->value_string,
+                node->type_name ? node->type_name : "");
             break;
         case A_IDENTIFIER:
             printf("IDENTIFIER %s (intvalue %lld)", node->value_string, node->value);

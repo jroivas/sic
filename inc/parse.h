@@ -73,6 +73,8 @@ struct node {
     int strnum;
 
     const char *value_string;
+    const char *type_name;
+
     literalnum value;
     literalnum fraction;
     struct token *token;
