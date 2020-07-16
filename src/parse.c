@@ -35,7 +35,9 @@ static const char *nodestr[] = {
     "&=",
     "|=",
     "^=",
-    "GLUE", "TYPE", "TYPESPEC", "TYPE_QUAL",
+    "GLUE",
+    "TYPE", "TYPESPEC", "TYPE_QUAL",
+    "TYPE_LIST",
     "DECLARATION",
     "PARAMS",
     "FUNCTION",
@@ -299,7 +301,7 @@ int __parse_struct(struct node *res, struct node *node, int pos)
     int bits = 0;
     int extra = 0;
 
-    if (node->node == A_TYPESPEC) {
+    if (node->node == A_TYPE_LIST) {
         if (node->bits == 0)
             bits = 32;
         else
@@ -307,9 +309,9 @@ int __parse_struct(struct node *res, struct node *node, int pos)
 
         /*
          * In case of non-packed, do alignment
-         * TODO: packed structs
+         * TODO: packed structs and unions
          */
-        while (bits >= 32 && (pos + bits + extra) % 32 != 0)
+        while (bits >= 32 && (pos + bits + extra) % 64 != 0)
             extra++;
 
         struct node *tmp = res;
@@ -318,12 +320,13 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
         tmp->right->left = type_resolve(NULL, node, 0);
         // Solve name of the element
-        if (node->right)
-            tmp->right->left->value_string = node->right->value_string;
+        struct node *namenode = node->right;
+        while (namenode->right)
+            namenode = namenode->right;
+        if (namenode)
+            tmp->right->left->value_string = namenode->value_string;
+        return bits + extra;
     }
-
-    // TODO: Union
-    bits += extra;
 
     if (node->left)
         bits +=  __parse_struct(res, node->left, bits);
@@ -340,6 +343,9 @@ int parse_struct(struct node *res, struct node *node)
 
 struct node *type_resolve(struct token *t, struct node *node, int d)
 {
+    // Need to flatten struct from A_TYPE_LIST
+    if (node->left && (node->left->node == A_STRUCT || node->left->node == A_UNION))
+        node = node->left;
     if (node->node == A_STRUCT || node->node == A_UNION) {
         // FIXME
         struct node *name = node->left;
@@ -1193,8 +1199,7 @@ struct node *specifier_qualifier_list(struct scanfile *f, struct token *token)
         return NULL;
 
     struct node *rest = specifier_qualifier_list(f, token);
-    if (rest)
-        return make_node(token, A_LIST, type, NULL, rest);
+    type = make_node(token, A_TYPE_LIST, type, NULL, rest);
 
     return type;
 }

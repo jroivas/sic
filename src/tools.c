@@ -123,6 +123,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_STRUCT:
         case A_UNION:
         case A_ACCESS:
+        case A_TYPE_LIST:
         case A_SIZEOF:
             printf("%s", node_str(node));
             break;

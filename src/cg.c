@@ -1900,8 +1900,11 @@ int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
     } else if (type->type == V_INT || type->type == V_FLOAT) {
             buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
                 type->bits / 8, res->reg, align(res->type->bits));
+    } else if (type->type == V_STRUCT || type->type == V_UNION) {
+            buffer_write(ctx->data, "store i32 %d, i32* %%%d, align %d\n",
+                type->bits / 8, res->reg, align(res->type->bits));
     } else
-        ERR("Invalid variable for sizeof");
+        ERR("Invalid variable for sizeof: %s", type_str(type->type));
 
     return res->reg;
 }
@@ -2027,12 +2030,14 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
 
     if (access_type->type == V_INT) {
         ret = new_variable(ctx, NULL, V_INT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
-        FATALN(!ret, node, "Can't create return variable");
-
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds %%struct.%s, %%struct.%s* %%%d, i32 0, i32 %d; %d\n", 
-            ret->reg, var->type->name, var->type->name, var->reg, index_num, access_type->bits);
+    } else if (access_type->type == V_FLOAT) {
+        ret = new_variable(ctx, NULL, V_FLOAT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
     } else
         ERR("Can't access %s from struct", type_str(access_type->type));
+
+    FATALN(!ret, node, "Can't create return variable");
+    buffer_write(ctx->data, "%%%d = getelementptr inbounds %%struct.%s, %%struct.%s* %%%d, i32 0, i32 %d; %d\n",
+        ret->reg, var->type->name, var->type->name, var->reg, index_num, access_type->bits);
 
     return ret->reg;
 }
