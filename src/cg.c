@@ -285,7 +285,6 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                  * so we just mark 0 as size.
                  */
                 type->bits += t->bits;
-                printf("Type %s size now: %d, from %d\n", type->type_name, type->bits, t->bits);
                 buffer_write(ctx->init, "%%struct.%s", l->type_name);
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
