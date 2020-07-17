@@ -707,6 +707,8 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
             return v;
         else if (v->type->type == V_NULL && target->type == V_INT) {
             val = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 0, 0, 0);
+            buffer_write(ctx->data, "%%%d = alloca i%d, align %d ; null to int\n",
+                val->reg, val->type->bits, align(val->type->bits));
             buffer_write(ctx->data, "store i%d 0, i%d* %s%d, align %d ; gen_cast NULL to int\n",
                 val->type->bits, val->type->bits, REGP(val), val->reg, align(val->type->bits));
 
@@ -1062,7 +1064,7 @@ struct variable *gen_load_int(struct gen_context *ctx, struct variable *v)
     }
     struct variable *res = new_variable(ctx, NULL, V_INT, v->type->bits, v->type->sign, 0, 0, 0);
 
-    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d; load_int\n",
+    buffer_write(ctx->data, "%%%d = load i%d, i%d* %s%d, align %d; gen_load_int\n",
             res->reg, res->type->bits, res->type->bits,
             REGP(v), reg, align(res->type->bits));
     res->ptr = v->ptr;
@@ -1735,11 +1737,10 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
                     par->reg);
                 break;
             case V_STR:
-                //buffer_write(params, "%si8*%s %%%d",
-                buffer_write(params, "%s@.str.%d%s",
+                buffer_write(params, "%si8* getelementptr inbounds "
+                    "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0)",
                     paramcnt > 1 ? ", " : "",
-                    par->reg,
-                    stars ? stars : "");
+                    par->bits, par->bits, par->reg);
                 break;
             default:
                 ERR("Invalid parameter type: %s", type_str(par->type->type));
@@ -2413,7 +2414,7 @@ struct node *flatten_list(struct node *node)
     return res;
 }
 
-char *gen_func_params(struct gen_context *ctx, struct node *orig)
+char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int allocate_params)
 {
     if (!orig)
         return NULL;
@@ -2482,98 +2483,107 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
         node = node->right;
     }
 
-    node = paramnode;
-    int parami = 0;
-    ctx->regnum += paramcnt;
-    while (node && node->node == A_LIST) {
-        struct node *pval = node;
-        if (node->right && node->right->node == A_LIST)
-            pval = node->left;
-        pval = flatten_list(pval);
+    if (allocate_params) {
+        node = paramnode;
+        int parami = 0;
+        ctx->regnum += paramcnt;
+        while (node && node->node == A_LIST) {
+            struct node *pval = node;
+            if (node->right && node->right->node == A_LIST)
+                pval = node->left;
+            pval = flatten_list(pval);
 
-        struct node *ptype = pval->left;
-        struct node *pname = pval->right;
-        // TODO: parse types properly, now just shortcutting
-        while (pname && pname->node == A_POINTER)
-            pname = pname->left;
+            struct node *ptype = pval->left;
+            struct node *pname = pval->right;
+            // TODO: parse types properly, now just shortcutting
+            while (pname && pname->node == A_POINTER)
+                pname = pname->left;
 
-        char *stars = get_stars(ptype->ptr);
-        if (ptype->type == V_INT) {
-            struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
-            FATALN(!res, pname, "Couldn't generate res");
-            buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
-                res->reg,
-                ptype->bits,
-                align(ptype->bits));
-            buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
-                ptype->bits,
-                stars ? stars : "",
-                parami,
-                ptype->bits,
-                stars ? stars : "",
-                res->reg,
-                align(ptype->bits));
-            pname->reg = res->reg;
-        } else if (ptype->type == V_FLOAT) {
-            struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
-            FATALN(!res, pname, "Couldn't generate res");
+            char *stars = get_stars(ptype->ptr);
+            if (ptype->type == V_INT) {
+                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+                FATALN(!res, pname, "Couldn't generate res");
+                buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
+                    res->reg,
+                    ptype->bits,
+                    stars ? stars : "",
+                    align(ptype->bits));
+                buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
+                    ptype->bits,
+                    stars ? stars : "",
+                    parami,
+                    ptype->bits,
+                    stars ? stars : "",
+                    res->reg,
+                    align(ptype->bits));
+                pname->reg = res->reg;
+            } else if (ptype->type == V_FLOAT) {
+                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+                FATALN(!res, pname, "Couldn't generate res");
 
-            buffer_write(allocs, "%%%d = alloca double%s, align %d\n",
-                res->reg,
-                stars ? stars : "",
-                align(ptype->bits));
-            buffer_write(allocs, "store double%s %%%d, double%s* %%%d, align %d\n",
-                stars ? stars : "",
-                parami,
-                stars ? stars : "",
-                res->reg,
-                align(ptype->bits));
-            pname->reg = res->reg;
-        } else if (ptype->type == V_VOID) {
-            struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
-            FATALN(!res, pname, "Couldn't generate res");
-            buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
-                res->reg,
-                8,
-                stars ? stars : "",
-                8);
-            buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
-                8,
-                stars ? stars : "",
-                parami,
-                8,
-                stars ? stars : "",
-                res->reg,
-                8);
-            pname->reg = res->reg;
-        } else if (ptype->type == V_STRUCT) {
-            struct variable *res = new_variable_struct(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0, ptype->type_name);
+                buffer_write(allocs, "%%%d = alloca double%s, align %d\n",
+                    res->reg,
+                    stars ? stars : "",
+                    align(ptype->bits));
+                buffer_write(allocs, "store double%s %%%d, double%s* %%%d, align %d\n",
+                    stars ? stars : "",
+                    parami,
+                    stars ? stars : "",
+                    res->reg,
+                    align(ptype->bits));
+                pname->reg = res->reg;
+            } else if (ptype->type == V_VOID) {
+                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+                FATALN(!res, pname, "Couldn't generate res");
+                buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
+                    res->reg,
+                    8,
+                    stars ? stars : "",
+                    8);
+                buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
+                    8,
+                    stars ? stars : "",
+                    parami,
+                    8,
+                    stars ? stars : "",
+                    res->reg,
+                    8);
+                pname->reg = res->reg;
+            } else if (ptype->type == V_STRUCT) {
+                struct variable *res = new_variable_struct(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0, ptype->type_name);
 
-            buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
-            buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d\n",
-                ptype->type_name,
-                stars ? stars : "",
-                parami,
-                ptype->type_name,
-                stars ? stars : "",
-                res->reg,
-                8);
-        } else
-            ERR("Invalid parameter");
-        if (stars)
-            free(stars);
-        parami++;
+                buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
+                buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d\n",
+                    ptype->type_name,
+                    stars ? stars : "",
+                    parami,
+                    ptype->type_name,
+                    stars ? stars : "",
+                    res->reg,
+                    8);
+            } else
+                ERR("Invalid parameter");
+            if (stars)
+                free(stars);
+            parami++;
 
-        node = node->right;
+            node = node->right;
+        }
     }
     const char *tmp = buffer_read(params);
     int tmplen = strlen(tmp) + 1;
     char *resbuf = calloc(1, tmplen);
     resbuf = memcpy(resbuf, tmp, tmplen);
     buffer_del(params);
-    buffer_append(ctx->init, buffer_read(allocs));
+    if (allocate_params)
+        buffer_append(ctx->init, buffer_read(allocs));
     buffer_del(allocs);
     return resbuf;
+}
+
+char *gen_func_params(struct gen_context *ctx, struct node *orig)
+{
+    return gen_func_params_with(ctx, orig, 1);
 }
 
 void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
@@ -2593,32 +2603,6 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
         params = gen_func_params(ctx, func_node);
 
     buffer_write(ctx->pre, "define dso_local %s @%s(%s) #0 {\n",
-            type, ctx->name,
-            params ? params : "");
-    if (params)
-        free(params);
-    if (tmp)
-        free(tmp);
-}
-
-void gen_func_decl(struct gen_context *global_ctx, struct gen_context *ctx, struct node *node, struct node *func_node)
-{
-    char *tmp = NULL;
-    const char *type = NULL;
-    if (ctx->main_type)
-        type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
-    else if (strcmp(ctx->name, "main") == 0 && node->type == V_VOID)
-        type = var_str(V_INT, 32, &tmp);
-    else
-        type = var_str(node->type, node->bits, &tmp);
-
-    char *params = NULL;
-    // Global context can't have params
-    if (!ctx->global && func_node)
-        params = gen_func_params(ctx, func_node);
-
-    //declare void @__assert_fail(i8*, i8*, i32, i8*) #2
-    buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
             type, ctx->name,
             params ? params : "");
     if (params)
@@ -2825,12 +2809,22 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     int inc2 = 0;
     struct variable *res = NULL;
     int ifret = 0;
+    /*
+     * FIXME This is horrible hack to preserve register number
+     * for ternary return value. If we don't do this hack
+     * we might end up having invalid LLVM IR output causing
+     * some register number being allocated in wrong order.
+     */
+    int ternary_save = 0;
 
     buffer_write(ctx->data, "; if branches\n");
     ctx->data = cmpblock;
     int label1 = gen_reserve_label(ctx);
-    buffer_write(cmpblock, "L%d:\n", label1);
+    buffer_write(cmpblock, "L%d: ; True block\n", label1);
     if (node->mid) {
+        // Reserve ternary regnum
+        if (ternary)
+            ternary_save = ctx->regnum++;
         int rets = ctx->rets;
         ifret = gen_recursive(ctx, node->mid);
         inc = rets < ctx->rets;
@@ -2840,12 +2834,21 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     /* Handle ternary return value */
     ctx->data = tmp;
     if (ternary) {
-        ctx->data = cmpblock;
+        // Save current regnum
+        int ternary_post = ctx->regnum;
+
+        // Restore to ternary number
+        ctx->regnum = ternary_save;
         struct variable *tres = find_variable(ctx, ifret);
         FATALN(!tres, node, "Ternary return type invalid");
-        buffer_write(cmpblock, "; TENARY TRUE\n");
+        buffer_write(cmpblock, "; TERNARY TRUE\n");
         res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->ptr, tres->addr, 0);
         gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1, 0);
+
+        // Restore where we were before the hack
+        // We'll shoot ourselves in foot if we caused more than one regnum resevation above for ternary
+        ctx->regnum = ternary_post;
+        ctx->data = cmpblock;
 
         tres = var_cast_to(ctx, tres, res->type);
 
@@ -2860,14 +2863,14 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     int label2 = gen_reserve_label(ctx);
     if (!inc && !node->right)
         buffer_write(ifblock, "br label %%L%d ; extra1\n", label2);
-    buffer_write(ifblock, "L%d: ; LL IF 2\n", label2);
+    buffer_write(ifblock, "L%d: ; False block\n", label2);
     if (node->right) {
         int rets = ctx->rets;
         ifret = gen_recursive(ctx, node->right);
         inc2 = rets < ctx->rets;
         if (ternary) {
             struct variable *tres = find_variable(ctx, ifret);
-            buffer_write(cmpblock, "; TENARY FALSE\n");
+            buffer_write(cmpblock, "; TERNARY FALSE\n");
             FATALN(!tres, node->right, "Ternary return type invalid");
             FATALN(!res, node->right, "Invalid ternary");
 
@@ -3013,16 +3016,18 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
         while (global_ctx->parent)
             global_ctx = global_ctx->parent;
         // This is prototype, just mark it.
-        //gen_func_decl(global_ctx, func_ctx, node->left, node);
         char *tmp = NULL;
         const char *type = NULL;
-        if (strcmp(func_name, "main") == 0 && node->type == V_VOID)
+        struct node *type_node = node->left;
+
+        //node_walk(node->left);
+        if (strcmp(func_name, "main") == 0 && type_node->type == V_VOID)
             type = var_str(V_INT, 32, &tmp);
         else
-            type = var_str(node->type, node->bits, &tmp);
+            type = var_str(type_node->type, type_node->bits, &tmp);
 
         char *params = NULL;
-        params = gen_func_params(ctx, node);
+        params = gen_func_params_with(ctx, node, 0);
 
         buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
             type, func_name,
