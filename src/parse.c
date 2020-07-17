@@ -117,6 +117,7 @@ enum var_type resolve_var_type(struct node *n)
     int ptr2 = 0;
     int addr1 = 0;
     int addr2 = 0;
+
     if (!n)
         return V_VOID;
 
@@ -184,6 +185,7 @@ enum var_type resolve_var_type(struct node *n)
     n->sign = s1;
     n->ptr = ptr1;
     n->addr = addr1;
+
     return v1;
 }
 
@@ -278,20 +280,25 @@ struct node *make_type_qual(struct token *t, const char *name)
     return n;
 }
 
-int scan_const(struct node *node)
+int scan_attribute(struct node *node, const char *name, enum nodetype type)
 {
     int res = 0;
     if (node == NULL)
         return res;
-    if (scan_const(node->left))
+    if (scan_attribute(node->left, name, type))
         res = 1;
-    if (scan_const(node->right))
+    if (scan_attribute(node->right, name, type))
         res = 1;
-    if (node->node == A_TYPE_QUAL) {
-        if (strcmp(node->value_string, "const") == 0)
+    if (node->node == type) {
+        if (strcmp(node->value_string, name) == 0)
             res = 1;
     }
     return res;
+}
+
+int scan_const(struct node *node)
+{
+    return scan_attribute(node, "const", A_TYPE_QUAL);
 }
 
 struct node *type_resolve(struct token *t, struct node *node, int d);
@@ -432,6 +439,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
 
     if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION || node->type == V_ENUM))
         return node;
+
     struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
     enum var_type type = node->type;
     type = resolve_var_type(node);
@@ -451,7 +459,15 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     res->type = type;
     res->ptr = ptr;
     res->addr = addr;
-    res->is_const = scan_const(node);
+    res->is_const = scan_const(node) || node->is_const;
+    res->is_extern = scan_attribute(node, "extern", A_STORAGE_CLASS) || node->is_extern;
+
+#if 0
+    printf("++ NODE: %s\n", node->value_string);
+    node_walk(node);
+    printf("++ into\n");
+    node_walk(res);
+#endif
 
     node_free(node);
     return res;
@@ -760,16 +776,17 @@ struct node *type_qualifier_list(struct scanfile *f, struct token *token)
 struct node *storage_class_specifier(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+    char *val = token->value_string;
 
     if (accept_keyword(f, token, K_EXTERN)) {
         res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
-        res->value_string = token->value_string;
+        res->value_string = val;
     }
 
     return res;
 }
 
-struct node *declaration_specifiers(struct scanfile *f, struct token *token)
+struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
 {
     struct node *type = storage_class_specifier(f, token);
     if (type == NULL) {
@@ -781,16 +798,26 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
                 return NULL;
         }
     }
-    type = type_resolve(token, type, 0);
 
     struct node *res = type;
     while (1) {
-        struct node *tmp = declaration_specifiers(f, token);
+        struct node *tmp = __declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
         res = make_node(token, A_GLUE, res, NULL, tmp);
     }
 
+    return res;
+}
+
+struct node *declaration_specifiers(struct scanfile *f, struct token *token)
+{
+
+    struct node *res = __declaration_specifiers(f, token);
+
+    if (!res)
+        return NULL;
+    res = type_resolve(token, res, 0);
     return res;
 }
 

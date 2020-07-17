@@ -70,6 +70,7 @@ struct node {
     int sign;
     int reg;
     int is_const;
+    int is_extern;
     int ptr;
     int addr;
     int strnum;
