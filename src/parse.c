@@ -1213,6 +1213,14 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
             scan(f, token);
 
             res = make_node(token, A_ACCESS, res, NULL, post);
+        } else if (accept(f, token, T_PTR_OP)) {
+            if (token->token != T_IDENTIFIER)
+                ERR("Invalid element access after dot");
+            struct node *post = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+            post->value_string = token->value_string;
+            scan(f, token);
+
+            res = make_node(token, A_ACCESS, res, NULL, post);
         } else
             break;
     }

@@ -29,6 +29,7 @@ enum tokentype {
     T_QUESTION,
     T_COLON,
     T_DOT,
+    T_PTR_OP,
     T_EOF
 };
 

@@ -29,6 +29,7 @@ static const char *tokenstr[] = {
     "?",
     ":",
     ".",
+    "->",
     "EOF"
 };
 
@@ -276,6 +277,8 @@ int scan(struct scanfile *f, struct token *t)
             c = next(f);
             if (c == '-')
                 t->token = T_MINUSMINUS;
+            else if (c == '>')
+                t->token = T_PTR_OP;
             else
                 putback(f, c);
             break;
