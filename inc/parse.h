@@ -57,6 +57,7 @@ enum nodetype {
     A_SIZEOF,
     A_STRUCT,
     A_UNION,
+    A_ENUM,
     A_ACCESS,
     A_LIST
 };

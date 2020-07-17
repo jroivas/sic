@@ -68,6 +68,7 @@ static const char *nodestr[] = {
     "SIZEOF",
     "STRUCT",
     "UNION",
+    "ENUM",
     "ACCESS",
     "LIST"
 };
@@ -342,10 +343,50 @@ int parse_struct(struct node *res, struct node *node)
     return __parse_struct(res, node->right, 0);
 }
 
+void __parse_enum(struct node *res, struct node *node, int val)
+{
+    struct node *valnode = NULL;
+    if (!node)
+        return;
+    //if (node->node == A_ASSIGN && node->left && node->left->node == A_IDENTIFIER && node->right && node->right->node == A_ASSIGN) {
+    if (node->node == A_ASSIGN) {
+        valnode = node->right;
+        node = node->left;
+    }
+
+    if (node->node == A_IDENTIFIER) {
+        struct node *tmp = res;
+        while (tmp->right)
+            tmp = tmp->right;
+        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
+
+#if 0
+        if (!valnode) {
+            valnode = make_node(NULL, A_INT_LIT, NULL, NULL, NULL);
+            valnode->value = val;
+            val++;
+        }
+#endif
+
+        tmp->right->left = make_node(NULL, A_IDENTIFIER, valnode, NULL, NULL);
+        tmp->right->left->value_string = node->value_string;
+    }
+
+    if (node->left)
+        __parse_enum(res, node->left, val);
+    if (node->right)
+        __parse_enum(res, node->right, val);
+}
+
+void parse_enum(struct node *res, struct node *node)
+{
+    __parse_enum(res, node, 0);
+}
+
 struct node *type_resolve(struct token *t, struct node *node, int d)
 {
     // Need to flatten struct from A_TYPE_LIST
-    if (node->left && (node->left->node == A_STRUCT || node->left->node == A_UNION))
+    if (node->left && (node->left->node == A_STRUCT || node->left->node == A_UNION || node->left->node == A_ENUM))
         node = node->left;
     if (node->node == A_STRUCT || node->node == A_UNION) {
         // FIXME
@@ -369,8 +410,25 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
 
         return res;
     }
+    if (node->node == A_ENUM) {
+        struct node *name = node->left;
+        struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
 
-    if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION))
+        res->type = V_ENUM;
+        if (name) {
+            res->value_string = name->value_string;
+            res->type_name = name->value_string;
+        }
+        res->ptr = node->ptr;
+        res->addr = node->addr;
+
+        res->bits = 32;
+        parse_enum(res, node->right);
+
+        return res;
+    }
+
+    if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION || node->type == V_ENUM))
         return node;
     struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
     enum var_type type = node->type;
@@ -581,11 +639,59 @@ struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *enumerator(struct scanfile *f, struct token *token)
+{
+    if (token->token != T_IDENTIFIER)
+        return NULL;
+
+    struct node *ident = NULL;
+    ident = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+    ident->value_string = token->value_string;
+    scan(f, token);
+
+    if (accept(f, token, T_EQ)) {
+        struct node *constexpr = constant_expression(f, token);
+        ident = make_node(token, A_ASSIGN, ident, NULL, constexpr);
+    }
+    return ident;
+}
+
+struct node *enumerator_list(struct scanfile *f, struct token *token)
+{
+    return iter_list(f, token, enumerator, COMMA_MANDATORY, 0);
+}
+
+struct node *enum_specifier(struct scanfile *f, struct token *token)
+{
+    if (!accept_keyword(f, token, K_ENUM))
+        return NULL;
+
+    struct node *ident = NULL;
+    struct node *list = NULL;
+
+    if (token->token == T_IDENTIFIER) {
+        ident = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+        ident->value_string = token->value_string;
+        scan(f, token);
+    }
+    if (accept(f, token, T_CURLY_OPEN)) {
+        list = enumerator_list(f, token);
+        expect(f, token, T_CURLY_CLOSE, "}");
+    }
+
+    if (!ident && !list)
+        return NULL;
+
+    return make_node(token, A_ENUM, ident, NULL, list);
+}
+
 struct node *type_specifier(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
     if (token->token == T_KEYWORD && (token->keyword == K_STRUCT || token->keyword == K_STRUCT))
         return struct_or_union_specifier(f, token);
+    if (token->token == T_KEYWORD && token->keyword == K_ENUM)
+        return enum_specifier(f, token);
     if (token->token != T_IDENTIFIER)
         return res;
 

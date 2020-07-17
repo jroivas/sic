@@ -233,6 +233,9 @@ int keyword(struct token *t)
     } else if (strcmp(v, "union") == 0) {
         res = 1;
         t->keyword = K_UNION;
+    } else if (strcmp(v, "enum") == 0) {
+        res = 1;
+        t->keyword = K_ENUM;
     } else if (strcmp(v, "sizeof") == 0) {
         res = 1;
         t->keyword = K_SIZEOF;

@@ -125,6 +125,8 @@ int gen_reserve_label(struct gen_context *ctx);
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_negate(struct gen_context *ctx, struct node *node, int a);
 struct variable *gen_load(struct gen_context *ctx, struct variable *v);
+struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr, int addr, int global);
+int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, literalnum val);
 
 char *stype_str(struct type *t)
 {
@@ -297,6 +299,30 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             type->items[type->itemcnt - 1].item = t;
             FATALN(!l->value_string, l, "Nameless struct value");
             type->items[type->itemcnt - 1].name = l->value_string;
+        }
+        tmp = tmp->right;
+    } while (tmp);
+
+}
+
+void complete_enum_type(struct gen_context *global_ctx, struct gen_context *ctx, struct type *type, struct node *node)
+{
+    struct node *tmp = node;
+    int value = 0;
+
+    do {
+        if (tmp->left) {
+            struct node *l = tmp->left;
+            if (l->left) {
+                // TODO Better handling of enum value, this supports only int constants
+                value = l->left->value;
+            }
+
+            buffer_write(ctx->init, "; ENUM: %s\n", l->value_string);
+            struct variable *var = new_variable(global_ctx, l->value_string, V_INT, 32, 1, 0, 0, global_ctx->global);
+            gen_allocate_int(global_ctx, var->reg, var->type->bits, var->ptr, 0, 0, value);
+
+            value++;
         }
         tmp = tmp->right;
     } while (tmp);
@@ -776,8 +802,8 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
 {
     if (ctx->global) {
         FATAL(ptr, "Global pointer not supported");
-        buffer_write(ctx->init, "%s%d = global i%d 0, align %d\n",
-            "@G", reg, bits, align(bits));
+        buffer_write(ctx->init, "%s%d = global i%d %d, align %d\n",
+            "@G", reg, bits, val, align(bits));
     } else if (array) {
         char *stars = get_stars(ptr);
         FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
@@ -1751,6 +1777,17 @@ int gen_type(struct gen_context *ctx, struct node *node)
 
         buffer_write(global_ctx->init, " }\n");
     }
+    if (!t && node->type == V_ENUM) {
+        struct gen_context *global_ctx = ctx;
+
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+
+        t = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        t->type_name = node->value_string;
+        complete_enum_type(global_ctx, ctx, t, node->right);
+    }
+
     FATALN(!t, node, "Couldn't find type: %s (%s, bits %d, %s)", node->value_string, type_str(node->type), node->bits, node->sign ? "signed" : "unsigned");
 
     int ptrval = node->ptr;
@@ -1772,6 +1809,8 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     struct type *target = ctx->pending_type;
     int ptrval = ctx->pending_type->ptr;
     if (var->type->type == V_INT && target->type == var->type->type) {
+        if (target->bits == var->type->bits)
+            return var->reg;
         res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
         if (var->ptr) {
             char *stars = get_stars(var->ptr);
@@ -1859,8 +1898,13 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     int ptrval = 0;
     int addrval = 0;
     int res = 0;
+    struct gen_context *global_ctx = ctx;
 
-    buffer_write(ctx->init, "; Variable: %s\n", node->value_string);
+    while (global_ctx->parent)
+        global_ctx = global_ctx->parent;
+
+    buffer_write(ctx->init, "; Variable: %s, type %s\n", node->value_string, type_str(t->type));
+
     switch (t->type) {
         case V_INT:
             ptrval = gen_use_ptr(ctx);
@@ -1884,6 +1928,19 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
         case V_STRUCT:
             var = new_variable_struct(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
             buffer_write(ctx->init, "%%%d = alloca %%struct.%s, align 8\n", var->reg, t->name);
+            res = var->reg;
+            break;
+        case V_ENUM:
+            if (node->left) {
+                var = new_variable(global_ctx, node->value_string, V_INT, 32, 1, ptrval, addrval, global_ctx->global);
+                res = gen_allocate_int(global_ctx, var->reg, var->type->bits, var->ptr, idx_value, 0, node->value);
+            } else {
+                var = find_variable_by_name(ctx, node->value_string);
+                if (!var) {
+                    var = new_variable(ctx, node->value_string, V_INT, 32, 1, ptrval, addrval, ctx->global);
+                    res = gen_allocate_int(ctx, var->reg, var->type->bits, var->ptr, idx_value, 0, node->value);
+                }
+            }
             res = var->reg;
             break;
         default:
@@ -1936,6 +1993,7 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
     struct variable *all_var = find_variable_by_name(ctx, node->value_string);
     struct variable *var = find_variable_by_name_scope(ctx, node->value_string, 0);
     int res;
+
     if (var == NULL) {
         if (all_var) {
             /*
@@ -2830,6 +2888,10 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
     switch (node->node) {
         case A_TYPE:
             gen_type(ctx, node);
+            if (node->type == V_ENUM) {
+                printf("Skipped recusive alloc: %s, %s\n", node_str(node), type_str(node->type));
+                return res;
+            }
             break;
         case A_POINTER:
             gen_pointer(ctx, node);
@@ -2913,10 +2975,14 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_while(ctx, node, LOOP_FOR);
 
     /* Recurse first to get children solved */
-    if (node->left)
-        resleft = gen_recursive(ctx, node->left);
-    if (node->right)
-        resright = gen_recursive(ctx, node->right);
+    if (node->node == A_TYPE && node->type == V_ENUM) {
+        printf("Skipped recusive gen: %s, %s\n", node_str(node), type_str(node->type));
+    } else {
+        if (node->left)
+            resleft = gen_recursive(ctx, node->left);
+        if (node->right)
+            resright = gen_recursive(ctx, node->right);
+    }
 
     if (ctx && ctx->debug)
         printf("DEBUG: gen_recursive(), node %s, left %d, right %d\n", node_str(node), resleft, resright);
