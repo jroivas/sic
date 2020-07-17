@@ -237,6 +237,9 @@ int keyword(struct token *t)
     } else if (strcmp(v, "enum") == 0) {
         res = 1;
         t->keyword = K_ENUM;
+    } else if (strcmp(v, "extern") == 0) {
+        res = 1;
+        t->keyword = K_EXTERN;
     } else if (strcmp(v, "sizeof") == 0) {
         res = 1;
         t->keyword = K_SIZEOF;
@@ -410,6 +413,16 @@ int scan(struct scanfile *f, struct token *t)
             t->token = T_STR_LIT;
             t->value_string = scan_string(f, c, '"');
             break;
+        case '\'':
+            c = next(f);
+            t->token = T_INT_LIT;
+            t->value_string = scan_string(f, c, '\'');
+            if (t->value_string) {
+                int r = solve_escape(t->value_string);
+                if (r >= 0)
+                    t->value = r;
+            }
+            break;
         default:
             if (isdigit(c)) {
                 t->token = T_INT_LIT;
@@ -430,7 +443,9 @@ int scan(struct scanfile *f, struct token *t)
                 ok = 1;
             } else if (!ok && (isalpha(c) || c == '_')) {
                 t->value_string = scan_identifier(f, c);
-                if (keyword(t))
+                if (strcmp(t->value_string, "__FUNCTION__") == 0 || strcmp(t->value_string, "__PRETTY_FUNCTION__") == 0) {
+                    t->token = T_STR_LIT;
+                } else if (keyword(t))
                     t->token = T_KEYWORD;
                 else if (strcmp(t->value_string, "NULL") == 0)
                     t->token = T_NULL;

@@ -914,11 +914,14 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
 
     int slen = strlen(n->value_string) + 1;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
+    val->ptr = 1;
 
     buffer_write(ctx->init, "; String literal: %s\n", n->value_string);
     buffer_write(glob->init, "@.str.%d = private unnamed_addr "
         "constant [%u x i8] c\"%s\\00\", align 1\n",
         val->reg, slen, n->value_string);
+    val->array = slen;
+    val->literal = 1;
 
     n->reg = val->reg;
     return val->reg;
@@ -1010,12 +1013,13 @@ struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *v
         index = idx_var->reg;
 
     if (var->array) {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; GG3\n",
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; gen_access_ptr_item arr\n",
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
     } else {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 0, i64 %s%d ; GG4\n",
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; gen_access_ptr_item\n",
             res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
     }
+
     return res;
 }
 
@@ -2111,8 +2115,14 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     idx_target.sign = 0;
 
     idx = load_and_cast_to(ctx, idx, &idx_target, CAST_NORMAL);
+    int newptr = var->ptr;
+    if (var->ptr) {
+        var = gen_load(ctx, var);
+        newptr--;
+    }
 
-    struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, var->ptr, var->addr, ctx->global);
+    struct variable *res = new_variable(ctx, NULL, V_INT, var->type->bits, var->type->sign, newptr, var->addr, ctx->global);
+
     res = gen_access_ptr_item(ctx, var, res, idx, 0);
 
     return res->reg;
@@ -2272,6 +2282,21 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     FATALN(!src, node, "No source in assign")
     FATALN(!dst, node, "No dest in assign: %d", left)
 
+    if (src->type->type == V_STR) {
+        char *stars = get_stars(src->ptr);
+
+        buffer_write(ctx->data, "store i8%s getelementptr inbounds ([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), i%d%s* %s%d, align %d ; gen_assign str\n",
+                stars ? stars : "",
+                src->array, src->array,
+                src->reg,
+                dst->type->bits, stars ? stars : "",
+                REGP(dst), dst->reg,
+                align(dst->type->bits));
+
+        if (stars)
+            free(stars);
+        return dst->reg;
+    }
     if (src->ptr || src->addr || (dst->type->type == V_VOID && dst->ptr)) {
         char *stars = get_stars(src->ptr);
 

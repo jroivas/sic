@@ -44,6 +44,7 @@ enum keyword_type {
     K_STRUCT,
     K_UNION,
     K_ENUM,
+    K_EXTERN,
     K_SIZEOF
 };
 

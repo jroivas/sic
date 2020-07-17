@@ -26,6 +26,7 @@ enum nodetype {
     A_XOR_ASSIGN,
     A_GLUE,
     A_TYPE, A_TYPESPEC, A_TYPE_QUAL,
+    A_STORAGE_CLASS,
     A_TYPE_LIST,
     A_DECLARATION,
     A_PARAMS,

@@ -13,6 +13,37 @@ const char *type_str(enum var_type t)
     return typestr[t];
 }
 
+int solve_escape(const char *v)
+{
+    if (!v || v[0] == 0)
+        return -1;
+    if (v[0] != '\\')
+        return v[0];
+    if (v[1] == 0)
+        return -2;
+
+    if (v[1] == 'n')
+        return '\n';
+    if (v[1] == 'r')
+        return '\r';
+    if (v[1] == 't')
+        return '\t';
+    if (v[1] == '0')
+        return 0;
+    if (v[1] == '\\')
+        return '\\';
+    if (v[1] == 'a')
+        return '\a';
+    if (v[1] == 'b')
+        return '\b';
+    if (v[1] == 'f')
+        return '\f';
+    if (v[1] == 'v')
+        return '\v';
+
+    return -3;
+}
+
 int determine_size_bytes(literalnum value)
 {
     if (value < 0x100)
@@ -162,7 +193,10 @@ void __node_walk(struct node *node, int depth, char arm)
                 node->value_string);
             break;
         case A_TYPE_QUAL:
-            printf("TYPEQUAL %s", node->value_string);
+            printf("TYPE_QUAL %s", node->value_string);
+            break;
+        case A_STORAGE_CLASS:
+            printf("STORAGE_CLASS %s", node->value_string);
             break;
         default:
             ERR("Unknown node while walking: %s", node_str(node));

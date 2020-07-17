@@ -1,4 +1,5 @@
 #include "parse.h"
+#include "buffer.h"
 #include <string.h>
 
 #define PARSE_SIGNED   0
@@ -37,6 +38,7 @@ static const char *nodestr[] = {
     "^=",
     "GLUE",
     "TYPE", "TYPESPEC", "TYPE_QUAL",
+    "STORAGE_CLASS",
     "TYPE_LIST",
     "DECLARATION",
     "PARAMS",
@@ -458,6 +460,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
 struct node *primary_expression(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+    struct buffer *tmpbuf = NULL;
 
     switch (token->token) {
         case T_INT_LIT:
@@ -468,7 +471,21 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
             break;
         case T_STR_LIT:
             res = make_leaf(token, A_STR_LIT);
-            break;
+            scan(f, token);
+            while (token->token == T_STR_LIT) {
+                if (!tmpbuf) {
+                    tmpbuf = buffer_init();
+                    buffer_write(tmpbuf, "%s", res->value_string);
+                }
+                buffer_write(tmpbuf, "%s", token->value_string);
+                scan(f, token);
+            }
+            if (tmpbuf) {
+                res->value_string = buffer_read(tmpbuf);
+                // FIXME: Memory leak
+                //buffer_del(tmpbuf);
+            }
+            return res;
         case T_IDENTIFIER:
             res = type_name(f, token);
             if (res) {
@@ -740,15 +757,29 @@ struct node *type_qualifier_list(struct scanfile *f, struct token *token)
     return iter_list(f, token, type_qualifier, COMMA_NONE, 0);
 }
 
+struct node *storage_class_specifier(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    if (accept_keyword(f, token, K_EXTERN)) {
+        res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+        res->value_string = token->value_string;
+    }
+
+    return res;
+}
+
 struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 {
-    struct node *type = type_specifier(f, token);
-    //TODO storage_class_specifier
+    struct node *type = storage_class_specifier(f, token);
     if (type == NULL) {
-        type = type_qualifier(f, token);
+        type = type_specifier(f, token);
+        if (type == NULL) {
+            type = type_qualifier(f, token);
 
-        if (type == NULL)
-            return type;
+            if (type == NULL)
+                return NULL;
+        }
     }
     type = type_resolve(token, type, 0);
 
