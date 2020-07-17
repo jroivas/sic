@@ -913,10 +913,22 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
     if (!n)
         ERR("No valid node given!");
 
+
     struct gen_context *glob = ctx;
     while (glob && !glob->global && glob->parent)
         glob = glob->parent;
     FATALN(!glob || !glob->global, n, "No global context found!");
+
+    if (strcmp(n->value_string, "__PRETTY_FUNCTION__") == 0) {
+        struct buffer *pretty = buffer_init();
+        buffer_write(pretty, "@__PRETTY_FUNCTION__.%s", ctx->name);
+        n->value_string = buffer_read(pretty);
+        struct variable *val = find_variable_by_name(ctx, buffer_read(pretty));
+        FATALN(!val, n, "Didn't find __PRETTY_FUNCTION__");
+        buffer_del(pretty);
+        n->reg = val->reg;
+        return val->reg;
+    }
 
     int slen = strlen(n->value_string) + 1;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
@@ -3001,6 +3013,14 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
     FATALN(!name, node, "Function name missing");
     const char *func_name = name->value_string;
     struct node *functype = node->left;
+    struct gen_context *global_ctx = ctx;
+    const char *type = NULL;
+    struct node *type_node = node->left;
+    char *tmp = NULL;
+    char *params = NULL;
+
+    while (global_ctx->parent)
+        global_ctx = global_ctx->parent;
 
     struct variable *func_var = find_variable_by_name(ctx, func_name);
     FATALN(func_var, node, "Function name already in use: %s", func_name);
@@ -3008,35 +3028,45 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
     func_var = new_variable(ctx, func_name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
     func_var->func = 1;
 
+    if (strcmp(func_name, "main") == 0 && type_node->type == V_VOID)
+        type = var_str(V_INT, 32, &tmp);
+    else
+        type = var_str(type_node->type, type_node->bits, &tmp);
+
+    params = gen_func_params_with(ctx, node, 0);
+    struct buffer *pretty = buffer_init();
+    buffer_write(pretty, "%s %s(%s)", type, func_name, params ? params : "");
+    const char *namestr = buffer_read(pretty);
+    struct buffer *pretty_id = buffer_init();
+    buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", func_name);
+
+    //printf("Pretty id: %s\n", buffer_read(pretty_id));
+    int slen = strlen(namestr) + 1;
+    struct variable *pretty_val = new_variable(global_ctx, buffer_read(pretty_id), V_STR, slen, 0, 0, 0, 1);
+    pretty_val->ptr = 1;
+    pretty_val->array = slen;
+    pretty_val->literal = 1;
+
+    buffer_write(ctx->init, "; __PRETTY_FUNCTION__.%s\n", func_name);
+    buffer_write(global_ctx->init, "@.str.%d = private unnamed_addr constant [%u x i8] c\"%s\\00\", align 1\n",
+        pretty_val->reg, slen, namestr);
+    buffer_del(pretty);
+    //buffer_del(pretty_id); // FIXME
+
     struct node *body = NULL;
     if (node && node->right && node->right->right)
         body = node->right->right;
     if (!body) {
-        struct gen_context *global_ctx = ctx;
-        while (global_ctx->parent)
-            global_ctx = global_ctx->parent;
         // This is prototype, just mark it.
-        char *tmp = NULL;
-        const char *type = NULL;
-        struct node *type_node = node->left;
-
-        //node_walk(node->left);
-        if (strcmp(func_name, "main") == 0 && type_node->type == V_VOID)
-            type = var_str(V_INT, 32, &tmp);
-        else
-            type = var_str(type_node->type, type_node->bits, &tmp);
-
-        char *params = NULL;
-        params = gen_func_params_with(ctx, node, 0);
 
         buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
             type, func_name,
             params ? params : "");
-        if (params)
-            free(params);
-        if (tmp)
-            free(tmp);
     }
+    if (params)
+        free(params);
+    if (tmp)
+        free(tmp);
 }
 
 // Scan all functions
@@ -3395,6 +3425,17 @@ int codegen(FILE *outfile, struct node *node)
     ctx->global = 1;
     ctx->node = node;
     ctx->main_type = find_main_type(node);
+
+    struct buffer *pretty_id = buffer_init();
+    buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", global_ctx_name);
+    struct variable *pretty_val = new_variable(ctx, buffer_read(pretty_id), V_STR, 9, 0, 0, 0, 1);
+    pretty_val->ptr = 1;
+    pretty_val->array = 9;
+    pretty_val->literal = 1;
+
+    buffer_write(ctx->init, "; __PRETTY_FUNCTION__.%s\n", ctx->name);
+    buffer_write(ctx->init, "@.str.%d = private unnamed_addr constant [9 x i8] c\"__global\\00\", align 1\n", pretty_val->reg);
+
 
     gen_scan_functions(ctx, node);
 
