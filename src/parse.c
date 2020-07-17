@@ -541,9 +541,9 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
 struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handler handler, enum comma_type comma, int force_list)
 {
     struct node *res = NULL;
-#if 1
+#if 0
     int first = 1;
-    
+
     while (1) {
         if (!first) {
             if (accept(f, token, T_COMMA)) {
@@ -567,24 +567,35 @@ struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handle
 #else
     struct node *prev = NULL;
     int first = 1;
-    
+    int second = 1;
+
     while (1) {
         if (!first) {
             if (accept(f, token, T_COMMA)) {
                 FATALN(comma == COMMA_NONE, res, "Expected no comma, got one");
             } else if (comma == COMMA_MANDATORY)
                 break;
-                //FATALN(comma == COMMA_MANDATORY, res, "Expected comma, didn't get one");
         }
         struct node *tmp = handler(f, token);
         if (!tmp)
             break;
-        tmp = make_node(token, A_LIST, tmp, NULL, NULL);
         first = 0;
-        if (!res)
-            res = tmp;
-        else
+        if (!res) {
+            if (force_list)
+                res = make_node(token, A_LIST, tmp, NULL, NULL);
+            else
+                res = tmp;
+        } else {
+            if (second) {
+                second = 0;
+                if (!force_list) {
+                    res = make_node(token, A_LIST, res, NULL, NULL);
+                    prev = res;
+                }
+            }
+            tmp = make_node(token, A_LIST, tmp, NULL, NULL);
             prev->right = tmp;
+        }
         prev = tmp;
     }
 #endif
@@ -892,6 +903,7 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
             if (!params)
                 params = identifier_list(f, token);
             res->right = params;
+            res->is_func = 1;
             expect(f, token, T_ROUND_CLOSE, ")");
         } else if (accept(f, token, T_SQUARE_OPEN)) {
             struct node *index = constant_expression(f, token);
@@ -1215,8 +1227,8 @@ struct node *declaration(struct scanfile *f, struct token *token)
 struct node *argument_expression_list(struct scanfile *f, struct token *token)
 {
     // FIXME: Make to use iter_list
-#if 1
     struct node *res = NULL;
+#if 1
     struct node *prev = NULL;
 
     while (1) {
@@ -1234,11 +1246,12 @@ struct node *argument_expression_list(struct scanfile *f, struct token *token)
         if (!accept(f, token, T_COMMA))
             break;
     }
-    return res;
 
 #else
-    return iter_list(f, token, assignment_expression, COMMA_MANDATORY, 1);
+    res = iter_list(f, token, assignment_expression, COMMA_MANDATORY, 1);
+    node_walk(res);
 #endif
+    return res;
 }
 
 struct node *postfix_expression(struct scanfile *f, struct token *token)
@@ -1714,13 +1727,21 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     if (!decl)
         ERR("Invalid function definition");
 #endif
+    save_point(f, token);
     struct node *comp = compound_statement(f, token);
     if (!comp) {
+        load_point(f, token);
+        if (decl->is_func && accept(f, token, T_SEMI)) {
+            // This is forward declaration
+            res = make_node(token, A_GLUE, decl, NULL, NULL);
+            res = make_node(token, A_FUNCTION, spec, NULL, res);
+            return res;
+        }
         // If no compound, this is most probably variable decls
         // This is handled by save points.
         return NULL;
     }
-
+    remove_save_point(f, token);
 
     //decl = type_resolve(token, decl, 0);
     res = make_node(token, A_GLUE, decl, NULL, comp);

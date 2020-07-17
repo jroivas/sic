@@ -2386,6 +2386,17 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     return res;
 }
 
+struct node *flatten_list(struct node *node)
+{
+    struct node *res = node;
+
+    while (res->node == A_LIST && !res->right && res->left && res->left->node == A_LIST) {
+        res = res->left;
+    }
+
+    return res;
+}
+
 char *gen_func_params(struct gen_context *ctx, struct node *orig)
 {
     if (!orig)
@@ -2408,10 +2419,11 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
     struct buffer *allocs = buffer_init();
     struct buffer *params = buffer_init();
     int paramcnt = 0;
-    while (node->node == A_LIST) {
+    while (node && node->node == A_LIST) {
         struct node *pval = node;
         if (node->right && node->right->node == A_LIST)
             pval = node->left;
+        pval = flatten_list(pval);
 
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
@@ -2457,10 +2469,11 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
     node = paramnode;
     int parami = 0;
     ctx->regnum += paramcnt;
-    while (node->node == A_LIST) {
+    while (node && node->node == A_LIST) {
         struct node *pval = node;
         if (node->right && node->right->node == A_LIST)
             pval = node->left;
+        pval = flatten_list(pval);
 
         struct node *ptype = pval->left;
         struct node *pname = pval->right;

@@ -71,6 +71,7 @@ struct node {
     int reg;
     int is_const;
     int is_extern;
+    int is_func;
     int ptr;
     int addr;
     int strnum;
