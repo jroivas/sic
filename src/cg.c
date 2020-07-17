@@ -591,12 +591,6 @@ struct variable *new_variable_struct(struct gen_context *ctx, const char *name, 
     else
         res->reg = ctx->regnum++;
 
-#if 0
-    if (global) {
-        printf("NEW VAR: %s, %d, %d reg %d\n", name, type, bits, ctx->regnum_global);
-        stack_trace();
-    }
-#endif
     // If bits == 0 and we have a pendign type which matches requested type, use it
     if (bits == 0 && ctx->pending_type && ctx->pending_type->type == type) {
         type = ctx->pending_type->type;
@@ -1726,8 +1720,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
                     par->reg);
                 break;
             case V_STRUCT:
-                printf("PTR: %d, %d\n", par->ptr, par->addr);
-                node_walk(node);
                 buffer_write(params, "%s%%struct.%s%s %%%d",
                     paramcnt > 1 ? ", " : "",
                     par->type->type_name,
@@ -2223,12 +2215,12 @@ int gen_dereference(struct gen_context *ctx, struct node *node, int reg)
     FATALN(!var->ptr, node, "Dereference variable is not pointer");
 
     char *src = get_stars(var->ptr);
-    struct variable *res = new_variable(ctx,
+    struct variable *res = new_variable_struct(ctx,
         NULL,
         var->type->type,
         var->type->bits, var->type->sign,
         var->ptr,
-        0, 0);
+        0, 0, var->type->type_name);
     if (var->type->type == V_INT) {
         if (var->ptr)
             res->ptr--;
@@ -2240,6 +2232,18 @@ int gen_dereference(struct gen_context *ctx, struct node *node, int reg)
             src ? src : "",
             var->reg,
             align(res->type->bits), res->ptr, var->ptr
+            );
+    } else if (var->type->type == V_STRUCT) {
+        if (var->ptr)
+            res->ptr--;
+        buffer_write(ctx->data, "%%%d = load %%struct.%s%s, %%struct.%s%s* %%%d, align %d ; DEREF %d %d\n",
+            res->reg,
+            var->type->type_name,
+            src ? src : "",
+            var->type->type_name,
+            src ? src : "",
+            var->reg,
+            8
             );
     } else
         ERR("Invalid type for deference");
