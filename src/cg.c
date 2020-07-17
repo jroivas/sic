@@ -706,6 +706,10 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
         else if (v->type->type == target->type)
             return v;
         else if (v->type->type == V_NULL && target->type == V_INT) {
+            val = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 0, 0, 0);
+            buffer_write(ctx->data, "store i%d 0, i%d* %s%d, align %d ; gen_cast NULL to int\n",
+                val->type->bits, val->type->bits, REGP(val), val->reg, align(val->type->bits));
+
 #if 0
             val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             //buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
@@ -713,7 +717,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
                     val->type->bits, val->type->bits, val->reg);
             val->direct = 1;
 #endif
-            return NULL;
+            //return NULL;
         }
     }
 
@@ -755,7 +759,7 @@ struct variable *var_cast_to(struct gen_context *ctx, struct variable *src, stru
 
     if (target->type != dst->type->type || target->bits != dst->type->bits) {
         dst = gen_cast(ctx, dst, target, 1);
-        FATAL(!dst, "Cast failed");
+        FATAL(!dst, "Cast failed from %s to %s", type_str(src->type->type), type_str(target->type));
         dst = gen_bits_cast(ctx, dst, target->bits, 1);
         FATAL(!dst, "Bit cast failed");
     }
@@ -1730,8 +1734,15 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
                     stars ? stars : "",
                     par->reg);
                 break;
+            case V_STR:
+                //buffer_write(params, "%si8*%s %%%d",
+                buffer_write(params, "%s@.str.%d%s",
+                    paramcnt > 1 ? ", " : "",
+                    par->reg,
+                    stars ? stars : "");
+                break;
             default:
-                ERR("Invalid parameter type: %d", par->type->type);
+                ERR("Invalid parameter type: %s", type_str(par->type->type));
         }
         if (stars)
             free(stars);
@@ -1895,9 +1906,11 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                 free(stars);
             if (stars2)
                 free(stars2);
+    } else if (target->type == V_VOID) {
+        // Void cast is just reference
+        res = var;
     } else {
-        node_walk(node);
-        FATALN(1, node, "Invalid cast");
+        FATALN(1, node, "Invalid cast to %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);
     }
 
     ctx->pending_type = NULL;
@@ -2338,8 +2351,11 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     } else if (src->type->type == V_VOID) {
         // TODO Void pointer
         return 0;
+    } else if (src->type->type == V_NULL && dst->type->type == V_INT) {
+        buffer_write(ctx->data, "store i%d 0, i%d* %s%d, align %d ; gen_assign NULL to int\n",
+                dst->type->bits, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else {
-        ERR("Invalid assign: %d from %d", left, right);
+        ERR("Invalid assign to reg %d from reg %d, to type %s from %s", left, right, type_str(dst->type->type), type_str(src->type->type));
     }
     return dst->reg;
 }
@@ -2488,7 +2504,6 @@ char *gen_func_params(struct gen_context *ctx, struct node *orig)
             buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
                 res->reg,
                 ptype->bits,
-                stars ? stars : "",
                 align(ptype->bits));
             buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
                 ptype->bits,
@@ -2586,6 +2601,32 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node)
         free(tmp);
 }
 
+void gen_func_decl(struct gen_context *global_ctx, struct gen_context *ctx, struct node *node, struct node *func_node)
+{
+    char *tmp = NULL;
+    const char *type = NULL;
+    if (ctx->main_type)
+        type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
+    else if (strcmp(ctx->name, "main") == 0 && node->type == V_VOID)
+        type = var_str(V_INT, 32, &tmp);
+    else
+        type = var_str(node->type, node->bits, &tmp);
+
+    char *params = NULL;
+    // Global context can't have params
+    if (!ctx->global && func_node)
+        params = gen_func_params(ctx, func_node);
+
+    //declare void @__assert_fail(i8*, i8*, i32, i8*) #2
+    buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
+            type, ctx->name,
+            params ? params : "");
+    if (params)
+        free(params);
+    if (tmp)
+        free(tmp);
+}
+
 void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *target, struct node *functype)
 {
     if (!target && functype)
@@ -2639,6 +2680,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     FATALN(name->node != A_IDENTIFIER, r, "Faulty function name");
     func_ctx->name = name->value_string;
     struct node *functype = node->left;
+    struct node *body = NULL;
 
 #if 0
 
@@ -2647,6 +2689,13 @@ int gen_function(struct gen_context *ctx, struct node *node)
 #else
     (void)func_proto;
 #endif
+    if (node && node->right && node->right->right)
+        body = node->right->right;
+
+    if (!body) {
+        // This is prototype, it's declared earlir
+        return 0;
+    }
 
     // Register function globally
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
@@ -2665,11 +2714,8 @@ int gen_function(struct gen_context *ctx, struct node *node)
             buffer_write(func_ctx->init, "call void @%s()\n", ctx->name);
     }
 
-    struct node *body = NULL;
     FATALN(node->right->node != A_GLUE, node->right, "Invalid function");
-
-    body = node->right->right;
-    FATALN(!body, node->right, "Invalid function body");
+    //FATALN(!body, node->right, "Invalid function body");
 
     // Need to tell return type
     if (func_ctx->main_type == NULL)
@@ -2794,13 +2840,13 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     /* Handle ternary return value */
     ctx->data = tmp;
     if (ternary) {
+        ctx->data = cmpblock;
         struct variable *tres = find_variable(ctx, ifret);
         FATALN(!tres, node, "Ternary return type invalid");
         buffer_write(cmpblock, "; TENARY TRUE\n");
         res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->ptr, tres->addr, 0);
         gen_allocate_int(ctx, res->reg, tres->type->bits, tres->ptr, 0, 1, 0);
 
-        ctx->data = cmpblock;
         tres = var_cast_to(ctx, tres, res->type);
 
         gen_assign(ctx, NULL,  res->reg, tres->reg);
@@ -2958,6 +3004,34 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
 
     func_var = new_variable(ctx, func_name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
     func_var->func = 1;
+
+    struct node *body = NULL;
+    if (node && node->right && node->right->right)
+        body = node->right->right;
+    if (!body) {
+        struct gen_context *global_ctx = ctx;
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+        // This is prototype, just mark it.
+        //gen_func_decl(global_ctx, func_ctx, node->left, node);
+        char *tmp = NULL;
+        const char *type = NULL;
+        if (strcmp(func_name, "main") == 0 && node->type == V_VOID)
+            type = var_str(V_INT, 32, &tmp);
+        else
+            type = var_str(node->type, node->bits, &tmp);
+
+        char *params = NULL;
+        params = gen_func_params(ctx, node);
+
+        buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
+            type, func_name,
+            params ? params : "");
+        if (params)
+            free(params);
+        if (tmp)
+            free(tmp);
+    }
 }
 
 // Scan all functions
