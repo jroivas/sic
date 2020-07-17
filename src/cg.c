@@ -2889,7 +2889,6 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         case A_TYPE:
             gen_type(ctx, node);
             if (node->type == V_ENUM) {
-                printf("Skipped recusive alloc: %s, %s\n", node_str(node), type_str(node->type));
                 return res;
             }
             break;
@@ -2976,7 +2975,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
 
     /* Recurse first to get children solved */
     if (node->node == A_TYPE && node->type == V_ENUM) {
-        printf("Skipped recusive gen: %s, %s\n", node_str(node), type_str(node->type));
+        // Skip
     } else {
         if (node->left)
             resleft = gen_recursive(ctx, node->left);
