@@ -168,6 +168,17 @@ int align(int bits)
     return 1;
 }
 
+struct node *flatten_list(struct node *node)
+{
+    struct node *res = node;
+
+    while (res->node == A_LIST && !res->right && res->left && res->left->node == A_LIST) {
+        res = res->left;
+    }
+
+    return res;
+}
+
 #if 0
 struct type *find_type_by_name(struct type *first, const char *name)
 {
@@ -1724,7 +1735,9 @@ char *gen_call_params(struct gen_context *ctx, struct node *node)
         struct variable *par = find_variable(ctx, r);
         par = gen_load(ctx, par);
         FATALN(!par, node, "Invalid parameter for function call");
+
         char *stars = get_stars(par->ptr);
+        // TODO get function parameter prototypes and safe cast if needed
 
         paramcnt++;
         switch (par->type->type) {
@@ -2415,17 +2428,6 @@ int gen_op_assign(struct gen_context *ctx, struct node *node, int left, int righ
     return res;
 }
 
-struct node *flatten_list(struct node *node)
-{
-    struct node *res = node;
-
-    while (res->node == A_LIST && !res->right && res->left && res->left->node == A_LIST) {
-        res = res->left;
-    }
-
-    return res;
-}
-
 char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int allocate_params)
 {
     if (!orig)
@@ -3015,7 +3017,6 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
     struct node *functype = node->left;
     struct gen_context *global_ctx = ctx;
     const char *type = NULL;
-    struct node *type_node = node->left;
     char *tmp = NULL;
     char *params = NULL;
 
@@ -3028,10 +3029,10 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
     func_var = new_variable(ctx, func_name, functype->type, functype->bits, functype->sign, functype->ptr, functype->addr, 1);
     func_var->func = 1;
 
-    if (strcmp(func_name, "main") == 0 && type_node->type == V_VOID)
+    if (strcmp(func_name, "main") == 0 && functype->type == V_VOID)
         type = var_str(V_INT, 32, &tmp);
     else
-        type = var_str(type_node->type, type_node->bits, &tmp);
+        type = var_str(functype->type, functype->bits, &tmp);
 
     params = gen_func_params_with(ctx, node, 0);
     struct buffer *pretty = buffer_init();
@@ -3040,7 +3041,6 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
     struct buffer *pretty_id = buffer_init();
     buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", func_name);
 
-    //printf("Pretty id: %s\n", buffer_read(pretty_id));
     int slen = strlen(namestr) + 1;
     struct variable *pretty_val = new_variable(global_ctx, buffer_read(pretty_id), V_STR, slen, 0, 0, 0, 1);
     pretty_val->ptr = 1;
