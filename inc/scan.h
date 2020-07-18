@@ -30,6 +30,7 @@ enum tokentype {
     T_COLON,
     T_DOT,
     T_PTR_OP,
+    T_ELLIPSIS,
     T_EOF
 };
 

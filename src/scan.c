@@ -181,7 +181,6 @@ char *scan_string(struct scanfile *f, int c, char end_char)
             ;
         else if (c == end_char)
             break;
-        // TODO: Check escape validity
         escape = (!escape && c == '\\');
     }
     return buf;
@@ -432,7 +431,13 @@ int scan(struct scanfile *f, struct token *t)
             }
             if (c == '.') {
                 c = next(f);
-                if (isdigit(c) || c == ' ') {
+                if (c == '.') {
+                    c = next(f);
+                    if (c == '.') {
+                       t->token = T_ELLIPSIS;
+                    } else
+                        ERR("Got only two dots \"..\"");
+                } else if (isdigit(c) || c == ' ') {
                     t->token = T_DEC_LIT;
                     t->fraction = scan_number(f, c);
                 } else {

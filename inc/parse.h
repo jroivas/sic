@@ -60,6 +60,7 @@ enum nodetype {
     A_UNION,
     A_ENUM,
     A_ACCESS,
+    A_ELLIPSIS,
     A_LIST
 };
 

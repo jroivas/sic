@@ -72,6 +72,7 @@ static const char *nodestr[] = {
     "UNION",
     "ENUM",
     "ACCESS",
+    "ELLIPSIS",
     "LIST"
 };
 
@@ -570,15 +571,21 @@ struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handle
     int second = 1;
 
     while (1) {
+        save_point(f, token);
         if (!first) {
             if (accept(f, token, T_COMMA)) {
                 FATALN(comma == COMMA_NONE, res, "Expected no comma, got one");
-            } else if (comma == COMMA_MANDATORY)
+            } else if (comma == COMMA_MANDATORY) {
+                remove_save_point(f, token);
                 break;
+            }
         }
         struct node *tmp = handler(f, token);
-        if (!tmp)
+        if (!tmp) {
+            load_point(f, token);
             break;
+        }
+        remove_save_point(f, token);
         first = 0;
         if (!res) {
             if (force_list)
@@ -834,6 +841,9 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 
 struct node *parameter_declaration(struct scanfile *f, struct token *token)
 {
+    if (accept(f, token, T_ELLIPSIS)) {
+        return make_node(token, A_ELLIPSIS, NULL, NULL, NULL);
+    }
     struct node *spec = declaration_specifiers(f, token);
     if (!spec)
         return NULL;
@@ -855,7 +865,14 @@ struct node *parameter_list(struct scanfile *f, struct token *token)
 struct node *parameter_type_list(struct scanfile *f, struct token *token)
 {
     struct node *res = parameter_list(f, token);
-    // TODO ellipsis
+
+#if  0
+    if (accept(f, token, T_COMMA)) {
+        if (accept(f, token, T_ELLIPSIS)) {
+            res = make_node(token, A_ELLIPSIS, res, NULL, NULL);
+        }
+    }
+#endif
     return res;
 }
 

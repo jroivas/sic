@@ -86,6 +86,7 @@ struct variable {
     hashtype name_hash;
     struct variable *next;
     struct node *params;
+    char *paramstr;
 };
 
 struct gen_context {
@@ -938,6 +939,35 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
+char *convert_escape(const char *src, int *len)
+{
+    int srclen = strlen(src);
+    int reslen = srclen * 3;
+    char *resptr = calloc(1, reslen);
+    char *res = resptr;
+    int escape = 0;
+
+    while (*src != 0) {
+        if (escape) {
+            int cnt = solve_escape_str(res, *src);
+            src++;
+            res += cnt;
+            (*len)++;
+            escape = 0;
+        } else if (*src == '\\'){
+            escape = 1;
+            src++;
+        } else {
+            *res = *src;
+            res++;
+            src++;
+            (*len)++;
+        }
+    }
+
+    return resptr;
+}
+
 int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
 {
     if (!n)
@@ -970,16 +1000,20 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
         return val->reg;
     }
 
-    int slen = strlen(n->value_string) + 1;
+    //int slen = strlen(n->value_string) + 1;
+    int slen = 0;
+    char *tmpstr = convert_escape(n->value_string, &slen);
+    slen++;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
     val->ptr = 1;
 
     buffer_write(ctx->init, "; String literal: %s\n", n->value_string);
     buffer_write(glob->init, "@.str.%d = private unnamed_addr "
         "constant [%u x i8] c\"%s\\00\", align 1\n",
-        val->reg, slen, n->value_string);
+        val->reg, slen, tmpstr);
     val->array = slen;
     val->literal = 1;
+    free(tmpstr);
 
     n->reg = val->reg;
     return val->reg;
@@ -1910,9 +1944,10 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     if (func->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func->type->bits, 1);
 
-        buffer_write(ctx->data, "%%%d = call i%d @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "%%%d = call i%d (%s) @%s(%s); FUNCCALL\n",
             res->reg,
             func->type->bits,
+            func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
     } else if (func->type->type == V_FLOAT) {
@@ -2565,6 +2600,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
     struct buffer *allocs = buffer_init();
     struct buffer *params = buffer_init();
     int paramcnt = 0;
+    int ellipsis = 0;
     while (node && node->node == A_LIST) {
         struct node *pval = node;
         if (node->right && node->right->node == A_LIST)
@@ -2574,6 +2610,16 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
         FATALN(!ptype, pval, "Invalid parameter");
+        //printf("PTR: %s\n", node_str(ptype));
+        FATALN(ellipsis, pval, "Got elements after ellipsis \"...\"");
+        if (ptype->node == A_ELLIPSIS) {
+            ellipsis = 1;
+            paramcnt++;
+            buffer_write(params, "%s...",
+                paramcnt > 1 ? ", " : "");
+            node = node->right;
+            continue;
+        }
         FATALN(ptype->node != A_TYPE, pval, "Invalid parameter type");
         // TODO: parse types properly, now just shortcutting
         int pointer = 0;
@@ -2596,7 +2642,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
             buffer_write(params, "%sdouble%s",
                 paramcnt > 1 ? ", " : "",
                 stars ? stars : "");
-        } else if (ptype->type == V_VOID && ptype->ptr) {
+        } else if (ptype->type == V_VOID && pointer) {
             buffer_write(params, "%si8%s",
                 paramcnt > 1 ? ", " : "",
                 stars ? stars : "");
@@ -2605,11 +2651,11 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                 paramcnt > 1 ? ", " : "",
                 ptype->type_name,
                 stars ? stars : "");
-        } else if (ptype->type == V_VOID && ptype->ptr) {
+        } else if (ptype->type == V_VOID && pointer) {
             buffer_write(params, "%si8%s*",
                 paramcnt > 1 ? ", " : "",
                 stars ? stars : "");
-        } else if (ptype->type == V_VOID && !ptype->ptr) {
+        } else if (ptype->type == V_VOID && !pointer) {
         } else {
             stack_trace();
             ERR("Invalid parameter type: %s", type_str(ptype->type));
@@ -2632,6 +2678,10 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
 
             struct node *ptype = pval->left;
             struct node *pname = pval->right;
+            if (ptype->node == A_ELLIPSIS) {
+                node = node->right;
+                continue;
+            }
             // TODO: parse types properly, now just shortcutting
             while (pname && pname->node == A_POINTER)
                 pname = pname->left;
@@ -2670,6 +2720,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     align(ptype->bits));
                 pname->reg = res->reg;
             } else if (ptype->type == V_VOID) {
+                //printf("VV: %p, %p\n", (void*)pname, (void*)ptype);
                 struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
@@ -3206,6 +3257,7 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
         type = var_str(functype->type, functype->bits, &tmp);
 
     params = gen_func_params_with(ctx, node, 0);
+    func_var->paramstr = params;
     if (ctx->gen_flags & GEN_FUNCTION)
         gen_var_function(ctx, func_name);
     if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
@@ -3221,8 +3273,10 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
             type, func_name,
             params ? params : "");
     }
+    /*
     if (params)
         free(params);
+    */
     if (tmp)
         free(tmp);
 }

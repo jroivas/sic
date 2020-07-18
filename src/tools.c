@@ -48,6 +48,71 @@ int solve_escape(const char *v)
     return -3;
 }
 
+int solve_escape_str(char *ptr, int v)
+{
+    if (v == '0') {
+        *ptr++ = 0;
+        return 1;
+    }
+    if (v == '\\') {
+        *ptr = '\\';
+        return 1;
+    }
+    if (v == '\'') {
+        *ptr = '\'';
+        return 1;
+    }
+    if (v == '"') {
+        *ptr = '"';
+        return 1;
+    }
+    if (v == 'a') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = '7';
+        return 3;
+    }
+    if (v == 'b') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = '8';
+        return 3;
+    }
+    if (v == 't') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = '9';
+        return 3;
+    }
+    if (v == 'n') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = 'A';
+        return 3;
+    }
+    if (v == 'v') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = 'B';
+        return 3;
+    }
+    if (v == 'f') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = 'C';
+        return 3;
+    }
+    if (v == 'r') {
+        *ptr++ = '\\';
+        *ptr++ = '0';
+        *ptr++ = 'D';
+        return 3;
+    }
+
+    return 0;
+}
+
+
 int determine_size_bytes(literalnum value)
 {
     if (value < 0x100)
@@ -160,6 +225,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ENUM:
         case A_ACCESS:
         case A_TYPE_LIST:
+        case A_ELLIPSIS:
         case A_SIZEOF:
             printf("%s", node_str(node));
             break;
