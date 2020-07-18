@@ -29,6 +29,14 @@ enum cast_opts {
     CAST_FLATTEN_PTR = 2,
 };
 
+enum generated_variables {
+    GEN_NONE,
+    GEN_FUNCTION = 1 << 0,
+    GEN_PRETTY_FUNCTION = 1 << 1,
+    GEN_FILE = 1 << 2,
+    GEN_LINE = 1 << 3,
+};
+
 struct type {
     int id;
     enum var_type type;
@@ -96,6 +104,8 @@ struct gen_context {
     int null_var;
     int is_decl;
     int debug;
+    int gen_flags;
+
     const char *name;
     struct node *node;
     struct node *main_type;
@@ -945,6 +955,16 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
         n->value_string = buffer_read(pretty);
         struct variable *val = find_variable_by_name(ctx, buffer_read(pretty));
         FATALN(!val, n, "Didn't find __PRETTY_FUNCTION__");
+        buffer_del(pretty);
+        n->reg = val->reg;
+        return val->reg;
+    }
+    if (strcmp(n->value_string, "__FUNCTION__") == 0) {
+        struct buffer *pretty = buffer_init();
+        buffer_write(pretty, "@__FUNCTION__.%s", ctx->name);
+        n->value_string = buffer_read(pretty);
+        struct variable *val = find_variable_by_name(ctx, buffer_read(pretty));
+        FATALN(!val, n, "Didn't find __FUNCTION__");
         buffer_del(pretty);
         n->reg = val->reg;
         return val->reg;
@@ -2769,6 +2789,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node);
 int gen_function(struct gen_context *ctx, struct node *node)
 {
     struct gen_context *func_ctx = init_ctx(ctx->f, ctx);
+    func_ctx->gen_flags = ctx->gen_flags;
 
     FATALN(!node->left, node, "Missing function definition");
 
@@ -3110,6 +3131,50 @@ int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
     return (node->node == A_POSTINC || node->node == A_POSTDEC) ? var->reg : res->reg;
 }
 
+void gen_var_function(struct gen_context *ctx, const char *func_name)
+{
+    struct gen_context *global_ctx = ctx;
+    while (global_ctx->parent)
+        global_ctx = global_ctx->parent;
+
+    struct buffer *pretty_id = buffer_init();
+    buffer_write(pretty_id, "@__FUNCTION__.%s", func_name);
+    int slen = strlen(func_name) + 1;
+    struct variable *pretty_val = new_variable(global_ctx, buffer_read(pretty_id), V_STR, slen, 0, 0, 0, 1);
+    pretty_val->ptr = 1;
+    pretty_val->array = slen;
+    pretty_val->literal = 1;
+
+    buffer_write(ctx->init, "; __FUNCTION__.%s\n", func_name);
+    buffer_write(global_ctx->init, "@.str.%d = private unnamed_addr constant [%u x i8] c\"%s\\00\", align 1\n",
+        pretty_val->reg, slen, func_name);
+    //buffer_del(pretty_id); // FIXME
+}
+
+void gen_var_pretty_function(struct gen_context *ctx, const char *func_name, const char *type, const char *params)
+{
+    struct gen_context *global_ctx = ctx;
+    while (global_ctx->parent)
+        global_ctx = global_ctx->parent;
+
+    struct buffer *pretty = buffer_init();
+    buffer_write(pretty, "%s %s(%s)", type, func_name, params ? params : "");
+    const char *namestr = buffer_read(pretty);
+    struct buffer *pretty_id = buffer_init();
+    buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", func_name);
+    int slen = strlen(namestr) + 1;
+    struct variable *pretty_val = new_variable(global_ctx, buffer_read(pretty_id), V_STR, slen, 0, 0, 0, 1);
+    pretty_val->ptr = 1;
+    pretty_val->array = slen;
+    pretty_val->literal = 1;
+
+    buffer_write(ctx->init, "; __PRETTY_FUNCTION__.%s\n", func_name);
+    buffer_write(global_ctx->init, "@.str.%d = private unnamed_addr constant [%u x i8] c\"%s\\00\", align 1\n",
+        pretty_val->reg, slen, namestr);
+    buffer_del(pretty);
+    //buffer_del(pretty_id); // FIXME
+}
+
 void gen_alloc_func(struct gen_context *ctx, struct node *node)
 {
     struct node *r = node->right;
@@ -3141,23 +3206,10 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
         type = var_str(functype->type, functype->bits, &tmp);
 
     params = gen_func_params_with(ctx, node, 0);
-    struct buffer *pretty = buffer_init();
-    buffer_write(pretty, "%s %s(%s)", type, func_name, params ? params : "");
-    const char *namestr = buffer_read(pretty);
-    struct buffer *pretty_id = buffer_init();
-    buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", func_name);
-
-    int slen = strlen(namestr) + 1;
-    struct variable *pretty_val = new_variable(global_ctx, buffer_read(pretty_id), V_STR, slen, 0, 0, 0, 1);
-    pretty_val->ptr = 1;
-    pretty_val->array = slen;
-    pretty_val->literal = 1;
-
-    buffer_write(ctx->init, "; __PRETTY_FUNCTION__.%s\n", func_name);
-    buffer_write(global_ctx->init, "@.str.%d = private unnamed_addr constant [%u x i8] c\"%s\\00\", align 1\n",
-        pretty_val->reg, slen, namestr);
-    buffer_del(pretty);
-    //buffer_del(pretty_id); // FIXME
+    if (ctx->gen_flags & GEN_FUNCTION)
+        gen_var_function(ctx, func_name);
+    if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
+        gen_var_pretty_function(ctx, func_name, type, params);
 
     struct node *body = NULL;
     if (node && node->right && node->right->right)
@@ -3430,6 +3482,7 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
     struct node main_node;
 
     main_ctx->name = "main";
+    main_ctx->gen_flags = ctx->gen_flags;
     main_node.type = V_INT;
     main_node.bits = 32;
 
@@ -3521,6 +3574,33 @@ struct node *find_main_type(struct node *node)
     return res;
 }
 
+int scan_gens(struct node *node)
+{
+    if (node == NULL)
+        return 0;
+
+    int res = 0;
+    if (node->node == A_STR_LIT) {
+        if (strcmp(node->value_string, "__FUNCTION__") == 0)
+            res |= GEN_FUNCTION;
+        else if (strcmp(node->value_string, "__PRETTY_FUNCTION__") == 0)
+            res |= GEN_PRETTY_FUNCTION;
+        else if (strcmp(node->value_string, "__FILE__") == 0)
+            res |= GEN_LINE;
+        else if (strcmp(node->value_string, "__LINE__") == 0)
+            res |= GEN_LINE;
+    }
+
+    if (node->left)
+        res |= scan_gens(node->left);
+    if (node->mid)
+        res |= scan_gens(node->mid);
+    if (node->right)
+        res |= scan_gens(node->right);
+
+    return res;
+}
+
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node, most probably parse error!");
@@ -3531,17 +3611,12 @@ int codegen(FILE *outfile, struct node *node)
     ctx->global = 1;
     ctx->node = node;
     ctx->main_type = find_main_type(node);
+    ctx->gen_flags = scan_gens(node);
 
-    struct buffer *pretty_id = buffer_init();
-    buffer_write(pretty_id, "@__PRETTY_FUNCTION__.%s", global_ctx_name);
-    struct variable *pretty_val = new_variable(ctx, buffer_read(pretty_id), V_STR, 9, 0, 0, 0, 1);
-    pretty_val->ptr = 1;
-    pretty_val->array = 9;
-    pretty_val->literal = 1;
-
-    buffer_write(ctx->init, "; __PRETTY_FUNCTION__.%s\n", ctx->name);
-    buffer_write(ctx->init, "@.str.%d = private unnamed_addr constant [9 x i8] c\"__global\\00\", align 1\n", pretty_val->reg);
-
+    if (ctx->gen_flags & GEN_FUNCTION)
+        gen_var_function(ctx, global_ctx_name);
+    if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
+        gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
     gen_scan_functions(ctx, node);
 
     gen_pre(ctx, node, node);
