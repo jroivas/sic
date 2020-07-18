@@ -1797,15 +1797,26 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
 
     struct buffer *params = buffer_init();
     int paramcnt = 0;
-    while (provided && wanted && wanted->node == A_LIST) {
-        struct node *pval = wanted;
-        if (wanted->right && wanted->right->node == A_LIST)
-            pval = wanted->left;
-        pval = flatten_list(pval);
+    int ellipsis = 0;
+    //while (provided && wanted && wanted->node == A_LIST) {
+    while (provided) {
+        struct node *pval = NULL;
+        struct node *ptype = NULL;
+        if (ellipsis)
+            pval = NULL;
+        else {
+            pval = wanted;
+            FATAL(!pval, "Too many parameters for %s", func->value_string);
+            if (wanted->right && wanted->right->node == A_LIST)
+                pval = wanted->left;
+            pval = flatten_list(pval);
 
-        struct node *ptype = pval->left;
-        FATALN(!ptype, pval, "Invalid parameter");
-        FATALN(ptype->node != A_TYPE, pval, "Invalid parameter type");
+            ptype = pval->left;
+            FATALN(!ptype, pval, "Invalid parameter");
+            if (ptype->node == A_ELLIPSIS)
+                ellipsis = 1;
+        }
+        //FATALN(!ellipsis && ptype->node != A_TYPE, provided, "Invalid parameter type");
 
         int r = gen_recursive(ctx, provided->left);
         FATALN(!r, provided, "Expected parameter for function call");
@@ -1818,17 +1829,32 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
         char *stars = get_stars(par->ptr);
         struct variable *tgt;
         struct type target;
-        target.type = ptype->type;
-        target.bits = ptype->bits;
-        target.sign = ptype->sign;
+        const char *type_name = NULL;
+        int type_ptr;
 
-        switch (ptype->type) {
+        if (!ellipsis) {
+            target.type = ptype->type;
+            target.bits = ptype->bits;
+            target.sign = ptype->sign;
+            type_name = ptype->type_name;
+            type_ptr = ptype->ptr;
+        } else {
+            target.type = par->type->type;
+            target.bits = par->type->bits;
+            if (target.type == V_INT && target.bits == 0)
+                target.bits = 32;
+            target.sign = par->type->sign;
+            type_name = par->type->type_name;
+            type_ptr = par->ptr;
+        }
+
+        switch (target.type) {
             case V_INT:
                 //printf("Param %d for %s at %d,%d\n", paramcnt, func->value_string, func->line, func->linepos);
                 tgt = load_and_cast_to(ctx, par, &target, CAST_NORMAL);
                 buffer_write(params, "%si%d%s %%%d",
                     paramcnt > 1 ? ", " : "",
-                    ptype->bits,
+                    target.bits,
                     stars ? stars : "",
                     tgt->reg);
                 break;
@@ -1842,7 +1868,7 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             case V_STRUCT:
                 buffer_write(params, "%s%%struct.%s%s %%%d",
                     paramcnt > 1 ? ", " : "",
-                    ptype->type_name,
+                    type_name,
                     stars ? stars : "",
                     par->reg);
                 break;
@@ -1853,7 +1879,7 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                     par->bits, par->bits, par->reg);
                 break;
             case V_VOID:
-                if (ptype->ptr) {
+                if (type_ptr) {
                     buffer_write(params, "%si8%s %%%d",
                         paramcnt > 1 ? ", " : "",
                         stars ? stars : "",
@@ -1866,10 +1892,13 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
 
         if (stars)
             free(stars);
-        if (provided->right == NULL || wanted->right == NULL)
+        if (provided->right == NULL || (!ellipsis && wanted->right == NULL))
             break;
         provided = provided->right;
-        wanted = wanted->right;
+        if (!ellipsis)
+            wanted = wanted->right;
+        else
+            wanted = NULL;
     }
     FATALN(wanted && !provided, param_node, "Not enought parameters");
 #if 0
@@ -3273,10 +3302,6 @@ void gen_alloc_func(struct gen_context *ctx, struct node *node)
             type, func_name,
             params ? params : "");
     }
-    /*
-    if (params)
-        free(params);
-    */
     if (tmp)
         free(tmp);
 }

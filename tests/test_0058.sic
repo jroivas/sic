@@ -1,0 +1,11 @@
+int printf(char *fmt, ...);
+
+int main()
+{
+    int *b;
+
+    printf("Hello world\n");
+    printf("Number is %d\n", 2 * 21);
+
+    return 0;
+}
