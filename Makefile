@@ -7,16 +7,18 @@ build/sic-static: build
 	$(CC) $(CFLAGS) -o build/sic-static -static main.c $(SRC_FILES)
 
 build/sic: build build/libsic.so
-	$(CC) $(CFLAGS) -o build/sic main.c build/libsic.so
+	$(CC) $(CFLAGS) -o build/sic -L build/ main.c build/libsic.so.0
 
 build/libsic.so: $(INC_FILES) $(SRC_FILES)
-	$(CC) $(CFLAGS) -shared -o build/libsic.so $(SRC_FILES)
+	$(CC) $(CFLAGS) -shared -Wl,-soname,libsic.so.0 -o build/libsic.so.0.1 $(SRC_FILES)
+	ln -sf libsic.so.0.1 build/libsic.so.0
+	ln -sf libsic.so.0 build/libsic.so
 
 test: build/sic unittest
-	CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build
+	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build
 
 testsic: build/sic
-	CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build llvm
+	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build llvm
 
 testc:
 	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/compiletest.sh build
@@ -24,7 +26,7 @@ testc:
 tests: test
 
 compiletest: build/sic
-	build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
+	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
 	cat build/test_$(TEST).sic.ir
 
 buildtest: compiletest
