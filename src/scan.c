@@ -239,6 +239,12 @@ int keyword(struct token *t)
     } else if (strcmp(v, "extern") == 0) {
         res = 1;
         t->keyword = K_EXTERN;
+    } else if (strcmp(v, "break") == 0) {
+        res = 1;
+        t->keyword = K_BREAK;
+    } else if (strcmp(v, "continue") == 0) {
+        res = 1;
+        t->keyword = K_CONTINUE;
     } else if (strcmp(v, "sizeof") == 0) {
         res = 1;
         t->keyword = K_SIZEOF;

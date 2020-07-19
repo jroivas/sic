@@ -61,6 +61,10 @@ enum nodetype {
     A_ENUM,
     A_ACCESS,
     A_ELLIPSIS,
+    A_BREAK,
+    A_CONTINUE,
+    A_GOTO,
+    A_LABEL,
     A_LIST
 };
 

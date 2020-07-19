@@ -46,6 +46,9 @@ enum keyword_type {
     K_UNION,
     K_ENUM,
     K_EXTERN,
+    K_GOTO,
+    K_BREAK,
+    K_CONTINUE,
     K_SIZEOF
 };
 

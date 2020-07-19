@@ -104,6 +104,8 @@ struct gen_context {
     int is_decl;
     int debug;
     int gen_flags;
+    int breaklabel;
+    int continuelabel;
 
     const char *name;
     struct node *node;
@@ -3148,11 +3150,27 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
     return ternary ? res->reg : 0;
 }
 
+int set_breaklabel(struct gen_context *ctx, int label)
+{
+    int res = ctx->breaklabel;
+    ctx->breaklabel = label;
+    return res;
+}
+
+int set_continuelabel(struct gen_context *ctx, int label)
+{
+    int res = ctx->continuelabel;
+    ctx->continuelabel = label;
+    return res;
+}
+
 int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype)
 {
     int looplabel = gen_reserve_label(ctx);
     int cmplabel = gen_reserve_label(ctx);
     int outlabel = gen_reserve_label(ctx);
+    int brklabel = set_breaklabel(ctx, outlabel);
+    int contlabel = set_continuelabel(ctx, cmplabel);
 
     if (looptype == LOOP_FOR) {
         FATALN(!node->mid || node->mid->node != A_GLUE, node, "Invalid for loop");
@@ -3188,7 +3206,26 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
         cmp_reg, looplabel, outlabel);
     buffer_write(ctx->data, "L%d:\n", outlabel);
 
+    set_breaklabel(ctx, brklabel);
+    set_continuelabel(ctx, contlabel);
+
     return 0;
+}
+
+int gen_break(struct gen_context *ctx, struct node *node, int a)
+{
+    FATALN(!ctx->breaklabel, node, "No break label");
+    buffer_write(ctx->data, "br label %%L%d ; break\n", ctx->breaklabel);
+    ctx->regnum++;
+    return ctx->breaklabel;
+}
+
+int gen_continue(struct gen_context *ctx, struct node *node, int a)
+{
+    FATALN(!ctx->continuelabel, node, "No continue label");
+    buffer_write(ctx->data, "br label %%L%d ; continue\n", ctx->continuelabel);
+    ctx->regnum++;
+    return ctx->continuelabel;
 }
 
 int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
@@ -3567,6 +3604,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_POSTINC:
         case A_POSTDEC:
             return gen_pre_post_op(ctx, node, resleft);
+        case A_BREAK:
+            return gen_break(ctx, node, resleft);
+        case A_CONTINUE:
+            return gen_continue(ctx, node, resleft);
         default:
             ERR("Unknown node in code gen: %s", node_str(node));
     }

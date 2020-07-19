@@ -73,6 +73,10 @@ static const char *nodestr[] = {
     "ENUM",
     "ACCESS",
     "ELLIPSIS",
+    "BREAK",
+    "CONTINUE",
+    "GOTO",
+    "LABEL",
     "LIST"
 };
 
@@ -1558,6 +1562,12 @@ struct node *jump_statement(struct scanfile *f, struct token *token)
         scan(f, token);
         res = expression(f, token);
         res = make_node(token, A_RETURN, res, NULL, NULL);
+    } else if (strcmp(token->value_string, "break") == 0) {
+        scan(f, token);
+        res = make_node(token, A_BREAK, res, NULL, NULL);
+    } else if (strcmp(token->value_string, "continue") == 0) {
+        scan(f, token);
+        res = make_node(token, A_CONTINUE, res, NULL, NULL);
     }
     if (res)
         semi(f, token);

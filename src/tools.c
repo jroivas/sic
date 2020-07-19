@@ -226,8 +226,16 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ACCESS:
         case A_TYPE_LIST:
         case A_ELLIPSIS:
+        case A_BREAK:
+        case A_CONTINUE:
         case A_SIZEOF:
             printf("%s", node_str(node));
+            break;
+        case A_GOTO:
+            printf("GOTO: %s", node->value_string);
+            break;
+        case A_LABEL:
+            printf("LABEL: %s", node->value_string);
             break;
         case A_INT_LIT:
             printf("INT: %llu, %d bits %s", node->value, node->bits, node->sign ? "signed" : "unsigned");
