@@ -1556,12 +1556,18 @@ struct node *expression_statement(struct scanfile *f, struct token *token)
 struct node *jump_statement(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+
     if (token->token != T_KEYWORD)
         return NULL;
+
     if (strcmp(token->value_string, "return") == 0) {
         scan(f, token);
         res = expression(f, token);
         res = make_node(token, A_RETURN, res, NULL, NULL);
+    } else if (strcmp(token->value_string, "goto") == 0) {
+        scan(f, token);
+        res = expression(f, token);
+        res = make_node(token, A_GOTO, res, NULL, NULL);
     } else if (strcmp(token->value_string, "break") == 0) {
         scan(f, token);
         res = make_node(token, A_BREAK, res, NULL, NULL);
@@ -1569,6 +1575,7 @@ struct node *jump_statement(struct scanfile *f, struct token *token)
         scan(f, token);
         res = make_node(token, A_CONTINUE, res, NULL, NULL);
     }
+
     if (res)
         semi(f, token);
     return res;
@@ -1657,11 +1664,39 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *labeled_statement(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    if (token->token == T_IDENTIFIER) {
+        struct node *label = make_node(token, A_LABEL, NULL, NULL, NULL);
+        label->value_string = token->value_string;
+        scan(f, token);
+
+        if (!accept(f, token, T_COLON)) {
+            free(label);
+            return NULL;
+        }
+        res = label;
+
+        // FIXME statment?
+    } 
+
+    return res;
+}
+
+
 struct node *statement(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
 
-    // TODO: labeled_statement
+    save_point(f, token);
+    res = labeled_statement(f, token);
+    if (res) {
+        remove_save_point(f, token);
+        return res;
+    }
+    load_point(f, token);
 
     save_point(f, token);
     res = compound_statement(f, token);

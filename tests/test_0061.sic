@@ -46,17 +46,28 @@ int main()
     if (i != 42)
         return 2;
 
-/*
     goto skip;
 
     i = 123;
 
 skip:
+
     if (i == 123)
         return 3;
     if (i != 42)
         return 4;
-*/
+
+    i = 5;
+    j = 0;
+retry:
+    j++;
+    if (--i)
+        goto retry;
+
+    if (i != 0)
+        return 5;
+    if (j != 5)
+        return 6;
 
     return 0;
 }

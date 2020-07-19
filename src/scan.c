@@ -245,6 +245,9 @@ int keyword(struct token *t)
     } else if (strcmp(v, "continue") == 0) {
         res = 1;
         t->keyword = K_CONTINUE;
+    } else if (strcmp(v, "goto") == 0) {
+        res = 1;
+        t->keyword = K_GOTO;
     } else if (strcmp(v, "sizeof") == 0) {
         res = 1;
         t->keyword = K_SIZEOF;

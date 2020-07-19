@@ -3232,6 +3232,24 @@ int gen_continue(struct gen_context *ctx, struct node *node, int a)
     return ctx->continuelabel;
 }
 
+int gen_label(struct gen_context *ctx, struct node *node)
+{
+    buffer_write(ctx->data, "br label %%LABEL_%s ; label goto\n", node->value_string);
+    buffer_write(ctx->data, "LABEL_%s: ; label\n", node->value_string);
+    return 0;
+}
+
+int gen_goto(struct gen_context *ctx, struct node *node)
+{
+    struct node *label = node->left;
+
+    FATALN(!label, node, "Goto missing label");
+
+    buffer_write(ctx->data, "br label %%LABEL_%s ; goto\n", label->value_string);
+    ctx->regnum++;
+    return 0;
+}
+
 int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
 {
     struct variable *orig = find_variable(ctx, a);
@@ -3388,6 +3406,10 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 
     if (node->node == A_FUNCTION)
         return 0;
+    if (node->node == A_LABEL)
+        return 0;
+    if (node->node == A_GOTO)
+        return 0;
 
     int res = 0;
     switch (node->node) {
@@ -3477,6 +3499,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         return gen_while(ctx, node, LOOP_DO);
     if (node->node == A_FOR)
         return gen_while(ctx, node, LOOP_FOR);
+    if (node->node == A_LABEL)
+        return gen_label(ctx, node);
+    if (node->node == A_GOTO)
+        return gen_goto(ctx, node);
 
     /* Recurse first to get children solved */
     if (node->node == A_TYPE && node->type == V_ENUM) {
