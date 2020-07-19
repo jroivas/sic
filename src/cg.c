@@ -822,6 +822,23 @@ struct variable *load_and_cast_to(struct gen_context *ctx, struct variable *src,
     return var_cast_to(ctx, src, target);
 }
 
+struct variable *cast_int_to_ptr(struct gen_context *ctx, struct variable *var)
+{
+    struct variable *res = var;
+
+    if (var->type->type == V_INT && !var->ptr) {
+            res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+            buffer_write(ctx->data, "%%%d = inttoptr i%d %%%d to i%d* ; cast_int_to_ptr\n",
+                res->reg,
+                var->type->bits,
+                var->reg,
+                res->type->bits);
+            res->ptr = 1;
+    }
+
+    return res;
+}
+
 struct variable *gen_bits(struct gen_context *ctx, struct variable *v1, struct variable *v2)
 {
     return gen_bits_cast(ctx, v1, v2->type->bits, v2->type->sign);
@@ -2093,16 +2110,17 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
             buffer_write(ctx->data, "%%%d = fptoui %s %%%d to i%d\n",
                 res->reg, var->type->bits == 64 ? "double" : "float", var->reg, target->bits);
     } else if (ptrval) {
+            var = cast_int_to_ptr(ctx, var);
             char *stars = get_stars(var->ptr);
             char *stars2 = get_stars(ptrval);
             if (var->type->type == V_INT && target->type == V_VOID) {
                 res = new_inst_variable(ctx, V_INT, 8, 0);
-                buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; %d\n",
+                buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_cast_to int -> ptr %d\n",
                     res->reg, var->bits, stars ? stars : "", var->reg, 8, stars2, ptrval);
                 res->ptr = ptrval;
             } else if (var->type->type == V_VOID && target->type == V_INT) {
                 res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
-                buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s\n",
+                buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_cast_to void -> int\n",
                     res->reg, 8, stars2 ? stars2 : "", var->reg, target->bits, stars ? stars : "");
                 res->ptr = ptrval;
             } else
