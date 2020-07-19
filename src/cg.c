@@ -33,8 +33,6 @@ enum generated_variables {
     GEN_NONE,
     GEN_FUNCTION = 1 << 0,
     GEN_PRETTY_FUNCTION = 1 << 1,
-    GEN_FILE = 1 << 2,
-    GEN_LINE = 1 << 3,
 };
 
 struct type {
@@ -1982,12 +1980,14 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     } else if (func->type->type == V_FLOAT) {
         res = new_inst_variable(ctx, V_FLOAT, func->type->bits, 1);
 
-        buffer_write(ctx->data, "%%%d = call double @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "%%%d = call double (%s) @%s(%s); FUNCCALL\n",
             res->reg,
+            func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
     } else if (func->type->type == V_VOID) {
-        buffer_write(ctx->data, "call void @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "call void (%s) @%s(%s); FUNCCALL\n",
+            func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
     } else {
@@ -3664,10 +3664,6 @@ int scan_gens(struct node *node)
             res |= GEN_FUNCTION;
         else if (strcmp(node->value_string, "__PRETTY_FUNCTION__") == 0)
             res |= GEN_PRETTY_FUNCTION;
-        else if (strcmp(node->value_string, "__FILE__") == 0)
-            res |= GEN_LINE;
-        else if (strcmp(node->value_string, "__LINE__") == 0)
-            res |= GEN_LINE;
     }
 
     if (node->left)

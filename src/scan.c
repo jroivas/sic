@@ -450,6 +450,12 @@ int scan(struct scanfile *f, struct token *t)
                 t->value_string = scan_identifier(f, c);
                 if (strcmp(t->value_string, "__FUNCTION__") == 0 || strcmp(t->value_string, "__PRETTY_FUNCTION__") == 0) {
                     t->token = T_STR_LIT;
+                } else if (strcmp(t->value_string, "__FILE__") == 0) {
+                    t->token = T_STR_LIT;
+                    t->value_string = (char*)f->filename;
+                } else if (strcmp(t->value_string, "__LINE__") == 0) {
+                    t->token = T_INT_LIT;
+                    t->value = f->line;
                 } else if (keyword(t))
                     t->token = T_KEYWORD;
                 else if (strcmp(t->value_string, "NULL") == 0)
