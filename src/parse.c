@@ -1643,10 +1643,7 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
             init = declaration(f, token);
         } else
             remove_save_point(f, token);
-        FATAL(!init, "Missing FOR initializer");
         struct node *comp = expression_statement(f, token);
-        FATAL(!init, "Missing FOR test");
-
         struct node *post = NULL;
         if (token->token != T_ROUND_CLOSE)
             post = expression(f, token);

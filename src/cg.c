@@ -3197,13 +3197,17 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
         if (node->mid->right)
             gen_recursive(ctx, node->mid->right);
     }
-    FATALN(!node->left, node, "No compare block in while");
-    int cond_reg = gen_recursive(ctx, node->left);
-    struct variable *cond = find_variable(ctx, cond_reg);
-    int cmp_reg = gen_cmp_bool(ctx, cond);
+    if (node->left) {
+        int cond_reg = gen_recursive(ctx, node->left);
+        struct variable *cond = find_variable(ctx, cond_reg);
+        int cmp_reg = gen_cmp_bool(ctx, cond);
 
-    buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
-        cmp_reg, looplabel, outlabel);
+        buffer_write(ctx->data, "br i1 %%%d, label %%L%d, label %%L%d\n",
+            cmp_reg, looplabel, outlabel);
+    } else {
+        // There's no compare, so loop forever
+        buffer_write(ctx->data, "br label %%L%d\n", looplabel);
+    }
     buffer_write(ctx->data, "L%d:\n", outlabel);
 
     set_breaklabel(ctx, brklabel);
