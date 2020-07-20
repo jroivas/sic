@@ -1549,6 +1549,7 @@ struct node *expression_statement(struct scanfile *f, struct token *token)
         return NULL;
     }
     remove_save_point(f, token);
+    while (accept(f, token,  T_SEMI));
 
     return res;
 }

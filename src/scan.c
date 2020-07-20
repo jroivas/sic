@@ -32,6 +32,7 @@ static const char *tokenstr[] = {
     ":",
     ".",
     "->",
+    "...",
     "EOF"
 };
 
@@ -56,9 +57,11 @@ void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name)
 
 void close_input_file(struct scanfile *f)
 {
-    if (f->pipe)
-        pclose(f->infile);
-    else
+    if (f->pipe) {
+        int res = WEXITSTATUS(pclose(f->infile));
+        if (res)
+            ERR("Preprocessor error: %d", res);
+    } else
         fclose(f->infile);
 }
 
@@ -111,6 +114,8 @@ static int next(struct scanfile *f)
             c = buffer_getch(f->buf);
         else {
             c = fgetc(f->infile);
+            if (c < 0)
+                return c;
             buffer_putch(f->buf, c);
             c = buffer_getch(f->buf);
         }
@@ -289,8 +294,8 @@ int scan(struct scanfile *f, struct token *t)
 {
     int c = skip(f);
     int ok = 0;
-    memset(t, 0, sizeof(struct token));
 
+    memset(t, 0, sizeof(struct token));
     token_set(f, t);
 
     switch (c) {

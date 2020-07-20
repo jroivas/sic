@@ -381,7 +381,7 @@ char *double_to_str(literalnum val)
 const char *resolve_cpp()
 {
     // FIXME
-    return "cpp -nostdinc -isystem inc";
+    return "cpp -nostdinc -isystem inc/sys";
 }
 
 char *gen_incs(char **incs, int inc_cnt)
@@ -393,8 +393,8 @@ char *gen_incs(char **incs, int inc_cnt)
     char *res = calloc(1, TEXT_BUFFER_SIZE);
 
     for (int i = 0; i < inc_cnt; i++) {
-        res = strncat(res, "-I ", cnt);
-        cnt -= 3;
+        res = strncat(res, "-I", cnt);
+        cnt -= 2;
         res = strncat(res, incs[i], cnt);
         cnt -= strlen(incs[i]);
         res = strncat(res, " ", cnt);

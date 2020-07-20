@@ -3,6 +3,8 @@ SRC_FILES := src/*.c
 #SRC_FILES = src/main.c src/scan.c src/parse.c
 CFLAGS = -std=c99 -Wall -Werror -pedantic -g -O3 -fPIC -Iinc/
 
+all: build/sic build/sic-static
+
 build/sic-static: build
 	$(CC) $(CFLAGS) -o build/sic-static -static main.c $(SRC_FILES)
 
@@ -47,8 +49,6 @@ clean:
 	rm -rf build
 
 testall: test testsic
-
-all: build/sic build/sic-static
 
 help:
 	@echo "SIC - Slighty Improved C"

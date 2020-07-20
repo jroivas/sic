@@ -33,6 +33,7 @@ int main(int argc, char **argv)
     int dump_tree = 0;
     char **incs = NULL;
     int inc_cnt = 0;
+    int do_preprocess = 1;
 
     if (argc <= 1) {
         usage(argv[0]);
@@ -55,6 +56,8 @@ int main(int argc, char **argv)
                 incs = add_inc(incs, inc_cnt, tmp);
             } else if (strcmp(argv[i], "--dump-tree") == 0) {
                 dump_tree = 1;
+            } else if (strcmp(argv[i], "--no-cpp") == 0) {
+                do_preprocess = 0;
             } else {
                 ERR("Invalid argument: %s\n", argv[i]);
             }
@@ -64,11 +67,16 @@ int main(int argc, char **argv)
         }
     }
 
-    FILE *preproc = preprocess(srcname, incs, inc_cnt);
-    if (preproc)
-        pipe_input_file(&f, preproc, srcname);
-    else
+    FILE *preproc = NULL;
+    if (do_preprocess) {
+        preproc = preprocess(srcname, incs, inc_cnt);
+        if (preproc)
+            pipe_input_file(&f, preproc, srcname);
+        else
+            open_input_file(&f, srcname);
+    } else
         open_input_file(&f, srcname);
+
     if (!f.infile)
         ERR("Can't open file: %s", srcname);
 
