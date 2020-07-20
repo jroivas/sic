@@ -1,6 +1,7 @@
 #include "sic.h"
 #include "parse.h"
 #include <execinfo.h>
+#include <string.h>
 
 static const char *typestr[] = {
     "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum"
@@ -110,6 +111,35 @@ int solve_escape_str(char *ptr, int v)
     }
 
     return 0;
+}
+
+char *convert_escape(const char *src, int *len)
+{
+    int srclen = strlen(src);
+    int reslen = srclen * 3;
+    char *resptr = calloc(1, reslen);
+    char *res = resptr;
+    int escape = 0;
+
+    while (*src != 0) {
+        if (escape) {
+            int cnt = solve_escape_str(res, *src);
+            src++;
+            res += cnt;
+            (*len)++;
+            escape = 0;
+        } else if (*src == '\\'){
+            escape = 1;
+            src++;
+        } else {
+            *res = *src;
+            res++;
+            src++;
+            (*len)++;
+        }
+    }
+
+    return resptr;
 }
 
 

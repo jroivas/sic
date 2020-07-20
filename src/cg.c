@@ -192,36 +192,6 @@ struct node *flatten_list(struct node *node)
     return res;
 }
 
-#if 0
-struct type *find_type_by_name(struct type *first, const char *name)
-{
-    struct type *res = first;
-    FATAL(!name, "No type name provided!");
-    hashtype h = hash(name);
-    while (res) {
-        if (res->name_hash == h && strcmp(res->name, name) == 0)
-            return res;
-        res = res->next;
-    }
-    return NULL;
-}
-#endif
-
-#if 0
-int same_type(struct type *a, struct type *b)
-{
-    if (a->type == V_VOID && b->type == V_VOID)
-        return 1;
-    if (a->type == V_STR && b->type == V_STR)
-        return 1;
-    if (a->type != b->type)
-        return 0;
-    if (a->type == V_FLOAT)
-        return 1;
-    return a->bits == b->bits && a->sign == b->sign;
-}
-#endif
-
 struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr, const char *name)
 {
     struct type *res = ctx->types;
@@ -411,9 +381,6 @@ struct variable *find_literal(struct gen_context *ctx, enum var_type type, int b
 {
     struct variable *val = ctx->variables;
     while (val != NULL) {
-        /* printf("Finding: %d, type %d == %d, bits %d == %d, sign %d == %d, value %lld == %lld\n",
-            val->literal, val->type->type, type, val->type->bits, bits, val->type->sign, sign, val->value, value);
-            */
         if (val->literal && val->type->type == type && (bits == 0 || val->type->bits == 0 || val->type->bits == bits) && val->value == value)
             return val;
         val = val->next;
@@ -735,15 +702,6 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
                 val->reg, val->type->bits, align(val->type->bits));
             buffer_write(ctx->data, "store i%d 0, i%d* %s%d, align %d ; gen_cast NULL to int\n",
                 val->type->bits, val->type->bits, REGP(val), val->reg, align(val->type->bits));
-
-#if 0
-            val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
-            //buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
-            buffer_write(ctx->data, "store i%d 0, i%d* %%%d; CAST NULL\n",
-                    val->type->bits, val->type->bits, val->reg);
-            val->direct = 1;
-#endif
-            //return NULL;
         }
         else if (target->type == V_INT && v->type->type == V_STR) {
             val = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 0, 0, 0);
@@ -829,13 +787,13 @@ struct variable *cast_int_to_ptr(struct gen_context *ctx, struct variable *var)
     struct variable *res = var;
 
     if (var->type->type == V_INT && !var->ptr) {
-            res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
-            buffer_write(ctx->data, "%%%d = inttoptr i%d %%%d to i%d* ; cast_int_to_ptr\n",
-                res->reg,
-                var->type->bits,
-                var->reg,
-                res->type->bits);
-            res->ptr = 1;
+        res = new_inst_variable(ctx, V_INT, var->type->bits, var->type->sign);
+        buffer_write(ctx->data, "%%%d = inttoptr i%d %%%d to i%d* ; cast_int_to_ptr\n",
+            res->reg,
+            var->type->bits,
+            var->reg,
+            res->type->bits);
+        res->ptr = 1;
     }
 
     return res;
@@ -869,8 +827,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
         vals = int_to_str(val);
         buffer_write(code_alloc ? ctx->data : ctx->init,
             "store i%d%s %s, i%d%s* %%%d, align %d ; allocate_int %lld\n",
-            bits, ptr ? stars : "" , ptr ? "null" : vals, bits, ptr ? stars : "", reg, align(bits), val
-            );
+            bits, ptr ? stars : "" , ptr ? "null" : vals, bits, ptr ? stars : "", reg, align(bits), val);
         free(vals);
         if (stars)
             free(stars);
@@ -905,12 +862,10 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
         ERR("No valid node given!");
     struct variable *val = find_literal(ctx, V_INT, n->bits, n->value < 0, n->value);
     if (val) {
-        //printf("FOUND LITERAL: %d\n", val->reg);
         n->reg = val->reg;
         return val->reg;
     }
     val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
-    //printf("NEW LITERAL: %d INT, bits %d, sign %d, value %lld\n", val->reg, n->bits, n->value < 0, n->value);
     /*
      * It might be we haven't been able to determine bits so far.
      * However we need to have it now since alloc will need bits
@@ -956,35 +911,6 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     return val->reg;
 }
 
-char *convert_escape(const char *src, int *len)
-{
-    int srclen = strlen(src);
-    int reslen = srclen * 3;
-    char *resptr = calloc(1, reslen);
-    char *res = resptr;
-    int escape = 0;
-
-    while (*src != 0) {
-        if (escape) {
-            int cnt = solve_escape_str(res, *src);
-            src++;
-            res += cnt;
-            (*len)++;
-            escape = 0;
-        } else if (*src == '\\'){
-            escape = 1;
-            src++;
-        } else {
-            *res = *src;
-            res++;
-            src++;
-            (*len)++;
-        }
-    }
-
-    return resptr;
-}
-
 int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
 {
     if (!n)
@@ -1017,10 +943,8 @@ int gen_prepare_store_str(struct gen_context *ctx, struct node *n)
         return val->reg;
     }
 
-    //int slen = strlen(n->value_string) + 1;
-    int slen = 0;
+    int slen = 1;
     char *tmpstr = convert_escape(n->value_string, &slen);
-    slen++;
     struct variable *val = new_variable(glob, NULL, V_STR, slen, 0, 0, 0, 1);
     val->ptr = 1;
 
@@ -1120,23 +1044,20 @@ struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *v
 {
     if (idx_var)
         index = idx_var->reg;
+    char *stars = get_stars(res->ptr);
+    char *stars2 = get_stars(var->ptr);
 
     if (var->array) {
         buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; gen_access_ptr_item arr\n",
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
-#if 0
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; gen_access_ptr_item arr\n",
-            res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
-#endif
     } else {
-        char *stars = get_stars(res->ptr);
-        char *stars2 = get_stars(var->ptr);
-
         buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d%s, i%d%s %%%d, i64 %s%d ; gen_access_ptr_item\n",
             res->reg, res->type->bits, stars ? stars : "", res->type->bits, stars2 ? stars2 : "", var->reg, idx_var ? "%" : "", index);
-        if (stars)
-            free(stars);
     }
+    if (stars)
+        free(stars);
+    if (stars2)
+        free(stars2);
 
     return res;
 }
@@ -1264,6 +1185,7 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
 {
     if (v == NULL)
         ERR("Can't load null!");
+
     if (v->direct)
         return v;
     else if (v->type->type == V_INT)
@@ -1820,7 +1742,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
     struct buffer *params = buffer_init();
     int paramcnt = 0;
     int ellipsis = 0;
-    //while (provided && wanted && wanted->node == A_LIST) {
     while (provided) {
         struct node *pval = NULL;
         struct node *ptype = NULL;
@@ -1838,7 +1759,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             if (ptype->node == A_ELLIPSIS)
                 ellipsis = 1;
         }
-        //FATALN(!ellipsis && ptype->node != A_TYPE, provided, "Invalid parameter type");
 
         int r = gen_recursive(ctx, provided->left);
         FATALN(!r, provided, "Expected parameter for function call");
@@ -1872,7 +1792,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
 
         switch (target.type) {
             case V_INT:
-                //printf("Param %d for %s at %d,%d\n", paramcnt, func->value_string, func->line, func->linepos);
                 tgt = load_and_cast_to(ctx, par, &target, CAST_NORMAL);
                 buffer_write(params, "%si%d%s %%%d",
                     paramcnt > 1 ? ", " : "",
@@ -1923,56 +1842,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             wanted = NULL;
     }
     FATALN(wanted && !provided, param_node, "Not enought parameters");
-#if 0
-    while (node->node == A_LIST) {
-        int r = gen_recursive(ctx, node->left);
-        FATALN(!r, node, "Expected parameter for function call");
-
-        struct variable *par = find_variable(ctx, r);
-        par = gen_load(ctx, par);
-        FATALN(!par, node, "Invalid parameter for function call");
-
-        char *stars = get_stars(par->ptr);
-        // TODO get function parameter prototypes and safe cast if needed
-
-        paramcnt++;
-        switch (par->type->type) {
-            case V_INT:
-                buffer_write(params, "%si%d%s %%%d",
-                    paramcnt > 1 ? ", " : "",
-                    par->type->bits,
-                    stars ? stars : "",
-                    par->reg);
-                break;
-            case V_FLOAT:
-                buffer_write(params, "%sdouble%s %%%d",
-                    paramcnt > 1 ? ", " : "",
-                    stars ? stars : "",
-                    par->reg);
-                break;
-            case V_STRUCT:
-                buffer_write(params, "%s%%struct.%s%s %%%d",
-                    paramcnt > 1 ? ", " : "",
-                    par->type->type_name,
-                    stars ? stars : "",
-                    par->reg);
-                break;
-            case V_STR:
-                buffer_write(params, "%si8* getelementptr inbounds "
-                    "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0)",
-                    paramcnt > 1 ? ", " : "",
-                    par->bits, par->bits, par->reg);
-                break;
-            default:
-                ERR("Invalid parameter type: %s", type_str(par->type->type));
-        }
-        if (stars)
-            free(stars);
-        if (node->right == NULL)
-            break;
-        node = node->right;
-    }
-#endif
 
     const char *tmp = buffer_read(params);
     int tmplen = strlen(tmp) + 1;
@@ -2664,7 +2533,6 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
         struct node *ptype = pval->left;
         struct node *pname = pval->right;
         FATALN(!ptype, pval, "Invalid parameter");
-        //printf("PTR: %s\n", node_str(ptype));
         FATALN(ellipsis, pval, "Got elements after ellipsis \"...\"");
         if (ptype->node == A_ELLIPSIS) {
             ellipsis = 1;
@@ -2774,7 +2642,6 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     align(ptype->bits));
                 pname->reg = res->reg;
             } else if (ptype->type == V_VOID) {
-                //printf("VV: %p, %p\n", (void*)pname, (void*)ptype);
                 struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
@@ -2899,6 +2766,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
     FATALN(!node->left, node, "Missing function definition");
 
     int func_proto = gen_recursive(func_ctx, node->left);
+    (void)func_proto;
 
     struct node *r = node->right;
     FATALN(!r, node, "Function body missing");
@@ -2909,22 +2777,15 @@ int gen_function(struct gen_context *ctx, struct node *node)
     struct node *functype = node->left;
     struct node *body = NULL;
 
-#if 0
-
-    FATAL(!v, "No proto variable: %d", func_proto);
-    FATAL(!v->type, "No proto type");
-#else
-    (void)func_proto;
-#endif
     if (node && node->right && node->right->right)
         body = node->right->right;
 
     if (!body) {
-        // This is prototype, it's declared earlir
+        // This is prototype, it's declared earlier
         return 0;
     }
 
-    // Register function globally
+    // Find previously defined function
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
     FATALN(!func_var, node, "Function not found: %s", func_ctx->name);
     FATALN(!func_var->func, node, "Function variable already in use: %s", func_ctx->name);
@@ -2942,7 +2803,6 @@ int gen_function(struct gen_context *ctx, struct node *node)
     }
 
     FATALN(node->right->node != A_GLUE, node->right, "Invalid function");
-    //FATALN(!body, node->right, "Invalid function body");
 
     // Need to tell return type
     if (func_ctx->main_type == NULL)
