@@ -6,17 +6,17 @@ int main()
     for (i = 0; i < 10; i++) {
         res += i;
     }
-    if (i != 10)
-        return 1;
     if (res != 45)
         return 2;
 
+    if (i != 10)
+        return i;
     for (int j = 0; j < 42; j++) {
         res += j;
         i++;
     }
-/* TODO: This should complain since j should be calid only
-    inside for loop.
+/* TODO: This should complain since j should be valid only
+   inside for loop.
 
     if (j != 42)
         return 42;

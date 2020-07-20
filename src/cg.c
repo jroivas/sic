@@ -1129,8 +1129,13 @@ struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *v
             res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
 #endif
     } else {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d, i%d* %%%d, i64 %s%d ; gen_access_ptr_item\n",
-            res->reg, res->type->bits, res->type->bits, var->reg, idx_var ? "%" : "", index);
+        char *stars = get_stars(res->ptr);
+        char *stars2 = get_stars(var->ptr);
+
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d%s, i%d%s %%%d, i64 %s%d ; gen_access_ptr_item\n",
+            res->reg, res->type->bits, stars ? stars : "", res->type->bits, stars2 ? stars2 : "", var->reg, idx_var ? "%" : "", index);
+        if (stars)
+            free(stars);
     }
 
     return res;
@@ -2673,7 +2678,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
         // TODO: parse types properly, now just shortcutting
         int pointer = 0;
         while (pname && pname->node == A_POINTER) {
-            pointer++;
+            pointer += pname->ptr;
             pname = pname->left;
         }
         // Need to update pointer value only once when allocting
@@ -3167,16 +3172,20 @@ int set_continuelabel(struct gen_context *ctx, int label)
 int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype)
 {
     int looplabel = gen_reserve_label(ctx);
+    int inclabel = gen_reserve_label(ctx);
     int cmplabel = gen_reserve_label(ctx);
     int outlabel = gen_reserve_label(ctx);
     int brklabel = set_breaklabel(ctx, outlabel);
-    int contlabel = set_continuelabel(ctx, cmplabel);
+    int contlabel = set_continuelabel(ctx, inclabel);
 
+    buffer_write(ctx->data, "; Loop begin\n");
     if (looptype == LOOP_FOR) {
         FATALN(!node->mid || node->mid->node != A_GLUE, node, "Invalid for loop");
-        if (node->mid->left)
+        if (node->mid->left) {
+            buffer_write(ctx->data, "; For init\n");
             gen_recursive(ctx, node->mid->left);
-        buffer_write(ctx->data, "br label %%L%d\n", looplabel);
+        }
+        buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     } else if (looptype == LOOP_DO) {
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
     } else {
@@ -3190,13 +3199,17 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
     if (rets != ctx->rets)
         ctx->regnum++;
 
-    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
-    buffer_write(ctx->data, "L%d:\n", cmplabel);
-
+    buffer_write(ctx->data, "br label %%L%d\n", inclabel);
+    buffer_write(ctx->data, "L%d:\n", inclabel);
     if (looptype == LOOP_FOR) {
+        buffer_write(ctx->data, "; Loop inc\n");
         if (node->mid->right)
             gen_recursive(ctx, node->mid->right);
     }
+    buffer_write(ctx->data, "; Loop compare\n");
+    buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
+    buffer_write(ctx->data, "L%d:\n", cmplabel);
+
     if (node->left) {
         int cond_reg = gen_recursive(ctx, node->left);
         struct variable *cond = find_variable(ctx, cond_reg);
@@ -3208,6 +3221,7 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
         // There's no compare, so loop forever
         buffer_write(ctx->data, "br label %%L%d\n", looplabel);
     }
+    buffer_write(ctx->data, "; Exit loop\n");
     buffer_write(ctx->data, "L%d:\n", outlabel);
 
     set_breaklabel(ctx, brklabel);

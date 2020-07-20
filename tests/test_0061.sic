@@ -38,7 +38,7 @@ int main()
 
     i = 0;
     for (;;) {
-        i++;    
+        i++;
         if (i > 41)
             break;
     }
