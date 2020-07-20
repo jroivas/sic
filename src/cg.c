@@ -2973,7 +2973,7 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         inc2 = rets < ctx->rets;
         if (ternary) {
             struct variable *tres = find_variable(ctx, ifret);
-            buffer_write(cmpblock, "; TERNARY FALSE\n");
+            buffer_write(ctx->data, "; TERNARY FALSE\n");
             FATALN(!tres, node->right, "Ternary return type invalid");
             FATALN(!res, node->right, "Invalid ternary");
 
