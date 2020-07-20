@@ -9,6 +9,7 @@ typedef unsigned long long literalnum;
 typedef unsigned long hashtype;
 
 #define MAX_STR_LEN 512
+#define TEXT_BUFFER_SIZE 4096
 #define STACK_TRACE_SIZE 64
 #define DEBUG 0
 #define REF_CTX(X) (-(X))
@@ -59,5 +60,6 @@ char *double_to_str(literalnum val);
 int solve_escape(const char *v);
 int solve_escape_str(char *ptr, int v);
 char *convert_escape(const char *src, int *len);
+FILE *preprocess(const char *fname, char **incs, int inc_cnt);
 
 #endif

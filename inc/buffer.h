@@ -10,4 +10,11 @@ int buffer_write(struct buffer *, const char *fmt, ...);
 const char *buffer_read(struct buffer *);
 void buffer_del(struct buffer *);
 
+char buffer_getch(struct buffer *);
+int buffer_putch(struct buffer *buf, char str);
+void buffer_seek(struct buffer *, size_t pos);
+size_t buffer_size(struct buffer *);
+size_t buffer_pos(struct buffer *);
+int buffer_eof(struct buffer *);
+
 #endif

@@ -10,6 +10,7 @@ struct buffer {
     char *data;
     size_t size;
     size_t alloc_size;
+    size_t pos;
 };
 
 static const unsigned BUFFER_EXTEND_SIZE = 256;
@@ -33,6 +34,24 @@ int buffer_append(struct buffer *buf, const char *str)
     }
 
     memcpy(buf->data + buf->size, str, len);
+    buf->size = newsize;
+    buf->data[buf->size] = 0;
+    return buf->size;
+}
+
+int buffer_putch(struct buffer *buf, char str)
+{
+    size_t len = 1;
+    size_t newsize = len + buf->size;
+
+    if (buf->alloc_size < newsize + 1) {
+        while (buf->alloc_size < newsize + 1)
+            buf->alloc_size += BUFFER_EXTEND_SIZE;
+
+        buf->data = realloc(buf->data, buf->alloc_size);
+    }
+
+    *(buf->data + buf->size) = str;
     buf->size = newsize;
     buf->data[buf->size] = 0;
     return buf->size;
@@ -64,6 +83,33 @@ int buffer_write(struct buffer *buf, const char *fmt, ...)
 const char *buffer_read(struct buffer *buf)
 {
     return buf->data ? buf->data : "";
+}
+
+char buffer_getch(struct buffer *buf)
+{
+    return buf->data[buf->pos++];
+}
+
+size_t buffer_size(struct buffer *buf)
+{
+    return buf->size;
+}
+
+size_t buffer_pos(struct buffer *buf)
+{
+    return buf->pos;
+}
+
+void buffer_seek(struct buffer *buf, size_t pos)
+{
+    buf->pos = pos;
+    if (buf->pos > buf->size)
+        buf->pos = buf->size;
+}
+
+int buffer_eof(struct buffer *buf)
+{
+    return (buf->pos >= buf->size);
 }
 
 void buffer_del(struct buffer *buf)

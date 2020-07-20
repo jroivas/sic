@@ -1,7 +1,10 @@
-#include "sic.h"
-#include "parse.h"
+#define _DEFAULT_SOURCE
+#include <stdio.h>
 #include <execinfo.h>
 #include <string.h>
+
+#include "sic.h"
+#include "parse.h"
 
 static const char *typestr[] = {
     "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum"
@@ -373,4 +376,42 @@ char *double_to_str(literalnum val)
     snprintf(res, max_size - 1, "%lf", (double)val);
 
     return res;
+}
+
+const char *resolve_cpp()
+{
+    // FIXME
+    return "cpp -nostdinc -isystem inc";
+}
+
+char *gen_incs(char **incs, int inc_cnt)
+{
+    if (!incs)
+        return "";
+
+    int cnt = TEXT_BUFFER_SIZE - 1;
+    char *res = calloc(1, TEXT_BUFFER_SIZE);
+
+    for (int i = 0; i < inc_cnt; i++) {
+        res = strncat(res, "-I ", cnt);
+        cnt -= 3;
+        res = strncat(res, incs[i], cnt);
+        cnt -= strlen(incs[i]);
+        res = strncat(res, " ", cnt);
+        cnt--;
+        FATAL(cnt <= 0, "Too many incs")
+    }
+    return res;
+}
+
+FILE *preprocess(const char *fname, char **incs, int inc_cnt)
+{
+    char cmd[TEXT_BUFFER_SIZE + 1];
+
+    snprintf(cmd, TEXT_BUFFER_SIZE, "%s %s %s", resolve_cpp(), gen_incs(incs, inc_cnt), fname);
+
+#if DEBUG
+    printf("Running: %s\n", cmd);
+#endif
+    return popen(cmd, "r");
 }

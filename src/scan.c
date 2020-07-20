@@ -1,8 +1,10 @@
+#define _DEFAULT_SOURCE
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
 #include "sic.h"
 #include "scan.h"
 #include "str.h"
-#include <string.h>
-#include <ctype.h>
 
 static const char *tokenstr[] = {
     "<INVALID>",
@@ -39,11 +41,25 @@ void open_input_file(struct scanfile *f, const char *name)
     f->infile = fopen(name, "r");
     f->filename = name;
     f->line = 1;
+    f->buf = buffer_init();
+}
+
+void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name)
+{
+    memset(f, 0, sizeof(struct scanfile));
+    f->infile = pipe;
+    f->filename = name;
+    f->line = 1;
+    f->pipe = 1;
+    f->buf = buffer_init();
 }
 
 void close_input_file(struct scanfile *f)
 {
-    fclose(f->infile);
+    if (f->pipe)
+        pclose(f->infile);
+    else
+        fclose(f->infile);
 }
 
 const char *token_val_str(enum tokentype t)
@@ -91,7 +107,13 @@ static int next(struct scanfile *f)
         f->putback = 0;
         f->linepos++;
     } else {
-        c = fgetc(f->infile);
+        if (buffer_size(f->buf) > buffer_pos(f->buf)) 
+            c = buffer_getch(f->buf);
+        else {
+            c = fgetc(f->infile);
+            buffer_putch(f->buf, c);
+            c = buffer_getch(f->buf);
+        }
         f->linepos++;
         if (c == '\n') {
             f->line++;
@@ -488,7 +510,8 @@ void save_point(struct scanfile *f, struct token *t)
     FATAL(f->savecnt + 1 >= SCANFILE_SAVE_MAX,
             "Maximum save points reached");
     memcpy(&f->save_token[f->savecnt], t, sizeof(*t));
-    long pos = ftell(f->infile);
+    //long pos = ftell(f->infile);
+    long pos = buffer_pos(f->buf);
     // If we have putback need to decrement pos.
     if (f->putback && pos)
         pos--;
@@ -516,7 +539,12 @@ void load_point(struct scanfile *f, struct token *t)
 {
     FATAL(!f->savecnt, "No save points to load");
     f->putback = 0;
-    fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
+    size_t p = buffer_size(f->buf);
+    long savepoint = f->save_point[--f->savecnt];
+
+    FATAL(p < savepoint, "Buffer underrun %lu < %ld", p, savepoint);
+    buffer_seek(f->buf, savepoint);
+    //fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
 #if 0
     printf("Loaded: %d,%d from %d,%d token %s\n", t->line, t->linepos, f->line, f->linepos, token_dump(t));

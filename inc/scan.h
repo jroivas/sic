@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include "sic.h"
+#include "buffer.h"
 
 enum tokentype {
     T_INVALID,
@@ -68,7 +69,10 @@ struct token {
 #define SCANFILE_SAVE_MAX 64
 struct scanfile {
     FILE *infile;
+    struct buffer *buf;
     const char *filename;
+
+    int pipe;
     int line;
     int linepos;
     int putback;
@@ -78,6 +82,7 @@ struct scanfile {
 };
 
 void open_input_file(struct scanfile *f, const char *name);
+void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name);
 void close_input_file(struct scanfile *f);
 int scan(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);

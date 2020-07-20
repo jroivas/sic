@@ -11,6 +11,16 @@ static void usage(char *cname)
     printf("Usage: %s infile.sic\n", cname);
 }
 
+char **add_inc(char **incs, int inc_cnt, char *newinc)
+{
+    if (!incs)
+        incs = calloc(inc_cnt, sizeof(*incs));
+    else
+        incs = realloc(incs, inc_cnt * sizeof(*incs));
+    incs[inc_cnt - 1] = newinc;
+    return incs;
+}
+
 int main(int argc, char **argv)
 {
     int res = 0;
@@ -21,6 +31,8 @@ int main(int argc, char **argv)
     const char *srcname = NULL;
     int i;
     int dump_tree = 0;
+    char **incs = NULL;
+    int inc_cnt = 0;
 
     if (argc <= 1) {
         usage(argv[0]);
@@ -32,6 +44,15 @@ int main(int argc, char **argv)
                 i++;
                 FATAL(i >= argc, "Missing output file name!");
                 outname = argv[i];
+            } else if (strcmp(argv[i], "-I") == 0) {
+                i++;
+                FATAL(i >= argc, "Missing include dir");
+                inc_cnt++;
+                incs = add_inc(incs, inc_cnt, argv[i]);
+            } else if (strncmp(argv[i], "-I", 2) == 0) {
+                char *tmp = argv[i] + 2;
+                inc_cnt++;
+                incs = add_inc(incs, inc_cnt, tmp);
             } else if (strcmp(argv[i], "--dump-tree") == 0) {
                 dump_tree = 1;
             } else {
@@ -43,7 +64,11 @@ int main(int argc, char **argv)
         }
     }
 
-    open_input_file(&f, srcname);
+    FILE *preproc = preprocess(srcname, incs, inc_cnt);
+    if (preproc)
+        pipe_input_file(&f, preproc, srcname);
+    else
+        open_input_file(&f, srcname);
     if (!f.infile)
         ERR("Can't open file: %s", srcname);
 
