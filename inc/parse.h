@@ -65,6 +65,8 @@ enum nodetype {
     A_CONTINUE,
     A_GOTO,
     A_LABEL,
+    A_ATTRIBUTE,
+    A_TYPEDEF,
     A_LIST
 };
 

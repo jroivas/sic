@@ -7,7 +7,7 @@
 #include "parse.h"
 
 static const char *typestr[] = {
-    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum"
+    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom"
 };
 
 const char *type_str(enum var_type t)
@@ -264,11 +264,17 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_SIZEOF:
             printf("%s", node_str(node));
             break;
+        case A_TYPEDEF:
+            printf("TYPEDEF: %s", node->value_string);
+            break;
         case A_GOTO:
             printf("GOTO: %s", node->value_string);
             break;
         case A_LABEL:
             printf("LABEL: %s", node->value_string);
+            break;
+        case A_ATTRIBUTE:
+            printf("ATTRIBUTE: %s", node->value_string);
             break;
         case A_INT_LIT:
             printf("INT: %llu, %d bits %s", node->value, node->bits, node->sign ? "signed" : "unsigned");
@@ -381,7 +387,9 @@ char *double_to_str(literalnum val)
 const char *resolve_cpp()
 {
     // FIXME
-    return "cpp -nostdinc -isystem inc/sys";
+    //return "cpp -nostdinc -isystem inc/sys";
+    //return "cpp -nostdinc";
+    return "cpp";
 }
 
 char *gen_incs(char **incs, int inc_cnt)
@@ -406,7 +414,7 @@ char *gen_incs(char **incs, int inc_cnt)
 
 FILE *preprocess(const char *fname, char **incs, int inc_cnt)
 {
-    char cmd[TEXT_BUFFER_SIZE + 1];
+    char cmd[2 * TEXT_BUFFER_SIZE + 1];
 
     snprintf(cmd, TEXT_BUFFER_SIZE, "%s %s %s", resolve_cpp(), gen_incs(incs, inc_cnt), fname);
 

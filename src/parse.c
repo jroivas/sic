@@ -14,7 +14,7 @@ struct node *expression(struct scanfile *f, struct token *token);
 struct node *abstract_declarator(struct scanfile *f, struct token *token);
 struct node *declarator(struct scanfile *f, struct token *token);
 struct node *type_name(struct scanfile *f, struct token *token);
-
+struct node *declaration_specifiers(struct scanfile *f, struct token *token);
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
@@ -77,8 +77,56 @@ static const char *nodestr[] = {
     "CONTINUE",
     "GOTO",
     "LABEL",
+    "ATTRIBUTE",
+    "TYPEDEF",
     "LIST"
 };
+
+struct typedef_info {
+    const char *name;
+    struct node *node;
+
+    struct typedef_info *next;
+};
+
+struct parse_private {
+    struct typedef_info *def;
+};
+
+#define PPRIV(X) ((struct parse_private*)((X)->parsedata))
+
+void typedef_add(struct scanfile *f, const char *name, struct node *node)
+{
+    struct typedef_info *newinfo = calloc(1, sizeof(struct typedef_info));
+    newinfo->name = name;
+    newinfo->node = node;
+
+    struct parse_private *priv = PPRIV(f);
+    FATAL(!priv, "Parser internal error, no private struct defined");
+    struct typedef_info *info = priv->def;
+    if (!info) {
+        priv->def = newinfo;
+    } else {
+        while (info->next)
+            info = info->next;
+        info->next = newinfo;
+    }
+}
+
+int typedef_is(struct scanfile *f, const char *name)
+{
+    struct parse_private *priv = PPRIV(f);
+    if (!priv)
+        return 0;
+    struct typedef_info *info = priv->def;
+
+    while (info) {
+        if (strcmp(info->name, name) == 0)
+            return 1;
+        info = info->next;
+    }
+    return 0;
+}
 
 const char *node_type_str(enum nodetype t)
 {
@@ -445,6 +493,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION || node->type == V_ENUM))
         return node;
 
+#if 0
     struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
     enum var_type type = node->type;
     type = resolve_var_type(node);
@@ -466,6 +515,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     res->addr = addr;
     res->is_const = scan_const(node) || node->is_const;
     res->is_extern = scan_attribute(node, "extern", A_STORAGE_CLASS) || node->is_extern;
+    res->value_string = node->value_string;
 
 #if 0
     printf("++ NODE: %s\n", node->value_string);
@@ -475,7 +525,20 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
 #endif
 
     node_free(node);
+
     return res;
+#else
+    enum var_type type = resolve_var_type(node);
+
+    int bits = node->bits;
+    if (type == V_INT && bits == 0) {
+        // Default for 32 bits
+        bits = 32;
+    }
+    node->bits = bits;
+
+    return node;
+#endif
 }
 
 struct node *primary_expression(struct scanfile *f, struct token *token)
@@ -766,6 +829,8 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "double") == 0)
         res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
+    else if (typedef_is(f, token->value_string))
+        res = make_type_spec(token, V_CUSTOM, 0, PARSE_SIGNED, token->value_string);
 
     // FIXME More types
 
@@ -795,6 +860,26 @@ struct node *type_qualifier_list(struct scanfile *f, struct token *token)
     return iter_list(f, token, type_qualifier, COMMA_NONE, 0);
 }
 
+struct node *typedef_declaration(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+
+    FATAL(typedef_is(f, token->value_string), "Redefinition of typedef: %s", token->value_string);
+    struct node *decl = declaration_specifiers(f, token);
+    FATAL(!decl, "Typedef missing type declaration");
+
+    FATAL(token->token != T_IDENTIFIER, "Expected identifier after typedef");
+    res = make_node(token, A_TYPEDEF, decl, NULL, NULL);
+    res->value_string = token->value_string;
+    scan(f, token);
+
+    semi(f, token);
+
+    typedef_add(f, res->value_string, res);
+
+    return res;
+}
+
 struct node *storage_class_specifier(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -803,6 +888,8 @@ struct node *storage_class_specifier(struct scanfile *f, struct token *token)
     if (accept_keyword(f, token, K_EXTERN)) {
         res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
         res->value_string = val;
+    } else if (accept_keyword(f, token, K_TYPEDEF)) {
+        res = typedef_declaration(f, token);
     }
 
     return res;
@@ -826,15 +913,17 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         struct node *tmp = __declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
-        res = make_node(token, A_GLUE, res, NULL, tmp);
+        res = make_node(token, A_TYPE_LIST, res, NULL, tmp);
     }
+
+    if (res->node != A_TYPE_LIST)
+        res = make_node(token, A_TYPE_LIST, res, NULL, NULL);
 
     return res;
 }
 
 struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 {
-
     struct node *res = __declaration_specifiers(f, token);
 
     if (!res)
@@ -1772,6 +1861,42 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *attributes(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (accept_keyword(f, token, K_ATTRIBUTE)) {
+        expect(f, token, T_ROUND_OPEN, "(");
+        expect(f, token, T_ROUND_OPEN, "(");
+
+        while (1) {
+            //if (!acccept(f, token, T_IDENTIFIER))
+            if (token->token != T_IDENTIFIER)
+                break;
+            struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+            tmp->value_string = token->value_string;
+            if (!res)
+                res = tmp;
+            else
+                res = make_node(token, A_LIST, res, NULL, tmp);
+            scan(f, token);
+
+            if (token->token != T_COMMA)
+                break;
+            accept(f, token, T_COMMA);
+        }
+
+        expect(f, token, T_ROUND_CLOSE, ")");
+        expect(f, token, T_ROUND_CLOSE, ")");
+    }
+    if (res) {
+        struct node *tmp = attributes(f, token);
+        if (tmp)
+            res = make_node(token, A_LIST, res, NULL, tmp);
+    }
+
+    return res;
+}
+
 struct node *function_definition(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -1787,6 +1912,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     if (!decl)
         ERR("Invalid function definition");
 #endif
+    struct node *attrib = attributes(f, token);
     save_point(f, token);
     struct node *comp = compound_statement(f, token);
     if (!comp) {
@@ -1794,7 +1920,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
         if (decl->is_func && accept(f, token, T_SEMI)) {
             // This is forward declaration
             res = make_node(token, A_GLUE, decl, NULL, NULL);
-            res = make_node(token, A_FUNCTION, spec, NULL, res);
+            res = make_node(token, A_FUNCTION, spec, attrib, res);
             return res;
         }
         // If no compound, this is most probably variable decls
@@ -1805,7 +1931,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
 
     //decl = type_resolve(token, decl, 0);
     res = make_node(token, A_GLUE, decl, NULL, comp);
-    res = make_node(token, A_FUNCTION, spec, NULL, res);
+    res = make_node(token, A_FUNCTION, spec, attrib, res);
 
     return res;
 }
@@ -1856,6 +1982,10 @@ struct node *translation_unit(struct scanfile *f, struct token *token)
 
 struct node *parse(struct scanfile *f)
 {
+    if (!f->parsedata) {
+        f->parsedata = calloc(1, sizeof(struct parse_private));
+    }
+
     struct token token;
     memset(&token, 0, sizeof(struct token));
     scan(f, &token);

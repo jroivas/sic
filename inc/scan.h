@@ -50,6 +50,9 @@ enum keyword_type {
     K_GOTO,
     K_BREAK,
     K_CONTINUE,
+    K_TYPEDEF,
+    K_ATTRIBUTE,
+    K_EXTENSION,
     K_SIZEOF
 };
 
@@ -79,6 +82,9 @@ struct scanfile {
     int savecnt;
     long save_point[SCANFILE_SAVE_MAX];
     struct token save_token[SCANFILE_SAVE_MAX];
+
+    // Parser defined data
+    void *parsedata;
 };
 
 void open_input_file(struct scanfile *f, const char *name);
