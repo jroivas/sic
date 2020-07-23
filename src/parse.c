@@ -451,18 +451,14 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
     if (node->left && (node->left->node == A_STRUCT || node->left->node == A_UNION || node->left->node == A_ENUM))
         node = node->left;
     if (node->node == A_STRUCT || node->node == A_UNION) {
-        // FIXME
-        struct node *name = node->left;
-        FATALN(!name, node, "Struct has no name");
-
         struct node *res = make_node(t, A_TYPE, NULL, NULL, NULL);
         if (node->node == A_STRUCT)
             res->type = V_STRUCT;
         else
             res->type = V_UNION;
 
-        res->value_string = name->value_string;
-        res->type_name = name->value_string;
+        res->value_string = node->value_string;
+        res->type_name = node->value_string;
         res->ptr = node->ptr;
         res->addr = node->addr;
 
@@ -739,10 +735,9 @@ struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
         return NULL;
 
     if (token->token == T_IDENTIFIER) {
-        struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
-        tmp->value_string = token->value_string;
+        res->value_string = token->value_string;
+        res->type_name = token->value_string;
         scan(f, token);
-        res->left = tmp;
     }
 
     if (accept(f, token, T_CURLY_OPEN)) {

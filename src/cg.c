@@ -42,6 +42,7 @@ struct type {
     int sign;
     int ptr;
     int is_const;
+    int temporary;
 
     const char *name;
     const char *type_name;
@@ -2023,7 +2024,30 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->bits = 0;
             res->sign = 0;
         }
-        free(res == tl ? tr : tl);
+        struct type *to_free = res == tl ? tr : tl;
+        if (to_free->temporary)
+            free(to_free);
+    } else if (node->node == A_STRUCT) {
+        res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
+
+        if (res)
+            return res;
+
+        struct gen_context *global_ctx = ctx;
+
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+
+        // We have most probably struct definition
+        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        res->type_name = node->value_string;
+
+        // FIXME This is a hack for now
+        buffer_write(global_ctx->init, "%%struct.%s = type { ",
+            node->value_string);
+        complete_struct_type(global_ctx, res, node->right);
+
+        buffer_write(global_ctx->init, " }\n");
     } else {
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
@@ -2033,6 +2057,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->name = node->value_string;
         res->is_const = node->is_const;
         res->type_name = node->type_name;
+        res->temporary = 1;
     }
 
     return res;
@@ -2051,7 +2076,8 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
-    free(tmp);
+    if (tmp->temporary)
+        free(tmp);
     return res;
 }
 
@@ -2060,6 +2086,7 @@ struct type *gen_type_list_type(struct gen_context *ctx, struct node *node)
     struct type *res = gen_type_list_simple(ctx, node);
     if (!res)
         res = gen_type_list_recurse(ctx, node);
+
     FATALN(!res, node, "Couldn't generate type");
     ctx->pending_type = res;
 
