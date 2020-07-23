@@ -142,11 +142,12 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v);
 struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr, int addr, int global);
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, literalnum val);
 struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, struct variable *res, struct variable *idx_var, int index);
+struct type *gen_type_list_type(struct gen_context *ctx, struct node *node);
 
 char *stype_str(struct type *t)
 {
     char *tmp = calloc(256, sizeof(char));
-    snprintf(tmp, 255, "%s, %d bits, %ssigned%s", type_str(t->type), t->bits, t->sign ? "" : "un", t->is_const ? ", const" : "");
+    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_const ? ", const" : "");
     tmp[255] = 0;
     return tmp;
 }
@@ -263,7 +264,7 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     do {
         if (tmp->left) {
             struct node *l = tmp->left;
-            struct type *t = __find_type_by(ctx, l->type, l->bits, l->sign, l->ptr, l->type_name);
+            struct type *t = gen_type_list_type(ctx, l);
             FATALN(!t, l, "Invalid type definition: %s", type_str(l->type));
             type->itemcnt++;
 
@@ -353,6 +354,8 @@ struct type *type_wrap(struct gen_context *ctx, struct type *src)
 struct type *type_wrap_to(struct gen_context *ctx, struct type *src, int ptrval)
 {
     struct type *res = src;
+    if (!res)
+        return res;
     while (ptrval--)
         res = type_wrap(ctx, res);
     return res;
@@ -1998,8 +2001,12 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 res = tr;
             else if (tl->type == V_INT && tr->type == V_VOID)
                 res = tl;
+            else if (tl->type == V_FLOAT && tr->type == V_VOID)
+                res = tl;
+            else if (tl->type == V_VOID && tr->type == V_FLOAT)
+                res = tr;
             else
-                ERR("Invalid types");
+                ERR("Invalid types: %s %s", type_str(tl->type), type_str(tr->type));
         } else
             res = tl;
 
@@ -2011,6 +2018,11 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->ptr = tr->ptr;
         if (!res->is_const && tr->is_const)
             res->is_const = 1;
+        // Void is special and need to hardcode these
+        if (res->type == V_VOID) {
+            res->bits = 0;
+            res->sign = 0;
+        }
         free(res == tl ? tr : tl);
     } else {
         res = calloc(1, sizeof(struct type));
@@ -2021,7 +2033,6 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->name = node->value_string;
         res->is_const = node->is_const;
         res->type_name = node->type_name;
-        res = type_wrap_to(ctx, res, node->ptr);
     }
 
     return res;
@@ -2039,6 +2050,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
     //printf("RECURS: %s\n", stype_str(tmp));
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
+    res = type_wrap_to(ctx, res, tmp->ptr);
     free(tmp);
     return res;
 }
@@ -2084,7 +2096,8 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(!var, node, "Invalid cast source");
     struct type *target = find_type_by_id(ctx, REF_CTX(a));
     FATALN(!target, node, "Invalid cast target");
-    int ptrval = ctx->pending_type->ptr;
+    int ptrval = target->ptr;
+    FATALN(!ptrval, node, "Invalid cast target");
     if (var->type->type == V_INT && target->type == var->type->type) {
         if (target->bits == var->type->bits)
             return var->reg;

@@ -1526,8 +1526,7 @@ struct node *type_name(struct scanfile *f, struct token *token)
         return res;
 
     struct node *rest = abstract_declarator(f, token);
-    if (rest)
-        res = make_node(token, A_LIST, res, NULL, rest);
+    res = make_node(token, A_TYPE_LIST, res, NULL, rest);
 
     return res;
 }
