@@ -1953,20 +1953,17 @@ struct type *gen_type_list_simple(struct gen_context *ctx, struct node *node)
 {
     if (!node)
         return NULL;
-    if (node->node == A_TYPE_LIST) {
-        if (!node->left)
-            return NULL;
-        if (node->left && node->right)
-            return NULL;
+    if (node->node != A_TYPE_LIST)
+        return NULL;
+    if (!node->left)
+        return NULL;
+    if (node->left && node->right)
+        return NULL;
 
-        if (node->left && !node->right)
-            if (node->left->left || node->left->right)
-                return NULL;
-        node = node->left;
-    } else {
-        if (node->left || node->left)
+    if (node->left && !node->right)
+        if (node->left->left || node->left->right)
             return NULL;
-    }
+    node = node->left;
 
     // Need to fix bits in case of int
     int search_bits = node->bits;
@@ -2019,22 +2016,15 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->ptr = tr->ptr;
         if (!res->is_const && tr->is_const)
             res->is_const = 1;
-        // Void is special and need to hardcode these
-        if (res->type == V_VOID) {
-            res->bits = 0;
-            res->sign = 0;
-        }
         struct type *to_free = res == tl ? tr : tl;
         if (to_free->temporary)
             free(to_free);
     } else if (node->node == A_STRUCT) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
-
         if (res)
             return res;
 
         struct gen_context *global_ctx = ctx;
-
         while (global_ctx->parent)
             global_ctx = global_ctx->parent;
 
@@ -2048,6 +2038,23 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         complete_struct_type(global_ctx, res, node->right);
 
         buffer_write(global_ctx->init, " }\n");
+    } else if (node->node == A_ENUM) {
+        res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
+        if (res)
+            return res;
+
+        struct gen_context *global_ctx = ctx;
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+
+        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        res->type_name = node->value_string;
+        complete_enum_type(global_ctx, ctx, res, node->right);
+    } else if (node->node == A_TYPE) {
+        if (node->type == V_STRUCT) {
+            res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
+            FATALN(!res, node, "ERRRs");
+        }
     } else {
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
@@ -2058,6 +2065,11 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->is_const = node->is_const;
         res->type_name = node->type_name;
         res->temporary = 1;
+    }
+    // Void is special and need to hardcode these
+    if (res->type == V_VOID) {
+        res->bits = 0;
+        res->sign = 0;
     }
 
     return res;
@@ -2072,7 +2084,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
     if (tmp->type == V_INT && !tmp->bits)
         tmp->bits = 32;
 
-    //printf("RECURS: %s\n", stype_str(tmp));
+    printf("RECURS: %s\n", stype_str(tmp));
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
@@ -2087,7 +2099,7 @@ struct type *gen_type_list_type(struct gen_context *ctx, struct node *node)
     if (!res)
         res = gen_type_list_recurse(ctx, node);
 
-    FATALN(!res, node, "Couldn't generate type");
+    FATALN(!res, node, "Couldn't generate type from type list");
     ctx->pending_type = res;
 
     node->reg = REF_CTX(res->id);
@@ -2124,7 +2136,6 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     struct type *target = find_type_by_id(ctx, REF_CTX(a));
     FATALN(!target, node, "Invalid cast target");
     int ptrval = target->ptr;
-    FATALN(!ptrval, node, "Invalid cast target");
     if (var->type->type == V_INT && target->type == var->type->type) {
         if (target->bits == var->type->bits)
             return var->reg;
@@ -2422,17 +2433,19 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
 int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *var = find_variable(ctx, a);
-    struct variable *idx = find_variable(ctx, b);
+    //struct variable *idx = find_variable(ctx, b);
     FATALN(!var, node, "Missing variable");
-    FATALN(!idx, node, "Missing index");
+    //FATALN(!idx, node, "Missing index");
+    FATALN(!node->right, node, "Missing index");
     if (var->ptr > 0)
         var = gen_load(ctx, var);
+    const char *idx_name = node->right->value_string;
 
     FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct: %s", type_str(var->type->type));
     struct type *access_type = NULL;
-    int index_num = struct_get_by_name(var->type, idx->name, &access_type);
-    FATALN(index_num < 0, node, "Couldn't find from struct: %s", idx->name);
-    FATALN(!access_type, node, "Can't find type of %s from struct", idx->name);
+    int index_num = struct_get_by_name(var->type, idx_name, &access_type);
+    FATALN(index_num < 0, node, "Couldn't find from struct: %s", idx_name);
+    FATALN(!access_type, node, "Can't find type of %s from struct", idx_name);
 
     struct variable *ret = NULL;
 
@@ -3476,6 +3489,21 @@ struct variable *gen_scan_functions(struct gen_context *ctx, struct node *node)
     return res;
 }
 
+struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
+{
+    if (!node)
+        return NULL;
+
+    if (node->node == A_TYPE && node->type == V_STRUCT) {
+        gen_type(ctx, node);
+    }
+
+    gen_scan_struct(ctx, node->left);
+    gen_scan_struct(ctx, node->right);
+
+    return NULL;
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -3539,7 +3567,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             ctx->is_decl++;
     if (node->mid)
         gen_recursive_allocs(ctx, node->mid);
-    if (node->right)
+    if (node->node != A_ACCESS && node->right)
         right = gen_recursive_allocs(ctx, node->right);
     if (node->node == A_DECLARATION)
         ctx->is_decl = 0;
@@ -3560,6 +3588,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     int resleft = 0, resright = 0;
     if (node == NULL)
         return 0;
+
+    if (ctx && ctx->debug)
+        printf("DEBUG: gen_recursive(), node %s\n", node_str(node));
 
     /* Special cases */
     if (node->node == A_FUNCTION)
@@ -3593,8 +3624,10 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     } else {
         if (node->left)
             resleft = gen_recursive(ctx, node->left);
-        if (node->right)
+        if (node->node != A_ACCESS && node->right)
             resright = gen_recursive(ctx, node->right);
+        else
+            resright = 0;
     }
 
     if (ctx && ctx->debug)
@@ -3835,6 +3868,7 @@ int codegen(FILE *outfile, struct node *node)
     if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
+    gen_scan_struct(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;

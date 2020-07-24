@@ -94,6 +94,7 @@ struct node {
     int line;
     int linepos;
 
+    struct node *parent;
     struct node *left;
     struct node *mid;
     struct node *right;

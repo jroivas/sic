@@ -252,6 +252,12 @@ struct node *make_node(struct token *t, enum nodetype node, struct node *left, s
     res->left = left;
     res->mid = mid;
     res->right = right;
+    if (left)
+        left->parent = res;
+    if (mid)
+        mid->parent = res;
+    if (right)
+        right->parent = res;
 
     if (t) {
         res->filename = t->filename;
