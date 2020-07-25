@@ -1722,14 +1722,15 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
         expect(f, token, T_ROUND_CLOSE, ")");
 
         struct node *body = statement(f, token);
-        res = make_node(token, A_WHILE, res, NULL, body);
+        res = make_node(token, A_WHILE, NULL, res, body);
+
     } else if (accept_keyword(f, token, K_DO)) {
         struct node *body = statement(f, token);
         FATAL(!accept_keyword(f, token, K_WHILE), "Do missing while");
         expect(f, token, T_ROUND_OPEN, "(");
         res = expression(f, token);
         expect(f, token, T_ROUND_CLOSE, ")");
-        res = make_node(token, A_DO, res, NULL, body);
+        res = make_node(token, A_DO, NULL, res, body);
         semi(f, token);
     } else if (accept_keyword(f, token, K_FOR)) {
         expect(f, token, T_ROUND_OPEN, "(");
@@ -1748,7 +1749,7 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
 
         struct node *body = statement(f, token);
         init = make_node(token, A_GLUE, init, NULL, post);
-        res = make_node(token, A_FOR, comp, init, body);
+        res = make_node(token, A_FOR, init, comp, body);
     }
 
     return res;

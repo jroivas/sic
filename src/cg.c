@@ -2071,6 +2071,9 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->bits = 0;
         res->sign = 0;
     }
+    else if (res->type == V_FLOAT) {
+        res->sign = 1;
+    }
 
     return res;
 }
@@ -2084,7 +2087,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
     if (tmp->type == V_INT && !tmp->bits)
         tmp->bits = 32;
 
-    printf("RECURS: %s\n", stype_str(tmp));
+    //printf("RECURS: %s\n", stype_str(tmp));
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
@@ -3239,10 +3242,10 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
 
     buffer_write(ctx->data, "; Loop begin\n");
     if (looptype == LOOP_FOR) {
-        FATALN(!node->mid || node->mid->node != A_GLUE, node, "Invalid for loop");
-        if (node->mid->left) {
+        FATALN(!node->left || node->left->node != A_GLUE, node, "Invalid for loop");
+        if (node->left->left) {
             buffer_write(ctx->data, "; For init\n");
-            gen_recursive(ctx, node->mid->left);
+            gen_recursive(ctx, node->left->left);
         }
         buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     } else if (looptype == LOOP_DO) {
@@ -3262,15 +3265,15 @@ int gen_while(struct gen_context *ctx, struct node *node, enum looptype looptype
     buffer_write(ctx->data, "L%d:\n", inclabel);
     if (looptype == LOOP_FOR) {
         buffer_write(ctx->data, "; Loop inc\n");
-        if (node->mid->right)
-            gen_recursive(ctx, node->mid->right);
+        if (node->left->right)
+            gen_recursive(ctx, node->left->right);
     }
     buffer_write(ctx->data, "; Loop compare\n");
     buffer_write(ctx->data, "br label %%L%d\n", cmplabel);
     buffer_write(ctx->data, "L%d:\n", cmplabel);
 
-    if (node->left) {
-        int cond_reg = gen_recursive(ctx, node->left);
+    if (node->mid) {
+        int cond_reg = gen_recursive(ctx, node->mid);
         struct variable *cond = find_variable(ctx, cond_reg);
         int cmp_reg = gen_cmp_bool(ctx, cond);
 
@@ -3516,6 +3519,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         return 0;
     if (node->node == A_GOTO)
         return 0;
+
     FATALN(node->node == A_TYPESPEC, node, "Got type spec, this is compiler errorand should not happen");
 
     int res = 0;
