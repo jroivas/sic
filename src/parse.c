@@ -889,8 +889,6 @@ struct node *storage_class_specifier(struct scanfile *f, struct token *token)
     if (accept_keyword(f, token, K_EXTERN)) {
         res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
         res->value_string = val;
-    } else if (accept_keyword(f, token, K_TYPEDEF)) {
-        res = typedef_declaration(f, token);
     }
 
     return res;
@@ -1302,8 +1300,16 @@ struct node *init_declarator_list(struct scanfile *f, struct token *token)
 
 struct node *declaration(struct scanfile *f, struct token *token)
 {
+    struct node *res = NULL;
+    if (accept_keyword(f, token, K_TYPEDEF)) {
+        res = typedef_declaration(f, token);
+        if (res)
+            res = make_node(token, A_TYPE_LIST, res, NULL, NULL);
+    }
+    if (res)
+        return res;
     save_point(f, token);
-    struct node *res = declaration_specifiers(f, token);
+    res = declaration_specifiers(f, token);
     if (!res) {
         load_point(f, token);
         return NULL;

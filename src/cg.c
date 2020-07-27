@@ -50,6 +50,7 @@ struct type {
     struct type *ref;
     struct type *next;
 
+    struct type *custom_type;
     /* Struct/union items */
     int itemcnt;
     struct type_item *items;
@@ -194,6 +195,16 @@ struct node *flatten_list(struct node *node)
     }
 
     return res;
+}
+
+struct type *custom_type_get(struct type *cust)
+{
+    // Not a custom type, so return as-is
+    if (!cust || cust->type != V_CUSTOM)
+        return cust;
+    FATAL(!cust->custom_type, "No target type defined in custom type");
+
+    return cust->custom_type;
 }
 
 struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr, const char *name)
@@ -349,7 +360,12 @@ struct type *type_wrap(struct gen_context *ctx, struct type *src)
     if (res)
         return res;
 
-    return register_type(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
+    res = register_type(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
+    if (src->type == V_CUSTOM) {
+        // For custom types we need to wrap the custom as well
+        res->custom_type = type_wrap(ctx, src->custom_type);
+    }
+    return res;
 }
 
 struct type *type_wrap_to(struct gen_context *ctx, struct type *src, int ptrval)
@@ -2003,6 +2019,10 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 res = tl;
             else if (tl->type == V_VOID && tr->type == V_FLOAT)
                 res = tr;
+            else if (tl->type == V_CUSTOM)
+                res = tl;
+            else if (tr->type == V_CUSTOM)
+                res = tr;
             else
                 ERR("Invalid types: %s %s", type_str(tl->type), type_str(tr->type));
         } else
@@ -2050,11 +2070,21 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
         res->type_name = node->value_string;
         complete_enum_type(global_ctx, ctx, res, node->right);
+    } else if (node->node == A_TYPEDEF) {
+        struct type *tmp = gen_type_list_type(ctx, node->left);
+        FATALN(!tmp, node, "Invalid typedef, missing result type");
+
+        res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign, tmp->ptr);
+        res->custom_type = tmp;
+        res->type_name = node->value_string;
     } else if (node->node == A_TYPE) {
         if (node->type == V_STRUCT) {
             res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
             FATALN(!res, node, "ERRRs");
-        }
+        } else
+            ERR("Should not get here!");
+    } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
+        res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
     } else {
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
@@ -2098,7 +2128,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
 
 struct type *gen_type_list_type(struct gen_context *ctx, struct node *node)
 {
-    struct type *res = gen_type_list_simple(ctx, node);
+    struct type *res = NULL; //gen_type_list_simple(ctx, node);
     if (!res)
         res = gen_type_list_recurse(ctx, node);
 
@@ -2228,7 +2258,7 @@ int gen_use_ptr(struct gen_context *ctx)
 int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
 {
     struct variable *var = NULL;
-    struct type *t = ctx->pending_type;
+    struct type *t = custom_type_get(ctx->pending_type);
     int ptrval = 0;
     int addrval = 0;
     int res = 0;
@@ -2236,6 +2266,8 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
 
     while (global_ctx->parent)
         global_ctx = global_ctx->parent;
+
+    FATALN(!t, node, "No type: %p", (void *)ctx->pending_type);
 
     buffer_write(ctx->init, "; Variable: %s, type %s\n", node->value_string, type_str(t->type));
     FATALN(strcmp(node->value_string, "add5") == 0, node, "Should not initialize function");
@@ -2297,6 +2329,7 @@ int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
     } else
         type = find_type_by_id(ctx, REF_CTX(left));
     FATALN(!type, node, "Didn't get type for sizeof");
+    type = custom_type_get(type);
 
     struct variable *res = new_variable(ctx, NULL, V_INT, 32, 1, 0, 0, 0);
     buffer_write(ctx->data, "%%%d = alloca i%d, align %d\n",
@@ -3507,6 +3540,21 @@ struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
     return NULL;
 }
 
+struct variable *gen_scan_typedef(struct gen_context *ctx, struct node *node)
+{
+    if (!node)
+        return NULL;
+
+    if (node->node == A_TYPE_LIST && node->type == V_STRUCT) {
+        //gen_type(ctx, node);
+    }
+
+    gen_scan_typedef(ctx, node->left);
+    gen_scan_typedef(ctx, node->right);
+
+    return NULL;
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -3873,6 +3921,7 @@ int codegen(FILE *outfile, struct node *node)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
     gen_scan_struct(ctx, node);
+    gen_scan_typedef(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;
