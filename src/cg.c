@@ -153,7 +153,6 @@ char *stype_str(struct type *t)
     tmp[255] = 0;
     return tmp;
 }
-
 const char *var_str(enum var_type v, int size, char **r)
 {
     FATAL(v >= sizeof(varstr) / sizeof (char*),
@@ -613,11 +612,12 @@ struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enu
         res->reg = ctx->regnum++;
 
     // If bits == 0 and we have a pendign type which matches requested type, use it
-    if (bits == 0 && ctx->pending_type && ctx->pending_type->type == type) {
-        type = ctx->pending_type->type;
-        bits = ctx->pending_type->bits;
-        sign = ctx->pending_type->sign;
-        type_name = ctx->pending_type->type_name;
+    struct type *pend = custom_type_get(ctx->pending_type);
+    if (bits == 0 && pend && pend->type == type) {
+        type = pend->type;
+        bits = pend->bits;
+        sign = pend->sign;
+        type_name = pend->type_name;
         //ptr = ctx->pending_type->ptr;
     } else if (type == V_VOID) {
         bits = 0;
@@ -2023,8 +2023,10 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 res = tl;
             else if (tr->type == V_CUSTOM)
                 res = tr;
-            else
-                ERR("Invalid types: %s %s", type_str(tl->type), type_str(tr->type));
+            else {
+                node_walk(node);
+                ERR("Invalid types in resolve: %s %s", type_str(tl->type), type_str(tr->type));
+            }
         } else
             res = tl;
 
@@ -2311,6 +2313,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             res = var->reg;
             break;
         default:
+            node_walk(node);
             ERR("Invalid type for variable: %s", type_str(t->type));
             break;
     }

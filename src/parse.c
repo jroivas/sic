@@ -15,6 +15,7 @@ struct node *abstract_declarator(struct scanfile *f, struct token *token);
 struct node *declarator(struct scanfile *f, struct token *token);
 struct node *type_name(struct scanfile *f, struct token *token);
 struct node *declaration_specifiers(struct scanfile *f, struct token *token);
+struct node *attributes(struct scanfile *f, struct token *token);
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
@@ -717,6 +718,8 @@ struct node *struct_declaration(struct scanfile *f, struct token *token)
         tmp = tmp->right;
 
     tmp->right = struct_declarator_list(f, token);
+    struct node *attribs = attributes(f, token);
+    (void)attribs;
     semi(f, token);
 
     return res;
@@ -1628,8 +1631,16 @@ struct node *expression(struct scanfile *f, struct token *token)
     if (token->token == T_EOF)
         return NULL;
     struct node *res = NULL;
-    res = assignment_expression(f, token);
-    // TODO comma
+    // Check for braced-group
+    if (token->token == T_CURLY_OPEN)
+        res = compound_statement(f, token);
+    else
+        res = assignment_expression(f, token);
+    if (accept(f, token, T_COMMA)) {
+        struct node *tmp = expression(f, token);
+        if (tmp)
+            res = make_node(token, A_LIST, res, NULL, tmp);
+    }
     return res;
 }
 
@@ -1740,14 +1751,10 @@ struct node *iteration_statement(struct scanfile *f, struct token *token)
         semi(f, token);
     } else if (accept_keyword(f, token, K_FOR)) {
         expect(f, token, T_ROUND_OPEN, "(");
-        save_point(f, token);
         struct node *init = expression_statement(f, token);
         if (!init) {
-            load_point(f, token);
             init = declaration(f, token);
-        } else
-            remove_save_point(f, token);
-        struct node *comp = expression_statement(f, token);
+        }        struct node *comp = expression_statement(f, token);
         struct node *post = NULL;
         if (token->token != T_ROUND_CLOSE)
             post = expression(f, token);
@@ -1787,6 +1794,9 @@ struct node *statement(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
 
+    if (accept(f, token, T_SEMI))
+        return NULL;
+
     save_point(f, token);
     res = labeled_statement(f, token);
     if (res) {
@@ -1803,13 +1813,14 @@ struct node *statement(struct scanfile *f, struct token *token)
     }
     load_point(f, token);
 
-    save_point(f, token);
+    /*
+     * REMARK: expression_statemen handles it's savepoins self.
+     * Having savepoint here will cause errors.
+     */
     res = expression_statement(f, token);
     if (res) {
-        remove_save_point(f, token);
         return res;
     }
-    load_point(f, token);
 
     res = selection_statement(f, token);
     if (res)
@@ -1861,6 +1872,11 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
 
     decl = declaration_list(f, token);
     res = statement_list(f, token);
+    if (token->token != T_CURLY_CLOSE) {
+        printf("TT: %s\n", token_dump(token));
+        node_walk(res);
+        stack_trace();
+    }
     expect(f, token, T_CURLY_CLOSE, "}");
 
     // We parsed body, always return it
@@ -1868,6 +1884,43 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *attribute_param(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (token->token == T_IDENTIFIER) {
+        res = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+        res->value_string = token->value_string;
+        scan(f, token);
+    }
+    return res;
+}
+
+struct node *attribute(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    res = specifier_qualifier_list(f, token);
+    if (!res && token->token == T_IDENTIFIER) {
+        res = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
+        res->value_string = token->value_string;
+        scan(f, token);
+
+    }
+    if (res && accept(f, token, T_ROUND_OPEN)) {
+        struct node *args = iter_list(f, token, attribute_param, COMMA_MANDATORY, 0);
+        res->left = args;
+        if (accept(f, token, T_ROUND_OPEN)) {
+            res->right = attribute(f, token);
+            expect(f, token, T_ROUND_CLOSE, ")");
+        }
+        expect(f, token, T_ROUND_CLOSE, ")");
+    }
+    return res;
+}
+
+struct node *attribute_list(struct scanfile *f, struct token *token)
+{
+    return iter_list(f, token, attribute, COMMA_MANDATORY, 0);
+}
 struct node *attributes(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -1875,22 +1928,8 @@ struct node *attributes(struct scanfile *f, struct token *token)
         expect(f, token, T_ROUND_OPEN, "(");
         expect(f, token, T_ROUND_OPEN, "(");
 
-        while (1) {
-            //if (!acccept(f, token, T_IDENTIFIER))
-            if (token->token != T_IDENTIFIER)
-                break;
-            struct node *tmp = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
-            tmp->value_string = token->value_string;
-            if (!res)
-                res = tmp;
-            else
-                res = make_node(token, A_LIST, res, NULL, tmp);
-            scan(f, token);
-
-            if (token->token != T_COMMA)
-                break;
-            accept(f, token, T_COMMA);
-        }
+        struct node *tmp = attribute_list(f, token);
+        res = make_node(token, A_ATTRIBUTE, tmp, NULL, NULL);
 
         expect(f, token, T_ROUND_CLOSE, ")");
         expect(f, token, T_ROUND_CLOSE, ")");
@@ -1924,6 +1963,11 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         load_point(f, token);
+        if (!(decl->is_func && accept(f, token, T_SEMI)))
+            return NULL;
+        // This is forward declaration so return result
+
+#if 0
         if (decl->is_func && accept(f, token, T_SEMI)) {
             // This is forward declaration
             res = make_node(token, A_GLUE, decl, NULL, NULL);
@@ -1933,8 +1977,13 @@ struct node *function_definition(struct scanfile *f, struct token *token)
         // If no compound, this is most probably variable decls
         // This is handled by save points.
         return NULL;
-    }
-    remove_save_point(f, token);
+#endif
+    } else
+        remove_save_point(f, token);
+
+    // TODO: Just ignore attributes for now
+    struct node *attribs = attributes(f, token);
+    (void)attribs;
 
     //decl = type_resolve(token, decl, 0);
     res = make_node(token, A_GLUE, decl, NULL, comp);
