@@ -297,7 +297,7 @@ struct node *make_leaf(struct token *t, enum nodetype node)
 #endif
         n->value = t->value;
         n->fraction = t->fraction;
-        n->bits = 8;
+        n->bits = 64; // Default to double
         n->type = V_FLOAT;
     } else if (t->token == T_STR_LIT) {
         n->value_string = t->value_string;
@@ -833,6 +833,8 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "double") == 0)
         res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "float") == 0)
+        res = make_type_spec(token, V_FLOAT, 32, PARSE_SIGNED, token->value_string);
     else if (typedef_is(f, token->value_string))
         res = make_type_spec(token, V_CUSTOM, 0, PARSE_SIGNED, token->value_string);
 
@@ -1872,11 +1874,6 @@ struct node *compound_statement(struct scanfile *f, struct token *token)
 
     decl = declaration_list(f, token);
     res = statement_list(f, token);
-    if (token->token != T_CURLY_CLOSE) {
-        printf("TT: %s\n", token_dump(token));
-        node_walk(res);
-        stack_trace();
-    }
     expect(f, token, T_CURLY_CLOSE, "}");
 
     // We parsed body, always return it

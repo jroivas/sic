@@ -90,6 +90,7 @@ struct variable {
     char *paramstr;
 };
 
+
 struct gen_context {
     FILE *f;
     int ids;
@@ -183,6 +184,16 @@ int align(int bits)
     if (bits >= 16)
         return 2;
     return 1;
+}
+
+const char *float_str(int bits)
+{
+    if (bits == 32)
+        return "float";
+    else if (bits == 64)
+        return "double";
+
+    ERR("Invalid bits for float: %d", bits);
 }
 
 struct node *flatten_list(struct node *node)
@@ -285,7 +296,10 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             if (t->type == V_INT) {
                 buffer_write(ctx->init, "i%d", (t->bits ? t->bits : 32));
             } else if (t->type == V_FLOAT) {
-                buffer_write(ctx->init, "double");
+                if (t->bits == 32)
+                    buffer_write(ctx->init, "float");
+                else
+                    buffer_write(ctx->init, "double");
             } else if (t->type == V_STRUCT) {
                 /*
                  * We need to resolve the size of struct now in
@@ -520,7 +534,8 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, "long", V_INT, 64, 1, 0);
     register_type(ctx, "unsigned long", V_INT, 64, 0, 0);
 
-    register_type(ctx, "float", V_FLOAT, 64, 1, 0);
+    register_type(ctx, "float", V_FLOAT, 32, 1, 0);
+    register_type(ctx, "double", V_FLOAT, 64, 1, 0);
 
     register_type(ctx, "strgin", V_STR, 0, 0, 0);
 }
@@ -623,11 +638,8 @@ struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enu
         bits = 0;
         sign = 0;
     } else if (type != V_STR && (bits == 0 || type == V_FLOAT)) {
-        // TODO Fix float bits
-        if (type == V_FLOAT)
-            bits = 64;
-        else
-            // Default to 32
+        // Default to 32
+        if (type == V_INT)
             bits = 32;
         sign = 1;
     }
@@ -637,7 +649,7 @@ struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enu
     res->name_hash = hash(name);
     res->bits = bits;
     res->type = __find_type_by(ctx, type, bits, sign, 0, type_name);
-    FATAL(!res->type, "Didn't find type: %s, %d bits, %s", type_str(type), bits, type_name);
+    FATAL(!res->type, "Didn't find type: %s, %d bits, sign: %s, name: %s", type_str(type), bits, sign ? "true" : "false", type_name);
     res->global = global;
     if (res->global) {
         res->next = ctx->globals;
@@ -723,8 +735,17 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
             val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
                 val->reg, v->type->bits, v->reg, target->bits);
-        }
-        else if (v->type->type == target->type)
+        } else if (target->type == V_FLOAT && v->type->type == V_FLOAT) {
+            if (target->bits >= v->type->bits)
+                return v;
+            // 64 -> 32
+            val = new_inst_variable(ctx, V_FLOAT, target->bits, 1);
+            if (v->type->bits == 64 && target->bits == 32)
+                buffer_write(ctx->data, "%%%d = fptrunc double %%%d to float\n",
+                    val->reg,  v->reg);
+            else
+                ERR("Can't cast bits %d to %d\n", v->type->bits, target->bits);
+        } else if (v->type->type == target->type)
             return v;
         else if (v->type->type == V_NULL && target->type == V_INT) {
             val = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 0, 0, 0);
@@ -757,15 +778,27 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
 
     FATAL(v1->global, "Can't cast from global");
     FATAL(v1->ptr, "Can't extend pointer bits");
-    struct variable *res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
-    /* We can't sign extend 1 bit */
-    if (sign2 && bits1 > 1) {
-        buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
-            res->reg, bits1, v1->reg, bits2);
-    } else {
-        buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
-            res->reg, bits1, v1->reg, bits2);
-    }
+    struct variable *res = NULL;
+
+    if (v1->type->type == V_INT) {
+        res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
+        /* We can't sign extend 1 bit */
+        if (sign2 && bits1 > 1) {
+            buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
+                res->reg, bits1, v1->reg, bits2);
+        } else {
+            buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
+                res->reg, bits1, v1->reg, bits2);
+        }
+    } else if (v1->type->type == V_FLOAT) {
+        res = new_inst_variable(ctx, V_FLOAT, bits2, 1);
+        if (bits1 == 32 && bits2 == 64)
+            buffer_write(ctx->data, "%%%d = fpext float %%%d to double\n",
+                res->reg,  v1->reg);
+        else
+            ERR("Invalid float cast");
+    } else
+        ERR("Can't cast");
     res->value = v1->value;
     return res;
 }
@@ -865,20 +898,19 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
     return reg;
 }
 
-int gen_allocate_double(struct gen_context *ctx, int reg, int ptr, int code_alloc, literalnum val)
+int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int code_alloc, literalnum val)
 {
     if (ctx->global) {
-        buffer_write(ctx->init, "%s%d = global double 0.0, align %d\n",
-            "@G", reg, align(64));
+        buffer_write(ctx->init, "%s%d = global %s 0.0, align %d\n", "@G", reg, float_str(bits), align(bits));
     } else {
         char *stars = get_stars(ptr);
         char *vals = NULL;
-        buffer_write(ctx->init, "%s%d = alloca double%s, align %d\n",
-            ctx->global ? "@G" : "%", reg, ptr ? stars : "", align(64));
+        buffer_write(ctx->init, "%s%d = alloca %s%s, align %d\n",
+            ctx->global ? "@G" : "%", reg, float_str(bits), ptr ? stars : "", align(bits));
         vals = double_to_str(val);
         buffer_write(code_alloc ? ctx->data : ctx->init,
-            "store double%s %s, double%s* %%%d, align %d ; allocate_double\n",
-            ptr ? stars : "" , ptr ? "null" : vals, ptr ? stars : "", reg, align(64));
+            "store %s%s %s, %s%s* %%%d, align %d ; allocate_double\n",
+            float_str(bits), ptr ? stars : "" , ptr ? "null" : vals, float_str(bits), ptr ? stars : "", reg, align(bits));
         free(vals);
         if (stars)
             free(stars);
@@ -936,7 +968,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     val->literal = 1;
     if (!ctx->global)
         val->assigned = 1;
-    gen_allocate_double(ctx, val->reg, 0, 0, n->value);
+    gen_allocate_double(ctx, val->reg, n->bits, 0, 0, n->value);
     n->reg = val->reg;
     return val->reg;
 }
@@ -1022,8 +1054,8 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 
     char *tmp = double_str(n->value, n->fraction);
 
-    buffer_write(ctx->data, "store double %s, double* %s%d, align %d\n",
-            tmp, REGP(val), val->reg, align(val->type->bits));
+    buffer_write(ctx->data, "store %s %s, %s* %s%d, align %d\n",
+            float_str(val->type->bits), tmp, float_str(val->type->bits), REGP(val), val->reg, align(val->type->bits));
     return val->reg;
 }
 
@@ -1049,8 +1081,8 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
         if (stars)
             free(stars);
     } else if (dst->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
-            src->reg, REGP(src), dst->reg, align(dst->type->bits));
+        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d\n",
+            float_str(dst->type->bits), src->reg, float_str(dst->type->bits), REGP(src), dst->reg, align(dst->type->bits));
     }
     return 0;
 }
@@ -1144,8 +1176,8 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
         return v;
     struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0, 0);
 
-    buffer_write(ctx->data, "%%%d = load double, double* %s%d, align %d\n",
-            res->reg, REGP(v), v->reg, align(v->type->bits));
+    buffer_write(ctx->data, "%%%d = load %s, %s* %s%d, align %d\n",
+            res->reg, float_str(v->type->bits), float_str(v->type->bits), REGP(v), v->reg, align(v->type->bits));
     res->direct = 1;
     return res;
 }
@@ -1571,12 +1603,19 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
             free(stars1);
         return res->reg;
     } else if (v1->type->type == V_FLOAT && v2->type->type == V_FLOAT) {
+        if (v1->type->bits == v2->type->bits);
+        else if (v1->type->bits > v2->type->bits)
+            v2 = gen_bits_cast(ctx, v2, v1->bits, 1);
+        else
+            v1 = gen_bits_cast(ctx, v1, v2->bits, 1);
+
         struct variable *res = new_bool(ctx, VAR_DIRECT);
         char *stars1 = get_stars(v1->ptr);
         const char *op = node->node == A_EQ_OP ? "oeq" : "une";
-        buffer_write(ctx->data, "%%%d = fcmp %s double %%%d%s, "
+        buffer_write(ctx->data, "%%%d = fcmp %s %s %%%d%s, "
             "%%%d\n",
             res->reg, op,
+            float_str(v1->type->bits),
             v1->reg, stars1 ? stars1 : "",
             v2->reg);
 
@@ -2292,7 +2331,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
             var->global = ctx->global;
             var->array = idx_value;
-            res = gen_allocate_double(ctx, var->reg, var->ptr, 0, node->value);
+            res = gen_allocate_double(ctx, var->reg, var->bits, var->ptr, 0, node->value);
             break;
         case V_STRUCT:
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
@@ -2531,8 +2570,9 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
                 res->reg, align(res->type->bits)
                 );
         } else if (var->type->type == V_FLOAT) {
-            gen_allocate_double(ctx, res->reg, res->ptr, 1, node->value);
-            buffer_write(ctx->data, "store double %s %%%d, %s %s%d, align %d\n",
+            gen_allocate_double(ctx, res->reg, res->type->bits, res->ptr, 1, node->value);
+            buffer_write(ctx->data, "store %s %s %%%d, %s %s%d, align %d\n",
+                float_str(var->type->bits),
                 src ? src : "",
                 reg,
                 dst ? dst : "",
@@ -2671,8 +2711,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
         buffer_write(ctx->data, "store i%d %%%d, i%d* %s%d, align %d ; gen_assign\n",
                 src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "store double %%%d, double* %s%d, align %d\n",
-                src->reg, REGP(dst), dst->reg, align(dst->type->bits));
+        src = load_and_cast_to(ctx, src, dst->type, CAST_NORMAL);
+        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d\n",
+            float_str(src->type->bits), src->reg, float_str(src->type->bits), REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_STR) {
 	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
 		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
@@ -2794,9 +2835,14 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                 par_type->bits,
                 stars ? stars : "");
         } else if (par_type->type == V_FLOAT) {
-            buffer_write(params, "%sdouble%s",
-                paramcnt > 1 ? ", " : "",
-                stars ? stars : "");
+            if (par_type->bits == 32)
+                buffer_write(params, "%sfloat%s",
+                    paramcnt > 1 ? ", " : "",
+                    stars ? stars : "");
+            else
+                buffer_write(params, "%sdouble%s",
+                    paramcnt > 1 ? ", " : "",
+                    stars ? stars : "");
         } else if (par_type->type == V_VOID && pointer) {
             buffer_write(params, "%si8%s",
                 paramcnt > 1 ? ", " : "",
@@ -2863,13 +2909,16 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                 struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
 
-                buffer_write(allocs, "%%%d = alloca double%s, align %d\n",
+                buffer_write(allocs, "%%%d = alloca %s%s, align %d\n",
                     res->reg,
+                    float_str(ptype->bits),
                     stars ? stars : "",
                     align(ptype->bits));
-                buffer_write(allocs, "store double%s %%%d, double%s* %%%d, align %d\n",
+                buffer_write(allocs, "store %s%s %%%d, %s%s* %%%d, align %d\n",
+                    float_str(ptype->bits),
                     stars ? stars : "",
                     parami,
+                    float_str(ptype->bits),
                     stars ? stars : "",
                     res->reg,
                     align(ptype->bits));
@@ -2970,7 +3019,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
             if (target->type == V_INT) {
                 buffer_write(ctx->post, "ret i%d %%%d ; RET1\n", target->bits, res);
             } else if (target->type == V_FLOAT) {
-                buffer_write(ctx->post, "ret double %%%d ; RET1\n", res);
+                buffer_write(ctx->post, "ret %s %%%d ; RET1\n", float_str(target->bits), res);
             } else
                 ERR("Invalid return type");
 
@@ -2979,7 +3028,7 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, struct type *
             if (target->type == V_INT) {
                 buffer_write(ctx->data, "ret i%d 0 ; RET2\n", target->bits, res);
             } else if (target->type == V_FLOAT) {
-                buffer_write(ctx->data, "ret double 0.0 ; RET2\n", res);
+                buffer_write(ctx->data, "ret %s 0.0 ; RET2\n", float_str(target->bits), res);
             } else
                 ERR("Invalid return type");
             ctx->rets++;
@@ -3076,7 +3125,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     if (target->type == V_INT) {
         buffer_write(ctx->data, "ret i%d %%%d ; RET3\n", target->bits, res);
     } else if (target->type == V_FLOAT) {
-        buffer_write(ctx->data, "ret double %%%d ; RET3\n", res);
+        buffer_write(ctx->data, "ret %s %%%d ; RET3\n", float_str(target->bits), res);
     } else
         ERR("Invalid return type");
     ctx->rets++;
@@ -3114,8 +3163,9 @@ int gen_cmp_bool(struct gen_context *ctx, struct variable *src)
             var->reg);
         return res->reg;
     } else if (var->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "%%%d = fcmp une double %%%d, 0.0e+00\n",
+        buffer_write(ctx->data, "%%%d = fcmp une %s %%%d, 0.0e+00\n",
             res->reg,
+            float_str(var->type->bits),
             var->reg);
         return res->reg;
     } else if (var->type->type == V_NULL) {
@@ -3379,8 +3429,8 @@ int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
             buffer_write(ctx->data, "%%%d = add nsw i%d %%%d, 1\n",
                 res->reg, var->type->bits, var->reg);
         } else if (res->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "%%%d = fadd double %%%d, 1.0e+00\n",
-                res->reg, var->reg);
+            buffer_write(ctx->data, "%%%d = fadd %s %%%d, 1.0e+00\n",
+                res->reg, float_str(res->type->bits), var->reg);
         } else ERR_TRACE("Invalid type: %d", node->type);
         gen_store_var(ctx, orig, res);
     } else if (node->node == A_PREDEC || node->node == A_POSTDEC) {
@@ -3391,8 +3441,8 @@ int gen_pre_post_op(struct gen_context *ctx, struct node *node, int a)
             buffer_write(ctx->data, "%%%d = sub i%d %%%d, 1\n",
                 res->reg, var->type->bits, var->reg);
         } else if (res->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "%%%d = fsub double %%%d, 1.0e+00\n",
-                res->reg, var->reg);
+            buffer_write(ctx->data, "%%%d = fsub %s %%%d, 1.0e+00\n",
+                res->reg, float_str(res->type->bits), var->reg);
         } else ERR_TRACE("Invalid type");
         gen_store_var(ctx, orig, res);
     } else FATALN(1, node, "Invalid pre/post op");
