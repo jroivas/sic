@@ -363,7 +363,7 @@ int scan_const(struct node *node)
 
 struct node *type_resolve(struct token *t, struct node *node, int d);
 
-int __parse_struct(struct node *res, struct node *node, int pos)
+int __parse_struct(struct node *res, struct node *node, int pos, int align)
 {
     if (!node)
         return 0;
@@ -378,17 +378,27 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
         tmp->right->left = type_resolve(NULL, node, 0);
 
-        if (tmp->right->bits == 0 && tmp->right->left->type != V_STRUCT && tmp->right->left->type != V_UNION)
-            bits = 32;
-        else
-            bits = tmp->right->bits;
+        struct node *typenode = tmp->right;
+        FATALN(!typenode->left, typenode, "Invalid type 1")
+        typenode = typenode->left;
+        // TODO Fix bit solving
+        if (typenode->left) {
+            //node_walk(typenode);
+            typenode = typenode->left;
+            if (typenode->bits == 0 && typenode->type == V_INT)
+                bits = 32;
+            else
+                bits = typenode->bits;
+            //printf("SIZE: %d\n", bits);
 
         /*
          * In case of non-packed, do alignment
          * TODO: packed structs and unions
          */
-        while (bits >= 32 && (pos + bits + extra) % 64 != 0)
-            extra++;
+        //printf("PRE: %d, align %d, pos %d\n", bits, align, pos);
+        if (bits > 0)
+            extra = (bits - (pos % bits)) % bits;
+        //printf("RES: %d, align %d, pos %d, pad %d\n", bits, align, pos, extra);
 
         // Solve name of the element
         struct node *namenode = node->right;
@@ -397,19 +407,58 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         if (namenode)
             tmp->right->left->value_string = namenode->value_string;
         return bits + extra;
+        }
     }
 
     if (node->left)
-        bits +=  __parse_struct(res, node->left, bits);
+        bits +=  __parse_struct(res, node->left, pos + bits, align);
     if (node->right)
-        bits +=  __parse_struct(res, node->right, bits);
+        bits +=  __parse_struct(res, node->right, pos + bits, align);
 
     return bits;
 }
 
+int get_struct_max(struct node *node)
+{
+    int res = 1;
+    if (!node)
+        return res;
+
+    if (node->node == A_TYPE_LIST) {
+        struct node *tmp = node;
+        while (tmp->right) {
+            int bits = tmp->bits;
+            if (bits == 0 && tmp->type == V_INT)
+                bits = 32;
+            if (bits > res)
+                res = bits;
+            tmp = tmp->right;
+        }
+
+    }
+
+    int tmp = get_struct_max(node->left);
+    if (tmp > res)
+        res = tmp;
+    tmp = get_struct_max(node->right);
+    if (tmp > res)
+        res = tmp;
+
+    return res;
+}
+
 int parse_struct(struct node *res, struct node *node)
 {
-    return __parse_struct(res, node->right, 0);
+    int align = get_struct_max(node);
+    //printf("ALIGN: %d\n", align);
+    int bits =  __parse_struct(res, node->right, 0, align);
+
+    // Take care of padding at the end
+    int extra = 0;
+    while ((bits + extra) % align != 0)
+        extra++;
+
+    return bits + extra;
 }
 
 void __parse_enum(struct node *res, struct node *node, int val)

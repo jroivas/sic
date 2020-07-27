@@ -192,8 +192,16 @@ const char *float_str(int bits)
         return "float";
     else if (bits == 64)
         return "double";
+    else if (bits == 128)
+        return "double";
+        // TODO Fix long double
+        //return "x86_fp80";
 
     ERR("Invalid bits for float: %d", bits);
+}
+
+int float_has_128() {
+    return strcmp(float_str(128), "double") != 0;
 }
 
 struct node *flatten_list(struct node *node)
@@ -223,14 +231,14 @@ struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bit
     while (res) {
 #if DEBUG
         if (res->type == type)
-            printf("Typecheck: %d == %d, %d == %d, %s\n", res->bits, bits, res->sign, sign, type_str(type));
+            printf("Typecheck: %d == %d, %d == %d, %s, names %s == %s\n", res->bits, bits, res->sign, sign, type_str(type), name, res ? res->name : NULL);
 #endif
         if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
             return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
             if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
                 return res;
-            else if (res->type != V_STRUCT)
+            else if (res->type != V_STRUCT && res->type != V_CUSTOM)
                 return res;
         }
         res = res->next;
@@ -536,6 +544,7 @@ void register_builtin_types(struct gen_context *ctx)
 
     register_type(ctx, "float", V_FLOAT, 32, 1, 0);
     register_type(ctx, "double", V_FLOAT, 64, 1, 0);
+    register_type(ctx, "long double", V_FLOAT, 128, 1, 0);
 
     register_type(ctx, "strgin", V_STR, 0, 0, 0);
 }
@@ -791,12 +800,11 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
                 res->reg, bits1, v1->reg, bits2);
         }
     } else if (v1->type->type == V_FLOAT) {
+        if (bits2 == 128 && !float_has_128())
+            return v1;
         res = new_inst_variable(ctx, V_FLOAT, bits2, 1);
-        if (bits1 == 32 && bits2 == 64)
-            buffer_write(ctx->data, "%%%d = fpext float %%%d to double\n",
-                res->reg,  v1->reg);
-        else
-            ERR("Invalid float cast");
+        buffer_write(ctx->data, "%%%d = fpext %s %%%d to %s\n",
+            res->reg,float_str(bits1), v1->reg, float_str(bits2));
     } else
         ERR("Can't cast");
     res->value = v1->value;
@@ -1973,13 +1981,29 @@ int gen_type(struct gen_context *ctx, struct node *node)
         while (global_ctx->parent)
             global_ctx = global_ctx->parent;
 
+        const char *typename = node->value_string;
+        if (!typename) {
+            if (node->parent && (node->parent->node == A_TYPEDEF) && node->parent->value_string) {
+                typename = node->parent->value_string;
+#if 1
+                char *tmp = calloc(1, 4096);
+                tmp = strcat(tmp, "__generated_struct_name_");
+                tmp = strcat(tmp, typename);
+                node->value_string = tmp;
+                node->type_name = tmp;
+                typename = tmp;
+#else
+                node->value_string = typename;
+                node->type_name = typename;
+#endif
+            }
+        }
         // We have most probably struct definition
-        t = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        t = register_type(global_ctx, typename, node->type, node->bits, 0, node->ptr);
         t->type_name = node->value_string;
 
         // FIXME This is a hack for now
-        buffer_write(global_ctx->init, "%%struct.%s = type { ",
-            node->value_string);
+        buffer_write(global_ctx->init, "%%struct.%s = type { ", typename);
         complete_struct_type(global_ctx, t, node->right);
 
         buffer_write(global_ctx->init, " }\n");
@@ -2062,8 +2086,13 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 res = tl;
             else if (tr->type == V_CUSTOM)
                 res = tr;
+            else if (tl->type == V_INT && tr->type == V_FLOAT) {
+                res = tr;
+                if (tl->bits == 64 && tr->bits == 64)
+                    res->bits = 128;
+            } else if (tl->type == V_FLOAT && tr->type == V_INT)
+                res = tl;
             else {
-                node_walk(node);
                 ERR("Invalid types in resolve: %s %s", type_str(tl->type), type_str(tr->type));
             }
         } else
@@ -2120,8 +2149,14 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->type_name = node->value_string;
     } else if (node->node == A_TYPE) {
         if (node->type == V_STRUCT) {
-            res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
-            FATALN(!res, node, "ERRRs");
+#if 0
+            if (!node->type_name && node->parent && node->parent->value_string)
+                res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->parent->value_string);
+            else
+#endif
+                res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
+
+            FATALN(!res, node->parent, "Couldn't solve type in struct: %s, %s", node->type_name, node->parent->value_string);
         } else
             ERR("Should not get here!");
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
@@ -2522,7 +2557,7 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct: %s", type_str(var->type->type));
     struct type *access_type = NULL;
     int index_num = struct_get_by_name(var->type, idx_name, &access_type);
-    FATALN(index_num < 0, node, "Couldn't find from struct: %s", idx_name);
+    FATALN(index_num < 0, node, "Couldn't find from struct %s: %s", var->type->type_name, idx_name);
     FATALN(!access_type, node, "Can't find type of %s from struct", idx_name);
 
     struct variable *ret = NULL;

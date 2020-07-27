@@ -27,16 +27,16 @@ int main()
     if (v.b.b != 30)
         return 3;
 
-    if (sizeof(v) != 24)
+    if (sizeof(v) != 12)
         return 4;
 
-    if (sizeof(v.b) != 16)
+    if (sizeof(v.b) != 8)
         return 5;
 
-    if (sizeof(struct values) != 24)
+    if (sizeof(struct values) != 12)
         return 6;
 
-    if (sizeof(struct subvalues) != 16)
+    if (sizeof(struct subvalues) != 8)
         return 7;
 
     return 0;

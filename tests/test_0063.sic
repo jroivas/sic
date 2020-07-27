@@ -10,4 +10,6 @@ int main()
     assert(a == 0);
     assert(b == 0.0);
     assert(p == NULL);
+
+    return 0;
 }

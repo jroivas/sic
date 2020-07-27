@@ -7,6 +7,8 @@ struct values
     int e;
 };
 
+extern int printf(const char *msg, ...);
+
 int main()
 {
     struct values v;
@@ -28,7 +30,7 @@ int main()
         return 4;
 
     if (sizeof(struct values) != 40)
-        return 4;
+        return 5;
 
     return 0;
 }
