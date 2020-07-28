@@ -222,7 +222,7 @@ struct type *custom_type_get(struct type *cust)
         return cust;
     FATAL(!cust->custom_type, "No target type defined in custom type");
 
-    return cust->custom_type;
+    return custom_type_get(cust->custom_type);
 }
 
 struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bits, int sign, int ptr, const char *name)

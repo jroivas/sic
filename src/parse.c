@@ -16,6 +16,7 @@ struct node *declarator(struct scanfile *f, struct token *token);
 struct node *type_name(struct scanfile *f, struct token *token);
 struct node *declaration_specifiers(struct scanfile *f, struct token *token);
 struct node *attributes(struct scanfile *f, struct token *token);
+struct node *pointer(struct scanfile *f, struct token *token);
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
@@ -923,12 +924,18 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
 
-    FATAL(typedef_is(f, token->value_string), "Redefinition of typedef: %s", token->value_string);
+    //printf("PP: %d:%d\n", f->line, f->linepos);
     struct node *decl = declaration_specifiers(f, token);
     FATAL(!decl, "Typedef missing type declaration");
 
-    FATAL(token->token != T_IDENTIFIER, "Expected identifier after typedef");
+    struct node *ptr = pointer(f, token);
+    if (ptr) {
+        ptr->left = decl;
+        decl = ptr;
+    }
+    FATALN(token->token != T_IDENTIFIER, decl, "Expected identifier after typedef");
     res = make_node(token, A_TYPEDEF, decl, NULL, NULL);
+    FATAL(typedef_is(f, token->value_string), "Redefinition of typedef: %s", token->value_string);
     res->value_string = token->value_string;
     scan(f, token);
 
