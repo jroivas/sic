@@ -786,10 +786,18 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
         return v1;
 
     FATAL(v1->global, "Can't cast from global");
-    FATAL(v1->ptr, "Can't extend pointer bits");
+    FATAL(v1->type->type != V_INT && v1->ptr, "Can't extend pointer bits: %d\n", v1->reg);
     struct variable *res = NULL;
 
-    if (v1->type->type == V_INT) {
+    if (v1->ptr) {
+        char *stars = get_stars(v1->ptr);
+
+        res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign);
+        buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_assign cast ptr\n",
+                res->reg, bits1, stars ? stars : "", v1->reg, bits2, stars);
+        if (stars)
+            free(stars);
+    } else if (v1->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign || sign2);
         /* We can't sign extend 1 bit */
         if (sign2 && bits1 > 1) {
@@ -2717,6 +2725,19 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     }
     if (src->ptr || src->addr || (dst->type->type == V_VOID && dst->ptr)) {
         char *stars = get_stars(src->ptr);
+        if (dst->type->type == V_INT && src->type->bits != dst->type->bits) {
+            char *stars = get_stars(src->ptr);
+            char *stars2 = get_stars(dst->ptr);
+
+            struct variable *res = new_inst_variable(ctx, V_INT, dst->type->bits, dst->type->sign);
+            buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_assign cast ptr\n",
+                    res->reg, src->bits, stars ? stars : "", src->reg, dst->type->bits, stars2);
+            if (stars)
+                free(stars);
+            if (stars2)
+                free(stars2);
+            src = res;
+        }
 
         buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr\n",
                 src->type->bits, stars ? stars : "", src->reg,

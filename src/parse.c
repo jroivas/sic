@@ -363,7 +363,26 @@ int scan_const(struct node *node)
 
 struct node *type_resolve(struct token *t, struct node *node, int d);
 
-int __parse_struct(struct node *res, struct node *node, int pos, int align)
+int solve_bits_recurse(struct node *node)
+{
+    int res = 0;
+    if (!node)
+        return res;
+
+    res = node->bits;
+    if (node->type == V_INT && res == 0)
+        res = 32;
+    if (node->ptr)
+        res = 64;
+
+    int b = solve_bits_recurse(node->right);
+    if (b > res)
+        res = b;
+
+    return res;
+}
+
+int __parse_struct(struct node *res, struct node *node, int pos)
 {
     if (!node)
         return 0;
@@ -378,27 +397,14 @@ int __parse_struct(struct node *res, struct node *node, int pos, int align)
         tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
         tmp->right->left = type_resolve(NULL, node, 0);
 
-        struct node *typenode = tmp->right;
-        FATALN(!typenode->left, typenode, "Invalid type 1")
-        typenode = typenode->left;
-        // TODO Fix bit solving
-        if (typenode->left) {
-            //node_walk(typenode);
-            typenode = typenode->left;
-            if (typenode->bits == 0 && typenode->type == V_INT)
-                bits = 32;
-            else
-                bits = typenode->bits;
-            //printf("SIZE: %d\n", bits);
+        bits = solve_bits_recurse(tmp->right->left);
 
         /*
          * In case of non-packed, do alignment
          * TODO: packed structs and unions
          */
-        //printf("PRE: %d, align %d, pos %d\n", bits, align, pos);
         if (bits > 0)
             extra = (bits - (pos % bits)) % bits;
-        //printf("RES: %d, align %d, pos %d, pad %d\n", bits, align, pos, extra);
 
         // Solve name of the element
         struct node *namenode = node->right;
@@ -407,13 +413,12 @@ int __parse_struct(struct node *res, struct node *node, int pos, int align)
         if (namenode)
             tmp->right->left->value_string = namenode->value_string;
         return bits + extra;
-        }
     }
 
     if (node->left)
-        bits +=  __parse_struct(res, node->left, pos + bits, align);
+        bits +=  __parse_struct(res, node->left, pos + bits);
     if (node->right)
-        bits +=  __parse_struct(res, node->right, pos + bits, align);
+        bits +=  __parse_struct(res, node->right, pos + bits);
 
     return bits;
 }
@@ -450,8 +455,7 @@ int get_struct_max(struct node *node)
 int parse_struct(struct node *res, struct node *node)
 {
     int align = get_struct_max(node);
-    //printf("ALIGN: %d\n", align);
-    int bits =  __parse_struct(res, node->right, 0, align);
+    int bits =  __parse_struct(res, node->right, 0);
 
     // Take care of padding at the end
     int extra = 0;
