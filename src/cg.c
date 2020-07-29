@@ -149,6 +149,8 @@ struct type *gen_type_list_type(struct gen_context *ctx, struct node *node);
 
 char *stype_str(struct type *t)
 {
+    if (!t)
+        return NULL;
     char *tmp = calloc(256, sizeof(char));
     snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_const ? ", const" : "");
     tmp[255] = 0;
@@ -238,7 +240,7 @@ struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bit
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
             if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
                 return res;
-            else if (res->type != V_STRUCT && res->type != V_CUSTOM)
+            else if (res->type != V_STRUCT && res->type != V_UNION && res->type != V_CUSTOM)
                 return res;
         }
         res = res->next;
@@ -291,6 +293,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     struct node *tmp = node;
     int first = 1;
     int ok_gen = 1;
+
+    FATALN(!tmp, node, "Invalid struct/union: %p", (void *)node);
 
     do {
         if (tmp->left) {
@@ -744,9 +748,9 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
 
     struct variable *val = NULL;
     if (target->type == V_FLOAT && v->type->type == V_INT) {
-        val = new_variable(ctx, NULL, V_FLOAT, v->type->bits, 1, 0, 0, 0);
-        buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double\n",
-                val->reg, v->type->bits, v->reg);
+        val = new_variable(ctx, NULL, V_FLOAT, 64, 1, 0, 0, 0);
+        buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to double; gen_cast\n",
+                val->reg, v->type->bits, v->reg, 64);
         val->direct = 1;
     } else if (!force) {
         ERR("Invalid cast for %d, %d -> %d",
@@ -2317,7 +2321,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     } else if (var->type->type == V_INT && target->type == V_FLOAT) {
         res = new_inst_variable(ctx, V_FLOAT, target->bits, target->sign);
         if (var->type->sign)
-            buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to %s\n",
+            buffer_write(ctx->data, "%%%d = sitofp i%d %%%d to %s ; gen_cast_to\n",
                 res->reg, var->bits, var->reg, target->bits == 64 ? "double" : "float");
         else
             buffer_write(ctx->data, "%%%d = uitofp i%d %%%d to %s\n",
@@ -3758,27 +3762,12 @@ struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
     if (!node)
         return NULL;
 
-    if (node->node == A_TYPE && node->type == V_STRUCT) {
+    if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION)) {
         gen_type(ctx, node);
     }
 
     gen_scan_struct(ctx, node->left);
     gen_scan_struct(ctx, node->right);
-
-    return NULL;
-}
-
-struct variable *gen_scan_typedef(struct gen_context *ctx, struct node *node)
-{
-    if (!node)
-        return NULL;
-
-    if (node->node == A_TYPE_LIST && node->type == V_STRUCT) {
-        //gen_type(ctx, node);
-    }
-
-    gen_scan_typedef(ctx, node->left);
-    gen_scan_typedef(ctx, node->right);
 
     return NULL;
 }
@@ -4149,7 +4138,6 @@ int codegen(FILE *outfile, struct node *node)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
     gen_scan_struct(ctx, node);
-    gen_scan_typedef(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;

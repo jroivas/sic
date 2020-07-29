@@ -461,12 +461,13 @@ int parse_struct(struct node *res, struct node *node)
 
     bits = __parse_struct(res, node->right, 0);
 
-    if (res->node == A_STRUCT) {
+    if (node->node == A_UNION) {
+        bits = align;
+    } else {
         // Take care of padding at the end
         while ((bits + extra) % align != 0)
             extra++;
-    } else
-        bits = align;
+    }
 
     return bits + extra;
 }
