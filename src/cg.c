@@ -286,10 +286,11 @@ struct type *register_type(struct gen_context *ctx, const char *name, enum var_t
     return t;
 }
 
-void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node)
+void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node, int is_union)
 {
     struct node *tmp = node;
     int first = 1;
+    int ok_gen = 1;
 
     do {
         if (tmp->left) {
@@ -298,16 +299,22 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             FATALN(!t, l, "Invalid type definition: %s", type_str(l->type));
             type->itemcnt++;
 
-            if (!first)
+            if (!first && is_union)
+                ok_gen = 0;
+
+            if (!first && ok_gen)
                 buffer_write(ctx->init, ", ");
             first = 0;
             if (t->type == V_INT) {
-                buffer_write(ctx->init, "i%d", (t->bits ? t->bits : 32));
+                if (ok_gen)
+                    buffer_write(ctx->init, "i%d", (t->bits ? t->bits : 32));
             } else if (t->type == V_FLOAT) {
-                if (t->bits == 32)
-                    buffer_write(ctx->init, "float");
-                else
-                    buffer_write(ctx->init, "double");
+                if (ok_gen) {
+                    if (t->bits == 32)
+                        buffer_write(ctx->init, "float");
+                    else
+                        buffer_write(ctx->init, "double");
+                }
             } else if (t->type == V_STRUCT) {
                 /*
                  * We need to resolve the size of struct now in
@@ -317,7 +324,12 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                  * so we just mark 0 as size.
                  */
                 type->bits += t->bits;
-                buffer_write(ctx->init, "%%struct.%s", l->type_name);
+                if (ok_gen)
+                    buffer_write(ctx->init, "%%struct.%s", l->type_name);
+            } else if (t->type == V_UNION) {
+                type->bits += t->bits;
+                if (ok_gen)
+                    buffer_write(ctx->init, "%%union.%s", l->type_name);
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
 
@@ -357,6 +369,17 @@ void complete_enum_type(struct gen_context *global_ctx, struct gen_context *ctx,
         tmp = tmp->right;
     } while (tmp);
 
+}
+
+struct type *struct_get_by_index(struct type *type, int index)
+{
+    FATAL(!type, "No struct type");
+    //FATAL(index >= type->itemcnt, "Struct/union access out of bounds");
+
+    if (index >= type->itemcnt)
+        return NULL;
+
+    return type->items[index].item;
 }
 
 int struct_get_by_name(struct type *type, const char *name, struct type **res)
@@ -914,7 +937,7 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
     return reg;
 }
 
-int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int code_alloc, literalnum val)
+int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int code_alloc, literalnum val, literalnum frac)
 {
     if (ctx->global) {
         buffer_write(ctx->init, "%s%d = global %s 0.0, align %d\n", "@G", reg, float_str(bits), align(bits));
@@ -923,7 +946,7 @@ int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int
         char *vals = NULL;
         buffer_write(ctx->init, "%s%d = alloca %s%s, align %d\n",
             ctx->global ? "@G" : "%", reg, float_str(bits), ptr ? stars : "", align(bits));
-        vals = double_to_str(val);
+        vals = double_to_str(val, frac);
         buffer_write(code_alloc ? ctx->data : ctx->init,
             "store %s%s %s, %s%s* %%%d, align %d ; allocate_double\n",
             float_str(bits), ptr ? stars : "" , ptr ? "null" : vals, float_str(bits), ptr ? stars : "", reg, align(bits));
@@ -943,14 +966,17 @@ int gen_prepare_store_int(struct gen_context *ctx, struct node *n)
         n->reg = val->reg;
         return val->reg;
     }
-    val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
     /*
      * It might be we haven't been able to determine bits so far.
      * However we need to have it now since alloc will need bits
      * or it will fail otherwise.
      */
-    if (val->type->bits == 0)
-        val->type->bits = 32;
+    if (n->bits == 0)
+        n->bits = 32;
+    // Auto convert to 64 bit if literal is too small
+    if ((unsigned int)n->value < n->value)
+        n->bits = 64;
+    val = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0, 0, 0, ctx->global);
     buffer_write(ctx->init, "; Int literal: %d\n", n->value);
 #if 0
     // FIXME, causes issue
@@ -984,7 +1010,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     val->literal = 1;
     if (!ctx->global)
         val->assigned = 1;
-    gen_allocate_double(ctx, val->reg, n->bits, 0, 0, n->value);
+    gen_allocate_double(ctx, val->reg, n->bits, 0, 0, n->value, n->fraction);
     n->reg = val->reg;
     return val->reg;
 }
@@ -1898,6 +1924,13 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                     stars ? stars : "",
                     par->reg);
                 break;
+            case V_UNION:
+                buffer_write(params, "%s%%union.%s%s %%%d",
+                    paramcnt > 1 ? ", " : "",
+                    type_name,
+                    stars ? stars : "",
+                    par->reg);
+                break;
             case V_STR:
                 buffer_write(params, "%si8* getelementptr inbounds "
                     "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0)",
@@ -1983,7 +2016,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
 
-    if (!t && node->type == V_STRUCT) {
+    if (!t && (node->type == V_STRUCT || node->type == V_UNION)) {
         struct gen_context *global_ctx = ctx;
 
         while (global_ctx->parent)
@@ -2011,10 +2044,13 @@ int gen_type(struct gen_context *ctx, struct node *node)
         t->type_name = node->value_string;
 
         // FIXME This is a hack for now
-        buffer_write(global_ctx->init, "%%struct.%s = type { ", typename);
-        complete_struct_type(global_ctx, t, node->right);
-
+        if (node->type == V_STRUCT)
+            buffer_write(global_ctx->init, "%%struct.%s = type { ", typename);
+        else
+            buffer_write(global_ctx->init, "%%union.%s = type { ", typename);
+        complete_struct_type(global_ctx, t, node->right, node->type == V_UNION);
         buffer_write(global_ctx->init, " }\n");
+
     }
     if (!t && node->type == V_ENUM) {
         struct gen_context *global_ctx = ctx;
@@ -2117,7 +2153,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         struct type *to_free = res == tl ? tr : tl;
         if (to_free->temporary)
             free(to_free);
-    } else if (node->node == A_STRUCT) {
+    } else if (node->node == A_STRUCT || node->node == A_UNION) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
         if (res)
             return res;
@@ -2131,9 +2167,11 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->type_name = node->value_string;
 
         // FIXME This is a hack for now
-        buffer_write(global_ctx->init, "%%struct.%s = type { ",
-            node->value_string);
-        complete_struct_type(global_ctx, res, node->right);
+        if (node->type == V_STRUCT)
+            buffer_write(global_ctx->init, "%%struct.%s = type { ", node->value_string);
+        else
+            buffer_write(global_ctx->init, "%%union.%s = type { ", node->value_string);
+        complete_struct_type(global_ctx, res, node->right, node->type == V_UNION);
 
         buffer_write(global_ctx->init, " }\n");
     } else if (node->node == A_ENUM) {
@@ -2156,7 +2194,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->custom_type = tmp;
         res->type_name = node->value_string;
     } else if (node->node == A_TYPE) {
-        if (node->type == V_STRUCT) {
+        if (node->type == V_STRUCT || node->type == V_UNION) {
 #if 0
             if (!node->type_name && node->parent && node->parent->value_string)
                 res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->parent->value_string);
@@ -2166,7 +2204,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
 
             FATALN(!res, node->parent, "Couldn't solve type in struct: %s, %s", node->type_name, node->parent->value_string);
         } else
-            ERR("Should not get here!");
+            ERR("Should not get here, got: %s", type_str(node->type));
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
     } else {
@@ -2374,11 +2412,16 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, 1, ptrval, addrval, ctx->global);
             var->global = ctx->global;
             var->array = idx_value;
-            res = gen_allocate_double(ctx, var->reg, var->bits, var->ptr, 0, node->value);
+            res = gen_allocate_double(ctx, var->reg, var->bits, var->ptr, 0, node->value, node->fraction);
             break;
         case V_STRUCT:
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
             buffer_write(ctx->init, "%%%d = alloca %%struct.%s, align 8\n", var->reg, t->name);
+            res = var->reg;
+            break;
+        case V_UNION:
+            var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
+            buffer_write(ctx->init, "%%%d = alloca %%union.%s, align 8\n", var->reg, t->name);
             res = var->reg;
             break;
         case V_ENUM:
@@ -2551,6 +2594,22 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     return res->reg;
 }
 
+struct variable *gen_access_type_target(struct gen_context *ctx, struct type *access_type)
+{
+    struct variable *ret = NULL;
+
+    if (access_type->type == V_INT) {
+        ret = new_variable(ctx, NULL, V_INT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
+    } else if (access_type->type == V_FLOAT) {
+        ret = new_variable(ctx, NULL, V_FLOAT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
+    } else if (access_type->type == V_STRUCT) {
+        ret = new_variable_ext(ctx, NULL, V_STRUCT, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
+    } else
+        ERR("Can't access %s from struct", type_str(access_type->type));
+
+    return ret;
+}
+
 int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
 {
     struct variable *var = find_variable(ctx, a);
@@ -2564,24 +2623,45 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
 
     FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct: %s", type_str(var->type->type));
     struct type *access_type = NULL;
-    int index_num = struct_get_by_name(var->type, idx_name, &access_type);
+    int index_num = 0;
+    index_num = struct_get_by_name(var->type, idx_name, &access_type);
+#if 0
+    if (var->type->type == V_UNION) {
+        access_type = struct_get_by_index(var->type, 0);
+    } else
+        index_num = struct_get_by_name(var->type, idx_name, &access_type);
+#endif
     FATALN(index_num < 0, node, "Couldn't find from struct %s: %s", var->type->type_name, idx_name);
     FATALN(!access_type, node, "Can't find type of %s from struct", idx_name);
 
-    struct variable *ret = NULL;
-
-    if (access_type->type == V_INT) {
-        ret = new_variable(ctx, NULL, V_INT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
-    } else if (access_type->type == V_FLOAT) {
-        ret = new_variable(ctx, NULL, V_FLOAT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
-    } else if (access_type->type == V_STRUCT) {
-        ret = new_variable_ext(ctx, NULL, V_STRUCT, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
-    } else
-        ERR("Can't access %s from struct", type_str(access_type->type));
+    struct variable *ret = gen_access_type_target(ctx, access_type);
 
     FATALN(!ret, node, "Can't create return variable");
-    buffer_write(ctx->data, "%%%d = getelementptr inbounds %%struct.%s, %%struct.%s* %%%d, i32 0, i32 %d\n",
-        ret->reg, var->type->name, var->type->name, var->reg, index_num);
+    if (var->type->type == V_STRUCT)
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds %%struct.%s, %%struct.%s* %%%d, i32 0, i32 %d\n",
+            ret->reg, var->type->name, var->type->name, var->reg, index_num);
+    else {
+        if (access_type->type == V_INT)
+            buffer_write(ctx->data, "%%%d = bitcast %%union.%s* %%%d to i%d*\n",
+                ret->reg, var->type->name, var->reg, access_type->bits);
+        else if (access_type->type == V_FLOAT)
+            buffer_write(ctx->data, "%%%d = bitcast %%union.%s* %%%d to %s*\n",
+                ret->reg, var->type->name, var->reg, float_str(access_type->bits));
+        else
+            ERR("Can't access from union");
+#if 0
+        struct type *alt_access_type = NULL;
+        int alt_index_num = struct_get_by_name(var->type, idx_name, &alt_access_type);
+
+        // Union always get first element
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds %%union.%s, %%union.%s* %%%d, i32 0, i32 0\n",
+            ret->reg, var->type->name, var->type->name, var->reg, index_num);
+
+        struct variable *alt_ret = gen_access_type_target(ctx, alt_access_type);
+        buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_assign cast ptr\n",
+#endif
+        //ret = gen_cast(ctx, ret, access_type, 1);
+    }
 
     return ret->reg;
 }
@@ -2613,7 +2693,7 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
                 res->reg, align(res->type->bits)
                 );
         } else if (var->type->type == V_FLOAT) {
-            gen_allocate_double(ctx, res->reg, res->type->bits, res->ptr, 1, node->value);
+            gen_allocate_double(ctx, res->reg, res->type->bits, res->ptr, 1, node->value, node->fraction);
             buffer_write(ctx->data, "store %s %s %%%d, %s %s%d, align %d\n",
                 float_str(var->type->bits),
                 src ? src : "",
@@ -2625,6 +2705,16 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
         } else if (var->type->type == V_STRUCT) {
             buffer_write(ctx->data, "%%%d = alloca %%struct.%s%s, align 8 ; gen_addr\n", res->reg, var->type->type_name, src ? src : "");
             buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s %s%d, align %d ; gen_addr\n",
+                var->type->type_name,
+                src ? src : "",
+                reg,
+                var->type->type_name,
+                dst ? dst : "",
+                REGP(res), res->reg,
+                8);
+        } else if (var->type->type == V_UNION) {
+            buffer_write(ctx->data, "%%%d = alloca %%union.%s%s, align 8 ; gen_addr\n", res->reg, var->type->type_name, src ? src : "");
+            buffer_write(ctx->data, "store %%union.%s%s %%%d, %%union.%s%s %s%d, align %d ; gen_addr\n",
                 var->type->type_name,
                 src ? src : "",
                 reg,
@@ -2673,6 +2763,18 @@ int gen_dereference(struct gen_context *ctx, struct node *node, int reg)
         if (var->ptr)
             res->ptr--;
         buffer_write(ctx->data, "%%%d = load %%struct.%s%s, %%struct.%s%s* %%%d, align %d ; DEREF %d %d\n",
+            res->reg,
+            var->type->type_name,
+            src ? src : "",
+            var->type->type_name,
+            src ? src : "",
+            var->reg,
+            8
+            );
+    } else if (var->type->type == V_UNION) {
+        if (var->ptr)
+            res->ptr--;
+        buffer_write(ctx->data, "%%%d = load %%union.%s%s, %%union.%s%s* %%%d, align %d ; DEREF %d %d\n",
             res->reg,
             var->type->type_name,
             src ? src : "",
@@ -2908,6 +3010,11 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                 paramcnt > 1 ? ", " : "",
                 par_type->type_name,
                 stars ? stars : "");
+        } else if (par_type->type == V_UNION) {
+            buffer_write(params, "%s%%union.%s%s",
+                paramcnt > 1 ? ", " : "",
+                par_type->type_name,
+                stars ? stars : "");
         } else if (par_type->type == V_VOID && pointer) {
             buffer_write(params, "%si8%s*",
                 paramcnt > 1 ? ", " : "",
@@ -3001,6 +3108,18 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
 
                 buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d\n",
+                    ptype->type_name,
+                    stars ? stars : "",
+                    parami,
+                    ptype->type_name,
+                    stars ? stars : "",
+                    res->reg,
+                    8);
+            } else if (ptype->type == V_UNION) {
+                struct variable *res = new_variable_ext(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0, ptype->type_name);
+
+                buffer_write(ctx->init, "%%%d = alloca %%union.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
+                buffer_write(allocs, "store %%union.%s%s %%%d, %%union.%s%s* %%%d, align %d\n",
                     ptype->type_name,
                     stars ? stars : "",
                     parami,

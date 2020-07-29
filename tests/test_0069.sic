@@ -1,0 +1,27 @@
+int printf(const char *fmt, ...);
+
+typedef union test_t {
+    double a;
+    long b;
+} test;
+
+union test_t {
+    double a;
+    long b;
+};
+
+int main()
+{
+    union test_t a;
+    test b;
+
+    a.a = 1.1;
+    if (a.b != 4607632778762754458)
+        return 1;
+
+    b.a = 42;
+    if (b.a != -1.0)
+        return 2;
+
+    return 0;
+}

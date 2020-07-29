@@ -456,12 +456,17 @@ int get_struct_max(struct node *node)
 int parse_struct(struct node *res, struct node *node)
 {
     int align = get_struct_max(node);
-    int bits =  __parse_struct(res, node->right, 0);
-
-    // Take care of padding at the end
+    int bits = 0;
     int extra = 0;
-    while ((bits + extra) % align != 0)
-        extra++;
+
+    bits = __parse_struct(res, node->right, 0);
+
+    if (res->node == A_STRUCT) {
+        // Take care of padding at the end
+        while ((bits + extra) % align != 0)
+            extra++;
+    } else
+        bits = align;
 
     return bits + extra;
 }
@@ -864,7 +869,7 @@ struct node *enum_specifier(struct scanfile *f, struct token *token)
 struct node *type_specifier(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
-    if (token->token == T_KEYWORD && (token->keyword == K_STRUCT || token->keyword == K_STRUCT))
+    if (token->token == T_KEYWORD && (token->keyword == K_STRUCT || token->keyword == K_UNION))
         return struct_or_union_specifier(f, token);
     if (token->token == T_KEYWORD && token->keyword == K_ENUM)
         return enum_specifier(f, token);
