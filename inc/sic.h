@@ -15,7 +15,7 @@ typedef unsigned long hashtype;
 #define REF_CTX(X) (-(X))
 
 enum var_type {
-    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR, V_STRUCT, V_UNION, V_ENUM, V_CUSTOM
+    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR, V_STRUCT, V_UNION, V_ENUM, V_CUSTOM, V_BUILTIN
 };
 
 #define WARN(...) { \
@@ -50,6 +50,13 @@ void stack_trace(void);
     exit(EXIT_FAILURE); \
 } }
 
+#define FATALF(check, file, ...) do {\
+    struct node *n = calloc(1,sizeof(struct node));\
+    n->filename =  file->filename;\
+    n->line =  file->line;\
+    n->linepos =  file->linepos;\
+    FATALN(check, n, __VA_ARGS__);\
+} while(0);
 #define FATAL(check, ...) FATALN(check, NULL, __VA_ARGS__)
 
 const char *type_str(enum var_type t);

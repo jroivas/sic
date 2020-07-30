@@ -130,6 +130,14 @@ int typedef_is(struct scanfile *f, const char *name)
     return 0;
 }
 
+int builtin_is(struct scanfile *f, const char *name)
+{
+    if (strcmp(name, "__builtin_va_list") == 0)
+        return 1;
+
+    return 0;
+}
+
 const char *node_type_str(enum nodetype t)
 {
     FATAL(t >= sizeof(nodestr) / sizeof (char*),
@@ -897,6 +905,8 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_FLOAT, 32, PARSE_SIGNED, token->value_string);
     else if (typedef_is(f, token->value_string))
         res = make_type_spec(token, V_CUSTOM, 0, PARSE_SIGNED, token->value_string);
+    else if (builtin_is(f, token->value_string))
+        res = make_type_spec(token, V_BUILTIN, 0, PARSE_SIGNED, token->value_string);
 
     // FIXME More types
 
@@ -930,9 +940,8 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
 
-    //printf("PP: %d:%d\n", f->line, f->linepos);
     struct node *decl = declaration_specifiers(f, token);
-    FATAL(!decl, "Typedef missing type declaration");
+    FATALF(!decl, f, "Typedef missing type declaration");
 
     struct node *ptr = pointer(f, token);
     if (ptr) {
@@ -972,7 +981,6 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         type = type_specifier(f, token);
         if (type == NULL) {
             type = type_qualifier(f, token);
-
             if (type == NULL)
                 return NULL;
         }

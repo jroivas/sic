@@ -7,7 +7,7 @@
 #include "parse.h"
 
 static const char *typestr[] = {
-    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom"
+    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom", "builtin"
 };
 
 const char *type_str(enum var_type t)

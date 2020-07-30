@@ -134,7 +134,7 @@ struct gen_context {
 };
 
 static const char *varstr[] = {
-    "void", "null", "i32", "double", "fixed", "struct", "union", "enum", "custom", "invalid"
+    "void", "null", "i32", "double", "fixed", "struct", "union", "enum", "custom", "builtin", "invalid"
 };
 
 struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
@@ -152,7 +152,7 @@ char *stype_str(struct type *t)
     if (!t)
         return NULL;
     char *tmp = calloc(256, sizeof(char));
-    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_const ? ", const" : "");
+    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "");
     tmp[255] = 0;
     return tmp;
 }
@@ -299,9 +299,13 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     do {
         if (tmp->left) {
             struct node *l = tmp->left;
+            struct node *namenode = l->right;
             struct type *t = gen_type_list_type(ctx, l);
             FATALN(!t, l, "Invalid type definition: %s", type_str(l->type));
             type->itemcnt++;
+
+            while (namenode && namenode->left)
+                namenode = namenode->left;
 
             if (!first && is_union)
                 ok_gen = 0;
@@ -342,9 +346,10 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 type->items = calloc(type->itemcnt, sizeof(struct type_item));
             else
                 type->items = realloc(type->items, type->itemcnt * sizeof(struct type_item));
+
             type->items[type->itemcnt - 1].item = t;
-            FATALN(!l->value_string, l, "Nameless struct value");
-            type->items[type->itemcnt - 1].name = l->value_string;
+            FATALN(!namenode->value_string, l, "Nameless struct value");
+            type->items[type->itemcnt - 1].name = namenode->value_string;
         }
         tmp = tmp->right;
     } while (tmp);
@@ -2211,6 +2216,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             ERR("Should not get here, got: %s", type_str(node->type));
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
+    } else if (node->type == V_BUILTIN) {
+        res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
     } else {
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
@@ -2419,6 +2426,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             res = gen_allocate_double(ctx, var->reg, var->bits, var->ptr, 0, node->value, node->fraction);
             break;
         case V_STRUCT:
+            node_walk(node);
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, 0, ptrval, addrval, ctx->global, t->type_name);
             buffer_write(ctx->init, "%%%d = alloca %%struct.%s, align 8\n", var->reg, t->name);
             res = var->reg;
@@ -3037,7 +3045,11 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
     if (allocate_params) {
         node = paramnode;
         int parami = 0;
-        ctx->regnum += paramcnt;
+        if (ellipsis) {
+            if (paramcnt)
+                ctx->regnum += paramcnt - 1;
+        } else
+            ctx->regnum += paramcnt;
         while (node && node->node == A_LIST) {
             struct node *pval = node;
             if (node->right && node->right->node == A_LIST)
@@ -3772,6 +3784,44 @@ struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
     return NULL;
 }
 
+void gen_builtint_va_list(struct gen_context *ctx, struct node *node)
+{
+    struct type *res = register_type(ctx, node->value_string, V_STRUCT, 8, 0, 0);
+    res->type_name = node->value_string;
+
+    // FIXME { i8* } now, shoulde be { i32, i32, i8*, i8* }
+    buffer_write(ctx->init, "%%struct.%s = type { i8* }\n", node->value_string);
+    res->itemcnt = 1;
+    res->items = calloc(res->itemcnt, sizeof(struct type_item));
+
+    struct type *int8 = find_type_by(ctx, V_INT, 8, 0, 1);
+    if (!int8) {
+        int8 = find_type_by(ctx, V_INT, 8, 0, 0);
+        int8 = type_wrap(ctx, int8);
+    }
+
+    res->items[0].item = int8;
+    res->items[0].name = "value";
+    res = type_wrap(ctx, res);
+}
+
+void gen_scan_builtin(struct gen_context *ctx, struct node *node)
+{
+    if (!node)
+        return;
+
+    if (node->node == A_TYPESPEC && node->type == V_BUILTIN) {
+        if (strcmp(node->value_string, "__builtin_va_list") == 0) {
+            struct type *res = __find_type_by(ctx, V_STRUCT, 0, 0, 0, node->value_string);
+            if (!res)
+                gen_builtint_va_list(ctx, node);
+        }
+    }
+
+    gen_scan_builtin(ctx, node->left);
+    gen_scan_builtin(ctx, node->right);
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -4137,6 +4187,7 @@ int codegen(FILE *outfile, struct node *node)
     if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
+    gen_scan_builtin(ctx, node);
     gen_scan_struct(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
