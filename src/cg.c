@@ -847,34 +847,8 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
         else if (target->type == V_INT && v->type->type == V_STRUCT) {
             //FATAL(!target->ptr, "Can't convert int to struct, need pointer");
             buffer_write(ctx->data, "; ptr %d -> %d\n", target->ptr, v->ptr);
-#if 0
-            int fixed = 0;
-            while (target->ptr > v->ptr) {
-                fixed = 1;
-                char *stars = get_stars(v->ptr + 1);
-                struct variable *res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->ptr + 1, 0, 0, v->type->type_name);
-                buffer_write(ctx->data, "%%%d = alloca %%struct.%s%s, align %d\n",
-                    res->reg,
-                    v->type->type_name,
-                    stars, 8);
-                buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d ; cast take addr\n",
-                    v->type->type_name,
-                    stars,
-                    v->reg,
-                    v->type->type_name,
-                    stars,
-                    res->reg,
-                    8);
-                res->direct = 0;
-                free(stars);
-                v = res;
-            }
-            if (fixed)
+            if (target->ptr > v->ptr)
                 v = gen_load_struct(ctx, v);
-#else
-            while (target->ptr > v->ptr)
-                v = gen_load_struct(ctx, v);
-#endif
 
             char *stars = get_stars(v->ptr);
             char *stars2 = get_stars(target->ptr);
@@ -2013,7 +1987,7 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             FATALN(!ptype, pval, "Invalid parameter");
             if (ptype->node == A_ELLIPSIS)
                 ellipsis = 1;
-            pname = wanted->right;
+            pname = pval->right;
         }
 
         int r = gen_recursive(ctx, provided->left);
