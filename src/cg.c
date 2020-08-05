@@ -341,8 +341,10 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             char *stars = get_stars(l->ptr);
             type->itemcnt++;
 
-            while (namenode && namenode->left)
-                namenode = namenode->left;
+            if (!namenode)
+                namenode = l;
+            while (namenode && namenode->right)
+                namenode = namenode->right;
 
             if (!first && is_union)
                 ok_gen = 0;
@@ -384,6 +386,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             else
                 type->items = realloc(type->items, type->itemcnt * sizeof(struct type_item));
 
+            FATALN(!namenode, tmp, "No name");
+            //printf("Struct new item: %s, type %s\n", namenode->value_string, stype_str(t));
             type->items[type->itemcnt - 1].item = t;
             FATALN(!namenode->value_string, l, "Nameless struct value");
             type->items[type->itemcnt - 1].name = namenode->value_string;
@@ -2848,7 +2852,7 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
     } else
         index_num = struct_get_by_name(var->type, idx_name, &access_type);
 #endif
-    FATALN(index_num < 0, node, "Couldn't find from struct %s: %s", var->type->type_name, idx_name);
+    FATALN(index_num < 0, node, "Couldn't find from struct \"%s\": %s", var->type->type_name, idx_name);
     FATALN(!access_type, node, "Can't find type of %s from struct", idx_name);
 
     struct variable *ret = gen_access_type_target(ctx, access_type);
