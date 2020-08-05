@@ -345,6 +345,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 namenode = l;
             while (namenode && namenode->right)
                 namenode = namenode->right;
+            while (namenode && namenode->left)
+                namenode = namenode->left;
 
             if (!first && is_union)
                 ok_gen = 0;
