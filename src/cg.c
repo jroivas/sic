@@ -1967,7 +1967,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
     struct buffer *params = buffer_init();
     int paramcnt = 0;
     enum builtin_function builtin = builtin_func(func->value_string);
-    //int ellipsis = builtin != BUILTIN_NONE;
     int ellipsis = 0;
 
     while (provided) {
@@ -2002,7 +2001,8 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                 pointer += pname->ptr;
                 pname = pname->left;
             }
-        }
+        } else if (ellipsis)
+            pointer = par->ptr;
 
         paramcnt++;
         if (builtin == BUILTIN_VA_START && paramcnt > 1)
