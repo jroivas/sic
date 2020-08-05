@@ -160,14 +160,14 @@ int determine_size_bytes(literalnum value)
 
 char *get_stars(int cnt)
 {
-        char *tmp = NULL;
-        if (cnt <= 0)
-            return tmp;
+    char *tmp = NULL;;
+    if (cnt <= 0)
+        return calloc(1, 1);
 
-        tmp = calloc(cnt + 1, 1);
-        for (int i = 0; i < cnt; i++)
-            tmp[i] = '*';
-        return tmp;
+    tmp = calloc(cnt + 1, 1);
+    for (int i = 0; i < cnt; i++)
+        tmp[i] = '*';
+    return tmp;
 }
 
 int determine_size(literalnum value)

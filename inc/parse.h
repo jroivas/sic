@@ -106,6 +106,7 @@ extern void node_walk(struct node *node);
 extern void node_free(struct node *node);
 const char *node_type_str(enum nodetype t);
 const char *node_str(struct node *n);
+struct node *make_node(struct token *t, enum nodetype node, struct node *left, struct node *mid, struct node *right);
 
 enum comma_type {
     COMMA_NONE,
