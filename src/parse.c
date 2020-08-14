@@ -17,6 +17,8 @@ struct node *type_name(struct scanfile *f, struct token *token);
 struct node *declaration_specifiers(struct scanfile *f, struct token *token);
 struct node *attributes(struct scanfile *f, struct token *token);
 struct node *pointer(struct scanfile *f, struct token *token);
+struct node *argument_expression_list(struct scanfile *f, struct token *token);
+struct node *parameter_type_list(struct scanfile *f, struct token *token);
 
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
@@ -954,6 +956,14 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
     res->value_string = token->value_string;
     scan(f, token);
 
+    if (accept(f, token, T_ROUND_OPEN)) {
+        struct node *args = parameter_type_list(f, token);
+        // This is function typedef
+        expect(f, token, T_ROUND_CLOSE, ")");
+        res->mid = args;
+    }
+
+    FATALN(token->token != T_SEMI, res, "Expected semi, got: %s", token_dump(token));
     semi(f, token);
 
     typedef_add(f, res->value_string, res);

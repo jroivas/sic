@@ -243,7 +243,7 @@ struct type *custom_type_get(struct type *cust)
     // Not a custom type, so return as-is
     if (!cust || cust->type != V_CUSTOM)
         return cust;
-    FATAL(!cust->custom_type, "No target type defined in custom type");
+    FATAL(!cust->custom_type, "No target type defined in custom type: %s", stype_str(cust));
 
     return custom_type_get(cust->custom_type);
 }
@@ -2389,6 +2389,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             ERR("Should not get here, got: %s", type_str(node->type));
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
+        FATAL(!res, "Invalid res");
     } else if (node->type == V_BUILTIN) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
     } else {
@@ -3171,7 +3172,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
         }
         int t = get_type_list(ctx, ptype);
         FATALN(t >= 0, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
-        struct type *par_type = find_type_by_id(ctx, REF_CTX(t));
+        struct type *par_type = custom_type_get(find_type_by_id(ctx, REF_CTX(t)));
         FATALN(!par_type, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
         int pointer = 0;
         while (pname && pname->node == A_POINTER) {
@@ -3247,48 +3248,51 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                 node = node->right;
                 continue;
             }
+            int t = get_type_list(ctx, ptype);
+            FATALN(t >= 0, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
+            struct type *par_type = custom_type_get(find_type_by_id(ctx, REF_CTX(t)));
             // TODO: parse types properly, now just shortcutting
             while (pname && pname->node == A_POINTER)
                 pname = pname->left;
 
             char *stars = get_stars(ptype->ptr);
-            if (ptype->type == V_INT) {
-                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+            if (par_type->type == V_INT) {
+                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
                     res->reg,
-                    ptype->bits,
+                    par_type->bits,
                     stars ? stars : "",
-                    align(ptype->bits));
+                    align(par_type->bits));
                 buffer_write(allocs, "store i%d%s %%%d, i%d%s* %%%d, align %d ; func_params\n",
-                    ptype->bits,
+                    par_type->bits,
                     stars ? stars : "",
                     parami,
-                    ptype->bits,
+                    par_type->bits,
                     stars ? stars : "",
                     res->reg,
-                    align(ptype->bits));
+                    align(par_type->bits));
                 pname->reg = res->reg;
-            } else if (ptype->type == V_FLOAT) {
-                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+            } else if (par_type->type == V_FLOAT) {
+                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
 
                 buffer_write(allocs, "%%%d = alloca %s%s, align %d\n",
                     res->reg,
-                    float_str(ptype->bits),
+                    float_str(par_type->bits),
                     stars ? stars : "",
-                    align(ptype->bits));
+                    align(par_type->bits));
                 buffer_write(allocs, "store %s%s %%%d, %s%s* %%%d, align %d\n",
-                    float_str(ptype->bits),
+                    float_str(par_type->bits),
                     stars ? stars : "",
                     parami,
-                    float_str(ptype->bits),
+                    float_str(par_type->bits),
                     stars ? stars : "",
                     res->reg,
-                    align(ptype->bits));
+                    align(par_type->bits));
                 pname->reg = res->reg;
-            } else if (ptype->type == V_VOID) {
-                struct variable *res = new_variable(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0);
+            } else if (par_type->type == V_VOID) {
+                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
                     res->reg,
@@ -3304,32 +3308,32 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     res->reg,
                     8);
                 pname->reg = res->reg;
-            } else if (ptype->type == V_STRUCT) {
-                struct variable *res = new_variable_ext(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0, ptype->type_name);
+            } else if (par_type->type == V_STRUCT) {
+                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0, par_type->type_name);
 
-                buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
+                buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d; func param list cast\n",
-                    ptype->type_name,
+                    par_type->type_name,
                     stars ? stars : "",
                     parami,
-                    ptype->type_name,
+                    par_type->type_name,
                     stars ? stars : "",
                     res->reg,
                     8);
-            } else if (ptype->type == V_UNION) {
-                struct variable *res = new_variable_ext(ctx, pname->value_string, ptype->type, ptype->bits, ptype->sign, ptype->ptr, ptype->addr, 0, ptype->type_name);
+            } else if (par_type->type == V_UNION) {
+                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0, par_type->type_name);
 
-                buffer_write(ctx->init, "%%%d = alloca %%union.%s%s, align 8\n", res->reg, ptype->type_name, stars ? stars : "");
+                buffer_write(ctx->init, "%%%d = alloca %%union.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%union.%s%s %%%d, %%union.%s%s* %%%d, align %d\n",
-                    ptype->type_name,
+                    par_type->type_name,
                     stars ? stars : "",
                     parami,
-                    ptype->type_name,
+                    par_type->type_name,
                     stars ? stars : "",
                     res->reg,
                     8);
             } else
-                ERR("Invalid parameter");
+                ERR("Invalid parameter type: %s", type_str(par_type->type));
             if (stars)
                 free(stars);
             parami++;
@@ -3446,7 +3450,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
 
     // Find previously defined function
     struct variable *func_var = find_variable_by_name(ctx, func_ctx->name);
-    struct type *func_type = func_var->type;
+    struct type *func_type = custom_type_get(func_var->type);
     // Need to tell return type
     if (func_ctx->main_type == NULL)
         func_ctx->main_type = func_type;
@@ -3489,7 +3493,7 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
         return 0;
     int res = 0;
     struct variable *var;
-    struct type *target = resolve_return_type(ctx, ctx->node, res);
+    struct type *target = custom_type_get(resolve_return_type(ctx, ctx->node, res));
     if (right)
         var = find_variable(ctx, right);
     else
@@ -3505,7 +3509,6 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
     } else
         ERR("Invalid return type");
     ctx->rets++;
-    free(target);
 
     return res;
 }
@@ -3895,7 +3898,7 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     struct variable *func_var = find_variable_by_name(ctx, func_name);
     FATALN(func_var, node, "Function name already in use: %s", func_name);
 
-    func_var = new_variable(ctx, func_name, func_type->type, func_type->bits, func_type->sign, func_type->ptr, func_node->addr, 1);
+    func_var = new_variable_ext(ctx, func_name, func_type->type, func_type->bits, func_type->sign, func_type->ptr, func_node->addr, 1, func_type->type_name);
     func_var->func = 1;
     FATALN(!node->right, node, "Invalid function");
     FATALN(!node->right->left, node, "Invalid function, no name");
@@ -3918,7 +3921,6 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
         body = node->right->right;
     if (!body) {
         // This is prototype, just mark it.
-
         buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
             type, func_name,
             params ? params : "");
@@ -3967,6 +3969,25 @@ struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
     gen_scan_struct(ctx, node->right);
 
     return NULL;
+}
+
+void gen_scan_typedef(struct gen_context *ctx, struct node *node)
+{
+    if (!node)
+        return;
+
+    if (node->node == A_TYPEDEF) {
+        struct type *tmp = gen_type_list_type(ctx, node->left);
+        FATALN(!tmp, node, "Invalid typedef, missing result type");
+
+        struct type *res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign, tmp->ptr);
+        res->custom_type = tmp;
+        res->type_name = node->value_string;
+        return;
+    }
+
+    gen_scan_typedef(ctx, node->left);
+    gen_scan_typedef(ctx, node->right);
 }
 
 void gen_builtin_va_list(struct gen_context *ctx, struct node *node)
@@ -4406,29 +4427,13 @@ struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int re
 
 struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg)
 {
-    struct type *res = calloc(1, sizeof(struct type));
-    int got = 0;
+    struct type *res = NULL;
     if (ctx->main_type) {
-        if (ctx->main_type->type == V_VOID) {
-            res->type = V_VOID;
-            got = 1;
-        } else {
-            res->type = ctx->main_type->type;
-            res->bits = ctx->main_type->bits;
-            res->sign = ctx->main_type->sign;
-            got = 1;
-        }
+        res = __find_type_by(ctx, ctx->main_type->type, ctx->main_type->bits, ctx->main_type->sign, ctx->main_type->ptr, ctx->main_type->type_name);
     } else if (node && node->type != V_VOID) {
-        res->type = node->type;
-        res->bits = node->bits;
-        res->sign = node->sign;
-        buffer_write(ctx->post, "; FF %s\n", stype_str(res));
-        got = 1;
-    }
-    if (!got) {
-        res->type = V_INT;
-        res->bits = 32;
-        res->sign = 1;
+        res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->value_string);
+    } else {
+        res = __find_type_by(ctx, V_INT, 32, 1, 0, NULL);
     }
     return res;
 }
@@ -4474,6 +4479,7 @@ int codegen(FILE *outfile, struct node *node)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
     gen_scan_builtin(ctx, node);
+    gen_scan_typedef(ctx, node);
     gen_scan_struct(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
@@ -4485,7 +4491,7 @@ int codegen(FILE *outfile, struct node *node)
     res = gen_recursive_allocs(ctx, node);
     res = gen_recursive(ctx, node);
 
-    struct type *target = resolve_return_type(ctx, node, res);
+    struct type *target = custom_type_get(resolve_return_type(ctx, node, res));
     char *stype = stype_str(target);
     buffer_write(ctx->post, "; F2 %s, %d\n", stype, target->type);
     free(stype);
@@ -4497,7 +4503,6 @@ int codegen(FILE *outfile, struct node *node)
         struct gen_context *main_ctx = fake_main(ctx, node, res);
         output_ctx(main_ctx);
     }
-    free(target);
 
     return res;
 }
