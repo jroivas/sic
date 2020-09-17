@@ -3436,6 +3436,9 @@ int gen_function(struct gen_context *ctx, struct node *node)
     struct node *r = node->right;
     FATALN(!r, node, "Function body missing");
     struct node *name = r->left;
+    while ((name->node != A_IDENTIFIER || name->value_string == NULL) && name->left) {
+        name = name->left;
+    }
     FATALN(!name, r, "Function name missing");
     FATALN(name->node != A_IDENTIFIER, r, "Faulty function name");
     func_ctx->name = name->value_string;
@@ -3891,6 +3894,11 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
         global_ctx = global_ctx->parent;
 
     struct type *func_type = gen_type_list_type(ctx, node->left);
+    while ((name->node != A_IDENTIFIER || func_name == NULL) && name->left) {
+        name = name->left;
+        func_name = name->value_string;
+    }
+    FATALN(!name, node, "Missing function name");
     if (strcmp(func_name, "main") == 0) {
         if (func_type->type == V_VOID)
             func_type = find_type_by(ctx, V_VOID, 0, 0, 0);
@@ -3922,9 +3930,11 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
         body = node->right->right;
     if (!body) {
         // This is prototype, just mark it.
-        buffer_write(global_ctx->pre, "declare %s @%s(%s);\n",
-            type, func_name,
+        char *stars = get_stars(func_type->ptr);
+        buffer_write(global_ctx->pre, "declare %s%s @%s(%s);\n",
+            type, stars, func_name,
             params ? params : "");
+        free(stars);
     }
     if (tmp)
         free(tmp);

@@ -65,6 +65,7 @@ struct token {
     literalnum fraction;
 
     const char *filename;
+    size_t pos;
     int line;
     int linepos;
     char c;
@@ -77,6 +78,8 @@ struct scanfile {
     FILE *infile;
     struct buffer *buf;
     const char *filename;
+
+    size_t pos;
 
     int pipe;
     int line;
@@ -100,7 +103,9 @@ int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword);
 void save_point(struct scanfile *f, struct token *t);
 void remove_save_point(struct scanfile *f, struct token *t);
-void load_point(struct scanfile *f, struct token *t);
+void __load_point(struct scanfile *f, struct token *t, const char *file, int line);
+
+#define load_point(f, t) __load_point(f, t, __FILE__, __LINE__)
 
 const char *token_val_str(enum tokentype t);
 const char *token_str(struct token *t);

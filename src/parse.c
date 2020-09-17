@@ -992,8 +992,11 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         type = type_specifier(f, token);
         if (type == NULL) {
             type = type_qualifier(f, token);
-            if (type == NULL)
-                return NULL;
+            if (type == NULL) {
+                type = pointer(f, token);
+                if (type == NULL)
+                    return NULL;
+            }
         }
     }
 
@@ -2045,7 +2048,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         load_point(f, token);
-        if (!(decl->is_func && accept(f, token, T_SEMI)))
+        if (!((decl->is_func || (decl->left && decl->left->is_func)) && accept(f, token, T_SEMI)))
             return NULL;
         // This is forward declaration so return result
 

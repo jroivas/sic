@@ -125,6 +125,7 @@ static int next(struct scanfile *f)
     if (f->linepos < SCANFILE_LINEBUF)
         f->linebuf[f->linepos] = c;
     f->linepos++;
+    f->pos = buffer_pos(f->buf);
     if (c == '\n') {
         f->line++;
         f->linepos = 0;
@@ -538,14 +539,19 @@ void save_point(struct scanfile *f, struct token *t)
     FATAL(f->savecnt + 1 >= SCANFILE_SAVE_MAX,
             "Maximum save points reached");
     memcpy(&f->save_token[f->savecnt], t, sizeof(*t));
-    //long pos = ftell(f->infile);
     long pos = buffer_pos(f->buf);
+#if 0
+    f->save_token[f->savecnt].line = f->line;
+    f->save_token[f->savecnt].linepos = f->linepos;
+    f->save_token[f->savecnt].linepos = pos;
+#endif
+    //long pos = ftell(f->infile);
     // If we have putback need to decrement pos.
     if (f->putback && pos)
         pos--;
 
 #if 0
-    printf("Saved: %d,%d token %s\n", t->line, t->linepos, token_dump(t));
+    printf("* Saved: %d,%d token %s\n", t->line, t->linepos, token_dump(t));
     //stack_trace();
 #endif
     f->save_point[f->savecnt++] = pos;
@@ -563,7 +569,7 @@ void remove_save_point(struct scanfile *f, struct token *t)
 #endif
 }
 
-void load_point(struct scanfile *f, struct token *t)
+void __load_point(struct scanfile *f, struct token *t, const char *file, int line)
 {
     FATAL(!f->savecnt, "No save points to load");
     f->putback = 0;
@@ -575,7 +581,7 @@ void load_point(struct scanfile *f, struct token *t)
     //fseek(f->infile, f->save_point[--f->savecnt], SEEK_SET);
     memcpy(t, &f->save_token[f->savecnt], sizeof(*t));
 #if 0
-    printf("Loaded: %d,%d from %d,%d token %s\n", t->line, t->linepos, f->line, f->linepos, token_dump(t));
+    printf("Loaded: %d,%d from %d,%d token %s (%s:%d)\n", t->line, t->linepos, f->line, f->linepos, token_dump(t), file, line);
     //stack_trace();
 #endif
     /*
@@ -584,5 +590,6 @@ void load_point(struct scanfile *f, struct token *t)
      */
     f->line = t->line;
     f->linepos = t->linepos;
+    f->pos = t->pos;
     memcpy(f->linebuf, t->linebuf, SCANFILE_LINEBUF);
 }
