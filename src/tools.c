@@ -5,6 +5,7 @@
 
 #include "sic.h"
 #include "parse.h"
+#include "fatal.h"
 
 static const char *typestr[] = {
     "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom", "builtin"
@@ -388,6 +389,7 @@ const char *resolve_cpp()
     //return "cpp -nostdinc -isystem inc/sys";
     //return "cpp -nostdinc";
     //return "cpp -ansi -pedantic -D__extension__=";
+    //return "cpp -D__extension__= -D__restrict=";
     return "cpp -D__extension__=";
 }
 

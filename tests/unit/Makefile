@@ -11,6 +11,7 @@ test: runtest libsic.so
 libsic.so:
 	make -C ../.. build/libsic.so
 	cp -f ../../build/libsic.so .
+	ln -s libsic.so libsic.so.0
 
 test.o: test.c test.h
 
@@ -22,6 +23,6 @@ runtest: test.o $(SRCS) libsic.so
 	$(CC) -c $(CFLAGS) $< -o $@
 
 clean:
-	rm -f runtest libsic.so *.o
+	rm -f runtest libsic.so libsic.so,* *.o
 
 .PHONY: test runtest libsic.so

@@ -1,7 +1,8 @@
 INC_FILES := inc/*.h
 SRC_FILES := src/*.c
-#SRC_FILES = src/main.c src/scan.c src/parse.c
-CFLAGS = -std=c99 -Wall -Werror -pedantic -g -O3 -fPIC -Iinc/
+CFLAGS_RELEASE = -std=c99 -Wall -Werror -pedantic -O3 -fPIC -Iinc/
+CFLAGS_DEBUG = -std=c99 -Wall -Werror -pedantic -g -O0 -fPIC -Iinc/
+CFLAGS = $(CFLAGS_DEBUG)
 
 all: build/sic build/sic-static
 
@@ -38,6 +39,11 @@ buildtest: compiletest
 
 runtest: buildtest
 	build/test_$(TEST).ir.bin ; echo $$? || true
+
+build/scantool: tools/scantool.c build/libsic.so
+	$(CC) $(CFLAGS) -o build/scantool -L build/ tools/scantool.c build/libsic.so.0
+
+tools: build/scantool
 
 unittest:
 	make -C tests/unit

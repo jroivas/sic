@@ -1,5 +1,6 @@
 #include "parse.h"
 #include "buffer.h"
+#include "fatal.h"
 #include <string.h>
 
 #define PARSE_SIGNED   0

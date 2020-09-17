@@ -56,6 +56,7 @@ enum keyword_type {
     K_SIZEOF
 };
 
+#define SCANFILE_LINEBUF 1024
 struct token {
     enum tokentype token;
     enum keyword_type keyword;
@@ -66,6 +67,8 @@ struct token {
     const char *filename;
     int line;
     int linepos;
+    char c;
+    char linebuf[SCANFILE_LINEBUF + 1];
 };
 
 // Max 32 save points, adjust when compiler comes more compilicated
@@ -82,6 +85,8 @@ struct scanfile {
     int savecnt;
     long save_point[SCANFILE_SAVE_MAX];
     struct token save_token[SCANFILE_SAVE_MAX];
+
+    char linebuf[SCANFILE_LINEBUF + 1];
 
     // Parser defined data
     void *parsedata;
@@ -104,8 +109,8 @@ char *token_dump(struct token *t);
 static inline int expect_err(struct scanfile *f,
     struct token *t, const char *e, const char *file, int line)
 {
-    ERR("Expected %s on %s:%d,%d, got %s instead at %s:%d",
-        e, t->filename, t->line, t->linepos, token_dump(t), file, line);
+    ERR("Expected %s on %s:%d,%d, got %s instead at %s:%d\nLine: %s",
+        e, t->filename, t->line, t->linepos, token_dump(t), file, line, f->linebuf);
 }
 
 #define expect(f, t, token, e)\

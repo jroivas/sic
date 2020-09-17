@@ -4,6 +4,7 @@
 #include <ctype.h>
 #include "sic.h"
 #include "scan.h"
+#include "fatal.h"
 #include "str.h"
 
 static const char *tokenstr[] = {
@@ -105,10 +106,11 @@ static int next(struct scanfile *f)
 {
     int c;
 
+    if (f->linepos == 0)
+        memset(f->linebuf, 0, SCANFILE_LINEBUF);
     if (f->putback) {
         c = f->putback;
         f->putback = 0;
-        f->linepos++;
     } else {
         if (buffer_size(f->buf) > buffer_pos(f->buf)) 
             c = buffer_getch(f->buf);
@@ -119,11 +121,13 @@ static int next(struct scanfile *f)
             buffer_putch(f->buf, c);
             c = buffer_getch(f->buf);
         }
-        f->linepos++;
-        if (c == '\n') {
-            f->line++;
-            f->linepos = 0;
-        }
+    }
+    if (f->linepos < SCANFILE_LINEBUF)
+        f->linebuf[f->linepos] = c;
+    f->linepos++;
+    if (c == '\n') {
+        f->line++;
+        f->linepos = 0;
     }
 
     //printf("Scanned: %c (%d) at %d@%d\n", c, c, f->line, f->linepos);
@@ -161,7 +165,14 @@ int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keywor
 static void putback(struct scanfile *f, int c)
 {
     f->putback = c;
-    f->linepos--;
+#if 1
+    if (c == '\n') {
+        f->line--;
+        //ERR("putback line: %s", f->linebuf);
+    }
+    else if (f->linepos)
+        f->linepos--;
+#endif
 }
 
 literalnum scan_number(struct scanfile *f, int c)
@@ -292,11 +303,14 @@ int keyword(struct token *t)
     return res;
 }
 
-void token_set(struct scanfile *f, struct token *t)
+void token_set(struct scanfile *f, struct token *t, char c)
 {
     t->filename = f->filename;
     t->line = f->line;
     t->linepos = f->linepos;
+    t->c = c;
+    t->linebuf[t->linepos + 1] = 0;
+    memcpy(t->linebuf, f->linebuf, SCANFILE_LINEBUF);
 }
 
 int scan(struct scanfile *f, struct token *t)
@@ -305,7 +319,7 @@ int scan(struct scanfile *f, struct token *t)
     int ok = 0;
 
     memset(t, 0, sizeof(struct token));
-    token_set(f, t);
+    token_set(f, t, c);
 
     switch (c) {
         case EOF:
@@ -570,4 +584,5 @@ void load_point(struct scanfile *f, struct token *t)
      */
     f->line = t->line;
     f->linepos = t->linepos;
+    memcpy(f->linebuf, t->linebuf, SCANFILE_LINEBUF);
 }

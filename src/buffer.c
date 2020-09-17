@@ -1,5 +1,6 @@
 #include "sic.h"
 #include "buffer.h"
+#include "fatal.h"
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>

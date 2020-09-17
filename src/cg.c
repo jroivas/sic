@@ -1,5 +1,6 @@
 #include "cg.h"
 #include "parse.h"
+#include "fatal.h"
 #include "buffer.h"
 #include <string.h>
 
@@ -2528,7 +2529,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
             } else if (var->type->type == V_VOID && target->type == V_INT) {
                 res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
                 buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_cast_to void -> int\n",
-                    res->reg, 8, stars2 ? stars2 : "", var->reg, target->bits, stars ? stars : "");
+                    res->reg, 8, stars ? stars : "", var->reg, target->bits, stars2 ? stars2 : "");
                 res->ptr = ptrval;
             } else
                 ERR("Can't cast void to ptr");
@@ -3274,7 +3275,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     align(par_type->bits));
                 pname->reg = res->reg;
             } else if (par_type->type == V_FLOAT) {
-                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0);
+                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
 
                 buffer_write(allocs, "%%%d = alloca %s%s, align %d\n",
@@ -3292,7 +3293,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     align(par_type->bits));
                 pname->reg = res->reg;
             } else if (par_type->type == V_VOID) {
-                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0);
+                struct variable *res = new_variable(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0);
                 FATALN(!res, pname, "Couldn't generate res");
                 buffer_write(allocs, "%%%d = alloca i%d%s, align %d\n",
                     res->reg,
@@ -3309,7 +3310,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     8);
                 pname->reg = res->reg;
             } else if (par_type->type == V_STRUCT) {
-                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0, par_type->type_name);
+                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0, par_type->type_name);
 
                 buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d; func param list cast\n",
@@ -3321,7 +3322,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
                     res->reg,
                     8);
             } else if (par_type->type == V_UNION) {
-                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, par_type->ptr, ptype->addr, 0, par_type->type_name);
+                struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0, par_type->type_name);
 
                 buffer_write(ctx->init, "%%%d = alloca %%union.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%union.%s%s %%%d, %%union.%s%s* %%%d, align %d\n",
@@ -4479,8 +4480,8 @@ int codegen(FILE *outfile, struct node *node)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
     gen_scan_builtin(ctx, node);
-    gen_scan_typedef(ctx, node);
     gen_scan_struct(ctx, node);
+    gen_scan_typedef(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;

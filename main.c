@@ -2,6 +2,7 @@
 #include <string.h>
 #include "sic.h"
 #include "scan.h"
+#include "fatal.h"
 #include "parse.h"
 #include "cg.h"
 #include "str.h"
