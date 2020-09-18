@@ -182,6 +182,19 @@ const char *var_str(enum var_type v, int size, char **r)
     return varstr[v];
 }
 
+char *variable_str(struct variable *var)
+{
+    char *tmp = calloc(512, sizeof(char));
+    snprintf(tmp, 511, "var %d: reg %d, direct: %d, global: %d, "
+        "ptr: %d, addr: %d, strlen: %d, bits: %d, "
+        "type: 0x%p, name: %s",
+        var->id, var->reg,
+        var->direct, var->global,
+        var->type->ptr, var->addr, var->strlen, var->bits,
+        (void*)var->type, var->name);
+    return tmp;
+}
+
 int align(int bits)
 {
     if (bits == 0)
@@ -254,9 +267,9 @@ struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bit
     while (res) {
 #if DEBUG
         if (res->type == type)
-            printf("Typecheck: %d == %d, %d == %d, %s, names %s == %s\n", res->bits, bits, res->sign, sign, type_str(type), name, res ? res->name : NULL);
+            printf("Typecheck: bits %d == %d, sign %d == %d, ptr %d == %d, %s, names %s == %s\n", res->bits, bits, res->sign, sign, res->ptr, ptr, type_str(type), name, res ? res->name : NULL);
 #endif
-        if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
+        if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0 && ptr == res->ptr)
             return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
             if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
@@ -425,6 +438,15 @@ void complete_enum_type(struct gen_context *global_ctx, struct gen_context *ctx,
 
 }
 
+struct type *type_unwrap(struct gen_context *ctx, struct type *src)
+{
+    if (!src->ptr)
+        return src;
+
+    struct type *res = __find_type_by(ctx, src->type, src->bits, src->sign, src->ptr - 1, src->name);
+    return type_unwrap(ctx, res);
+}
+
 struct type *struct_get_by_index(struct type *type, int index)
 {
     FATAL(!type, "No struct type");
@@ -436,10 +458,12 @@ struct type *struct_get_by_index(struct type *type, int index)
     return type->items[index].item;
 }
 
-int struct_get_by_name(struct type *type, const char *name, struct type **res)
+int struct_get_by_name(struct gen_context *ctx, struct type *type, const char *name, struct type **res)
 {
     FATAL(!type, "No struct type");
     FATAL(!name, "Can't access empty from struct");
+
+    type = type_unwrap(ctx, type);
 
     for (int i = 0; i < type->itemcnt; i++) {
         FATAL(!type->items[i].name, "Struct element has no name");
@@ -454,17 +478,22 @@ int struct_get_by_name(struct type *type, const char *name, struct type **res)
 
 struct type *type_wrap(struct gen_context *ctx, struct type *src)
 {
-    struct type *res = find_type_by(ctx, src->type, src->bits, src->sign, src->ptr + 1);
-    if (res)
+    struct type *res = __find_type_by(ctx, src->type, src->bits, src->sign, src->ptr + 1, src->name);
+    if (res) {
+        FATAL(res->ptr != src->ptr + 1, "Wrap failure");
         return res;
+    }
 
     res = register_type(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
+    res->name = src->name;
+    res->type_name = src->type_name;
     if (src->type == V_CUSTOM) {
         // For custom types we need to wrap the custom as well
         res->custom_type = type_wrap(ctx, src->custom_type);
     }
     return res;
 }
+
 
 struct type *type_wrap_to(struct gen_context *ctx, struct type *src, int ptrval)
 {
@@ -1378,6 +1407,7 @@ struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
 
         free(stars);
 
+        FATAL(res->type == v->type, "Couldn't change type");
         return gen_load_struct(ctx, res);
         
     } else {
@@ -2823,7 +2853,7 @@ int gen_access(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(var->type->type != V_STRUCT && var->type->type != V_UNION, node, "Aceess from non-struct: %s", type_str(var->type->type));
     struct type *access_type = NULL;
     int index_num = 0;
-    index_num = struct_get_by_name(var->type, idx_name, &access_type);
+    index_num = struct_get_by_name(ctx, var->type, idx_name, &access_type);
 #if 0
     if (var->type->type == V_UNION) {
         access_type = struct_get_by_index(var->type, 0);

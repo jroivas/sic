@@ -318,6 +318,8 @@ void __node_walk(struct node *node, int depth, char arm)
         default:
             ERR("Unknown node while walking: %s", node_str(node));
     }
+    if (node->ptr)
+        printf(", ptr %d", node->ptr);
     printf("\n");
 
     if (node->left)

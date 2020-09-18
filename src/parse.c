@@ -523,8 +523,25 @@ void parse_enum(struct node *res, struct node *node)
     __parse_enum(res, node, 0);
 }
 
-struct node *type_resolve(struct token *t, struct node *node, int d)
+int node_parse_ptr(struct node *res)
 {
+    if (!res)
+        return 0;
+    int ptr = res->ptr;
+    int a = node_parse_ptr(res->left);
+    int b = node_parse_ptr(res->right);
+
+    if (a > ptr)
+        ptr = a;
+    if (b > ptr)
+        ptr = b;
+
+    return ptr;
+}
+
+struct node *type_resolve(struct token *t, struct node *orig_node, int d)
+{
+    struct node *node = orig_node;
     // Need to flatten struct from A_TYPE_LIST
     if (node->left && (node->left->node == A_STRUCT || node->left->node == A_UNION || node->left->node == A_ENUM))
         node = node->left;
@@ -537,7 +554,7 @@ struct node *type_resolve(struct token *t, struct node *node, int d)
 
         res->value_string = node->value_string;
         res->type_name = node->value_string;
-        res->ptr = node->ptr;
+        res->ptr = node_parse_ptr(orig_node);
         res->addr = node->addr;
 
         res->bits = parse_struct(res, node);
