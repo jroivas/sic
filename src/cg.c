@@ -2031,8 +2031,12 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                 pname = pname->left;
             }
             pointer += ptype->ptr;
-        } else if (ellipsis)
-            pointer = ptype->ptr;
+        } else if (ellipsis) {
+            if (par)
+                pointer = par->type->ptr;
+            else if (ptype)
+                pointer = ptype->ptr;
+        }
 
         paramcnt++;
         if (builtin == BUILTIN_VA_START && paramcnt > 1)
