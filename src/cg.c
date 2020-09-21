@@ -319,7 +319,7 @@ struct type *find_type_by_id(struct gen_context *ctx, int id)
     return NULL;
 }
 
-struct type *register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr)
+struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign, int ptr)
 {
     struct type *t = find_type_by(ctx, type, bits, sign, ptr);
     FATAL(t, "Type already registered: %s", name);
@@ -337,6 +337,11 @@ struct type *register_type(struct gen_context *ctx, const char *name, enum var_t
     ctx->types = t;
 
     return t;
+}
+
+struct type *register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, int sign)
+{
+    return register_type_ptr(ctx, name, type, bits, sign, 0);
 }
 
 void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node, int is_union)
@@ -486,7 +491,7 @@ struct type *type_wrap(struct gen_context *ctx, struct type *src)
         return res;
     }
 
-    res = register_type(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
+    res = register_type_ptr(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
     res->name = src->name;
     res->type_name = src->type_name;
     if (src->type == V_CUSTOM) {
@@ -634,27 +639,27 @@ void register_variable(struct gen_context *ctx, struct variable *var)
 
 void register_builtin_types(struct gen_context *ctx)
 {
-    register_type(ctx, "void", V_VOID, 0, 0, 0);
+    register_type(ctx, "void", V_VOID, 0, 0);
 
-    register_type(ctx, "bool", V_INT, 1, 0, 0);
+    register_type(ctx, "bool", V_INT, 1, 0);
 
-    register_type(ctx, "char", V_INT, 8, 1, 0);
-    register_type(ctx, "unsigned char", V_INT, 8, 0, 0);
+    register_type(ctx, "char", V_INT, 8, 1);
+    register_type(ctx, "unsigned char", V_INT, 8, 0);
 
-    register_type(ctx, "short", V_INT, 16, 1, 0);
-    register_type(ctx, "unsigned short", V_INT, 16, 0, 0);
+    register_type(ctx, "short", V_INT, 16, 1);
+    register_type(ctx, "unsigned short", V_INT, 16, 0);
 
-    register_type(ctx, "int", V_INT, 32, 1, 0);
-    register_type(ctx, "unsigned int", V_INT, 32, 0, 0);
+    register_type(ctx, "int", V_INT, 32, 1);
+    register_type(ctx, "unsigned int", V_INT, 32, 0);
 
-    register_type(ctx, "long", V_INT, 64, 1, 0);
-    register_type(ctx, "unsigned long", V_INT, 64, 0, 0);
+    register_type(ctx, "long", V_INT, 64, 1);
+    register_type(ctx, "unsigned long", V_INT, 64, 0);
 
-    register_type(ctx, "float", V_FLOAT, 32, 1, 0);
-    register_type(ctx, "double", V_FLOAT, 64, 1, 0);
-    register_type(ctx, "long double", V_FLOAT, 128, 1, 0);
+    register_type(ctx, "float", V_FLOAT, 32, 1);
+    register_type(ctx, "double", V_FLOAT, 64, 1);
+    register_type(ctx, "long double", V_FLOAT, 128, 1);
 
-    register_type(ctx, "strgin", V_STR, 0, 0, 0);
+    register_type(ctx, "strgin", V_STR, 0, 0);
 }
 
 struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
@@ -689,7 +694,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 
     if (!parent) {
         // Register singleton NULL variable to global context
-        register_type(res, "nulltype", V_NULL, 0, 0, 0);
+        register_type(res, "nulltype", V_NULL, 0, 0);
         struct type *null_type = find_type_by(res, V_NULL, 0, 0, 0);
         FATAL(!null_type, "Couldn't find NULL type");
         struct variable *null_var = init_variable("NULL", null_type);
@@ -2256,7 +2261,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
             }
         }
         // We have most probably struct definition
-        t = register_type(global_ctx, typename, node->type, node->bits, 0, node->ptr);
+        t = register_type(global_ctx, typename, node->type, node->bits, 0);
         t->type_name = node->value_string;
 
         // FIXME This is a hack for now
@@ -2274,7 +2279,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
         while (global_ctx->parent)
             global_ctx = global_ctx->parent;
 
-        t = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        t = register_type(global_ctx, node->value_string, node->type, node->bits, 0);
         t->type_name = node->value_string;
         complete_enum_type(global_ctx, ctx, t, node->right);
     }
@@ -2379,7 +2384,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             global_ctx = global_ctx->parent;
 
         // We have most probably struct definition
-        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0);
         res->type_name = node->value_string;
 
         // FIXME This is a hack for now
@@ -2399,14 +2404,14 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         while (global_ctx->parent)
             global_ctx = global_ctx->parent;
 
-        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0, node->ptr);
+        res = register_type(global_ctx, node->value_string, node->type, node->bits, 0);
         res->type_name = node->value_string;
         complete_enum_type(global_ctx, ctx, res, node->right);
     } else if (node->node == A_TYPEDEF) {
         struct type *tmp = gen_type_list_type(ctx, node->left);
         FATALN(!tmp, node, "Invalid typedef, missing result type");
 
-        res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign, tmp->ptr);
+        res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign);
         res->custom_type = tmp;
         res->type_name = node->value_string;
     } else if (node->node == A_TYPE) {
@@ -4027,7 +4032,7 @@ void gen_scan_typedef(struct gen_context *ctx, struct node *node)
         struct type *tmp = gen_type_list_type(ctx, node->left);
         FATALN(!tmp, node, "Invalid typedef, missing result type");
 
-        struct type *res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign, tmp->ptr);
+        struct type *res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign);
         res->custom_type = tmp;
         res->type_name = node->value_string;
 #if DEBUG
@@ -4045,7 +4050,7 @@ void gen_scan_typedef(struct gen_context *ctx, struct node *node)
 
 void gen_builtin_va_list(struct gen_context *ctx, struct node *node)
 {
-    struct type *res = register_type(ctx, node->value_string, V_STRUCT, 8, 0, 0);
+    struct type *res = register_type(ctx, node->value_string, V_STRUCT, 8, 0);
     res->type_name = node->value_string;
 
     // FIXME { i8* } now, shoulde be { i32, i32, i8*, i8* }
