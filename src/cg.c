@@ -2366,11 +2366,11 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->bits = tr->bits;
         if (res->sign != tr->sign && !tr->sign) 
             res->sign = tr->sign;
-        if (res->ptr < tr->ptr)
-            res->ptr = tr->ptr;
         if (!res->is_const && tr->is_const)
             res->is_const = 1;
         struct type *to_free = res == tl ? tr : tl;
+        if (res->ptr < tr->ptr)
+            res = type_wrap_to(ctx, res, tr->ptr - res->ptr);
         if (to_free->temporary)
             free(to_free);
     } else if (node->node == A_STRUCT || node->node == A_UNION) {
