@@ -263,6 +263,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_BREAK:
         case A_CONTINUE:
         case A_ATTRIBUTE:
+        case A_ASM:
         case A_SIZEOF:
             printf("%s", node_str(node));
             break;
@@ -391,8 +392,8 @@ const char *resolve_cpp()
     //return "cpp -nostdinc -isystem inc/sys";
     //return "cpp -nostdinc";
     //return "cpp -ansi -pedantic -D__extension__=";
-    //return "cpp -D__extension__= -D__restrict=";
-    return "cpp -D__extension__=";
+    return "cpp -D__extension__= -D__restrict=";
+    //return "cpp -D__extension__=";
 }
 
 char *gen_incs(char **incs, int inc_cnt)

@@ -53,6 +53,7 @@ enum keyword_type {
     K_TYPEDEF,
     K_ATTRIBUTE,
     K_EXTENSION,
+    K_ASM,
     K_SIZEOF
 };
 

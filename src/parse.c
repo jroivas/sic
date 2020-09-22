@@ -83,6 +83,7 @@ static const char *nodestr[] = {
     "GOTO",
     "LABEL",
     "ATTRIBUTE",
+    "ASM",
     "TYPEDEF",
     "LIST"
 };
@@ -1994,6 +1995,13 @@ struct node *attribute_param(struct scanfile *f, struct token *token)
         res->value_string = token->value_string;
         scan(f, token);
     }
+    else if (token->token == T_INT_LIT) {
+        res = make_node(token, A_INT_LIT, NULL, NULL, NULL);
+        res->value = token->value;
+        res->type = V_INT;
+        res->bits = 0;
+        scan(f, token);
+    }
     return res;
 }
 
@@ -2045,6 +2053,34 @@ struct node *attributes(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *string_lit(struct scanfile *f, struct token *token)
+{
+    if (token->token != T_STR_LIT)
+        return NULL;
+
+    struct node *res = make_node(token, A_STR_LIT, NULL, NULL, NULL);
+    res->value_string = token->value_string;
+    res->type = V_STR;
+    res->bits = 0;
+    scan(f, token);
+    return res;
+}
+
+struct node *asm_export(struct scanfile *f, struct token *token)
+{
+    struct node *res = NULL;
+    if (!accept_keyword(f, token, K_ASM))
+        return res;
+
+    expect(f, token, T_ROUND_OPEN, "(");
+
+    struct node *tmp = iter_list(f, token, string_lit, COMMA_NONE, 0);
+    res = make_node(token, A_ASM, tmp, NULL, NULL);
+    expect(f, token, T_ROUND_CLOSE, ")");
+
+    return res;
+}
+
 struct node *function_definition(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
@@ -2060,12 +2096,26 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     if (!decl)
         ERR("Invalid function definition");
 #endif
+    struct node *asms = asm_export(f, token);
+    /*
+     * TODO: Just ignore __asm__ export rename. We should use
+     * function name internally, but then map export and calls
+     * to the __asm__ defined name, for example:
+     *
+     *     void test(void) __asm__("__my_test");
+     *
+     * We should be able to do test(); call, and implement it
+     * as test(). However exported nam should by __my_test().
+     * If we don't define it ourselves, we should map all the
+     * calls to __my_test() in generated code.
+     */
+    // TODO: Just ignore attributes for now
     struct node *attrib = attributes(f, token);
     save_point(f, token);
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         load_point(f, token);
-        if (!((decl->is_func || (decl->left && decl->left->is_func)) && accept(f, token, T_SEMI)))
+        if (!((decl->is_func || (decl->left && decl->left->is_func)) && (accept(f, token, T_SEMI) || asms != NULL)))
             return NULL;
         // This is forward declaration so return result
 
@@ -2083,11 +2133,6 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     } else
         remove_save_point(f, token);
 
-    // TODO: Just ignore attributes for now
-    struct node *attribs = attributes(f, token);
-    (void)attribs;
-
-    //decl = type_resolve(token, decl, 0);
     res = make_node(token, A_GLUE, decl, NULL, comp);
     res = make_node(token, A_FUNCTION, spec, attrib, res);
 

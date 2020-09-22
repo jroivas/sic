@@ -212,7 +212,7 @@ char *scan_string(struct scanfile *f, int c, char end_char)
     char *ptr = buf;
     int escape = 0;
 
-    while (ptr - buf < MAX_STR_LEN - 2) {
+    while (c != end_char && ptr - buf < MAX_STR_LEN - 2) {
         *ptr = c;
         ptr++;
         c = next(f);
@@ -296,6 +296,9 @@ int keyword(struct token *t)
     } else if (strcmp(v, "__extension__") == 0) {
         res = 1;
         t->keyword = K_EXTENSION;
+    } else if (strcmp(v, "__asm__") == 0) {
+        res = 1;
+        t->keyword = K_ASM;
     } else if (strcmp(v, "sizeof") == 0) {
         res = 1;
         t->keyword = K_SIZEOF;
