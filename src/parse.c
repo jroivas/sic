@@ -21,6 +21,20 @@ struct node *pointer(struct scanfile *f, struct token *token);
 struct node *argument_expression_list(struct scanfile *f, struct token *token);
 struct node *parameter_type_list(struct scanfile *f, struct token *token);
 
+static inline void node_left(struct node *p, struct node *l)
+{
+    p->left = l;
+    if (l)
+        l->parent = p;
+}
+
+static inline void node_right(struct node *p, struct node *r)
+{
+    p->right = r;
+    if (r)
+        r->parent = p;
+}
+
 static const char *nodestr[] = {
     "+", "-", "*", "/", "%",
     "<<", ">>", "&", "|", "^",
@@ -407,8 +421,8 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         struct node *tmp = res;
         while (tmp->right)
             tmp = tmp->right;
-        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
-        tmp->right->left = type_resolve(NULL, node, 0);
+        node_right(tmp, make_node(NULL, A_LIST, NULL, NULL, NULL));
+        node_left(tmp->right, type_resolve(NULL, node, 0));
 
         bits = solve_bits_recurse(tmp->right->left);
 
@@ -499,7 +513,7 @@ void __parse_enum(struct node *res, struct node *node, int val)
         struct node *tmp = res;
         while (tmp->right)
             tmp = tmp->right;
-        tmp->right = make_node(NULL, A_LIST, NULL, NULL, NULL);
+        node_right(tmp, make_node(NULL, A_LIST, NULL, NULL, NULL));
 
 #if 0
         if (!valnode) {
@@ -509,7 +523,7 @@ void __parse_enum(struct node *res, struct node *node, int val)
         }
 #endif
 
-        tmp->right->left = make_node(NULL, A_IDENTIFIER, valnode, NULL, NULL);
+        node_left(tmp->right, make_node(NULL, A_IDENTIFIER, valnode, NULL, NULL));
         tmp->right->left->value_string = node->value_string;
     }
 
@@ -760,7 +774,7 @@ struct node *iter_list(struct scanfile *f, struct token *token, list_iter_handle
                 }
             }
             tmp = make_node(token, A_LIST, tmp, NULL, NULL);
-            prev->right = tmp;
+            node_right(prev, tmp);
         }
         prev = tmp;
     }
@@ -806,7 +820,7 @@ struct node *struct_declaration(struct scanfile *f, struct token *token)
     while (tmp->right != NULL)
         tmp = tmp->right;
 
-    tmp->right = struct_declarator_list(f, token);
+    node_right(tmp, struct_declarator_list(f, token));
     struct node *attribs = attributes(f, token);
     (void)attribs;
     semi(f, token);
@@ -839,7 +853,7 @@ struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
     }
 
     if (accept(f, token, T_CURLY_OPEN)) {
-        res->right = struct_declaration_list(f, token);
+        node_right(res, struct_declaration_list(f, token));
         expect(f, token, T_CURLY_CLOSE, "}");
     }
 #if 0
@@ -966,7 +980,7 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
 
     struct node *ptr = pointer(f, token);
     if (ptr) {
-        ptr->left = decl;
+        node_left(ptr, decl);
         decl = ptr;
     }
     FATALN(token->token != T_IDENTIFIER, decl, "Expected identifier after typedef");
@@ -1122,7 +1136,7 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
             struct node *params = parameter_type_list(f, token);
             if (!params)
                 params = identifier_list(f, token);
-            res->right = params;
+            node_right(res, params);
             res->is_func = 1;
             expect(f, token, T_ROUND_CLOSE, ")");
         } else if (accept(f, token, T_SQUARE_OPEN)) {
@@ -1143,7 +1157,7 @@ struct node *pointer(struct scanfile *f, struct token *token)
         struct node *qual = type_qualifier_list(f, token);
         if (qual) {
             if (res)
-                res->right = qual;
+                node_right(res, qual);
             else
                 res = make_node(token, A_POINTER, qual, NULL, NULL);
         } else {
@@ -1164,7 +1178,7 @@ struct node *declarator(struct scanfile *f, struct token *token)
     struct node *ptr = pointer(f, token);
     struct node *res = direct_declarator(f, token);
     if (ptr) {
-        ptr->left = res;
+        node_left(ptr, res);
         res = ptr;
     }
     return res;
@@ -1468,7 +1482,7 @@ struct node *argument_expression_list(struct scanfile *f, struct token *token)
             res = tmp;
         else {
             FATAL(prev->right, "Compiler error!")
-            prev->right = tmp;
+            node_right(prev, tmp);
         }
         prev = tmp;
         if (!accept(f, token, T_COMMA))
@@ -1958,7 +1972,7 @@ struct node *statement_list(struct scanfile *f, struct token *token)
             res = tmp;
         else {
             FATAL(prev->right, "Compiler error!")
-            prev->right = tmp;
+            node_right(prev, tmp);
         }
         prev = tmp;
     }
@@ -2017,9 +2031,9 @@ struct node *attribute(struct scanfile *f, struct token *token)
     }
     if (res && accept(f, token, T_ROUND_OPEN)) {
         struct node *args = iter_list(f, token, attribute_param, COMMA_MANDATORY, 0);
-        res->left = args;
+        node_left(res, args);
         if (accept(f, token, T_ROUND_OPEN)) {
-            res->right = attribute(f, token);
+            node_right(res, attribute(f, token));
             expect(f, token, T_ROUND_CLOSE, ")");
         }
         expect(f, token, T_ROUND_CLOSE, ")");

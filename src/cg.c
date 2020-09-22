@@ -344,6 +344,28 @@ struct type *register_type(struct gen_context *ctx, const char *name, enum var_t
     return register_type_ptr(ctx, name, type, bits, sign, 0);
 }
 
+struct node *find_struct_item_name(struct node *node)
+{
+    struct node *namenode = node;
+
+    while (namenode && namenode->right) {
+        if (namenode->node == A_INDEX) {
+            namenode = namenode->left;
+            break;
+        }
+        namenode = namenode->right;
+    }
+
+    while (namenode && namenode->left) {
+        if (namenode->node == A_INDEX) {
+            namenode = namenode->left;
+            break;
+        }
+        namenode = namenode->left;
+    }
+    return namenode;
+}
+
 void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node, int is_union)
 {
     struct node *tmp = node;
@@ -363,10 +385,7 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
 
             if (!namenode)
                 namenode = l;
-            while (namenode && namenode->right)
-                namenode = namenode->right;
-            while (namenode && namenode->left)
-                namenode = namenode->left;
+            namenode = find_struct_item_name(namenode);
 
             if (!first && is_union)
                 ok_gen = 0;
@@ -411,7 +430,7 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             FATALN(!namenode, tmp, "No name");
             //printf("Struct new item: %s, type %s\n", namenode->value_string, stype_str(t));
             type->items[type->itemcnt - 1].item = t;
-            FATALN(!namenode->value_string, l, "Nameless struct value");
+            FATALN(!namenode->value_string, namenode, "Nameless struct value");
             type->items[type->itemcnt - 1].name = namenode->value_string;
             if (stars)
                 free(stars);
