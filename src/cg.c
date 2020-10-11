@@ -472,6 +472,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             if (!first && ok_gen)
                 buffer_write(struct_init, ", ");
             first = 0;
+            if (t->type == V_CUSTOM)
+                t = custom_type_get(ctx, t);
             if (t->type == V_INT) {
                 itemsize = t->bits ? t->bits : 32;
                 if (ok_gen)
@@ -495,13 +497,13 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 itemsize = t->bits;
                 type->bits += t->bits;
                 if (ok_gen)
-                    buffer_write(struct_init, "%%struct.%s%s", l->type_name, stars);
+                    buffer_write(struct_init, "%%struct.%s%s", t->type_name, stars);
                 namenode = l;
             } else if (t->type == V_UNION) {
                 itemsize = t->bits;
                 type->bits += t->bits;
                 if (ok_gen)
-                    buffer_write(struct_init, "%%union.%s%s", l->type_name, stars);
+                    buffer_write(struct_init, "%%union.%s%s", t->type_name, stars);
                 namenode = l;
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
@@ -2594,7 +2596,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             ERR("Should not get here, got: %s", type_str(node->type));
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
-        FATAL(!res, "Invalid res");
+        FATAL(!res, "Invalid custom typespec: %s", node->value_string);
     } else if (node->type == V_BUILTIN) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->value_string);
     } else {
@@ -4176,23 +4178,7 @@ struct variable *gen_scan_functions(struct gen_context *ctx, struct node *node)
     return res;
 }
 
-struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
-{
-    if (!node)
-        return NULL;
-
-    if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION)) {
-        gen_type(ctx, node);
-        return NULL;
-    }
-
-    gen_scan_struct(ctx, node->left);
-    gen_scan_struct(ctx, node->right);
-
-    return NULL;
-}
-
-void gen_scan_typedef(struct gen_context *ctx, struct node *node)
+void gen_scan_struct_typedef(struct gen_context *ctx, struct node *node)
 {
     if (!node)
         return;
@@ -4211,10 +4197,13 @@ void gen_scan_typedef(struct gen_context *ctx, struct node *node)
         node_walk(node);
 #endif
         return;
+    } else if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION)) {
+        gen_type(ctx, node);
+        return;
     }
 
-    gen_scan_typedef(ctx, node->left);
-    gen_scan_typedef(ctx, node->right);
+    gen_scan_struct_typedef(ctx, node->left);
+    gen_scan_struct_typedef(ctx, node->right);
 }
 
 void gen_builtin_va_list(struct gen_context *ctx, struct node *node)
@@ -4706,8 +4695,7 @@ int codegen(FILE *outfile, struct node *node)
         gen_var_pretty_function(ctx, global_ctx_name, "void", NULL);
 
     gen_scan_builtin(ctx, node);
-    gen_scan_struct(ctx, node);
-    gen_scan_typedef(ctx, node);
+    gen_scan_struct_typedef(ctx, node);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;
