@@ -52,6 +52,7 @@ struct type {
     int ptr;
     int is_const;
     int temporary;
+    int forward;
 
     const char *name;
     const char *type_name;
@@ -208,7 +209,19 @@ char *struct_name(struct gen_context *ctx)
     char *res = NULL;
     struct struct_name *tmp = ctx->structs;
 
+    if (tmp && tmp->next == NULL) {
+        size_t l = strlen(tmp->name);
+        res = calloc(1, l + 1);
+        memcpy(res, tmp->name, l);
+        return res;
+    }
+
     while (tmp != NULL) {
+        if (!tmp->name) {
+            tmp = tmp->next;
+            continue;
+        }
+
         size_t l = strlen(tmp->name);
         if (res == NULL) {
             res = calloc(1, l + 2);
@@ -449,6 +462,9 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     int ok_gen = 1;
     int union_size = 0;
 
+    /* This must be forward declaration, or then invalid */
+    if (!tmp)
+        return;
     FATALN(!tmp, node, "Invalid struct/union: %p", (void *)node);
 
     do {
@@ -508,6 +524,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
 
+            if (t->ptr)
+                itemsize = 8; //FIXME
 
             if (itemsize > union_size)
                 union_size = itemsize;
@@ -519,7 +537,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             FATALN(!namenode, tmp, "No name");
             //printf("Struct new item: %s, type %s\n", namenode->value_string, stype_str(t));
             type->items[type->itemcnt - 1].item = t;
-            FATALN(!namenode->value_string, namenode, "Nameless struct value");
+            FATALN(!namenode->value_string && !namenode->type_name, namenode, "Nameless struct value");
+            //if (namenode->value_string)
             type->items[type->itemcnt - 1].name = namenode->value_string;
             if (stars)
                 free(stars);
@@ -2355,7 +2374,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 {
     struct type *t = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->type_name);
 
-    if (!t && (node->type == V_STRUCT || node->type == V_UNION)) {
+    if ((!t || t->forward) && (node->type == V_STRUCT || node->type == V_UNION)) {
         struct gen_context *global_ctx = ctx;
 
         while (global_ctx->parent)
@@ -2388,22 +2407,24 @@ int gen_type(struct gen_context *ctx, struct node *node)
         struct_add(ctx, new_struct);
 
         char *sname = struct_name(ctx);
-        t = register_type(global_ctx, sname, node->type, node->bits, TYPE_UNSIGNED);
+        if (!t)
+            t = register_type(global_ctx, sname, node->type, node->bits, TYPE_UNSIGNED);
         node->type_name = sname;
         t->type_name = sname;
-        
 
-        // FIXME This is a hack for now
-        if (node->type == V_STRUCT)
-            //buffer_write(struct_init, "%%struct.%s = type { ", typename);
-            buffer_write(struct_init, "%%struct.%s = type { ", sname);
-        else
-            //buffer_write(struct_init, "%%union.%s = type { ", typename);
-            buffer_write(struct_init, "%%union.%s = type { ", sname);
-        complete_struct_type(global_ctx, t, node->right, node->type == V_UNION, struct_init);
-        buffer_write(struct_init, " } ; gen_type\n");
-        buffer_append(ctx->init, buffer_read(struct_init));
-        buffer_del(struct_init);
+        if (node->right) {
+            // FIXME This is a hack for now
+            if (node->type == V_STRUCT)
+                buffer_write(struct_init, "%%struct.%s = type { ", sname);
+            else
+                buffer_write(struct_init, "%%union.%s = type { ", sname);
+            complete_struct_type(global_ctx, t, node->right, node->type == V_UNION, struct_init);
+            buffer_write(struct_init, " } ; gen_type\n");
+            buffer_append(ctx->init, buffer_read(struct_init));
+            buffer_del(struct_init);
+            t->forward = 0;
+        } else
+            t->forward = 1;
         struct_pop(ctx);
     }
     if (!t && node->type == V_ENUM) {

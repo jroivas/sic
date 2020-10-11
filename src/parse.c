@@ -437,6 +437,8 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         struct node *namenode = node->right;
         while (namenode->right)
             namenode = namenode->right;
+        while (namenode->node != A_IDENTIFIER && namenode->left)
+            namenode = namenode->left;
         if (namenode)
             tmp->right->left->value_string = namenode->value_string;
         return bits + extra;
