@@ -447,6 +447,7 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
     struct node *tmp = node;
     int first = 1;
     int ok_gen = 1;
+    int union_size = 0;
 
     FATALN(!tmp, node, "Invalid struct/union: %p", (void *)node);
 
@@ -457,19 +458,22 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
             struct type *t = gen_type_list_type(ctx, l);
             FATALN(!t, l, "Invalid type definition: %s", type_str(l->type));
             char *stars = get_stars(l->ptr);
+            int itemsize = 0;
+
             type->itemcnt++;
 
             if (!namenode)
                 namenode = l;
             namenode = find_struct_item_name(namenode);
 
-            if (!first && is_union)
+            if (is_union)
                 ok_gen = 0;
 
             if (!first && ok_gen)
                 buffer_write(struct_init, ", ");
             first = 0;
             if (t->type == V_INT) {
+                itemsize = t->bits ? t->bits : 32;
                 if (ok_gen)
                     buffer_write(struct_init, "i%d%s", (t->bits ? t->bits : 32), stars);
             } else if (t->type == V_FLOAT) {
@@ -479,6 +483,7 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                     else
                         buffer_write(struct_init, "double%s", stars);
                 }
+                itemsize = t->bits;
             } else if (t->type == V_STRUCT) {
                 /*
                  * We need to resolve the size of struct now in
@@ -487,11 +492,13 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                  * have reference to the struct this is referring
                  * so we just mark 0 as size.
                  */
+                itemsize = t->bits;
                 type->bits += t->bits;
                 if (ok_gen)
                     buffer_write(struct_init, "%%struct.%s%s", l->type_name, stars);
                 namenode = l;
             } else if (t->type == V_UNION) {
+                itemsize = t->bits;
                 type->bits += t->bits;
                 if (ok_gen)
                     buffer_write(struct_init, "%%union.%s%s", l->type_name, stars);
@@ -500,6 +507,8 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 ERR("Unsupported type: %s", type_str(t->type));
 
 
+            if (itemsize > union_size)
+                union_size = itemsize;
             if (type->items == NULL)
                 type->items = calloc(type->itemcnt, sizeof(struct type_item));
             else
@@ -515,6 +524,18 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
         }
         tmp = tmp->right;
     } while (tmp);
+    if (is_union) {
+        switch (union_size) {
+            case 8:
+            case 16:
+            case 32:
+            case 64:
+                buffer_write(struct_init, "i%d", union_size);
+                break;
+            default:
+                buffer_write(struct_init, "[%d x i%d]", union_size);
+        }
+    }
 }
 
 void complete_enum_type(struct gen_context *global_ctx, struct gen_context *ctx, struct type *type, struct node *node)
