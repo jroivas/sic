@@ -70,6 +70,12 @@ struct type_item {
     const char *name;
 };
 
+struct struct_name {
+    const char *name;
+    struct struct_name *parent;
+    struct struct_name *next;
+};
+
 struct variable {
     int id;
     int reg;
@@ -139,6 +145,8 @@ struct gen_context {
     struct buffer *init;
     struct buffer *data;
     struct buffer *post;
+
+    struct struct_name *structs;
 };
 
 static const char *varstr[] = {
@@ -157,6 +165,69 @@ struct type *gen_type_list_type(struct gen_context *ctx, struct node *node);
 struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v);
 struct type *type_wrap(struct gen_context *ctx, struct type *src);
 struct type *type_wrap_to(struct gen_context *ctx, struct type *src, int ptrval);
+int gen_type(struct gen_context *ctx, struct node *node);
+
+void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
+{
+        if (ctx->structs == NULL) {
+            ctx->structs = new_struct;
+        } else {
+            struct struct_name *tmp = ctx->structs;
+            while (tmp->next != NULL)
+                tmp = tmp->next;
+            tmp->next = new_struct;
+            new_struct->parent = tmp;
+        }
+}
+
+void struct_pop(struct gen_context *ctx)
+{
+    if (ctx->structs == NULL)
+        return;
+
+    if (ctx->structs->next == NULL) {
+        ctx->structs = NULL;
+        return;
+    }
+
+    struct struct_name *tmp = ctx->structs;
+    struct struct_name *prev = tmp;
+    while (tmp->next != NULL) {
+        prev = tmp;
+        tmp = tmp->next;
+    }
+    free(prev->next);
+    prev->next = NULL;
+}
+
+char *struct_name(struct gen_context *ctx)
+{
+    if (!ctx->structs)
+        return NULL;
+
+    char *res = NULL;
+    struct struct_name *tmp = ctx->structs;
+
+    while (tmp != NULL) {
+        size_t l = strlen(tmp->name);
+        if (res == NULL) {
+            res = calloc(1, l + 2);
+            memcpy(res, tmp->name, l);
+            res[l] = '_';
+        } else {
+            size_t ll = strlen(res);
+            res = realloc(res, strlen(res) + l + 2);
+            memcpy(res + ll, tmp->name, l);
+            res[ll + l] = '_';
+        }
+        tmp = tmp->next;
+    }
+
+    if (res != NULL)
+        res[strlen(res) - 1] = 0;
+
+    return res;
+}
 
 char *stype_str(struct type *t)
 {
@@ -167,6 +238,7 @@ char *stype_str(struct type *t)
     tmp[255] = 0;
     return tmp;
 }
+
 const char *var_str(enum var_type v, int size, char **r)
 {
     FATAL(v >= sizeof(varstr) / sizeof (char*),
@@ -271,6 +343,10 @@ struct type *__find_type_by(struct gen_context *ctx, enum var_type type, int bit
         if (res->type == type)
             printf("Typecheck: bits %d == %d, sign %d == %d, ptr %d == %d, %s, names %s == %s\n", res->bits, bits, res->sign, sign, res->ptr, ptr, type_str(type), name, res ? res->name : NULL);
 #endif
+#if 0
+        if (name && res->name)
+            printf("CMP: %s == %s\n", res->name, name);
+#endif
         if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0 && ptr == res->ptr)
             return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
@@ -366,7 +442,7 @@ struct node *find_struct_item_name(struct node *node)
     return namenode;
 }
 
-void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node, int is_union)
+void complete_struct_type(struct gen_context *ctx, struct type *type, struct node *node, int is_union, struct buffer *struct_init)
 {
     struct node *tmp = node;
     int first = 1;
@@ -391,17 +467,17 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 ok_gen = 0;
 
             if (!first && ok_gen)
-                buffer_write(ctx->init, ", ");
+                buffer_write(struct_init, ", ");
             first = 0;
             if (t->type == V_INT) {
                 if (ok_gen)
-                    buffer_write(ctx->init, "i%d%s", (t->bits ? t->bits : 32), stars);
+                    buffer_write(struct_init, "i%d%s", (t->bits ? t->bits : 32), stars);
             } else if (t->type == V_FLOAT) {
                 if (ok_gen) {
                     if (t->bits == 32)
-                        buffer_write(ctx->init, "float%s", stars);
+                        buffer_write(struct_init, "float%s", stars);
                     else
-                        buffer_write(ctx->init, "double%s", stars);
+                        buffer_write(struct_init, "double%s", stars);
                 }
             } else if (t->type == V_STRUCT) {
                 /*
@@ -413,11 +489,13 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                  */
                 type->bits += t->bits;
                 if (ok_gen)
-                    buffer_write(ctx->init, "%%struct.%s%s", l->type_name, stars);
+                    buffer_write(struct_init, "%%struct.%s%s", l->type_name, stars);
+                namenode = l;
             } else if (t->type == V_UNION) {
                 type->bits += t->bits;
                 if (ok_gen)
-                    buffer_write(ctx->init, "%%union.%s%s", l->type_name, stars);
+                    buffer_write(struct_init, "%%union.%s%s", l->type_name, stars);
+                namenode = l;
             } else
                 ERR("Unsupported type: %s", type_str(t->type));
 
@@ -437,7 +515,6 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
         }
         tmp = tmp->right;
     } while (tmp);
-
 }
 
 void complete_enum_type(struct gen_context *global_ctx, struct gen_context *ctx, struct type *type, struct node *node)
@@ -2222,8 +2299,8 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
         res = new_inst_variable(ctx, V_INT, func->type->bits, TYPE_SIGNED);
 
         buffer_write(ctx->data, "%%%d = call i%d (%s) @%s(%s); FUNCCALL\n",
-            res->reg,
-            func->type->bits,
+                res->reg,
+                func->type->bits,
             func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
@@ -2279,17 +2356,32 @@ int gen_type(struct gen_context *ctx, struct node *node)
             }
         }
         // We have most probably struct definition
-        t = register_type(global_ctx, typename, node->type, node->bits, TYPE_UNSIGNED);
-        t->type_name = node->value_string;
+        //t->type_name = node->value_string;
+        struct buffer *struct_init = buffer_init();
+        //stack_trace();
+
+        struct struct_name *new_struct = calloc(1, sizeof(struct struct_name));
+        new_struct->name = typename;
+        struct_add(ctx, new_struct);
+
+        char *sname = struct_name(ctx);
+        t = register_type(global_ctx, sname, node->type, node->bits, TYPE_UNSIGNED);
+        node->type_name = sname;
+        t->type_name = sname;
+        
 
         // FIXME This is a hack for now
         if (node->type == V_STRUCT)
-            buffer_write(global_ctx->init, "%%struct.%s = type { ", typename);
+            //buffer_write(struct_init, "%%struct.%s = type { ", typename);
+            buffer_write(struct_init, "%%struct.%s = type { ", sname);
         else
-            buffer_write(global_ctx->init, "%%union.%s = type { ", typename);
-        complete_struct_type(global_ctx, t, node->right, node->type == V_UNION);
-        buffer_write(global_ctx->init, " } ; gen_type\n");
-
+            //buffer_write(struct_init, "%%union.%s = type { ", typename);
+            buffer_write(struct_init, "%%union.%s = type { ", sname);
+        complete_struct_type(global_ctx, t, node->right, node->type == V_UNION, struct_init);
+        buffer_write(struct_init, " } ; gen_type\n");
+        buffer_append(ctx->init, buffer_read(struct_init));
+        buffer_del(struct_init);
+        struct_pop(ctx);
     }
     if (!t && node->type == V_ENUM) {
         struct gen_context *global_ctx = ctx;
@@ -2403,16 +2495,30 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
 
         // We have most probably struct definition
         res = register_type(global_ctx, node->value_string, node->type, node->bits, TYPE_UNSIGNED);
-        res->type_name = node->value_string;
+        //res->type_name = node->value_string;
+        struct buffer *struct_init = buffer_init();
+
+        struct struct_name *new_struct = calloc(1, sizeof(struct struct_name));
+        new_struct->name = node->value_string;
+        struct_add(ctx, new_struct);
+
+        char *sname = struct_name(ctx);
+        node->type_name = sname;
+        res->type_name = sname;
 
         // FIXME This is a hack for now
         if (node->type == V_STRUCT)
-            buffer_write(global_ctx->init, "%%struct.%s = type { ", node->value_string);
+            //buffer_write(struct_init, "%%struct.%s = type { ", node->value_string);
+            buffer_write(struct_init, "%%struct.%s = type { ", sname);
         else
-            buffer_write(global_ctx->init, "%%union.%s = type { ", node->value_string);
-        complete_struct_type(global_ctx, res, node->right, node->type == V_UNION);
+            //buffer_write(struct_init, "%%union.%s = type { ", node->value_string);
+            buffer_write(struct_init, "%%union.%s = type { ", sname);
+        complete_struct_type(global_ctx, res, node->right, node->type == V_UNION, struct_init);
 
-        buffer_write(global_ctx->init, " }\n");
+        buffer_write(struct_init, " }\n");
+        buffer_append(ctx->init, buffer_read(struct_init));
+        buffer_del(struct_init);
+        struct_pop(ctx);
     } else if (node->node == A_ENUM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
         if (res)
@@ -2439,7 +2545,28 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->parent->value_string);
             else
 #endif
+            // FIXME might be inplace def, and not defined
+            // earlier so should handle it now! Example:
+            // struct tmp {
+            //   struct {
+            //      int a;
+            //   } other;
+            //   int b;
+            // };
+            // So "struct other" is defined only inside "tmp"
+            // thus need to define it now there
+            res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
+            if (!res) {
+                // This might be in-place definition, parse it
+                int type_id = REF_CTX(gen_type(ctx, node));
+                res = find_type_by_id(ctx, type_id);
+                node->type_name = res->type_name;
                 res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
+#if 0
+                printf("Gens: %s\n", node->name);
+                res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
+#endif
+            }
 
             FATALN(!res, node->parent, "Couldn't solve type in struct: %s, %s", node->type_name, node->parent->value_string);
         } else
@@ -2481,7 +2608,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
     if (tmp->type == V_INT && !tmp->bits)
         tmp->bits = 32;
 
-    //printf("RECURS: %s\n", stype_str(tmp));
+    //printf("RECURS: %s, from %s\n", stype_str(tmp), tmp->type_name);
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
@@ -2862,6 +2989,8 @@ struct variable *gen_access_type_target(struct gen_context *ctx, struct type *ac
         ret = new_variable(ctx, NULL, V_FLOAT, access_type->bits, access_type->sign, access_type->ptr, 0, 0);
     } else if (access_type->type == V_STRUCT) {
         ret = new_variable_ext(ctx, NULL, V_STRUCT, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
+    } else if (access_type->type == V_UNION) {
+        ret = new_variable_ext(ctx, NULL, V_UNION, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
     } else
         ERR("Can't access %s from struct", type_str(access_type->type));
 
@@ -4033,6 +4162,7 @@ struct variable *gen_scan_struct(struct gen_context *ctx, struct node *node)
 
     if (node->node == A_TYPE && (node->type == V_STRUCT || node->type == V_UNION)) {
         gen_type(ctx, node);
+        return NULL;
     }
 
     gen_scan_struct(ctx, node->left);
