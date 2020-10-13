@@ -1206,7 +1206,7 @@ int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int
     } else {
         char *stars = get_stars(ptr);
         char *vals = NULL;
-        buffer_write(ctx->init, "%s%d = alloca %s%s, align %d\n",
+        buffer_write(code_alloc ? ctx->data : ctx->init, "%s%d = alloca %s%s, align %d ; allocate_double\n",
             ctx->global ? "@G" : "%", reg, float_str(bits), ptr ? stars : "", align(bits));
         vals = double_to_str(val, frac);
         buffer_write(code_alloc ? ctx->data : ctx->init,
@@ -1359,7 +1359,7 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
 
     char *tmp = double_str(n->value, n->fraction);
 
-    buffer_write(ctx->data, "store %s %s, %s* %s%d, align %d\n",
+    buffer_write(ctx->data, "store %s %s, %s* %s%d, align %d ; store_double\n",
             float_str(val->type->bits), tmp, float_str(val->type->bits), REGP(val), val->reg, align(val->type->bits));
     return val->reg;
 }
@@ -1386,7 +1386,7 @@ int gen_store_var(struct gen_context *ctx, struct variable *dst, struct variable
         if (stars)
             free(stars);
     } else if (dst->type->type == V_FLOAT) {
-        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d\n",
+        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d ; store_var\n",
             float_str(dst->type->bits), src->reg, float_str(dst->type->bits), REGP(src), dst->reg, align(dst->type->bits));
     }
     return 0;
@@ -1477,11 +1477,36 @@ struct variable *gen_load_float(struct gen_context *ctx, struct variable *v)
 {
     if (v->direct)
         return v;
-    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, TYPE_SIGNED, 0, 0, 0);
+    char *stars = get_stars(v->type->ptr);
+    struct variable *prev = NULL;
+    int reg = v->reg;
 
-    buffer_write(ctx->data, "%%%d = load %s, %s* %s%d, align %d\n",
-            res->reg, float_str(v->type->bits), float_str(v->type->bits), REGP(v), v->reg, align(v->type->bits));
+    if (v->type->ptr || v->addr) {
+        prev = new_variable(ctx, NULL, V_FLOAT, v->type->bits, TYPE_SIGNED, v->type->ptr, 0, 0);
+        buffer_write(ctx->data, "%%%d = load %s%s, %s*%s %s%d, align %d ; gen_load_float %d, %d, %d\n",
+                prev->reg,
+                float_str(v->type->bits),
+                stars ? stars : "",
+                float_str(v->type->bits),
+                stars ? stars : "",
+                REGP(v), reg, align(prev->type->bits), v->type->ptr, v->addr, v->reg);
+        prev->addr = v->addr;
+        prev->direct = 1;
+        free(stars);
+        return prev;
+    }
+    struct variable *res = new_variable(ctx, NULL, V_FLOAT, v->type->bits, TYPE_SIGNED, 0, 0, 0);
+    buffer_write(ctx->data, "%%%d = load %s%s, %s%s* %s%d, align %d ; load_float\n",
+            res->reg,
+            float_str(v->type->bits),
+            stars,
+            float_str(v->type->bits),
+            stars,
+            REGP(v),
+            v->reg,
+            align(v->type->bits));
     res->direct = 1;
+    free(stars);
     return res;
 }
 
@@ -1523,10 +1548,11 @@ struct variable *gen_load_void(struct gen_context *ctx, struct variable *v)
     return res;
 }
 
-struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
+struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable *v, int is_union)
 {
     struct variable *res = NULL;
     char *stars = get_stars(v->type->ptr);
+    char *sname = is_union ? "union" : "struct";
 
     buffer_write(ctx->data, "; load from %d ptr %d\n", v->reg, v->type->ptr);
     // Refuse to load ptr to non-ptr
@@ -1534,18 +1560,22 @@ struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
         free(stars);
         stars = get_stars(v->type->ptr + 1);
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr + 1, 0, 0, v->type->type_name);
-        buffer_write(ctx->data, "%%%d = alloca %%struct.%s%s, align %d\n",
+        buffer_write(ctx->data, "%%%d = alloca %%%s.%s%s, align %d\n",
             res->reg,
             v->type->type_name,
+            sname,
             stars, 8);
-        buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d ; load struct ptr-nonptr\n",
+        buffer_write(ctx->data, "store %%%s.%s%s %%%d, %%%s.%s%s* %%%d, align %d ; load %s ptr-nonptr\n",
+            sname,
             v->type->type_name,
             stars,
             v->reg,
+            sname,
             v->type->type_name,
             stars,
             res->reg,
-            8);
+            8,
+            sname);
         //buffer_write(ctx->data, "%%%d = bitcast %%struct.%s%s, %%struct.%s*%s %s%d, align %d ; gen_load_struct\n",
         res->direct = 0;
 
@@ -1556,13 +1586,15 @@ struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
         
     } else {
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr, 0, 0, v->type->type_name);
-        buffer_write(ctx->data, "%%%d = load %%struct.%s%s, %%struct.%s*%s %s%d, align %d ; gen_load_struct\n",
+        buffer_write(ctx->data, "%%%d = load %%%s.%s%s, %%%s.%s*%s %s%d, align %d ; gen_load_%s\n",
                 res->reg,
+                sname,
                 v->type->type_name,
                 stars ? stars : "",
+                sname,
                 v->type->type_name,
                 stars ? stars : "",
-                REGP(v), v->reg, 8);
+                REGP(v), v->reg, 8, sname);
         res->direct = 1;
     }
     res->addr = v->addr;
@@ -1570,6 +1602,16 @@ struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
         free(stars);
 
     return res;
+}
+
+struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v)
+{
+    return gen_load_struct_union(ctx, v, 0);
+}
+
+struct variable *gen_load_union(struct gen_context *ctx, struct variable *v)
+{
+    return gen_load_struct_union(ctx, v, 1);
 }
 
 struct variable *gen_load(struct gen_context *ctx, struct variable *v)
@@ -1591,6 +1633,8 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
         return gen_load_void(ctx, v);
     else if (v->type->type == V_STRUCT)
         return gen_load_struct(ctx, v);
+    else if (v->type->type == V_UNION)
+        return gen_load_union(ctx, v);
 
     ERR("Invalid type: %d", v->type->type);
 }
@@ -3125,10 +3169,11 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
                 );
         } else if (var->type->type == V_FLOAT) {
             gen_allocate_double(ctx, res->reg, res->type->bits, res->type->ptr, 1, node->value, node->fraction);
-            buffer_write(ctx->data, "store %s %s %%%d, %s %s%d, align %d\n",
+            buffer_write(ctx->data, "store %s%s %%%d, %s%s %s%d, align %d ; gen_addr\n",
                 float_str(var->type->bits),
                 src ? src : "",
                 reg,
+                float_str(var->type->bits),
                 dst ? dst : "",
                 REGP(res),
                 res->reg, align(res->type->bits)
@@ -3250,8 +3295,28 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
             free(stars);
         return dst->reg;
     }
+    // FIXME Supports only integers
     if (src->type->ptr || src->addr || (dst->type->type == V_VOID && dst->type->ptr)) {
         char *stars = get_stars(src->type->ptr);
+        if (src->type->type == V_STRUCT && dst->type->type == V_STRUCT) {
+            buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s* %s%d, align 8 ; gen_assign ptr struct\n",
+                    src->type->type_name, stars ? stars : "", src->reg,
+                    dst->type->type_name, stars ? stars : "",
+                    REGP(dst), dst->reg);
+        } else if (src->type->type == V_UNION && dst->type->type == V_UNION) {
+            buffer_write(ctx->data, "store %%union.%s%s %%%d, %%union.%s%s* %s%d, align 8 ; gen_assign ptr union\n",
+                    src->type->type_name, stars ? stars : "", src->reg,
+                    dst->type->type_name, stars ? stars : "",
+                    REGP(dst), dst->reg);
+        } else if (src->type->type == V_FLOAT) {
+            buffer_write(ctx->data, "store %s%s %%%d, %s%s* %s%d, align %d ; gen_assign ptr\n",
+                    float_str(src->type->bits),
+                    stars, src->reg,
+                    float_str(dst->type->bits),
+                    stars,
+                    REGP(dst), dst->reg,
+                    align(dst->type->bits));
+        } else {
         if (dst->type->type == V_INT && src->type->bits != dst->type->bits) {
             char *stars = get_stars(src->type->ptr);
             char *stars2 = get_stars(dst->type->ptr);
@@ -3271,6 +3336,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
                 dst->type->bits, stars ? stars : "",
                 REGP(dst), dst->reg,
                 align(dst->type->bits));
+        }
         if (stars)
             free(stars);
         return dst->reg;
@@ -3295,7 +3361,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
                 src->type->bits, src->reg, dst->type->bits, REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_FLOAT) {
         src = load_and_cast_to(ctx, src, dst->type, CAST_NORMAL);
-        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d\n",
+        buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d ; gen_assign\n",
             float_str(src->type->bits), src->reg, float_str(src->type->bits), REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_STR) {
 	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
