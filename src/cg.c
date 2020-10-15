@@ -1562,8 +1562,8 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr + 1, 0, 0, v->type->type_name);
         buffer_write(ctx->data, "%%%d = alloca %%%s.%s%s, align %d\n",
             res->reg,
-            v->type->type_name,
             sname,
+            v->type->type_name,
             stars, 8);
         buffer_write(ctx->data, "store %%%s.%s%s %%%d, %%%s.%s%s* %%%d, align %d ; load %s ptr-nonptr\n",
             sname,
