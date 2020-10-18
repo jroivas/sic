@@ -53,6 +53,7 @@ struct type {
     int is_const;
     int temporary;
     int forward;
+    int opaque;
 
     const char *name;
     const char *type_name;
@@ -2453,10 +2454,10 @@ int gen_type(struct gen_context *ctx, struct node *node)
         char *sname = struct_name(ctx);
         if (!t)
             t = register_type(global_ctx, sname, node->type, node->bits, TYPE_UNSIGNED);
-        node->type_name = sname;
-        t->type_name = sname;
 
         if (node->right) {
+            node->type_name = sname;
+            t->type_name = sname;
             // FIXME This is a hack for now
             if (node->type == V_STRUCT)
                 buffer_write(struct_init, "%%struct.%s = type { ", sname);
@@ -2467,8 +2468,12 @@ int gen_type(struct gen_context *ctx, struct node *node)
             buffer_append(ctx->init, buffer_read(struct_init));
             buffer_del(struct_init);
             t->forward = 0;
-        } else
+        } else if (!t->forward) {
+            // This is either forward or opaque
+            node->type_name = typename;
+            t->type_name = typename;
             t->forward = 1;
+        }
         struct_pop(ctx);
     }
     if (!t && node->type == V_ENUM) {
@@ -2648,6 +2653,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 // This might be in-place definition, parse it
                 int type_id = REF_CTX(gen_type(ctx, node));
                 res = find_type_by_id(ctx, type_id);
+                printf("N: %s\n", node->type_name);
+                node_walk(node);
                 node->type_name = res->type_name;
                 res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
 #if 0
@@ -2656,7 +2663,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
 #endif
             }
 
-            FATALN(!res, node->parent, "Couldn't solve type in struct: %s, %s", node->type_name, node->parent->value_string);
+            //FATALN(!res, node->parent, "Couldn't solve type in struct: %s, %s", node->type_name, node->parent->value_string);
         } else
             ERR("Should not get here, got: %s", type_str(node->type));
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
@@ -2675,6 +2682,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->type_name = node->type_name;
         res->temporary = 1;
     }
+    FATALN(!res, node->parent, "Couldn't solve type");
+
     // Void is special and need to hardcode these
     if (res->type == V_VOID) {
         res->bits = 0;
@@ -4764,6 +4773,20 @@ int scan_gens(struct node *node)
     return res;
 }
 
+void gen_opaque(struct gen_context *ctx)
+{
+    struct type *res = ctx->types;
+    while (res) {
+            // This is opaque struct/union
+            if (res->forward && (res->type == V_STRUCT || res->type == V_UNION)) {
+                buffer_write(ctx->init, "%%%s.%s = type opaque\n", res->type == V_UNION ? "union" : "struct", res->type_name);
+            }
+            res = res->next;
+    }
+    if (ctx->parent)
+        gen_opaque(ctx->parent);
+}
+
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node, most probably parse error!");
@@ -4783,6 +4806,7 @@ int codegen(FILE *outfile, struct node *node)
 
     gen_scan_builtin(ctx, node);
     gen_scan_struct_typedef(ctx, node);
+    gen_opaque(ctx);
     struct variable *main_var = gen_scan_functions(ctx, node);
     if (main_var)
         ctx->main_type = main_var->type;
