@@ -90,6 +90,7 @@ struct variable {
     int constant;
     int literal;
     int assigned;
+    int prototype;
     /*
      * If this is bigger than 0 it's array of "array" elements.
      * In case this is less than 0, it's size is still unknown
@@ -4217,9 +4218,12 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     }
 
     struct variable *func_var = find_variable_by_name(ctx, func_name);
-    FATALN(func_var, node, "Function name already in use: %s", func_name);
+    //printf("FV: %d\n", func_var->forward);
+    FATALN(func_var && func_var->prototype == 0, node, "Function name already in use: %s", func_name);
 
-    func_var = new_variable_ext(ctx, func_name, func_type->type, func_type->bits, func_type->sign, func_type->ptr, func_node->addr, 1, func_type->type_name);
+    if (!func_var) {
+        func_var = new_variable_ext(ctx, func_name, func_type->type, func_type->bits, func_type->sign, func_type->ptr, func_node->addr, 1, func_type->type_name);
+    }
     func_var->func = 1;
     FATALN(!node->right, node, "Invalid function");
     FATALN(!node->right->left, node, "Invalid function, no name");
@@ -4242,11 +4246,9 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
         body = node->right->right;
     if (!body) {
         // This is prototype, just mark it.
-        char *stars = get_stars(func_type->ptr);
-        buffer_write(global_ctx->pre, "declare %s%s @%s(%s);\n",
-            type, stars, func_name,
-            params ? params : "");
-        free(stars);
+        func_var->prototype = 1;
+    } else {
+        func_var->prototype = 0;
     }
     if (tmp)
         free(tmp);
@@ -4277,6 +4279,47 @@ struct variable *gen_scan_functions(struct gen_context *ctx, struct node *node)
             res = tmp;
     }
     return res;
+}
+
+void __gen_func_declarations(struct gen_context *global_ctx, struct variable *var)
+{
+    while (var) {
+        if (var->prototype) {
+            FATAL(!var->func, "Got non-function prototype");
+
+            struct type *func_type = var->type;
+            const char *type = NULL;
+            const char *func_name = var->name;
+            char *tmp = NULL;
+            if (strcmp(func_name, "main") == 0 && func_type->type == V_VOID)
+                type = var_str(V_INT, 32, &tmp);
+            else
+                type = var_str(func_type->type, func_type->bits, &tmp);
+
+            char *stars = get_stars(func_type->ptr);
+            buffer_write(global_ctx->pre, "declare %s%s @%s(%s);\n",
+                type, stars, func_name,
+                var->paramstr ? var->paramstr : "");
+            free(stars);
+            if (tmp)
+                free(tmp);
+        }
+        var = var->next;
+    }
+}
+
+void gen_func_declarations(struct gen_context *ctx)
+{
+    struct gen_context *global_ctx = ctx;
+
+    while (global_ctx->parent)
+        global_ctx = global_ctx->parent;
+
+    __gen_func_declarations(global_ctx, ctx->globals);
+    __gen_func_declarations(global_ctx, ctx->variables);
+
+    if (ctx->parent)
+        gen_func_declarations(ctx->parent);
 }
 
 void gen_scan_struct_typedef(struct gen_context *ctx, struct node *node)
@@ -4817,6 +4860,7 @@ int codegen(FILE *outfile, struct node *node)
         ctx->main_type = main_var->type;
     else
         ctx->main_type = find_type_by(ctx, V_INT, 32, TYPE_SIGNED, 0);
+    gen_func_declarations(ctx);
 
     gen_pre(ctx, node, node, ctx->main_type);
     res = gen_recursive_allocs(ctx, node);
