@@ -522,8 +522,13 @@ void complete_struct_type(struct gen_context *ctx, struct type *type, struct nod
                 if (ok_gen)
                     buffer_write(struct_init, "%%union.%s%s", t->type_name, stars);
                 namenode = l;
-            } else
+            } else if (t->ptr && t->type == V_VOID) {
+                if (ok_gen)
+                    buffer_write(struct_init, "i8%s", stars);
+            } else {
+                node_walk(tmp);
                 ERR("Unsupported type: %s", type_str(t->type));
+            }
 
             if (t->ptr)
                 itemsize = 8; //FIXME
@@ -1534,7 +1539,7 @@ struct variable *gen_load_void(struct gen_context *ctx, struct variable *v)
     struct variable *res = NULL;
     char *stars = get_stars(v->type->ptr);
 
-    res = new_variable(ctx, NULL, V_VOID, 8, v->type->sign, v->type->ptr, 0, 0);
+    res = new_variable(ctx, NULL, V_VOID, 8, TYPE_UNSIGNED, v->type->ptr, 0, 0);
     buffer_write(ctx->data, "%%%d = load i%d%s, i%d*%s %s%d, align %d\n",
             res->reg, 8, //res->type->bits,
             stars ? stars : "",
@@ -3086,6 +3091,8 @@ struct variable *gen_access_type_target(struct gen_context *ctx, struct type *ac
         ret = new_variable_ext(ctx, NULL, V_STRUCT, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
     } else if (access_type->type == V_UNION) {
         ret = new_variable_ext(ctx, NULL, V_UNION, access_type->bits, access_type->sign, access_type->ptr, 0, 0, access_type->type_name);
+    } else if (access_type->type == V_VOID && access_type->ptr) {
+        ret = new_variable(ctx, NULL, V_INT, 8, TYPE_UNSIGNED, access_type->ptr, 0, 0);
     } else
         ERR("Can't access %s from struct", type_str(access_type->type));
 
