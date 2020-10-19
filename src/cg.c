@@ -2653,8 +2653,6 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
                 // This might be in-place definition, parse it
                 int type_id = REF_CTX(gen_type(ctx, node));
                 res = find_type_by_id(ctx, type_id);
-                printf("N: %s\n", node->type_name);
-                node_walk(node);
                 node->type_name = res->type_name;
                 res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
 #if 0
