@@ -392,7 +392,7 @@ int scan_const(struct node *node)
     return scan_attribute(node, "const", A_TYPE_QUAL);
 }
 
-struct node *type_resolve(struct token *t, struct node *node);
+struct node *type_resolve(struct token *t, struct node *node, int skip_free);
 
 int solve_bits_recurse(struct node *node)
 {
@@ -426,7 +426,7 @@ int __parse_struct(struct node *res, struct node *node, int pos, int *freed)
         while (tmp->right)
             tmp = tmp->right;
         node_right(tmp, make_node(NULL, A_LIST, NULL, NULL, NULL));
-        struct node *resolved = type_resolve(NULL, node);
+        struct node *resolved = type_resolve(NULL, node, 1);
         node_left(tmp->right, resolved);
 
         bits = solve_bits_recurse(tmp->right->left);
@@ -592,7 +592,7 @@ int node_parse_ptr(struct node *res)
     return ptr;
 }
 
-struct node *type_resolve(struct token *t, struct node *orig_node)
+struct node *type_resolve(struct token *t, struct node *orig_node, int skip_free)
 {
     struct node *node = orig_node;
     // Need to flatten struct from A_TYPE_LIST
@@ -612,8 +612,9 @@ struct node *type_resolve(struct token *t, struct node *orig_node)
 
         res->bits = parse_struct(res, node);
 
-        res = type_resolve(NULL, res);
-        node_free(orig_node);
+        res = type_resolve(NULL, res, skip_free);
+        if (!skip_free)
+            node_free(orig_node);
 
         return res;
     }
@@ -720,7 +721,7 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_IDENTIFIER:
             res = type_name(f, token);
             if (res) {
-                res = type_resolve(token, res);
+                res = type_resolve(token, res, 0);
                 return res;
             }
 
@@ -1093,7 +1094,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 
     if (!res)
         return NULL;
-    res = type_resolve(token, res);
+    res = type_resolve(token, res, 0);
     return res;
 }
 
@@ -1481,7 +1482,7 @@ struct node *declaration(struct scanfile *f, struct token *token)
         load_point(f, token);
         return NULL;
     }
-    res = type_resolve(token, res);
+    res = type_resolve(token, res, 0);
 
     struct node *decl = init_declarator_list(f, token);
     if (decl) {
@@ -1643,7 +1644,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             left = type_name(f, token);
             if (left) {
                 remove_save_point(f, token);
-                left = type_resolve(token, left);
+                left = type_resolve(token, left, 0);
                 expect(f, token, T_ROUND_CLOSE, ")");
             } else
                 load_point(f, token);
@@ -1713,7 +1714,7 @@ struct node *cast_expression(struct scanfile *f, struct token *token)
         if (cast_to) {
             remove_save_point(f, token);
             //FATAL(!cast_to, "No cast type name");
-            cast_to = type_resolve(token, cast_to);
+            cast_to = type_resolve(token, cast_to, 0);
             expect(f, token, T_ROUND_CLOSE, ")");
             struct node *src = cast_expression(f, token);
             FATAL(!src, "No cast source");
@@ -2143,7 +2144,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *spec = declaration_specifiers(f, token);
     if (!spec)
         return NULL;
-    spec = type_resolve(token, spec);
+    spec = type_resolve(token, spec, 0);
     struct node *decl = declarator(f, token);
     if (!decl) {
         if (spec)
