@@ -4927,7 +4927,6 @@ int codegen(FILE *outfile, struct node *node)
     if (!got_main) {
         struct gen_context *main_ctx = fake_main(ctx, node, res);
         output_ctx(main_ctx);
-        free_ctx(main_ctx);
     }
 
     free_ctx(ctx);
