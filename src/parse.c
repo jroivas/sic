@@ -392,7 +392,7 @@ int scan_const(struct node *node)
     return scan_attribute(node, "const", A_TYPE_QUAL);
 }
 
-struct node *type_resolve(struct token *t, struct node *node, int d);
+struct node *type_resolve(struct token *t, struct node *node);
 
 int solve_bits_recurse(struct node *node)
 {
@@ -413,7 +413,7 @@ int solve_bits_recurse(struct node *node)
     return res;
 }
 
-int __parse_struct(struct node *res, struct node *node, int pos)
+int __parse_struct(struct node *res, struct node *node, int pos, int *freed)
 {
     if (!node)
         return 0;
@@ -426,7 +426,8 @@ int __parse_struct(struct node *res, struct node *node, int pos)
         while (tmp->right)
             tmp = tmp->right;
         node_right(tmp, make_node(NULL, A_LIST, NULL, NULL, NULL));
-        node_left(tmp->right, type_resolve(NULL, node, 0));
+        struct node *resolved = type_resolve(NULL, node);
+        node_left(tmp->right, resolved);
 
         bits = solve_bits_recurse(tmp->right->left);
 
@@ -445,13 +446,30 @@ int __parse_struct(struct node *res, struct node *node, int pos)
             namenode = namenode->left;
         if (namenode)
             tmp->right->left->value_string = namenode->value_string;
+        // End up making new node, thus we can free the old one
+        if (resolved != node)
+            free(node);
+        // Whatever happens here, we mark this as NULL
+        *freed = 1;
         return bits + extra;
     }
 
-    if (node->left)
-        bits +=  __parse_struct(res, node->left, pos + bits);
-    if (node->right)
-        bits +=  __parse_struct(res, node->right, pos + bits);
+    if (node->left) {
+        int this_freed = 0;
+        bits +=  __parse_struct(res, node->left, pos + bits, &this_freed);
+        if (this_freed)
+            node->left = NULL;
+    }
+    if (node->right) {
+        int this_freed = 0;
+        bits +=  __parse_struct(res, node->right, pos + bits, &this_freed);
+        if (this_freed)
+            node->right = NULL;
+    }
+    if (node->left == NULL && node->right == NULL) {
+        free(node);
+        *freed = 1;
+    }
 
     return bits;
 }
@@ -490,8 +508,12 @@ int parse_struct(struct node *res, struct node *node)
     int align = get_struct_max(node);
     int bits = 0;
     int extra = 0;
+    int freed = 0;
 
-    bits = __parse_struct(res, node->right, 0);
+    bits = __parse_struct(res, node->right, 0, &freed);
+    if (freed)
+        node->right = NULL;
+    //node_free(node->right);
 
     if (node->node == A_UNION) {
         bits = align;
@@ -504,17 +526,19 @@ int parse_struct(struct node *res, struct node *node)
     return bits + extra;
 }
 
-void __parse_enum(struct node *res, struct node *node, int val)
+int __parse_enum(struct node *res, struct node *node, int val)
 {
     struct node *valnode = NULL;
     if (!node)
-        return;
+        return 1;
+    int do_free = 0;
     //if (node->node == A_ASSIGN && node->left && node->left->node == A_IDENTIFIER && node->right && node->right->node == A_ASSIGN) {
     if (node->node == A_ASSIGN) {
         valnode = node->right;
+        struct node *tmp = node;
         node = node->left;
+        free(tmp);
     }
-
     if (node->node == A_IDENTIFIER) {
         struct node *tmp = res;
         while (tmp->right)
@@ -531,12 +555,20 @@ void __parse_enum(struct node *res, struct node *node, int val)
 
         node_left(tmp->right, make_node(NULL, A_IDENTIFIER, valnode, NULL, NULL));
         tmp->right->left->value_string = node->value_string;
+        do_free = 1;
     }
 
-    if (node->left)
-        __parse_enum(res, node->left, val);
-    if (node->right)
-        __parse_enum(res, node->right, val);
+    if (node->left) {
+        if (__parse_enum(res, node->left, val))
+            node->left = NULL;
+    }
+    if (node->right) {
+        if (__parse_enum(res, node->right, val))
+            node->right = NULL;
+    }
+    if (do_free)
+        node_free(node);
+    return do_free;
 }
 
 void parse_enum(struct node *res, struct node *node)
@@ -560,7 +592,7 @@ int node_parse_ptr(struct node *res)
     return ptr;
 }
 
-struct node *type_resolve(struct token *t, struct node *orig_node, int d)
+struct node *type_resolve(struct token *t, struct node *orig_node)
 {
     struct node *node = orig_node;
     // Need to flatten struct from A_TYPE_LIST
@@ -580,7 +612,8 @@ struct node *type_resolve(struct token *t, struct node *orig_node, int d)
 
         res->bits = parse_struct(res, node);
 
-        res = type_resolve(NULL, res, 0);
+        res = type_resolve(NULL, res);
+        node_free(orig_node);
 
         return res;
     }
@@ -598,6 +631,8 @@ struct node *type_resolve(struct token *t, struct node *orig_node, int d)
 
         res->bits = 32;
         parse_enum(res, node->right);
+
+        node_free(orig_node);
 
         return res;
     }
@@ -685,7 +720,7 @@ struct node *primary_expression(struct scanfile *f, struct token *token)
         case T_IDENTIFIER:
             res = type_name(f, token);
             if (res) {
-                res = type_resolve(token, res, 0);
+                res = type_resolve(token, res);
                 return res;
             }
 
@@ -1058,7 +1093,7 @@ struct node *declaration_specifiers(struct scanfile *f, struct token *token)
 
     if (!res)
         return NULL;
-    res = type_resolve(token, res, 0);
+    res = type_resolve(token, res);
     return res;
 }
 
@@ -1445,7 +1480,7 @@ struct node *declaration(struct scanfile *f, struct token *token)
         load_point(f, token);
         return NULL;
     }
-    res = type_resolve(token, res, 0);
+    res = type_resolve(token, res);
 
     struct node *decl = init_declarator_list(f, token);
     if (decl) {
@@ -1607,7 +1642,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
             left = type_name(f, token);
             if (left) {
                 remove_save_point(f, token);
-                left = type_resolve(token, left, 0);
+                left = type_resolve(token, left);
                 expect(f, token, T_ROUND_CLOSE, ")");
             } else
                 load_point(f, token);
@@ -1677,7 +1712,7 @@ struct node *cast_expression(struct scanfile *f, struct token *token)
         if (cast_to) {
             remove_save_point(f, token);
             //FATAL(!cast_to, "No cast type name");
-            cast_to = type_resolve(token, cast_to, 0);
+            cast_to = type_resolve(token, cast_to);
             expect(f, token, T_ROUND_CLOSE, ")");
             struct node *src = cast_expression(f, token);
             FATAL(!src, "No cast source");
@@ -2107,7 +2142,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *spec = declaration_specifiers(f, token);
     if (!spec)
         return NULL;
-    spec = type_resolve(token, spec, 0);
+    spec = type_resolve(token, spec);
     struct node *decl = declarator(f, token);
     if (!decl)
         return NULL;
