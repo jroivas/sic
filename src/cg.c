@@ -150,6 +150,9 @@ struct gen_context {
     struct buffer *post;
 
     struct struct_name *structs;
+
+    char **struct_names;
+    unsigned int struct_names_cnt;
 };
 
 static const char *varstr[] = {
@@ -217,6 +220,9 @@ char *struct_name(struct gen_context *ctx)
         size_t l = strlen(tmp->name);
         res = calloc(1, l + 1);
         memcpy(res, tmp->name, l);
+        ctx->struct_names_cnt++;
+        ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt);
+        ctx->struct_names[ctx->struct_names_cnt - 1] = res;
         return res;
     }
 
@@ -243,6 +249,9 @@ char *struct_name(struct gen_context *ctx)
     if (res != NULL)
         res[strlen(res) - 1] = 0;
 
+    ctx->struct_names_cnt++;
+    ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt);
+    ctx->struct_names[ctx->struct_names_cnt - 1] = res;
     return res;
 }
 
@@ -4877,6 +4886,14 @@ void free_ctx(struct gen_context *ctx)
         struct gen_context *next = child->next;
         free_ctx(child);
         child = next;
+    }
+
+    if (ctx->struct_names) {
+        unsigned int i;
+        for (i = 0; i < ctx->struct_names_cnt; i++) {
+            free(ctx->struct_names[i]);
+        }
+        free(ctx->struct_names);
     }
     buffer_del(ctx->pre);
     buffer_del(ctx->init);
