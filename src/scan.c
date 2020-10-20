@@ -58,6 +58,8 @@ void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name)
 
 void close_input_file(struct scanfile *f)
 {
+    if (f->buf)
+        buffer_del(f->buf);
     if (f->pipe) {
         int res = WEXITSTATUS(pclose(f->infile));
         if (res)

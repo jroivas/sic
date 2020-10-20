@@ -103,6 +103,7 @@ struct node {
 
 
 struct node *parse(struct scanfile *f);
+void parse_end(struct scanfile *f);
 extern void node_walk(struct node *node);
 extern void node_free(struct node *node);
 const char *node_type_str(enum nodetype t);

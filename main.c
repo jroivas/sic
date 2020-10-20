@@ -82,6 +82,7 @@ int main(int argc, char **argv)
         ERR("Can't open file: %s", srcname);
 
     node = parse(&f);
+    parse_end(&f);
     close_input_file(&f);
     if (dump_tree)
         node_walk(node);

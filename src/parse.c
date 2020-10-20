@@ -23,6 +23,8 @@ struct node *parameter_type_list(struct scanfile *f, struct token *token);
 
 static inline void node_left(struct node *p, struct node *l)
 {
+    if (!p)
+        ERR("Nullptr in node left");
     p->left = l;
     if (l)
         l->parent = p;
@@ -30,6 +32,8 @@ static inline void node_left(struct node *p, struct node *l)
 
 static inline void node_right(struct node *p, struct node *r)
 {
+    if (!p)
+        ERR("Nullptr in node right");
     p->right = r;
     if (r)
         r->parent = p;
@@ -2209,6 +2213,14 @@ struct node *parse(struct scanfile *f)
     memset(&token, 0, sizeof(struct token));
     scan(f, &token);
     struct node *res = translation_unit(f, &token);
-    FATAL(!res, "Can't parse source, didn't detect token: %s", token_dump(&token));
+    FATAL(!res, "Can't narse source, didn't detect token: %s", token_dump(&token));
     return res;
+}
+
+void parse_end(struct scanfile *f)
+{
+    if (!f)
+        return;
+    if (f->parsedata)
+        free(f->parsedata);
 }

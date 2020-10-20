@@ -138,7 +138,7 @@ struct gen_context {
 
     struct variable *variables;
     struct variable *globals;
-    struct variable *last_ident;
+    //struct variable *last_ident;
 
     struct gen_context *parent;
     struct gen_context *child;
@@ -169,6 +169,7 @@ struct variable *gen_load_struct(struct gen_context *ctx, struct variable *v);
 struct type *type_wrap(struct gen_context *ctx, struct type *src);
 struct type *type_wrap_to(struct gen_context *ctx, struct type *src, int ptrval);
 int gen_type(struct gen_context *ctx, struct node *node);
+void free_ctx(struct gen_context *ctx);
 
 void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
 {
@@ -189,6 +190,7 @@ void struct_pop(struct gen_context *ctx)
         return;
 
     if (ctx->structs->next == NULL) {
+        free(ctx->structs);
         ctx->structs = NULL;
         return;
     }
@@ -4835,6 +4837,54 @@ void gen_opaque(struct gen_context *ctx)
         gen_opaque(ctx->parent);
 }
 
+void free_ctx(struct gen_context *ctx)
+{
+    struct variable *var = ctx->variables;
+    while (var) {
+        struct variable *next = var->next;
+        free(var);
+        var = next;
+    }
+
+    var = ctx->globals;
+    while (var) {
+        struct variable *next = var->next;
+        free(var);
+        var = next;
+    }
+
+    struct type *typ = ctx->types;
+    while (typ) {
+        struct type *next = typ->next;
+        if (typ->items)
+            free(typ->items);
+        free(typ);
+        typ = next;
+    }
+
+    struct struct_name *str = ctx->structs;
+    while (str) {
+        struct struct_name *next = str->next;
+        free(str);
+        str = next;
+    }
+#if 0
+    if (ctx->parent)
+        free_ctx(ctx->parent);
+#endif
+    struct gen_context *child = ctx->child;
+    while (child) {
+        struct gen_context *next = child->next;
+        free_ctx(child);
+        child = next;
+    }
+    buffer_del(ctx->pre);
+    buffer_del(ctx->init);
+    buffer_del(ctx->data);
+    buffer_del(ctx->post);
+    free(ctx);
+}
+
 int codegen(FILE *outfile, struct node *node)
 {
     FATAL(!node, "Didn't get a node, most probably parse error!");
@@ -4877,7 +4927,9 @@ int codegen(FILE *outfile, struct node *node)
     if (!got_main) {
         struct gen_context *main_ctx = fake_main(ctx, node, res);
         output_ctx(main_ctx);
+        free_ctx(main_ctx);
     }
 
+    free_ctx(ctx);
     return res;
 }
