@@ -201,6 +201,9 @@ void __node_walk(struct node *node, int depth, char arm)
         return;
 
     printf("%c %*s", arm, depth * 2, "");
+#if 0
+    printf("%p ", (void*)node);
+#endif
     switch (node->node) {
         case A_ADD:
         case A_MINUS:

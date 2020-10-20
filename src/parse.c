@@ -448,7 +448,7 @@ int __parse_struct(struct node *res, struct node *node, int pos, int *freed)
             tmp->right->left->value_string = namenode->value_string;
         // End up making new node, thus we can free the old one
         if (resolved != node)
-            free(node);
+            node_free(node);
         // Whatever happens here, we mark this as NULL
         *freed = 1;
         return bits + extra;
@@ -1426,6 +1426,7 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
             return res;
         }
     }
+    node_free(unary);
     load_point(f, token);
 
     res = conditional_expression(f, token);
@@ -2144,8 +2145,11 @@ struct node *function_definition(struct scanfile *f, struct token *token)
         return NULL;
     spec = type_resolve(token, spec);
     struct node *decl = declarator(f, token);
-    if (!decl)
+    if (!decl) {
+        if (spec)
+            node_free(spec);
         return NULL;
+    }
     //FATALN(!decl, spec, "Invalid function definition");
 #if 0
     if (!decl)
