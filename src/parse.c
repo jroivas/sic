@@ -1110,10 +1110,7 @@ struct node *parameter_declaration(struct scanfile *f, struct token *token)
     struct node *decl = declarator(f, token);
     if (!decl)
         decl = abstract_declarator(f, token);
-    if (decl)
-        return make_node(token, A_LIST, spec, NULL, decl);
-
-    return spec;
+    return make_node(token, A_LIST, spec, NULL, decl);
 }
 
 struct node *parameter_list(struct scanfile *f, struct token *token)
@@ -2088,6 +2085,7 @@ struct node *attribute_list(struct scanfile *f, struct token *token)
 {
     return iter_list(f, token, attribute, COMMA_MANDATORY, 0);
 }
+
 struct node *attributes(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
