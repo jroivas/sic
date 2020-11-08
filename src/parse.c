@@ -592,6 +592,19 @@ int node_parse_ptr(struct node *res)
     return ptr;
 }
 
+int struct_parse_ptr(struct node *res)
+{
+    if (!res)
+        return 0;
+    if (res->node == A_STRUCT) {
+        if (res->left && res->left->node == A_POINTER)
+            return res->left->ptr;
+    }
+    else if (res->node == A_TYPE_LIST)
+        return struct_parse_ptr(res->left);
+    return 0;
+}
+
 struct node *type_resolve(struct token *t, struct node *orig_node, int skip_free)
 {
     struct node *node = orig_node;
@@ -607,7 +620,7 @@ struct node *type_resolve(struct token *t, struct node *orig_node, int skip_free
 
         res->value_string = node->value_string;
         res->type_name = node->value_string;
-        res->ptr = node_parse_ptr(orig_node);
+        res->ptr = struct_parse_ptr(orig_node);
         res->addr = node->addr;
 
         res->bits = parse_struct(res, node);
@@ -1053,6 +1066,7 @@ struct node *storage_class_specifier(struct scanfile *f, struct token *token)
 
     if (accept_keyword(f, token, K_EXTERN)) {
         res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+        res->is_extern = strcmp(val, "extern") == 0;
         res->value_string = val;
     }
 
@@ -1067,12 +1081,17 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         if (type == NULL) {
             type = type_qualifier(f, token);
             if (type == NULL) {
+#if 0
                 type = pointer(f, token);
                 if (type == NULL)
+#endif
                     return NULL;
             }
         }
     }
+    struct node *ptr = pointer(f, token);
+    if (ptr)
+        type->ptr = ptr->ptr;
 
     struct node *res = type;
     while (1) {

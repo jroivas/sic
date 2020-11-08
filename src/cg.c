@@ -51,6 +51,7 @@ struct type {
     int bits;
     int ptr;
     int is_const;
+    int is_extern;
     int temporary;
     int forward;
     int opaque;
@@ -187,6 +188,21 @@ void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
         }
 }
 
+char *get_name(struct variable *var)
+{
+    char *res = calloc(1, 32);
+    if (var->global) {
+        if (var->type->is_extern) {
+            sprintf(res, "@%s", var->type->name);
+        } else {
+            sprintf(res, "@G%d", var->reg);
+        }
+    } else {
+        sprintf(res, "%%%d", var->reg);
+    }
+    return res;
+}
+
 void struct_pop(struct gen_context *ctx)
 {
     if (ctx->structs == NULL)
@@ -260,7 +276,7 @@ char *stype_str(struct type *t)
     if (!t)
         return NULL;
     char *tmp = calloc(256, sizeof(char));
-    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "");
+    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_extern ? ", extern" : "", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "");
     tmp[255] = 0;
     return tmp;
 }
@@ -1058,10 +1074,14 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
                 tmp_val->reg, v->type->name, v->type->name, v->reg, 0);
 */
 #endif
-
             val = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 0, 0, 0);
-            buffer_write(ctx->data, "%%%d = bitcast %%struct.%s%s %%%d to i%d%s ; gen_cast int_ptr to struct\n",
-                val->reg, v->type->type_name, stars, v->reg, target->bits, stars2);
+            if (v->type->ptr && !target->ptr) {
+                buffer_write(ctx->data, "%%%d = ptrtoint %%struct.%s%s %s%d to i%d; gen_cast struct ptr to int\n",
+                    val->reg, v->type->type_name, stars, REGP(v), v->reg, target->bits);
+            } else {
+                buffer_write(ctx->data, "%%%d = bitcast %%struct.%s%s %%%d to i%d%s ; gen_cast struct to int_ptr\n",
+                    val->reg, v->type->type_name, stars, v->reg, target->bits, stars2);
+            }
 #if 0
             buffer_write(ctx->data, "%%%d = bitcast %%struct.%s %%%d to i%d%s ; gen_cast int_ptr to struct\n",
                 val->reg, v->type->type_name, tmp_val->reg, target->bits, stars);
@@ -1215,6 +1235,29 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
             free(stars);
     }
     return reg;
+}
+
+int gen_allocate_struct_union(struct gen_context *ctx, int reg, struct type *ot, struct type *t, struct variable *var, int ptrval, int is_union)
+{
+
+    char *stars = get_stars(ptrval);
+
+    if (ctx->global) {
+        if (ot->is_extern) {
+            buffer_write(ctx->init, "@%s = external dso_local global %%%s.%s%s, align 8 ; type %s\n", var->name, is_union ? "union" : "struct", t->name, stars, stype_str(t));
+        } else {
+            buffer_write(ctx->init, "@G%d = common dso_local global %%%s.%s%s, align 8 ; type %s\n", reg, is_union ? "union" : "struct", t->name, stars, stype_str(t));
+        }
+    } else {
+        buffer_write(ctx->init, "%%%d = alloca %%%s.%s%s, align 8 ; gen_allocate_%s \n", var->reg, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
+    }
+    free(stars);
+    return reg;
+}
+
+int gen_allocate_struct(struct gen_context *ctx, int reg, struct type *ot, struct type *t, struct variable *var, int ptrval)
+{
+    return gen_allocate_struct_union(ctx, reg, ot, t, var, ptrval, 0);
 }
 
 int gen_allocate_double(struct gen_context *ctx, int reg, int bits, int ptr, int code_alloc, literalnum val, literalnum frac)
@@ -1583,10 +1626,11 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
             sname,
             v->type->type_name,
             stars, 8);
-        buffer_write(ctx->data, "store %%%s.%s%s %%%d, %%%s.%s%s* %%%d, align %d ; load %s ptr-nonptr\n",
+        buffer_write(ctx->data, "store %%%s.%s%s %s%d, %%%s.%s%s* %%%d, align %d ; load %s ptr-nonptr\n",
             sname,
             v->type->type_name,
             stars,
+            REGP(v),
             v->reg,
             sname,
             v->type->type_name,
@@ -1604,6 +1648,7 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
         
     } else {
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr, 0, 0, v->type->type_name);
+#if 0
         buffer_write(ctx->data, "%%%d = load %%%s.%s%s, %%%s.%s*%s %s%d, align %d ; gen_load_%s\n",
                 res->reg,
                 sname,
@@ -1613,6 +1658,20 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
                 v->type->type_name,
                 stars ? stars : "",
                 REGP(v), v->reg, 8, sname);
+#else
+        char *nn = get_name(v);
+        buffer_write(ctx->data, "; %s\n", stype_str(v->type));
+        buffer_write(ctx->data, "%%%d = load %%%s.%s%s, %%%s.%s*%s %s, align %d ; gen_load_%s\n",
+                res->reg,
+                sname,
+                v->type->type_name,
+                stars ? stars : "",
+                sname,
+                v->type->type_name,
+                stars ? stars : "",
+                nn, 8, sname);
+        free(nn);
+#endif
         res->direct = 1;
     }
     res->addr = v->addr;
@@ -2587,9 +2646,13 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->bits = tr->bits;
         if (res->sign != tr->sign && !tr->sign) 
             res->sign = tr->sign;
-        if (!res->is_const && tr->is_const)
+        if (!res->is_const && (tr->is_const || tl->is_const))
             res->is_const = 1;
+        if (!res->is_extern && (tr->is_extern || tl->is_extern))
+            res->is_extern = 1;
         struct type *to_free = res == tl ? tr : tl;
+        //printf("PTRS: %d < %d, %d\n", res->ptr, tr->ptr, node->ptr);
+        //printf("EXTS: %d < %d, %d, %s\n", res->is_extern, tr->is_extern, node->is_extern, stype_str(res));
         if (res->ptr < tr->ptr)
             res = type_wrap_to(ctx, res, tr->ptr - res->ptr);
         if (to_free->temporary)
@@ -2684,6 +2747,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
     } else if (node->node == A_TYPESPEC && node->type == V_CUSTOM) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, 0, node->value_string);
         FATAL(!res, "Invalid custom typespec: %s", node->value_string);
+        res = type_wrap_to(ctx, res, node->ptr);
     } else if (node->type == V_BUILTIN) {
         res = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->value_string);
     } else {
@@ -2694,6 +2758,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->ptr = node->ptr;
         res->name = node->value_string;
         res->is_const = node->is_const;
+        res->is_extern = node->is_extern;
         res->type_name = node->type_name;
         res->temporary = 1;
     }
@@ -2721,9 +2786,11 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
         tmp->bits = 32;
 
     //printf("RECURS: %s, from %s\n", stype_str(tmp), tmp->type_name);
+    //node_walk(node);
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
+    //printf("RRR: %s\n", stype_str(res));
     if (tmp->temporary)
         free(tmp);
     return res;
@@ -2873,7 +2940,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
 
     FATALN(!t, node, "No type: %p", (void *)ctx->pending_type);
 
-    buffer_write(ctx->init, "; Variable: %s, type %s, ptr %d\n", node->value_string, type_str(t->type), ptrval);
+    buffer_write(ctx->init, "; Variable: %s, type %s, ptr %d: %s\n", node->value_string, type_str(t->type), ptrval, stype_str(t));
     FATALN(strcmp(node->value_string, "add5") == 0, node, "Should not initialize function");
 
     switch (t->type) {
@@ -2901,19 +2968,21 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             break;
         case V_STRUCT:
             {
-            ptrval = gen_use_ptr(ctx) + node->ptr;
+            ptrval = gen_use_ptr(ctx) + t->ptr;
 
-            //buffer_write(ctx->init, "; ptr %d\n", ptrval);
-            char *stars = get_stars(ptrval);
+            node_walk(node);
+            buffer_write(ctx->init, "; ptr %d , %d\n", ptrval, node->ptr);
+            //char *stars = get_stars(ptrval);
 
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
-            buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", var->reg, t->name, stars);
+            res = gen_allocate_struct(ctx, var->reg, ctx->pending_type, t, var, ptrval);
+            //buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", var->reg, t->name, stars);
 
             //var->ptr = ptrval;
             //var->type->ptr = ptrval;
             //node->ptr = ptrval;
             res = var->reg;
-            free(stars);
+            //free(stars);
             }
             break;
         case V_UNION:
@@ -3574,6 +3643,15 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
             // TODO: parse types properly, now just shortcutting
             while (pname && pname->node == A_POINTER)
                 pname = pname->left;
+            if (par_type->type == V_VOID && !ptype->ptr) {
+                // This is just "void", skip and reduce it
+                // from parameters
+                node = node->right;
+                ctx->regnum--;
+                continue;
+            }
+
+            FATALN(!pname, paramnode->parent, "No name in");
 
             char *stars = get_stars(ptype->ptr);
             if (par_type->type == V_INT) {
