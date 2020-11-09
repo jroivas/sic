@@ -625,7 +625,7 @@ struct node *type_resolve(struct token *t, struct node *orig_node, int skip_free
 
         res->value_string = node->value_string;
         res->type_name = node->value_string;
-        res->ptr = struct_parse_ptr(orig_node);
+        res->ptr = struct_parse_ptr(node);
         res->addr = node->addr;
 
         res->bits = parse_struct(res, node);
@@ -915,6 +915,9 @@ struct node *struct_or_union_specifier(struct scanfile *f, struct token *token)
     if (accept(f, token, T_CURLY_OPEN)) {
         node_right(res, struct_declaration_list(f, token));
         expect(f, token, T_CURLY_CLOSE, "}");
+    } else {
+        // It didn't have declaration, check for pointer
+        node_left(res, pointer(f, token));
     }
 #if 0
     node_walk(res);
