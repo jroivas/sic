@@ -263,8 +263,11 @@ char *struct_name(struct gen_context *ctx)
         tmp = tmp->next;
     }
 
-    if (res != NULL)
-        res[strlen(res) - 1] = 0;
+    if (res != NULL) {
+        int ln = strlen(res);
+        if (ln > 0)
+            res[ln - 1] = 0;
+    }
 
     ctx->struct_names_cnt++;
     ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt);
@@ -277,7 +280,7 @@ char *stype_str(struct type *t)
     if (!t)
         return NULL;
     char *tmp = calloc(256, sizeof(char));
-    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_extern ? ", extern" : "", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "");
+    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_extern ? ", extern" : "", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "", t->temporary ? ", temporary" : "");
     tmp[255] = 0;
     return tmp;
 }
@@ -2616,8 +2619,14 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             return NULL;
         if (tl && !tr)
             return tl;
-        if (tr && !tl)
+        if (!tl && tr)
             return tr;
+#if 1
+        if (!tr) {
+            ERR("No TR!");
+            return tl;
+        }
+#endif
 
         if (tl->type != tr->type) {
             if (tl->type == V_VOID && tr->type == V_INT)
@@ -2646,7 +2655,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
 
         if (node->left->bits < node->right->bits)
             res->bits = tr->bits;
-        if (res->sign != tr->sign && !tr->sign) 
+        if (res->sign != tr->sign && !tr->sign)
             res->sign = tr->sign;
         if (!res->is_const && (tr->is_const || tl->is_const))
             res->is_const = 1;
@@ -2655,8 +2664,13 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         struct type *to_free = res == tl ? tr : tl;
         //printf("PTRS: %d < %d, %d\n", res->ptr, tr->ptr, node->ptr);
         //printf("EXTS: %d < %d, %d, %s\n", res->is_extern, tr->is_extern, node->is_extern, stype_str(res));
-        if (res->ptr < tr->ptr)
-            res = type_wrap_to(ctx, res, tr->ptr - res->ptr);
+        if (res->ptr < tr->ptr) {
+            int diff = tr->ptr - res->ptr;
+            if (res->temporary)
+                res->ptr += diff;
+            else
+                res = type_wrap_to(ctx, res, diff);
+        }
         if (to_free->temporary)
             free(to_free);
     } else if (node->node == A_STRUCT || node->node == A_UNION) {

@@ -28,6 +28,10 @@ testc:
 
 tests: test
 
+compiletest_notree: build/sic
+	LD_LIBRARY_PATH=build/: build/sic tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
+	cat build/test_$(TEST).sic.ir
+
 compiletest: build/sic
 	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
 	cat build/test_$(TEST).sic.ir
