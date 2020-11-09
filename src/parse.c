@@ -599,6 +599,11 @@ int struct_parse_ptr(struct node *res)
     if (res->node == A_STRUCT) {
         if (res->left && res->left->node == A_POINTER)
             return res->left->ptr;
+        else if (!res->left && res->ptr)
+            /* This is not definition of struct, but usage
+             * and we should carry ptr value with this.
+             */
+            return res->ptr;
     }
     else if (res->node == A_TYPE_LIST)
         return struct_parse_ptr(res->left);
