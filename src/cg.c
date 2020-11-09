@@ -102,6 +102,7 @@ struct variable {
     literalnum value;
     struct type *type;
     const char *name;
+    const char *ext_name;
     hashtype name_hash;
     struct variable *next;
     struct node *params;
@@ -192,8 +193,8 @@ char *get_name(struct variable *var)
 {
     char *res = calloc(1, 32);
     if (var->global) {
-        if (var->type->is_extern) {
-            sprintf(res, "@%s", var->type->name);
+        if (var->ext_name) {
+            sprintf(res, "@%s", var->ext_name);
         } else {
             sprintf(res, "@G%d", var->reg);
         }
@@ -1244,7 +1245,8 @@ int gen_allocate_struct_union(struct gen_context *ctx, int reg, struct type *ot,
 
     if (ctx->global) {
         if (ot->is_extern) {
-            buffer_write(ctx->init, "@%s = external dso_local global %%%s.%s%s, align 8 ; type %s\n", var->name, is_union ? "union" : "struct", t->name, stars, stype_str(t));
+            buffer_write(ctx->init, "@%s = external dso_local global %%%s.%s%s, align 8 ; type %s, id %d\n", var->name, is_union ? "union" : "struct", t->name, stars, stype_str(t), var->reg);
+            var->ext_name = var->name;
         } else {
             buffer_write(ctx->init, "@G%d = common dso_local global %%%s.%s%s, align 8 ; type %s\n", reg, is_union ? "union" : "struct", t->name, stars, stype_str(t));
         }
@@ -1662,14 +1664,14 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
         char *nn = get_name(v);
         buffer_write(ctx->data, "; %s\n", stype_str(v->type));
         buffer_write(ctx->data, "%%%d = load %%%s.%s%s, %%%s.%s*%s %s, align %d ; gen_load_%s\n",
-                res->reg,
-                sname,
-                v->type->type_name,
-                stars ? stars : "",
-                sname,
-                v->type->type_name,
-                stars ? stars : "",
-                nn, 8, sname);
+            res->reg,
+            sname,
+            v->type->type_name,
+            stars ? stars : "",
+            sname,
+            v->type->type_name,
+            stars ? stars : "",
+            nn, 8, sname);
         free(nn);
 #endif
         res->direct = 1;
@@ -2970,8 +2972,6 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             {
             ptrval = gen_use_ptr(ctx) + t->ptr;
 
-            node_walk(node);
-            buffer_write(ctx->init, "; ptr %d , %d\n", ptrval, node->ptr);
             //char *stars = get_stars(ptrval);
 
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
@@ -3392,24 +3392,25 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     }
     // FIXME Supports only integers
     if (src->type->ptr || src->addr || (dst->type->type == V_VOID && dst->type->ptr)) {
+        char *dst_name = get_name(dst);
         char *stars = get_stars(src->type->ptr);
         if (src->type->type == V_STRUCT && dst->type->type == V_STRUCT) {
-            buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s* %s%d, align 8 ; gen_assign ptr struct\n",
+            buffer_write(ctx->data, "store %%struct.%s%s %%%d, %%struct.%s%s* %s, align 8 ; gen_assign ptr struct\n",
                     src->type->type_name, stars ? stars : "", src->reg,
                     dst->type->type_name, stars ? stars : "",
-                    REGP(dst), dst->reg);
+                    dst_name);
         } else if (src->type->type == V_UNION && dst->type->type == V_UNION) {
-            buffer_write(ctx->data, "store %%union.%s%s %%%d, %%union.%s%s* %s%d, align 8 ; gen_assign ptr union\n",
+            buffer_write(ctx->data, "store %%union.%s%s %%%d, %%union.%s%s* %s, align 8 ; gen_assign ptr union\n",
                     src->type->type_name, stars ? stars : "", src->reg,
                     dst->type->type_name, stars ? stars : "",
-                    REGP(dst), dst->reg);
+                    dst_name);
         } else if (src->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "store %s%s %%%d, %s%s* %s%d, align %d ; gen_assign ptr\n",
+            buffer_write(ctx->data, "store %s%s %%%d, %s%s* %s, align %d ; gen_assign ptr\n",
                     float_str(src->type->bits),
                     stars, src->reg,
                     float_str(dst->type->bits),
                     stars,
-                    REGP(dst), dst->reg,
+                    dst_name,
                     align(dst->type->bits));
         } else {
         if (dst->type->type == V_INT && src->type->bits != dst->type->bits) {
@@ -3432,6 +3433,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
                 REGP(dst), dst->reg,
                 align(dst->type->bits));
         }
+        free(dst_name);
         if (stars)
             free(stars);
         return dst->reg;
