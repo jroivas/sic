@@ -23,6 +23,7 @@
     n->line =  file->line;\
     n->linepos =  file->linepos;\
     FATALN(check, n, __VA_ARGS__);\
+    free(n);\
 } while(0);
 #define FATAL(check, ...) FATALN(check, NULL, __VA_ARGS__)
 

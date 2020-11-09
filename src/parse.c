@@ -1095,8 +1095,10 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         }
     }
     struct node *ptr = pointer(f, token);
-    if (ptr)
+    if (ptr) {
         type->ptr = ptr->ptr;
+        free(ptr);
+    }
 
     struct node *res = type;
     while (1) {
@@ -2197,8 +2199,12 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     struct node *comp = compound_statement(f, token);
     if (!comp) {
         load_point(f, token);
-        if (!((decl->is_func || (decl->left && decl->left->is_func)) && (accept(f, token, T_SEMI) || asms != NULL)))
+        if (!((decl->is_func || (decl->left && decl->left->is_func)) && (accept(f, token, T_SEMI) || asms != NULL))) {
+            node_free(asms);
+            node_free(decl);
+            node_free(spec);
             return NULL;
+        }
         // This is forward declaration so return result
 
 #if 0
@@ -2215,6 +2221,7 @@ struct node *function_definition(struct scanfile *f, struct token *token)
     } else
         remove_save_point(f, token);
 
+    node_free(asms);
     res = make_node(token, A_GLUE, decl, NULL, comp);
     res = make_node(token, A_FUNCTION, spec, attrib, res);
 
@@ -2283,6 +2290,14 @@ void parse_end(struct scanfile *f)
 {
     if (!f)
         return;
-    if (f->parsedata)
+    if (f->parsedata) {
+        struct parse_private *priv = PPRIV(f);
+        struct typedef_info *info = priv->def;
+        while (info) {
+            struct typedef_info *nn = info->next;
+            free(info);
+            info = nn;
+        }
         free(f->parsedata);
+    }
 }

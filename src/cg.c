@@ -1248,10 +1248,10 @@ int gen_allocate_struct_union(struct gen_context *ctx, int reg, struct type *ot,
 
     if (ctx->global) {
         if (ot->is_extern) {
-            buffer_write(ctx->init, "@%s = external dso_local global %%%s.%s%s, align 8 ; type %s, id %d\n", var->name, is_union ? "union" : "struct", t->name, stars, stype_str(t), var->reg);
+            buffer_write(ctx->init, "@%s = external dso_local global %%%s.%s%s, align 8\n", var->name, is_union ? "union" : "struct", t->name, stars);
             var->ext_name = var->name;
         } else {
-            buffer_write(ctx->init, "@G%d = common dso_local global %%%s.%s%s, align 8 ; type %s\n", reg, is_union ? "union" : "struct", t->name, stars, stype_str(t));
+            buffer_write(ctx->init, "@G%d = common dso_local global %%%s.%s%s, align 8\n", reg, is_union ? "union" : "struct", t->name, stars);
         }
     } else {
         buffer_write(ctx->init, "%%%d = alloca %%%s.%s%s, align 8 ; gen_allocate_%s \n", var->reg, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
@@ -1665,7 +1665,6 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
                 REGP(v), v->reg, 8, sname);
 #else
         char *nn = get_name(v);
-        buffer_write(ctx->data, "; %s\n", stype_str(v->type));
         buffer_write(ctx->data, "%%%d = load %%%s.%s%s, %%%s.%s*%s %s, align %d ; gen_load_%s\n",
             res->reg,
             sname,
@@ -2511,6 +2510,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
             if (node->parent && (node->parent->node == A_TYPEDEF) && node->parent->value_string) {
                 typename = node->parent->value_string;
 #if 1
+                // TODO: Free this
                 char *tmp = calloc(1, 4096);
                 tmp = strcat(tmp, "__generated_struct_name_");
                 tmp = strcat(tmp, typename);
@@ -2547,7 +2547,6 @@ int gen_type(struct gen_context *ctx, struct node *node)
             complete_struct_type(global_ctx, t, node->right, node->type == V_UNION, struct_init);
             buffer_write(struct_init, " } ; gen_type\n");
             buffer_append(ctx->init, buffer_read(struct_init));
-            buffer_del(struct_init);
             t->forward = 0;
         } else if (!t->forward) {
             // This is either forward or opaque
@@ -2555,6 +2554,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
             t->type_name = typename;
             t->forward = 1;
         }
+        buffer_del(struct_init);
         struct_pop(ctx);
     }
     if (!t && node->type == V_ENUM) {
@@ -2956,7 +2956,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
 
     FATALN(!t, node, "No type: %p", (void *)ctx->pending_type);
 
-    buffer_write(ctx->init, "; Variable: %s, type %s, ptr %d: %s\n", node->value_string, type_str(t->type), ptrval, stype_str(t));
+    //buffer_write(ctx->init, "; Variable: %s, type %s, ptr %d: %s\n", node->value_string, type_str(t->type), ptrval, stype_str(t));
     FATALN(strcmp(node->value_string, "add5") == 0, node, "Should not initialize function");
 
     switch (t->type) {
@@ -3862,6 +3862,7 @@ int gen_function(struct gen_context *ctx, struct node *node)
 
     if (!body) {
         // This is prototype, it's declared earlier
+        free_ctx(func_ctx);
         return 0;
     }
 
@@ -4339,8 +4340,12 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     else
         type = var_str(func_type->type, func_type->bits, &tmp);
 
-    params = gen_func_params_with(ctx, node, 0);
-    func_var->paramstr = params;
+    if (func_var->prototype)
+        params = func_var->paramstr;
+    else {
+        params = gen_func_params_with(ctx, node, 0);
+        func_var->paramstr = params;
+    }
     if (ctx->gen_flags & GEN_FUNCTION)
         gen_var_function(ctx, func_name);
     if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
@@ -4945,6 +4950,8 @@ void free_ctx(struct gen_context *ctx)
     struct variable *var = ctx->variables;
     while (var) {
         struct variable *next = var->next;
+        if (var->paramstr)
+            free(var->paramstr);
         free(var);
         var = next;
     }
@@ -4952,6 +4959,8 @@ void free_ctx(struct gen_context *ctx)
     var = ctx->globals;
     while (var) {
         struct variable *next = var->next;
+        if (var->paramstr)
+            free(var->paramstr);
         free(var);
         var = next;
     }
