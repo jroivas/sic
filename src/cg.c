@@ -4397,19 +4397,27 @@ void __gen_func_declarations(struct gen_context *global_ctx, struct variable *va
         if (var->prototype) {
             FATAL(!var->func, "Got non-function prototype");
 
-            struct type *func_type = var->type;
+            struct type *func_type = custom_type_get(global_ctx, var->type);
             const char *type = NULL;
             const char *func_name = var->name;
             char *tmp = NULL;
             if (strcmp(func_name, "main") == 0 && func_type->type == V_VOID)
                 type = var_str(V_INT, 32, &tmp);
-            else
+            else if (func_type->type == V_STRUCT) {
+                tmp = calloc(1, 256);
+                sprintf(tmp, "%%struct.%s", func_type->type_name);
+                type = tmp;
+            } else if (func_type->type == V_UNION) {
+                tmp = calloc(1, 256);
+                sprintf(tmp, "%%union.%s", func_type->type_name);
+                type = tmp;
+            } else
                 type = var_str(func_type->type, func_type->bits, &tmp);
 
             char *stars = get_stars(func_type->ptr);
             buffer_write(global_ctx->pre, "declare %s%s @%s(%s);\n",
                 type, stars, func_name,
-                var->paramstr ? var->paramstr : "");
+                var->paramstr ? var->paramstr : "", type);
             free(stars);
             if (tmp)
                 free(tmp);
