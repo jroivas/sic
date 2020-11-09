@@ -396,7 +396,7 @@ const char *resolve_cpp()
     //return "cpp -nostdinc";
     //return "cpp -ansi -pedantic -D__extension__=";
     //return "cpp -std=c17 -D__extension__= -D__restrict=";
-    return "cpp -ansi -D__extension__= -D__restrict=";
+    return "cpp -std=c99 -D__extension__= -D__restrict=";
     //return "cpp -D__extension__=";
 }
 
