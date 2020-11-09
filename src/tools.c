@@ -431,3 +431,11 @@ FILE *preprocess(const char *fname, char **incs, int inc_cnt)
     return popen(cmd, "r");
 }
 
+char *strcopy(const char *src)
+{
+    int len = strlen(src);
+    char *r = calloc(1, len + 1);
+    memcpy(r, src, len);
+    r[len] = 0;
+    return r;
+}

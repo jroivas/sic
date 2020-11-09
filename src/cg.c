@@ -2420,10 +2420,10 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     enum builtin_function builtin = builtin_func(func->name);
     if (builtin == BUILTIN_VA_START) {
         func->name = "llvm.va_start";
-        func->paramstr = "i8*";
+        func->paramstr = strcopy("i8*");
     } else if (builtin == BUILTIN_VA_END) {
         func->name = "llvm.va_end";
-        func->paramstr = "i8*";
+        func->paramstr = strcopy("i8*");
     } else if (builtin == BUILTIN_VA_ARG) {
         func->name = "llvm.va_arg";
 

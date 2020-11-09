@@ -46,5 +46,6 @@ int solve_escape(const char *v);
 int solve_escape_str(char *ptr, int v);
 char *convert_escape(const char *src, int *len);
 FILE *preprocess(const char *fname, char **incs, int inc_cnt);
+char *strcopy(const char *src);
 
 #endif
