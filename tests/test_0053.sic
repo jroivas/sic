@@ -28,10 +28,8 @@ int test(struct values *v)
     if (sizeof(v) != 8)
         return 4;
 
-#if 0
     if (sizeof(*v) != 12)
         return 5;
-#endif
 
     if (sizeof(v->b) != 8)
         return 6;

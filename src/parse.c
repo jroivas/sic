@@ -576,22 +576,6 @@ void parse_enum(struct node *res, struct node *node)
     __parse_enum(res, node, 0);
 }
 
-int node_parse_ptr(struct node *res)
-{
-    if (!res)
-        return 0;
-    int ptr = res->ptr;
-    int a = node_parse_ptr(res->left);
-    int b = node_parse_ptr(res->right);
-
-    if (a > ptr)
-        ptr = a;
-    if (b > ptr)
-        ptr = b;
-
-    return ptr;
-}
-
 int struct_parse_ptr(struct node *res)
 {
     if (!res)
@@ -1046,11 +1030,20 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
         node_left(ptr, decl);
         decl = ptr;
     }
-    FATALN(token->token != T_IDENTIFIER, decl, "Expected identifier after typedef");
-    res = make_node(token, A_TYPEDEF, decl, NULL, NULL);
+    int need_bracket = 0;
+    struct node *func_ptr = NULL;
+    if (accept(f, token, T_ROUND_OPEN)) {
+        need_bracket = 1;
+        func_ptr = pointer(f, token);
+    }
+
+    FATALN(token->token != T_IDENTIFIER, decl, "Expected identifier after typedef, got %s", token_str(token));
+    res = make_node(token, A_TYPEDEF, decl, NULL, func_ptr);
     FATAL(typedef_is(f, token->value_string), "Redefinition of typedef: %s", token->value_string);
     res->value_string = token->value_string;
     scan(f, token);
+    if (need_bracket)
+        expect(f, token, T_ROUND_CLOSE, ")");
 
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *args = parameter_type_list(f, token);
