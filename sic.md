@@ -3,6 +3,10 @@
 Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
 
+
+**REMARK** Most of the features described here are only planned, and **NOT** implemented.
+For now the focus has been implementing more or less standard C compiler.
+
 # Limit undefined behavior
 
 One of C's optimization strategies is "undefined behavior"
@@ -37,6 +41,43 @@ Example:
         assert(b == 0.0);
         assert(p == NULL);
     }
+
+# Integer sizes
+
+Traditionally in C the size of `int` may be different according the system where it's compiled into.
+We specify size of all types explicitly:
+
+- 8 bits: char == unsigned char
+- 8 bits: byte and unsigned byte
+- 16 bits: short and unsigned short
+- 32 bits: int and unsigned int
+- 64 bits: long and unsigned long
+- 64 bits: long long and unsigned long long
+
+All chars are unsigned, and signed char does not exists. Value is always between 0 - 255.
+Instead byte is signed in range -128 - 127 and unsigned byte matches char.
+
+On top of that we have specific bit size ints:
+
+- 8 bits: int8, uint8
+- 16 bits: int16, uint16
+- 32 bits: int32, uint32
+- 64 bits: int64, uint64
+- 128 bits: int128, uint128
+
+Extending to bigger types is trivial, if there comes hardware support.
+However compiler supports built-in bigint, which allows arbitrary big integers.
+These are not any specific bit/byte size, but can grow any size when needed.
+This of course has it's performance and storage size issues.
+Otherwise bigints can be used like any other integer type:
+
+    int32 a = 12345;
+    int64 b = 567890;
+    bigint c = 123456789123456789001234567890;
+
+    bigint d = a + b;
+    d += c;
+
 
 ## Integer overflow
 
@@ -151,43 +192,6 @@ Also, here we first time take return value `overflow` and assign it into
 and integer. Earlier example in case of `if` works same way.
 So `overflow` return `0` in case of success, and `1` if overflow was detected.
 
-# Integer sizes
-
-Traditionally in C the size of `int` may be different according the system where it's compiled into.
-We specify size of all types explicitly:
-
-- 8 bits: char == unsigned char
-- 8 bits: byte and unsigned byte
-- 16 bits: short and unsigned short
-- 32 bits: int and unsigned int
-- 64 bits: long and unsigned long
-- 64 bits: long long and unsigned long long
-
-All chars are unsigned, and signed char does not exists. Value is always between 0 - 255.
-Instead byte is signed in range -128 - 127 and unsigned byte matches char.
-
-On top of that we have specific bit size ints:
-
-- 8 bits: int8, uint8
-- 16 bits: int16, uint16
-- 32 bits: int32, uint32
-- 64 bits: int64, uint64
-- 128 bits: int128, uint128
-
-Extending to bigger types is trivial, if there comes hardware support.
-However compiler supports built-in bigint, which allows arbitrary big integers.
-These are not any specific bit/byte size, but can grow any size when needed.
-This of course has it's performance and storage size issues.
-Otherwise bigints can be used like any other integer type:
-
-    int32 a = 12345;
-    int64 b = 567890;
-    bigint c = 123456789123456789001234567890;
-
-    bigint d = a + b;
-    d += c;
-
-
 # Built-in fixed point, and extended floats
 
 Floating point is great, but sometimes more exact representation is needed.
@@ -229,7 +233,7 @@ For example:
     // Prints fixed<10,9>
     printf("%s\n", typestr(a + b));
 
-Similar way if storing the result to new fixed point number, reserved precision must be bigger:
+Similar way if storing the result to new fixed point number, reserved precision must be matching or bigger:
 
     fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
@@ -238,12 +242,10 @@ Similar way if storing the result to new fixed point number, reserved precision 
     fixed<11,11> d = a + b;
     fixed<5,4>   f = a + b;  // Compiler failure
 
-Fixed numbers are most effective when the whole are fits in a 64 bit number, but are not limited to that.
+Fixed numbers are most effective when the whole precision fits into 64 bit number, but are not limited to that.
 One just need to keep in mind, that compiler can generate way much more optimal code if the numbers does not
 exceed certain limits.
-Otherwise it might need to rely on bigint feature, which means most time performance hit.
-Systems supporting efficient 128 bit integer handling can be way much more efficient on bigger values.
-Compilers may produce quite optimal code to 128 bit, even on systems supporting max 64 bit numbers.
+Otherwise it might need to rely on bigint feature, which means most of the time a performance hit.
 
 
 # Built-in string
@@ -295,7 +297,7 @@ constructor and destructor:
 
 
 These looks like C++ classes, but we do not support directly other member methods
-than the constructor and destructor. Like in C++ they're automatically called on creation
+than the constructor and destructor. Like in C++ they're automatically called on creation,
 and when getting out of scope:
 
 
@@ -409,7 +411,7 @@ Proper way would be:
     } else
         do_other();
 
-Now it's clear to for which `if`the `else` belongs to.
+Now it's clear to which `if`the `else` belongs to.
 
 # Imports
 
@@ -531,13 +533,14 @@ Case may contain multiple expressions and span to multiple lines.
 It's valid to define variables inside case, unlike in C.
 One can imagine automatic curly braces after the colon, until next `case`,
 with automatic `break` added.
+One can still explicitly state `break`, but it has no effect.
 
 Compared to C this is a breaking change.
 
 
 # Rotate and shift
 
-Original C has only shift left and right operators, but missing rotate,
+Original C has only shift left and shift right operators, but missing rotate,
 even thought there's instructions for it on some CPU's, and it's widely utilized on programs.
 
 Introducing rotate left `<<<` and rotate right `>>>` operators.  Example:
@@ -558,7 +561,7 @@ Shifts are exactly specified:
   * Unsigned fills always zero
   * Signed fills always sign bit
 - Shift count can be anything
-  * In case of overflow result is zero, except if signed, it's filled with sign bit
+  * In case of overflow result is zero, except if signed right shift, it's filled with sign bit
   * If count is zero or negative, value is not shifted at all.
 
 Examples:
@@ -586,23 +589,38 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         int tail[5];
         string test = "Hello world!"
 
-        for (int i = 0; i < values.size(); i++) {
+        for (int i = 0; i < values.size; i++) {
             values[i] = i;
-            tail[i] = i + values.size();
+            tail[i] = i + values.size;
         }
 
-        printf("String: %s, len: %d\n", test, test.length());
+        printf("String: %s, len: %d\n", test, test.length);
 
         int combined[20] = values + tail;
         // Will print 20, and not 10
         // Contents will be 1..10 and rest zeros
-        printf("Combined length: %d\n", combined.length());
+        printf("Combined length: %d\n", combined.length);
 
         // Will print 10
-        printf("Combined2 length: %d\n", (values + tail).length());
+        printf("Combined2 length: %d\n", (values + tail).length);
     }
+
+Thus arrays (and strings) has both `size` and `length` values, which are calculated usually at compile time,
+but might get updated at runtime. For now both of those are the same.
+Recommendation is to use `length` to determine number of elements.
+In case of string `length` tells number of unicode characters (or code points) in the string, but size is the size in bytes.
+
+The values are also used to perform runtime bound checks for extra safety and to prevent out of bounds errors.
 
 ## Swap
 
 Support built-in swap operation, which can be compiled to assembly instruction
 on target architectures supporting it.
+
+    int a = 6;
+    int b = 20;
+
+    a <> b;   // Swap values
+
+    printf("%d\n", a); // prints 20
+    printf("%d\n", b); // prints 6
