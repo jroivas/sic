@@ -1,16 +1,16 @@
-# SIC - Slighltly Improved C
+# SIC - Slightly Improved C
 
 Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
 
-# Limit undefined behaviour
+# Limit undefined behavior
 
-One of C's optimization strategies is "undefined behaviour"
-when copiler may do whatever it wants.
+One of C's optimization strategies is "undefined behavior"
+when compiler may do whatever it wants.
 
 We remove that freedom and try to specify what to do on each of the cases.
 
-Reason is to avoid hard to debug undefined behaviour cases.
+Reason is to avoid hard to debug undefined behavior cases.
 Our thesis is, compiler can do good enough (if not optimal) code even with
 these rules, and same time prevent unnecessary lost human time.
 
@@ -40,7 +40,7 @@ Example:
 
 ## Integer overflow
 
-Integer overflow is not undefined behaviour.
+Integer overflow is not undefined behavior.
 Instead these rules apply:
 
 - By default signed and unsigned overflow causes wrap around
@@ -81,7 +81,7 @@ Example:
 
 Without `overflow` keyword execution of program would be
 ended with an exception. Now it just iterates first from
-MAX_INT - 5 to MAX_INT, then assings a = 0, and continues
+MAX_INT - 5 to MAX_INT, then assigns a = 0, and continues
 iteration until 5.
 
 However this example is perfectly valid:
@@ -209,13 +209,13 @@ and `b` is max meaningful digits for fraction part.
 
 - fixed<2,4>: 2 digits for integral, 4 digits for fraction allowing -99.9999 to 99.9999
 - fixed<2,2>: 2 digits for integral, 2 digits for fraction allowing -99.99 to 99.99
-- fixed<10,1>: 10 digts for integral, 1 digit for fraction allowing -9999999999.9 to 9999999999.9
+- fixed<10,1>: 10 digits for integral, 1 digit for fraction allowing -9999999999.9 to 9999999999.9
 
-One can use plain `fixed` but it's in most cases suboptimal.
+One can use plain `fixed` but it's in most cases sub-optimal.
 Compiler tries to determine maximum value, but sometimes that's just impossible.
-On these cases plain `fixed` can be exteneded to bigger precision.
+On these cases plain `fixed` can be extended to bigger precision.
 Unfortunately that might be expensive and compiler is unable to produce optimal code.
-It's always recommended to define precisions for fixed types.
+It's always recommended to define precision for fixed types.
 
 On can perform operations on different sized fixed numbers with certain constraints.
 Result of the operation must fit into the combined bigger precision limits.
@@ -240,7 +240,7 @@ Similar way if storing the result to new fixed point number, reserved precision 
 
 Fixed numbers are most effective when the whole are fits in a 64 bit number, but are not limited to that.
 One just need to keep in mind, that compiler can generate way much more optimal code if the numbers does not
-exceed certaing limits.
+exceed certain limits.
 Otherwise it might need to rely on bigint feature, which means most time performance hit.
 Systems supporting efficient 128 bit integer handling can be way much more efficient on bigger values.
 Compilers may produce quite optimal code to 128 bit, even on systems supporting max 64 bit numbers.
@@ -294,7 +294,7 @@ constructor and destructor:
     }
 
 
-These looks like C++ classes, but we do not support direclty other member methods
+These looks like C++ classes, but we do not support directly other member methods
 than the constructor and destructor. Like in C++ they're automatically called on creation
 and when getting out of scope:
 
@@ -340,7 +340,7 @@ Which is just typo, and should be:
     if (x == y)
         foo();
 
-One solution is to disallow assignment in thuth evaluation expressions
+One solution is to disallow assignment in truth evaluation expressions
 like if, while, etc.
 
 First case would then be:
@@ -498,7 +498,7 @@ Biggest problem is the fallthrough in case of missing break.
 
 We're breaking `switch` and making it opposite.
 Default is to break after each case, and fallthrough
-must be specificly stated:
+must be specifically stated:
 
     int test(int x)
     {
@@ -550,7 +550,7 @@ Introducing rotate left `<<<` and rotate right `>>>` operators.  Example:
 
 That would print out `0x34567812`.
 
-Shifts are exaclty specified:
+Shifts are exactly specified:
 
 - Left shift `<<`
   * Always fills zero
