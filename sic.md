@@ -1,8 +1,7 @@
-# SIC - Slightly Improved C
+# SIC - Slightly Improved C specification
 
 Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
-
 
 **REMARK** Most of the features described here are only planned, and **NOT** implemented.
 For now the focus has been implementing more or less standard C compiler.

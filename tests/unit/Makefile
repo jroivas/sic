@@ -11,7 +11,7 @@ test: runtest libsic.so
 libsic.so:
 	make -C ../.. build/libsic.so
 	cp -f ../../build/libsic.so .
-	ln -s libsic.so libsic.so.0
+	ln -sf libsic.so libsic.so.0
 
 test.o: test.c test.h
 
