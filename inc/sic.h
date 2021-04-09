@@ -15,7 +15,7 @@ typedef unsigned long hashtype;
 #define REF_CTX(X) (-(X))
 
 enum var_type {
-    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR, V_STRUCT, V_UNION, V_ENUM, V_CUSTOM, V_BUILTIN
+    V_VOID, V_NULL, V_INT, V_FLOAT, V_FIXED, V_STR, V_STRUCT, V_UNION, V_ENUM, V_CUSTOM, V_FUNCPTR, V_BUILTIN
 };
 
 #define WARN(...) { \

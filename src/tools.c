@@ -8,7 +8,7 @@
 #include "fatal.h"
 
 static const char *typestr[] = {
-    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom", "builtin"
+    "void", "NULL", "int", "float", "fixed", "str", "struct", "union", "enum", "custom", "funcptr", "builtin"
 };
 
 const char *type_str(enum var_type t)

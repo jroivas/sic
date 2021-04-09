@@ -137,6 +137,21 @@ void typedef_add(struct scanfile *f, const char *name, struct node *node)
     }
 }
 
+struct typedef_info *typedef_get(struct scanfile *f, const char *name)
+{
+    struct parse_private *priv = PPRIV(f);
+    if (!priv)
+        return NULL;
+    struct typedef_info *info = priv->def;
+
+    while (info) {
+        if (strcmp(info->name, name) == 0)
+            return info;
+        info = info->next;
+    }
+    return NULL;
+}
+
 int typedef_is(struct scanfile *f, const char *name)
 {
     struct parse_private *priv = PPRIV(f);
@@ -985,8 +1000,13 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_FLOAT, 64, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "float") == 0)
         res = make_type_spec(token, V_FLOAT, 32, PARSE_SIGNED, token->value_string);
-    else if (typedef_is(f, token->value_string))
-        res = make_type_spec(token, V_CUSTOM, 0, PARSE_SIGNED, token->value_string);
+    else if (typedef_is(f, token->value_string)) {
+        struct typedef_info *info = typedef_get(f, token->value_string);
+        if (info->node->is_func)
+            res = make_type_spec(token, V_FUNCPTR, 64, PARSE_SIGNED, token->value_string);
+        else
+            res = make_type_spec(token, V_CUSTOM, 0, PARSE_SIGNED, token->value_string);
+    }
     else if (builtin_is(f, token->value_string))
         res = make_type_spec(token, V_BUILTIN, 0, PARSE_SIGNED, token->value_string);
 
@@ -1042,14 +1062,17 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
     FATAL(typedef_is(f, token->value_string), "Redefinition of typedef: %s", token->value_string);
     res->value_string = token->value_string;
     scan(f, token);
-    if (need_bracket)
+    if (need_bracket) {
         expect(f, token, T_ROUND_CLOSE, ")");
+        res->is_func = 1;
+    }
 
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *args = parameter_type_list(f, token);
         // This is function typedef
         expect(f, token, T_ROUND_CLOSE, ")");
         res->mid = args;
+        res->is_func = 1;
     }
 
     FATALN(token->token != T_SEMI, res, "Expected semi, got: %s", token_dump(token));
