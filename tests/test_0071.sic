@@ -3,6 +3,7 @@ typedef struct {
     int a;
     int b;
     char *value;
+    char *d;
 } va_list;
 
 void a(char *b)

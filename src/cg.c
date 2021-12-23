@@ -1063,7 +1063,7 @@ struct variable *find_global_variable_by_name(struct gen_context *ctx, const cha
     return NULL;
 }
 
-struct variable *find_variable_by_name_scope(struct gen_context *ctx, const char *name, int globals)
+struct variable *find_variable_by_name_scope(struct gen_context *ctx, const char *name, int globals, int parents)
 {
     if (name == NULL)
         return NULL;
@@ -1075,8 +1075,8 @@ struct variable *find_variable_by_name_scope(struct gen_context *ctx, const char
             return res;
         res = res->next;
     }
-    if (ctx->parent)
-        return find_variable_by_name_scope(ctx->parent, name, globals);
+    if (parents && ctx->parent)
+        return find_variable_by_name_scope(ctx->parent, name, globals, parents);
     if (globals)
         return find_global_variable_by_name(ctx, name);
     return NULL;
@@ -1084,7 +1084,7 @@ struct variable *find_variable_by_name_scope(struct gen_context *ctx, const char
 
 struct variable *find_variable_by_name(struct gen_context *ctx, const char *name)
 {
-    return find_variable_by_name_scope(ctx, name, 1);
+    return find_variable_by_name_scope(ctx, name, 1, 1);
 }
 
 struct variable *init_variable(const char *name, struct type *t)
@@ -3048,7 +3048,7 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->retval = tmp;
             //res->ptr = node->ptr;
             res = type_wrap_to(ctx, res, node->ptr);
-            printf("nnnPTRVVV: %d %d %s, id %d\n", node->ptr, res->ptr, res->type_name, res->id);
+            //printf("nnnPTRVVV: %d %d %s, id %d\n", node->ptr, res->ptr, res->type_name, res->id);
         } else {
             res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign);
             res->custom_type = tmp;
@@ -3132,7 +3132,7 @@ struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *node)
     if (tmp->type == V_INT && !tmp->bits)
         tmp->bits = 32;
 
-    printf("RECURS: %s, from %s\n", stype_str(tmp), tmp->type_name);
+    //printf("RECURS: %s, from %s\n", stype_str(tmp), tmp->type_name);
     //node_walk(node);
 
     struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
@@ -3151,11 +3151,13 @@ struct type *gen_type_list_type(struct gen_context *ctx, struct node *node)
 
     FATALN(!res, node, "Couldn't generate type from type list");
     ctx->pending_type = res;
+#if 0
     if (res->id == 21 || res->id == 29) {
         printf("Pend is: %d\n", res->id);
         stack_trace();
         node_walk(node);
     }
+#endif
 
     node->reg = REF_CTX(res->id);
 
@@ -3419,11 +3421,11 @@ int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
 int gen_identifier(struct gen_context *ctx, struct node *node)
 {
     struct variable *all_var = find_variable_by_name(ctx, node->value_string);
-    struct variable *var = find_variable_by_name_scope(ctx, node->value_string, 0);
+    struct variable *var = find_variable_by_name_scope(ctx, node->value_string, 0, 1);
     int res;
 
     if (var == NULL) {
-        if (all_var) {
+        if (all_var && ctx->is_decl < 100) {
             /* This is a function, return it's reference */
             if (all_var->func)
                 return all_var->reg;
@@ -3432,18 +3434,27 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
              * this is declaration we can override it,
              * otherwise just return the global reference.
              */
-            if (ctx->is_decl < 100)
-                return all_var->reg;
+            return all_var->reg;
         }
         // Utilize pending type from previous type def
         FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", node->value_string);
         res = gen_init_var(ctx, node, 0);
-    } else {
-            // TODO FIXME Faulty check
-#if 0
-            FATAL(ctx->is_decl >= 100 && ctx->is_decl < 102, "Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
+    } else if (ctx->is_decl > 100) {
+        /* We have the variable but this is declaration, check only this scope for redeclaraion */
+        struct variable *var_scope = find_variable_by_name_scope(ctx, node->value_string, 0, 0);
+#if 1
+        if (var_scope)
+            ERR("Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
+#else
+        FATAL(var_scope, "Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
 #endif
-            res = var->reg;
+        res = gen_init_var(ctx, node, 0);
+    } else {
+        // TODO FIXME Faulty check
+#if 0
+        FATAL(ctx->is_decl >= 100 && ctx->is_decl < 102, "Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
+#endif
+        res = var->reg;
     }
     return res;
 }
@@ -3731,7 +3742,7 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     if (!var)
         return 0;
     FATALN(!var, node, "Variable not found in get_identitifier: %s", node->value_string);
-    printf("VVAR %s, %d\n", var->name, var->reg);
+    //printf("VVAR %s, %d\n", var->name, var->reg);
     return var->reg;
 }
 
@@ -3745,7 +3756,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
     FATALN(!src, node, "No source in assign")
     FATALN(!dst, node, "No dest in assign: %d", left)
 
-#if 1
+#if 0
     node_walk(node);
     printf("ASSIGNreg: %d = %d (%d)\n", dst->reg, src->reg, right);
     printf("ASSIGN: %s = %s\n", stype_str(dst->type), stype_str(src->type));
@@ -3837,10 +3848,10 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
         buffer_write(ctx->data, "store %s %%%d, %s* %s%d, align %d ; gen_assign\n",
             float_str(src->type->bits), src->reg, float_str(src->type->bits), REGP(dst), dst->reg, align(dst->type->bits));
     } else if (src->type->type == V_STR) {
-	    buffer_write(ctx->data, "store i8* getelementptr inbounds "
-		"([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
-		"i8** %%%d, align 8\n",
-		src_val->bits, src_val->bits, src->reg, dst->reg);
+        buffer_write(ctx->data, "store i8* getelementptr inbounds "
+            "([%d x i8], [%d x i8]* @.str.%d, i32 0, i32 0), "
+            "i8** %%%d, align 8\n",
+        src_val->bits, src_val->bits, src->reg, dst->reg);
     } else if (src->type->type == V_VOID) {
         // TODO Void pointer
         return 0;
@@ -4831,7 +4842,7 @@ void gen_scan_struct_typedef(struct gen_context *ctx, struct node *node)
             res->retval = tmp;
             res = type_wrap_to(ctx, res, node->ptr);
             //res->ptr = node->ptr;
-            printf("PTRVVV: %d %d %s, id %d\n", node->ptr, res->ptr, res->type_name, res->id);
+            //printf("PTRVVV: %d %d %s, id %d\n", node->ptr, res->ptr, res->type_name, res->id);
         } else {
             res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign);
             res->custom_type = tmp;
@@ -5036,7 +5047,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             res = gen_prepare_store_str(ctx, node);
             break;
         case A_DECLARATION:
-            ctx->is_decl = 100;
+            ctx->is_decl += 100;
             break;
         case A_ASSIGN:
             /* If It's declaration, and assign increase is_decl since we're declaring a variable. */
@@ -5053,13 +5064,14 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         left = gen_recursive_allocs(ctx, node->left);
     /* After handling left side of assign we need to stop checking for variables since right side can't be declaration */
     if (node->node == A_ASSIGN)
-            ctx->is_decl++;
+            ctx->is_decl--;
     if (node->mid)
         gen_recursive_allocs(ctx, node->mid);
     if (node->node != A_ACCESS && node->right)
         right = gen_recursive_allocs(ctx, node->right);
     if (node->node == A_DECLARATION)
         ctx->is_decl = 0;
+        //ctx->is_decl -= 100;
     if (node->node == A_ASSIGN && left > 0 && right > 0) {
         /* Need to handle assign values */
         struct variable *v1 = find_variable(ctx, left);

@@ -47,7 +47,7 @@ int main()
         val[i] = i + 2;
 
     val[n] = 0;
-    
+
     if (first(val) != 2)
         return 1;
 
