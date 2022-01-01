@@ -49,6 +49,7 @@ struct type {
     enum var_type type;
     enum type_sign sign;
     int bits;
+    int array_size;
     int ptr;
     int is_const;
     int is_extern;
@@ -2972,6 +2973,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
 
         if (node->left->bits < node->right->bits)
             res->bits = tr->bits;
+        if (node->left->array_size < node->right->array_size)
+            res->array_size = tr->array_size;
         if (res->sign != tr->sign && !tr->sign)
             res->sign = tr->sign;
         if (!res->is_const && (tr->is_const || tl->is_const))
@@ -3101,6 +3104,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
         res->bits = node->bits;
+        /* FIXME utilize */
+        res->array_size = node->array_size;
         res->sign = !node->sign;
         res->ptr = node->ptr;
         res->name = node->value_string;
@@ -5033,6 +5038,8 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             break;
         case A_INDEX:
             res = gen_index(ctx, node);
+            break;
+        case A_ARRAYDEF:
             break;
         case A_IDENTIFIER:
             res = gen_identifier(ctx, node);

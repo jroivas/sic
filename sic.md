@@ -46,15 +46,15 @@ Example:
 Traditionally in C the size of `int` may be different according the system where it's compiled into.
 We specify size of all types explicitly:
 
-- 8 bits: char == unsigned char
+- 8-32 bits: one unicode character as UTF-8
 - 8 bits: byte and unsigned byte
 - 16 bits: short and unsigned short
 - 32 bits: int and unsigned int
 - 64 bits: long and unsigned long
 - 64 bits: long long and unsigned long long
 
-All chars are unsigned, and signed char does not exists. Value is always between 0 - 255.
-Instead byte is signed in range -128 - 127 and unsigned byte matches char.
+All chars are unsigned and may expand to max 4 bytes (UTF-8). Signed char does not exists.
+Instead byte is signed in range -128 - 127 and unsigned byte has value between 0 - 255.
 
 On top of that we have specific bit size ints:
 
@@ -77,6 +77,12 @@ Otherwise bigints can be used like any other integer type:
     bigint d = a + b;
     d += c;
 
+For machine word size, there's two types:
+
+- isize: signed machine word size (32/64 bits)
+- usize: unsigned machine word size (32/64 bits)
+
+These can be used to produce optimal code for the target architecture.
 
 ## Integer overflow
 
@@ -276,7 +282,6 @@ Strings support concatenate and substring:
 This is not valid:
 
     char test[];
-
 
 # Scopes and automatic release
 
@@ -610,6 +615,44 @@ Recommendation is to use `length` to determine number of elements.
 In case of string `length` tells number of unicode characters (or code points) in the string, but size is the size in bytes.
 
 The values are also used to perform runtime bound checks for extra safety and to prevent out of bounds errors.
+
+## Tuples
+
+Support for built-in tuple type. Eases for example returning multiple values from function:
+
+    tuple get_two(int x)
+    {
+        return tuple(x * 2, x * 3)
+    }
+
+    int main()
+    {
+        int a, b;
+
+        tuple(a, b) = get_two(42);
+
+        printf("Got: %d and %d\n", a, b);
+
+        return 0;
+    }
+
+Thus keyword "tuple" works in three ways:
+
+- type: tuple tmp;
+- pack values as: tmp = tuple(pack1, pack2, ...);
+- unpack values as: tuple(unpack1, unpack2, ...) = tmp;
+
+One can also access tuples with indexes, like arrays:
+
+    tuple tmp;
+
+    tmp = tuple(88, 66, 42);
+
+    printf("First : %d\n", tmp[0]);
+    printf("Second: %d\n", tmp[1]);
+    printf("Third : %d\n", tmp[2]);
+
+Values in tuples are strongly typed. Types are checked when unpacking.
 
 ## Swap
 

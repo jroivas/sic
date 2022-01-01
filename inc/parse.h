@@ -55,6 +55,7 @@ enum nodetype {
     A_DO,
     A_FOR,
     A_INDEX,
+    A_ARRAYDEF,
     A_SIZEOF,
     A_STRUCT,
     A_UNION,
@@ -83,6 +84,7 @@ struct node {
     int ptr;
     int addr;
     int strnum;
+    int array_size;
 
     const char *value_string;
     const char *type_name;

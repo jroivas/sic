@@ -90,6 +90,7 @@ static const char *nodestr[] = {
     "DO",
     "FOR",
     "INDEX",
+    "ARRAYDEF",
     "SIZEOF",
     "STRUCT",
     "UNION",
@@ -115,6 +116,7 @@ struct typedef_info {
 
 struct parse_private {
     struct typedef_info *def;
+    int params;
 };
 
 #define PPRIV(X) ((struct parse_private*)((X)->parsedata))
@@ -1155,6 +1157,25 @@ struct node *parameter_declaration(struct scanfile *f, struct token *token)
     struct node *decl = declarator(f, token);
     if (!decl)
         decl = abstract_declarator(f, token);
+    if (decl && decl->node == A_ARRAYDEF) {
+        struct node *tmp;
+        //struct node *ptr;
+
+        FATAL(spec->node != A_TYPE_LIST, "Declatation should be type list");
+        FATAL(spec->left->node != A_TYPESPEC, "Declatation left should be type spec");
+        FATAL(!decl->right, "Declatation have right value");
+
+        /* Make it pointer with array size */
+        spec->ptr = 1;
+        spec->left->ptr = 1;
+        spec->left->array_size = decl->right->value;
+
+        tmp = decl->left;
+        decl->left = NULL;
+        decl->right = NULL;
+        free(decl);
+        decl = tmp;
+    }
     return make_node(token, A_LIST, spec, NULL, decl);
 }
 
@@ -1197,6 +1218,8 @@ struct node *identifier_list(struct scanfile *f, struct token *token)
 struct node *direct_declarator(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
+    struct parse_private *priv = PPRIV(f);
+
     save_point(f, token);
     if (token->token == T_IDENTIFIER) {
         res = make_node(token, A_IDENTIFIER, NULL, NULL, NULL);
@@ -1217,20 +1240,35 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
     // TODO Rest of cases
     if (res) {
         if (accept(f, token, T_ROUND_OPEN)) {
-            struct node *params = parameter_type_list(f, token);
+            struct node *params;
+
+            priv->params = 1;
+            params = parameter_type_list(f, token);
             if (!params)
                 params = identifier_list(f, token);
             node_right(res, params);
             res->is_func = 1;
             expect(f, token, T_ROUND_CLOSE, ")");
+            priv->params = 0;
         } else if (accept(f, token, T_SQUARE_OPEN)) {
             struct node *index = constant_expression(f, token);
             expect(f, token, T_SQUARE_CLOSE, "]");
-            res = make_node(token, A_INDEX, res, NULL, index);
+            if (priv->params)
+                res = make_node(token, A_ARRAYDEF, res, NULL, index);
+            else
+                res = make_node(token, A_INDEX, res, NULL, index);
         }
 
+    } else if (priv->params && accept(f, token, T_SQUARE_OPEN)) {
+        /*
+         * In case we're in function parameter parsing and
+         * didn't get identifier. It's still valid to have
+         * array def with suquare brackets like int[20]
+         */
+        struct node *index = constant_expression(f, token);
+        expect(f, token, T_SQUARE_CLOSE, "]");
+        res = make_node(token, A_ARRAYDEF, res, NULL, index);
     }
-    // TODO other cases
     return res;
 }
 

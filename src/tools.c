@@ -255,6 +255,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_DO:
         case A_FOR:
         case A_INDEX:
+        case A_ARRAYDEF:
         case A_PARAMS:
         case A_DEREFERENCE:
         case A_STRUCT:
@@ -309,8 +310,8 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("ADDR: %d", node->addr);
             break;
         case A_TYPESPEC:
-            printf("TYPESPEC %s %d %s, %s", type_str(node->type),
-                node->bits, node->sign ? "signed" : "unsigned",
+            printf("TYPESPEC %s %d (%d) %s, %s", type_str(node->type),
+                node->bits, node->array_size, node->sign ? "signed" : "unsigned",
                 node->value_string);
             break;
         case A_TYPE_QUAL:
