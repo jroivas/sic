@@ -1367,7 +1367,7 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, struct ty
 
             char *stars = get_stars(v->type->ptr);
             char *stars2 = get_stars(target->ptr);
-            
+
 #if 0
             struct type *access_type = struct_get_by_index(v->type, 0);
 
@@ -1555,8 +1555,11 @@ int gen_allocate_struct_union(struct gen_context *ctx, int reg, struct type *ot,
         } else {
             buffer_write(ctx->init, "@G%d = common dso_local global %%%s.%s%s, align 8\n", reg, is_union ? "union" : "struct", t->name, stars);
         }
+    } else if (var->array) {
+        // TODO generalize these!
+        buffer_write(ctx->init, "%%%d = alloca [%u x %%%s.%s%s], align 16 ; gen_allocate_%s\n", var->reg, var->array, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
     } else {
-        buffer_write(ctx->init, "%%%d = alloca %%%s.%s%s, align 8 ; gen_allocate_%s \n", var->reg, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
+        buffer_write(ctx->init, "%%%d = alloca %%%s.%s%s, align 8 ; gen_allocate_%s\n", var->reg, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
     }
     free(stars);
     return reg;
@@ -1929,7 +1932,14 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
 
     buffer_write(ctx->data, "; load from %d ptr %d\n", v->reg, v->type->ptr);
     // Refuse to load ptr to non-ptr
-    if (v->type->ptr < 1) {
+    if (v->array) {
+        res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr + 1, 0, 0, v->type->type_name);
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x %%struct.%s], [%d x %%struct.%s]* %s%d, i64 0, i64 0 ; loadptr %s array\n",
+            res->reg,
+            v->array, v->type->type_name,
+            v->array, v->type->type_name,
+            REGP(v), v->reg, sname);
+    } else if (v->type->ptr < 1) {
         free(stars);
         stars = get_stars(v->type->ptr + 1);
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr + 1, 0, 0, v->type->type_name);
@@ -1957,7 +1967,7 @@ struct variable *gen_load_struct_union(struct gen_context *ctx, struct variable 
 
         FATAL(res->type == v->type, "Couldn't change type");
         return gen_load_struct(ctx, res);
-        
+
     } else {
         res = new_variable_ext(ctx, NULL, V_STRUCT, v->type->bits, v->type->sign, v->type->ptr, 0, 0, v->type->type_name);
 #if 0
@@ -3347,6 +3357,8 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             //char *stars = get_stars(ptrval);
 
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
+            if (ctx->pending_type && strcmp(ctx->pending_type->name, "va_list") == 0)
+                var->array += 1;
             res = gen_allocate_struct(ctx, var->reg, ctx->pending_type, t, var, ptrval);
             //buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", var->reg, t->name, stars);
 
@@ -4898,8 +4910,6 @@ void gen_builtin_va_list(struct gen_context *ctx, struct node *node)
     res->items[2].name = "value3";
     res->items[3].item = int8;
     res->items[3].name = "value4";
-
-    res = type_wrap(ctx, res);
 }
 
 void gen_builtin_va_start(struct gen_context *ctx, struct node *node)
@@ -4983,7 +4993,6 @@ void gen_scan_builtin(struct gen_context *ctx, struct node *node)
     if (!node)
         return;
 
-    // TODO __builtin_va_arg
     if (node->node == A_TYPESPEC && node->type == V_BUILTIN) {
         if (strcmp(node->value_string, "__builtin_va_list") == 0) {
             struct type *res = __find_type_by(ctx, V_STRUCT, 0, TYPE_UNSIGNED, 0, node->value_string);

@@ -34,5 +34,18 @@ int main()
     int sum = test(3, 1, 2, 4);
     if (sum != 7)
         return 1;
+
+    sum = test(4, 7, 10, 5, 3);
+    if (sum != 25)
+        return 2;
+
+    sum = test(10, 7, 10, 5, 3, 1, 9, 10, 20, 5, 10);
+    if (sum != 80)
+        return 3;
+
+    sum = test(9, 7, 10, 5, 3, 1, 9, 10, 20, 5, 10);
+    if (sum != 70)
+        return 4;
+
     return 0;
 }
