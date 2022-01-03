@@ -588,9 +588,9 @@ int __parse_enum(struct node *res, struct node *node, int val)
     return do_free;
 }
 
-void parse_enum(struct node *res, struct node *node)
+int parse_enum(struct node *res, struct node *node)
 {
-    __parse_enum(res, node, 0);
+    return __parse_enum(res, node, 0);
 }
 
 int struct_parse_ptr(struct node *res)
@@ -650,9 +650,8 @@ struct node *type_resolve(struct token *t, struct node *orig_node, int skip_free
         res->addr = node->addr;
 
         res->bits = 32;
-        parse_enum(res, node->right);
-
-        node_free(orig_node);
+        if (!parse_enum(res, node->right))
+            node_free(orig_node);
 
         return res;
     }
@@ -965,6 +964,7 @@ struct node *enum_specifier(struct scanfile *f, struct token *token)
     }
     if (accept(f, token, T_CURLY_OPEN)) {
         list = enumerator_list(f, token);
+        while (accept(f, token, T_COMMA));
         expect(f, token, T_CURLY_CLOSE, "}");
     }
 
@@ -1076,6 +1076,9 @@ struct node *typedef_declaration(struct scanfile *f, struct token *token)
         res->mid = args;
         res->is_func = 1;
     }
+
+    struct node *attribs = attributes(f, token);
+    decl->mid = attribs;
 
     FATALN(token->token != T_SEMI, res, "Expected semi, got: %s", token_dump(token));
     semi(f, token);
