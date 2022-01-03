@@ -25,16 +25,17 @@ enum var_type {
 }
 
 void stack_trace(void);
-#define ERR_FULL(trace, ...) { \
+#define ERR_FULL(trace, fail, ...) { \
     fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
     if (trace) stack_trace();\
-    exit(EXIT_FAILURE); \
+    if (fail) exit(EXIT_FAILURE); \
 }
 
-#define ERR(...) ERR_FULL(0, __VA_ARGS__)
-#define ERR_TRACE(...) ERR_FULL(1, __VA_ARGS__)
+#define ERR_NOFAIL(...) ERR_FULL(0, 0, __VA_ARGS__)
+#define ERR(...) ERR_FULL(0, 1, __VA_ARGS__)
+#define ERR_TRACE(...) ERR_FULL(1, 1, __VA_ARGS__)
 
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);

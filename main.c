@@ -72,18 +72,18 @@ int main(int argc, char **argv)
     if (do_preprocess) {
         preproc = preprocess(srcname, incs, inc_cnt);
         if (preproc)
-            pipe_input_file(&f, preproc, srcname);
+            scanfile_pipe(&f, preproc, srcname);
         else
-            open_input_file(&f, srcname);
+            scanfile_open(&f, srcname);
     } else
-        open_input_file(&f, srcname);
+        scanfile_open(&f, srcname);
 
     if (!f.infile)
         ERR("Can't open file: %s", srcname);
 
     node = parse(&f);
     parse_end(&f);
-    close_input_file(&f);
+    scanfile_close(&f);
     if (dump_tree)
         node_walk(node);
 

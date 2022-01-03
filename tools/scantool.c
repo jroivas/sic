@@ -13,7 +13,7 @@ int main(int argc, char **argv)
     }
     srcname = argv[1];
 
-    open_input_file(&f, srcname);
+    scanfile_open(&f, srcname);
     if (!f.infile)
         ERR("Can't open file: %s", srcname);
 
@@ -45,7 +45,7 @@ int main(int argc, char **argv)
         cnt++;
     } while (token.token != T_EOF);
 
-    close_input_file(&f);
+    scanfile_close(&f);
 
     return 0;
 }

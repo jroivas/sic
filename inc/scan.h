@@ -96,9 +96,10 @@ struct scanfile {
     void *parsedata;
 };
 
-void open_input_file(struct scanfile *f, const char *name);
-void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name);
-void close_input_file(struct scanfile *f);
+void scanfile_open(struct scanfile *f, const char *name);
+void scanfile_pipe(struct scanfile *f, FILE *pipe, const char *name);
+void scanfile_close(struct scanfile *f);
+
 int scan(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword);

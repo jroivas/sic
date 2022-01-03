@@ -2339,7 +2339,9 @@ struct node *parse(struct scanfile *f)
     memset(&token, 0, sizeof(struct token));
     scan(f, &token);
     struct node *res = translation_unit(f, &token);
-    FATAL(!res, "Can't narse source, didn't detect token: %s", token_dump(&token));
+    FATAL(!res, "Can't parse source, didn't detect token: %s", token_dump(&token));
+    if (token.token != T_EOF)
+        ERR_NOFAIL("Parser didn't reach EOF! This is most likely a compiler bug");
     return res;
 }
 

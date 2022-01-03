@@ -37,7 +37,7 @@ static const char *tokenstr[] = {
     "EOF"
 };
 
-void open_input_file(struct scanfile *f, const char *name)
+void scanfile_open(struct scanfile *f, const char *name)
 {
     memset(f, 0, sizeof(struct scanfile));
     f->infile = fopen(name, "r");
@@ -46,7 +46,7 @@ void open_input_file(struct scanfile *f, const char *name)
     f->buf = buffer_init();
 }
 
-void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name)
+void scanfile_pipe(struct scanfile *f, FILE *pipe, const char *name)
 {
     memset(f, 0, sizeof(struct scanfile));
     f->infile = pipe;
@@ -56,7 +56,7 @@ void pipe_input_file(struct scanfile *f, FILE *pipe, const char *name)
     f->buf = buffer_init();
 }
 
-void close_input_file(struct scanfile *f)
+void scanfile_close(struct scanfile *f)
 {
     if (f->buf)
         buffer_del(f->buf);
@@ -114,7 +114,7 @@ static int next(struct scanfile *f)
         c = f->putback;
         f->putback = 0;
     } else {
-        if (buffer_size(f->buf) > buffer_pos(f->buf)) 
+        if (buffer_size(f->buf) > buffer_pos(f->buf))
             c = buffer_getch(f->buf);
         else {
             c = fgetc(f->infile);
