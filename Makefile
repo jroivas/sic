@@ -9,7 +9,7 @@ all: build/sic build/sic-static
 build/sic-static: build
 	$(CC) $(CFLAGS) -o build/sic-static -static main.c $(SRC_FILES)
 
-build/sic: build build/libsic.so
+build/sic: build build/libsic.so main.c
 	$(CC) $(CFLAGS) -o build/sic -L build/ main.c build/libsic.so.0
 
 build/libsic.so: $(INC_FILES) $(SRC_FILES)
