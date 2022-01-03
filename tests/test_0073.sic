@@ -1,0 +1,43 @@
+typedef long int __ssize_t;
+typedef long unsigned int size_t;
+
+typedef __ssize_t __io_read_fn (void *__cookie, char *__buf, size_t __nbytes);
+#if 1
+typedef __ssize_t (*__io_read_fn2) (void *__cookie, char *__buf, size_t __nbytes);
+#endif
+
+
+__ssize_t ff(void *a, char *b, size_t c)
+{
+    return 123;
+}
+
+int main()
+{
+#if 0
+    char *cookie = "kex";
+    char buf[4096];
+#endif
+
+#if 0
+    __ssize_t a = __io_read_fn(cookie, buf, 4000);
+    __io_read_fn *fna = ff;
+#endif
+#if 1
+    __io_read_fn2 fnb = ff;
+#endif
+
+#if 0
+    __ssize_t a = fna(cookie, buf, 10);
+    if (a != 123)
+        return 1;
+#endif
+
+#if 0
+    __ssize_t b = fnb(cookie, buf, 10);
+    if (b != 123)
+        return 2;
+#endif
+
+    return 0;
+}
