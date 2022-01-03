@@ -17,32 +17,32 @@ build/libsic.so: $(INC_FILES) $(SRC_FILES)
 	ln -sf libsic.so.0.1 build/libsic.so.0
 	ln -sf libsic.so.0 build/libsic.so
 
-test: build/sic unittest
-	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build
+test: build/sic build/tests unittest
+	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build/tests
 
 testsic: build/sic
-	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build llvm
+	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build/tests llvm
 
 testc:
-	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/compiletest.sh build
+	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/compiletest.sh build/tests
 
 tests: test
 
-compiletest_notree: build/sic
-	LD_LIBRARY_PATH=build/: build/sic tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
-	cat build/test_$(TEST).sic.ir
+compiletest_notree: build/sic build/tests
+	LD_LIBRARY_PATH=build/: build/sic tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
+	cat build/tests/test_$(TEST).sic.ir
 
-compiletest: build/sic
-	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/test_$(TEST).sic.ir
-	cat build/test_$(TEST).sic.ir
+compiletest: build/sic build/tests
+	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
+	cat build/tests/test_$(TEST).sic.ir
 
-buildtest: compiletest
-	llvm-as build/test_$(TEST).sic.ir
-	llc -O0 -relocation-model=pic -filetype=obj build/test_$(TEST).sic.ir.bc -o build/test_$(TEST).ir.o
-	$(CC) build/test_$(TEST).ir.o -o build/test_$(TEST).ir.bin -lm
+buildtest: compiletest build/tests
+	llvm-as build/tests/test_$(TEST).sic.ir
+	llc -O0 -relocation-model=pic -filetype=obj build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).ir.o
+	$(CC) build/tests/test_$(TEST).ir.o -o build/tests/test_$(TEST).ir.bin -lm
 
 runtest: buildtest
-	build/test_$(TEST).ir.bin ; echo $$? || true
+	build/tests/test_$(TEST).ir.bin ; echo $$? || true
 
 build/scantool: tools/scantool.c build/libsic.so
 	$(CC) $(CFLAGS) -o build/scantool -L build/ tools/scantool.c build/libsic.so.0
@@ -54,6 +54,9 @@ unittest:
 
 build:
 	mkdir -p build
+
+build/tests: build
+	mkdir -p build/tests
 
 clean:
 	rm -rf build
