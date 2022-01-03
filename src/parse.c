@@ -1092,7 +1092,15 @@ struct node *storage_class_specifier(struct scanfile *f, struct token *token)
 
     if (accept_keyword(f, token, K_EXTERN)) {
         res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
-        res->is_extern = strcmp(val, "extern") == 0;
+        res->is_extern = 1;
+        res->value_string = val;
+    } else if (accept_keyword(f, token, K_STATIC)) {
+        res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+        res->is_static = 1;
+        res->value_string = val;
+    } else if (accept_keyword(f, token, K_INLINE)) {
+        res = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+        res->is_inline = 1;
         res->value_string = val;
     }
 

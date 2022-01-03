@@ -80,6 +80,8 @@ struct node {
     int reg;
     int is_const;
     int is_extern;
+    int is_static;
+    int is_inline;
     int is_func;
     int ptr;
     int addr;

@@ -53,6 +53,8 @@ struct type {
     int ptr;
     int is_const;
     int is_extern;
+    int is_static;
+    int is_inline;
     int temporary;
     int forward;
     int opaque;
@@ -233,7 +235,12 @@ char *stype_str(struct type *t)
     if (!t)
         return NULL;
     char *tmp = calloc(256, sizeof(char));
-    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s%s", type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un", t->is_extern ? ", extern" : "", t->is_const ? ", const" : "", t->type_name ? ", " : "", t->type_name ? t->type_name : "", t->temporary ? ", temporary" : "");
+    snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s%s%s%s",
+        type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un",
+        t->is_extern ? ", extern" : "", t->is_const ? ", const" : "",
+        t->is_static ? ", static" : "", t->is_inline ? ", inline" : "",
+        t->type_name ? ", " : "", t->type_name ? t->type_name : "",
+        t->temporary ? ", temporary" : "");
     tmp[255] = 0;
     return tmp;
 }
@@ -2991,6 +2998,10 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
             res->is_const = 1;
         if (!res->is_extern && (tr->is_extern || tl->is_extern))
             res->is_extern = 1;
+        if (!res->is_static && (tr->is_static || tl->is_static))
+            res->is_static = 1;
+        if (!res->is_inline && (tr->is_inline || tl->is_inline))
+            res->is_inline = 1;
         struct type *to_free = res == tl ? tr : tl;
         //printf("PTRS: %d < %d, %d\n", res->ptr, tr->ptr, node->ptr);
         //printf("EXTS: %d < %d, %d, %s\n", res->is_extern, tr->is_extern, node->is_extern, stype_str(res));
@@ -3121,6 +3132,8 @@ struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node *node,
         res->name = node->value_string;
         res->is_const = node->is_const;
         res->is_extern = node->is_extern;
+        res->is_static = node->is_static;
+        res->is_inline = node->is_inline;
         res->type_name = node->type_name;
         res->temporary = 1;
     }
