@@ -1560,7 +1560,12 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
             ERR("Expected initializer after '=' in %u", f->line);
             return NULL;
         }
-        res = make_node(token, A_ASSIGN, res, NULL, tmp);
+        /* Move array initializer to mid node of declarator */
+        if (tmp->node == A_ARRAY_INITIALIZER) {
+            res->mid = tmp;
+            res = make_node(token, A_ASSIGN, res, NULL, NULL);
+        } else
+            res = make_node(token, A_ASSIGN, res, NULL, tmp);
     }
 
     return res;
