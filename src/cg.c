@@ -1532,8 +1532,15 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
 {
     if (ctx->global) {
         FATAL(ptr, "Global pointer not supported");
-        buffer_write(ctx->init, "%s%d = global i%d %d, align %d\n",
-            "@G", reg, bits, val, align(bits));
+        if (array) {
+            char *stars = get_stars(ptr);
+            buffer_write(code_alloc ? ctx->data : ctx->init, "@G%d = global [%d x i%d%s], align %d\n",
+                reg, array, bits, ptr ? stars : "", 16);
+            if (stars)
+                free(stars);
+        } else
+            buffer_write(ctx->init, "%s%d = global i%d %d, align %d\n",
+                "@G", reg, bits, val, align(bits));
     } else if (array) {
         char *stars = get_stars(ptr);
         FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
@@ -1730,7 +1737,7 @@ int gen_store_int(struct gen_context *ctx, struct node *n)
         return val->reg;
     val->value = n->value;
 
-    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; store_int %lld\n",
+    buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; store_int %llu\n",
             val->type->bits, n->value, val->type->bits, REGP(val), val->reg, align(val->type->bits), val->value);
     return val->reg;
 }
@@ -3529,7 +3536,58 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
     return res;
 }
 
+int gen_array_initializer(struct gen_context *ctx, struct node *node)
+{
+    struct node *var_node;
+    struct variable *var;
+    struct node *item;
+    int idx;
+
+    /* FIXME Should allow anonymous initializers like:
+     * (int[2]){10, 5}
+     */
+    FATAL(!node->parent || !node->parent->left || !node->parent->left->left, "Array initializer has no variable");
+    var_node = node->parent->left->left;
+    var = find_variable_by_name(ctx, var_node->value_string);
+
+    item = node->left;
+    idx = 0;
+    while (item) {
+        FATAL(!item->left, "Missing item definition in initializer");
+
+        /* FIXME Assuming int array for now */
+#if 0
+        struct variable *res = new_variable(ctx,
+            NULL,
+            var->type->type,
+            var->type->bits, var->type->sign,
+            var->type->ptr + 1,
+            0, 0);
+        res = gen_access_ptr(ctx, var, res, NULL, idx);
+        buffer_write(ctx->data, "store i%d %llu, i%d* %s%d, align %d ; store_int %llu\n",
+                res->type->bits, item->left->value, res->type->bits, REGP(res), res->reg,
+                align(res->type->bits), item->left->value);
+
+#endif
+
+        item = item->right;
+        idx++;
+    };
+    (void)var;
+
+    return 0;
+}
+
 int gen_index(struct gen_context *ctx, struct node *node)
+{
+    struct node *ident = node->left;
+    struct variable *var = find_variable_by_name(ctx, ident->value_string);
+
+    FATALN(!var, node, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
+    return var->reg;
+}
+
+int gen_indexdef(struct gen_context *ctx, struct node *node)
 {
     struct node *ident = node->left;
     //struct node *idx = node->right;
@@ -3537,15 +3595,18 @@ int gen_index(struct gen_context *ctx, struct node *node)
     FATALN(!ident, node, "Invalid index without identifier");
     struct variable *var = find_variable_by_name(ctx, ident->value_string);
 
+#if 0
     // FIXME
     if (ctx->is_decl < 100) {
         FATALN(!var, node, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
         gen_recursive_allocs(ctx, node->right);
         return var->reg;
     }
+#endif
 
     FATALN(var, node, "Variable already assigned");
     FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", ident->value_string);
+#if 0
     gen_recursive_allocs(ctx, node->right);
     /*
      * TODO This should ensure we have right index in alloc. Note that
@@ -3561,23 +3622,64 @@ int gen_index(struct gen_context *ctx, struct node *node)
     int idx_reg = gen_recursive(ctx, node->right);
     //ctx->debug = 0;
     struct variable *idx = find_variable(ctx, idx_reg);
+    int ok = 0;
+    int idx_value;
     FATALN(!idx, node, "Invalid index");
-    FATALN(idx->type->type != V_INT, node, "Invalid index, should be int");
+    if (idx->type->type != V_INT) {
+        // If it's array initializer, we're fine, otherwise fail.
+        if (node->parent && node->parent->right && node->parent->right->node == A_ARRAY_INITIALIZER) {
+            idx_value = 0;
+            ok = 1;
+        }
+    }
+    FATALN(!ok && idx->type->type != V_INT, node, "Invalid index, should be int");
     ctx->data = tmp;
     buffer_append(ctx->init, buffer_read(tmpdata));
     buffer_del(tmpdata);
 
-    // We assume now direct value
-    int idx_value = node->right->value;
-    if (idx_value == 0) {
-        idx_value = idx->value;
-        FATALN(!idx_value, node->right, "Invalid array init");
+    if (!ok) {
+        // We assume now direct value
+        idx_value = node->right->value;
+        if (idx_value == 0) {
+            idx_value = idx->value;
+            FATALN(!idx_value, node->right, "Invalid array init");
+        }
     }
 
     int res = gen_init_var(ctx, ident, idx_value);
     node->ptr = ident->ptr;
     node->addr = ident->addr;
     return res;
+#endif
+#if 0
+    int idx_reg = gen_recursive_allocs(ctx, node->right);
+    printf("regf: %u\n", idx_reg);
+
+    struct buffer *tmpdata = buffer_init();
+    struct buffer *tmp = ctx->data;
+    ctx->data = tmpdata;
+
+    struct variable *idx = find_variable(ctx, idx_reg);
+    FATALN(idx->type->type != V_INT, node, "Invalid index, should be int");
+
+    ctx->data = tmp;
+    buffer_append(ctx->init, buffer_read(tmpdata));
+    buffer_del(tmpdata);
+
+    int res = gen_init_var(ctx, ident, 0);
+    node->ptr = ident->ptr;
+    node->addr = ident->addr;
+    return res;
+#endif
+#if 1
+    /* FIXME Just getting the value, should ensure it's ok, etc.. */
+    int idx_value = node->right->value;
+
+    int res = gen_init_var(ctx, ident, idx_value);
+    node->ptr = ident->ptr;
+    node->addr = ident->addr;
+    return res;
+#endif
 }
 
 
@@ -3608,6 +3710,14 @@ int get_index(struct gen_context *ctx, struct node *node, int a, int b)
     res = gen_access_ptr_item(ctx, var, res, idx, 0);
 
     return res->reg;
+}
+
+int get_indexdef(struct gen_context *ctx, struct node *node, int a)
+{
+    struct variable *var = find_variable(ctx, a);
+    FATALN(!var, node, "Missing variable");
+
+    return var->reg;
 }
 
 struct variable *gen_access_type_target(struct gen_context *ctx, struct type *access_type)
@@ -5172,10 +5282,16 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         case A_INDEX:
             res = gen_index(ctx, node);
             break;
+        case A_INDEXDEF:
+            res = gen_indexdef(ctx, node);
+            break;
         case A_ARRAYDEF:
             break;
         case A_IDENTIFIER:
             res = gen_identifier(ctx, node);
+            break;
+        case A_ARRAY_INITIALIZER:
+            res = gen_array_initializer(ctx, node);
             break;
         case A_INT_LIT:
             res = gen_prepare_store_int(ctx, node);
@@ -5200,14 +5316,14 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
     int left = 0;
     int right = 0;
 
-    if (node->node != A_INDEX && node->node != A_FUNC_CALL && node->left)
+    if (node->node != A_INDEX && node->node != A_INDEXDEF && node->node != A_FUNC_CALL && node->left)
         left = gen_recursive_allocs(ctx, node->left);
     /* After handling left side of assign we need to stop checking for variables since right side can't be declaration */
     if (node->node == A_ASSIGN)
             ctx->is_decl--;
     if (node->mid)
         gen_recursive_allocs(ctx, node->mid);
-    if (node->node != A_ACCESS && node->right)
+    if (node->node != A_INDEXDEF && node->node != A_ACCESS && node->right)
         right = gen_recursive_allocs(ctx, node->right);
     if (node->node == A_DECLARATION)
         ctx->is_decl = 0;
@@ -5234,6 +5350,8 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         printf("DEBUG: gen_recursive(), node %s\n", node_str(node));
 
     /* Special cases */
+    if (node->node == A_ARRAY_INITIALIZER)
+        return 0;
     if (node->node == A_FUNCTION)
         return gen_function(ctx, node);
     if (node->node == A_FUNC_CALL)
@@ -5265,7 +5383,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     } else {
         if (node->left)
             resleft = gen_recursive(ctx, node->left);
-        if (node->node != A_ACCESS && node->right)
+        if (node->node != A_ACCESS && node->node != A_INDEXDEF && node->right)
             resright = gen_recursive(ctx, node->right);
         else
             resright = 0;
@@ -5279,6 +5397,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
         case A_INDEX:
             ctx->last_label = 0;
             return get_index(ctx, node, resleft, resright);
+        case A_INDEXDEF:
+            ctx->last_label = 0;
+            return get_indexdef(ctx, node, resleft);
         case A_ACCESS:
             ctx->last_label = 0;
             return gen_access(ctx, node, resleft, resright);

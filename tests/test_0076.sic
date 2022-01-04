@@ -1,11 +1,17 @@
-static const int values[] = {
+#if 0
+//static const int values[] = {
+int values[10] = {
     1,
     2,
     3,
     0,
 };
+#else
+static int values[10];
+#endif
 
 int main()
 {
+    //int values[10];
     return values[3];
 }

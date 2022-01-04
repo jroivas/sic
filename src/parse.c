@@ -90,6 +90,7 @@ static const char *nodestr[] = {
     "DO",
     "FOR",
     "INDEX",
+    "INDEXDEF",
     "ARRAYDEF",
     "SIZEOF",
     "STRUCT",
@@ -1268,7 +1269,7 @@ struct node *direct_declarator(struct scanfile *f, struct token *token)
             if (priv->params)
                 res = make_node(token, A_ARRAYDEF, res, NULL, index);
             else
-                res = make_node(token, A_INDEX, res, NULL, index);
+                res = make_node(token, A_INDEXDEF, res, NULL, index);
         }
 
     } else if (priv->params && accept(f, token, T_SQUARE_OPEN)) {

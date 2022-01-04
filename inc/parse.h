@@ -55,6 +55,7 @@ enum nodetype {
     A_DO,
     A_FOR,
     A_INDEX,
+    A_INDEXDEF,
     A_ARRAYDEF,
     A_SIZEOF,
     A_STRUCT,
