@@ -69,6 +69,7 @@ enum nodetype {
     A_ATTRIBUTE,
     A_ASM,
     A_TYPEDEF,
+    A_ARRAY_INITIALIZER,
     A_LIST
 };
 

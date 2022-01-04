@@ -104,6 +104,7 @@ static const char *nodestr[] = {
     "ATTRIBUTE",
     "ASM",
     "TYPEDEF",
+    "ARRAY_INITIALZIER",
     "LIST"
 };
 
@@ -1526,12 +1527,24 @@ struct node *assignment_expression(struct scanfile *f, struct token *token)
     return res;
 }
 
+struct node *initializer_list(struct scanfile *f, struct token *token);
 struct node *initializer(struct scanfile *f, struct token *token)
 {
-    struct node *res = assignment_expression(f, token);
-    if (res)
-        return res;
-    return NULL;
+    struct node *res = NULL;
+    if (accept(f, token, T_CURLY_OPEN)) {
+        res = initializer_list(f, token);
+        while (accept(f, token, T_COMMA));
+        expect(f, token, T_CURLY_CLOSE, "}");
+        res = make_node(token, A_ARRAY_INITIALIZER, res, NULL, NULL);
+    } else {
+        res = assignment_expression(f, token);
+    }
+    return res;
+}
+
+struct node *initializer_list(struct scanfile *f, struct token *token)
+{
+    return iter_list(f, token, initializer, COMMA_MANDATORY, 0);
 }
 
 struct node *init_declarator(struct scanfile *f, struct token *token)

@@ -216,6 +216,7 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_MOD:
         case A_GLUE:
         case A_LIST:
+        case A_ARRAY_INITIALIZER:
         case A_ASSIGN:
         case A_ADD_ASSIGN:
         case A_SUB_ASSIGN:
