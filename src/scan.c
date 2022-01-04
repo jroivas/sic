@@ -283,7 +283,7 @@ int keyword(struct token *t)
     } else if (strcmp(v, "static") == 0) {
         res = 1;
         t->keyword = K_STATIC;
-    } else if (strcmp(v, "inline") == 0 || strcmp(v, "__inline__") == 0) {
+    } else if (strcmp(v, "inline") == 0 || strcmp(v, "__inline__") == 0 || strcmp(v, "__inline") == 0) {
         res = 1;
         t->keyword = K_INLINE;
     } else if (strcmp(v, "break") == 0) {

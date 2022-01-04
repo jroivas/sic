@@ -42,6 +42,9 @@ enum builtin_function {
     BUILTIN_VA_START,
     BUILTIN_VA_ARG,
     BUILTIN_VA_END,
+    BUILTIN_BSWAP16,
+    BUILTIN_BSWAP32,
+    BUILTIN_BSWAP64,
 };
 
 struct type {
@@ -686,6 +689,12 @@ enum builtin_function builtin_func(const char *name)
         return BUILTIN_VA_END;
     if (strcmp(name, "__builtin_va_arg") == 0)
         return BUILTIN_VA_ARG;
+    if (strcmp(name, "__builtin_bswap16") == 0)
+        return BUILTIN_BSWAP16;
+    if (strcmp(name, "__builtin_bswap32") == 0)
+        return BUILTIN_BSWAP32;
+    if (strcmp(name, "__builtin_bswap64") == 0)
+        return BUILTIN_BSWAP64;
 
     return BUILTIN_NONE;
 }
@@ -2645,43 +2654,62 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             break;
         char *stars = get_stars(pointer);
         struct variable *tgt;
-        struct type target;
+        struct type *target;
+        struct type target_raw;
         const char *type_name = NULL;
         int type_ptr;
 
         if (!ellipsis) {
-            target.type = ptype->type;
-            target.bits = ptype->bits;
-            target.sign = ptype->sign;
+            target_raw.type = ptype->type;
+            target_raw.bits = ptype->bits;
+            target_raw.sign = ptype->sign;
             type_name = ptype->type_name;
             //type_ptr = ptype->ptr;
             type_ptr = pointer;
             //if (!type_ptr && par->ptr)
             //    type_ptr = par->ptr;
-            target.ptr = type_ptr;
+            target_raw.ptr = type_ptr;
+            if (target_raw.type == V_CUSTOM && ptype->left)
+                target = find_type_by_name(ctx, ptype->left->value_string);
+            else
+                target =  &target_raw;
         } else {
-            target.type = par->type->type;
-            target.bits = par->type->bits;
-            if (target.type == V_INT && target.bits == 0)
-                target.bits = 32;
-            target.sign = par->type->sign;
+            target_raw.type = par->type->type;
+            target_raw.bits = par->type->bits;
+            if (target_raw.type == V_INT && target_raw.bits == 0)
+                target_raw.bits = 32;
+            target_raw.sign = par->type->sign;
             type_name = par->type->type_name;
             //type_ptr = par->ptr;
             type_ptr = pointer;
-            target.ptr = type_ptr;
+            target_raw.ptr = type_ptr;
+            if (target_raw.type == V_CUSTOM && ptype->left)
+                target = find_type_by_name(ctx, ptype->left->value_string);
+            else
+                target =  &target_raw;
         }
+        if (target->type == V_CUSTOM)
+            target = custom_type_get(ctx, target);
+#if 0
+        if (target_raw.type == V_CUSTOM) {
+            printf("NAME: %s\n", ptype->left->value_string);
+            node_walk(ptype);
+            target = custom_type_get(ctx, &target_raw);
+        } else
+            target =  &target_raw;
+#endif
 
-        switch (target.type) {
+        switch (target->type) {
             case V_INT:
-                tgt = load_and_cast_to(ctx, par, &target, CAST_NO_LOAD_STRUCT);
+                tgt = load_and_cast_to(ctx, par, target, CAST_NO_LOAD_STRUCT);
                 buffer_write(params, "%si%d%s %%%d",
                     paramcnt > 1 ? ", " : "",
-                    target.bits,
+                    target->bits,
                     stars ? stars : "",
                     tgt->reg);
                 break;
             case V_FLOAT:
-                tgt = load_and_cast_to(ctx, par, &target, CAST_NORMAL);
+                tgt = load_and_cast_to(ctx, par, target, CAST_NORMAL);
                 buffer_write(params, "%sdouble%s %%%d",
                     paramcnt > 1 ? ", " : "",
                     stars ? stars : "",
@@ -2755,6 +2783,15 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     } else if (builtin == BUILTIN_VA_END) {
         func->name = "llvm.va_end";
         func->paramstr = strcopy("i8*");
+    } else if (builtin == BUILTIN_BSWAP16) {
+        func->name = "llvm.bswap.16";
+        func->paramstr = strcopy("i16");
+    } else if (builtin == BUILTIN_BSWAP32) {
+        func->name = "llvm.bswap.32";
+        func->paramstr = strcopy("i32");
+    } else if (builtin == BUILTIN_BSWAP64) {
+        func->name = "llvm.bswap.64";
+        func->paramstr = strcopy("i64");
     } else if (builtin == BUILTIN_VA_ARG) {
         func->name = "llvm.va_arg";
 
@@ -2793,6 +2830,9 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
         return res->reg;
     }
     paramstr = gen_call_params(ctx, node->right, func->params, node->left);
+    if (func->type->type == V_CUSTOM) {
+        func->type = custom_type_get(ctx, func->type);
+    }
     if (func->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func->type->bits, TYPE_SIGNED);
 
@@ -5001,6 +5041,65 @@ void gen_builtin_va_arg(struct gen_context *ctx, struct node *node)
     func_var->params = make_node(NULL, A_LIST, par1, NULL, ptr1);
 }
 
+void gen_builtin_bswap(struct gen_context *ctx, struct node *node, int bits)
+{
+    struct type *func_type;
+    switch (bits) {
+    case 16:
+        func_type = find_type_by_name(ctx, "short");
+        break;
+    case 32:
+        func_type = find_type_by_name(ctx, "int");
+        break;
+    case 64:
+        func_type = find_type_by_name(ctx, "long");
+        break;
+    default:
+        func_type = NULL;
+    }
+    FATALN(!func_type, node, "Couldn't find bswap type");
+
+    struct variable *func_var = new_variable(ctx, node->value_string, func_type->type, func_type->bits, func_type->sign, 0, 0, 1);
+    func_var->func = 1;
+
+    struct node *par1_def = make_node(NULL, A_TYPESPEC, NULL, NULL, NULL);
+    par1_def->type = V_INT;
+    par1_def->bits = bits;
+    par1_def->value_string = "short";
+    switch (bits) {
+    case 16:
+        par1_def->value_string = "short";
+        break;
+    case 32:
+        par1_def->value_string = "int";
+        break;
+    case 64:
+        par1_def->value_string = "long";
+        break;
+    }
+
+    struct node *ptrname1 = make_node(NULL, A_IDENTIFIER, NULL, NULL, NULL);
+    ptrname1->value_string = "__generated_parameter";
+
+    struct node *par1 = make_node(NULL, A_TYPE_LIST, par1_def, NULL, NULL);
+
+    func_var->params = make_node(NULL, A_LIST, par1, NULL,  NULL);
+    node_walk(func_var->params);
+
+    switch (bits) {
+    case 16:
+        buffer_write(ctx->init, "declare i16 @llvm.bswap.16(i16)\n");
+        break;
+    case 32:
+        buffer_write(ctx->init, "declare i32 @llvm.bswap.32(i32)\n");
+        break;
+    case 64:
+        buffer_write(ctx->init, "declare i64 @llvm.bswap.64(i64)\n");
+        break;
+    }
+}
+
+
 void gen_scan_builtin(struct gen_context *ctx, struct node *node)
 {
     if (!node)
@@ -5024,6 +5123,18 @@ void gen_scan_builtin(struct gen_context *ctx, struct node *node)
         struct variable *func_var = find_variable_by_name(ctx, node->value_string);
         if (!func_var)
             gen_builtin_va_arg(ctx, node);
+    } else if (node->node == A_IDENTIFIER && strcmp(node->value_string, "__builtin_bswap16") == 0) {
+        struct variable *func_var = find_variable_by_name(ctx, node->value_string);
+        if (!func_var)
+            gen_builtin_bswap(ctx, node, 16);
+    } else if (node->node == A_IDENTIFIER && strcmp(node->value_string, "__builtin_bswap32") == 0) {
+        struct variable *func_var = find_variable_by_name(ctx, node->value_string);
+        if (!func_var)
+            gen_builtin_bswap(ctx, node, 32);
+    } else if (node->node == A_IDENTIFIER && strcmp(node->value_string, "__builtin_bswap64") == 0) {
+        struct variable *func_var = find_variable_by_name(ctx, node->value_string);
+        if (!func_var)
+            gen_builtin_bswap(ctx, node, 64);
     }
 
     gen_scan_builtin(ctx, node->left);
