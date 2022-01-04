@@ -1543,7 +1543,7 @@ struct node *init_declarator(struct scanfile *f, struct token *token)
     if (accept(f, token, T_EQ)) {
         struct node *tmp = initializer(f, token);
         if (!tmp) {
-            ERR("Expected initializer after '='");
+            ERR("Expected initializer after '=' in %u", f->line);
             return NULL;
         }
         res = make_node(token, A_ASSIGN, res, NULL, tmp);
