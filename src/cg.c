@@ -789,7 +789,7 @@ struct node *find_struct_item_name(struct node *node)
     struct node *namenode = node;
 
     while (namenode && namenode->right) {
-        if (namenode->node == A_INDEX) {
+        if (namenode->node == A_INDEX || namenode->node == A_INDEXDEF) {
             namenode = namenode->left;
             break;
         }
@@ -797,7 +797,7 @@ struct node *find_struct_item_name(struct node *node)
     }
 
     while (namenode && namenode->left) {
-        if (namenode->node == A_INDEX) {
+        if (namenode->node == A_INDEX || namenode->node == A_INDEXDEF) {
             namenode = namenode->left;
             break;
         }
@@ -1557,10 +1557,41 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
                 "@G", reg, bits, val, align(bits));
     } else if (array) {
         char *stars = get_stars(ptr);
+        static int arrayinit = 0;
+        struct gen_context *global_ctx = ctx;
+
         FATAL(!bits, "Invalid int type: reg %d, bits %d, ptr %d", reg, bits, ptr);
+        while (global_ctx->parent)
+            global_ctx = global_ctx->parent;
+        struct buffer *buf = global_ctx->init;
+
         buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = alloca [%d x i%d%s], align %d\n",
             reg, array, bits, ptr ? stars : "", 16);
-        // TODO Initialize array with zeros
+        buffer_write(buf, "@__const.values.arrayinit%d = private unnamed_addr constant [%d x i%d%s] [",
+            ++arrayinit, array, bits, ptr ? stars : "");
+        struct node *init = node->parent->mid;
+        if (init)
+            init = init->left;
+        for (int i = 0; i < array; i++) {
+            if (i > 0)
+                buffer_write(buf, ", ");
+            if (init && init->left) {
+                buffer_write(buf, "i%d %d", bits, init->left->value);
+                init = init->right;
+            } else
+                buffer_write(buf, "i%d %d", bits, 0);
+        }
+        buffer_write(buf, "], align 16\n");
+
+        struct variable *tmpv = new_variable(ctx, NULL, V_INT, 8, 0, 1, 0, 0);
+        FATAL(!tmpv, "Could not allocate variable");
+        buffer_write(code_alloc ? ctx->data : ctx->init, "%%%d = bitcast [%d x i%d]* %%%d to i8*\n",
+            tmpv->reg, array, bits, reg);
+        if (arrayinit == 1)
+            buffer_write(buf, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8* noalias nocapture writeonly, i8* noalias nocapture readonly, i64, i1 immarg)\n");
+        buffer_write(code_alloc ? ctx->data : ctx->init, "call void @llvm.memcpy.p0i8.p0i8.i64(i8* align 16 %%%d, i8* align 16 bitcast([%d x i%d]* @__const.values.arrayinit%d to i8*), i64 %u, i1 false)\n",
+            tmpv->reg, array, bits, arrayinit, array * bits / 8);
+
         if (stars)
             free(stars);
     } else {
@@ -1828,13 +1859,12 @@ struct variable *gen_access_ptr_item(struct gen_context *ctx, struct variable *v
     char *stars2 = get_stars(var->type->ptr);
 
     if (var->array) {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %%%d, i64 0, i64 %s%d ; gen_access_ptr_item arr\n",
-            res->reg, var->array, var->type->bits, var->array, var->type->bits, var->reg, idx_var ? "%": "", index);
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds [%d x i%d], [%d x i%d]* %s%d, i64 0, i64 %s%d ; gen_access_ptr_item arr\n",
+            res->reg, var->array, var->type->bits, var->array, var->type->bits, REGP(var), var->reg, idx_var ? "%": "", index);
     } else {
-        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d%s, i%d%s %%%d, i64 %s%d ; gen_access_ptr_item\n",
-            res->reg, res->type->bits, stars ? stars : "", res->type->bits, stars2 ? stars2 : "", var->reg, idx_var ? "%" : "", index);
+        buffer_write(ctx->data, "%%%d = getelementptr inbounds i%d%s, i%d%s %s%d, i64 %s%d ; gen_access_ptr_item\n",
+            res->reg, res->type->bits, stars ? stars : "", res->type->bits, stars2 ? stars2 : "", REGP(var), var->reg, idx_var ? "%" : "", index);
     }
-    stack_trace();
     if (stars)
         free(stars);
     if (stars2)
@@ -3579,82 +3609,57 @@ int gen_indexdef(struct gen_context *ctx, struct node *node)
 
     FATALN(var, node, "Variable already assigned");
     FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", ident->value_string);
-#if 0
-    gen_recursive_allocs(ctx, node->right);
-    /*
-     * TODO This should ensure we have right index in alloc. Note that
-     * this also means we do not support dynamic arrays for now.
-     * Generating dynamic array would mean alloc/realloc from heap
-     * instead of stack, so postponing it.
-     */
-    struct buffer *tmpdata = buffer_init();
-    struct buffer *tmp = ctx->data;
-    ctx->data = tmpdata;
-
-    //ctx->debug = 1;
-    int idx_reg = gen_recursive(ctx, node->right);
-    //ctx->debug = 0;
-    struct variable *idx = find_variable(ctx, idx_reg);
-    int ok = 0;
-    int idx_value;
-    FATALN(!idx, node, "Invalid index");
-    if (idx->type->type != V_INT) {
-        // If it's array initializer, we're fine, otherwise fail.
-        if (node->parent && node->parent->right && node->parent->right->node == A_ARRAY_INITIALIZER) {
-            idx_value = 0;
-            ok = 1;
-        }
-    }
-    FATALN(!ok && idx->type->type != V_INT, node, "Invalid index, should be int");
-    ctx->data = tmp;
-    buffer_append(ctx->init, buffer_read(tmpdata));
-    buffer_del(tmpdata);
-
-    if (!ok) {
-        // We assume now direct value
-        idx_value = node->right->value;
-        if (idx_value == 0) {
-            idx_value = idx->value;
-            FATALN(!idx_value, node->right, "Invalid array init");
-        }
-    }
-
-    int res = gen_init_var(ctx, ident, idx_value);
-    node->ptr = ident->ptr;
-    node->addr = ident->addr;
-    return res;
-#endif
-#if 0
-    int idx_reg = gen_recursive_allocs(ctx, node->right);
-    printf("regf: %u\n", idx_reg);
-
-    struct buffer *tmpdata = buffer_init();
-    struct buffer *tmp = ctx->data;
-    ctx->data = tmpdata;
-
-    struct variable *idx = find_variable(ctx, idx_reg);
-    FATALN(idx->type->type != V_INT, node, "Invalid index, should be int");
-
-    ctx->data = tmp;
-    buffer_append(ctx->init, buffer_read(tmpdata));
-    buffer_del(tmpdata);
-
-    int res = gen_init_var(ctx, ident, 0);
-    node->ptr = ident->ptr;
-    node->addr = ident->addr;
-    return res;
-#endif
-#if 1
     /* FIXME Just getting the value, should ensure it's ok, etc.. */
-    int idx_value = node->right->value;
+    int idx_value = 0;
+    if (node->right) {
+        if (node->right->node == A_INT_LIT)
+            idx_value = node->right->value;
+        else {
+            /*
+             * TODO This should ensure we have right index in alloc.
+             * Note that this also means we do not support dynamic
+             * arrays for now.  Generating dynamic array would mean
+             * alloc/realloc from heap instead of stack, thus not
+             * supporting it.
+             */
+            //struct buffer *tmpinit = buffer_init();
+            struct buffer *tmpdata = buffer_init();
+            //struct buffer *tmpi = ctx->init;
+            struct buffer *tmp = ctx->data;
+            //ctx->init = tmpinit;
+            ctx->data = tmpdata;
+
+            gen_recursive_allocs(ctx, node->right);
+            int idx_reg = gen_recursive(ctx, node->right);
+            struct variable *idx = find_variable(ctx, idx_reg);
+            FATALN(idx->type->type != V_INT, node, "Invalid index, should be int");
+
+            //ctx->init = tmpi;
+            ctx->data = tmp;
+            buffer_append(ctx->init, buffer_read(tmpdata));
+            buffer_del(tmpdata);
+            idx_value = node->right->value;
+            if (idx_value == 0) {
+                idx_value = idx->value;
+                FATALN(!idx_value, node->right, "Invalid array init");
+            }
+        }
+    } else if (node->mid) {
+        /* Detect list size by initializer size */
+        struct node *val = node->mid->left;
+        while (val) {
+            if (val->left)
+                idx_value++;
+            val = val->right;
+        }
+    } else
+        ERR("Array definition missing size or initializer: %s", ident->value_string);
 
     int res = gen_init_var(ctx, ident, idx_value);
     node->ptr = ident->ptr;
     node->addr = ident->addr;
     return res;
-#endif
 }
-
 
 int get_index(struct gen_context *ctx, struct node *node, int a, int b)
 {
@@ -3908,6 +3913,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 
     FATALN(!src, node, "No source in assign")
     FATALN(!dst, node, "No dest in assign: %d", left)
+
+    if (node && node->left && node->left->node == A_INDEXDEF)
+        return 0;
 
 #if 0
     node_walk(node);

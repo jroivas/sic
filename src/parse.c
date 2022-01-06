@@ -105,7 +105,7 @@ static const char *nodestr[] = {
     "ATTRIBUTE",
     "ASM",
     "TYPEDEF",
-    "ARRAY_INITIALZIER",
+    "ARRAY_INITIALIZIER",
     "LIST"
 };
 
