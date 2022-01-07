@@ -9,6 +9,10 @@ enum type_sign {
     TYPE_SIGNED = 1
 };
 
-int codegen(FILE *outfile, struct node *node);
+struct codegen_config {
+    int no_link;
+};
+
+int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf);
 
 #endif

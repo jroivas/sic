@@ -27,6 +27,7 @@ int main(int argc, char **argv)
     int res = 0;
     struct scanfile f;
     struct node *node;
+    struct codegen_config conf = {0};
     FILE *outfile = NULL;
     char *outname = NULL;
     const char *srcname = NULL;
@@ -46,6 +47,8 @@ int main(int argc, char **argv)
                 i++;
                 FATAL(i >= argc, "Missing output file name!");
                 outname = argv[i];
+            } else if (strcmp(argv[i], "-c") == 0) {
+                conf.no_link = 1;
             } else if (strcmp(argv[i], "-I") == 0) {
                 i++;
                 FATAL(i >= argc, "Missing include dir");
@@ -93,7 +96,7 @@ int main(int argc, char **argv)
         outname[255] = 0;
     }
     outfile = fopen(outname, "w+");
-    codegen(outfile, node);
+    codegen(outfile, node, &conf);
     fclose(outfile);
 
     node_free(node);
