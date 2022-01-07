@@ -610,7 +610,7 @@ char *struct_name(struct gen_context *ctx)
         res = calloc(1, l + 1);
         memcpy(res, tmp->name, l);
         ctx->struct_names_cnt++;
-        ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt);
+        ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt + 1);
         ctx->struct_names[ctx->struct_names_cnt - 1] = res;
         return res;
     }
@@ -626,11 +626,13 @@ char *struct_name(struct gen_context *ctx)
             res = calloc(1, l + 2);
             memcpy(res, tmp->name, l);
             res[l] = '_';
+            res[l + 1] = 0;
         } else {
             size_t ll = strlen(res);
-            res = realloc(res, strlen(res) + l + 2);
+            res = realloc(res, ll + l + 2);
             memcpy(res + ll, tmp->name, l);
             res[ll + l] = '_';
+            res[ll + l + 1] = 0;
         }
         tmp = tmp->next;
     }
@@ -642,7 +644,7 @@ char *struct_name(struct gen_context *ctx)
     }
 
     ctx->struct_names_cnt++;
-    ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt);
+    ctx->struct_names = realloc(ctx->struct_names, sizeof(char*) * ctx->struct_names_cnt + 1);
     ctx->struct_names[ctx->struct_names_cnt - 1] = res;
     return res;
 }

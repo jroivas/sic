@@ -20,11 +20,11 @@ build/libsic.so: $(INC_FILES) $(SRC_FILES)
 test: build/sic build/tests unittest
 	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build/tests
 
-testsic: build/sic
+testsic: build/sic build/tests
 	LD_LIBRARY_PATH=build/: CC=build/sic HOSTCC=$(CC) tests/compiletest.sh build/tests llvm
 
-testc:
-	CC="$(CC) -c -x c" HOSTCC=$(CC) tests/compiletest.sh build/tests
+testc: build/tests
+	CC="$(CC) -c -x c -DNULL=0" HOSTCC=$(CC) tests/compiletest.sh build/tests
 
 tests: test
 
@@ -41,7 +41,7 @@ buildtest: compiletest build/tests
 	llc -O0 -relocation-model=pic -filetype=obj build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).ir.o
 	$(CC) build/tests/test_$(TEST).ir.o -o build/tests/test_$(TEST).ir.bin -lm
 
-runtest: buildtest
+runtest: buildtest build/tests
 	build/tests/test_$(TEST).ir.bin ; echo $$? || true
 
 build/scantool: tools/scantool.c build/libsic.so

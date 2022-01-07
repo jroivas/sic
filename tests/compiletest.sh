@@ -21,16 +21,16 @@ dotest()
     base=$(basename $test .sic)
     echo "*** $base"
     tests=$((tests+1))
-    if ! ${CC} $test -o "$outfolder/$base.ir" ; then
+    if ! ${CC} $test -o "$outfolder/$base.sic.ir" ; then
         echo "FAILED: ${CC} compile"
         return 1
     fi
     if [ "$llvm" -eq 1 ]; then
-        if ! llvm-as "$outfolder/$base.ir"; then
+        if ! llvm-as "$outfolder/$base.sic.ir"; then
             echo "FAILED: llvm-as"
             return 1
         fi
-        if ! llc -O0 -relocation-model=pic -filetype=obj "$outfolder/$base.ir.bc" -o "$outfolder/$base.ir.o"; then
+        if ! llc -O0 -relocation-model=pic -filetype=obj "$outfolder/$base.sic.ir.bc" -o "$outfolder/$base.ir.o"; then
             echo "FAILED: llc"
             return 1
         fi
