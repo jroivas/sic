@@ -260,8 +260,6 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ARRAYDEF:
         case A_PARAMS:
         case A_DEREFERENCE:
-        case A_STRUCT:
-        case A_UNION:
         case A_ENUM:
         case A_ACCESS:
         case A_TYPE_LIST:
@@ -272,6 +270,10 @@ void __node_walk(struct node *node, int depth, char arm)
         case A_ASM:
         case A_SIZEOF:
             printf("%s", node_str(node));
+            break;
+        case A_STRUCT:
+        case A_UNION:
+            printf("%s %s", node_str(node), node->type_name ? node->type_name : "");
             break;
         case A_TYPEDEF:
             printf("TYPEDEF: %s", node->value_string);

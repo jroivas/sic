@@ -782,7 +782,7 @@ int ctx_reserve_id(struct gen_context *ctx)
 
 struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr)
 {
-    const struct type *ot = (struct type *)find_type_by(ctx, type, bits, sign, ptr);
+    const struct type *ot = __find_type_by(ctx, type, bits, sign, ptr, name);
     struct type *t;
 
     FATAL(ot, "Type already registered: %s, %s, %d bits, %s, ptr %d", name, type_str(type), bits, sign ? "signed" : "unsigned", ptr);
@@ -791,6 +791,8 @@ struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum v
     t->type = type;
     t->bits = bits;
     t->name = name;
+    if (name && (type == V_STRUCT || type == V_UNION || type == V_ENUM))
+        t->type_name = name;
     t->sign = sign;
     t->ptr = ptr;
     t->name_hash = hash(name);
@@ -2993,7 +2995,7 @@ int gen_type(struct gen_context *ctx, struct node *node)
 
         if (node->right) {
             node->type_name = sname;
-            t->type_name = sname;
+            //t->type_name = sname;
             // FIXME This is a hack for now
             if (node->type == V_STRUCT)
                 buffer_write(struct_init, "%%struct.%s = type { ", sname);
@@ -3160,7 +3162,8 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
             free((void*)to_free);
 #endif
     } else if (node->node == A_STRUCT || node->node == A_UNION) {
-        const struct type *res2 = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
+        enum var_type type = node->node == A_STRUCT ? V_STRUCT : V_UNION;
+        const struct type *res2 = __find_type_by(ctx, type, node->bits, node->sign, node->ptr, node->type_name);
         if (res2)
             return res2;
 
@@ -3432,6 +3435,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                         );
                     res->type = type_wrap_to(ctx, res->type, ptrval);
                 } else if (var->type->type == V_VOID) {
+                        printf("To: %s\n", get_type_str(ctx, target));
                         node_walk(node);
                         ERR("Not supported!");
                 } else {
