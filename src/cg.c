@@ -1636,6 +1636,16 @@ int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int ar
     return reg;
 }
 
+int gen_allocate_void_ptr(struct gen_context *ctx, int reg, int ptr, int global)
+{
+    char *stars = get_stars(ptr);
+
+    buffer_write(ctx->init,
+        "%s%u = alloca i8%s, align 8\n",
+        global ? "@P" : "%", reg, stars);
+    return reg;
+}
+
 int gen_allocate_struct_union(struct gen_context *ctx, int reg, const struct type *ot, const struct type *t, struct variable *var, int ptrval, int is_union)
 {
 
@@ -3409,8 +3419,29 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                 buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_cast_to void -> int\n",
                     res->reg, 8, stars ? stars : "", var->reg, target->bits, stars2 ? stars2 : "");
                 res->type = type_wrap_to(ctx, res->type, ptrval);
-            } else
+            } else if (ptrval && var->type->ptr) {
+                /* Assign ptrval to ptr */
+                if (var->type->type == V_STRUCT) {
+                    res = new_inst_variable(ctx, V_VOID, 0, var->type->sign);
+                    buffer_write(ctx->data, "%%%u = bitcast %%struct.%s%s %%%d to i8%s ; gen_cast_to struct -> void*\n",
+                        res->reg,
+                        orig->type->name,
+                        stars ? stars : "",
+                        var->reg,
+                        stars ? stars : ""
+                        );
+                    res->type = type_wrap_to(ctx, res->type, ptrval);
+                } else if (var->type->type == V_VOID) {
+                        node_walk(node);
+                        ERR("Not supported!");
+                } else {
+                        ERR("Casting from %s to void not supported yet", get_type_str(ctx, var->type));
+                }
+            } else {
+                printf("TMP: %d %d\n", var->type->ptr, ptrval);
+                node_walk(node);
                 ERR("Can't cast void to ptr");
+            }
             if (stars)
                 free(stars);
             if (stars2)
@@ -3531,6 +3562,16 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
                 }
             }
             res = var->reg;
+            break;
+        case V_VOID:
+            ptrval = gen_use_ptr(ctx);
+            if (!ptrval)
+                ptrval = t->ptr;
+            if (!ptrval)
+                ERR("'void' is not valid type for variable!\n");
+            var = new_variable(ctx, node->value_string, V_VOID, 0, TYPE_UNSIGNED, ptrval, addrval, ctx->global);
+            res = gen_allocate_void_ptr(ctx, var->reg, ptrval, ctx->global);
+            // TODO
             break;
         default:
             node_walk(node);
@@ -3992,12 +4033,22 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
                     dst->type->type_name, stars ? stars : "",
                     dst_name);
         } else if (src->type->type == V_FLOAT) {
-            buffer_write(ctx->data, "store %s%s %%%d, %s%s* %s, align %d ; gen_assign ptr\n",
+            buffer_write(ctx->data, "store %s%s %%%d, %s%s* %s, align %d ; gen_assign ptr float\n",
                     float_str(src->type->bits),
                     stars, src->reg,
                     float_str(dst->type->bits),
                     stars,
                     dst_name,
+                    align(dst->type->bits));
+        } else if (src->type->type == V_VOID) {
+            int dbits = dst->type->bits;
+            if (dst->type->type == V_VOID)
+                dbits = 8;
+            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr\n",
+                    8,
+                    stars ? stars : "", src->reg,
+                    dbits, stars ? stars : "",
+                    REGP(dst), dst->reg,
                     align(dst->type->bits));
         } else {
         if (dst->type->type == V_INT && src->type->bits != dst->type->bits) {
@@ -4309,7 +4360,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
             } else if (par_type->type == V_STRUCT) {
                 struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0, par_type->type_name);
 
-                buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
+                buffer_write(ctx->init, "%%%u = alloca %%struct.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%struct.%s%s %%%d, %%struct.%s%s* %%%d, align %d; func param list cast\n",
                     par_type->type_name,
                     stars ? stars : "",
@@ -4321,7 +4372,7 @@ char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int alloc
             } else if (par_type->type == V_UNION) {
                 struct variable *res = new_variable_ext(ctx, pname->value_string, par_type->type, par_type->bits, par_type->sign, ptype->ptr, ptype->addr, 0, par_type->type_name);
 
-                buffer_write(ctx->init, "%%%d = alloca %%union.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
+                buffer_write(ctx->init, "%%%u = alloca %%union.%s%s, align 8\n", res->reg, par_type->type_name, stars ? stars : "");
                 buffer_write(allocs, "store %%union.%s%s %%%d, %%union.%s%s* %%%d, align %d\n",
                     par_type->type_name,
                     stars ? stars : "",
