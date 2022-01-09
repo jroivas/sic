@@ -785,7 +785,7 @@ struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum v
     const struct type *ot = __find_type_by(ctx, type, bits, sign, ptr, name);
     struct type *t;
 
-    FATAL(ot, "Type already registered: %s, %s, %d bits, %s, ptr %d", name, type_str(type), bits, sign ? "signed" : "unsigned", ptr);
+    FATAL(ot, "Type already registered: %s, %s, %d bits, %s, ptr %d, got: %s %s", name, type_str(type), bits, sign ? "signed" : "unsigned", ptr, get_type_str(ctx, ot), ot->type_name);
 
     t = calloc(1, sizeof(struct type));
     t->type = type;
@@ -3218,6 +3218,13 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         res->type_name = node->value_string;
         complete_enum_type(global_ctx, ctx, res, node->right);
     } else if (node->node == A_TYPEDEF) {
+        const struct type *res2 = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->type_name);
+        if (res2)
+            return res2;
+        res2 = __find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->value_string);
+        if (res2)
+            return res2;
+
         const struct type *tmp = gen_type_list_type(ctx, node->left);
         FATALN(!tmp, node, "Invalid typedef, missing typedef define type");
         if (node->is_func) {
