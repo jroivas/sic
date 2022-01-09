@@ -3435,9 +3435,20 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                         );
                     res->type = type_wrap_to(ctx, res->type, ptrval);
                 } else if (var->type->type == V_VOID) {
-                        printf("To: %s\n", get_type_str(ctx, target));
-                        node_walk(node);
-                        ERR("Not supported!");
+                        if (target->type == V_STRUCT) {
+                            //res = new_inst_variable(ctx, V_STRUCT, target->, var->type->sign);
+                            res = new_variable_ext(ctx, NULL, V_STRUCT, target->bits, TYPE_UNSIGNED, 0, 0, ctx->global, target->type_name);
+                            res->direct = 1;
+                            buffer_write(ctx->data, "%%%u = bitcast i8%s %%%u to %%struct.%s%s ; gen_cast_to void* -> struct\n",
+                                res->reg,
+                                stars ? stars : "",
+                                var->reg,
+                                target->name,
+                                stars ? stars : ""
+                                );
+                            res->type = type_wrap_to(ctx, res->type, ptrval);
+                        } else
+                            ERR("Not supported void to %s!", get_type_str(ctx, target));
                 } else {
                         ERR("Casting from %s to void not supported yet", get_type_str(ctx, var->type));
                 }
