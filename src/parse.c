@@ -1742,12 +1742,13 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         left = cast_expression(f, token);
         if (!left)
             ERR("Required lvalue for unary '&' operator");
-        if (left->node != A_IDENTIFIER) {
+        if (left->node == A_IDENTIFIER || left->node == A_ACCESS) {
+            left = make_node(token, A_ADDR, left, NULL, NULL);
+            left->addr = addr;
+        } else {
             node_walk(left);
             ERR("Expected identifier lvalue for unary '&' operator at %d", f->line);
         }
-        left = make_node(token, A_ADDR, left, NULL, NULL);
-        left->addr = addr;
         return left;
     } else if (accept_keyword(f, token, K_SIZEOF)) {
         left = NULL;

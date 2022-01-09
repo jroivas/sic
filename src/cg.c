@@ -4079,7 +4079,7 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
             int dbits = dst->type->bits;
             if (dst->type->type == V_VOID)
                 dbits = 8;
-            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr\n",
+            buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr void\n",
                     8,
                     stars ? stars : "", src->reg,
                     dbits, stars ? stars : "",
@@ -4100,9 +4100,11 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
             src = res;
         }
 
+        /* Imn case dst bits is 0, it's void ptr */
         buffer_write(ctx->data, "store i%d%s %%%d, i%d%s* %s%d, align %d ; gen_assign ptr\n",
                 src->type->bits, stars ? stars : "", src->reg,
-                dst->type->bits, stars ? stars : "",
+                dst->type->bits ? dst->type->bits : 8,
+                stars ? stars : "",
                 REGP(dst), dst->reg,
                 align(dst->type->bits));
         }
