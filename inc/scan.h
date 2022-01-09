@@ -82,8 +82,8 @@ struct token {
     char linebuf[SCANFILE_LINEBUF + 1];
 };
 
-// Max 32 save points, adjust when compiler comes more compilicated
-#define SCANFILE_SAVE_MAX 64
+// Max 256 save points, adjust when compiler comes more compilicated
+#define SCANFILE_SAVE_MAX 256
 struct scanfile {
     FILE *infile;
     struct buffer *buf;

@@ -37,6 +37,9 @@ void stack_trace(void);
 #define ERR(...) ERR_FULL(0, 1, __VA_ARGS__)
 #define ERR_TRACE(...) ERR_FULL(1, 1, __VA_ARGS__)
 
+#define ELVIS(X, Y) ((X) ? (X) : (Y))
+#define ESTR(X) ELVIS(X, "")
+
 const char *type_str(enum var_type t);
 int determine_size(literalnum value);
 hashtype hash(const char *str);

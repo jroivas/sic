@@ -170,7 +170,7 @@ struct gen_context {
 };
 
 static const char *varstr[] = {
-    "void", "null", "i32", "double", "fixed", "struct", "union", "enum", "custom", "builtin", "invalid"
+    "void", "null", "i32", "double", "fixed", "string", "struct", "union", "enum", "custom", "builtin", "invalid"
 };
 
 const struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
@@ -2531,6 +2531,19 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         if (stars1)
             free(stars1);
         return res->reg;
+    } else if (v1->type->type == V_STRUCT && (v2->type->type == V_NULL ||
+            (v2->type->type == V_INT && v2->value == 0))) {
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
+        const char *op = node->node == A_EQ_OP ? "eq" : "ne";
+        char *stars1 = get_stars(v1->type->ptr);
+        buffer_write(ctx->data, "%%%d = icmp %s %%struct.%s%s %%%u, null\n",
+            res->reg, op,
+            v1->type->type_name,
+            stars1 ? stars1 : "",
+            v1->reg);
+        if (stars1)
+            free(stars1);
+        return res->reg;
     }
 
     ERR("Invalid EQ: %s != %s", type_str(v1->type->type), type_str(v2->type->type));
@@ -2936,7 +2949,7 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     if (func->type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func->type->bits, TYPE_SIGNED);
 
-        buffer_write(ctx->data, "%%%d = call i%d (%s) @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "%%%d = call i%u (%s) @%s(%s); FUNCCALL\n",
                 res->reg,
                 func->type->bits,
             func->paramstr ? func->paramstr : "",
@@ -2952,6 +2965,17 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
             paramstr ? paramstr : "");
     } else if (func->type->type == V_VOID) {
         buffer_write(ctx->data, "call void (%s) @%s(%s); FUNCCALL\n",
+            func->paramstr ? func->paramstr : "",
+            func->name,
+            paramstr ? paramstr : "");
+    } else if (func->type->type == V_STRUCT) {
+        char *stars = get_stars(func->type->ptr);
+        res = new_variable_ext(ctx, NULL, V_STRUCT, func->type->bits, func->type->sign, func->type->ptr, 0, 0, func->type->type_name);
+        res->direct = 1;
+        buffer_write(ctx->data, "%%%u = call %%struct.%s%s (%s) @%s(%s); FUNCCALL\n",
+            res->reg,
+            func->type->type_name,
+            ESTR(stars),
             func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
@@ -3134,6 +3158,7 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
                     res->bits = 128;
                 to_free = tl;
             } else {
+                node_walk(node);
                 ERR("Invalid types in resolve: %s %s", type_str(tl->type), type_str(tr->type));
             }
         } else
@@ -3283,6 +3308,13 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         return type_wrap_to(ctx, res2, node->ptr);
     } else if (node->type == V_BUILTIN) {
         return type_ret_validate(__find_type_by(ctx, node->type, node->bits, node->sign, node->ptr, node->value_string), node);
+    } else if (node->node == A_STORAGE_CLASS) {
+        res = (struct type *)__gen_type_list_recurse(ctx, node->left, res);
+        FATAL(!res, "Invalid storage class def: %s", node->value_string);
+        res->is_const = node->is_const;
+        res->is_extern = node->is_extern;
+        res->is_static = node->is_static;
+        res->is_inline = node->is_inline;
     } else {
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
@@ -4448,14 +4480,31 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node,
 {
     char *tmp = NULL;
     const char *type = NULL;
-    if (func_type)
+    char tmp_buf[1024]; // FIXME
+
+    if (func_type) {
         type = var_str(func_type->type, func_type->bits, &tmp);
-    else if (ctx->main_type)
-        type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
-    else if (strcmp(ctx->name, "main") == 0 && func_type->type == V_VOID)
+    } else if (ctx->main_type) {
+        char *stars = get_stars(ctx->main_type->ptr);
+        switch (ctx->main_type->type) {
+        case V_STRUCT:
+            snprintf(tmp_buf, 1024, "%%struct.%s%s", ctx->main_type->type_name, ESTR(stars));
+            type = tmp_buf;
+            break;
+        case V_UNION:
+            snprintf(tmp_buf, 1024, "%%union.%s%s", ctx->main_type->type_name, ESTR(stars));
+            type = tmp_buf;
+            break;
+        default:
+            type = var_str(ctx->main_type->type, ctx->main_type->bits, &tmp);
+        }
+        if (stars)
+            free(stars);
+    } else if (strcmp(ctx->name, "main") == 0 && func_type->type == V_VOID)
         type = var_str(V_INT, 32, &tmp);
-    else
+    else {
         type = var_str(node->type, node->bits, &tmp);
+    }
 
     char *params = NULL;
     // Global context can't have params
@@ -4468,10 +4517,11 @@ void gen_pre(struct gen_context *ctx, struct node *node, struct node *func_node,
         buffer_write(ctx->pre, "define internal %s @%s(%s) #0 {\n",
                 type, ctx->name,
                 params ? params : "");
-    } else
+    } else {
         buffer_write(ctx->pre, "define dso_local %s @%s(%s) #0 {\n",
                 type, ctx->name,
                 params ? params : "");
+    }
     if (params)
         free(params);
     if (tmp)
@@ -4487,13 +4537,17 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, const struct 
         buffer_write(ctx->data, "ret i32 0 ; RET5\n");
     } else if (target && target->type != V_VOID) {
         struct variable *var = find_variable(ctx, res);
+        char *stars = get_stars(target->ptr);
         if (var && var->type->type != V_NULL) {
             var = load_and_cast_to(ctx, var, target, CAST_FLATTEN_PTR);
             res = var->reg;
             if (target->type == V_INT) {
-                buffer_write(ctx->post, "ret i%d %%%d ; RET1\n", target->bits, res);
+                buffer_write(ctx->post, "ret i%d%s %%%d ; RET1\n", target->bits, ESTR(stars), res);
             } else if (target->type == V_FLOAT) {
-                buffer_write(ctx->post, "ret %s %%%d ; RET1\n", float_str(target->bits), res);
+                buffer_write(ctx->post, "ret %s%s %%%d ; RET1\n", float_str(target->bits), ESTR(stars), res);
+            } else if (target->type == V_STRUCT) {
+                buffer_write(ctx->data, "ret %%struct.%s%s %%%d ; RET1\n",
+                        target->type_name, ESTR(stars), res);
             } else
                 ERR("Invalid return type");
 
@@ -4507,6 +4561,8 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, const struct 
                 ERR("Invalid return type");
             ctx->rets++;
         }
+        if (stars)
+            free(stars);
     } else {
         buffer_write(ctx->post, "ret void ; RET4\n");
         ctx->rets++;
@@ -4601,13 +4657,19 @@ int gen_return(struct gen_context *ctx, struct node *node, int left, int right)
 
     var = load_and_cast_to(ctx, var, target, CAST_NORMAL);
     res = var->reg;
+    char *stars = get_stars(target->ptr);
 
     if (target->type == V_INT) {
-        buffer_write(ctx->data, "ret i%d %%%d ; RET3\n", target->bits, res);
+        buffer_write(ctx->data, "ret i%d%s %%%d ; RET3\n", target->bits, ESTR(stars), res);
     } else if (target->type == V_FLOAT) {
-        buffer_write(ctx->data, "ret %s %%%d ; RET3\n", float_str(target->bits), res);
+        buffer_write(ctx->data, "ret %s%s %%%d ; RET3\n", float_str(target->bits), ESTR(stars), res);
+    } else if (target->type == V_STRUCT) {
+        buffer_write(ctx->data, "ret %%struct.%s%s %%%d ; RET3\n",
+                target->type_name, ESTR(stars), res);
     } else
-        ERR("Invalid return type");
+        ERR("Invalid/unsupported return type");
+    if (stars)
+        free(stars);
     ctx->rets++;
 
     return res;

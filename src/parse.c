@@ -1139,7 +1139,11 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         struct node *tmp = __declaration_specifiers(f, token);
         if (tmp == NULL)
             break;
-        res = make_node(token, A_TYPE_LIST, res, NULL, tmp);
+        /* Making declarations a subtree of storage class easies codegen */
+        if (res == type && res->node == A_STORAGE_CLASS) {
+            res->left = tmp;
+        } else
+            res = make_node(token, A_TYPE_LIST, res, NULL, tmp);
     }
 
     if (res->node != A_TYPE_LIST)
@@ -1742,7 +1746,7 @@ struct node *unary_expression(struct scanfile *f, struct token *token)
         left = cast_expression(f, token);
         if (!left)
             ERR("Required lvalue for unary '&' operator");
-        if (left->node == A_IDENTIFIER || left->node == A_ACCESS) {
+        if (left->node == A_IDENTIFIER || left->node == A_ACCESS || left->node == A_INDEX) {
             left = make_node(token, A_ADDR, left, NULL, NULL);
             left->addr = addr;
         } else {
