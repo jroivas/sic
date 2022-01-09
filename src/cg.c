@@ -3204,6 +3204,9 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         const struct type *res2 = __find_type_by(ctx, type, node->bits, node->sign, node->ptr, node->type_name);
         if (res2)
             return res2;
+        res2 = __find_type_by(ctx, type, node->bits, node->sign, 0, node->type_name);
+        if (res2)
+            return res2;
 
         struct gen_context *global_ctx = get_global_ctx(ctx);
 
@@ -3315,7 +3318,16 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         res->is_extern = node->is_extern;
         res->is_static = node->is_static;
         res->is_inline = node->is_inline;
+    } else if (node->node == A_TYPE_QUAL) {
+        res = (struct type *)__gen_type_list_recurse(ctx, node->left, res);
+        if (!res)
+            goto fallback_type;
+        res->is_const = node->is_const;
+        res->is_extern = node->is_extern;
+        res->is_static = node->is_static;
+        res->is_inline = node->is_inline;
     } else {
+fallback_type:
         res = calloc(1, sizeof(struct type));
         res->type = node->type;
         res->bits = node->bits;

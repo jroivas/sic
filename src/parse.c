@@ -1140,7 +1140,8 @@ struct node *__declaration_specifiers(struct scanfile *f, struct token *token)
         if (tmp == NULL)
             break;
         /* Making declarations a subtree of storage class easies codegen */
-        if (res == type && res->node == A_STORAGE_CLASS) {
+        if (res == type && (res->node == A_STORAGE_CLASS ||
+                res->node == A_TYPE_QUAL)) {
             res->left = tmp;
         } else
             res = make_node(token, A_TYPE_LIST, res, NULL, tmp);
