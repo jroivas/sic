@@ -2518,6 +2518,19 @@ int gen_eq(struct gen_context *ctx, struct node *node, int a, int b)
         if (stars1)
             free(stars1);
         return res->reg;
+    } else if (v1->type->type == V_STRUCT && v2->type->type == V_STRUCT) {
+        struct variable *res = new_bool(ctx, VAR_DIRECT);
+        const char *op = node->node == A_EQ_OP ? "eq" : "ne";
+        char *stars1 = get_stars(v1->type->ptr);
+        buffer_write(ctx->data, "%%%d = icmp %s %%struct.%s%s %%%u, %%%u\n",
+            res->reg, op,
+            v1->type->type_name,
+            stars1 ? stars1 : "",
+            v1->reg,
+            v2->reg);
+        if (stars1)
+            free(stars1);
+        return res->reg;
     }
 
     ERR("Invalid EQ: %s != %s", type_str(v1->type->type), type_str(v2->type->type));
