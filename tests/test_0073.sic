@@ -1,7 +1,9 @@
 typedef long int __ssize_t;
 typedef long unsigned int size_t;
 
+#if 0
 typedef __ssize_t __io_read_fn (void *__cookie, char *__buf, size_t __nbytes);
+#endif
 #if 1
 typedef __ssize_t (*__io_read_fn2) (void *__cookie, char *__buf, size_t __nbytes);
 #endif
