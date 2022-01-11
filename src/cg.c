@@ -3734,9 +3734,10 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
     int res;
 
     if (var == NULL) {
-        if (all_var && !ctx->decl_name)
-            ERR("Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
-        if (all_var && ctx->decl_name) {
+        if (all_var && !ctx->decl_name && !all_var->func && ctx->is_decl >= 100) {
+            ERR("Redeclaring variable: %s (lvl %d) %u", node->value_string, ctx->is_decl, node->line);
+        }
+        if (all_var && (ctx->is_decl < 100 || ctx->decl_name)) {
             /* This is a function, return it's reference */
             if (all_var->func) {
                 return all_var->reg;
