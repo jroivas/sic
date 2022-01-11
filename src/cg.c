@@ -141,6 +141,7 @@ struct gen_context {
     int continuelabel;
 
     const char *name;
+    const char *decl_name;
     struct node *node;
     //struct node *main_type;
     const struct type *main_type;
@@ -2115,6 +2116,28 @@ struct variable *gen_load_union(struct gen_context *ctx, struct variable *v)
     return gen_load_struct_union(ctx, v, 1);
 }
 
+struct variable *gen_load_func(struct gen_context *ctx, struct variable *v)
+{
+        if (v->func)
+            return v;
+
+        char *stars = get_stars(v->type->ptr + 1);
+        struct variable *res = new_variable_ext(ctx, NULL, V_FUNCPTR, v->type->bits, v->type->sign, v->type->ptr, 0, 0, v->type->type_name);
+        char *ret = get_type_str(ctx, v->type->retval);
+        char *par = get_param_type_str(ctx, v->type->params);
+
+        buffer_write(ctx->data, "%%%d = load %s (%s)%s, %s (%s)%s* %%%u, align %d ; gen_load_func\n",
+            res->reg,
+            ret, par, ESTR(stars),
+            ret, par, ESTR(stars),
+            v->reg, 8);
+        printf("a5\n");
+        if (stars)
+            free(stars);
+
+        return res;
+}
+
 struct variable *gen_load(struct gen_context *ctx, struct variable *v)
 {
     if (v == NULL)
@@ -2137,6 +2160,8 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
             return gen_load_struct(ctx, v);
         case V_UNION:
             return gen_load_union(ctx, v);
+        case V_FUNCPTR:
+            return gen_load_func(ctx, v);
         case V_NULL:
         case V_CUSTOM:
             return v;
@@ -3378,7 +3403,6 @@ const struct type *gen_type_list_recurse(struct gen_context *ctx, struct node *n
 
     const struct type *res = __find_type_by(ctx, tmp->type, tmp->bits, tmp->sign, 0, tmp->type_name);
     res = type_wrap_to(ctx, res, tmp->ptr);
-    //printf("RRR: %s\n", stype_str(res));
     if (tmp->temporary)
         free((void*)tmp);
     return res;
@@ -3601,9 +3625,11 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             //buffer_write(ctx->init, "%%%d = alloca %s (%s)%s, align 8\n", var->reg, retval, params, stars);
             buffer_write(ctx->init, "%%%d = alloca %s (%s)%s, align 8\n", var->reg, retval, params, stars);
 #else
-            printf("VVT: %d\n", t->id);
+            char *stars = get_stars(ptrval + 1);
             char *types = get_type_str(ctx, t);
-            buffer_write(ctx->init, "%%%d = alloca %s, align 8\n", var->reg, types);
+            buffer_write(ctx->init, "%%%d = alloca %s%s, align 8 ; alloc func\n", var->reg, types, ESTR(stars));
+            if (stars)
+                free(stars);
             free(types);
 #endif
             break;
@@ -3708,10 +3734,13 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
     int res;
 
     if (var == NULL) {
-        if (all_var && ctx->is_decl < 100) {
+        if (all_var && !ctx->decl_name)
+            ERR("Redeclaring variable: %s (lvl %d)", node->value_string, ctx->is_decl);
+        if (all_var && ctx->decl_name) {
             /* This is a function, return it's reference */
-            if (all_var->func)
+            if (all_var->func) {
                 return all_var->reg;
+            }
             /*
              * We have global variable but not local, thus if
              * this is declaration we can override it,
@@ -3719,6 +3748,8 @@ int gen_identifier(struct gen_context *ctx, struct node *node)
              */
             return all_var->reg;
         }
+        if (ctx->is_decl >= 100 && ctx->decl_name == NULL)
+            ctx->decl_name = node->value_string;
         // Utilize pending type from previous type def
         FATALN(!ctx->pending_type, node, "Can't determine type of variable %s", node->value_string);
         res = gen_init_var(ctx, node, 0);
@@ -4061,7 +4092,7 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     if (!var)
         return 0;
     FATALN(!var, node, "Variable not found in get_identitifier: %s", node->value_string);
-    //printf("VVAR %s, %d\n", var->name, var->reg);
+    //printf("VVAR %s, %d, %s\n", var->name, var->reg, get_type_str(ctx, var->type));
     return var->reg;
 }
 
@@ -4200,6 +4231,19 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
                 types, src->name, types, dst->reg);
         } else
             ERR("Can't assign function ptr to %s from %d", stype_str(dst->type), src->reg);
+    } else if (src->type->type == V_FUNCPTR && dst->type->type == V_FUNCPTR) {
+        char *s_ret = get_type_str(ctx, src->type->retval);
+        char *s_par = get_param_type_str(ctx, src->type->params);
+        char *d_ret = get_type_str(ctx, dst->type->retval);
+        char *d_par = get_param_type_str(ctx, dst->type->params);
+        if (src->func)
+            buffer_write(ctx->data, "store %s (%s)* @%s, %s (%s)** %%%u, align 8\n",
+                s_ret, s_par, src->name,
+                d_ret, d_par, dst->reg);
+        else
+            buffer_write(ctx->data, "store %s (%s)* %%%u, %s (%s)** %%%u, align 8\n",
+                s_ret, s_par, src->reg,
+                d_ret, d_par, dst->reg);
     } else {
         ERR("Invalid assign to reg %d from reg %d, to type %s from %s", left, right, type_str(dst->type->type), type_str(src->type->type));
     }
@@ -5501,6 +5545,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
             res = gen_prepare_store_str(ctx, node);
             break;
         case A_DECLARATION:
+            ctx->decl_name = NULL;
             ctx->is_decl += 100;
             break;
         case A_ASSIGN:
@@ -5523,8 +5568,10 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
         gen_recursive_allocs(ctx, node->mid);
     if (node->node != A_INDEXDEF && node->node != A_ACCESS && node->right)
         right = gen_recursive_allocs(ctx, node->right);
-    if (node->node == A_DECLARATION)
+    if (node->node == A_DECLARATION) {
         ctx->is_decl = 0;
+        ctx->decl_name = NULL;
+    }
         //ctx->is_decl -= 100;
     if (node->node == A_ASSIGN && left > 0 && right > 0) {
         /* Need to handle assign values */
