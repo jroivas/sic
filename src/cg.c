@@ -720,9 +720,7 @@ const struct type *__find_type_by(struct gen_context *ctx, enum var_type type, i
         if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0 && ptr == res->ptr)
             return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
-            if (name == NULL)
-                return res;
-            else if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
+            if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
                 return res;
             else if (res->type != V_STRUCT && res->type != V_UNION && res->type != V_CUSTOM && res->type != V_FUNCPTR)
                 return res;
@@ -784,7 +782,7 @@ int ctx_reserve_id(struct gen_context *ctx)
     return res;
 }
 
-struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr)
+struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, const struct type *custom)
 {
     const struct type *ot = __find_type_by(ctx, type, bits, sign, ptr, name);
     struct type *t;
@@ -800,6 +798,7 @@ struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum v
     t->sign = sign;
     t->ptr = ptr;
     t->name_hash = hash(name);
+    t->custom_type = custom;
 
     t->id = ctx_reserve_id(ctx);
     t->next = ctx->types;
@@ -808,9 +807,14 @@ struct type *register_type_ptr(struct gen_context *ctx, const char *name, enum v
     return t;
 }
 
+struct type *register_custom_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, const struct type *custom)
+{
+    return register_type_ptr(ctx, name, type, bits, sign, 0, custom);
+}
+
 struct type *register_type(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign)
 {
-    return register_type_ptr(ctx, name, type, bits, sign, 0);
+    return register_type_ptr(ctx, name, type, bits, sign, 0, NULL);
 }
 
 struct node *find_struct_item_name(struct node *node)
@@ -1014,7 +1018,7 @@ const struct type *type_wrap(struct gen_context *ctx, const struct type *src)
         return res_old;
     }
 
-    struct type *res = register_type_ptr(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1);
+    struct type *res = register_type_ptr(ctx, NULL, src->type, src->bits, src->sign, src->ptr + 1, src->custom_type);
     res->name = src->name;
     res->type_name = src->type_name;
     if (src->type == V_CUSTOM) {
@@ -1219,9 +1223,14 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
         register_type(res, "nulltype", V_NULL, 0, TYPE_UNSIGNED);
         const struct type *null_type = find_type_by(res, V_NULL, 0, TYPE_UNSIGNED, 0);
         FATAL(!null_type, "Couldn't find NULL type");
+#if 1
         struct variable *null_var = new_variable(res, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
         buffer_write(res->init, "@G%u = dso_local global i8* null, align 8\n",
             null_var->reg);
+#else
+        struct variable *null_var = init_variable("NULL", null_type);
+        register_variable(res, null_var);
+#endif
 
         res->null_var = null_var->reg;
     } else {
@@ -1372,7 +1381,10 @@ struct variable *gen_cast(struct gen_context *ctx, struct variable *v, const str
         ERR("Invalid cast for %d, %d -> %d",
             v->reg, v->type->type, target->type);
     } else {
-        if (target->type == V_INT && v->type->type == V_FLOAT) {
+        if (target->type == V_VOID && !target->ptr) {
+            // Casting to void thus provide null
+            val = find_variable(ctx, ctx->null_var);
+        } else if (target->type == V_INT && v->type->type == V_FLOAT) {
             val = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             if (target->sign) {
                 buffer_write(ctx->data, "%%%d = fptosi double %%%d to i%d\n",
@@ -1474,7 +1486,7 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
         char *stars = get_stars(v1->type->ptr);
 
         res = new_inst_variable(ctx, V_INT, bits2, v1->type->sign);
-        buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_assign cast ptr\n",
+        buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_bit_cast cast ptr\n",
                 res->reg, bits1, ESTR(stars), v1->reg, bits2, stars);
         if (stars)
             free(stars);
@@ -2138,7 +2150,6 @@ struct variable *gen_load_func(struct gen_context *ctx, struct variable *v)
             ret, par, ESTR(stars),
             ret, par, ESTR(stars),
             v->reg, 8);
-        printf("a5\n");
         if (stars)
             free(stars);
 
@@ -2147,6 +2158,7 @@ struct variable *gen_load_func(struct gen_context *ctx, struct variable *v)
 
 struct variable *gen_load_null(struct gen_context *ctx, struct variable *v)
 {
+#if 1
     struct variable *res = new_variable_ext(ctx, NULL, V_NULL, 0, TYPE_UNSIGNED, 1, 0, 0, NULL);
     char *stars = get_stars(v->type->ptr + 1);
 
@@ -2154,6 +2166,9 @@ struct variable *gen_load_null(struct gen_context *ctx, struct variable *v)
         res->reg, ESTR(stars),
         ESTR(stars), REGP(v), v->reg);
     return res;
+#else
+    return v;
+#endif
 }
 
 struct variable *gen_load(struct gen_context *ctx, struct variable *v)
@@ -3030,6 +3045,8 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
             func->name,
             paramstr ? paramstr : "");
     } else if (func_ret_type->type == V_VOID) {
+        res = new_inst_variable(ctx, V_VOID, 0, TYPE_UNSIGNED);
+        buffer_write(ctx->data, "%%%u = alloca i8, align 8; void call\n", res->reg);
         buffer_write(ctx->data, "call void (%s) @%s(%s); FUNCCALL void\n",
             func->paramstr ? func->paramstr : "",
             func->name,
@@ -3543,6 +3560,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
             char *stars2 = get_stars(ptrval);
             if (var->type->type == V_INT && target->type == V_VOID) {
                 res = new_inst_variable(ctx, V_INT, 8, TYPE_UNSIGNED);
+                //res = new_inst_variable(ctx, V_VOID, 0, TYPE_UNSIGNED);
                 buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_cast_to int -> ptr %d\n",
                     res->reg, var->bits, ESTR(stars), var->reg, 8, stars2, ptrval);
                 res->type = type_wrap_to(ctx, res->type, ptrval);
@@ -3592,7 +3610,9 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                 free(stars2);
     } else if (target->type == V_VOID) {
         // Void cast is just reference
-        res = var;
+        //res = var;
+        res = new_inst_variable(ctx, V_VOID, 0, TYPE_UNSIGNED);
+        buffer_write(ctx->data, "%%%u = alloca i8, align 8; void cast\n", res->reg);
     } else {
         FATALN(1, node, "Invalid cast to %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);
     }
@@ -4136,18 +4156,20 @@ int get_identifier(struct gen_context *ctx, struct node *node)
     return var->reg;
 }
 
-int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
+int gen_assign(struct gen_context *ctx, struct node *node, int left, int mid, int right)
 {
+    /* In case it's index we have handled it already*/
+    if (node && node->left && node->left->node == A_INDEXDEF)
+        return 0;
     struct variable *src_val = find_variable(ctx, right);
-    FATALN(!src_val, node, "Can't assign from zero: %d to %d", right, left);
+    if (!src_val)
+        src_val = find_variable(ctx, mid);
+    FATALN(!src_val, node, "Can't assign from zero: %d to %d, %d", right, left, mid);
     struct variable *src = gen_load(ctx, src_val);
     struct variable *dst = find_variable(ctx, left);
 
     FATALN(!src, node, "No source in assign")
     FATALN(!dst, node, "No dest in assign: %d", left)
-
-    if (node && node->left && node->left->node == A_INDEXDEF)
-        return 0;
 
 #if 0
     node_walk(node);
@@ -4209,7 +4231,9 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
 
             struct variable *res = new_inst_variable(ctx, V_INT, dst->type->bits, dst->type->sign);
             buffer_write(ctx->data, "%%%d = bitcast i%d%s %%%d to i%d%s ; gen_assign cast ptr\n",
-                    res->reg, src->bits, ESTR(stars), src->reg, dst->type->bits, stars2);
+                    res->reg, ELVIS(src->bits, 8),
+                    ESTR(stars),
+                    src->reg, dst->type->bits, stars2);
             if (stars)
                 free(stars);
             if (stars2)
@@ -4638,7 +4662,9 @@ void gen_post(struct gen_context *ctx, struct node *node, int res, const struct 
     } else if (target && target->type != V_VOID) {
         struct variable *var = find_variable(ctx, res);
         char *stars = get_stars(target->ptr);
-        if (var && var->type->type != V_NULL) {
+        if (var && var->type->type == V_VOID) {
+            buffer_write(ctx->post, "ret i32 0 ; RET6\n");
+        } else if (var && var->type->type != V_NULL) {
             var = load_and_cast_to(ctx, var, target, CAST_FLATTEN_PTR);
             res = var->reg;
             if (target->type == V_INT) {
@@ -4875,16 +4901,19 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
         FATALN(!tres, node, "Ternary return type invalid");
         buffer_write(cmpblock, "; TERNARY TRUE\n");
         res = new_variable(ctx, NULL, tres->type->type, tres->type->bits, tres->type->sign, tres->type->ptr, tres->addr, 0);
-        gen_allocate_int(ctx, res->reg, tres->type->bits, tres->type->ptr, 0, 1, 0, NULL);
+        gen_allocate_int(ctx, res->reg,
+            ELVIS(tres->type->bits, 8), tres->type->ptr,
+            0, 1, 0, NULL);
 
         // Restore where we were before the hack
         // We'll shoot ourselves in foot if we caused more than one regnum resevation above for ternary
+        buffer_write(cmpblock, "; TR: %d %d\n", ctx->regnum, ternary_post);
         ctx->regnum = ternary_post;
         ctx->data = cmpblock;
 
         tres = var_cast_to(ctx, tres, res->type);
 
-        gen_assign(ctx, NULL,  res->reg, tres->reg);
+        gen_assign(ctx, NULL,  res->reg, 0, tres->reg);
     }
 
     /* Hack to handle "unnamed" and unreachable branch */
@@ -4907,7 +4936,7 @@ int gen_if(struct gen_context *ctx, struct node *node, int ternary)
             FATALN(!res, node->right, "Invalid ternary");
 
             tres = var_cast_to(ctx, tres, res->type);
-            gen_assign(ctx, NULL,  res->reg, tres->reg);
+            gen_assign(ctx, NULL,  res->reg, 0, tres->reg);
         }
     } else {
         FATALN(ternary, node, "Ternary missing false block!");
@@ -5294,8 +5323,7 @@ void gen_scan_struct_typedef(struct gen_context *ctx, struct node *node)
             //res->ptr = node->ptr;
             //printf("PTRVVV: %d %d %s, id %d\n", node->ptr, res->ptr, res->type_name, res->id);
         } else {
-            res = register_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign);
-            res->custom_type = tmp;
+            res = register_custom_type(ctx, node->value_string, V_CUSTOM, tmp->bits, tmp->sign, tmp);
             res->type_name = node->value_string;
         }
 #if DEBUG
@@ -5633,7 +5661,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 
 int gen_recursive(struct gen_context *ctx, struct node *node)
 {
-    int resleft = 0, resright = 0;
+    int resleft = 0, resright = 0, resmid = 0;
     if (node == NULL)
         return 0;
 
@@ -5774,7 +5802,9 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_return(ctx, node, resleft, resright);
         case A_ASSIGN:
             ctx->last_label = 0;
-            return gen_assign(ctx, node, resleft, resright);
+            if (node->mid)
+                resmid = gen_recursive(ctx, node->mid);
+            return gen_assign(ctx, node, resleft, resmid, resright);
         case A_DEREFERENCE:
             ctx->last_label = 0;
             return gen_dereference(ctx, node, resleft);
