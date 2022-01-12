@@ -9,9 +9,9 @@ typedef __ssize_t (*__io_read_fn2) (void *__cookie, char *__buf, size_t __nbytes
 #endif
 
 
-__ssize_t ff(void *a, char *b, size_t c)
+size_t ff(void *a, char *b, size_t c)
 {
-    return 123;
+    return c + 123;
 }
 
 int main()
@@ -29,6 +29,15 @@ int main()
     __io_read_fn2 fnb = ff;
     __io_read_fn2 fnb2 = fnb;
 #endif
+    size_t res = fnb2(NULL, "Hello1", 100);
+    if (res != 223)
+        return 1;
+    res = fnb(NULL, "Hello2", 200);
+    if (res != 323)
+        return 2;
+    res = ff(NULL, "Hello3", 300);
+    if (res != 423)
+        return 3;
 
 #if 0
     __ssize_t a = fna(cookie, buf, 10);

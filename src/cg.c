@@ -192,6 +192,7 @@ int get_type_list(struct gen_context *ctx, struct node *node);
 const struct type *find_type_by_id(struct gen_context *ctx, int id);
 char *get_param_type_str(struct gen_context *ctx, struct node *node);
 struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global, const char *type_name);
+char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int allocate_params);
 
 void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
 {
@@ -719,7 +720,9 @@ const struct type *__find_type_by(struct gen_context *ctx, enum var_type type, i
         if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0 && ptr == res->ptr)
             return res;
         if (res->type == type && (res->bits == bits || bits == 0 || res->bits == 0) && res->sign == sign && res->ptr == ptr) {
-            if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
+            if (name == NULL)
+                return res;
+            else if (name != NULL && res->name != NULL && strcmp(res->name, name) == 0)
                 return res;
             else if (res->type != V_STRUCT && res->type != V_UNION && res->type != V_CUSTOM && res->type != V_FUNCPTR)
                 return res;
@@ -1216,9 +1219,10 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
         register_type(res, "nulltype", V_NULL, 0, TYPE_UNSIGNED);
         const struct type *null_type = find_type_by(res, V_NULL, 0, TYPE_UNSIGNED, 0);
         FATAL(!null_type, "Couldn't find NULL type");
-        struct variable *null_var = init_variable("NULL", null_type);
+        struct variable *null_var = new_variable(res, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
+        buffer_write(res->init, "@G%u = dso_local global i8* null, align 8\n",
+            null_var->reg);
 
-        register_variable(res, null_var);
         res->null_var = null_var->reg;
     } else {
         res->null_var = parent->null_var;
@@ -1269,7 +1273,10 @@ struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enu
 
     // If bits == 0 and we have a pendign type which matches requested type, use it
     const struct type *pend = custom_type_get(ctx, ctx->pending_type);
-    if (bits == 0 && pend && pend->type == type) {
+    if (type == V_NULL) {
+        bits = 0;
+        sign = TYPE_UNSIGNED;
+    } else if (bits == 0 && pend && pend->type == type) {
         type = pend->type;
         bits = pend->bits;
         sign = pend->sign;
@@ -2138,6 +2145,17 @@ struct variable *gen_load_func(struct gen_context *ctx, struct variable *v)
         return res;
 }
 
+struct variable *gen_load_null(struct gen_context *ctx, struct variable *v)
+{
+    struct variable *res = new_variable_ext(ctx, NULL, V_NULL, 0, TYPE_UNSIGNED, 1, 0, 0, NULL);
+    char *stars = get_stars(v->type->ptr + 1);
+
+    buffer_write(ctx->data, "%%%d = load i8%s, i8%s* %s%u, align 4; gen_load_null\n",
+        res->reg, ESTR(stars),
+        ESTR(stars), REGP(v), v->reg);
+    return res;
+}
+
 struct variable *gen_load(struct gen_context *ctx, struct variable *v)
 {
     if (v == NULL)
@@ -2163,6 +2181,7 @@ struct variable *gen_load(struct gen_context *ctx, struct variable *v)
         case V_FUNCPTR:
             return gen_load_func(ctx, v);
         case V_NULL:
+            return gen_load_null(ctx, v);
         case V_CUSTOM:
             return v;
         default:
@@ -2753,6 +2772,10 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
             pval = NULL;
         else {
             pval = wanted;
+            if (!pval) {
+                printf("a: %u\n", ellipsis);
+                node_walk(param_node);
+            }
             FATAL(!pval, "Too many parameters for %s", func->value_string);
             if (wanted->right && wanted->right->node == A_LIST)
                 pval = wanted->left;
@@ -2766,7 +2789,7 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
         }
 
         int r = gen_recursive(ctx, provided->left);
-        FATALN(!r, provided, "Expected parameter for function call");
+        FATALN(!r, provided, "Expected parameter for function call: %u", r);
 
         struct variable *par = find_variable(ctx, r);
         par = gen_load(ctx, par);
@@ -2875,9 +2898,10 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                 break;
             case V_VOID:
                 if (type_ptr) {
-                    buffer_write(params, "%si8%s %%%d",
+                    buffer_write(params, "%si8%s %s%d",
                         paramcnt > 1 ? ", " : "",
                         ESTR(stars),
+                        REGP(par),
                         par->reg);
                 }
                 break;
@@ -2914,6 +2938,9 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
     FATALN(!func, node, "Invalid function to call");
     //FATALN(!func->func, node, "Not calling a function");
+    struct variable *fn = func;
+    if (!func->func)
+        fn = gen_load(ctx, func);
     enum builtin_function builtin = builtin_func(func->name);
     if (builtin == BUILTIN_VA_START) {
         func->name = "llvm.va_start";
@@ -2967,7 +2994,10 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
         return res->reg;
     }
-    paramstr = gen_call_params(ctx, node->right, func->params, node->left);
+    if (!func->params)
+        paramstr = gen_call_params(ctx, node->right, func->type->params, node->left);
+    else
+        paramstr = gen_call_params(ctx, node->right, func->params, node->left);
     const struct type *func_ret_type = func->type->retval;
     FATAL(!func_ret_type, "Didn't get return type for function: %s", func->name);
     if (func_ret_type->type == V_CUSTOM) {
@@ -2976,22 +3006,31 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
     if (func_ret_type->type == V_INT) {
         res = new_inst_variable(ctx, V_INT, func_ret_type->bits, TYPE_SIGNED);
 
-        buffer_write(ctx->data, "%%%d = call i%u (%s) @%s(%s); FUNCCALL\n",
-                res->reg,
-                func_ret_type->bits,
-            func->paramstr ? func->paramstr : "",
-            func->name,
-            paramstr ? paramstr : "");
+        if (func->func)
+            buffer_write(ctx->data, "%%%d = call i%u (%s) @%s(%s); FUNCCALL int\n",
+                    res->reg,
+                    func_ret_type->bits,
+                func->paramstr ? func->paramstr : "",
+                func->name,
+                paramstr ? paramstr : "");
+        else {
+            buffer_write(ctx->data, "%%%d = call i%u (%s) %%%u(%s); FUNCCALL int\n",
+                    res->reg,
+                    func_ret_type->bits,
+                func->paramstr ? func->paramstr : "",
+                fn->reg,
+                paramstr ? paramstr : "");
+        }
     } else if (func_ret_type->type == V_FLOAT) {
         res = new_inst_variable(ctx, V_FLOAT, func_ret_type->bits, TYPE_SIGNED);
 
-        buffer_write(ctx->data, "%%%d = call double (%s) @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "%%%d = call double (%s) @%s(%s); FUNCCALL float\n",
             res->reg,
             func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
     } else if (func_ret_type->type == V_VOID) {
-        buffer_write(ctx->data, "call void (%s) @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "call void (%s) @%s(%s); FUNCCALL void\n",
             func->paramstr ? func->paramstr : "",
             func->name,
             paramstr ? paramstr : "");
@@ -2999,7 +3038,7 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
         char *stars = get_stars(func_ret_type->ptr);
         res = new_variable_ext(ctx, NULL, V_STRUCT, func_ret_type->bits, func_ret_type->sign, func_ret_type->ptr, 0, 0, func_ret_type->type_name);
         res->direct = 1;
-        buffer_write(ctx->data, "%%%u = call %%struct.%s%s (%s) @%s(%s); FUNCCALL\n",
+        buffer_write(ctx->data, "%%%u = call %%struct.%s%s (%s) @%s(%s); FUNCCALL struct\n",
             res->reg,
             func_ret_type->type_name,
             ESTR(stars),
@@ -4245,6 +4284,8 @@ int gen_assign(struct gen_context *ctx, struct node *node, int left, int right)
             buffer_write(ctx->data, "store %s (%s)* %%%u, %s (%s)** %%%u, align 8\n",
                 s_ret, s_par, src->reg,
                 d_ret, d_par, dst->reg);
+        // Copy parameter str
+        dst->paramstr = strcopy(src_val->paramstr);
     } else {
         ERR("Invalid assign to reg %d from reg %d, to type %s from %s", left, right, type_str(dst->type->type), type_str(src->type->type));
     }
@@ -5453,6 +5494,10 @@ void gen_builtin_bswap(struct gen_context *ctx, struct node *node, int bits)
     }
 }
 
+int gen_null(struct gen_context *ctx, struct node *node)
+{
+    return ctx->null_var;
+}
 
 void gen_scan_builtin(struct gen_context *ctx, struct node *node)
 {
@@ -5752,7 +5797,7 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
             return gen_declaration(ctx, node, resleft, resright);
         case A_NULL:
             ctx->last_label = 0;
-            return ctx->null_var;
+            return gen_null(ctx, node);
         case A_PREINC:
         case A_PREDEC:
         case A_POSTINC:
