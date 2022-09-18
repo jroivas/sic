@@ -126,6 +126,7 @@ struct parse_private {
 void typedef_add(struct scanfile *f, const char *name, struct node *node)
 {
     struct typedef_info *newinfo = calloc(1, sizeof(struct typedef_info));
+
     newinfo->name = name;
     newinfo->node = node;
 
@@ -1352,7 +1353,7 @@ struct node *relational_expression(struct scanfile *f, struct token *token)
         enum nodetype type = A_LT;
         if (accept(f, token, T_EQ))
             type = A_LT_EQ;
-        
+
         struct node *right = relational_expression(f, token);
         FATAL(!right, "Invalid relational expression");
         return make_node(token, type, res, NULL, right);
@@ -1360,7 +1361,7 @@ struct node *relational_expression(struct scanfile *f, struct token *token)
         enum nodetype type = A_GT;
         if (accept(f, token, T_EQ))
             type = A_GT_EQ;
-        
+
         struct node *right = relational_expression(f, token);
         FATAL(!right, "Invalid relational expression");
         return make_node(token, type, res, NULL, right);
@@ -1656,12 +1657,26 @@ struct node *argument_expression_list(struct scanfile *f, struct token *token)
 
 struct node *postfix_expression(struct scanfile *f, struct token *token)
 {
-    struct node *res = primary_expression(f, token);
+    struct node *res = NULL;
 
-    if (!res)
-        return NULL;
+    save_point(f, token);
+    if (accept(f, token, T_ROUND_OPEN)) {
+        struct node *cast_to = type_name(f, token);
+        if (cast_to) {
+            remove_save_point(f, token);
+            cast_to = type_resolve(token, cast_to, 0);
+            expect(f, token, T_ROUND_CLOSE, ")");
+            if (accept(f, token, T_CURLY_OPEN)) {
+                struct node *init_list = initializer_list(f, token);
 
-    // TODO  "[..]", pointers, elements, etc.
+                res = make_node(token, A_CAST, cast_to, NULL, init_list);
+                expect(f, token, T_CURLY_CLOSE, "}");
+                return res;
+            }
+        }
+    }
+    load_point(f, token);
+
     while (1) {
         if (accept(f, token, T_ROUND_OPEN)) {
             struct node *args = argument_expression_list(f, token);
@@ -1692,10 +1707,14 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
             scan(f, token);
 
             res = make_node(token, A_ACCESS, res, NULL, post);
-        } else
-            break;
+        } else {
+            if (res)
+                break;
+            res = primary_expression(f, token);
+            if (!res)
+                break;
+        }
     }
-
     return res;
 }
 
@@ -1796,8 +1815,52 @@ struct node *specifier_qualifier_list(struct scanfile *f, struct token *token)
 
 struct node *direct_abstract_declarator(struct scanfile *f, struct token *token)
 {
-    // TODO
-    return NULL;
+    struct node *res = NULL;
+
+    if (accept(f, token, T_ROUND_OPEN)) {
+        res = abstract_declarator(f, token);
+        expect(f, token, T_ROUND_CLOSE, ")");
+    }
+    if (accept(f, token, T_SQUARE_OPEN)) {
+        struct node *parm;
+        struct node *is_static = NULL;
+        struct node *assig;
+        char *val = token->value_string;
+
+        if (accept(f, token, T_STAR)) {
+            ERR("Not implemented star in abstract expression");
+        } else {
+            if (accept_keyword(f, token, K_STATIC)) {
+                is_static = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+                is_static->is_static = 1;
+                is_static->value_string = val;
+            }
+
+            parm = type_qualifier_list(f, token);
+            if (parm && is_static)
+                parm = make_node(token, A_LIST, is_static, NULL, parm);
+            if (!is_static && accept_keyword(f, token, K_STATIC)) {
+                is_static = make_node(token, A_STORAGE_CLASS, NULL, NULL, NULL);
+                is_static->is_static = 1;
+                is_static->value_string = val;
+                parm = make_node(token, A_LIST, parm, NULL, is_static);
+            }
+
+            assig = assignment_expression(f, token);
+            if (parm && assig)
+                parm = make_node(token, A_LIST, parm, NULL, assig);
+        }
+
+        expect(f, token, T_SQUARE_CLOSE, "]");
+    } else if (accept(f, token, T_ROUND_OPEN)) {
+        struct node *parm = parameter_type_list(f, token);
+        expect(f, token, T_ROUND_CLOSE, ")");
+        if (res)
+            res = make_node(token, A_LIST, res, NULL, parm);
+        else
+            res = parm;
+    }
+    return res;
 }
 
 struct node *abstract_declarator(struct scanfile *f, struct token *token)
@@ -1826,6 +1889,12 @@ struct node *type_name(struct scanfile *f, struct token *token)
 
 struct node *cast_expression(struct scanfile *f, struct token *token)
 {
+    struct node *res = NULL;
+
+    res = unary_expression(f, token);
+    if (res)
+        return res;
+
     save_point(f, token);
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *cast_to = type_name(f, token);
@@ -1841,7 +1910,7 @@ struct node *cast_expression(struct scanfile *f, struct token *token)
     }
     load_point(f, token);
 
-    return unary_expression(f, token);
+    return NULL;
 }
 
 struct node *multiplicative_expression(struct scanfile *f, struct token *token)

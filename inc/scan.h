@@ -112,6 +112,7 @@ void scanfile_close(struct scanfile *f);
 int scan(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword);
+int is_next(struct scanfile *f, struct token *t, enum tokentype token);
 void save_point(struct scanfile *f, struct token *t);
 void remove_save_point(struct scanfile *f, struct token *t);
 void __load_point(struct scanfile *f, struct token *t, const char *file, int line);

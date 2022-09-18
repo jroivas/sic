@@ -165,6 +165,13 @@ int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keywor
     return 0;
 }
 
+int is_next(struct scanfile *f, struct token *t, enum tokentype token)
+{
+    if (t->token == token)
+        return 1;
+    return 0;
+}
+
 static void putback(struct scanfile *f, int c)
 {
     f->putback = c;
