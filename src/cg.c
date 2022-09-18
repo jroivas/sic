@@ -3632,6 +3632,36 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
         //res = var;
         res = new_inst_variable(ctx, V_VOID, 0, TYPE_UNSIGNED);
         buffer_write(ctx->data, "%%%u = alloca i8, align 8; void cast\n", res->reg);
+    } else if (target->type == V_STRUCT) {
+        /* We have struct, handle it */
+        printf("typ: %u\n", var->type->type);
+        if (node->right && node->right->node == A_LIST) {
+            struct node *val;
+            unsigned int idx = 0;
+            char *stars = get_stars(target->ptr);
+
+            res = new_variable_ext(ctx, NULL, V_STRUCT, target->bits, target->sign, target->ptr, 0, 0, target->type_name);
+            buffer_write(ctx->data, "%%%u = alloca %%struct.%s, align 4; struct cast init\n", res->reg, target->type_name);
+
+            /* This is initializer list (OR IS IT?) */
+            val = node->right;
+            while (val) {
+                if (val->left) {
+                    struct node *vnode = val->left;
+                    const struct type *access_type = struct_get_by_index(res->type, idx);
+                    struct variable *tmp_val = new_variable(ctx, NULL, access_type->type, access_type->bits, access_type->sign, 0, 0, 0);
+                    const char *vstars = get_stars(vnode->ptr);
+
+                    buffer_write(ctx->data, "%%%u = getelementptr inbounds %%struct.%s%s, %%struct.%s%s* %%%u, i32 0, i32 %u\n", tmp_val->reg, target->type_name, stars, target->type_name, stars, res->reg, idx);
+                    if (vnode->type == V_INT) {
+                        buffer_write(ctx->data, "store i%u%s %u, i%u%s* %%%u, align %u\n", vnode->bits, vstars, vnode->value, vnode->bits, vstars, tmp_val->reg, align(vnode->bits));
+                    }
+                }
+                idx++;
+                val = val->right;
+            }
+        }
+        //FATALN(1, node, "Invalid cast to struct %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);
     } else {
         FATALN(1, node, "Invalid cast to %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);
     }
