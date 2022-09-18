@@ -1685,6 +1685,25 @@ int gen_allocate_struct_union(struct gen_context *ctx, int reg, const struct typ
         buffer_write(ctx->init, "%%%d = alloca [%u x %%%s.%s%s], align 16 ; gen_allocate_%s\n", var->reg, var->array, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
     } else {
         buffer_write(ctx->init, "%%%d = alloca %%%s.%s%s, align 8 ; gen_allocate_%s\n", var->reg, is_union ? "union" : "struct", t->name, stars, is_union ? "union" : "struct");
+
+        /* Zeroing the struct */
+        if (ptrval == 0) {
+            struct variable *casted;
+            static int __initted = 0;
+
+            if (!__initted) {
+                struct gen_context *global_ctx = get_global_ctx(ctx);
+
+                buffer_write(global_ctx->init, "declare void @llvm.memset.p0i8.i64(i8* nocapture writeonly, i8, i64, i1 immarg)");
+                __initted = 1;
+            }
+
+            casted = new_inst_variable(ctx, V_INT, 8, TYPE_UNSIGNED);
+            buffer_write(ctx->init, "%%%d = bitcast %%%s.%s* %%%d to i%d%s ; gen_%s_cast_to\n",
+                    casted->reg, is_union ? "union" : "struct", t->name, var->reg, 8, "*", is_union ? "union" : "struct");
+
+            buffer_write(ctx->init, "call void @llvm.memset.p0i8.i64(i8* align 4 %%%d, i8 0, i64 %u, i1 false)\n", casted->reg, t->bits / 8);
+        }
     }
     free(stars);
     return reg;
