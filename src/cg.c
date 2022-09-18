@@ -1551,6 +1551,22 @@ struct variable *load_and_cast_to(struct gen_context *ctx, struct variable *src,
     if (!src->direct && (src->type->type != V_STRUCT || (cast_flags & CAST_NO_LOAD_STRUCT) == 0)) {
         src = gen_load(ctx, src);
     }
+    else if (src->type->type == V_STRUCT) {
+        int now_ptr = src->type->ptr;
+        int prev_reg = src->reg;
+        struct variable *res = NULL;
+
+        while (target->ptr < now_ptr) {
+            char *stars = get_stars(now_ptr - 1);
+            res = new_variable_ext(ctx, NULL, V_STRUCT, src->type->bits, src->type->sign, now_ptr - 1, 0, 0, src->type->type_name);
+
+            buffer_write(ctx->data, "%%%u = load %%struct.%s%s, %%struct.%s%s* %%%u, align %u\n", res->reg, src->type->type_name, stars, src->type->type_name, stars, prev_reg, align(src->type->bits));
+            prev_reg = res->reg;
+            now_ptr--;
+        }
+        if (res)
+            src = res;
+    }
 
     return var_cast_to(ctx, src, target);
 }
@@ -2817,9 +2833,15 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
 
             ptype = pval->left;
             FATALN(!ptype, pval, "Invalid parameter");
+            pname = pval->right;
             if (ptype->node == A_ELLIPSIS)
                 ellipsis = 1;
-            pname = pval->right;
+#if 0
+            int t = get_type_list(ctx, ptype);
+            FATALN(t >= 0, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
+            const struct type *par_type = custom_type_get(ctx, find_type_by_id(ctx, REF_CTX(t)));
+            FATALN(!par_type, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
+#endif
         }
 
         int r = gen_recursive(ctx, provided->left);
@@ -2893,7 +2915,6 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
         } else
             target =  &target_raw;
 #endif
-
         switch (target->type) {
             case V_INT:
                 tgt = load_and_cast_to(ctx, par, target, CAST_NO_LOAD_STRUCT);
@@ -2911,11 +2932,12 @@ char *gen_call_params(struct gen_context *ctx, struct node *provided, struct nod
                     tgt->reg);
                 break;
             case V_STRUCT:
+                tgt = load_and_cast_to(ctx, par, target, CAST_NORMAL);
                 buffer_write(params, "%s%%struct.%s%s %%%d",
                     paramcnt > 1 ? ", " : "",
                     type_name,
                     ESTR(stars),
-                    par->reg);
+                    tgt->reg);
                 break;
             case V_UNION:
                 buffer_write(params, "%s%%union.%s%s %%%d",
@@ -3042,15 +3064,15 @@ int gen_func_call(struct gen_context *ctx, struct node *node)
 
         if (func->func)
             buffer_write(ctx->data, "%%%d = call i%u (%s) @%s(%s); FUNCCALL int\n",
-                    res->reg,
-                    func_ret_type->bits,
+                res->reg,
+                func_ret_type->bits,
                 func->paramstr ? func->paramstr : "",
                 func->name,
                 paramstr ? paramstr : "");
         else {
             buffer_write(ctx->data, "%%%d = call i%u (%s) %%%u(%s); FUNCCALL int\n",
-                    res->reg,
-                    func_ret_type->bits,
+                res->reg,
+                func_ret_type->bits,
                 func->paramstr ? func->paramstr : "",
                 fn->reg,
                 paramstr ? paramstr : "");
@@ -3428,6 +3450,24 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         res->is_extern = node->is_extern;
         res->is_static = node->is_static;
         res->is_inline = node->is_inline;
+#if 0
+    } else if (node->node == A_INDEXDEF) {
+        struct type *res2 = NULL;
+
+        /* Special case for indexes like int[2] */
+        res = (struct type *)__gen_type_list_recurse(ctx, node->left, res);
+        res2 = (struct type *)__gen_type_list_recurse(ctx, node->right, res);
+        if (!res)
+            res = res2;
+        if (!res)
+            ERR("Invalid indexdef type");
+        res->name = node->value_string;
+        res->is_const = node->is_const;
+        res->is_extern = node->is_extern;
+        res->is_static = node->is_static;
+        res->is_inline = node->is_inline;
+        return type_wrap_to(ctx, res, node->ptr);
+#endif
     } else {
 fallback_type:
         res = calloc(1, sizeof(struct type));
@@ -3634,7 +3674,6 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
         buffer_write(ctx->data, "%%%u = alloca i8, align 8; void cast\n", res->reg);
     } else if (target->type == V_STRUCT) {
         /* We have struct, handle it */
-        printf("typ: %u\n", var->type->type);
         if (node->right && node->right->node == A_LIST) {
             struct node *val;
             unsigned int idx = 0;
@@ -5240,7 +5279,7 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     if (!func_var) {
         const struct type *func_type = register_type(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED);
         ((struct type*)func_type)->retval = func_ret_type;
-        ((struct type*)func_type)->params =  node->right->left->right;
+        ((struct type*)func_type)->params = node->right->left->right;
         (void)func_node;
 
         func_var = new_variable_ext(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED, 0, 0, 1, func_name);
