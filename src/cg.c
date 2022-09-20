@@ -3646,6 +3646,7 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
         } else {
             // This is truncate so warn
             WARN("Truncating from %d bits to %d bits, this may result lost of precision\n", var->bits, target->bits);
+            res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             buffer_write(ctx->data, "%%%d = trunc i%d %%%d to i%d\n",
                 res->reg, var->bits, var->reg, target->bits);
         }

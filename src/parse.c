@@ -1894,28 +1894,29 @@ struct node *type_name(struct scanfile *f, struct token *token)
 
 struct node *cast_expression(struct scanfile *f, struct token *token)
 {
-    struct node *res = NULL;
-
-    res = unary_expression(f, token);
-    if (res)
-        return res;
-
     save_point(f, token);
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *cast_to = type_name(f, token);
         if (cast_to) {
-            remove_save_point(f, token);
             //FATAL(!cast_to, "No cast type name");
             cast_to = type_resolve(token, cast_to, 0);
             expect(f, token, T_ROUND_CLOSE, ")");
-            struct node *src = cast_expression(f, token);
-            FATAL(!src, "No cast source");
-            return make_node(token, A_CAST, cast_to, NULL, src);
+            /*
+             * "(" type-name ")" "{" initializer-list "}"
+             * is special form and should be handled in
+             * unary_expression. thus skip it now
+             */
+            if (!is_next(f, token, T_CURLY_OPEN)) {
+                struct node *src = cast_expression(f, token);
+                FATAL(!src, "No cast source");
+                remove_save_point(f, token);
+                return make_node(token, A_CAST, cast_to, NULL, src);
+            }
         }
     }
     load_point(f, token);
 
-    return NULL;
+    return unary_expression(f, token);
 }
 
 struct node *multiplicative_expression(struct scanfile *f, struct token *token)
