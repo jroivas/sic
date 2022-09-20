@@ -95,6 +95,8 @@ int main(int argc, char **argv)
         snprintf(outname, 255, "%s.ir", srcname);
         outname[255] = 0;
     }
+    conf.name_in = srcname;
+    conf.name_out = outname;
     outfile = fopen(outname, "w+");
     codegen(outfile, node, &conf);
     fclose(outfile);

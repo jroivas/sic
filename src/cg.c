@@ -4,6 +4,10 @@
 #include "buffer.h"
 #include <string.h>
 
+#include <llvm-c/Analysis.h>
+#include <llvm-c/Core.h>
+#include <llvm-c/BitWriter.h>
+
 #define GLOBAL_START 0x100000
 #define REGP(X) (X->global) ? "@G" : "%"
 static const char *global_ctx_name = "__global_context";
@@ -102,6 +106,8 @@ struct variable {
     int literal;
     int assigned;
     int prototype;
+
+    LLVMValueRef val;
     /*
      * If this is bigger than 0 it's array of "array" elements.
      * In case this is less than 0, it's size is still unknown
@@ -168,12 +174,25 @@ struct gen_context {
 
     char **struct_names;
     unsigned int struct_names_cnt;
+
+    LLVMModuleRef mod_ref;
+    LLVMBuilderRef build_ref;
+    LLVMBasicBlockRef block_ref;
+    LLVMContextRef context_ref;
+    LLVMValueRef func_ref;
+#if 0
+    LLVMTypeRef functype;
+    LLVMValueRef start;
+    LLVMBasicBlockRef entry;
+    LLVMContextRef context;
+#endif
 };
 
 static const char *varstr[] = {
     "void", "null", "i32", "double", "fixed", "string", "struct", "union", "enum", "custom", "builtin", "invalid"
 };
 
+int gen_recurse(struct gen_context *ctx, struct node *node);
 const struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
 int gen_reserve_label(struct gen_context *ctx);
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
@@ -220,6 +239,86 @@ char *get_name(struct variable *var)
         sprintf(res, "%%%d", var->reg);
     }
     return res;
+}
+
+char *llvm_gen_name(void)
+{
+    char *tmp = calloc(1, 256);
+    static unsigned idx = 0;
+
+    snprintf(tmp, 256, "__gen_llvm_sic_name%u", ++idx);
+    tmp[255] = 0;
+    return tmp;
+}
+
+LLVMValueRef llvm_zero_from_sic_type(const struct type *t)
+{
+    switch (t->type) {
+    case V_INT:
+        switch (t->bits) {
+        case 1:
+            return LLVMConstInt(LLVMInt1Type(), 0, 0);
+        case 8:
+            return LLVMConstInt(LLVMInt8Type(), 0, 0);
+        case 16:
+            return LLVMConstInt(LLVMInt16Type(), 0, 0);
+        default:
+        case 32:
+            return LLVMConstInt(LLVMInt32Type(), 0, 0);
+        case 64:
+            return LLVMConstInt(LLVMInt64Type(), 0, 0);
+        case 128:
+            return LLVMConstInt(LLVMInt128Type(), 0, 0);
+        }
+    case V_FLOAT:
+        switch (t->bits) {
+        case 32:
+            return LLVMConstReal(LLVMFloatType(), 0);
+        default:
+        case 64:
+            return LLVMConstReal(LLVMDoubleType(), 0);
+        case 128:
+            return LLVMConstReal(LLVMFP128Type(), 0);
+        }
+    case V_VOID:
+    default:
+        return NULL;
+    }
+}
+
+LLVMTypeRef sic_type_to_llvm_type(const struct type *t)
+{
+    switch (t->type) {
+    case V_INT:
+        switch (t->bits) {
+        case 1:
+            return LLVMInt1Type();
+        case 8:
+            return LLVMInt8Type();
+        case 16:
+            return LLVMInt16Type();
+        default:
+        case 32:
+            return LLVMInt32Type();
+        case 64:
+            return LLVMInt64Type();
+        case 128:
+            return LLVMInt128Type();
+        }
+    case V_FLOAT:
+        switch (t->bits) {
+        case 32:
+            return LLVMFloatType();
+        default:
+        case 64:
+            return LLVMDoubleType();
+        case 128:
+            return LLVMFP128Type();
+        }
+    case V_VOID:
+    default:
+        return LLVMVoidType();
+    }
 }
 
 int align(int bits)
@@ -1192,6 +1291,11 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
 {
     struct gen_context *res = calloc(1, sizeof(struct gen_context));
     res->f = outfile;
+
+    if (parent)
+        res->mod_ref = parent->mod_ref;
+
+
     res->regnum = 1;
     res->labels = 1;
     res->last_label = 0;
@@ -5307,6 +5411,64 @@ void gen_var_pretty_function(struct gen_context *ctx, const char *func_name, con
 
 struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
 {
+    struct node *body = node->right;
+    FATALN(!body, node, "Function body missing");
+
+    struct node *name = body->left;
+    FATALN(!name, node, "Function name missing");
+
+    struct gen_context *func_ctx = init_ctx(ctx->f, ctx);
+
+    const char *func_name = name->value_string;
+    struct variable *func_var = find_variable_by_name(ctx, func_name);
+    const struct type *func_ret_type = gen_type_list_type(ctx, node->left);
+
+    if (!func_var) {
+        const struct type *func_type = register_type(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED);
+
+        ((struct type*)func_type)->retval = func_ret_type;
+        ((struct type*)func_type)->params = node->right->left->right;
+
+        func_var = new_variable_ext(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED, 0, 0, 1, func_name);
+    }
+
+    func_ctx->context_ref = LLVMContextCreate();
+    func_ctx->build_ref = LLVMCreateBuilderInContext(func_ctx->context_ref);
+    LLVMTypeRef functype = LLVMFunctionType(
+        sic_type_to_llvm_type(func_ret_type),
+        NULL, 0, 0
+        );
+
+
+    func_var->val = LLVMAddFunction(ctx->mod_ref, func_name, functype);
+    func_ctx->func_ref = func_var->val;
+    func_ctx->block_ref = LLVMAppendBasicBlockInContext(func_ctx->context_ref, ctx->func_ref, "entry");
+
+    LLVMPositionBuilderAtEnd(func_ctx->build_ref, func_ctx->block_ref);
+
+    LLVMValueRef retval = LLVMConstInt(LLVMInt32TypeInContext(func_ctx->context_ref), 0, 0);
+
+    if (node && node->right && node->right->right)
+        body = node->right->right;
+    else
+        body = NULL;
+    /* Recurse into function body */
+    if (gen_recurse(func_ctx, body))
+        ERR("Failed");
+
+    switch (func_ret_type->type) {
+    case V_INT:
+        LLVMBuildRet(func_ctx->build_ref, retval);
+        break;
+    default:
+    case V_VOID:
+        LLVMBuildRetVoid(func_ctx->build_ref);
+        break;
+    }
+
+    return func_var;
+
+#if 0
     struct node *r = node->right;
     FATALN(!r, node, "Function body missing");
     struct node *name = r->left;
@@ -5373,6 +5535,7 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     if (strcmp(func_name, "main") == 0)
         return func_var;
 
+#endif
     return NULL;
 }
 
@@ -5710,6 +5873,91 @@ void gen_scan_builtin(struct gen_context *ctx, struct node *node)
     gen_scan_builtin(ctx, node->right);
 }
 
+int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
+{
+    /*
+     * In simple form type is on left, and right has name.
+     * More complex form right hand has ASSIGN
+     */
+    int a, b = 0;
+
+    a = gen_recurse(ctx, node->left);
+    if (node->right && node->right->node != A_ASSIGN) {
+        b = gen_recurse(ctx, node->right);
+    } else {
+        ERR("Assign not supported");
+    }
+    if (!a || ! b)
+        return 0;
+
+    const struct type *type = find_type_by_id(ctx, REF_CTX(a));
+    struct variable *var = find_variable(ctx, b);
+    struct variable *res = NULL;
+    if (type && var) {
+        LLVMTypeRef llt = sic_type_to_llvm_type(type);
+
+        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr, 0, 0);
+
+        res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+        LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+        if (zeroval)
+            LLVMBuildStore(ctx->build_ref, zeroval, res->val);
+        else
+            ERR("Unsupported zero for type: %s", stype_str(type));
+    } else
+        ERR("Unsupported declaration");
+
+    return res ? res->reg : 0;
+}
+
+int gen_llvm_if(struct gen_context *ctx, struct node *node)
+{
+    /*
+     * On left hand we have the condition, and true block in mid,
+     * and else on right.
+     */
+    int a, b;
+    printf("llvm_ifgen\n");
+    a = gen_recurse(ctx, node->left);
+
+    LLVMBasicBlockRef true_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMBasicBlockRef false_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMBasicBlockRef out_block;
+    if (!node->right)
+        out_block = false_block;
+    else
+        out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+
+    struct variable *cond_var = find_variable(ctx, a);
+    if (!cond_var || !cond_var->val)
+        ERR("Missing conditional variable");
+
+    LLVMValueRef zeroval = llvm_zero_from_sic_type(cond_var->type);
+    if (!zeroval)
+        ERR("Invalid if zero")
+#if 1
+    LLVMValueRef cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
+        cond_var->val, zeroval, llvm_gen_name());
+    LLVMBuildCondBr(ctx->build_ref, cond, true_block, false_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, true_block);
+    LLVMBuildBr(ctx->build_ref, out_block);
+
+    if (node->right) {
+        LLVMPositionBuilderAtEnd(ctx->build_ref, false_block);
+        LLVMBuildBr(ctx->build_ref, out_block);
+    }
+#else
+    (void)cond;
+    (void)true_block;
+#endif
+    b = gen_recurse(ctx, node->mid);
+    (void)b;
+    (void)out_block;
+
+    return 0;
+}
+
 // First pass to scan types and alloc
 int gen_recursive_allocs(struct gen_context *ctx, struct node *node)
 {
@@ -5985,6 +6233,59 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+#define return_one(a, b) \
+    if (a) return a;\
+    if (b) return b;
+
+int gen_recurse(struct gen_context *ctx, struct node *node)
+{
+    int resleft;
+    int resright;
+    int res = 0;
+
+    if (node == NULL)
+        return 0;
+
+#if 0
+    if (node->left)
+        resleft = gen_recurse(ctx, node->left);
+    if (node->node != A_ACCESS && node->node != A_INDEXDEF && node->right)
+        resright = gen_recurse(ctx, node->right);
+    else
+        resright = 0;
+#endif
+    (void)resright;
+
+    switch (node->node) {
+    case A_FUNCTION:
+        return 0;
+    case A_TYPE_LIST:
+        return get_type_list(ctx, node);
+    case A_DECLARATION:
+        gen_llvm_declaration(ctx, node);
+        break;
+    case A_IDENTIFIER:
+        res = gen_identifier(ctx, node);
+        break;
+    case A_LIST:
+    case A_GLUE:
+        resleft = gen_recurse(ctx, node->left);
+        resright = gen_recurse(ctx, node->right);
+        return_one(resright, resleft);
+        break;
+#if 0
+    case A_IF:
+        res = gen_llvm_if(ctx, node);
+        break;
+#endif
+    default:
+        ERR("Unknown node in code gen: %s", node_str(node));
+        break;
+    }
+
+    return res;
+}
+
 struct gen_context *fake_main(struct gen_context *ctx, struct node *node, int res)
 {
     struct gen_context *main_ctx = init_ctx(ctx->f, ctx);
@@ -6136,6 +6437,52 @@ void free_ctx(struct gen_context *ctx)
 
 int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
 {
+    int res = 0;
+    int got_main = 0;
+    char *error = NULL;
+
+
+    FATAL(!node, "Didn't get a node, most probably parse error!");
+
+    struct gen_context *ctx = init_ctx(outfile, NULL);
+
+    ctx->mod_ref = LLVMModuleCreateWithName(conf->name_in);
+    ctx->context_ref = LLVMContextCreate();
+    ctx->build_ref = LLVMCreateBuilderInContext(ctx->context_ref);
+
+    ctx->conf = conf;
+    ctx->global = 1;
+    ctx->node = node;
+
+    ctx->gen_flags = scan_gens(node);
+
+#if 0
+    if (ctx->gen_flags & GEN_FUNCTION)
+        // Generate __FUNCTION__
+    if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
+        // Generate __PRETTY_FUNCTION__
+#endif
+
+    struct variable *main_var = gen_scan_functions(ctx, node);
+    (void)main_var;
+    (void)got_main;
+
+
+
+    /* Gen bytecode */
+#if 1
+    LLVMVerifyModule(ctx->mod_ref, LLVMPrintMessageAction, &error);
+    LLVMDisposeMessage(error);
+    printf("\n");
+#else
+    (void)error;
+#endif
+    LLVMWriteBitcodeToFile(ctx->mod_ref, conf->name_out);
+    //LLVMDumpModule(ctx->mod_ref);
+
+    return res;
+
+#if 0
     FATAL(!node, "Didn't get a node, most probably parse error!");
     struct gen_context *ctx = init_ctx(outfile, NULL);
     int res;
@@ -6181,4 +6528,5 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
 
     free_ctx(ctx);
     return res;
+#endif
 }

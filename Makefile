@@ -3,14 +3,18 @@ SRC_FILES := src/*.c
 CFLAGS_RELEASE = -std=c99 -Wall -Werror -pedantic -O3 -fPIC -Iinc/
 CFLAGS_DEBUG = -std=c99 -Wall -Werror -pedantic -g -O0 -fPIC -Iinc/
 CFLAGS = $(CFLAGS_DEBUG)
+CFLAGS += $(shell llvm-config --cflags)
+LDFLAGS += $(shell llvm-config --libs)
 
-all: build/sic build/sic-static
+all: build/sic
 
-build/sic-static: build
-	$(CC) $(CFLAGS) -o build/sic-static -static main.c $(SRC_FILES)
+#build/sic-static
+
+#build/sic-static: build
+#	$(CC) $(CFLAGS) -o build/sic-static -static main.c $(SRC_FILES) $(LDFLAGS)
 
 build/sic: build build/libsic.so main.c
-	$(CC) $(CFLAGS) -o build/sic -L build/ main.c build/libsic.so.0
+	$(CC) $(CFLAGS) -o build/sic -L build/ main.c build/libsic.so.0 $(LDFLAGS)
 
 build/libsic.so: $(INC_FILES) $(SRC_FILES)
 	$(CC) $(CFLAGS) -shared -Wl,-soname,libsic.so.0 -o build/libsic.so.0.1 $(SRC_FILES)
@@ -33,11 +37,13 @@ compiletest_notree: build/sic build/tests
 	cat build/tests/test_$(TEST).sic.ir
 
 compiletest: build/sic build/tests
-	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
+	#LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
+	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir.bc
+	llvm-dis build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).sic.ir
 	cat build/tests/test_$(TEST).sic.ir
 
 buildtest: compiletest build/tests
-	llvm-as build/tests/test_$(TEST).sic.ir
+	#llvm-as build/tests/test_$(TEST).sic.ir
 	llc -O0 -relocation-model=pic -filetype=obj build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).ir.o
 	$(CC) build/tests/test_$(TEST).ir.o -o build/tests/test_$(TEST).ir.bin -lm
 

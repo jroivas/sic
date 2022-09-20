@@ -11,6 +11,8 @@ enum type_sign {
 
 struct codegen_config {
     int no_link;
+    const char *name_in;
+    const char *name_out;
 };
 
 int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf);
