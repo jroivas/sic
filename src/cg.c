@@ -3450,7 +3450,6 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         res->is_extern = node->is_extern;
         res->is_static = node->is_static;
         res->is_inline = node->is_inline;
-#if 0
     } else if (node->node == A_INDEXDEF) {
         struct type *res2 = NULL;
 
@@ -3466,8 +3465,15 @@ const struct type *__gen_type_list_recurse(struct gen_context *ctx, struct node 
         res->is_extern = node->is_extern;
         res->is_static = node->is_static;
         res->is_inline = node->is_inline;
-        return type_wrap_to(ctx, res, node->ptr);
-#endif
+        res->ptr = 1;
+        if (node->right && node->right->value > 0) {
+            /* This is most likely thrown away */
+            res->array_size = node->right->value;
+            /* Thus mark it in node */
+            node->right->array_size = node->right->value;
+            node->array_size = node->right->value;
+        }
+        return res;
     } else {
 fallback_type:
         res = calloc(1, sizeof(struct type));
@@ -3575,22 +3581,68 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
     FATALN(!target, node, "Invalid cast target");
     int ptrval = target->ptr;
     if (var->type->type == V_INT && target->type == var->type->type) {
-        if (target->bits == var->type->bits)
+        if (target->bits == var->type->bits && target->ptr == var->type->ptr)
             return var->reg;
-        res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
         if (var->type->ptr) {
             char *stars = get_stars(var->type->ptr);
+
+            res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             buffer_write(ctx->data, "%%%d = ptrtoint i%d%s %%%d to i%d ; gen_cast_to\n",
                 res->reg, var->bits, stars, var->reg, target->bits);
             if (stars)
                 free(stars);
         } else if (target->bits > var->type->bits) {
+            res = new_inst_variable(ctx, V_INT, target->bits, target->sign);
             if (target->sign || var->type->sign)
                 buffer_write(ctx->data, "%%%d = sext i%d %%%d to i%d\n",
                     res->reg, var->bits, var->reg, target->bits);
             else
                 buffer_write(ctx->data, "%%%d = zext i%d %%%d to i%d\n",
                     res->reg, var->bits, var->reg, target->bits);
+        } else if (target->ptr != var->type->ptr && target->bits == var->type->bits) {
+            literalnum arraysize = 0;
+
+            if (node->left && node->left->right && node->left->right->array_size) {
+
+                arraysize = node->left->right->array_size;
+                res = new_variable_ext(ctx,
+                    NULL,
+                    target->type,
+                    target->bits, target->sign,
+                    0, 0, 0, target->type_name);
+                res->array = arraysize;
+                buffer_write(ctx->data, "%%%d = alloca [%d x i%d], align 16\n",
+                    res->reg, arraysize, target->bits);
+            }
+            if (arraysize && node->right && node->right->node == A_LIST) {
+                /*
+                 * Casting list to array, thus most likely initializer
+                 * list.
+                 */
+                struct node *val;
+                unsigned int idx = 0;
+                struct variable *res2;
+
+                res2 = new_variable(ctx, NULL, V_INT, target->bits, target->sign, 1, 0, 0);
+                buffer_write(ctx->data, "%%%u = bitcast [%u x i%u]* %%%u to i%u*\n",
+                    res2->reg, arraysize, target->bits, res->reg, target->bits);
+                val = node->right;
+                while (val) {
+                    if (val->left) {
+                        struct node *vnode = val->left;
+                        struct variable *tmp_val = new_variable(ctx, NULL, target->type, target->bits, target->sign, 0, 0, 0);
+                        const char *vstars = get_stars(vnode->ptr);
+
+                        buffer_write(ctx->data, "%%%u = getelementptr inbounds i%u, i%u* %%%u, i64 %u\n", tmp_val->reg, target->bits, target->bits, res2->reg, idx);
+                        if (vnode->type == V_INT) {
+                            buffer_write(ctx->data, "store i%u%s %u, i%u%s* %%%u, align %u\n", target->bits, vstars, vnode->value, target->bits, vstars, tmp_val->reg, align(vnode->bits));
+                        }
+                    }
+                    idx++;
+                    val = val->right;
+                }
+            } else
+                ERR("same bits but diff ptr: %u != %u", target->ptr, var->type->ptr);
         } else {
             // This is truncate so warn
             WARN("Truncating from %d bits to %d bits, this may result lost of precision\n", var->bits, target->bits);
@@ -3699,7 +3751,8 @@ int gen_cast_to(struct gen_context *ctx, struct node *node, int a, int b)
                 idx++;
                 val = val->right;
             }
-        }
+        } else
+            ERR("Unimpemented struct cast!");
         //FATALN(1, node, "Invalid cast to struct %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);
     } else {
         FATALN(1, node, "Invalid cast to %s from %d, %d reg %d, orig %d", type_str(var->type->type), a, b, var->reg, orig->reg);

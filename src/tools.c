@@ -329,6 +329,8 @@ void __node_walk(struct node *node, int depth, char arm)
     }
     if (node->ptr)
         printf(", ptr %d", node->ptr);
+    if (node->array_size)
+        printf(", arraysize %d", node->array_size);
     printf("\n");
 
     if (node->left)

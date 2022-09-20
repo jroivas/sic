@@ -1849,14 +1849,10 @@ struct node *direct_abstract_declarator(struct scanfile *f, struct token *token)
             assig = assignment_expression(f, token);
             if (parm && assig)
                 parm = make_node(token, A_LIST, parm, NULL, assig);
+            else
+                parm = assig;
 
-            if (parm)
-                res = parm;
-
-            //res = make_node(token, A_INDEXDEF, parm, NULL, assig);
-            // FIXME not indexdef, should be fixed
-            res = make_node(token, A_LIST, parm, NULL, assig);
-            res->ptr = 1;
+            res = make_node(token, A_INDEXDEF, NULL, NULL, parm);
         }
 
         expect(f, token, T_SQUARE_CLOSE, "]");
