@@ -1659,11 +1659,11 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
 {
     struct node *res = NULL;
 
+    /* First handle "(" type-name ")" "{" initializer-list "}" */
     save_point(f, token);
     if (accept(f, token, T_ROUND_OPEN)) {
         struct node *cast_to = type_name(f, token);
         if (cast_to) {
-            remove_save_point(f, token);
             cast_to = type_resolve(token, cast_to, 0);
             expect(f, token, T_ROUND_CLOSE, ")");
             if (accept(f, token, T_CURLY_OPEN)) {
@@ -1671,11 +1671,17 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
 
                 res = make_node(token, A_CAST, cast_to, NULL, init_list);
                 expect(f, token, T_CURLY_CLOSE, "}");
+                remove_save_point(f, token);
                 return res;
             }
         }
     }
     load_point(f, token);
+
+    /* Handle the other cases, they need primary_expression first */
+    res = primary_expression(f, token);
+    if (!res)
+        return NULL;
 
     while (1) {
         if (accept(f, token, T_ROUND_OPEN)) {
@@ -1707,13 +1713,8 @@ struct node *postfix_expression(struct scanfile *f, struct token *token)
             scan(f, token);
 
             res = make_node(token, A_ACCESS, res, NULL, post);
-        } else {
-            if (res)
-                break;
-            res = primary_expression(f, token);
-            if (!res)
-                break;
-        }
+        } else
+            break;
     }
     return res;
 }
