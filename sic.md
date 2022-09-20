@@ -3,7 +3,7 @@
 Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
 
-**REMARK** Most of the features described here are only planned, and **NOT** implemented.
+**REMARK** Most of the features described here are only planned, and **NOT** yet implemented.
 For now the focus has been implementing more or less standard C compiler.
 
 # Limit undefined behavior
@@ -14,7 +14,7 @@ when compiler may do whatever it wants.
 We remove that freedom and try to specify what to do on each of the cases.
 
 Reason is to avoid hard to debug undefined behavior cases.
-Our thesis is, compiler can do good enough (if not optimal) code even with
+Our thesis is, compiler can do good enough code even with
 these rules, and same time prevent unnecessary lost human time.
 
 ## Initialized variables
@@ -26,7 +26,7 @@ This avoids problems with uninitialized variables.
 - Floating and fixed point to 0.0
 - Pointers to NULL
 - Strings to empty string
-- Structures to memset(struct, sizeof(struct), 0)
+- Structures to memset(struct, 0, sizeof(struct))
 
 Example:
 
@@ -64,10 +64,10 @@ On top of that we have specific bit size ints:
 - 64 bits: int64, uint64
 - 128 bits: int128, uint128
 
-Extending to bigger types is trivial, if there comes hardware support.
+Extending to bigger types is trivial, in case hardware support comes available.
 However compiler supports built-in bigint, which allows arbitrary big integers.
 These are not any specific bit/byte size, but can grow any size when needed.
-This of course has it's performance and storage size issues.
+This of course has it's performance and storage size cost.
 Otherwise bigints can be used like any other integer type:
 
     int32 a = 12345;
@@ -77,12 +77,12 @@ Otherwise bigints can be used like any other integer type:
     bigint d = a + b;
     d += c;
 
-For machine word size, there's two types:
+In case it's specificly needed there's two types for machine word size:
 
 - isize: signed machine word size (32/64 bits)
 - usize: unsigned machine word size (32/64 bits)
 
-These can be used to produce optimal code for the target architecture.
+These can be used to produce optimal code for the target architecture. Should not be used in portable code.
 
 ## Integer overflow
 
