@@ -60,6 +60,8 @@ int main(int argc, char **argv)
                 incs = add_inc(incs, inc_cnt, tmp);
             } else if (strcmp(argv[i], "--dump-tree") == 0) {
                 dump_tree = 1;
+            } else if (strcmp(argv[i], "--dump-ir") == 0) {
+                conf.dump = 1;
             } else if (strcmp(argv[i], "--no-cpp") == 0) {
                 do_preprocess = 0;
             } else {

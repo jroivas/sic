@@ -10,6 +10,7 @@ enum type_sign {
 };
 
 struct codegen_config {
+    int dump;
     int no_link;
     const char *name_in;
     const char *name_out;

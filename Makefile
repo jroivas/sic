@@ -38,9 +38,9 @@ compiletest_notree: build/sic build/tests
 
 compiletest: build/sic build/tests
 	#LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
-	LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir.bc
-	llvm-dis build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).sic.ir
-	cat build/tests/test_$(TEST).sic.ir
+	LD_LIBRARY_PATH=build/: build/sic --dump-tree --dump-ir tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir.bc
+	#llvm-dis build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).sic.ir
+	#cat build/tests/test_$(TEST).sic.ir
 
 buildtest: compiletest build/tests
 	#llvm-as build/tests/test_$(TEST).sic.ir

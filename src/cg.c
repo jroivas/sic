@@ -6544,7 +6544,8 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
 
 
     /* Gen bytecode */
-    LLVMDumpModule(ctx->mod_ref);
+    if (conf->dump)
+        LLVMDumpModule(ctx->mod_ref);
 #if 1
     LLVMVerifyModule(ctx->mod_ref, LLVMPrintMessageAction, &error);
     LLVMDisposeMessage(error);
