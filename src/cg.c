@@ -5914,6 +5914,20 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     return res ? res->reg : 0;
 }
 
+int gen_llvm_assign(struct gen_context *ctx, struct node *node)
+{
+    int a, b = 0;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->right);
+
+    struct variable *vara = find_variable(ctx, a);
+    struct variable *varb = find_variable(ctx, b);
+
+    LLVMBuildStore(ctx->build_ref, varb->val, vara->val);
+    return vara->reg;
+}
+
 int gen_llvm_if(struct gen_context *ctx, struct node *node)
 {
     /*
@@ -5925,11 +5939,13 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
 
     LLVMBasicBlockRef true_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
     LLVMBasicBlockRef false_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
-    LLVMBasicBlockRef out_block;
+    LLVMBasicBlockRef out_block = NULL;
+#if 1
     if (!node->right)
         out_block = false_block;
     else
         out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+#endif
 
     struct variable *cond_var = find_variable(ctx, a);
     if (!cond_var || !cond_var->val)
@@ -5961,6 +5977,7 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     LLVMPositionBuilderAtEnd(ctx->build_ref, true_block);
     int rets = ctx->rets;
     b = gen_recurse(ctx, node->mid);
+    (void)b;
     if (rets == ctx->rets)
         LLVMBuildBr(ctx->build_ref, out_block);
 
@@ -5975,7 +5992,11 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
 
     /* Out */
     LLVMPositionBuilderAtEnd(ctx->build_ref, out_block);
-    (void)b;
+    LLVMBasicBlockRef last_block = LLVMGetLastBasicBlock(ctx->func_ref);
+    if (last_block != out_block) {
+        LLVMBuildBr(ctx->build_ref, last_block);
+        LLVMPositionBuilderAtEnd(ctx->build_ref, last_block);
+    }
 
     return 0;
 }
@@ -6334,6 +6355,9 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return gen_llvm_int_const(ctx, node);
     case A_TYPE_LIST:
         return get_type_list(ctx, node);
+    case A_ASSIGN:
+        gen_llvm_assign(ctx, node);
+        break;
     case A_DECLARATION:
         gen_llvm_declaration(ctx, node);
         break;
