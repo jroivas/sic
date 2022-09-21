@@ -5503,8 +5503,8 @@ struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
     else
         body = NULL;
     /* Recurse into function body */
-    if (gen_recurse(func_ctx, body))
-        ERR("Failed");
+    int resval = gen_recurse(func_ctx, body);
+    (void)resval;
 
     if (!func_ctx->last_is_ret) {
         switch (func_ret_type->type) {
@@ -5884,6 +5884,40 @@ int gen_null(struct gen_context *ctx, struct node *node)
     return ctx->null_var;
 }
 
+LLVMValueRef gen_llvm_int_const_ref(int bits, literalnum val, int signext)
+{
+    switch (bits) {
+    case 1:
+        return LLVMConstInt(LLVMInt1Type(), val, signext);
+    case 8:
+        return LLVMConstInt(LLVMInt8Type(), val, signext);
+    case 16:
+        return LLVMConstInt(LLVMInt16Type(), val, signext);
+    default:
+    case 32:
+        return  LLVMConstInt(LLVMInt32Type(), val, signext);
+    case 64:
+        return LLVMConstInt(LLVMInt64Type(), val, signext);
+    case 128:
+        return LLVMConstInt(LLVMInt128Type(), val, signext);
+    }
+    return NULL;
+}
+
+LLVMValueRef gen_llvm_real_const_ref(int bits, double val)
+{
+    switch (bits) {
+    case 32:
+        return  LLVMConstReal(LLVMFloatType(), val);
+    default:
+    case 64:
+        return LLVMConstReal(LLVMDoubleType(), val);
+    case 128:
+        return LLVMConstReal(LLVMFP128Type(), val);
+    }
+    return NULL;
+}
+
 LLVMValueRef sic_cast_llvm(struct gen_context *ctx, struct variable *var, const struct type *type)
 {
     switch (type->type) {
@@ -6113,6 +6147,60 @@ int gen_llvm_add(struct gen_context *ctx, struct node *node)
     return res->reg;
 }
 
+int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
+{
+    struct variable *res = NULL;
+    struct variable *res2 = NULL;
+    int a;
+
+    a = gen_recurse(ctx, node->left);
+    struct variable *vara = find_variable(ctx, a);
+    if (!vara)
+        ERR("Invalid pre/post inc/dec");
+
+    res = new_inst_variable(ctx, vara->type->type, vara->type->bits, vara->type->sign);
+    res2 = new_inst_variable(ctx, vara->type->type, vara->type->bits, vara->type->sign);
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+    LLVMValueRef one;
+    res2->val = va;
+
+    if (vara->type->type == V_INT)
+        one = gen_llvm_int_const_ref(vara->type->bits, 1, 0);
+    else if (vara->type->type == V_FLOAT)
+        one = gen_llvm_real_const_ref(vara->type->bits, 1.0);
+    else
+        ERR("INC/DEC not supported: %s", stype_str(vara->type));
+
+    switch (node->node) {
+    case A_PREINC:
+    case A_POSTINC:
+        if (vara->type->type == V_INT) {
+            res->val = LLVMBuildNSWAdd(ctx->build_ref, va, one,
+                    llvm_gen_name());
+        } else if (vara->type->type == V_FLOAT) {
+            res->val = LLVMBuildFAdd(ctx->build_ref, va, one,
+                    llvm_gen_name());
+        }
+        LLVMBuildStore(ctx->build_ref, res->val, vara->val);
+        break;
+    case A_PREDEC:
+    case A_POSTDEC:
+        if (vara->type->type == V_INT) {
+            res->val = LLVMBuildNSWSub(ctx->build_ref, va, one,
+                    llvm_gen_name());
+        } else if (vara->type->type == V_FLOAT) {
+            res->val = LLVMBuildFSub(ctx->build_ref, va, one,
+                    llvm_gen_name());
+        }
+        LLVMBuildStore(ctx->build_ref, res->val, vara->val);
+        break;
+    default:
+        ERR("Invaliad inc/dec op");
+    }
+
+    return (node->node == A_POSTINC || node->node == A_POSTDEC) ? res2->reg : res->reg;
+}
+
 int gen_llvm_if(struct gen_context *ctx, struct node *node)
 {
     /*
@@ -6204,27 +6292,7 @@ int gen_llvm_int_const(struct gen_context *ctx, struct node *n)
     struct variable *var = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0 ? TYPE_SIGNED : TYPE_UNSIGNED, 0, 0, ctx->global);
     signext = n->value < 0 ? 1 : 0;
 
-    switch (n->bits) {
-    case 1:
-        var->val = LLVMConstInt(LLVMInt1Type(), n->value, signext);
-        break;
-    case 8:
-        var->val = LLVMConstInt(LLVMInt8Type(), n->value, signext);
-        break;
-    case 16:
-        var->val = LLVMConstInt(LLVMInt16Type(), n->value, signext);
-        break;
-    default:
-    case 32:
-        var->val = LLVMConstInt(LLVMInt32Type(), n->value, signext);
-        break;
-    case 64:
-        var->val = LLVMConstInt(LLVMInt64Type(), n->value, signext);
-        break;
-    case 128:
-        var->val = LLVMConstInt(LLVMInt128Type(), n->value, signext);
-        break;
-    }
+    var->val = gen_llvm_int_const_ref(n->bits, n->value, signext);
 
     return var->reg;
 }
@@ -6597,6 +6665,11 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_ADD:
         res = gen_llvm_add(ctx, node);
         break;
+    case A_PREINC:
+    case A_PREDEC:
+    case A_POSTINC:
+    case A_POSTDEC:
+        return gen_llvm_pre_post_op(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
         break;
