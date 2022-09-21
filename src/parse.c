@@ -344,7 +344,7 @@ struct node *make_leaf(struct token *t, enum nodetype node)
         n->bits = 0;
     } else if (t->token == T_DEC_LIT) {
 #if DEBUG
-        printf("  DEC: %llu.%llu\n", t->value, t->fraction);
+        printf("  DEC: %llu.%lf\n", t->value, t->fraction);
 #endif
         n->value = t->value;
         n->fraction = t->fraction;

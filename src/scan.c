@@ -89,7 +89,7 @@ char *token_dump(struct token *t)
             snprintf(tmp, MAX_LEN, "%s (%llu)", token_str(t), t->value);
             break;
         case T_DEC_LIT:
-            snprintf(tmp, MAX_LEN, "%s (%llu.%llu)", token_str(t), t->value, t->fraction);
+            snprintf(tmp, MAX_LEN, "%s (%llu.%lf)", token_str(t), t->value, t->fraction);
             break;
         case T_IDENTIFIER:
             snprintf(tmp, MAX_LEN, "%s (%s)", token_str(t), t->value_string);
@@ -213,6 +213,27 @@ literalnum scan_number(struct scanfile *f, int c)
     putback(f, c);
 
     return res;
+}
+
+double scan_real_number(struct scanfile *f, int c)
+{
+    const char *numbers = "0123456789abcdef";
+    char *p;
+    unsigned int d = 0;
+    double res = 0;
+    double div = 1;
+
+    while ((p = strchr(numbers, tolower(c))) != NULL) {
+        d = (unsigned int)(p - numbers);
+        if (d >= 10)
+            ERR("Invalid digit in number: %c", c);
+        res = res * 10 + d;
+        div *= 10;
+        c = next(f);
+    }
+    putback(f, c);
+
+    return res / div;
 }
 
 char *scan_string(struct scanfile *f, int c, char end_char)
@@ -517,7 +538,8 @@ int scan(struct scanfile *f, struct token *t)
                         ERR("Got only two dots \"..\"");
                 } else if (isdigit(c) || c == ' ') {
                     t->token = T_DEC_LIT;
-                    t->fraction = scan_number(f, c);
+                    //t->fraction = scan_number(f, c);
+                    t->fraction = scan_real_number(f, c);
                 } else {
                     // Next is not number so just make dot token
                     putback(f, c);

@@ -72,7 +72,7 @@ struct token {
     enum keyword_type keyword;
     char *value_string;
     literalnum value;
-    literalnum fraction;
+    double fraction;
 
     const char *filename;
     size_t pos;

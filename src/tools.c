@@ -288,7 +288,7 @@ void __node_walk(struct node *node, int depth, char arm)
             printf("INT: %llu, %d bits %s", node->value, node->bits, node->sign ? "signed" : "unsigned");
             break;
         case A_DEC_LIT:
-            printf("DECIMAL: %llu.%llu", node->value, node->fraction);
+            printf("DECIMAL: %llu.%lf", node->value, node->fraction);
             break;
         case A_STR_LIT:
             printf("STRING: %s", node->value_string);

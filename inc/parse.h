@@ -94,7 +94,7 @@ struct node {
     const char *type_name;
 
     literalnum value;
-    literalnum fraction;
+    double fraction;
     struct token *token;
 
     const char *filename;

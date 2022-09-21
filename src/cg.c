@@ -854,6 +854,11 @@ const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a,
     int wanted_bits;
     int wanted_sign;
 
+    if (a->type == V_NULL)
+        return b;
+    if (b->type == V_NULL)
+        return a;
+
     if (a->type != b->type)
         return NULL;
     /* Make sure a is bigger than b */
@@ -1954,7 +1959,7 @@ int gen_prepare_store_double(struct gen_context *ctx, struct node *n)
     val->literal = 1;
     if (!ctx->global)
         val->assigned = 1;
-    gen_allocate_double(ctx, val->reg, n->bits, 0, 0, n->value, n->fraction);
+    gen_allocate_double(ctx, val->reg, n->bits, 0, 0, n->value, 0/*n->fraction*/);
     n->reg = val->reg;
     return val->reg;
 }
@@ -2037,7 +2042,8 @@ int gen_store_double(struct gen_context *ctx, struct node *n)
     if (val->assigned)
         return val->reg;
 
-    char *tmp = double_str(n->value, n->fraction);
+    //char *tmp = double_str(n->value, n->fraction);
+    char *tmp = double_str(n->value, 0);
 
     buffer_write(ctx->data, "store %s %s, %s* %s%d, align %d ; store_double\n",
             float_str(val->type->bits), tmp, float_str(val->type->bits), REGP(val), val->reg, align(val->type->bits));
@@ -3960,7 +3966,8 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, TYPE_SIGNED, ptrval, addrval, ctx->global);
             var->global = ctx->global;
             var->array = idx_value;
-            res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr, 0, node->value, node->fraction);
+            //res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr, 0, node->value, node->fraction);
+            res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr, 0, node->value, 0);
             break;
         case V_FUNCPTR:
             var = new_variable_ext(ctx, node->value_string, V_FUNCPTR, 64, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
@@ -4341,7 +4348,8 @@ int gen_addr(struct gen_context *ctx, struct node *node, int reg)
                 res->reg, align(res->type->bits)
                 );
         } else if (var->type->type == V_FLOAT) {
-            gen_allocate_double(ctx, res->reg, res->type->bits, res->type->ptr, 1, node->value, node->fraction);
+            //gen_allocate_double(ctx, res->reg, res->type->bits, res->type->ptr, 1, node->value, node->fraction);
+            gen_allocate_double(ctx, res->reg, res->type->bits, res->type->ptr, 1, node->value, 0);
             buffer_write(ctx->data, "store %s%s %%%d, %s%s %s%d, align %d ; gen_addr\n",
                 float_str(var->type->bits),
                 src ? src : "",
@@ -5876,6 +5884,16 @@ int gen_null(struct gen_context *ctx, struct node *node)
     return ctx->null_var;
 }
 
+LLVMValueRef sic_cast_llvm(struct gen_context *ctx, struct variable *var, const struct type *type)
+{
+    switch (type->type) {
+    case V_FLOAT:
+        return LLVMBuildFPCast(ctx->build_ref, var->val, sic_type_to_llvm_type(type), llvm_gen_name());
+    default:
+        ERR("Invalid cast");
+    }
+}
+
 void gen_scan_builtin(struct gen_context *ctx, struct node *node)
 {
     if (!node)
@@ -5927,7 +5945,12 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     struct variable *vara = find_variable(ctx, a);
     struct variable *varb = find_variable(ctx, b);
 
-    LLVMBuildStore(ctx->build_ref, varb->val, vara->val);
+    LLVMValueRef src = varb->val;
+
+    if (vara->type->type != varb->type->type)
+        src = sic_cast_llvm(ctx, varb, vara->type);
+
+    LLVMBuildStore(ctx->build_ref, src, vara->val);
     return vara->reg;
 }
 
@@ -5938,7 +5961,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
      * More complex form right hand has ASSIGN
      */
     int a, b = 0;
-    int is_assign = 1;
+    int is_assign = 0;
 
     a = gen_recurse(ctx, node->left);
     if (node->right && node->right->node != A_ASSIGN) {
@@ -5947,6 +5970,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
             node->right->left) {
         /* Name is on node->right->left */
         b = gen_recurse(ctx, node->right->left);
+        is_assign = 1;
     }
     if (!a || ! b)
         return 0;
@@ -6000,7 +6024,6 @@ LLVMValueRef sic_cast_load_pointer(struct gen_context *ctx, struct variable *var
         return vr_ref;
 }
 
-
 int gen_llvm_eq(struct gen_context *ctx, struct node *node)
 {
     int a, b;
@@ -6014,7 +6037,7 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
     if (!vara || !varb)
         ERR("Invalid eq, can't solve items");
 
-    if (vara->type->type != varb->type->type)
+    if (vara->type->type != varb->type->type && vara->type->type != V_NULL && varb->type->type != V_NULL)
         ERR("Not same type");
 
     const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
@@ -6200,6 +6223,36 @@ int gen_llvm_int_const(struct gen_context *ctx, struct node *n)
         break;
     case 128:
         var->val = LLVMConstInt(LLVMInt128Type(), n->value, signext);
+        break;
+    }
+
+    return var->reg;
+}
+
+int gen_llvm_null(struct gen_context *ctx, struct node *n)
+{
+    struct variable *null_var = new_variable(ctx, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
+    // FIXME
+    null_var->val = LLVMConstNull(LLVMInt32Type());
+
+    return null_var->reg;
+}
+
+int gen_llvm_real_const(struct gen_context *ctx, struct node *n)
+{
+    struct variable *var = new_variable(ctx, NULL, V_FLOAT, n->bits, 1, 0, 0, ctx->global);
+    double val = n->value + n->fraction;
+
+    switch (n->bits) {
+    case 32:
+        var->val = LLVMConstReal(LLVMFloatType(), val);
+        break;
+    default:
+    case 64:
+        var->val = LLVMConstReal(LLVMDoubleType(), val);
+        break;
+    case 128:
+        var->val = LLVMConstReal(LLVMFP128Type(), val);
         break;
     }
 
@@ -6510,6 +6563,10 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return 0;
     case A_INT_LIT:
         return gen_llvm_int_const(ctx, node);
+    case A_DEC_LIT:
+        return gen_llvm_real_const(ctx, node);
+    case A_NULL:
+        return gen_llvm_null(ctx, node);
     case A_TYPE_LIST:
         return get_type_list(ctx, node);
     case A_ASSIGN:
