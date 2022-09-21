@@ -200,6 +200,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_negate(struct gen_context *ctx, struct node *node, int a);
 struct variable *gen_load(struct gen_context *ctx, struct variable *v);
 struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global);
+struct variable *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type, int ptr, int addr, int global);
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, literalnum val, struct node *node);
 struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, struct variable *res, struct variable *idx_var, int index);
 const struct type *gen_type_list_type(struct gen_context *ctx, struct node *node);
@@ -247,8 +248,8 @@ char *llvm_gen_name(void)
     char *tmp = calloc(1, 256);
     static unsigned idx = 0;
 
-    //snprintf(tmp, 256, "__gen_llvm_sic_name%u", ++idx);
-    snprintf(tmp, 256, "__sic_tmp%u", ++idx);
+    //snprintf(tmp, 256, "__sic_tmp%u", ++idx);
+    snprintf(tmp, 256, "__%u", ++idx);
     tmp[255] = 0;
     return tmp;
 }
@@ -848,6 +849,40 @@ const struct type *find_type_by_name(struct gen_context *ctx, const char *name)
     return NULL;
 }
 
+const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a, const struct type *b)
+{
+    int wanted_bits;
+    int wanted_sign;
+
+    if (a->type != b->type)
+        return NULL;
+    /* Make sure a is bigger than b */
+    if (b->bits > a->bits) {
+        const struct type *tmp = a;
+        a = b;
+        b = tmp;
+    }
+    wanted_bits = a->bits;
+    wanted_sign = a->sign;
+    /* Check for signess */
+    if (a->sign != b->sign) {
+        /*
+         * If we have same bits we might have an issue. For now force
+         * unsigned.
+         */
+        if (a->bits == b->bits)
+            wanted_sign = 0;
+    }
+    /* If pointer value differs we have issue */
+#if 0
+    if (a->ptr != b->ptr)
+        ERR("Pointer value differs in type!");
+#endif
+    //return __find_type_by(ctx, a->type, wanted_bits, wanted_sign, a->ptr, NULL);
+    return __find_type_by(ctx, a->type, wanted_bits, wanted_sign, 0, NULL);
+}
+
+
 const struct type *find_type_by(struct gen_context *ctx, enum var_type type, int bits, enum type_sign sign, int ptr)
 {
     return __find_type_by(ctx, type, bits, sign, ptr, NULL);
@@ -1428,6 +1463,11 @@ struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enu
 struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global)
 {
     return new_variable_ext(ctx, name, type, bits, sign, ptr, addr, global, NULL);
+}
+
+struct variable *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type, int ptr, int addr, int global)
+{
+    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, ptr, addr, global, type->name);
 }
 
 struct variable *new_inst_variable(struct gen_context *ctx,
@@ -5877,43 +5917,6 @@ void gen_scan_builtin(struct gen_context *ctx, struct node *node)
     gen_scan_builtin(ctx, node->right);
 }
 
-int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
-{
-    /*
-     * In simple form type is on left, and right has name.
-     * More complex form right hand has ASSIGN
-     */
-    int a, b = 0;
-
-    a = gen_recurse(ctx, node->left);
-    if (node->right && node->right->node != A_ASSIGN) {
-        b = gen_recurse(ctx, node->right);
-    } else {
-        ERR("Assign not supported");
-    }
-    if (!a || ! b)
-        return 0;
-
-    const struct type *type = find_type_by_id(ctx, REF_CTX(a));
-    struct variable *var = find_variable(ctx, b);
-    struct variable *res = NULL;
-    if (type && var) {
-        LLVMTypeRef llt = sic_type_to_llvm_type(type);
-
-        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr, 0, 0);
-
-        res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
-        LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
-        if (zeroval)
-            LLVMBuildStore(ctx->build_ref, zeroval, res->val);
-        else
-            ERR("Unsupported zero for type: %s", stype_str(type));
-    } else
-        ERR("Unsupported declaration");
-
-    return res ? res->reg : 0;
-}
-
 int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 {
     int a, b = 0;
@@ -5926,6 +5929,165 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 
     LLVMBuildStore(ctx->build_ref, varb->val, vara->val);
     return vara->reg;
+}
+
+int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
+{
+    /*
+     * In simple form type is on left, and right has name.
+     * More complex form right hand has ASSIGN
+     */
+    int a, b = 0;
+    int is_assign = 1;
+
+    a = gen_recurse(ctx, node->left);
+    if (node->right && node->right->node != A_ASSIGN) {
+        b = gen_recurse(ctx, node->right);
+    } else if (node->right && node->right->node == A_ASSIGN &&
+            node->right->left) {
+        /* Name is on node->right->left */
+        b = gen_recurse(ctx, node->right->left);
+    }
+    if (!a || ! b)
+        return 0;
+
+    const struct type *type = find_type_by_id(ctx, REF_CTX(a));
+    struct variable *var = find_variable(ctx, b);
+    struct variable *res = NULL;
+    if (type && var) {
+        LLVMTypeRef llt = sic_type_to_llvm_type(type);
+
+        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr + 1, 0, 0);
+
+        res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+        if (!is_assign) {
+            LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+            if (zeroval)
+                LLVMBuildStore(ctx->build_ref, zeroval, res->val);
+            else
+                ERR("Unsupported zero for type: %s", stype_str(type));
+        }
+    } else
+        ERR("Unsupported declaration");
+
+    if (is_assign) {
+        /* Recurse separately for the assign after declaration */
+        gen_recurse(ctx, node->right);
+    }
+
+    return res ? res->reg : 0;
+}
+
+LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, const struct type *t)
+{
+    LLVMValueRef res = var->val;
+
+    if (t->bits > var->type->bits) {
+        res = LLVMBuildBitCast(ctx->build_ref,
+            var->val, sic_type_to_llvm_type(t), llvm_gen_name());
+    }
+    return res;
+}
+
+LLVMValueRef sic_cast_load_pointer(struct gen_context *ctx, struct variable *var, const struct type *type)
+{
+        LLVMValueRef vref = gen_llvm_cast_to(ctx, var, type);
+        LLVMValueRef vr_ref = vref;
+        if (var->type->ptr)
+            vr_ref = LLVMBuildLoad2(ctx->build_ref,
+                sic_type_to_llvm_type(type),
+                vref, llvm_gen_name());
+        return vr_ref;
+}
+
+
+int gen_llvm_eq(struct gen_context *ctx, struct node *node)
+{
+    int a, b;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->right);
+
+    struct variable *vara = find_variable(ctx, a);
+    struct variable *varb = find_variable(ctx, b);
+
+    if (!vara || !varb)
+        ERR("Invalid eq, can't solve items");
+
+    if (vara->type->type != varb->type->type)
+        ERR("Not same type");
+
+    const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
+    if (!restype)
+        ERR("Can't solve type");
+
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
+    if (restype->type == V_INT) {
+        LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+        LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+
+        res->val = LLVMBuildICmp(ctx->build_ref,
+            node->node == A_EQ_OP ? LLVMIntEQ : LLVMIntNE,
+            va, vb, llvm_gen_name());
+    } else if (restype->type == V_FLOAT) {
+        LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+        LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+
+        res->val = LLVMBuildFCmp(ctx->build_ref,
+            node->node == A_EQ_OP ? LLVMRealOEQ : LLVMRealONE,
+            va, vb, llvm_gen_name());
+    } else
+        ERR("Invalid compare");
+
+    return res->reg;
+}
+
+int gen_llvm_add(struct gen_context *ctx, struct node *node)
+{
+    int a, b;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->right);
+
+    struct variable *vara = find_variable(ctx, a);
+    struct variable *varb = find_variable(ctx, b);
+    struct variable *res = NULL;
+
+    if (!vara || !varb)
+        ERR("Invalid addition, can't solve items");
+
+    if (vara->type->type != varb->type->type)
+        ERR("Not same type");
+    const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
+    if (!restype)
+        ERR("Can't solve type");
+
+    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    switch (restype->type) {
+    case V_INT:
+        {
+            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+            if (!va || !vb)
+                ERR("Cast failed");
+            res->val = LLVMBuildAdd(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        }
+        break;
+    case V_FLOAT:
+        {
+            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+            if (!va || !vb)
+                ERR("Cast failed");
+            res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        }
+        break;
+    default:
+        ERR("Addition not supported for %s", stype_str(restype));
+    }
+    return res->reg;
 }
 
 int gen_llvm_if(struct gen_context *ctx, struct node *node)
@@ -5956,13 +6118,7 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
         ERR("Invalid if zero")
 
     /* Condition */
-#if 0
-    LLVMValueRef cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
-        cond_var->val, zeroval, llvm_gen_name());
-#else
-    LLVMValueRef cond_val_ref = LLVMBuildLoad2(ctx->build_ref,
-        sic_type_to_llvm_type(cond_var->type),
-        cond_var->val, llvm_gen_name());
+    LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
     LLVMValueRef cond;
     if (cond_var->type->type == V_INT)
         cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
@@ -5970,7 +6126,8 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     else if (cond_var->type->type == V_FLOAT)
         cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealONE,
             cond_val_ref, zeroval, llvm_gen_name());
-#endif
+    else
+        ERR("Invalid compare");
     LLVMBuildCondBr(ctx->build_ref, cond, true_block, false_block);
 
     /* True */
@@ -6375,6 +6532,13 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         break;
     case A_RETURN:
         res = gen_llvm_return(ctx, node);
+        break;
+    case A_EQ_OP:
+    case A_NE_OP:
+        res = gen_llvm_eq(ctx, node);
+        break;
+    case A_ADD:
+        res = gen_llvm_add(ctx, node);
         break;
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
