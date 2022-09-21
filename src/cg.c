@@ -849,6 +849,8 @@ const struct type *find_type_by_name(struct gen_context *ctx, const char *name)
     return NULL;
 }
 
+#define swaptype(a, b) do { const struct type *tmp = a; a = b; b = tmp; } while(0)
+
 const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a, const struct type *b)
 {
     int wanted_bits;
@@ -859,14 +861,16 @@ const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a,
     if (b->type == V_NULL)
         return a;
 
-    if (a->type != b->type)
-        return NULL;
-    /* Make sure a is bigger than b */
-    if (b->bits > a->bits) {
-        const struct type *tmp = a;
-        a = b;
-        b = tmp;
+    if (a->type != b->type) {
+        if (a->type == V_FLOAT && b->type == V_INT);
+        else if (a->type == V_INT && b->type == V_FLOAT)
+            swaptype(a, b);
+        else
+            return NULL;
     }
+    /* Make sure a is bigger than b */
+    if (b->bits > a->bits)
+        swaptype(a, b);
     wanted_bits = a->bits;
     wanted_sign = a->sign;
     /* Check for signess */
@@ -1656,7 +1660,7 @@ struct variable *gen_bits_cast(struct gen_context *ctx, struct variable *v1, int
             return v1;
         res = new_inst_variable(ctx, V_FLOAT, bits2, TYPE_SIGNED);
         buffer_write(ctx->data, "%%%d = fpext %s %%%d to %s\n",
-            res->reg,float_str(bits1), v1->reg, float_str(bits2));
+            res->reg, float_str(bits1), v1->reg, float_str(bits2));
     } else
         ERR("Can't cast");
     res->value = v1->value;
@@ -6040,9 +6044,26 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
 {
     LLVMValueRef res = var->val;
 
-    if (t->bits > var->type->bits) {
+    if (t->type != var->type->type) {
+        if (t->type == V_FLOAT && var->type->type == V_INT) {
+            if (var->type->sign)
+                res = LLVMBuildSIToFP(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+            else
+                res = LLVMBuildSIToFP(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+        } else if (t->type == V_INT && var->type->type == V_FLOAT) {
+            if (t->sign)
+                res = LLVMBuildFPToSI(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+            else
+                res = LLVMBuildFPToUI(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+        } else
+            ERR("Unknown cast");
+    } else if (t->type == var->type->type && t->bits > var->type->bits) {
         res = LLVMBuildBitCast(ctx->build_ref,
-            var->val, sic_type_to_llvm_type(t), llvm_gen_name());
+                var->val, sic_type_to_llvm_type(t), llvm_gen_name());
     }
     return res;
 }
@@ -6091,7 +6112,7 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
         LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
 
         res->val = LLVMBuildFCmp(ctx->build_ref,
-            node->node == A_EQ_OP ? LLVMRealOEQ : LLVMRealONE,
+            node->node == A_EQ_OP ? LLVMRealOEQ : LLVMRealUNE,
             va, vb, llvm_gen_name());
     } else
         ERR("Invalid compare");
@@ -6138,6 +6159,84 @@ int gen_llvm_add(struct gen_context *ctx, struct node *node)
             if (!va || !vb)
                 ERR("Cast failed");
             res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        }
+        break;
+    default:
+        ERR("Addition not supported for %s", stype_str(restype));
+    }
+    return res->reg;
+}
+
+int gen_llvm_negate(struct gen_context *ctx, struct node *node)
+{
+    struct variable *res = NULL;
+    int a;
+
+    a = gen_recurse(ctx, node->left);
+    struct variable *vara = find_variable(ctx, a);
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+
+    LLVMValueRef zero;
+
+    res = new_variable_from_type(ctx, NULL, vara->type, 0, 0, 0);
+    switch (vara->type->type) {
+    case V_INT:
+        zero = gen_llvm_int_const_ref(vara->type->bits, 0, 0);
+        res->val = LLVMBuildNSWSub(ctx->build_ref, zero, va,
+                llvm_gen_name());
+        break;
+    case V_FLOAT:
+        zero = gen_llvm_real_const_ref(vara->type->bits, 0.0);
+        res->val = LLVMBuildFSub(ctx->build_ref, zero, va,
+                llvm_gen_name());
+        break;
+    default:
+        ERR("Invalid negate");
+    }
+
+    return res->reg;
+}
+
+int gen_llvm_mul(struct gen_context *ctx, struct node *node)
+{
+    int a, b;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->right);
+
+    struct variable *vara = find_variable(ctx, a);
+    struct variable *varb = find_variable(ctx, b);
+    struct variable *res = NULL;
+
+    if (!vara || !varb)
+        ERR("Invalid addition, can't solve items");
+
+    if (vara->type->type != varb->type->type)
+        ERR("Not same type");
+    const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
+    if (!restype)
+        ERR("Can't solve type");
+
+    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    switch (restype->type) {
+    case V_INT:
+        {
+            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+            if (!va || !vb)
+                ERR("Cast failed");
+            res->val = LLVMBuildMul(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        }
+        break;
+    case V_FLOAT:
+        {
+            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+            if (!va || !vb)
+                ERR("Cast failed");
+            res->val = LLVMBuildFMul(ctx->build_ref, va, vb,
                 llvm_gen_name());
         }
         break;
@@ -6201,6 +6300,83 @@ int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
     return (node->node == A_POSTINC || node->node == A_POSTDEC) ? res2->reg : res->reg;
 }
 
+int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
+{
+    struct variable *res;
+    int a, b;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->right);
+
+    struct variable *vara = find_variable(ctx, a);
+    struct variable *varb = find_variable(ctx, b);
+
+    const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
+    if (!restype)
+        ERR("Can't solve type: %s %s", stype_str(vara->type), stype_str(varb->type));
+
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+    LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+
+    if (!(restype->type == V_INT || restype->type == V_FLOAT))
+        ERR("Invalid op assign type");
+
+    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    switch (node->node) {
+    case A_ADD_ASSIGN:
+        if (restype->type == V_INT)
+            res->val = LLVMBuildNSWAdd(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
+    case A_SUB_ASSIGN:
+        if (restype->type == V_INT)
+            res->val = LLVMBuildNSWSub(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildFSub(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
+    case A_MUL_ASSIGN:
+        if (restype->type == V_INT)
+            res->val = LLVMBuildNSWMul(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildFMul(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
+    case A_DIV_ASSIGN:
+        if (restype->type == V_FLOAT)
+            res->val = LLVMBuildFDiv(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else if (restype->sign)
+            res->val = LLVMBuildSDiv(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildUDiv(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
+    case A_MOD_ASSIGN:
+        if (restype->type == V_FLOAT)
+            res->val = LLVMBuildFRem(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else if (restype->sign)
+            res->val = LLVMBuildSRem(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildURem(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
+    default:
+        ERR("Invalid op assign");
+    }
+    LLVMBuildStore(ctx->build_ref, res->val, vara->val);
+
+    return res->reg;
+}
+
 int gen_llvm_if(struct gen_context *ctx, struct node *node)
 {
     /*
@@ -6235,7 +6411,7 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
         cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
             cond_val_ref, zeroval, llvm_gen_name());
     else if (cond_var->type->type == V_FLOAT)
-        cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealONE,
+        cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealUNE,
             cond_val_ref, zeroval, llvm_gen_name());
     else
         ERR("Invalid compare");
@@ -6665,11 +6841,27 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_ADD:
         res = gen_llvm_add(ctx, node);
         break;
+    case A_MUL:
+        res = gen_llvm_mul(ctx, node);
+        break;
+    case A_ADD_ASSIGN:
+    case A_SUB_ASSIGN:
+    case A_MUL_ASSIGN:
+    case A_DIV_ASSIGN:
+    case A_MOD_ASSIGN:
+    case A_LEFT_ASSIGN:
+    case A_RIGHT_ASSIGN:
+    case A_AND_ASSIGN:
+    case A_OR_ASSIGN:
+    case A_XOR_ASSIGN:
+        return gen_llvm_op_assign(ctx, node);
     case A_PREINC:
     case A_PREDEC:
     case A_POSTINC:
     case A_POSTDEC:
         return gen_llvm_pre_post_op(ctx, node);
+    case A_NEGATE:
+        return gen_llvm_negate(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
         break;
