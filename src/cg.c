@@ -6120,7 +6120,7 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
     return res->reg;
 }
 
-int gen_llvm_add(struct gen_context *ctx, struct node *node)
+int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
 {
     int a, b;
 
@@ -6134,32 +6134,92 @@ int gen_llvm_add(struct gen_context *ctx, struct node *node)
     if (!vara || !varb)
         ERR("Invalid addition, can't solve items");
 
-    if (vara->type->type != varb->type->type)
-        ERR("Not same type");
     const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
     if (!restype)
         ERR("Can't solve type");
 
     res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
+    LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+    if (!va || !vb)
+        ERR("Cast failed");
+
     switch (restype->type) {
     case V_INT:
-        {
-            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
-            if (!va || !vb)
-                ERR("Cast failed");
-            res->val = LLVMBuildAdd(ctx->build_ref, va, vb,
+        switch (op) {
+        case A_ADD:
+            res->val = LLVMBuildNSWAdd(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            break;
+        case A_MINUS:
+            res->val = LLVMBuildNSWSub(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_MUL:
+            res->val = LLVMBuildNSWMul(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_DIV:
+            if (restype->sign)
+                res->val = LLVMBuildSDiv(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            else
+                res->val = LLVMBuildUDiv(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            break;
+        case A_MOD:
+            if (restype->sign)
+                res->val = LLVMBuildSRem(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            else
+                res->val = LLVMBuildURem(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            break;
+        case A_OR:
+            res->val = LLVMBuildOr(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_XOR:
+            res->val = LLVMBuildXor(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_AND:
+            res->val = LLVMBuildAnd(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        default:
+            ERR("Invalid integer arithmetic operation: %s", node_str(node));
         }
         break;
     case V_FLOAT:
-        {
-            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
-            if (!va || !vb)
-                ERR("Cast failed");
+        switch (op) {
+        case A_ADD:
             res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            break;
+        case A_MINUS:
+            res->val = LLVMBuildFSub(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_MUL:
+            res->val = LLVMBuildFMul(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_DIV:
+            res->val = LLVMBuildFDiv(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_MOD:
+            res->val = LLVMBuildFRem(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_OR:
+        case A_XOR:
+        case A_AND:
+            ERR("Invalid %s, bitwise operations supported only for integer types", node_str(node));
+            break;
+        default:
+            ERR("Invalid floating arithmetic operation: %s", node_str(node));
         }
         break;
     default:
@@ -6195,54 +6255,6 @@ int gen_llvm_negate(struct gen_context *ctx, struct node *node)
         ERR("Invalid negate");
     }
 
-    return res->reg;
-}
-
-int gen_llvm_mul(struct gen_context *ctx, struct node *node)
-{
-    int a, b;
-
-    a = gen_recurse(ctx, node->left);
-    b = gen_recurse(ctx, node->right);
-
-    struct variable *vara = find_variable(ctx, a);
-    struct variable *varb = find_variable(ctx, b);
-    struct variable *res = NULL;
-
-    if (!vara || !varb)
-        ERR("Invalid addition, can't solve items");
-
-    if (vara->type->type != varb->type->type)
-        ERR("Not same type");
-    const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
-    if (!restype)
-        ERR("Can't solve type");
-
-    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
-    switch (restype->type) {
-    case V_INT:
-        {
-            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
-            if (!va || !vb)
-                ERR("Cast failed");
-            res->val = LLVMBuildMul(ctx->build_ref, va, vb,
-                llvm_gen_name());
-        }
-        break;
-    case V_FLOAT:
-        {
-            LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-            LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
-            if (!va || !vb)
-                ERR("Cast failed");
-            res->val = LLVMBuildFMul(ctx->build_ref, va, vb,
-                llvm_gen_name());
-        }
-        break;
-    default:
-        ERR("Addition not supported for %s", stype_str(restype));
-    }
     return res->reg;
 }
 
@@ -6369,8 +6381,26 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
             res->val = LLVMBuildURem(ctx->build_ref, va, vb,
                     llvm_gen_name());
         break;
+    case A_OR_ASSIGN:
+        if (restype->type != V_INT)
+            ERR("Invalid OR, bitwise operations supported only for integer types");
+        res->val = LLVMBuildOr(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        break;
+    case A_XOR_ASSIGN:
+        if (restype->type != V_INT)
+            ERR("Invalid XOR, bitwise operations supported only for integer types");
+        res->val = LLVMBuildXor(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        break;
+    case A_AND_ASSIGN:
+        if (restype->type != V_INT)
+            ERR("Invalid XOR, bitwise operations supported only for integer types");
+        res->val = LLVMBuildAnd(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        break;
     default:
-        ERR("Invalid op assign");
+        ERR("Invalid op assign: %s", node_str(node));
     }
     LLVMBuildStore(ctx->build_ref, res->val, vara->val);
 
@@ -6839,10 +6869,14 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         res = gen_llvm_eq(ctx, node);
         break;
     case A_ADD:
-        res = gen_llvm_add(ctx, node);
-        break;
+    case A_MINUS:
     case A_MUL:
-        res = gen_llvm_mul(ctx, node);
+    case A_DIV:
+    case A_MOD:
+    case A_OR:
+    case A_XOR:
+    case A_AND:
+        res = gen_llvm_op(ctx, node, node->node);
         break;
     case A_ADD_ASSIGN:
     case A_SUB_ASSIGN:
