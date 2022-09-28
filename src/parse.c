@@ -991,10 +991,34 @@ struct node *type_specifier(struct scanfile *f, struct token *token)
         res = make_type_spec(token, V_VOID, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "char") == 0)
         res = make_type_spec(token, V_INT, 8, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "int8") == 0)
+        res = make_type_spec(token, V_INT, 8, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "uint8") == 0)
+        res = make_type_spec(token, V_INT, 8, PARSE_UNSIGNED, token->value_string);
+    else if (strcmp(token->value_string, "int16") == 0)
+        res = make_type_spec(token, V_INT, 16, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "uint16") == 0)
+        res = make_type_spec(token, V_INT, 16, PARSE_UNSIGNED, token->value_string);
+    else if (strcmp(token->value_string, "int32") == 0)
+        res = make_type_spec(token, V_INT, 32, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "uint32") == 0)
+        res = make_type_spec(token, V_INT, 32, PARSE_UNSIGNED, token->value_string);
+    else if (strcmp(token->value_string, "int64") == 0)
+        res = make_type_spec(token, V_INT, 64, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "uint64") == 0)
+        res = make_type_spec(token, V_INT, 64, PARSE_UNSIGNED, token->value_string);
+    else if (strcmp(token->value_string, "int128") == 0)
+        res = make_type_spec(token, V_INT, 128, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "uint128") == 0)
+        res = make_type_spec(token, V_INT, 128, PARSE_UNSIGNED, token->value_string);
     else if (strcmp(token->value_string, "int") == 0)
         res = make_type_spec(token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "unsigned") == 0)
         res = make_type_spec(token, V_INT, 0, PARSE_UNSIGNED, token->value_string);
+    else if (strcmp(token->value_string, "isize") == 0)
+        res = make_type_spec(token, V_INT, sizeof(ssize_t) * 8, PARSE_SIGNED, token->value_string);
+    else if (strcmp(token->value_string, "usize") == 0)
+        res = make_type_spec(token, V_INT, sizeof(size_t) * 8, PARSE_UNSIGNED, token->value_string);
     else if (strcmp(token->value_string, "signed") == 0)
         res = make_type_spec(token, V_INT, 0, PARSE_SIGNED, token->value_string);
     else if (strcmp(token->value_string, "short") == 0)

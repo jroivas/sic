@@ -183,6 +183,7 @@ struct gen_context {
     LLVMContextRef context_ref;
     LLVMValueRef func_ref;
     LLVMValueRef init_func_ref;
+    LLVMBasicBlockRef last_out_ref;
 #if 0
     LLVMTypeRef functype;
     LLVMValueRef start;
@@ -195,6 +196,7 @@ static const char *varstr[] = {
     "void", "null", "i32", "double", "fixed", "string", "struct", "union", "enum", "custom", "builtin", "invalid"
 };
 
+LLVMValueRef sic_cast_load_pointer(struct gen_context *ctx, struct variable *var, const struct type *type);
 int gen_recurse(struct gen_context *ctx, struct node *node);
 const struct type *resolve_return_type(struct gen_context *ctx, struct node *node, int reg);
 int gen_reserve_label(struct gen_context *ctx);
@@ -1328,6 +1330,9 @@ void register_builtin_types(struct gen_context *ctx)
     register_type(ctx, "long", V_INT, 64, TYPE_SIGNED);
     register_type(ctx, "unsigned long", V_INT, 64, TYPE_UNSIGNED);
 
+    register_type(ctx, "__int128", V_INT, 128, TYPE_SIGNED);
+    register_type(ctx, "unsigned __int128", V_INT, 128, TYPE_UNSIGNED);
+
     register_type(ctx, "float", V_FLOAT, 32, TYPE_SIGNED);
     register_type(ctx, "double", V_FLOAT, 64, TYPE_SIGNED);
     register_type(ctx, "long double", V_FLOAT, 128, TYPE_SIGNED);
@@ -1367,27 +1372,10 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->data = buffer_init();
     res->post = buffer_init();
 
+    res->last_out_ref = NULL;
+
     if (!parent)
         register_builtin_types(res);
-
-    if (!parent) {
-        // Register singleton NULL variable to global context
-        register_type(res, "nulltype", V_NULL, 0, TYPE_UNSIGNED);
-        const struct type *null_type = find_type_by(res, V_NULL, 0, TYPE_UNSIGNED, 0);
-        FATAL(!null_type, "Couldn't find NULL type");
-#if 1
-        struct variable *null_var = new_variable(res, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
-        buffer_write(res->init, "@G%u = dso_local global i8* null, align 8\n",
-            null_var->reg);
-#else
-        struct variable *null_var = init_variable("NULL", null_type);
-        register_variable(res, null_var);
-#endif
-
-        res->null_var = null_var->reg;
-    } else {
-        res->null_var = parent->null_var;
-    }
 
     return res;
 }
@@ -5937,7 +5925,7 @@ LLVMValueRef gen_llvm_real_const_ref(int bits, double val)
     return NULL;
 }
 
-LLVMValueRef sic_cast_llvm(struct gen_context *ctx, struct variable *var, const struct type *type)
+LLVMValueRef sic_cast_llvm_type(struct gen_context *ctx, struct variable *var, const struct type *type)
 {
     switch (type->type) {
     case V_FLOAT:
@@ -5945,6 +5933,29 @@ LLVMValueRef sic_cast_llvm(struct gen_context *ctx, struct variable *var, const 
     default:
         ERR("Invalid cast");
     }
+}
+
+LLVMValueRef sic_cast_llvm_size(struct gen_context *ctx, struct variable *var, const struct type *type)
+{
+    LLVMValueRef res = var->val;
+
+    if (type->bits > var->type->bits) {
+        if (type->type == V_INT) {
+            if (type->sign)
+                res = LLVMBuildSExtOrBitCast(ctx->build_ref, var->val,
+                        sic_type_to_llvm_type(type), llvm_gen_name());
+            else
+                res = LLVMBuildZExtOrBitCast(ctx->build_ref, var->val,
+                        sic_type_to_llvm_type(type), llvm_gen_name());
+        } else {
+            /* FIXME */
+            res = LLVMBuildBitCast(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(type), llvm_gen_name());
+        }
+    } else
+        ERR("Non-explicit truncate!");
+
+    return res;
 }
 
 void gen_scan_builtin(struct gen_context *ctx, struct node *node)
@@ -5992,7 +6003,6 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 {
     int a, b = 0;
 
-    node_walk(node);
     a = gen_recurse(ctx, node->left);
     b = gen_recurse(ctx, node->right);
 
@@ -6000,17 +6010,19 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     struct variable *varb = find_variable(ctx, b);
 
     LLVMValueRef src = varb->val;
-
     if (!src)
         ERR("Invalid source");
 
     if (vara->type->type != varb->type->type)
-        src = sic_cast_llvm(ctx, varb, vara->type);
+        src = sic_cast_llvm_type(ctx, varb, vara->type);
+    else if (vara->type->bits != varb->type->bits)
+        src = sic_cast_llvm_size(ctx, varb, vara->type);
 
     if (ctx->global)
         LLVMSetInitializer(vara->val, src);
     else
         LLVMBuildStore(ctx->build_ref, src, vara->val);
+
     return vara->reg;
 }
 
@@ -6100,8 +6112,16 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
         } else
             ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
-        res = LLVMBuildBitCast(ctx->build_ref,
-                var->val, sic_type_to_llvm_type(t), llvm_gen_name());
+        if (t->type == V_INT) {
+            if (t->sign)
+                res = LLVMBuildSExtOrBitCast(ctx->build_ref,
+                        var->val, sic_type_to_llvm_type(t), llvm_gen_name());
+            else
+                res = LLVMBuildZExtOrBitCast(ctx->build_ref,
+                        var->val, sic_type_to_llvm_type(t), llvm_gen_name());
+        } else
+            res = LLVMBuildBitCast(ctx->build_ref,
+                    var->val, sic_type_to_llvm_type(t), llvm_gen_name());
     }
     return res;
 }
@@ -6312,6 +6332,38 @@ int gen_llvm_negate(struct gen_context *ctx, struct node *node)
     return res->reg;
 }
 
+int gen_llvm_sizeof(struct gen_context *ctx, struct node *node)
+{
+    int a;
+    const struct type *type;
+
+    a = gen_recurse(ctx, node->left);
+    if (a >= 0) {
+        struct variable *var = find_variable(ctx, a);
+
+        FATALN(!var, node, "No valid variable passed for sizeof: %d", a);
+        type = var->type;
+    } else
+        type = find_type_by_id(ctx, REF_CTX(a));
+
+    FATALN(!type, node, "Didn't get type for sizeof");
+    type = custom_type_get(ctx, type);
+
+    struct variable *res = new_variable(ctx, NULL, V_INT, 32, TYPE_SIGNED, 0, 0, 0);
+    switch (type->type) {
+    case V_INT:
+        if (!type->bits)
+            res->val = gen_llvm_int_const_ref(32, 32, 0);
+        else
+            res->val = gen_llvm_int_const_ref(32, type->bits / 8, 0);
+        break;
+    default:
+        ERR("Unsupported type for sizeof(): %s", stype_str(type));
+    }
+
+    return res->reg;
+}
+
 int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
 {
     struct variable *res = NULL;
@@ -6485,6 +6537,7 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
      */
     int a, b;
     a = gen_recurse(ctx, node->left);
+    LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(ctx->build_ref);
 
     LLVMBasicBlockRef true_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
     LLVMBasicBlockRef false_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
@@ -6495,6 +6548,15 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     else
         out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
 #endif
+    if (ctx->last_out_ref) {
+        if (ctx->last_out_ref != cur_block) {
+            /* Hack to generate goto out in case of complex if without else */
+            LLVMPositionBuilderAtEnd(ctx->build_ref, ctx->last_out_ref);
+            LLVMBuildBr(ctx->build_ref, out_block);
+            LLVMPositionBuilderAtEnd(ctx->build_ref, cur_block);
+        }
+        ctx->last_out_ref = NULL;
+    }
 
     struct variable *cond_var = find_variable(ctx, a);
     if (!cond_var || !cond_var->val)
@@ -6520,17 +6582,20 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     /* True */
     LLVMPositionBuilderAtEnd(ctx->build_ref, true_block);
     int rets = ctx->rets;
+    int rets2 = 0;
     b = gen_recurse(ctx, node->mid);
     (void)b;
-    if (rets == ctx->rets)
+    rets = ctx->rets - rets;
+    if (!rets)
         LLVMBuildBr(ctx->build_ref, out_block);
 
     /* Else */
     if (node->right) {
         LLVMPositionBuilderAtEnd(ctx->build_ref, false_block);
-        rets = ctx->rets;
+        rets2 = ctx->rets;
         b = gen_recurse(ctx, node->right);
-        if (rets == ctx->rets)
+        rets2 = ctx->rets - rets2;
+        if (!rets2)
             LLVMBuildBr(ctx->build_ref, out_block);
     }
 
@@ -6540,6 +6605,8 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     if (last_block != out_block) {
         LLVMBuildBr(ctx->build_ref, last_block);
         LLVMPositionBuilderAtEnd(ctx->build_ref, last_block);
+    } else if (!node->right) {
+        ctx->last_out_ref = out_block;
     }
 
     return 0;
@@ -6553,7 +6620,7 @@ int gen_llvm_return(struct gen_context *ctx, struct node *node)
     if (!var)
         ERR("Failed return");
     if (!var->val)
-        ERR("No val in ret");
+        ERR("No valid value in return statement");
 
     LLVMValueRef va = sic_cast_load_pointer(ctx, var, ctx->return_type);
     LLVMBuildRet(ctx->build_ref, va);
@@ -6568,7 +6635,7 @@ int gen_llvm_int_const(struct gen_context *ctx, struct node *n)
 {
     int signext;
 
-    struct variable *var = new_variable(ctx, NULL, V_INT, n->bits, n->value < 0 ? TYPE_SIGNED : TYPE_UNSIGNED, 0, 0, ctx->global);
+    struct variable *var = new_variable(ctx, NULL, V_INT, n->bits ? n->bits : 32, n->value < 0 ? TYPE_SIGNED : TYPE_UNSIGNED, 0, 0, ctx->global);
     signext = n->value < 0 ? 1 : 0;
 
     var->val = gen_llvm_int_const_ref(n->bits, n->value, signext);
@@ -6971,6 +7038,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return gen_llvm_pre_post_op(ctx, node);
     case A_NEGATE:
         return gen_llvm_negate(ctx, node);
+    case A_SIZEOF:
+        return gen_llvm_sizeof(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
         break;

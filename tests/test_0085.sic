@@ -1,0 +1,44 @@
+int main()
+{
+    if (sizeof(int) != 4)
+        return 1;
+
+    if (sizeof(unsigned int) != 4)
+        return 2;
+
+    if (sizeof(int8) != 1)
+        return 3;
+    if (sizeof(int16) != 2)
+        return 4;
+    if (sizeof(int32) != 4)
+        return 5;
+    if (sizeof(int64) != 8)
+        return 6;
+    if (sizeof(int128) != 16)
+        return 7;
+
+    if (sizeof(uint8) != 1)
+        return 8;
+    if (sizeof(uint16) != 2)
+        return 9;
+    if (sizeof(uint32) != 4)
+        return 10;
+    if (sizeof(uint64) != 8)
+        return 11;
+    if (sizeof(uint128) != 16)
+        return 12;
+
+    /*
+     * These depends on compiler and should be same
+     * for isize and usize
+     */
+    if (sizeof(isize) == 8) {
+        if (sizeof(usize) != 8)
+           return 13;
+    } else if (sizeof(isize) == 4) {
+        if (sizeof(usize) != 4)
+            return 14;
+    }
+
+    return 0;
+}
