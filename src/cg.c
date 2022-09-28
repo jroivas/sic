@@ -1390,6 +1390,13 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     if (!parent)
         register_builtin_types(res);
 
+    if (!parent) {
+        // Register singleton NULL variable to global context
+        register_type(res, "nulltype", V_NULL, 0, TYPE_UNSIGNED);
+        const struct type *null_type = find_type_by(res, V_NULL, 0, TYPE_UNSIGNED, 0);
+        FATAL(!null_type, "Couldn't find NULL type");
+    }
+
     return res;
 }
 
@@ -6105,7 +6112,13 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
         } else {
             res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
             if (!is_assign) {
-                LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+                LLVMValueRef zeroval;
+                if (type->ptr) {
+                    LLVMTypeRef basetype = sic_type_to_llvm_type(type);
+                    basetype = llvm_type_wrap(basetype, type->ptr);
+                    zeroval = LLVMConstPointerNull(basetype);
+                } else
+                    zeroval = llvm_zero_from_sic_type(type);
                 if (zeroval)
                     LLVMBuildStore(ctx->build_ref, zeroval, res->val);
                 else
@@ -6144,7 +6157,13 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
                     sic_type_to_llvm_type(t), llvm_gen_name());
         } else if (var->type->type == V_NULL && t->ptr) {
             /* Null can be casted to anything as long as target is ptr */
+#if 1
+            LLVMTypeRef basetype = sic_type_to_llvm_type(t);
+            basetype = llvm_type_wrap(basetype, t->ptr - 1);
+            res = LLVMConstPointerNull(basetype);
+#else
             res = LLVMConstNull(sic_type_to_llvm_type(t));
+#endif
         } else
             ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
