@@ -2,6 +2,8 @@ int main()
 {
     int a = 1;
     int b = 1;
+    unsigned int c = 1;
+    int d = 1;
 
     a = a << 2;
     a = a >> 1;
@@ -14,6 +16,21 @@ int main()
 
     if (a != 2)
         return 2;
+
+    c = 1;
+    c <<= 31;
+    c >>= 31;
+
+    d = 1;
+    d <<= 31;
+    d >>= 31;
+
+    /* Unsigned shifting should not sign fill */
+    if (c != 1)
+        return 3;
+    /* Signed shifting should fill sign thus this should be -1 */
+    if (c == d)
+        return 4;
 
     return 0;
 }

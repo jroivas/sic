@@ -176,6 +176,7 @@ struct gen_context {
     char **struct_names;
     unsigned int struct_names_cnt;
 
+    const struct type *return_type;
     LLVMModuleRef mod_ref;
     LLVMBuilderRef build_ref;
     LLVMBasicBlockRef block_ref;
@@ -5476,12 +5477,12 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
 
     const char *func_name = name->value_string;
     struct variable *func_var = find_variable_by_name(ctx, func_name);
-    const struct type *func_ret_type = gen_type_list_type(ctx, node->left);
+    func_ctx->return_type = gen_type_list_type(ctx, node->left);
 
     if (!func_var) {
         const struct type *func_type = register_type(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED);
 
-        ((struct type*)func_type)->retval = func_ret_type;
+        ((struct type*)func_type)->retval = func_ctx->return_type;
         ((struct type*)func_type)->params = node->right->left->right;
 
         func_var = new_variable_ext(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED, 0, 0, 1, func_name);
@@ -5490,7 +5491,7 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     func_ctx->context_ref = LLVMContextCreate();
     func_ctx->build_ref = LLVMCreateBuilderInContext(func_ctx->context_ref);
     LLVMTypeRef functype = LLVMFunctionType(
-        sic_type_to_llvm_type(func_ret_type),
+        sic_type_to_llvm_type(func_ctx->return_type),
         NULL, 0, 0
         );
 
@@ -5512,7 +5513,7 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     (void)resval;
 
     if (!func_ctx->last_is_ret) {
-        switch (func_ret_type->type) {
+        switch (func_ctx->return_type->type) {
         case V_INT:
             LLVMBuildRet(func_ctx->build_ref, retval);
             break;
@@ -6224,6 +6225,18 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
             res->val = LLVMBuildAnd(ctx->build_ref, va, vb,
                 llvm_gen_name());
             break;
+        case A_LEFT:
+            res->val = LLVMBuildShl(ctx->build_ref, va, vb,
+                llvm_gen_name());
+            break;
+        case A_RIGHT:
+            if (vara->type->sign)
+                res->val = LLVMBuildAShr(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            else
+                res->val = LLVMBuildLShr(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+            break;
         default:
             ERR("Invalid integer arithmetic operation: %s", node_str(node));
         }
@@ -6254,6 +6267,10 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         case A_XOR:
         case A_AND:
             ERR("Invalid %s, bitwise operations supported only for integer types", node_str(node));
+            break;
+        case A_LEFT:
+        case A_RIGHT:
+            ERR("Invalid %s, shift operations supported only for integer types", node_str(node));
             break;
         default:
             ERR("Invalid floating arithmetic operation: %s", node_str(node));
@@ -6436,6 +6453,22 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
         res->val = LLVMBuildAnd(ctx->build_ref, va, vb,
                 llvm_gen_name());
         break;
+    case A_LEFT_ASSIGN:
+        if (restype->type != V_INT)
+            ERR("Invalid <<, shift operations supported only for integer types");
+        res->val = LLVMBuildShl(ctx->build_ref, va, vb,
+                llvm_gen_name());
+        break;
+    case A_RIGHT_ASSIGN:
+        if (restype->type != V_INT)
+            ERR("Invalid >>, shift operations supported only for integer types");
+        if (vara->type->sign)
+            res->val = LLVMBuildAShr(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        else
+            res->val = LLVMBuildLShr(ctx->build_ref, va, vb,
+                    llvm_gen_name());
+        break;
     default:
         ERR("Invalid op assign: %s", node_str(node));
     }
@@ -6522,7 +6555,10 @@ int gen_llvm_return(struct gen_context *ctx, struct node *node)
     if (!var->val)
         ERR("No val in ret");
 
-    LLVMBuildRet(ctx->build_ref, var->val);
+    LLVMValueRef va = sic_cast_load_pointer(ctx, var, ctx->return_type);
+    LLVMBuildRet(ctx->build_ref, va);
+
+    //LLVMBuildRet(ctx->build_ref, var->val);
     ctx->rets++;
     ctx->last_is_ret = 1;
     return 0;
@@ -6913,6 +6949,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_OR:
     case A_XOR:
     case A_AND:
+    case A_RIGHT:
+    case A_LEFT:
         res = gen_llvm_op(ctx, node, node->node);
         break;
     case A_ADD_ASSIGN:
@@ -6920,11 +6958,11 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_MUL_ASSIGN:
     case A_DIV_ASSIGN:
     case A_MOD_ASSIGN:
-    case A_LEFT_ASSIGN:
-    case A_RIGHT_ASSIGN:
     case A_AND_ASSIGN:
     case A_OR_ASSIGN:
     case A_XOR_ASSIGN:
+    case A_RIGHT_ASSIGN:
+    case A_LEFT_ASSIGN:
         return gen_llvm_op_assign(ctx, node);
     case A_PREINC:
     case A_PREDEC:
