@@ -181,6 +181,7 @@ struct gen_context {
     LLVMBasicBlockRef block_ref;
     LLVMContextRef context_ref;
     LLVMValueRef func_ref;
+    LLVMValueRef init_func_ref;
 #if 0
     LLVMTypeRef functype;
     LLVMValueRef start;
@@ -5463,7 +5464,7 @@ void gen_var_pretty_function(struct gen_context *ctx, const char *func_name, con
     //buffer_del(pretty_id); // FIXME
 }
 
-struct variable *gen_alloc_func(struct gen_context *ctx, struct node *node)
+struct variable *gen_func(struct gen_context *ctx, struct node *node)
 {
     struct node *body = node->right;
     FATALN(!body, node, "Function body missing");
@@ -5603,7 +5604,7 @@ struct variable *gen_scan_functions(struct gen_context *ctx, struct node *node)
         return res;
 
     if (node->node == A_FUNCTION)
-        res = gen_alloc_func(ctx, node);
+        res = gen_func(ctx, node);
 
     if (node->left) {
         struct variable *tmp = gen_scan_functions(ctx, node->left);
@@ -5616,6 +5617,19 @@ struct variable *gen_scan_functions(struct gen_context *ctx, struct node *node)
             res = tmp;
     }
     return res;
+}
+
+int gen_globals(struct gen_context *ctx, struct node *node)
+{
+    int res = 0;
+    if (node == NULL)
+        return 0;
+
+    /* Skip functions, just focus on globals */
+    if (node->node == A_FUNCTION)
+        return res;
+
+    return gen_recurse(ctx, node);
 }
 
 void __gen_func_declarations(struct gen_context *global_ctx, struct variable *var)
@@ -5977,6 +5991,7 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 {
     int a, b = 0;
 
+    node_walk(node);
     a = gen_recurse(ctx, node->left);
     b = gen_recurse(ctx, node->right);
 
@@ -5985,10 +6000,16 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 
     LLVMValueRef src = varb->val;
 
+    if (!src)
+        ERR("Invalid source");
+
     if (vara->type->type != varb->type->type)
         src = sic_cast_llvm(ctx, varb, vara->type);
 
-    LLVMBuildStore(ctx->build_ref, src, vara->val);
+    if (ctx->global)
+        LLVMSetInitializer(vara->val, src);
+    else
+        LLVMBuildStore(ctx->build_ref, src, vara->val);
     return vara->reg;
 }
 
@@ -6019,15 +6040,28 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     if (type && var) {
         LLVMTypeRef llt = sic_type_to_llvm_type(type);
 
-        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr + 1, 0, 0);
+        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr + 1, 0, ctx->global);
 
-        res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
-        if (!is_assign) {
-            LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
-            if (zeroval)
-                LLVMBuildStore(ctx->build_ref, zeroval, res->val);
-            else
-                ERR("Unsupported zero for type: %s", stype_str(type));
+        if (ctx->global) {
+            res->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
+            /* FIXME TODO Different linkages */
+            LLVMSetLinkage(res->val, LLVMPrivateLinkage);
+            if (!is_assign) {
+                LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+                if (zeroval)
+                    LLVMSetInitializer(res->val, zeroval);
+                else
+                    ERR("Unsupported zero for global type: %s", stype_str(type));
+            }
+        } else {
+            res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+            if (!is_assign) {
+                LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+                if (zeroval)
+                    LLVMBuildStore(ctx->build_ref, zeroval, res->val);
+                else
+                    ERR("Unsupported zero for type: %s", stype_str(type));
+            }
         }
     } else
         ERR("Unsupported declaration");
@@ -7068,8 +7102,17 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
     struct gen_context *ctx = init_ctx(outfile, NULL);
 
     ctx->mod_ref = LLVMModuleCreateWithName(conf->name_in);
-    ctx->context_ref = LLVMContextCreate();
+    //ctx->context_ref = LLVMContextCreate();
+    ctx->context_ref = LLVMGetGlobalContext();
     ctx->build_ref = LLVMCreateBuilderInContext(ctx->context_ref);
+    LLVMTypeRef functype = LLVMFunctionType(
+        LLVMVoidType(),
+        NULL, 0, 0
+        );
+    ctx->init_func_ref = LLVMAddFunction(ctx->mod_ref, "__sic_init_func", functype);
+    ctx->func_ref = ctx->init_func_ref;
+    ctx->block_ref = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->init_func_ref, "global_ctx");
+    LLVMPositionBuilderAtEnd(ctx->build_ref, ctx->block_ref);
 
     ctx->conf = conf;
     ctx->global = 1;
@@ -7083,6 +7126,7 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
     if (ctx->gen_flags & GEN_PRETTY_FUNCTION)
         // Generate __PRETTY_FUNCTION__
 #endif
+    gen_globals(ctx, node);
 
     struct variable *main_var = gen_scan_functions(ctx, node);
     (void)main_var;
@@ -7090,9 +7134,12 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
 
 
 
+    LLVMPositionBuilderAtEnd(ctx->build_ref, ctx->block_ref);
+    LLVMBuildRetVoid(ctx->build_ref);
     /* Gen bytecode */
     if (conf->dump)
         LLVMDumpModule(ctx->mod_ref);
+    printf("\n----\n");
 #if 1
     LLVMVerifyModule(ctx->mod_ref, LLVMPrintMessageAction, &error);
     LLVMDisposeMessage(error);
