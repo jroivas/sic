@@ -6059,8 +6059,11 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
             else
                 res = LLVMBuildFPToUI(ctx->build_ref, var->val,
                     sic_type_to_llvm_type(t), llvm_gen_name());
+        } else if (var->type->type == V_NULL && t->ptr) {
+            /* Null can be casted to anything as long as target is ptr */
+            res = LLVMConstNull(sic_type_to_llvm_type(t));
         } else
-            ERR("Unknown cast");
+            ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
         res = LLVMBuildBitCast(ctx->build_ref,
                 var->val, sic_type_to_llvm_type(t), llvm_gen_name());
