@@ -6239,7 +6239,6 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
 
         vr_ref = LLVMBuildLoad2(ctx->build_ref, ltyp, vr_ref,
                 llvm_gen_name());
-        printf("Loaded: %s -> %s\n", stype_str(src_type), stype_str(type));
     }
 
     return vr_ref;
@@ -6415,6 +6414,98 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         ERR("Addition not supported for %s", stype_str(restype));
     }
     return res->reg;
+}
+
+int gen_llvm_log_and_or(struct gen_context *ctx, struct node *node)
+{
+    int a, b;
+
+    a = gen_recurse(ctx, node->left);
+    struct variable *vara = find_variable(ctx, a);
+    LLVMValueRef ra;
+    LLVMValueRef rb;
+
+    struct variable *res = new_variable(ctx, NULL, V_INT, 1, 0, 1, 0, 0);
+    LLVMValueRef one_res = gen_llvm_int_const_ref(1, 1, 0);
+    LLVMValueRef zero_res = gen_llvm_int_const_ref(1, 0, 0);
+    const struct type *restype = res->type;
+    LLVMValueRef zero;
+    res->val = LLVMBuildAlloca(ctx->build_ref, sic_type_to_llvm_type(restype), llvm_gen_name());
+
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+    switch (vara->type->type) {
+    case V_INT:
+        zero = gen_llvm_int_const_ref(vara->type->bits, 0, 0);
+        ra = LLVMBuildICmp(ctx->build_ref, LLVMIntNE, va, zero, llvm_gen_name());
+        break;
+    default:
+        ERR("Invalid type for &&: %s", stype_str(vara->type));
+    }
+
+    /* FIXME Maybe 3 labels is enough... */
+    LLVMBasicBlockRef true_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMBasicBlockRef false_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+
+    if (node->node == A_LOG_AND)
+        LLVMBuildCondBr(ctx->build_ref, ra, true_block, false_block);
+    else
+        LLVMBuildCondBr(ctx->build_ref, ra, false_block, true_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, true_block);
+    b = gen_recurse(ctx, node->right);
+    struct variable *varb = find_variable(ctx, b);
+
+    LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, varb->type);
+    switch (varb->type->type) {
+    case V_INT:
+        zero = gen_llvm_int_const_ref(varb->type->bits, 0, 0);
+        rb = LLVMBuildICmp(ctx->build_ref, LLVMIntNE, vb, zero, llvm_gen_name());
+        break;
+    default:
+        ERR("Invalid type for &&: %s", stype_str(vara->type));
+    }
+
+    LLVMBasicBlockRef true2_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    if (node->node == A_LOG_AND)
+        LLVMBuildCondBr(ctx->build_ref, rb, true2_block, false_block);
+    else
+        LLVMBuildCondBr(ctx->build_ref, rb, false_block, true2_block);
+
+    LLVMBasicBlockRef out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMPositionBuilderAtEnd(ctx->build_ref, true2_block);
+    if (node->node == A_LOG_AND)
+        LLVMBuildStore(ctx->build_ref, one_res, res->val);
+    else
+        LLVMBuildStore(ctx->build_ref, zero_res, res->val);
+    LLVMBuildBr(ctx->build_ref, out_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, false_block);
+    if (node->node == A_LOG_AND)
+        LLVMBuildStore(ctx->build_ref, zero_res, res->val);
+    else
+        LLVMBuildStore(ctx->build_ref, one_res, res->val);
+    LLVMBuildBr(ctx->build_ref, out_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, out_block);
+
+    LLVMBasicBlockRef last_block = LLVMGetLastBasicBlock(ctx->func_ref);
+    if (last_block != out_block) {
+        LLVMBuildBr(ctx->build_ref, last_block);
+        LLVMPositionBuilderAtEnd(ctx->build_ref, last_block);
+    } else
+        ctx->last_out_ref = out_block;
+
+    return res->reg;
+}
+
+int gen_llvm_log_and(struct gen_context *ctx, struct node *node)
+{
+    return gen_llvm_log_and_or(ctx, node);
+}
+
+int gen_llvm_log_or(struct gen_context *ctx, struct node *node)
+{
+    return gen_llvm_log_and_or(ctx, node);
 }
 
 int gen_llvm_negate(struct gen_context *ctx, struct node *node)
@@ -6758,7 +6849,7 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
         out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
 #endif
     if (ctx->last_out_ref) {
-        if (ctx->last_out_ref != cur_block) {
+        if (ctx->last_out_ref != cur_block && !LLVMGetBasicBlockTerminator(cur_block)) {
             /* Hack to generate goto out in case of complex if without else */
             LLVMPositionBuilderAtEnd(ctx->build_ref, ctx->last_out_ref);
             LLVMBuildBr(ctx->build_ref, out_block);
@@ -7257,6 +7348,10 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_NE_OP:
         res = gen_llvm_eq(ctx, node);
         break;
+    case A_LOG_AND:
+        return gen_llvm_log_and(ctx, node);
+    case A_LOG_OR:
+        return gen_llvm_log_or(ctx, node);
     case A_ADD:
     case A_MINUS:
     case A_MUL:
