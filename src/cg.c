@@ -6724,12 +6724,21 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     /* Condition */
     LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
     LLVMValueRef cond;
-    if (cond_var->type->type == V_INT)
-        cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
-            cond_val_ref, zeroval, llvm_gen_name());
-    else if (cond_var->type->type == V_FLOAT)
-        cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealUNE,
-            cond_val_ref, zeroval, llvm_gen_name());
+    if (cond_var->type->type == V_INT) {
+        if (cond_var->type->ptr > 1)
+            cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
+                    llvm_gen_name());
+        else
+            cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
+                    cond_val_ref, zeroval, llvm_gen_name());
+    } else if (cond_var->type->type == V_FLOAT) {
+        if (cond_var->type->ptr > 1)
+            cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
+                    llvm_gen_name());
+        else
+            cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealUNE,
+                    cond_val_ref, zeroval, llvm_gen_name());
+    }
     else
         ERR("Invalid compare");
     LLVMBuildCondBr(ctx->build_ref, cond, true_block, false_block);
