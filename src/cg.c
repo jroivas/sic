@@ -5997,7 +5997,7 @@ LLVMValueRef sic_cast_llvm_size(struct gen_context *ctx, struct variable *var, c
 
     if (type->bits > var->type->bits) {
         if (type->type == V_INT) {
-            if (type->sign)
+            if (var->type->sign)
                 res = LLVMBuildSExtOrBitCast(ctx->build_ref, var->val,
                         sic_type_to_llvm_type(type), llvm_gen_name());
             else
@@ -6094,6 +6094,8 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     struct variable *vara = find_variable(ctx, a);
     struct variable *varb = find_variable(ctx, b);
 
+    FATAL(!varb, "Missing right side of assign");
+
     LLVMValueRef src = varb->val;
     if (!src)
         ERR("Invalid source");
@@ -6188,6 +6190,11 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
     LLVMValueRef res = var->val;
 
     if (t->type != var->type->type) {
+        if (var->type->ptr == 1 && !t->ptr) {
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
+            var = tmp;
+        }
         if (t->type == V_FLOAT && var->type->type == V_INT) {
             if (var->type->sign)
                 res = LLVMBuildSIToFP(ctx->build_ref, var->val,
@@ -6214,8 +6221,16 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
         } else
             ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
+        if (var->type->ptr == 1 && !t->ptr) {
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
+            var = tmp;
+        }
         if (t->type == V_INT) {
-            if (t->sign)
+            if (var->type->ptr > 1 && !t->ptr)
+                res = LLVMBuildPtrToInt(ctx->build_ref, var->val,
+                        sic_type_to_llvm_type(t), llvm_gen_name());
+            else if (var->type->sign)
                 res = LLVMBuildSExtOrBitCast(ctx->build_ref,
                         var->val, sic_type_to_llvm_type(t), llvm_gen_name());
             else
@@ -6224,7 +6239,24 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
         } else
             res = LLVMBuildBitCast(ctx->build_ref,
                     var->val, sic_type_to_llvm_type(t), llvm_gen_name());
-    }
+    } else if (t->type == var->type->type && t->bits < var->type->bits) {
+        if (var->type->ptr == 1 && !t->ptr) {
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
+            var = tmp;
+        }
+        if (t->type == V_INT) {
+            res = LLVMBuildTrunc(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+        } else if (t->type == V_FLOAT) {
+            res = LLVMBuildFPTrunc(ctx->build_ref, var->val,
+                    sic_type_to_llvm_type(t), llvm_gen_name());
+        } else
+            ERR("Can't truncate type %s to %s", stype_str(var->type), stype_str(t));
+    } else if (t->type == var->type->type && t->bits == var->type->bits) {
+        // Nothing to do
+    } else
+        ERR("Can't cast type %s to %s", stype_str(var->type), stype_str(t));
     return res;
 }
 
@@ -6413,6 +6445,20 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
     default:
         ERR("Addition not supported for %s", stype_str(restype));
     }
+    return res->reg;
+}
+
+int gen_llvm_cast_op(struct gen_context *ctx, struct node *node)
+{
+    const struct type *cast_type = gen_type_list_type(ctx, node->left);
+    int b = gen_recurse(ctx, node->right);
+    struct variable *varb = find_variable(ctx, b);
+    FATAL(!varb, "No cast source");
+
+    //struct variable *res = new_variable(ctx, NULL, V_INT, 32, TYPE_SIGNED, 0, 0, 0);
+    struct variable *res = new_variable_from_type(ctx, NULL, cast_type, 0, 0, 0);
+    res->val = gen_llvm_cast_to(ctx, varb, cast_type);
+
     return res->reg;
 }
 
@@ -6944,11 +6990,20 @@ int gen_llvm_return(struct gen_context *ctx, struct node *node)
 int gen_llvm_int_const(struct gen_context *ctx, struct node *n)
 {
     int signext;
+    int bits = n->bits;
+    unsigned long long tmp;
 
-    struct variable *var = new_variable(ctx, NULL, V_INT, n->bits ? n->bits : 32, n->value < 0 ? TYPE_SIGNED : TYPE_UNSIGNED, 0, 0, ctx->global);
+    if (!n->bits)
+        bits = 32;
+    tmp = n->value;
+    /* Force 64 bit literal if it doesn't fit on 32 bit*/
+    if ((tmp >> 32) != 0)
+        bits = 64;
+
+    struct variable *var = new_variable(ctx, NULL, V_INT, bits, n->value < 0 ? TYPE_SIGNED : TYPE_UNSIGNED, 0, 0, ctx->global);
     signext = n->value < 0 ? 1 : 0;
 
-    var->val = gen_llvm_int_const_ref(n->bits, n->value, signext);
+    var->val = gen_llvm_int_const_ref(bits, n->value, signext);
     ctx->last_val = var;
 
     return var->reg;
@@ -7352,6 +7407,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return gen_llvm_log_and(ctx, node);
     case A_LOG_OR:
         return gen_llvm_log_or(ctx, node);
+    case A_CAST:
+        return gen_llvm_cast_op(ctx, node);
     case A_ADD:
     case A_MINUS:
     case A_MUL:
