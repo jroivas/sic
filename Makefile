@@ -32,11 +32,16 @@ testc: build/tests
 
 tests: test
 
-compiletest_notree: build/sic build/tests
+check_test:
+ifndef TEST
+	$(error TEST variable not defined, should be given like: TEST=0022)
+endif
+
+compiletest_notree: build/sic build/tests check_test
 	LD_LIBRARY_PATH=build/: build/sic tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
 	cat build/tests/test_$(TEST).sic.ir
 
-compiletest: build/sic build/tests
+compiletest: build/sic build/tests check_test
 	#LD_LIBRARY_PATH=build/: build/sic --dump-tree tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir
 	LD_LIBRARY_PATH=build/: build/sic --dump-tree --dump-ir tests/test_$(TEST).sic -o build/tests/test_$(TEST).sic.ir.bc
 	#llvm-dis build/tests/test_$(TEST).sic.ir.bc -o build/tests/test_$(TEST).sic.ir
@@ -85,4 +90,4 @@ help:
 	@echo ""
 	@echo "Env variable TEST should contain test number, eg. 0012"
 
-.PHONY: help test clean runtest buildtest compiletest testsic testc unittest testall all
+.PHONY: help test clean runtest buildtest compiletest testsic testc unittest testall all check_test
