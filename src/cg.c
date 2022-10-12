@@ -7023,6 +7023,34 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+int gen_llvm_ternary(struct gen_context *ctx, struct node *node)
+{
+    int a, b, c;
+
+    a = gen_recurse(ctx, node->left);
+    b = gen_recurse(ctx, node->mid);
+    c = gen_recurse(ctx, node->right);
+
+    struct variable *cond_var = find_variable(ctx, a);
+    struct variable *true_var = find_variable(ctx, b);
+    struct variable *false_var = find_variable(ctx, c);
+
+    FATAL(!cond_var, "Missing ternary compator");
+    FATAL(!true_var, "Missing ternary true");
+    FATAL(!false_var, "Missing ternary false");
+
+    if (true_var->type != false_var->type) {
+        LLVMValueRef va = gen_llvm_cast_to(ctx, false_var, true_var->type);
+        false_var = new_variable_from_type(ctx, NULL, true_var->type, true_var->type->ptr, 0, 0);
+        false_var->val = va;
+    }
+
+    struct variable *res = new_variable(ctx, NULL, true_var->type->type, true_var->type->bits, true_var->type->sign, true_var->type->ptr, 0, 0);
+    res->val = LLVMBuildSelect(ctx->build_ref, cond_var->val, true_var->val, false_var->val, llvm_gen_name());
+
+    return res->reg;
+}
+
 int gen_llvm_return(struct gen_context *ctx, struct node *node)
 {
     int a = gen_recurse(ctx, node->left);
@@ -7451,6 +7479,9 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         break;
     case A_IF:
         res = gen_llvm_if(ctx, node);
+        break;
+    case A_TERNARY:
+        res = gen_llvm_ternary(ctx, node);
         break;
     case A_RETURN:
         res = gen_llvm_return(ctx, node);
