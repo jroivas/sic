@@ -6307,17 +6307,73 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
     if (restype->type == V_INT) {
         LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
         LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+        LLVMIntPredicate op;
 
-        res->val = LLVMBuildICmp(ctx->build_ref,
-            node->node == A_EQ_OP ? LLVMIntEQ : LLVMIntNE,
-            va, vb, llvm_gen_name());
+
+        switch (node->node) {
+        case A_EQ_OP:
+            op = LLVMIntEQ;
+            break;
+        case A_NE_OP:
+            op = LLVMIntNE;
+            break;
+        case A_LT:
+            if (vara->type->sign)
+                op = LLVMIntSLT;
+            else
+                op = LLVMIntULT;
+            break;
+        case A_LT_EQ:
+            if (vara->type->sign)
+                op = LLVMIntSLE;
+            else
+                op = LLVMIntULE;
+            break;
+        case A_GT:
+            if (vara->type->sign)
+                op = LLVMIntSGT;
+            else
+                op = LLVMIntUGT;
+            break;
+        case A_GT_EQ:
+            if (vara->type->sign)
+                op = LLVMIntSGE;
+            else
+                op = LLVMIntUGE;
+            break;
+        default:
+            ERR("Invalid compare op: %s", node->value_string);
+        }
+
+        res->val = LLVMBuildICmp(ctx->build_ref, op, va, vb, llvm_gen_name());
     } else if (restype->type == V_FLOAT) {
         LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
         LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+        LLVMRealPredicate op;
 
-        res->val = LLVMBuildFCmp(ctx->build_ref,
-            node->node == A_EQ_OP ? LLVMRealOEQ : LLVMRealUNE,
-            va, vb, llvm_gen_name());
+        switch (node->node) {
+        case A_EQ_OP:
+            op = LLVMRealOEQ;
+            break;
+        case A_NE_OP:
+            op = LLVMRealONE;
+            break;
+        case A_LT:
+            op = LLVMRealOLT;
+            break;
+        case A_LT_EQ:
+            op = LLVMRealOLE;
+            break;
+        case A_GT:
+            op = LLVMRealOGT;
+            break;
+        case A_GT_EQ:
+            op = LLVMRealOGE;
+            break;
+        default:
+            ERR("Invalid compare op: %s", node->value_string);
+        }
+        res->val = LLVMBuildFCmp(ctx->build_ref, op, va, vb, llvm_gen_name());
     } else
         ERR("Invalid compare");
 
@@ -7399,6 +7455,10 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_RETURN:
         res = gen_llvm_return(ctx, node);
         break;
+    case A_LT:
+    case A_GT:
+    case A_LT_EQ:
+    case A_GT_EQ:
     case A_EQ_OP:
     case A_NE_OP:
         res = gen_llvm_eq(ctx, node);
