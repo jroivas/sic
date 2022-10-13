@@ -7061,7 +7061,11 @@ int gen_llvm_while(struct gen_context *ctx, struct node *node)
         LLVMBuildBr(ctx->build_ref, cmp_block);
     else if (node->node == A_DO)
         LLVMBuildBr(ctx->build_ref, loop_block);
-    else
+    else if (node->node == A_FOR) {
+        // FOR init
+        gen_recurse(ctx, node->left->left);
+        LLVMBuildBr(ctx->build_ref, cmp_block);
+    } else
         ERR("Invalid loop command");
 
     LLVMPositionBuilderAtEnd(ctx->build_ref, cmp_block);
@@ -7097,6 +7101,10 @@ int gen_llvm_while(struct gen_context *ctx, struct node *node)
     int b = gen_recurse(ctx, node->right);
     (void)b;
     rets = ctx->rets - rets;
+    if (node->node == A_FOR) {
+        // Increment
+        gen_recurse(ctx, node->left->right);
+    }
     if (!rets)
         LLVMBuildBr(ctx->build_ref, cmp_block);
 
@@ -7598,6 +7606,7 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return gen_llvm_sizeof(ctx, node);
     case A_WHILE:
     case A_DO:
+    case A_FOR:
         return gen_llvm_while(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
