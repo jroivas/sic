@@ -7051,6 +7051,66 @@ int gen_llvm_ternary(struct gen_context *ctx, struct node *node)
     return res->reg;
 }
 
+int gen_llvm_while(struct gen_context *ctx, struct node *node)
+{
+    LLVMBasicBlockRef cmp_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMBasicBlockRef loop_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+    LLVMBasicBlockRef out_block = LLVMAppendBasicBlockInContext(ctx->context_ref, ctx->func_ref, llvm_gen_name());
+
+    if (node->node == A_WHILE)
+        LLVMBuildBr(ctx->build_ref, cmp_block);
+    else if (node->node == A_DO)
+        LLVMBuildBr(ctx->build_ref, loop_block);
+    else
+        ERR("Invalid loop command");
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, cmp_block);
+    int a = gen_recurse(ctx, node->mid);
+    struct variable *cond_var = find_variable(ctx, a);
+
+    LLVMValueRef zeroval = llvm_zero_from_sic_type(cond_var->type);
+    if (!zeroval)
+        ERR("Invalid if zero")
+    LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
+    LLVMValueRef cond;
+    if (cond_var->type->type == V_INT) {
+        if (cond_var->type->ptr > 1)
+            cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
+                    llvm_gen_name());
+        else
+            cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
+                    cond_val_ref, zeroval, llvm_gen_name());
+    } else if (cond_var->type->type == V_FLOAT) {
+        if (cond_var->type->ptr > 1)
+            cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
+                    llvm_gen_name());
+        else
+            cond = LLVMBuildFCmp(ctx->build_ref, LLVMRealUNE,
+                    cond_val_ref, zeroval, llvm_gen_name());
+    }
+    else
+        ERR("Invalid compare");
+    LLVMBuildCondBr(ctx->build_ref, cond, loop_block, out_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, loop_block);
+    int rets = ctx->rets;
+    int b = gen_recurse(ctx, node->right);
+    (void)b;
+    rets = ctx->rets - rets;
+    if (!rets)
+        LLVMBuildBr(ctx->build_ref, cmp_block);
+
+    LLVMPositionBuilderAtEnd(ctx->build_ref, out_block);
+
+    LLVMBasicBlockRef last_block = LLVMGetLastBasicBlock(ctx->func_ref);
+    if (last_block != out_block && !LLVMGetBasicBlockTerminator(out_block)) {
+        LLVMBuildBr(ctx->build_ref, last_block);
+        LLVMPositionBuilderAtEnd(ctx->build_ref, last_block);
+    } else
+        ctx->last_out_ref = out_block;
+    return 0;
+}
+
 int gen_llvm_return(struct gen_context *ctx, struct node *node)
 {
     int a = gen_recurse(ctx, node->left);
@@ -7536,6 +7596,9 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         return gen_llvm_not(ctx, node);
     case A_SIZEOF:
         return gen_llvm_sizeof(ctx, node);
+    case A_WHILE:
+    case A_DO:
+        return gen_llvm_while(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
         break;
