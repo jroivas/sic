@@ -125,7 +125,6 @@ struct variable {
     char *paramstr;
 };
 
-
 struct gen_context {
     FILE *f;
     int __ids;
@@ -177,6 +176,7 @@ struct gen_context {
     unsigned int struct_names_cnt;
 
     const struct type *return_type;
+    const struct type *decl_type;
     LLVMModuleRef mod_ref;
     LLVMBuilderRef build_ref;
     LLVMBasicBlockRef block_ref;
@@ -216,6 +216,8 @@ const struct type *find_type_by_id(struct gen_context *ctx, int id);
 char *get_param_type_str(struct gen_context *ctx, struct node *node);
 struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global, const char *type_name);
 char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int allocate_params);
+
+LLVMValueRef gen_llvm_assign2(struct gen_context *ctx, LLVMValueRef dst, LLVMValueRef src, const struct type *dst_type, const struct type *src_type);
 
 void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
 {
@@ -3962,13 +3964,19 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     int ptrval = 0;
     int addrval = 0;
     int res = 0;
-    struct gen_context *global_ctx = get_global_ctx(ctx);
+    //struct gen_context *global_ctx = get_global_ctx(ctx);
+    LLVMTypeRef llt = NULL;
+
+    FATAL(!ctx->decl_type, "Missing declaration type");
+    llt = sic_type_to_llvm_type(ctx->decl_type);
+    llt = llvm_type_wrap(llt, ctx->decl_type->ptr);
 
     FATALN(!t, node, "No type: %p", (void *)ctx->pending_type);
 
     //buffer_write(ctx->init, "; Variable: %s, type %s, ptr %d: %s\n", node->value_string, type_str(t->type), ptrval, stype_str(t));
     FATALN(strcmp(node->value_string, "add5") == 0, node, "Should not initialize function");
 
+#if 0
     switch (t->type) {
         case V_INT:
             ptrval = gen_use_ptr(ctx);
@@ -3981,20 +3989,20 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var->global = ctx->global;
             var->addr = addrval;
             var->array = idx_value;
-            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->type->ptr, idx_value, 0, node->value, node);
+            res = gen_allocate_int(ctx, var->reg, var->type->bits, var->type->ptr + 1, idx_value, 0, node->value, node);
             break;
         case V_FLOAT:
             ptrval = gen_use_ptr(ctx);
             node->ptr = ptrval;
             node->addr = addrval;
-            var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, TYPE_SIGNED, ptrval, addrval, ctx->global);
+            var = new_variable(ctx, node->value_string, V_FLOAT, t->bits, TYPE_SIGNED, ptrval + 1, addrval, ctx->global);
             var->global = ctx->global;
             var->array = idx_value;
             //res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr, 0, node->value, node->fraction);
-            res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr, 0, node->value, 0);
+            res = gen_allocate_double(ctx, var->reg, var->bits, var->type->ptr + 1, 0, node->value, 0);
             break;
         case V_FUNCPTR:
-            var = new_variable_ext(ctx, node->value_string, V_FUNCPTR, 64, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
+            var = new_variable_ext(ctx, node->value_string, V_FUNCPTR, 64, TYPE_UNSIGNED, ptrval + 1, addrval, ctx->global, t->type_name);
 #if 0
             char *stars = get_stars(ptrval);
             // %2 = alloca i64 (i8*, i8*, i64)*, align 8
@@ -4019,7 +4027,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             var = new_variable_ext(ctx, node->value_string, V_STRUCT, t->bits, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
             if (ctx->pending_type && strcmp(ctx->pending_type->name, "va_list") == 0)
                 var->array += 1;
-            res = gen_allocate_struct(ctx, var->reg, ctx->pending_type, t, var, ptrval);
+            res = gen_allocate_struct(ctx, var->reg, ctx->pending_type, t, var, ptrval + 1);
             //buffer_write(ctx->init, "%%%d = alloca %%struct.%s%s, align 8\n", var->reg, t->name, stars);
 
             //var->ptr = ptrval;
@@ -4030,20 +4038,20 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             break;
         case V_UNION:
             ptrval = gen_use_ptr(ctx) + t->ptr;
-            var = new_variable_ext(ctx, node->value_string, V_UNION, t->bits, TYPE_UNSIGNED, ptrval, addrval, ctx->global, t->type_name);
+            var = new_variable_ext(ctx, node->value_string, V_UNION, t->bits, TYPE_UNSIGNED, ptrval + 1, addrval, ctx->global, t->type_name);
             //buffer_write(ctx->init, "%%%d = alloca %%union.%s, align 8\n", var->reg, t->name);
             res = gen_allocate_union(ctx, var->reg, ctx->pending_type, t, var, ptrval);
             res = var->reg;
             break;
         case V_ENUM:
             if (node->left) {
-                var = new_variable(global_ctx, node->value_string, V_INT, 32, TYPE_SIGNED, ptrval, addrval, global_ctx->global);
-                res = gen_allocate_int(global_ctx, var->reg, var->type->bits, var->type->ptr, idx_value, 0, node->value, node);
+                var = new_variable(global_ctx, node->value_string, V_INT, 32, TYPE_SIGNED, ptrval + 1, addrval, global_ctx->global);
+                res = gen_allocate_int(global_ctx, var->reg, var->type->bits, var->type->ptr + 1, idx_value, 0, node->value, node);
             } else {
                 var = find_variable_by_name(ctx, node->value_string);
                 if (!var) {
-                    var = new_variable(ctx, node->value_string, V_INT, 32, TYPE_SIGNED, ptrval, addrval, ctx->global);
-                    res = gen_allocate_int(ctx, var->reg, var->type->bits, var->type->ptr, idx_value, 0, node->value, node);
+                    var = new_variable(ctx, node->value_string, V_INT, 32, TYPE_SIGNED, ptrval + 1, addrval, ctx->global);
+                    res = gen_allocate_int(ctx, var->reg, var->type->bits, var->type->ptr + 1, idx_value, 0, node->value, node);
                 }
             }
             res = var->reg;
@@ -4054,7 +4062,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
                 ptrval = t->ptr;
             if (!ptrval)
                 ERR("'void' is not valid type for variable!\n");
-            var = new_variable(ctx, node->value_string, V_VOID, 0, TYPE_UNSIGNED, ptrval, addrval, ctx->global);
+            var = new_variable(ctx, node->value_string, V_VOID, 0, TYPE_UNSIGNED, ptrval + 1, addrval, ctx->global);
             res = gen_allocate_void_ptr(ctx, var->reg, ptrval, ctx->global);
             // TODO
             break;
@@ -4063,6 +4071,42 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
             ERR("Invalid type for variable: %s", type_str(t->type));
             break;
     }
+#endif
+    ptrval = gen_use_ptr(ctx);
+    if (!ptrval)
+        ptrval = t->ptr;
+    node->ptr = ptrval;
+    node->addr = addrval;
+    (void)addrval;
+    (void)ptrval;
+    var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
+    var->array = idx_value;
+
+    if (ctx->global) {
+        var->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
+        /* FIXME TODO Different linkages */
+        LLVMSetLinkage(var->val, LLVMPrivateLinkage);
+        LLVMValueRef zeroval = llvm_zero_from_sic_type(ctx->decl_type);
+        if (zeroval)
+            LLVMSetInitializer(var->val, zeroval);
+        else
+            ERR("Unsupported zero for global type: %s", stype_str(ctx->decl_type));
+    } else {
+        var->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+        LLVMValueRef zeroval;
+        const struct type *zerotype;
+        if (ctx->decl_type->ptr) {
+            LLVMTypeRef basetype = sic_type_to_llvm_type(ctx->decl_type);
+            basetype = llvm_type_wrap(basetype, ctx->decl_type->ptr);
+            zeroval = LLVMConstPointerNull(basetype);
+            zerotype = find_type_by_name(ctx, "nulltype");
+        } else {
+            zeroval = llvm_zero_from_sic_type(ctx->decl_type);
+            zerotype = ctx->decl_type;
+        }
+        gen_llvm_assign2(ctx, var->val, zeroval, ctx->decl_type, zerotype);
+    }
+    ctx->last_val = var;
 
     return res;
 }
@@ -6094,7 +6138,7 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     struct variable *vara = find_variable(ctx, a);
     struct variable *varb = find_variable(ctx, b);
 
-    FATAL(!varb, "Missing right side of assign");
+    FATAL(!varb, "Missing right side of assign: %d", b);
 
     LLVMValueRef src = varb->val;
     if (!src)
@@ -6108,6 +6152,7 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     (void)assigncmd;
 #endif
 
+    printf("assign res: %d\n", vara->reg);
     return vara->reg;
 }
 
@@ -6123,6 +6168,8 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     // Need skip ASSIGN nodes here, they're handled later on
     ctx->skip_node = A_ASSIGN;
     a = gen_recurse(ctx, node->left);
+    ctx->decl_type = find_type_by_id(ctx, REF_CTX(a));
+    ctx->is_decl += 100;
     if (node->right && node->right->node != A_ASSIGN) {
         b = gen_recurse(ctx, node->right);
     } else if (node->right && node->right->node == A_ASSIGN &&
@@ -6131,6 +6178,8 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
         b = gen_recurse(ctx, node->right->left);
         is_assign = 1;
     }
+    ctx->is_decl = 0;
+    ctx->decl_type = NULL;
     ctx->skip_node = 0;
     if (!a || ! b)
         return 0;
@@ -6138,7 +6187,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     const struct type *type = find_type_by_id(ctx, REF_CTX(a));
     struct variable *var = find_variable(ctx, b);
     struct variable *res = NULL;
-    if (type && var) {
+    if (type && var && !var->val) {
         LLVMTypeRef llt = sic_type_to_llvm_type(type);
 
         llt = llvm_type_wrap(llt, type->ptr);
@@ -6174,8 +6223,8 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
             }
         }
         ctx->last_val = res;
-    } else
-        ERR("Unsupported declaration");
+    } // else
+        //ERR("Unsupported declaration");
 
     if (is_assign) {
         /* Recurse separately for the assign after declaration */
@@ -6309,6 +6358,8 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
         LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
         LLVMIntPredicate op;
 
+        FATAL(!va, "Missing left variable in compare for: %s", vara->name);
+        FATAL(!vb, "Missing right variable in compare for: %s", varb->name);
 
         switch (node->node) {
         case A_EQ_OP:
@@ -7529,8 +7580,7 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_TYPE_LIST:
         return get_type_list(ctx, node);
     case A_ASSIGN:
-        gen_llvm_assign(ctx, node);
-        break;
+        return gen_llvm_assign(ctx, node);
     case A_DECLARATION:
         gen_llvm_declaration(ctx, node);
         break;
