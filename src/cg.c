@@ -117,6 +117,8 @@ struct variable {
     /* Initial value of the variable */
     literalnum value;
     const struct type *type;
+    const struct type *return_type;
+    LLVMTypeRef func_type;
     const char *name;
     const char *ext_name;
     hashtype name_hash;
@@ -145,6 +147,7 @@ struct gen_context {
     int breaklabel;
     int continuelabel;
     int last_is_ret;
+    int decl_is_assign;
 
     const char *name;
     const char *decl_name;
@@ -1391,6 +1394,7 @@ struct gen_context *init_ctx(FILE *outfile, struct gen_context *parent)
     res->next = NULL;
     res->node = NULL;
     res->strs = 0;
+    res->decl_is_assign = 0;
 
     res->pre = buffer_init();
     res->init = buffer_init();
@@ -3963,8 +3967,8 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     const struct type *t = custom_type_get(ctx, ctx->pending_type);
     int ptrval = 0;
     int addrval = 0;
-    int res = 0;
-    //struct gen_context *global_ctx = get_global_ctx(ctx);
+    //int res = 0;
+    struct gen_context *global_ctx = get_global_ctx(ctx);
     LLVMTypeRef llt = NULL;
 
     FATAL(!ctx->decl_type, "Missing declaration type");
@@ -4079,9 +4083,13 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     node->addr = addrval;
     (void)addrval;
     (void)ptrval;
-    var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
+    if (ctx->global)
+        var = new_variable(global_ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
+    else
+        var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
     var->array = idx_value;
 
+    if (!ctx->decl_is_assign) {
     if (ctx->global) {
         var->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
         /* FIXME TODO Different linkages */
@@ -4106,9 +4114,10 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
         }
         gen_llvm_assign2(ctx, var->val, zeroval, ctx->decl_type, zerotype);
     }
+    }
     ctx->last_val = var;
 
-    return res;
+    return var->reg;
 }
 
 int gen_sizeof(struct gen_context *ctx, struct node *node, int left)
@@ -5556,9 +5565,11 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
         sic_type_to_llvm_type(func_ctx->return_type),
         NULL, 0, 0
         );
+    func_var->func_type = functype;
 
 
     func_var->val = LLVMAddFunction(ctx->mod_ref, func_name, functype);
+    func_var->return_type = func_ctx->return_type;
     func_ctx->func_ref = func_var->val;
     func_ctx->block_ref = LLVMAppendBasicBlockInContext(func_ctx->context_ref, func_ctx->func_ref, "entry");
 
@@ -6152,7 +6163,6 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
     (void)assigncmd;
 #endif
 
-    printf("assign res: %d\n", vara->reg);
     return vara->reg;
 }
 
@@ -6163,7 +6173,6 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
      * More complex form right hand has ASSIGN
      */
     int a, b = 0;
-    int is_assign = 0;
 
     // Need skip ASSIGN nodes here, they're handled later on
     ctx->skip_node = A_ASSIGN;
@@ -6171,18 +6180,19 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     ctx->decl_type = find_type_by_id(ctx, REF_CTX(a));
     ctx->is_decl += 100;
     if (node->right && node->right->node != A_ASSIGN) {
+        ctx->decl_is_assign = 0;
         b = gen_recurse(ctx, node->right);
     } else if (node->right && node->right->node == A_ASSIGN &&
             node->right->left) {
+        ctx->decl_is_assign = 1;
         /* Name is on node->right->left */
         b = gen_recurse(ctx, node->right->left);
-        is_assign = 1;
     }
     ctx->is_decl = 0;
     ctx->decl_type = NULL;
     ctx->skip_node = 0;
-    if (!a || ! b)
-        return 0;
+    FATAL(!a, "Declaration missing type")
+    FATAL(!b, "Declaration missing name")
 
     const struct type *type = find_type_by_id(ctx, REF_CTX(a));
     struct variable *var = find_variable(ctx, b);
@@ -6198,7 +6208,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
             res->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
             /* FIXME TODO Different linkages */
             LLVMSetLinkage(res->val, LLVMPrivateLinkage);
-            if (!is_assign) {
+            if (!ctx->decl_is_assign) {
                 LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
                 if (zeroval)
                     LLVMSetInitializer(res->val, zeroval);
@@ -6207,7 +6217,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
             }
         } else {
             res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
-            if (!is_assign) {
+            if (!ctx->decl_is_assign) {
                 LLVMValueRef zeroval;
                 const struct type *zerotype;
                 if (type->ptr) {
@@ -6225,13 +6235,41 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
         ctx->last_val = res;
     } // else
         //ERR("Unsupported declaration");
+    if (var && !res)
+        res = var;
 
-    if (is_assign) {
+    if (ctx->decl_is_assign) {
         /* Recurse separately for the assign after declaration */
         gen_recurse(ctx, node->right);
     }
+    ctx->decl_is_assign = 0;
 
     return res ? res->reg : 0;
+}
+
+int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
+{
+    int a;
+
+    a = gen_recurse(ctx, node->left);
+    struct variable *fnvar = find_variable(ctx, a);
+    LLVMValueRef *args = NULL;
+    LLVMValueRef arg = NULL;
+    unsigned int num_args = 0;
+
+    FATAL(!fnvar, "No function variable");
+
+    arg = LLVMConstNull(LLVMInt1Type());
+    args = &arg;
+
+    printf("fn: %p, ftyp %p\n", (void*)fnvar->val, (void*)fnvar->func_type);
+
+    struct variable *res = new_variable_from_type(ctx, NULL, fnvar->return_type, 0, 0, 0);
+    res->val = LLVMBuildCall2(ctx->build_ref, fnvar->func_type,
+        fnvar->val, args, num_args, llvm_gen_name()
+        );
+
+    return res->reg;
 }
 
 LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, const struct type *t)
@@ -7540,9 +7578,13 @@ int gen_recursive(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
-#define return_one(a, b) \
+#if 0
+#define return_one(a, b) do {\
     if (a) return a;\
-    if (b) return b;
+    if (b) return b; } while(0);
+#endif
+
+#define return_one(a, b) return (a) ? (a) : (b);
 
 int gen_recurse(struct gen_context *ctx, struct node *node)
 {
@@ -7569,6 +7611,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     switch (node->node) {
     case A_FUNCTION:
         return 0;
+    case A_FUNC_CALL:
+        return gen_llvm_func_call(ctx, node);
     case A_INT_LIT:
         return gen_llvm_int_const(ctx, node);
     case A_DEC_LIT:
@@ -7582,8 +7626,7 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_ASSIGN:
         return gen_llvm_assign(ctx, node);
     case A_DECLARATION:
-        gen_llvm_declaration(ctx, node);
-        break;
+        return gen_llvm_declaration(ctx, node);
     case A_IDENTIFIER:
         res = gen_identifier(ctx, node);
         break;
