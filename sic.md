@@ -6,7 +6,7 @@ but is not afraid to introduce breaking changes in order to improve it.
 **REMARK** Most of the features described here are only planned, and **NOT** yet implemented.
 For now the focus has been implementing more or less standard C compiler.
 
-# Limit undefined behavior
+## Limit undefined behavior
 
 One of C's optimization strategies is "undefined behavior"
 when compiler may do whatever it wants.
@@ -17,7 +17,7 @@ Reason is to avoid hard to debug undefined behavior cases.
 Our thesis is, compiler can do good enough code even with
 these rules, and same time prevent unnecessary lost human time.
 
-## Initialized variables
+### Initialized variables
 
 All variables are initialized to 0 (or logically similar).
 This avoids problems with uninitialized variables.
@@ -41,7 +41,7 @@ Example:
         assert(p == NULL);
     }
 
-# Integer sizes
+## Integer sizes
 
 Traditionally in C the size of `int` may be different according the system where it's compiled into.
 We specify size of all types explicitly:
@@ -197,7 +197,7 @@ Also, here we first time take return value `overflow` and assign it into
 and integer. Earlier example in case of `if` works same way.
 So `overflow` return `0` in case of success, and `1` if overflow was detected.
 
-# Built-in fixed point, and extended floats
+## Built-in fixed point, and extended floats
 
 Floating point is great, but sometimes more exact representation is needed.
 Solution if fixed point math, and it improves precision, for example,
@@ -253,7 +253,7 @@ exceed certain limits.
 Otherwise it might need to rely on bigint feature, which means most of the time a performance hit.
 
 
-# Built-in string
+## Built-in string
 
 We have built in string type, which creates optimal code to target.
 However null terminated strings are of course still supported...
@@ -277,13 +277,13 @@ Strings support concatenate and substring:
     }
 
 
-# Empty brackets pointer
+## Empty brackets pointer
 
 This is not valid:
 
     char test[];
 
-# Scopes and automatic release
+## Scopes and automatic release
 
 We borrow `new` keyword from C++ to create new "objects".
 However they're not fat objects like in C++, but structs which can have
@@ -465,7 +465,7 @@ Passing reference to another function is valid:
 
 When passing a reference as a parameter a new reference is formed, and the reference count of original variable is increased.
 
-# Strict mode
+## Strict mode
 
 As another addition we add more rusty like features, which however are optional.
 In order to enable those a new strict mode is introduced.
@@ -497,7 +497,7 @@ but not the other way around.
 Another change is passing pointers.
 We are adding borrowing, reference counting and ownership to all pointer by default.
 
-## Ownership, and moving it
+### Ownership, and moving it
 
 One big thing is ownership. Variables are always owned by someone.
 Let's see example in strict mode:
@@ -600,7 +600,7 @@ Since `text` is not mutable, one can't assign the return value back to it,
 but need to reserve new variable for it.
 Rules state also that `text` is moved and not useable after the call.
 
-# Assignment and equals
+## Assignment and equals
 
 There's make clear rules for assignment and equals operators,
 which is not always the case in C.
@@ -673,7 +673,7 @@ On that case compiler is allowed to optimize this to:
     x = y;
     foo();
 
-# Dangling else
+## Dangling else
 
 Force curly braces for non-trivial if-statement.
 
@@ -702,7 +702,7 @@ Proper way would be:
 
 Now it's clear to which `if`the `else` belongs to.
 
-# Imports
+## Imports
 
 Current C-preprocessor mechanism of include, headers and main units works
 but has it's drawbacks.
@@ -782,7 +782,7 @@ When compiling a module, it produces these outputs:
 - module\_[module\_name].h
 - module\_[module\_name].def
 
-# Match
+## Match
 
 New alternative to traditional `switch` and `case`.
 Match takes an instance of `enum`.
@@ -793,8 +793,8 @@ Old C style enums are imporoved a bit:
         None
     };
 
-    enum Result {
-        Ok<int>,
+    enum Result<T> {
+        Ok<T>,
         Err<string>
     };
 
@@ -812,10 +812,10 @@ With these two we can make something like:
     check_option(a);
     check_option(b);
 
-    Result r = Ok(5);
-    Result e = Err("Some error");
+    Result<int> r = Ok(5);
+    Result<int> e = Err("Some error");
 
-    void check_result(Result res) {
+    void check_result(Result<int> res) {
         match (r) {
             Ok(val): printf("Result: %d\n", val);
             Err(msg): {
@@ -833,7 +833,7 @@ All entries in the enum contains name, and optionally a type.
 Instances of enums can contain value value of the defined type.
 All entries may have different type.
 
-# Switch - case
+## Switch - case
 
 One problematic construction is `switch` and it's `case`.
 Biggest problem is the fallthrough in case of missing break.
@@ -873,11 +873,11 @@ Thur `break` and `fallthrough` must be specifically stated:
         return r + a;
     }
 
-It's fault in caste there's missing `break` or `fallthrough` statement after every `case`.
+It's fault in case there's missing `break` or `fallthrough` statement after every `case`.
 It's not allowed to have any code between `break` or `fallthrough` and the next `case` statement.
 Compared to C this is a breaking change, however current C code can easily make compatible by adding missing `fallthrough` statements.
 
-# Rotate and shift
+## Rotate and shift
 
 Original C has only shift left and shift right operators, but missing rotate,
 even thought there's instructions for it on some CPU's, and it's widely utilized on programs.
@@ -918,7 +918,7 @@ Examples:
 
 Results would be: `0`, `0x12345678`, `0xfab3a9c8`, `0xfffffab3`, `0xffffffff`.
 
-## Arrays and lists
+# Arrays and lists
 
 Extend arrays and list handling with helpful sugar. Let's take an example:
 
@@ -1001,3 +1001,90 @@ on target architectures supporting it.
 
     printf("%d\n", a); // prints 20
     printf("%d\n", b); // prints 6
+
+Swapped values must be same type.
+
+## Errors and exceptions
+
+We have been talking about errors and exceptions earlier in this document, but haven't yet specified how they work.
+In case of SIC most errors are actually just bit better error codes. Let's take an example:
+
+    int readbyte(&mut std.File f) {
+        return f.read(1);
+    }
+
+This simple function tries to read one byte from a file. We get the file as reference, read one byte from there and return the value.
+Instead of C API we use SIC API and it's `std.File` interface which implements SIC style errors.
+
+When we try to compile that example it fails. Reason is that we didn't actually handle the possible exception.
+For that we have two options: handle it locally, or pass it forward. Here's an example to just handle it there:
+
+    int readbyte(&mut std.File f) {
+        std.Result<int, string> res = f.read(1);
+
+        match (res) {
+            Ok(val): return val;
+            Err(msg): printf("Can't read from file!\n");
+        }
+    }
+
+As you can see the error in this case is actually just wrapper around an enum. In order to pass it forward one just:
+
+    std.Result<int, string> readbyte(&mut std.File f) {
+        return f.read(1);
+    }
+
+Which passes the result forward and it's caller's responsibility to handle it.
+
+There's exceptions that may be triggered by some operations. For example divide by zero in unsafe mode
+(Remark that in normal mode result would be `0` instead without any exceptions):
+
+    int dodiv(int a, int b) {
+        unsafe {
+            return a / b;
+        }
+    }
+
+    printf("Res: %d\n", dodiv(10, 0));
+
+On these primitive exceptions the program in question is terminated. Stack trace might be printed, or some other error message.
+In order to handle the exeption instead of crashing the program one can use specific exception keywords: `overflow`, `divide_by_zero` and `exception`:
+
+    int dodiv(int a, int b) {
+        unsafe {
+            int res:
+            if (divide_by_zero { res = a / b }) {
+                return 0;
+            }
+            return res;
+        }
+    }
+
+    printf("Res: %d\n", dodiv(10, 0));
+
+On this case the example works exacly as it would in normal mode without the manual handling.
+
+## Multine strings
+
+We're borrowing multiline string syntax from Python:
+
+    string multistring = """This is multine string.
+        It starts with three quotation marks, and ends
+        until three quotations marks are found.
+        Thus it's valid to insert " or ' inside here.
+        In case one would like to have three quotation marks,
+        one can always escape it like \"\"\" this.
+        One escape would also work: \""""
+
+        Inside this quotation newlines and indent is NOT saved unless
+        the string is marked as raw string.
+        That happens by giving identifier r before fist quotation mark.
+        """;
+
+    string raw_multistring = r"""This is raw multiline string.
+
+        All formatting, newlines, etc. is preserved.
+        Suitable for making templates that should be printed or written as-is.
+        """;
+
+Those strings can be used like any strings.
