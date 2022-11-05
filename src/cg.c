@@ -5543,6 +5543,55 @@ void gen_var_pretty_function(struct gen_context *ctx, const char *func_name, con
     //buffer_del(pretty_id); // FIXME
 }
 
+
+void parse_func_params(struct gen_context *ctx, struct node * node, LLVMTypeRef **param_types, const char ***param_names, struct variable ***param_vars, unsigned int *param_cnt)
+{
+    FATALN(node && node->node != A_LIST && node->type != V_VOID, node, "Parameters is not list or void");
+
+    int ellipsis = 0;
+
+    *param_cnt = 0;
+
+    while (node && node->node == A_LIST) {
+        struct node *pval = node;
+        if (node->right && node->right->node == A_LIST)
+            pval = node->left;
+        pval = flatten_list(pval);
+
+        struct node *ptype = pval->left;
+        struct node *pname = pval->right;
+        FATALN(!ptype, pval, "Invalid parameter");
+        FATALN(ellipsis, pval, "Got elements after ellipsis \"...\"");
+
+        if (ptype->node == A_ELLIPSIS) {
+            ellipsis = 1;
+            (*param_cnt)++;
+            // FIXME handle ellipsis
+            node = node->right;
+            continue;
+        }
+
+        int t = get_type_list(ctx, ptype);
+        FATALN(t >= 0, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
+        const struct type *par_type = custom_type_get(ctx, find_type_by_id(ctx, REF_CTX(t)));
+        FATALN(!par_type, pval, "Invalid parameter type: %s", node_type_str(ptype->node));
+        int pointer = 0;
+        while (pname && pname->node == A_POINTER) {
+            pointer += pname->ptr;
+            pname = pname->left;
+        }
+        (*param_cnt)++;
+        *param_types = realloc(*param_types, sizeof(LLVMTypeRef) * (*param_cnt));
+        *param_names = realloc(*param_names, sizeof(char *) * (*param_cnt));
+        *param_vars = realloc(*param_vars, sizeof(struct variable) * (*param_cnt));
+
+        (*param_types)[*param_cnt - 1] = sic_type_to_llvm_type(par_type);
+        (*param_names)[*param_cnt - 1] = pname->value_string;
+        (*param_vars)[*param_cnt - 1] = new_variable_from_type(ctx, pname->value_string, par_type, par_type->ptr, 0, 0);
+        node = node->right;
+    }
+}
+
 struct variable *gen_func(struct gen_context *ctx, struct node *node)
 {
     struct node *body = node->right;
@@ -5566,19 +5615,41 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
         func_var = new_variable_ext(ctx, func_name, V_FUNCPTR, 64, TYPE_UNSIGNED, 0, 0, 1, func_name);
     }
 
+    /* FIXME prototype */
+
+    LLVMTypeRef *param_types = NULL;
+    const char **param_names = NULL;
+    struct variable **param_vars = NULL;
+    unsigned int param_cnt = 0;
+
+    struct node *paramnode = node->right;
+    FATALN(!paramnode, node, "Invalid function");
+    paramnode = paramnode->left;
+    FATALN(!paramnode, node, "Invalid function, no name");
+    paramnode = paramnode->right;
+
+    if (paramnode)
+        parse_func_params(func_ctx, paramnode, &param_types, &param_names, &param_vars, &param_cnt);
+
     func_ctx->context_ref = LLVMContextCreate();
     func_ctx->build_ref = LLVMCreateBuilderInContext(func_ctx->context_ref);
     LLVMTypeRef functype = LLVMFunctionType(
         sic_type_to_llvm_type(func_ctx->return_type),
-        NULL, 0, 0
-        );
+        param_types, param_cnt, 0);
     func_var->func_type = functype;
-
 
     func_var->val = LLVMAddFunction(ctx->mod_ref, func_name, functype);
     func_var->return_type = func_ctx->return_type;
     func_ctx->func_ref = func_var->val;
     func_ctx->block_ref = LLVMAppendBasicBlockInContext(func_ctx->context_ref, func_ctx->func_ref, "entry");
+
+    for (int i = 0; i < param_cnt; i++) {
+        LLVMValueRef par = LLVMGetParam(func_var->val, i);
+        param_vars[i]->val = par;
+        if (par && param_names && param_names[i]) {
+            LLVMSetValueName2(par, param_names[i], strlen(param_names[i]));
+        }
+    }
 
     LLVMPositionBuilderAtEnd(func_ctx->build_ref, func_ctx->block_ref);
 
