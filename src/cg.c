@@ -125,6 +125,11 @@ struct variable {
     struct variable *next;
     struct node *params;
     char *paramstr;
+
+    LLVMTypeRef *param_types;
+    const char **param_names;
+    struct variable **param_vars;
+    unsigned int param_cnt;
 };
 
 struct gen_context {
@@ -5616,11 +5621,12 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     }
 
     /* FIXME prototype */
+    FATAL(func_var->param_cnt || func_var->param_types || func_var->param_types || func_var->param_vars, "Function already defined: %s\n", func_name);
 
-    LLVMTypeRef *param_types = NULL;
-    const char **param_names = NULL;
-    struct variable **param_vars = NULL;
-    unsigned int param_cnt = 0;
+    func_var->param_types = NULL;
+    func_var->param_names = NULL;
+    func_var->param_vars = NULL;
+    func_var->param_cnt = 0;
 
     struct node *paramnode = node->right;
     FATALN(!paramnode, node, "Invalid function");
@@ -5629,13 +5635,13 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     paramnode = paramnode->right;
 
     if (paramnode)
-        parse_func_params(func_ctx, paramnode, &param_types, &param_names, &param_vars, &param_cnt);
+        parse_func_params(func_ctx, paramnode, &func_var->param_types, &func_var->param_names, &func_var->param_vars, &func_var->param_cnt);
 
     func_ctx->context_ref = LLVMContextCreate();
     func_ctx->build_ref = LLVMCreateBuilderInContext(func_ctx->context_ref);
     LLVMTypeRef functype = LLVMFunctionType(
         sic_type_to_llvm_type(func_ctx->return_type),
-        param_types, param_cnt, 0);
+        func_var->param_types, func_var->param_cnt, 0);
     func_var->func_type = functype;
 
     func_var->val = LLVMAddFunction(ctx->mod_ref, func_name, functype);
@@ -5643,11 +5649,11 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     func_ctx->func_ref = func_var->val;
     func_ctx->block_ref = LLVMAppendBasicBlockInContext(func_ctx->context_ref, func_ctx->func_ref, "entry");
 
-    for (int i = 0; i < param_cnt; i++) {
+    for (int i = 0; i < func_var->param_cnt; i++) {
         LLVMValueRef par = LLVMGetParam(func_var->val, i);
-        param_vars[i]->val = par;
-        if (par && param_names && param_names[i]) {
-            LLVMSetValueName2(par, param_names[i], strlen(param_names[i]));
+        func_var->param_vars[i]->val = par;
+        if (par && func_var->param_names && func_var->param_names[i]) {
+            LLVMSetValueName2(par, func_var->param_names[i], strlen(func_var->param_names[i]));
         }
     }
 
@@ -6331,6 +6337,23 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
     return res ? res->reg : 0;
 }
 
+void parse_func_call_params(struct gen_context *ctx, struct node *node, unsigned int param_cnt, LLVMValueRef *args)
+{
+    unsigned int i = 0;
+
+    while (node) {
+        if (node->node == A_LIST) {
+            int a = gen_recurse(ctx, node->left);
+            struct variable *vara = find_variable(ctx, a);
+            // TODO Conversion to proper type
+            args[i] = vara->val;
+            i++;
+            node = node->right;
+        } else
+            ERR("Invalid parameter: %s", node_str(node));
+    }
+}
+
 int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
 {
     int a;
@@ -6338,15 +6361,17 @@ int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
     a = gen_recurse(ctx, node->left);
     struct variable *fnvar = find_variable(ctx, a);
     LLVMValueRef *args = NULL;
-    LLVMValueRef arg = NULL;
     unsigned int num_args = 0;
 
     FATAL(!fnvar, "No function variable");
+    // TODO Built-in funcs
 
-    arg = LLVMConstNull(LLVMInt1Type());
-    args = &arg;
-
-    printf("fn: %p, ftyp %p\n", (void*)fnvar->val, (void*)fnvar->func_type);
+   if (fnvar->param_cnt) {
+        args = calloc(fnvar->param_cnt, sizeof(LLVMValueRef));
+        parse_func_call_params(ctx, node->right, fnvar->param_cnt, args);
+        num_args = fnvar->param_cnt;
+    } else
+        args = NULL;
 
     struct variable *res = new_variable_from_type(ctx, NULL, fnvar->return_type, 0, 0, 0);
     res->val = LLVMBuildCall2(ctx->build_ref, fnvar->func_type,
