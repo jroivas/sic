@@ -5585,14 +5585,21 @@ void parse_func_params(struct gen_context *ctx, struct node * node, LLVMTypeRef 
             pointer += pname->ptr;
             pname = pname->left;
         }
+        ptype->ptr += pointer;
+        pointer = ptype->ptr;
+
+        /* void param */
+        if (par_type->type == V_VOID && !pointer)
+            break;
+
         (*param_cnt)++;
         *param_types = realloc(*param_types, sizeof(LLVMTypeRef) * (*param_cnt));
         *param_names = realloc(*param_names, sizeof(char *) * (*param_cnt));
         *param_vars = realloc(*param_vars, sizeof(struct variable) * (*param_cnt));
 
-        (*param_types)[*param_cnt - 1] = sic_type_to_llvm_type(par_type);
-        (*param_names)[*param_cnt - 1] = pname->value_string;
-        (*param_vars)[*param_cnt - 1] = new_variable_from_type(ctx, pname->value_string, par_type, par_type->ptr, 0, 0);
+        (*param_types)[*param_cnt - 1] = llvm_type_wrap(sic_type_to_llvm_type(par_type), pointer);
+        (*param_names)[*param_cnt - 1] = pname ? pname->value_string : "";
+        (*param_vars)[*param_cnt - 1] = new_variable_from_type(ctx, pname ? pname->value_string : NULL, par_type, par_type->ptr, 0, 0);
         node = node->right;
     }
 }
@@ -5639,19 +5646,24 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
 
     func_ctx->context_ref = LLVMContextCreate();
     func_ctx->build_ref = LLVMCreateBuilderInContext(func_ctx->context_ref);
-    LLVMTypeRef functype = LLVMFunctionType(
+    LLVMTypeRef functype;
+    functype = LLVMFunctionType(
         sic_type_to_llvm_type(func_ctx->return_type),
         func_var->param_types, func_var->param_cnt, 0);
     func_var->func_type = functype;
 
     func_var->val = LLVMAddFunction(ctx->mod_ref, func_name, functype);
+    // TODO Configurable calling convention
+    //LLVMSetFunctionCallConv(func_var->val, LLVMCCallConv);
     func_var->return_type = func_ctx->return_type;
     func_ctx->func_ref = func_var->val;
     func_ctx->block_ref = LLVMAppendBasicBlockInContext(func_ctx->context_ref, func_ctx->func_ref, "entry");
+    func_var->func = 1;
 
     for (int i = 0; i < func_var->param_cnt; i++) {
         LLVMValueRef par = LLVMGetParam(func_var->val, i);
-        func_var->param_vars[i]->val = par;
+        if (func_var->param_vars)
+            func_var->param_vars[i]->val = par;
         if (par && func_var->param_names && func_var->param_names[i]) {
             LLVMSetValueName2(par, func_var->param_names[i], strlen(func_var->param_names[i]));
         }
@@ -6374,11 +6386,19 @@ int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
         args = NULL;
 
     struct variable *res = new_variable_from_type(ctx, NULL, fnvar->return_type, 0, 0, 0);
+
+#if 0
+        LLVMValueRef fn = LLVMGetNamedFunction(ctx->mod_ref, fnvar->name);
+        res->val = LLVMBuildCall2(ctx->build_ref, LLVMTypeOf(fn),
+            fn, args, num_args,
+            fnvar->return_type->type != V_VOID ? llvm_gen_name() : "");
+#endif
     res->val = LLVMBuildCall2(ctx->build_ref, fnvar->func_type,
-        fnvar->val, args, num_args, llvm_gen_name()
-        );
+        fnvar->val, args, num_args,
+        fnvar->return_type->type != V_VOID ? llvm_gen_name() : "");
 
     return res->reg;
+
 }
 
 LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, const struct type *t)
@@ -6612,14 +6632,17 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         case A_ADD:
             res->val = LLVMBuildNSWAdd(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value + varb->value;
             break;
         case A_MINUS:
             res->val = LLVMBuildNSWSub(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value - varb->value;
             break;
         case A_MUL:
             res->val = LLVMBuildNSWMul(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value * varb->value;
             break;
         case A_DIV:
             if (restype->sign)
@@ -6629,6 +6652,10 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
                 res->val = LLVMBuildUDiv(ctx->build_ref, va, vb,
                     llvm_gen_name());
             break;
+            if (varb->value != 0)
+                res->value = vara->value / varb->value;
+            else
+                res->value = 0;
         case A_MOD:
             if (restype->sign)
                 res->val = LLVMBuildSRem(ctx->build_ref, va, vb,
@@ -6636,18 +6663,25 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
             else
                 res->val = LLVMBuildURem(ctx->build_ref, va, vb,
                     llvm_gen_name());
+            if (varb->value != 0)
+                res->value = vara->value % varb->value;
+            else
+                res->value = 0;
             break;
         case A_OR:
             res->val = LLVMBuildOr(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value | varb->value;
             break;
         case A_XOR:
             res->val = LLVMBuildXor(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value ^ varb->value;
             break;
         case A_AND:
             res->val = LLVMBuildAnd(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value & varb->value;
             break;
         case A_LEFT:
             res->val = LLVMBuildShl(ctx->build_ref, va, vb,
@@ -6670,22 +6704,33 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         case A_ADD:
             res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value + varb->value;
             break;
         case A_MINUS:
             res->val = LLVMBuildFSub(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value - varb->value;
             break;
         case A_MUL:
             res->val = LLVMBuildFMul(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            res->value = vara->value * varb->value;
             break;
         case A_DIV:
             res->val = LLVMBuildFDiv(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            if (varb->value != 0)
+                res->value = vara->value / varb->value;
+            else
+                res->value = 0;
             break;
         case A_MOD:
             res->val = LLVMBuildFRem(ctx->build_ref, va, vb,
                 llvm_gen_name());
+            if (varb->value != 0)
+                res->value = vara->value % varb->value;
+            else
+                res->value = 0;
             break;
         case A_OR:
         case A_XOR:
@@ -6933,6 +6978,25 @@ int gen_llvm_addr(struct gen_context *ctx, struct node *node)
 
     res->val = LLVMBuildAlloca(ctx->build_ref, typeref, llvm_gen_name());
     LLVMBuildStore(ctx->build_ref, va, res->val);
+    return res->reg;
+}
+
+int gen_llvm_dereference(struct gen_context *ctx, struct node *node)
+{
+    int a;
+
+    a = gen_recurse(ctx, node->left);
+    struct variable *vara = find_variable(ctx, a);
+
+    FATAL(!vara, "Missing dereference variable");
+
+    if (!vara->type->ptr) {
+        ERR("Dereferencing a non-pointer type");
+    }
+
+    struct variable *res = new_variable_from_type(ctx, NULL, vara->type, vara->type->ptr -1, 0, 0);
+    res->val = sic_cast_load_pointer2(ctx, vara->val, vara->type, res->type);
+
     return res->reg;
 }
 
@@ -7830,6 +7894,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
         break;
     case A_ADDR:
         return gen_llvm_addr(ctx, node);
+    case A_DEREFERENCE:
+        return gen_llvm_dereference(ctx, node);
     case A_LIST:
     case A_GLUE:
         resleft = gen_recurse(ctx, node->left);
