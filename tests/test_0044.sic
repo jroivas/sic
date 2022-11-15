@@ -23,6 +23,7 @@ int last(int *arr)
     return last;
 }
 
+#if 0
 int cnt(int *arr)
 {
     int cnt = 0;
@@ -35,11 +36,12 @@ int cnt(int *arr)
 
     return cnt;
 }
+#endif
 
 int main()
 {
     int n = 10;
-    int val[n + 1];
+    int val[n + 2];
 
     tmp();
 
@@ -47,6 +49,7 @@ int main()
         val[i] = i + 2;
 
     val[n] = 0;
+    val[9] = 0;
 
     if (first(val) != 2)
         return 1;
@@ -54,6 +57,7 @@ int main()
     if (last(val) != 11)
         return 2;
 
+#if 0
     int cnt_items = cnt(val);
     if (cnt_items != n)
         return 3;
@@ -94,6 +98,7 @@ int main()
     ptr = val - 1 + 2;
     if (*ptr != 3)
         return 12;
+#endif
 
     return 0;
 }
