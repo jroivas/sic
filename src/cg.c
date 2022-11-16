@@ -223,7 +223,7 @@ int gen_recursive_allocs(struct gen_context *ctx, struct node *node);
 int gen_negate(struct gen_context *ctx, struct node *node, int a);
 struct variable *gen_load(struct gen_context *ctx, struct variable *v);
 struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global);
-struct variable *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type, int ptr, int addr, int global);
+struct variable *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type);
 int gen_allocate_int(struct gen_context *ctx, int reg, int bits, int ptr, int array, int code_alloc, literalnum val, struct node *node);
 struct variable *gen_access_ptr(struct gen_context *ctx, struct variable *var, struct variable *res, struct variable *idx_var, int index);
 const struct type *gen_type_list_type(struct gen_context *ctx, struct node *node);
@@ -1501,9 +1501,9 @@ void output_res(struct gen_context *ctx, int *got_main)
     }
 }
 
-struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global, const char *type_name)
+variable_t *new_variable_ext(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global, const char *type_name)
 {
-    struct variable *res = calloc(1, sizeof(struct variable));
+    variable_t *res = calloc(1, sizeof(variable_t));
 
     res->id = ctx_reserve_id(ctx);
     // Float and fixed are always signed
@@ -1587,7 +1587,7 @@ LLVMValueRef gen_llvm_real_const_ref(int bits, double val)
     return NULL;
 }
 
-struct variable *sic_new_int_lit(struct gen_context *ctx, literalnum value, int sign, int bits)
+variable_t *sic_new_int_lit(struct gen_context *ctx, literalnum value, int sign, int bits)
 {
     if (bits == 0)
         bits = 32;
@@ -1607,7 +1607,7 @@ struct variable *sic_new_int_lit(struct gen_context *ctx, literalnum value, int 
     return var;
 }
 
-struct variable *sic_new_real_lit(struct gen_context *ctx, double value, int bits)
+variable_t *sic_new_real_lit(struct gen_context *ctx, double value, int bits)
 {
     struct variable *var = new_variable(
         ctx, NULL, V_FLOAT, bits,
@@ -1618,17 +1618,17 @@ struct variable *sic_new_real_lit(struct gen_context *ctx, double value, int bit
     return var;
 }
 
-struct variable *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global)
+variable_t *new_variable(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global)
 {
     return new_variable_ext(ctx, name, type, bits, sign, ptr, addr, global, NULL);
 }
 
-struct variable *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type, int ptr, int addr, int global)
+variable_t *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type)
 {
-    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, ptr, addr, global, type->name);
+    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, 0/*type->ptr*/, 0, ctx->global, type->name);
 }
 
-struct variable *new_inst_variable(struct gen_context *ctx,
+variable_t *new_inst_variable(struct gen_context *ctx,
         enum var_type type, int bits, enum type_sign sign)
 {
     struct variable *res = new_variable(ctx, NULL, type, bits, sign, 0, 0, 0);
@@ -1636,14 +1636,14 @@ struct variable *new_inst_variable(struct gen_context *ctx,
     return res;
 }
 
-struct variable *new_bool(struct gen_context *ctx, enum vartype direct)
+variable_t *new_bool(struct gen_context *ctx, enum vartype direct)
 {
     if (direct == VAR_DIRECT)
         return new_inst_variable(ctx, V_INT, 1, TYPE_UNSIGNED);
     return new_variable(ctx, NULL, V_INT, 1, TYPE_UNSIGNED, 0, 0, 0);
 }
 
-struct variable *new_bool_alloc(struct gen_context *ctx, enum vartype direct)
+variable_t *new_bool_alloc(struct gen_context *ctx, enum vartype direct)
 {
     struct variable *res = new_bool(ctx, direct);
     buffer_write(ctx->data, "%%%d = alloca i1, align 1\n",
@@ -5710,7 +5710,7 @@ void parse_func_params(struct gen_context *ctx, struct node * node, LLVMTypeRef 
 
         (*param_types)[*param_cnt - 1] = llvm_type_wrap(sic_type_to_llvm_type(par_type), pointer);
         (*param_names)[*param_cnt - 1] = pname ? pname->value_string : "";
-        (*param_vars)[*param_cnt - 1] = new_variable_from_type(ctx, pname ? pname->value_string : NULL, par_type, par_type->ptr + 1, 0, 0);
+        (*param_vars)[*param_cnt - 1] = new_variable_from_type(ctx, pname ? pname->value_string : NULL, par_type);
         node = node->right;
     }
 }
@@ -6379,6 +6379,7 @@ int gen_decl_begin(struct gen_context *ctx, struct node *node)
 {
     int a;
 
+    // Need skip ASSIGN nodes here, they're handled later on
     ctx->skip_node = A_ASSIGN;
     a = gen_recurse(ctx, node);
     ctx->decl_type = find_type_by_id(ctx, REF_CTX(a));
@@ -6406,30 +6407,66 @@ int gen_decl_end(struct gen_context *ctx, struct node *node)
     return b;
 }
 
+variable_t *gen_decl_new(struct gen_context *ctx, variable_t *var, int a, int b)
+{
+    const struct type *type = find_type_by_id(ctx, REF_CTX(a));
+    if (!(type && var && !var->val))
+        return NULL;
+
+    LLVMTypeRef llt = sic_type_to_llvm_type(type);
+    llt = llvm_type_wrap(llt, type->ptr);
+
+    //variable_t *res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr, 0, ctx->global);
+    variable_t *res = new_variable_from_type(ctx, var->name, type);
+    res->kind = VAR_VAR;
+
+    if (ctx->global) {
+        res->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
+        /* FIXME TODO Different linkages */
+        LLVMSetLinkage(res->val, LLVMPrivateLinkage);
+        if (!ctx->decl_is_assign) {
+            LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
+            if (zeroval)
+                LLVMSetInitializer(res->val, zeroval);
+            else
+                ERR("Unsupported zero for global type: %s", stype_str(type));
+        }
+    } else {
+        res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+        if (!ctx->decl_is_assign) {
+            LLVMValueRef zeroval;
+            const struct type *zerotype;
+            if (type->ptr) {
+                LLVMTypeRef basetype = sic_type_to_llvm_type(type);
+                basetype = llvm_type_wrap(basetype, type->ptr);
+                zeroval = LLVMConstPointerNull(basetype);
+                zerotype = find_type_by_name(ctx, "nulltype");
+            } else {
+                zeroval = llvm_zero_from_sic_type(type);
+                zerotype = type;
+            }
+            gen_llvm_assign2(ctx, res->val, zeroval, type, zerotype, 0);
+        }
+    }
+    ctx->last_val = res;
+    return res;
+}
+
 int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
 {
     /*
      * In simple form type is on left, and right has name.
      * More complex form right hand has ASSIGN
      */
-    int a, b = 0;
-
-    // Need skip ASSIGN nodes here, they're handled later on
-#if 0
-    ctx->skip_node = A_ASSIGN;
-    a = gen_recurse(ctx, node->left);
-    ctx->decl_type = find_type_by_id(ctx, REF_CTX(a));
-    ctx->is_decl += 100;
-#endif
-    a = gen_decl_begin(ctx, node->left);
-    b = gen_decl_end(ctx, node->right);
+    int a = gen_decl_begin(ctx, node->left);
+    int b = gen_decl_end(ctx, node->right);
 
     FATAL(!a, "Declaration missing type")
     FATAL(!b, "Declaration missing name")
 
-    const struct type *type = find_type_by_id(ctx, REF_CTX(a));
-    struct variable *var = find_variable_incomplete(ctx, b);
-    struct variable *res = NULL;
+    variable_t *var = find_variable_incomplete(ctx, b);
+    variable_t *res = gen_decl_new(ctx, var, a, b);
+#if 0
     if (type && var && !var->val) {
         LLVMTypeRef llt = sic_type_to_llvm_type(type);
 
@@ -6469,6 +6506,7 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
         ctx->last_val = res;
     } // else
         //ERR("Unsupported declaration");
+#endif
     if (var && !res) {
         res = var;
         res->kind = VAR_VAR;
@@ -6524,7 +6562,7 @@ int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
     } else
         args = NULL;
 
-    struct variable *res = new_variable_from_type(ctx, NULL, fnvar->return_type, 0, 0, 0);
+    struct variable *res = new_variable_from_type(ctx, NULL, fnvar->return_type);
 
 #if 0
         LLVMValueRef fn = LLVMGetNamedFunction(ctx->mod_ref, fnvar->name);
@@ -6546,7 +6584,7 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
 
     if (t->type != var->type->type) {
         if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
             tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
             var = tmp;
         }
@@ -6595,7 +6633,7 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
             ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
         if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
             tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
             var = tmp;
         }
@@ -6614,7 +6652,7 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
                     var->val, sic_type_to_llvm_type(t), llvm_gen_name());
     } else if (t->type == var->type->type && t->bits < var->type->bits) {
         if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type, 0, 0, 0);
+            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
             tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
             var = tmp;
         }
@@ -6839,7 +6877,7 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         //ERR("Can't solve type");
         restype = vara->type;
 
-    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    res = new_variable_from_type(ctx, NULL, restype);
     res->kind = VAR_OP;
     LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
     LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
@@ -6979,7 +7017,7 @@ int gen_llvm_cast_op(struct gen_context *ctx, struct node *node)
     FATAL(!varb, "No cast source");
 
     //struct variable *res = new_variable(ctx, NULL, V_INT, 32, TYPE_SIGNED, 0, 0, 0);
-    struct variable *res = new_variable_from_type(ctx, NULL, cast_type, cast_type->ptr, 0, 0);
+    struct variable *res = new_variable_from_type(ctx, NULL, cast_type);
     res->val = gen_llvm_cast_to(ctx, varb, cast_type);
 
     return res->reg;
@@ -7088,7 +7126,7 @@ int gen_llvm_negate(struct gen_context *ctx, struct node *node)
 
     LLVMValueRef zero;
 
-    res = new_variable_from_type(ctx, NULL, vara->type, 0, 0, 0);
+    res = new_variable_from_type(ctx, NULL, vara->type);
     switch (vara->type->type) {
     case V_INT:
         zero = gen_llvm_int_const_ref(vara->type->bits, 0, 0);
@@ -7118,7 +7156,7 @@ int gen_llvm_tilde(struct gen_context *ctx, struct node *node)
 
     LLVMValueRef neg1;
 
-    res = new_variable_from_type(ctx, NULL, vara->type, 0, 0, 0);
+    res = new_variable_from_type(ctx, NULL, vara->type);
     switch (vara->type->type) {
     case V_INT:
         neg1 = gen_llvm_int_const_ref(vara->type->bits, -1, 0);
@@ -7222,7 +7260,7 @@ int gen_llvm_dereference(struct gen_context *ctx, struct node *node)
     }
 
     printf("DEREF: %s, %u\n", vara->name, vara->type->ptr - 1);
-    struct variable *res = new_variable_from_type(ctx, NULL, vara->type, vara->type->ptr - 1, 0, 0);
+    struct variable *res = new_variable_from_type(ctx, NULL, vara->type);
     res->val = sic_cast_load_pointer2(ctx, vara->val, vara->type, res->type);
     printf("DEREF dne: %s\n", vara->name);
 
@@ -7269,7 +7307,7 @@ int gen_llvm_index(struct gen_context *ctx, struct node *node)
 
     FATALN(!var, node, "Can't find variable in non-declr: %d, identifier \"%s\"\n", ctx->is_decl, ident->value_string);
 
-    struct variable *res = new_variable_from_type(ctx, NULL, var->type, var->type->ptr + 1, 0, 0);
+    struct variable *res = new_variable_from_type(ctx, NULL, var->type);
     b = gen_recurse(ctx, node->right);
     struct variable *varb = find_variable(ctx, b);
 
@@ -7496,7 +7534,7 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
             vb
         };
 
-        res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+        res = new_variable_from_type(ctx, NULL, restype);
         res->val = LLVMBuildInBoundsGEP2(
             ctx->build_ref,
             llvm_type_wrap_array(sic_type_to_llvm_type(restype), vara),
@@ -7513,7 +7551,7 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
     if (!(restype->type == V_INT || restype->type == V_FLOAT))
         ERR("Invalid op assign type");
 
-    res = new_variable_from_type(ctx, NULL, restype, 0, 0, 0);
+    res = new_variable_from_type(ctx, NULL, restype);
     switch (node->node) {
     case A_ADD_ASSIGN:
         if (restype->type == V_INT)
@@ -7714,7 +7752,7 @@ int gen_llvm_ternary(struct gen_context *ctx, struct node *node)
 
     if (true_var->type != false_var->type) {
         LLVMValueRef va = gen_llvm_cast_to(ctx, false_var, true_var->type);
-        false_var = new_variable_from_type(ctx, NULL, true_var->type, true_var->type->ptr, 0, 0);
+        false_var = new_variable_from_type(ctx, NULL, true_var->type);
         false_var->val = va;
     }
 
