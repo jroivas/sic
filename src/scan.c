@@ -44,6 +44,7 @@ void scanfile_open(struct scanfile *f, const char *name)
     f->filename = name;
     f->line = 1;
     f->buf = buffer_init();
+    f->step = 0;
 }
 
 void scanfile_pipe(struct scanfile *f, FILE *pipe, const char *name)
@@ -75,7 +76,7 @@ const char *token_val_str(enum tokentype t)
     return tokenstr[t];
 }
 
-const char *token_str(struct token *t)
+const char *token_str(const struct token *t)
 {
     return token_val_str(t->token);
 }
@@ -353,7 +354,7 @@ void token_set(struct scanfile *f, struct token *t, char c)
     memcpy(t->linebuf, f->linebuf, SCANFILE_LINEBUF);
 }
 
-int scan(struct scanfile *f, struct token *t)
+int __scan(struct scanfile *f, struct token *t)
 {
     int c = skip(f);
     int ok = 0;
@@ -400,7 +401,7 @@ int scan(struct scanfile *f, struct token *t)
                 c = next(f);
             }
             // Scan next
-            return scan(f, t);
+            return __scan(f, t);
         case '/':
             t->token = T_SLASH;
             c = next(f);
@@ -410,7 +411,7 @@ int scan(struct scanfile *f, struct token *t)
                     c = next(f);
                 }
                 // Scan next
-                return scan(f, t);
+                return __scan(f, t);
             } else if (c == '*') {
                 do {
                     int trigger;
@@ -423,7 +424,7 @@ int scan(struct scanfile *f, struct token *t)
                             break;
                     }
                 } while (c != EOF);
-                return scan(f, t);
+                return __scan(f, t);
             } else
                 putback(f, c);
             break;
@@ -572,6 +573,47 @@ int scan(struct scanfile *f, struct token *t)
 
     //printf("*** Scan res: %s from %d:%d\n", token_dump(t), t->line, t->linepos);
     return 1;
+}
+
+int scan(struct scanfile *f, struct token *t)
+{
+#if 0
+    switch (f->step) {
+    case 0:
+        __scan(f, &f->curr);
+        *t = f->curr;
+        f->step = 1;
+        if (!__scan(f, &f->next))
+            f->step = 2;
+        return 1;
+    case 1:
+        *t = f->curr = f->next;
+        if (!__scan(f, &f->next))
+            f->step = 2;
+        return 1;
+    case 2:
+        *t = f->next;
+        return 0;
+    default:
+        FATAL(NULL, "Should not get here!");
+        return 0;
+    }
+    return 0;
+#else
+    return __scan(f, t);
+#endif
+}
+
+int peek(struct scanfile *f, struct token *t)
+{
+#if 0
+    if (f->step == 0)
+        scan(f, t);
+    *t = f->next;
+    return f->step == 2 ? 0 : 1;
+#else
+    return 0;
+#endif
 }
 
 void save_point(struct scanfile *f, struct token *t)

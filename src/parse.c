@@ -2421,7 +2421,6 @@ struct node *function_definition(struct scanfile *f, struct token *token)
 
     return res;
 }
-
 struct node *external_declaration(struct scanfile *f, struct token *token)
 {
     struct node *res;
@@ -2473,7 +2472,6 @@ struct node *parse(struct scanfile *f)
     }
 
     struct token token;
-    memset(&token, 0, sizeof(struct token));
     scan(f, &token);
     struct node *res = translation_unit(f, &token);
     FATAL(!res, "Can't parse source, didn't detect token: %s", token_dump(&token));

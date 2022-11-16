@@ -91,6 +91,11 @@ struct scanfile {
 
     size_t pos;
 
+    struct token curr;
+    struct token next;
+
+    int step;
+
     int pipe;
     int line;
     int linepos;
@@ -110,6 +115,7 @@ void scanfile_pipe(struct scanfile *f, FILE *pipe, const char *name);
 void scanfile_close(struct scanfile *f);
 
 int scan(struct scanfile *f, struct token *t);
+int peek(struct scanfile *f, struct token *t);
 int accept(struct scanfile *f, struct token *t, enum tokentype token);
 int accept_keyword(struct scanfile *f, struct token *t, enum keyword_type keyword);
 int is_next(struct scanfile *f, struct token *t, enum tokentype token);
@@ -120,7 +126,7 @@ void __load_point(struct scanfile *f, struct token *t, const char *file, int lin
 #define load_point(f, t) __load_point(f, t, __FILE__, __LINE__)
 
 const char *token_val_str(enum tokentype t);
-const char *token_str(struct token *t);
+const char *token_str(const struct token *t);
 char *token_dump(struct token *t);
 
 static inline int expect_err(struct scanfile *f,
