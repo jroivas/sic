@@ -100,7 +100,8 @@ enum var_kind {
     VAR_NONE = 0,
     VAR_VAR,
     VAR_LITERAL,
-    VAR_OP,
+    VAR_LITERAL_TEMP,
+    VAR_LITERAL_BOOL,
     VAR_OTHER,
 };
 
@@ -238,6 +239,7 @@ char *get_param_type_str(struct gen_context *ctx, struct node *node);
 struct variable *new_variable_ext(struct gen_context *ctx, const char *name, enum var_type type, int bits, enum type_sign sign, int ptr, int addr, int global, const char *type_name);
 char *gen_func_params_with(struct gen_context *ctx, struct node *orig, int allocate_params);
 
+LLVMValueRef sic_access_lit(struct gen_context *ctx, variable_t *var, const type_t *type);
 LLVMValueRef gen_llvm_assign2(struct gen_context *ctx, LLVMValueRef dst, LLVMValueRef src, const struct type *dst_type, const struct type *src_type, unsigned src_array_size);
 
 void struct_add(struct gen_context *ctx, struct struct_name *new_struct)
@@ -277,6 +279,11 @@ char *llvm_gen_name(void)
     snprintf(tmp, 256, "__%u", ++idx);
     tmp[255] = 0;
     return tmp;
+}
+
+int sic_type_same(const type_t *a, const type_t *b)
+{
+    return (a == b);
 }
 
 /* Append named metadata TODO Not working properly */
@@ -454,7 +461,7 @@ const char *float_str(int bits)
 
 int sic_var_is_ptr(struct variable *var)
 {
-    return (var->type->ptr > 1) || var->array;
+    return var->type->ptr || var->array;
 }
 
 char *get_type_str(struct gen_context *ctx, const struct type *type)
@@ -956,11 +963,11 @@ const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a,
         if (a->bits == b->bits)
             wanted_sign = 0;
     }
-#if 0
+#if 1
     if (a->ptr > b->ptr) {
-        ptr = a->ptr;
+        ptr = a->ptr - b->ptr;
     } else
-        ptr = b->ptr;
+        ptr = b->ptr - a->ptr;
 #else
     ptr = 0;
 #endif
@@ -970,7 +977,17 @@ const struct type *sic_solve_type(struct gen_context *ctx, const struct type *a,
         ERR("Pointer value differs in type!");
 #endif
     //return __find_type_by(ctx, a->type, wanted_bits, wanted_sign, a->ptr, NULL);
-    return __find_type_by(ctx, a->type, wanted_bits, wanted_sign, ptr, NULL);
+    const type_t *restype = __find_type_by(ctx, a->type, wanted_bits, wanted_sign, 0, NULL);
+    if (!restype)
+        restype = a;
+    // FIXME
+#if 0
+    if (ptr)
+        restype = type_wrap_to(ctx, restype, ptr);
+#else
+    (void)ptr;
+#endif
+    return restype;
     //return type_wrap_to(ctx, __find_type_by(ctx, a->type, wanted_bits, wanted_sign, 0, NULL), ptr);
 }
 
@@ -6314,15 +6331,17 @@ LLVMValueRef gen_llvm_assign2(struct gen_context *ctx, LLVMValueRef dst, LLVMVal
 
     /* TODO FIXME Null can be passed as-is for now */
     if (!LLVMIsNull(src)) {
-
-    if (src_type->ptr) {
-        src = sic_cast_load_pointer2(ctx, src, src_type, dst_type);
-    }
-    if (src_arr_size && dst_type->ptr) {
-        src = gen_array_gep2(ctx, src, llvm_type_wrap_array2(sic_type_to_llvm_type(src_type), src_arr_size));
-    }
-    if (dst_type->type != src_type->type)
-        src = sic_cast_llvm_type2(ctx, src, src_type, dst_type);
+        // FIXME fail
+#if 0
+        if (src_type->ptr) {
+            src = sic_cast_load_pointer2(ctx, src, src_type, dst_type);
+        }
+        if (src_arr_size && dst_type->ptr) {
+            src = gen_array_gep2(ctx, src, llvm_type_wrap_array2(sic_type_to_llvm_type(src_type), src_arr_size));
+        }
+        if (dst_type->type != src_type->type)
+            src = sic_cast_llvm_type2(ctx, src, src_type, dst_type);
+#endif
 
     // FIXME TODO
 #if 0
@@ -6359,17 +6378,26 @@ int gen_llvm_assign(struct gen_context *ctx, struct node *node)
 
     FATAL(!varb, "Missing right side of assign: %d", b);
 
-    LLVMValueRef src = varb->val;
+    vara->value = varb->value;
+    LLVMValueRef src = sic_access_lit(ctx, varb, vara->type);
     if (!src)
         ERR("Invalid source");
+    LLVMValueRef dst = vara->val;
 
-    vara->value = varb->value;
-    LLVMValueRef assigncmd = gen_llvm_assign2(ctx, vara->val, varb->val, vara->type, varb->type, varb->array);
+#if 0
+    if (ctx->global)
+        LLVMSetInitializer(dst, src);
+    else
+        (void)LLVMBuildStore(ctx->build_ref, src, dst);
+#endif
+#if 1
+    LLVMValueRef assigncmd = gen_llvm_assign2(ctx, dst, src, vara->type, varb->type, varb->array);
 #if 0
     if (assigncmd)
         llvm_attach_metadata(ctx, assigncmd, vara->name);
 #else
     (void)assigncmd;
+#endif
 #endif
 
     return vara->reg;
@@ -6466,49 +6494,9 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
 
     variable_t *var = find_variable_incomplete(ctx, b);
     variable_t *res = gen_decl_new(ctx, var, a, b);
-#if 0
-    if (type && var && !var->val) {
-        LLVMTypeRef llt = sic_type_to_llvm_type(type);
-
-        llt = llvm_type_wrap(llt, type->ptr);
-
-        res = new_variable(ctx, var->name, type->type, type->bits, type->sign, type->ptr + 1, 0, ctx->global);
-        res->kind = VAR_VAR;
-
-        if (ctx->global) {
-            res->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
-            /* FIXME TODO Different linkages */
-            LLVMSetLinkage(res->val, LLVMPrivateLinkage);
-            if (!ctx->decl_is_assign) {
-                LLVMValueRef zeroval = llvm_zero_from_sic_type(type);
-                if (zeroval)
-                    LLVMSetInitializer(res->val, zeroval);
-                else
-                    ERR("Unsupported zero for global type: %s", stype_str(type));
-            }
-        } else {
-            res->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
-            if (!ctx->decl_is_assign) {
-                LLVMValueRef zeroval;
-                const struct type *zerotype;
-                if (type->ptr) {
-                    LLVMTypeRef basetype = sic_type_to_llvm_type(type);
-                    basetype = llvm_type_wrap(basetype, type->ptr);
-                    zeroval = LLVMConstPointerNull(basetype);
-                    zerotype = find_type_by_name(ctx, "nulltype");
-                } else {
-                    zeroval = llvm_zero_from_sic_type(type);
-                    zerotype = type;
-                }
-                gen_llvm_assign2(ctx, res->val, zeroval, type, zerotype, 0);
-            }
-        }
-        ctx->last_val = res;
-    } // else
-        //ERR("Unsupported declaration");
-#endif
     if (var && !res) {
         res = var;
+        FATAL(var->kind != VAR_NONE, "Variable alredy declared!");
         res->kind = VAR_VAR;
     }
 
@@ -6678,19 +6666,12 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
     //if (src_type->ptr > type->ptr) {
 // FIXME not working
     //if (src_type->ptr != type->ptr) {
-    if (src_type->ptr) {
-        int ptr = src_type->ptr;
+#if 1
+    int ptr = src_type->ptr;
+    if (ptr > type->ptr) {
         int dst = type->ptr;
-        int dec = 1;
 
-        if (ptr == 1 && dst == 0)
-            dec = 0;
-
-        if (ptr > 0)
-            ptr -= dec;
-        if (dst > 0)
-            dst--;
-        while (ptr > 0 && ptr >= dst) {
+        while (ptr > 0 && ptr > dst) {
             LLVMTypeRef srctyp = sic_type_to_llvm_type(src_type);
             if (ptr > 0)
                 srctyp = llvm_type_wrap(srctyp, ptr - 1);
@@ -6700,6 +6681,10 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
             --ptr;
         }
     }
+#endif
+    LLVMTypeRef srctyp = sic_type_to_llvm_type(src_type);
+    vr_ref = LLVMBuildLoad2(ctx->build_ref, srctyp, vr_ref,
+            llvm_gen_name());
     if (type->bits > src_type->bits) {
         vr_ref = sic_cast_llvm_size2(ctx, vr_ref, src_type, type);
     } else if (type->bits < src_type->bits) {
@@ -6715,10 +6700,10 @@ LLVMValueRef sic_cast_load_pointer(struct gen_context *ctx, struct variable *var
     return sic_cast_load_pointer2(ctx, vref, var->type, type);
 }
 
-LLVMValueRef sic_cast_pointer(struct gen_context *ctx, struct variable *var, const struct type *type)
+LLVMValueRef sic_cast(struct gen_context *ctx, variable_t *var, const type_t *type)
 {
     LLVMValueRef vr_ref = gen_llvm_cast_to(ctx, var, type);
-    const struct type *src_type = var->type;
+    const type_t *src_type = var->type;
 
     if (type->bits > src_type->bits) {
         vr_ref = sic_cast_llvm_size2(ctx, vr_ref, src_type, type);
@@ -6726,6 +6711,30 @@ LLVMValueRef sic_cast_pointer(struct gen_context *ctx, struct variable *var, con
         ERR("Casting to smaller bits width causes truncation");
     }
     return vr_ref;
+}
+
+LLVMValueRef sic_cast_pointer(struct gen_context *ctx, struct variable *var, const struct type *type)
+{
+    FATAL(NULL, "DEPRECATD - DO NOT USE");
+    (void)ctx;
+    (void)var;
+    (void)type;
+    return NULL;
+}
+
+LLVMValueRef sic_access_lit(struct gen_context *ctx, variable_t *var, const type_t *type)
+{
+    switch (var->kind) {
+    case VAR_LITERAL:
+    case VAR_LITERAL_TEMP:
+    case VAR_LITERAL_BOOL:
+        return sic_cast(ctx, var, type);
+    case VAR_VAR:
+        return sic_cast_load_pointer(ctx, var, type);
+    default:
+        FATAL(NULL, "Invalid from sic to llvm!");
+    }
+    return NULL;
 }
 
 int gen_llvm_eq(struct gen_context *ctx, struct node *node)
@@ -6741,6 +6750,7 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
     if (!vara || !varb)
         ERR("Invalid eq, can't solve items");
 
+#if 0
     if (vara->type->type != varb->type->type && vara->type->type != V_NULL && varb->type->type != V_NULL) {
         if (vara->type->type == V_VOID && vara->type->ptr > 0)
             goto skip;
@@ -6751,11 +6761,13 @@ int gen_llvm_eq(struct gen_context *ctx, struct node *node)
     }
 skip:
     (void)node;
+#endif
 
     const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
-    if (!restype)
-        restype = vara->type;
-        //ERR("Can't solve type");
+    FATAL(!restype, "Cannot eq %s: %s and %s",
+        node_str(node),
+        variable_str(vara),
+        variable_str(varb));
 
     int is_ptr1 = sic_var_is_ptr(vara);
     int is_ptr2 = sic_var_is_ptr(varb);
@@ -6766,7 +6778,7 @@ skip:
 #endif
 
     struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
-    res->kind = VAR_OP;
+    res->kind = VAR_LITERAL_BOOL;
     if (varb->type->type == V_NULL) {
         LLVMValueRef va = sic_cast_pointer(ctx, vara, restype);
         res->val = LLVMBuildIsNull(ctx->build_ref, va, llvm_gen_name());
@@ -6781,8 +6793,9 @@ skip:
             );
 
     } else if (restype->type == V_INT) {
-        LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-        LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+        // FIXME
+        LLVMValueRef va = sic_access_lit(ctx, vara, restype);
+        LLVMValueRef vb = sic_access_lit(ctx, varb, restype);
         LLVMIntPredicate op;
 
         FATAL(!va, "Missing left variable in compare for: %s", vara->name);
@@ -6873,19 +6886,31 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         ERR("Invalid addition, can't solve items");
 
     const struct type *restype = sic_solve_type(ctx, vara->type, varb->type);
-    if (!restype)
-        //ERR("Can't solve type");
-        restype = vara->type;
+    FATAL(!restype, "Cannot op %s: %s and %s",
+        node_str(node),
+        variable_str(vara),
+        variable_str(varb));
 
     res = new_variable_from_type(ctx, NULL, restype);
-    res->kind = VAR_OP;
+    LLVMValueRef va = sic_access_lit(ctx, vara, restype);
+    LLVMValueRef vb = sic_access_lit(ctx, varb, restype);
+#if 0
+    LLVMValueRef va = sic_cast_pointer(ctx, vara, restype);
+    LLVMValueRef vb = sic_cast_pointer(ctx, varb, restype);
+#endif
+#if 0
+    //res->kind = VAR_OP;
     LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
     LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
     if (!va || !vb)
         ERR("Cast failed");
+#endif
+    if (!va || !vb)
+        ERR("Invalid variables");
 
     switch (restype->type) {
     case V_INT:
+        res->kind = VAR_LITERAL_TEMP;
         switch (op) {
         case A_ADD:
             res->val = LLVMBuildNSWAdd(ctx->build_ref, va, vb,
@@ -6909,11 +6934,11 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
             else
                 res->val = LLVMBuildUDiv(ctx->build_ref, va, vb,
                     llvm_gen_name());
-            break;
             if (varb->value != 0)
                 res->value = vara->value / varb->value;
             else
                 res->value = 0;
+            break;
         case A_MOD:
             if (restype->sign)
                 res->val = LLVMBuildSRem(ctx->build_ref, va, vb,
@@ -6958,6 +6983,7 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         }
         break;
     case V_FLOAT:
+        res->kind = VAR_LITERAL_TEMP;
         switch (op) {
         case A_ADD:
             res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
@@ -7680,7 +7706,8 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
 
     /* Condition */
     //LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
-    LLVMValueRef cond_val_ref = sic_cast_pointer(ctx, cond_var, cond_var->type);
+    //LLVMValueRef cond_val_ref = sic_cast_pointer(ctx, cond_var, cond_var->type);
+    LLVMValueRef cond_val_ref = sic_access_lit(ctx, cond_var, cond_var->type);
     LLVMValueRef cond;
     if (cond_var->type->type == V_INT) {
         if (cond_var->type->ptr > 1)
@@ -7840,12 +7867,7 @@ int gen_llvm_return(struct gen_context *ctx, struct node *node)
     if (!var->val)
         ERR("No valid value in return statement");
 
-    printf("Return: %s %s -> %s\n",
-        var->name,
-        stype_str(var->type),
-        stype_str(ctx->return_type)
-            );
-    LLVMValueRef va = sic_cast_load_pointer(ctx, var, ctx->return_type);
+    LLVMValueRef va = sic_access_lit(ctx, var, ctx->return_type);
     LLVMBuildRet(ctx->build_ref, va);
     ctx->last_val = NULL;
 
