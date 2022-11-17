@@ -1642,7 +1642,12 @@ variable_t *new_variable(struct gen_context *ctx, const char *name, enum var_typ
 
 variable_t *new_variable_from_type(struct gen_context *ctx, const char *name, const struct type *type)
 {
-    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, 0/*type->ptr*/, 0, ctx->global, type->name);
+    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, type->ptr, 0, ctx->global, type->name);
+}
+
+variable_t *new_variable_from_type_ptr(struct gen_context *ctx, const char *name, const struct type *type, int ptr)
+{
+    return new_variable_ext(ctx, name, type->type, type->bits, type->sign, ptr, 0, ctx->global, type->name);
 }
 
 variable_t *new_inst_variable(struct gen_context *ctx,
@@ -4226,7 +4231,7 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     if (ctx->global)
         var = new_variable(global_ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
     else
-        var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
+        var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr, 0, ctx->global);
     var->array = idx_value;
 
     if (!ctx->decl_is_assign) {
@@ -6663,9 +6668,6 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
 {
     LLVMValueRef vr_ref = vref;
 
-    //if (src_type->ptr > type->ptr) {
-// FIXME not working
-    //if (src_type->ptr != type->ptr) {
 #if 1
     int ptr = src_type->ptr;
     if (ptr > type->ptr) {
@@ -6683,6 +6685,8 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
     }
 #endif
     LLVMTypeRef srctyp = sic_type_to_llvm_type(src_type);
+    if (ptr > 0)
+        srctyp = llvm_type_wrap(srctyp, ptr);
     vr_ref = LLVMBuildLoad2(ctx->build_ref, srctyp, vr_ref,
             llvm_gen_name());
     if (type->bits > src_type->bits) {
@@ -7203,17 +7207,13 @@ int gen_llvm_not(struct gen_context *ctx, struct node *node)
 
     a = gen_recurse(ctx, node->left);
     struct variable *vara = find_variable(ctx, a);
-    LLVMValueRef va;
 
     int is_ptr = sic_var_is_ptr(vara);
-    if (is_ptr)
-         va = sic_cast_pointer(ctx, vara, vara->type);
-    else
-         va = sic_cast_load_pointer(ctx, vara, vara->type);
-
+    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
     LLVMValueRef zero;
 
     res = new_inst_variable(ctx, V_INT, 1, 0);
+    res->kind = VAR_LITERAL;
     switch (vara->type->type) {
     case V_INT:
         if (is_ptr)
@@ -7253,20 +7253,15 @@ int gen_llvm_addr(struct gen_context *ctx, struct node *node)
     FATALN(!var, node, "No variable to take address from!");
 
     int addrval = var->type->ptr + node->addr;
-    int addrval2 = addrval - 1;
-    struct variable *res = new_variable_ext(ctx,
-        NULL,
-        var->type->type,
-        var->type->bits, var->type->sign,
-        addrval,
-        0, 0, var->type->type_name);
+    variable_t *res = new_variable_from_type_ptr(ctx, NULL, var->type, addrval);
+    res->kind = VAR_VAR;
 
     LLVMTypeRef typeref = sic_type_to_llvm_type(res->type);
-    typeref = llvm_type_wrap(typeref, addrval2);
+    typeref = llvm_type_wrap(typeref, addrval);
 
     LLVMValueRef va = gen_llvm_cast_to(ctx, var, res->type);
-
     res->val = LLVMBuildAlloca(ctx->build_ref, typeref, llvm_gen_name());
+
     LLVMBuildStore(ctx->build_ref, va, res->val);
     return res->reg;
 }
@@ -7707,17 +7702,20 @@ int gen_llvm_if(struct gen_context *ctx, struct node *node)
     /* Condition */
     //LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
     //LLVMValueRef cond_val_ref = sic_cast_pointer(ctx, cond_var, cond_var->type);
-    LLVMValueRef cond_val_ref = sic_access_lit(ctx, cond_var, cond_var->type);
+
+    LLVMValueRef cond_val_ref;
+    cond_val_ref = sic_access_lit(ctx, cond_var, cond_var->type);
+
     LLVMValueRef cond;
     if (cond_var->type->type == V_INT) {
-        if (cond_var->type->ptr > 1)
+        if (sic_var_is_ptr(cond_var))
             cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
                     llvm_gen_name());
         else
             cond = LLVMBuildICmp(ctx->build_ref, LLVMIntNE,
                     cond_val_ref, zeroval, llvm_gen_name());
     } else if (cond_var->type->type == V_FLOAT) {
-        if (cond_var->type->ptr > 1)
+        if (sic_var_is_ptr(cond_var))
             cond = LLVMBuildIsNotNull(ctx->build_ref, cond_val_ref,
                     llvm_gen_name());
         else
