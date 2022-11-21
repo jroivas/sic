@@ -102,6 +102,7 @@ enum var_kind {
     VAR_LITERAL,
     VAR_LITERAL_TEMP,
     VAR_LITERAL_BOOL,
+    VAR_LITERAL_NULL,
     VAR_OTHER,
 };
 
@@ -146,7 +147,7 @@ typedef struct variable {
     unsigned int param_cnt;
 } variable_t;
 
-struct gen_context {
+typedef struct gen_context {
     FILE *f;
     int __ids;
     int regnum;
@@ -167,6 +168,10 @@ struct gen_context {
     int continuelabel;
     int last_is_ret;
     int decl_is_assign;
+
+    const char *filename;
+    int line;
+    int linepos;
 
     const char *name;
     const char *decl_name;
@@ -208,7 +213,7 @@ struct gen_context {
     LLVMBasicBlockRef last_out_ref;
     struct variable *last_val;
     int skip_node;
-};
+} gen_context_t;
 
 static const char *varstr[] = {
     "void", "null", "i32", "double", "fixed", "string", "struct", "union", "enum", "custom", "builtin", "invalid"
@@ -1317,7 +1322,7 @@ struct variable *find_variable(struct gen_context *ctx, int reg)
 {
     variable_t *val = find_variable_incomplete(ctx, reg);
 
-    FATAL(val && val->kind == VAR_NONE, "Accessed incomplete variable: %s", variable_str(val));
+    FATALC(val && val->kind == VAR_NONE, ctx, "Accessed incomplete variable: %s", variable_str(val));
     return val;
 }
 
@@ -6576,11 +6581,6 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
     LLVMValueRef res = var->val;
 
     if (t->type != var->type->type) {
-        if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
-            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
-            var = tmp;
-        }
         if (t->type == V_FLOAT && var->type->type == V_INT) {
             if (var->type->sign)
                 res = LLVMBuildSIToFP(ctx->build_ref, var->val,
@@ -6625,11 +6625,6 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
         } else
             ERR("Unknown cast: %s to %s", stype_str(var->type), stype_str(t));
     } else if (t->type == var->type->type && t->bits > var->type->bits) {
-        if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
-            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
-            var = tmp;
-        }
         if (t->type == V_INT) {
             if (var->type->ptr > 1 && !t->ptr)
                 res = LLVMBuildPtrToInt(ctx->build_ref, var->val,
@@ -6644,11 +6639,6 @@ LLVMValueRef gen_llvm_cast_to(struct gen_context *ctx, struct variable *var, con
             res = LLVMBuildBitCast(ctx->build_ref,
                     var->val, sic_type_to_llvm_type(t), llvm_gen_name());
     } else if (t->type == var->type->type && t->bits < var->type->bits) {
-        if (var->type->ptr == 1 && !t->ptr) {
-            struct variable *tmp = new_variable_from_type(ctx, NULL, var->type);
-            tmp->val = sic_cast_load_pointer2(ctx, var->val, var->type, tmp->type);
-            var = tmp;
-        }
         if (t->type == V_INT) {
             res = LLVMBuildTrunc(ctx->build_ref, var->val,
                     sic_type_to_llvm_type(t), llvm_gen_name());
@@ -6719,7 +6709,7 @@ LLVMValueRef sic_cast(struct gen_context *ctx, variable_t *var, const type_t *ty
 
 LLVMValueRef sic_cast_pointer(struct gen_context *ctx, struct variable *var, const struct type *type)
 {
-    FATAL(NULL, "DEPRECATD - DO NOT USE");
+    FATAL(!NULL, "DEPRECATD - DO NOT USE");
     (void)ctx;
     (void)var;
     (void)type;
@@ -6729,6 +6719,8 @@ LLVMValueRef sic_cast_pointer(struct gen_context *ctx, struct variable *var, con
 LLVMValueRef sic_access_lit(struct gen_context *ctx, variable_t *var, const type_t *type)
 {
     switch (var->kind) {
+    case VAR_LITERAL_NULL:
+        return var->val;
     case VAR_LITERAL:
     case VAR_LITERAL_TEMP:
     case VAR_LITERAL_BOOL:
@@ -6783,18 +6775,27 @@ skip:
 
     struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     res->kind = VAR_LITERAL_BOOL;
-    if (varb->type->type == V_NULL) {
-        LLVMValueRef va = sic_cast_pointer(ctx, vara, restype);
-        res->val = LLVMBuildIsNull(ctx->build_ref, va, llvm_gen_name());
-    } else if (vara->type->type == V_NULL) {
-        LLVMValueRef vb = sic_cast_pointer(ctx, varb, restype);
-        res->val = LLVMBuildIsNull(ctx->build_ref, vb, llvm_gen_name());
+    if (vara->type->type == V_NULL || varb->type->type == V_NULL) {
+
+        LLVMValueRef var = sic_access_lit(ctx, vara->type->type == V_NULL ? vara : varb, restype);
+
+        switch (node->node) {
+        case A_EQ_OP:
+            res->val = LLVMBuildIsNull(ctx->build_ref, var, llvm_gen_name());
+            break;
+        case A_NE_OP:
+            res->val = LLVMBuildIsNotNull(ctx->build_ref, var, llvm_gen_name());
+            break;
+        default:
+            ERR("Invalid compare operation for NULL: %s", node->value_string);
+        }
     } else if (is_ptr1 || is_ptr2) {
-        printf("DA: %s == %s    %s\n",
+        printf("ISPTR both: %s == %s    %s\n",
             stype_str(vara->type),
             stype_str(varb->type),
             stype_str(restype)
             );
+        ERR("Invalid check\n");
 
     } else if (restype->type == V_INT) {
         // FIXME
@@ -6842,8 +6843,8 @@ skip:
 
         res->val = LLVMBuildICmp(ctx->build_ref, op, va, vb, llvm_gen_name());
     } else if (restype->type == V_FLOAT) {
-        LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-        LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+        LLVMValueRef va = sic_access_lit(ctx, vara, restype);
+        LLVMValueRef vb = sic_access_lit(ctx, varb, restype);
         LLVMRealPredicate op;
 
         switch (node->node) {
@@ -7903,10 +7904,14 @@ int gen_llvm_int_const(struct gen_context *ctx, struct node *n)
 
 int gen_llvm_null(struct gen_context *ctx, struct node *n)
 {
-    struct variable *null_var = new_variable(ctx, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
-    // FIXME
-    null_var->val = LLVMConstNull(LLVMInt32Type());
-    ctx->last_val = null_var;
+    static struct variable *null_var = NULL;
+
+    if (null_var == NULL) {
+        null_var = new_variable(ctx, "NULL", V_NULL, 0, TYPE_UNSIGNED, 0, 0, 1);
+        null_var->kind = VAR_LITERAL_NULL;
+        null_var->val = LLVMConstNull(LLVMInt32Type());
+        ctx->last_val = null_var;
+    }
 
     return null_var->reg;
 }
@@ -8251,6 +8256,9 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
 
     if (ctx->skip_node && node->node == ctx->skip_node)
         return 0;
+    ctx->filename = node->filename;
+    ctx->line = node->line;
+    ctx->linepos = node->linepos;
 #if 0
     if (node->left)
         resleft = gen_recurse(ctx, node->left);

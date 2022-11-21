@@ -25,7 +25,7 @@ enum var_type {
 }
 
 void stack_trace(void);
-#define ERR_FULL(trace, fail, ...) { \
+#define ERR_FULL(trace, fail, ctx, ...) { \
     fprintf(stderr, "ERROR in %s at %d: ", __FILE__, __LINE__);\
     fprintf(stderr, __VA_ARGS__);\
     fprintf(stderr, "\n");\
@@ -33,9 +33,9 @@ void stack_trace(void);
     if (fail) exit(EXIT_FAILURE); \
 }
 
-#define ERR_NOFAIL(...) ERR_FULL(0, 0, __VA_ARGS__)
-#define ERR(...) ERR_FULL(0, 1, __VA_ARGS__)
-#define ERR_TRACE(...) ERR_FULL(1, 1, __VA_ARGS__)
+#define ERR_NOFAIL(...) ERR_FULL(0, 0, NULL, __VA_ARGS__)
+#define ERR(...) ERR_FULL(0, 1, NULL, __VA_ARGS__)
+#define ERR_TRACE(...) ERR_FULL(1, 1, NULL,  __VA_ARGS__)
 
 #define ELVIS(X, Y) ((X) ? (X) : (Y))
 #define ESTR(X) ELVIS(X, "")

@@ -2,8 +2,10 @@
 #define __FATAL_H
 
 #include "sic.h"
-
 #include "parse.h"
+
+struct gen_context;
+
 #define FATALN(check, _node, ...) { if (check) { \
     if (_node) { \
         /*if (((struct node*)_node)->parent) node_walk(((struct node*)_node)->parent);\
@@ -18,10 +20,18 @@
 } }
 
 #define FATALF(check, file, ...) do {\
-    struct node *n = calloc(1,sizeof(struct node));\
-    n->filename =  file->filename;\
-    n->line =  file->line;\
-    n->linepos =  file->linepos;\
+    struct node *n = calloc(1, sizeof(struct node));\
+    n->filename = file->filename;\
+    n->line = file->line;\
+    n->linepos = file->linepos;\
+    FATALN(check, n, __VA_ARGS__);\
+    free(n);\
+} while(0);
+#define FATALC(check, ctx, ...) do {\
+    struct node *n = calloc(1, sizeof(struct node));\
+    n->filename = ctx->filename;\
+    n->line = ctx->line;\
+    n->linepos = ctx->linepos;\
     FATALN(check, n, __VA_ARGS__);\
     free(n);\
 } while(0);
