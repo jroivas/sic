@@ -6888,6 +6888,7 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         variable_str(varb));
 
     res = new_variable_from_type(ctx, NULL, restype);
+    res->kind = VAR_LITERAL_TEMP;
     LLVMValueRef va = sic_access_lit(ctx, vara, restype);
     LLVMValueRef vb = sic_access_lit(ctx, varb, restype);
 #if 0
@@ -6906,7 +6907,6 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
 
     switch (restype->type) {
     case V_INT:
-        res->kind = VAR_LITERAL_TEMP;
         switch (op) {
         case A_ADD:
             res->val = LLVMBuildNSWAdd(ctx->build_ref, va, vb,
@@ -6979,7 +6979,6 @@ int gen_llvm_op(struct gen_context *ctx, struct node *node, int op)
         }
         break;
     case V_FLOAT:
-        res->kind = VAR_LITERAL_TEMP;
         switch (op) {
         case A_ADD:
             res->val = LLVMBuildFAdd(ctx->build_ref, va, vb,
@@ -7054,14 +7053,15 @@ int gen_llvm_log_and_or(struct gen_context *ctx, struct node *node)
     LLVMValueRef ra;
     LLVMValueRef rb;
 
-    struct variable *res = new_variable(ctx, NULL, V_INT, 1, 0, 1, 0, 0);
+    struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     LLVMValueRef one_res = gen_llvm_int_const_ref(1, 1, 0);
     LLVMValueRef zero_res = gen_llvm_int_const_ref(1, 0, 0);
     const struct type *restype = res->type;
     LLVMValueRef zero;
     res->val = LLVMBuildAlloca(ctx->build_ref, sic_type_to_llvm_type(restype), llvm_gen_name());
+    res->kind = VAR_VAR;
 
-    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+    LLVMValueRef va = sic_access_lit(ctx, vara, vara->type);
     switch (vara->type->type) {
     case V_INT:
         zero = gen_llvm_int_const_ref(vara->type->bits, 0, 0);
@@ -7084,7 +7084,7 @@ int gen_llvm_log_and_or(struct gen_context *ctx, struct node *node)
     b = gen_recurse(ctx, node->right);
     struct variable *varb = find_variable(ctx, b);
 
-    LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, varb->type);
+    LLVMValueRef vb = sic_access_lit(ctx, varb, varb->type);
     switch (varb->type->type) {
     case V_INT:
         zero = gen_llvm_int_const_ref(varb->type->bits, 0, 0);
@@ -7202,7 +7202,7 @@ int gen_llvm_not(struct gen_context *ctx, struct node *node)
     struct variable *vara = find_variable(ctx, a);
 
     int is_ptr = sic_var_is_ptr(vara);
-    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+    LLVMValueRef va = sic_access_lit(ctx, vara, vara->type);
     LLVMValueRef zero;
 
     res = new_inst_variable(ctx, V_INT, 1, 0);
