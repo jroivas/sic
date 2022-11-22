@@ -99,6 +99,7 @@ struct struct_name {
 enum var_kind {
     VAR_NONE = 0,
     VAR_VAR,
+    VAR_FUNC,
     VAR_LITERAL,
     VAR_LITERAL_TEMP,
     VAR_LITERAL_BOOL,
@@ -4243,30 +4244,30 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     var->array = idx_value;
 
     if (!ctx->decl_is_assign) {
-    if (ctx->global) {
-        var->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
-        /* FIXME TODO Different linkages */
-        LLVMSetLinkage(var->val, LLVMPrivateLinkage);
-        LLVMValueRef zeroval = llvm_zero_from_sic_type(ctx->decl_type);
-        if (zeroval)
-            LLVMSetInitializer(var->val, zeroval);
-        else
-            ERR("Unsupported zero for global type: %s", stype_str(ctx->decl_type));
-    } else {
-        var->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
-        LLVMValueRef zeroval;
-        const struct type *zerotype;
-        if (ctx->decl_type->ptr) {
-            LLVMTypeRef basetype = sic_type_to_llvm_type(ctx->decl_type);
-            basetype = llvm_type_wrap(basetype, ctx->decl_type->ptr);
-            zeroval = LLVMConstPointerNull(basetype);
-            zerotype = find_type_by_name(ctx, "nulltype");
+        if (ctx->global) {
+            var->val = LLVMAddGlobal(ctx->mod_ref, llt, var->name);
+            /* FIXME TODO Different linkages */
+            LLVMSetLinkage(var->val, LLVMPrivateLinkage);
+            LLVMValueRef zeroval = llvm_zero_from_sic_type(ctx->decl_type);
+            if (zeroval)
+                LLVMSetInitializer(var->val, zeroval);
+            else
+                ERR("Unsupported zero for global type: %s", stype_str(ctx->decl_type));
         } else {
-            zeroval = llvm_zero_from_sic_type(ctx->decl_type);
-            zerotype = ctx->decl_type;
+            var->val = LLVMBuildAlloca(ctx->build_ref, llt, var->name);
+            LLVMValueRef zeroval;
+            const struct type *zerotype;
+            if (ctx->decl_type->ptr) {
+                LLVMTypeRef basetype = sic_type_to_llvm_type(ctx->decl_type);
+                basetype = llvm_type_wrap(basetype, ctx->decl_type->ptr);
+                zeroval = LLVMConstPointerNull(basetype);
+                zerotype = find_type_by_name(ctx, "nulltype");
+            } else {
+                zeroval = llvm_zero_from_sic_type(ctx->decl_type);
+                zerotype = ctx->decl_type;
+            }
+            gen_llvm_assign2(ctx, var->val, zeroval, ctx->decl_type, zerotype, 0);
         }
-        gen_llvm_assign2(ctx, var->val, zeroval, ctx->decl_type, zerotype, 0);
-    }
     }
     ctx->last_val = var;
 
@@ -5775,6 +5776,7 @@ struct variable *gen_func(struct gen_context *ctx, struct node *node)
     func_var->param_names = NULL;
     func_var->param_vars = NULL;
     func_var->param_cnt = 0;
+    func_var->kind = VAR_FUNC;
 
     struct node *paramnode = node->right;
     FATALN(!paramnode, node, "Invalid function");
@@ -6572,6 +6574,7 @@ int gen_llvm_func_call(struct gen_context *ctx, struct node *node)
             fn, args, num_args,
             fnvar->return_type->type != V_VOID ? llvm_gen_name() : "");
 #endif
+    res->kind = VAR_LITERAL;
     res->val = LLVMBuildCall2(ctx->build_ref, fnvar->func_type,
         fnvar->val, args, num_args,
         fnvar->return_type->type != V_VOID ? llvm_gen_name() : "");
@@ -7141,11 +7144,12 @@ int gen_llvm_negate(struct gen_context *ctx, struct node *node)
 
     a = gen_recurse(ctx, node->left);
     struct variable *vara = find_variable(ctx, a);
-    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, vara->type);
+    LLVMValueRef va = sic_access_lit(ctx, vara, vara->type);
 
     LLVMValueRef zero;
 
     res = new_variable_from_type(ctx, NULL, vara->type);
+    res->kind = VAR_LITERAL_TEMP;
     switch (vara->type->type) {
     case V_INT:
         zero = gen_llvm_int_const_ref(vara->type->bits, 0, 0);
@@ -7440,6 +7444,7 @@ int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
         va = sic_cast_load_pointer(ctx, vara, vara->type);
     LLVMValueRef one;
     res2->val = va;
+    res2->kind = VAR_LITERAL;
 
     if (is_ptr && (node->node == A_PREDEC || node->node == A_POSTDEC))
         one = gen_llvm_int_const_ref(vara->type->bits, -1, 0);
@@ -7477,6 +7482,7 @@ int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
             res->val = LLVMBuildFAdd(ctx->build_ref, va, one,
                     llvm_gen_name());
         }
+        res->kind = VAR_LITERAL;
         LLVMBuildStore(ctx->build_ref, res->val, vara->val);
         break;
     case A_PREDEC:
@@ -7494,6 +7500,7 @@ int gen_llvm_pre_post_op(struct gen_context *ctx, struct node *node)
             res->val = LLVMBuildFSub(ctx->build_ref, va, one,
                     llvm_gen_name());
         }
+        res->kind = VAR_LITERAL;
         LLVMBuildStore(ctx->build_ref, res->val, vara->val);
         break;
     default:
@@ -7530,8 +7537,8 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
         restype = type_unwrap(ctx, restype);
     }
 
-    LLVMValueRef va = sic_cast_load_pointer(ctx, vara, restype);
-    LLVMValueRef vb = sic_cast_load_pointer(ctx, varb, restype);
+    LLVMValueRef va = sic_access_lit(ctx, vara, restype);
+    LLVMValueRef vb = sic_access_lit(ctx, varb, restype);
 
     if (is_ptr) {
 #if 0
@@ -7562,6 +7569,7 @@ int gen_llvm_op_assign(struct gen_context *ctx, struct node *node)
         ERR("Invalid op assign type");
 
     res = new_variable_from_type(ctx, NULL, restype);
+    res->kind = VAR_LITERAL_TEMP;
     switch (node->node) {
     case A_ADD_ASSIGN:
         if (restype->type == V_INT)
