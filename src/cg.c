@@ -418,6 +418,7 @@ char *stype_str(const struct type *t)
 {
     if (!t)
         return NULL;
+
     char *tmp = calloc(256, sizeof(char));
     snprintf(tmp, 255, "%s, %d bits, ptr %d, %ssigned%s%s%s%s%s%s%s",
         type_str(t->type), t->bits, t->ptr, t->sign ? "" : "un",
@@ -457,8 +458,9 @@ const char *float_str(int bits)
     else if (bits == 64)
         return "double";
     else if (bits == 128)
-        return "double";
         // TODO Fix long double
+        ERR("Long double (float128) not supported yet");
+        //return "double";
         //return "x86_fp80";
 
     ERR("Invalid bits for float: %d", bits);
@@ -4233,8 +4235,9 @@ int gen_init_var(struct gen_context *ctx, struct node *node, int idx_value)
     node->addr = addrval;
     (void)addrval;
     (void)ptrval;
+
     if (ctx->global)
-        var = new_variable(global_ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr + 1, 0, ctx->global);
+        var = new_variable(global_ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr, 0, ctx->global);
     else
         var = new_variable(ctx, node->value_string, ctx->decl_type->type, ctx->decl_type->bits, ctx->decl_type->sign, ctx->decl_type->ptr, 0, ctx->global);
     var->array = idx_value;
@@ -6362,6 +6365,7 @@ LLVMValueRef gen_llvm_assign2(struct gen_context *ctx, LLVMValueRef dst, LLVMVal
 
 
     if (ctx->global)
+        // FIXME
         LLVMSetInitializer(dst, src);
     else
         //return LLVMBuildStore(ctx->build_ref, src, dst);
@@ -6765,14 +6769,6 @@ skip:
         variable_str(vara),
         variable_str(varb));
 
-    int is_ptr1 = sic_var_is_ptr(vara);
-    int is_ptr2 = sic_var_is_ptr(varb);
-#if 0
-    int is_ptr = vara->type->ptr > 1;
-    if (is_ptr && varb->type->type != V_NULL)
-        restype = type_unwrap(ctx, restype);
-#endif
-
     struct variable *res = new_inst_variable(ctx, V_INT, 1, 0);
     res->kind = VAR_LITERAL_BOOL;
     if (vara->type->type == V_NULL || varb->type->type == V_NULL) {
@@ -6789,14 +6785,6 @@ skip:
         default:
             ERR("Invalid compare operation for NULL: %s", node->value_string);
         }
-    } else if (is_ptr1 || is_ptr2) {
-        printf("ISPTR both: %s == %s    %s\n",
-            stype_str(vara->type),
-            stype_str(varb->type),
-            stype_str(restype)
-            );
-        ERR("Invalid check\n");
-
     } else if (restype->type == V_INT) {
         // FIXME
         LLVMValueRef va = sic_access_lit(ctx, vara, restype);
