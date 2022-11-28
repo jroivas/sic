@@ -22,10 +22,12 @@ int main()
     if (d != -1.0)
         return 3;
 
+#if 0
     c = (unsigned long)d;
     if (c != 0xFFFFFFFFFFFFFFFF)
         return 4;
     a = (int)d;
+#endif
 
     return 0;
 }
