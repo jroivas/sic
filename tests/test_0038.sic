@@ -1,7 +1,7 @@
 int main()
 {
-    /* This is not legal */
 #if 0
+    /* This is not legal */
     int a = b = c = 4;
 #else
     int a, b, c;

@@ -6440,23 +6440,37 @@ int gen_decl_begin(struct gen_context *ctx, struct node *node)
     return a;
 }
 
-int gen_decl_end(struct gen_context *ctx, struct node *node)
+int gen_decl_step(struct gen_context *ctx, struct node *node)
 {
     int b;
 
+    ctx->skip_node = A_ASSIGN;
+    ctx->is_decl += 100;
     if (node && node->node != A_ASSIGN) {
         ctx->decl_is_assign = 0;
-        b = gen_recurse(ctx, node);
+        if (node->node == A_LIST) {
+            if (node->left && node->left->node == A_ASSIGN) {
+                ctx->decl_is_assign = 1;
+                b = gen_recurse(ctx, node->left->left);
+            } else
+                b = gen_recurse(ctx, node->left);
+        } else
+            b = gen_recurse(ctx, node);
     } else if (node && node->node == A_ASSIGN && node->left) {
         ctx->decl_is_assign = 1;
         /* Name is on node->left */
         b = gen_recurse(ctx, node->left);
     }
+    ctx->skip_node = 0;
+    ctx->is_decl = 0;
+    return b;
+}
+
+void gen_decl_end(struct gen_context *ctx)
+{
     ctx->is_decl = 0;
     ctx->decl_type = NULL;
     ctx->skip_node = 0;
-
-    return b;
 }
 
 variable_t *gen_decl_new(struct gen_context *ctx, variable_t *var, int a, int b)
@@ -6511,26 +6525,43 @@ int gen_llvm_declaration(struct gen_context *ctx, struct node *node)
      * More complex form right hand has ASSIGN
      */
     int a = gen_decl_begin(ctx, node->left);
-    int b = gen_decl_end(ctx, node->right);
+    int recurse = (node->right && node->right->node == A_LIST);
+    int b;
+    variable_t *outres = NULL;
 
-    FATAL(!a, "Declaration missing type")
-    FATAL(!b, "Declaration missing name")
+    node = node->right;
+    do {
+        b = gen_decl_step(ctx, node);
 
-    variable_t *var = find_variable_incomplete(ctx, b);
-    variable_t *res = gen_decl_new(ctx, var, a, b);
-    if (var && !res) {
-        res = var;
-        FATAL(var->kind != VAR_NONE, "Variable alredy declared!");
-        res->kind = VAR_VAR;
-    }
+        FATAL(!a, "Declaration missing type")
+        FATAL(!b, "Declaration missing name")
 
-    if (ctx->decl_is_assign) {
-        /* Recurse separately for the assign after declaration */
-        gen_recurse(ctx, node->right);
-    }
-    ctx->decl_is_assign = 0;
+        variable_t *var = find_variable_incomplete(ctx, b);
+        variable_t *res = gen_decl_new(ctx, var, a, b);
+        if (var && !res) {
+            res = var;
+            FATAL(var->kind != VAR_NONE, "Variable alredy declared: %s", var->name);
+            res->kind = VAR_VAR;
+        }
 
-    return res ? res->reg : 0;
+        if (ctx->decl_is_assign) {
+            /* Recurse separately for the assign after declaration */
+            if (recurse)
+                gen_recurse(ctx, node->left);
+            else
+                gen_recurse(ctx, node);
+        }
+        ctx->decl_is_assign = 0;
+        if (!outres)
+            outres = res;
+        if (!recurse)
+            break;
+        node = node->right;
+    } while (node);
+
+    gen_decl_end(ctx);
+
+    return outres ? outres->reg : 0;
 }
 
 void parse_func_call_params(struct gen_context *ctx, struct node *node, unsigned int param_cnt, LLVMValueRef *args)
@@ -7829,6 +7860,7 @@ int gen_llvm_ternary(struct gen_context *ctx, struct node *node)
     }
 
     struct variable *res = new_variable(ctx, NULL, true_var->type->type, true_var->type->bits, true_var->type->sign, true_var->type->ptr, 0, 0);
+    res->kind = VAR_LITERAL_TEMP;
     res->val = LLVMBuildSelect(ctx->build_ref, cond_var->val, true_var->val, false_var->val, llvm_gen_name());
 
     return res->reg;
