@@ -4,6 +4,7 @@ int main()
     int *b = &a;
     unsigned long c;
     double d;
+    double *f = &d;
 
     c = (unsigned long)a;
     c = (unsigned long)b;
@@ -22,12 +23,14 @@ int main()
     if (d != -1.0)
         return 3;
 
-#if 0
     c = (unsigned long)d;
     if (c != 0xFFFFFFFFFFFFFFFF)
         return 4;
     a = (int)d;
-#endif
+
+    c = (unsigned long)f;
+    if (c == 0)
+        return 5;
 
     return 0;
 }

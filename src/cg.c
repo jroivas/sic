@@ -6271,8 +6271,10 @@ LLVMValueRef sic_cast_llvm_size2(struct gen_context *ctx, LLVMValueRef src, cons
                         sic_type_to_llvm_type(type), llvm_gen_name());
         } else {
             /* FIXME */
+#if 0
             res = LLVMBuildBitCast(ctx->build_ref, src,
                     sic_type_to_llvm_type(type), llvm_gen_name());
+#endif
         }
     } else
         ERR("Non-explicit truncate!");
@@ -6595,11 +6597,12 @@ LLVMValueRef gen_llvm_cast_to2(struct gen_context *ctx, LLVMValueRef val, const 
 
     if (t->type != src_type->type) {
         if (t->type == V_FLOAT && src_type->type == V_INT) {
+            res = val;
             if (src_type->sign)
                 res = LLVMBuildSIToFP(ctx->build_ref, val,
                     sic_type_to_llvm_type(t), llvm_gen_name());
             else
-                res = LLVMBuildSIToFP(ctx->build_ref, val,
+                res = LLVMBuildUIToFP(ctx->build_ref, val,
                     sic_type_to_llvm_type(t), llvm_gen_name());
         } else if (t->type == V_INT && src_type->type == V_FLOAT) {
             if (t->sign)
@@ -6696,12 +6699,14 @@ LLVMValueRef sic_cast_load_pointer2(struct gen_context *ctx, LLVMValueRef vref, 
         vr_ref = LLVMBuildLoad2(ctx->build_ref, srctyp, vr_ref,
                 llvm_gen_name());
     }
+#if 0
     if (type->bits > src_type->bits) {
         vr_ref = sic_cast_llvm_size2(ctx, vr_ref, src_type, type);
     } else if (type->bits < src_type->bits) {
         if (!ctx->is_cast)
             ERR("Casting to smaller bits width causes truncation");
     }
+#endif
 
     return vr_ref;
 }
@@ -7051,10 +7056,6 @@ int gen_llvm_cast_op(struct gen_context *ctx, struct node *node)
     //struct variable *res = new_variable(ctx, NULL, V_INT, 32, TYPE_SIGNED, 0, 0, 0);
     struct variable *res = new_variable_from_type(ctx, NULL, cast_type);
     LLVMValueRef val = var->val;
-    printf("casts: %s %s -> %s\n",
-        var->name,
-        stype_str(var->type),
-        stype_str(cast_type));
     LLVMTypeRef desttype = sic_type_to_llvm_type(cast_type);
     int did_cast = 0;
     ctx->is_cast = 1;
@@ -7072,14 +7073,20 @@ int gen_llvm_cast_op(struct gen_context *ctx, struct node *node)
                 val, desttype, llvm_gen_name());
             did_cast = 1;
         }
+    } else if (cast_type->type == V_FLOAT && var->type->type == V_FLOAT) {
+        if (sic_var_is_ptr(var) && !sic_type_is_ptr(cast_type))
+            ERR("Poiner can't be casted to float/double");
+    } else if (cast_type->type == V_INT && sic_var_is_ptr(var) && !sic_type_is_ptr(cast_type)) {
+            res->val = LLVMBuildPtrToInt(ctx->build_ref,
+                val, desttype, llvm_gen_name());
+            did_cast = 1;
     }
+
     if (!did_cast) {
         val = sic_cast_load_pointer2(ctx, val, var->type, cast_type);
         res->val = gen_llvm_cast_to2(ctx, val, var->type, cast_type);
     }
 
-    //val = sic_cast_load_pointer2(ctx, val, varb->type, cast_type);
-    //res->val = gen_llvm_cast_to2(ctx, val, varb->type, cast_type);
     res->kind = VAR_LITERAL_TEMP;
     ctx->is_cast = 0;
 
