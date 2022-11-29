@@ -7890,7 +7890,7 @@ int gen_llvm_while(struct gen_context *ctx, struct node *node)
     LLVMValueRef zeroval = llvm_zero_from_sic_type(cond_var->type);
     if (!zeroval)
         ERR("Invalid if zero")
-    LLVMValueRef cond_val_ref = sic_cast_load_pointer(ctx, cond_var, cond_var->type);
+    LLVMValueRef cond_val_ref = sic_access_lit(ctx, cond_var, cond_var->type);
     LLVMValueRef cond;
     if (cond_var->type->type == V_INT) {
         if (cond_var->type->ptr > 1)
