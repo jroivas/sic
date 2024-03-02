@@ -46,8 +46,8 @@ Example:
 Traditionally in C the size of `int` may be different according the system where it's compiled into.
 We specify size of all types explicitly:
 
-- 8-32 bits: one unicode character as UTF-8
-- 8 bits: byte and unsigned byte
+- 8-32 bits: one unicode character as UTF-8 (char)
+- 8 bits: byte and unsigned byte (byte, unsigned byte)
 - 16 bits: short and unsigned short
 - 32 bits: int and unsigned int
 - 64 bits: long and unsigned long
@@ -283,7 +283,10 @@ This is not valid:
 
     char test[];
 
-# Scopes and automatic release
+
+# Memory safetyp
+
+## Scopes and automatic release
 
 We borrow `new` keyword from C++ to create new "objects".
 However they're not fat objects like in C++, but structs which can have
@@ -336,12 +339,12 @@ Returned pointer is so called fat pointer. It will include information about the
 - data
 
 It will have reference_cnt set as 1.
-On every access to the data is protected with boundary checks. Thus the next line will end up making this check:
+On every access to the data is protected with boundary checks. Thus the second line will end up making this check:
 
     (10 * sizeof(int)) < size_of_allocation
 
 Since we have allocated `10 * sizeof(int)` but we're accessing element starting at `10 * sizeof(int)` this check will fail.
-Failed check will cause runtime exception.
+Failed check will cause runtime (or build time) exception.
 
 In case there would not be any overflows we would end up deleting the allocation.
 It will free the memory in case reference_cnt is decremented to 0.
@@ -372,12 +375,13 @@ Difference is that a reference to variable `name` is taken instead of passing `n
 Pointer would normally be passed as-is, but since we use `@` we're handling new kind of references.
 This referece has it's scope, and is automatically freed when getting out of scope.
 Thus it's valid only inside `calculate_length()` function.
-Inside the functin variable `s` itself can be utilized as it would be a normal immutable pointer passed there.
+Inside the function variable `s` itself can be utilized as it would be a normal immutable pointer passed there.
 
 There's few things that happens:
 First one is reference counting.
 In case `name` would be freed on another context, freeing up the memory is not done until the last reference is dropped.
 It's safe to pass references around, since they can never point to freed memory.
+Reference to NULL is not allowed.
 This means that one can't call `free` on a reference.
 Dereferencing is not allowed. Thus references are **always** scoped.
 
@@ -509,9 +513,12 @@ First we have `text` which refers to const string `Hello`.
 In strict mode one can omit `const` since all variables are by default immutable,
 that's why variable `another` doesn't need `const`.
 
-This flow is different from C. In C both `text` and `another` would be valid.
+This flow is different from C.
 In strict mode instead of doing assign, the value is moved.
-This means that `text` is not valid any more after line `another = text`.
+This means that `text` is not valid any more after assignment `another = text`.
+Thus only variable `another` is usable after the assignment.
+In C and non-strict mode both `text` and `another` would be valid and referring
+to same data.
 
 If one needs to copy the value in two different variables, there's clone keyword:
 
@@ -519,7 +526,7 @@ If one needs to copy the value in two different variables, there's clone keyword
     char *another = clone text;
 
 This makes a clone of the value of `text` and assigns it to `another`.
-After this both variables are valid.
+After this both variables are valid and can be used.
 
 Cloning might me expensive operation, and is done recursively if needed.
 For example:
@@ -567,7 +574,7 @@ On that example both `a` and `b` are still valid and usable.
 Ownership is moved similar way when passing as parameter:
 
     void tst1(char *s) {
-        // Ownership is moved here
+        // Ownership of "s" is moved here
         printf("Passed: %s\n", s);
     }
 
@@ -579,6 +586,7 @@ Ownership is moved similar way when passing as parameter:
     int val = 42;
 
     tst1(name);
+    // "name" is not usable here any more
     tst2(val);
 
 This example follows the rules defined earlier.
@@ -592,8 +600,9 @@ Ownership of a variable can be passed back by returning the passed variable:
 
     char *text = "Hello";
     char *text2 = print_and_return(text);
+    // "text" is not usable here any more but "text2" is basically the same
 
-    printf("Returned: %s\n", text2);
+    printf("Returned: %s\n", @text2);
 
 This is perfectly valid, since ownership is first taken, and then returned.
 Since `text` is not mutable, one can't assign the return value back to it,
@@ -741,7 +750,7 @@ To use the module:
         printf("%d\n", test.meaning);
     }
 
-Not also that exported symbols are accessible only from module's namespace.
+Note that exported symbols are accessible only from module's namespace.
 We can import specific symbols from module, or assign a new local identifier to them:
 
     // Imports only "double_int" from test and specifies it as "double_int" here
@@ -775,7 +784,7 @@ and it's considered to be different module if files located in different folder.
 Headers and other files can be included still with preprocessor `#include`
 from outside the module folder.
 
-When compiling a module, it produces these outputs:
+When compiling a module, it produces these outputs (in Linux system):
 
 - [module\_name]\_[file\_name].o
 - [module\_name].a
@@ -797,6 +806,9 @@ Old C style enums are imporoved a bit:
         Ok<int>,
         Err<string>
     };
+
+Every value in enum may have values and the values may have different types.
+Type is defined after the name inside < and >.
 
 With these two we can make something like:
 
@@ -928,7 +940,7 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         int tail[5];
         string test = "Hello world!"
 
-        for (int i = 0; i < values.size; i++) {
+        for (int i = 0; i < values.length; i++) {
             values[i] = i;
             tail[i] = i + values.size;
         }
@@ -939,15 +951,19 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         // Will print 20, and not 10
         // Contents will be 1..10 and rest zeros
         printf("Combined length: %d\n", combined.length);
+        // int combined[7] = values + tail // Would be an compiler error
 
         // Will print 10
         printf("Combined2 length: %d\n", (values + tail).length);
     }
 
 Thus arrays (and strings) has both `size` and `length` values, which are calculated usually at compile time,
-but might get updated at runtime. For now both of those are the same.
+but might get updated at runtime.
 Recommendation is to use `length` to determine number of elements.
-In case of string `length` tells number of unicode characters (or code points) in the string, but size is the size in bytes.
+Value of `size` depend on the element size.
+For example int takes 4 bytes thus `values.size` is 5 * 4 = 20, while `values.length` is 5.
+In case of string `length` tells number of unicode characters (or code points) in the string,
+but string `size` is the size of all the characters in bytes.
 
 The values are also used to perform runtime bound checks for extra safety and to prevent out of bounds errors.
 
@@ -987,7 +1003,11 @@ One can also access tuples with indexes, like arrays:
     printf("Second: %d\n", tmp[1]);
     printf("Third : %d\n", tmp[2]);
 
-Values in tuples are strongly typed. Types are checked when unpacking.
+Values in tuples are strongly typed.
+Types are assigned when tuple is created.
+All elements in tuple may have different type.
+Types are checked when unpacking.
+Tuples are always immutable after creation.
 
 ## Swap
 
@@ -1001,3 +1021,14 @@ on target architectures supporting it.
 
     printf("%d\n", a); // prints 20
     printf("%d\n", b); // prints 6
+
+Types of the value swapped should be the same or trivial conversion.
+Complex casting is not supported. However one can manually cast:
+
+    int64 a = 5;
+    int32 b = 1;
+
+    (int32)a <> b;
+
+    // a <> (int64)b; // This would cause error since 64-bit "a" can't fit into
+                      // 32-bit "b". This would be the default as well.

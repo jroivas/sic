@@ -7208,6 +7208,14 @@ int gen_llvm_while(struct gen_context *ctx, struct node *node)
     return 0;
 }
 
+int gen_llvm_indexdef(struct gen_context *ctx, struct node *node)
+{
+    //struct variable *name;
+    node_walk(node);
+    //ident = 
+    return 0;
+}
+
 int gen_llvm_return(struct gen_context *ctx, struct node *node)
 {
     int a = gen_recurse(ctx, node->left);
@@ -7701,6 +7709,8 @@ int gen_recurse(struct gen_context *ctx, struct node *node)
     case A_DO:
     case A_FOR:
         return gen_llvm_while(ctx, node);
+    case A_INDEXDEF:
+        return gen_llvm_indexdef(ctx, node);
     default:
         ERR("Unknown node in code gen: %s", node_str(node));
         break;
