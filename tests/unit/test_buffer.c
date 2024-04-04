@@ -69,3 +69,5 @@ int test_buffer()
 
     return 0;
 }
+
+TEST_MAIN(test_buffer)

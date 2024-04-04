@@ -284,7 +284,7 @@ This is not valid:
     char test[];
 
 
-# Memory safetyp
+# Memory safety
 
 ## Scopes and automatic release
 

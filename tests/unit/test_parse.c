@@ -21,3 +21,4 @@ int test_parse()
     return 0;
 }
 
+TEST_MAIN(test_parse)

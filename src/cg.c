@@ -7917,7 +7917,7 @@ int codegen(FILE *outfile, struct node *node, const struct codegen_config *conf)
     /* Gen bytecode */
     if (conf->dump)
         LLVMDumpModule(ctx->mod_ref);
-    printf("\n----\n");
+    //printf("\n----\n");
     LLVMWriteBitcodeToFile(ctx->mod_ref, conf->name_out);
 #if 1
     LLVMVerifyModule(ctx->mod_ref, LLVMPrintMessageAction, &error);

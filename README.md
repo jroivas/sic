@@ -17,23 +17,35 @@ System libc with headers is not mandatory but needed by few tests.
 
 ## Build and run
 
-There's custom [Makefile] to perform most of the builds.
+SIC uses meson and ninja for builds. Make sure you install those first. Then:
 
-First start with just `make` or `make test`.
-That will compile sic and perform unit tests, plus compile test snippets under tests folder.
+    mkdir build
+    cd build
+    meson setup ..
+    ninja
 
-In order to also build and run the tests use:
+To make static build instead issue this after setup step:
 
-    # Compile and one test
-    make runtest TEST=0020
+    meson configure -Ddefault_library=static
 
-    # Compile and run all tests, check result
-    make testsic
 
-To just compile a test:
+There's useful scripts in the scripts folder, for example to compile, build and
+run tests. This assume "sic" has been built and found on current folder:
 
-    make compiletest TEST=0020
+    ../scripts/compile.sh ../tests/test_0014.sic
+    ../scripts/build.sh ../tests/test_0014.sic
+    ../scripts/build_bin.sh ../tests/test_0014.sic
+    ../scripts/run-test.sh ../tests/test_0014.sic
 
+There's some environment variables to control the output of scripts:
+
+    VERBOSE=1
+    DUMP_IR=1
+    DUMP_TREE=1
+
+To run all the tests in a batch run:
+
+    ../scripts/test-all.sh
 
 ## Output and manual steps
 
@@ -42,11 +54,11 @@ That can be assembled with `llvm-as` and compiled to binary with `llc`.
 
 Thus manual steps would be:
 
-    LD_LIBRARY_PATH=build/: build/sic tests/test_0001.sic -o build/test_0001.sic.ir
-    llvm-as build/test_0001.sic.ir
-    llc -relocation-model=pic -filetype=obj build/test_0001.sic.ir.bc -o build/test_0001.ir.o
+    ./sic ../tests/test_0001.sic -o test_0001.sic.ir
+    llvm-as test_0001.sic.ir
+    llc -relocation-model=pic -filetype=obj test_0001.sic.ir.bc -o test_0001.ir.o
     # Linking with cc or any other method that suits you
-    cc build/test_0001.ir.o -o build/test_0001.ir.bin -lm
+    cc test_0001.ir.o -o test_0001.ir.bin -lm
 
 
 ## Roadmap

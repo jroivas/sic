@@ -8,4 +8,11 @@
     return 1;}
 #define TEST(X) if (X()) return 1;
 
+#define TEST_MAIN(X) int main() {\
+    if (X()) { printf("Test failed: %s\n", #X);\
+        return 1;\
+    } else printf("Tests passed: %s\n", #X);\
+    return 0;\
+}
+
 #endif

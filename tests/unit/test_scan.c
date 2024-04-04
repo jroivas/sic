@@ -14,3 +14,5 @@ int test_scan()
 
     return 0;
 }
+
+TEST_MAIN(test_scan)
