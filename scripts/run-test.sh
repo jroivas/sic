@@ -18,8 +18,8 @@ res=0
 "${OUT_DIR}/${BFNAME}.bin" || res=$?
 
 if [ "${res}" -eq "${expected_res}" ]; then
-    echo "+++ Success, return $res"
+    echo "+++ Success ${BFNAME}, return $res"
 else
-    echo "FAILED, return $res"
+    echo "FAILED ${BFNAME}, return $res"
     exit 1
 fi
