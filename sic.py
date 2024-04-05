@@ -43,11 +43,14 @@ class Token:
 class Scan:
     numbers = "0123456789abcdef"
 
-    def __init__(self, filename):
+    def __init__(self, filename, data=[]):
         self.fname = filename
         self.data = r''
-        with open(self.fname, 'rb') as fd:
-            self.data = fd.read()
+        if data:
+            self.data = data
+        else:
+            with open(self.fname, 'rb') as fd:
+                self.data = fd.read()
         self.data_len = len(self.data)
         self.idx = 0
         self.line = 0
@@ -59,6 +62,45 @@ class Scan:
     def next(self):
         """
         Take next character
+
+        >>> s = Scan("", b"1 + 5")
+        >>> s.next()
+        '1'
+        >>> s.next()
+        ' '
+        >>> s.next()
+        '+'
+        >>> s.next()
+        ' '
+        >>> s.next()
+        '5'
+        >>> s.next() #doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+         ...
+        sic.EOFError
+        >>> s = Scan("", b"1\\n\\n2\\n3\\n")
+        >>> s.next()
+        '1'
+        >>> s.next()
+        '\\n'
+        >>> s.next()
+        '\\n'
+        >>> s.next()
+        '2'
+        >>> s.next()
+        '\\n'
+        >>> s.next()
+        '3'
+        >>> s.next()
+        '\\n'
+        >>> s.next() #doctest: +IGNORE_EXCEPTION_DETAIL
+        Traceback (most recent call last):
+         ...
+        sic.EOFError
+        >>> s = Scan("", b"")
+        Traceback (most recent call last):
+         ...
+        FileNotFoundError: [Errno 2] No such file or directory: ''
         """
         if self.idx >= self.data_len:
             raise EOFError
@@ -73,6 +115,15 @@ class Scan:
     def peek(self):
         """
         Peek what is the next character
+
+        >>> s = Scan("", b"1")
+        >>> s.peek()
+        '1'
+        >>> s.peek()
+        '1'
+        >>> s = Scan("", b"a")
+        >>> s.idx = 1
+        >>> s.peek()
         """
         if self.idx >= self.data_len:
             return None
