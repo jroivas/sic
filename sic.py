@@ -10,6 +10,10 @@ class SyntaxError(Exception):
     def __init__(self, msg):
         Exception.__init__(self, msg)
 
+class ParserError(Exception):
+    def __init__(self, msg):
+        Exception.__init__(self, msg)
+
 class TokenType(Enum):
     INVALID = 0
     PLUS = 1
@@ -34,7 +38,7 @@ class Token:
         self.value = value
 
     def __repr__(self):
-        return 'Token({}, {})@{},{}'.format(self.tokentype, self.value, self.line, self.col)
+        return 'Token({}, {} @{},{})'.format(self.tokentype, self.value, self.line, self.col)
 
 class Scan:
     numbers = "0123456789abcdef"
@@ -66,6 +70,14 @@ class Scan:
         self.idx += 1
         return chr(c)
 
+    def peek(self):
+        """
+        Peek what is the next character
+        """
+        if self.idx >= self.data_len:
+            return None
+        return chr(self.data[self.idx])
+
     def is_space(self, c):
         if c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\f':
             return True
@@ -84,7 +96,7 @@ class Scan:
         if self.idx == 0:
             raise ValueError("Invalid undo")
         self.idx -= 1
-        if chr(self.idx) == '\n':
+        if chr(self.data[self.idx]) == '\n':
             self.line -= 1
         elif self.col:
             self.col -= 1
@@ -101,7 +113,7 @@ class Scan:
 
         return [int(tmp), div]
 
-    def scan_number(self, c):
+    def scan_decimal(self, c):
         radix = 10
         tmp = ''
 
@@ -150,6 +162,61 @@ class Scan:
             self.undo()
             self.emit(TokenType.PLUS, c)
 
+    def scan_minus(self, c):
+        c2 = self.next()
+        if c2 =='-':
+            self.emit(TokenType.MINUSMINUS, c + c2)
+        else:
+            self.undo()
+            self.emit(TokenType.MINUS, c)
+
+    def scan_number(self, c):
+        val = c
+        ttype = TokenType.INVALID
+
+        if c.isdigit():
+            ttype = TokenType.INT_LIT
+            val = self.scan_decimal(c)
+            c = self.next()
+
+        if c == '.':
+            p = self.peek()
+            if p is not None and (p.isdigit() or self.is_space(p)):
+                c = self.next()
+                frac = self.scan_fraction(c)
+                if val == '.':
+                    val = 0
+                self.emit(TokenType.DEC_LIT, [val, frac])
+                return True
+        elif ttype != TokenType.INVALID:
+            self.undo()
+            self.emit(ttype, val)
+            return True
+
+        return False
+
+    def scan_identifier(self, c):
+        if c == '.':
+            c = self.next()
+            if c == '.':
+                c = self.next()
+                if c == '.':
+                    self.emit(TokenType.ELLIPSIS, "...")
+                else:
+                    raise SyntaxError("Got two dots, invalid syntax")
+            elif c.isdigit() or self.is_space(c):
+                raise ParserError("Expected non number, compiler error")
+            else:
+                self.undo()
+                self.emit(TokenType.DOT, ".")
+        elif c.isalpha() or c == '_':
+            val = self.scan_identifier(c)
+            self.emit(TokenType.IDENTIFIER, val)
+        else:
+            return False
+
+        return True
+
     def scan(self):
         if self.tokens:
             return self.get_token()
@@ -162,52 +229,19 @@ class Scan:
         self.token_line = self.line
         self.token_col = self.col
         ttype = TokenType.INVALID
-        val = c
 
         if c == '+':
             self.scan_plus(c)
         elif c == '-':
-            c2 = self.next()
-            if c2 =='-':
-                self.emit(TokenType.MINUSMINUS, c + c2)
-            else:
-                self.undo()
-                self.emit(TokenType.MINUS, c)
+            self.scan_minus(c)
         elif c == ';':
             self.emit(TokenType.SEMI, c)
+        elif self.scan_number(c):
+            pass
+        elif self.scan_identifier(c):
+            pass
         else:
-            if c.isdigit():
-                ttype = TokenType.INT_LIT
-                val = self.scan_number(c)
-                c = self.next()
-            if c == '.':
-                c = self.next()
-                if c == '.':
-                    c = self.next()
-                    if c == '.':
-                        if ttype != TokenType.INVALID:
-                            self.emit(ttype, val)
-                        self.emit(TokenType.ELLIPSIS, "...")
-                    else:
-                        raise SyntaxError("Got two dots, invalid syntax")
-                elif c.isdigit() or self.is_space(c):
-                    frac = self.scan_fraction(c)
-                    if val == '.':
-                        val = 0
-                    self.emit(TokenType.DEC_LIT, [val, frac])
-                else:
-                    self.undo()
-                    if ttype != TokenType.INVALID:
-                        self.emit(ttype, val)
-                    self.emit(TokenType.DOT, ".")
-            elif ttype != TokenType.INVALID:
-                self.undo()
-                self.emit(ttype, val)
-            elif c.isalpha() or c == '_':
-                val = self.scan_identifier(c)
-                self.emit(TokenType.IDENTIFIER, val)
-            else:
-                raise SyntaxError("Invalid token: {}".format(c))
+            raise SyntaxError("Invalid token: {}".format(c))
 
         return self.get_token()
 
