@@ -24,18 +24,17 @@ class TokenType(Enum):
     IDENTIFIER = 10
 
 class Token:
-    def __init__(self, line, col, tokentype=TokenType.INVALID):
+    def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
         self.line = line
         self.col = col
         self.tokentype = tokentype
-        self.value = ''
-
-    def set(self, value, tokentype):
         self.value = value
-        self.tokentype = tokentype
+
+    def set_val(self, value):
+        self.value = value
 
     def __repr__(self):
-        return 'Token({}, {})'.format(self.tokentype, self.value)
+        return 'Token({}, {})@{},{}'.format(self.tokentype, self.value, self.line, self.col)
 
 class Scan:
     numbers = "0123456789abcdef"
@@ -49,6 +48,8 @@ class Scan:
         self.idx = 0
         self.line = 0
         self.col = 0
+        self.token_line = 0
+        self.token_col = 0
         self.tokens = []
 
     def next(self):
@@ -58,7 +59,8 @@ class Scan:
         if self.idx >= self.data_len:
             raise EOFError
         c = self.data[self.idx]
-        if c == '\n':
+        self.col += 1
+        if chr(c) == '\n':
             self.line += 1
             self.col = 0
         self.idx += 1
@@ -82,7 +84,7 @@ class Scan:
         if self.idx == 0:
             raise ValueError("Invalid undo")
         self.idx -= 1
-        if self.idx == '\n':
+        if chr(self.idx) == '\n':
             self.line -= 1
         elif self.col:
             self.col -= 1
@@ -129,14 +131,24 @@ class Scan:
         c.undo()
         return tmp
 
-    def emit(self, token, tokentype, value):
-        token.set(value, tokentype)
+    def emit(self, tokentype, value):
+        token = Token(self.token_line, self.token_col, tokentype, value)
         self.tokens.append(token)
+        self.token_line = self.line
+        self.token_col = self.col
 
     def get_token(self):
         if not self.tokens:
             return None
         return self.tokens.pop(0)
+
+    def scan_plus(self, c):
+        c2 = self.next()
+        if c2 =='+':
+            self.emit(TokenType.PLUSPLUS, c + c2)
+        else:
+            self.undo()
+            self.emit(TokenType.PLUS, c)
 
     def scan(self):
         if self.tokens:
@@ -147,26 +159,22 @@ class Scan:
         except EOFError:
             return None
 
-        token = Token(self.line, self.col)
+        self.token_line = self.line
+        self.token_col = self.col
         ttype = TokenType.INVALID
         val = c
 
         if c == '+':
-            c2 = self.next()
-            if c2 =='+':
-                self.emit(token, TokenType.PLUSPLUS, c + c2)
-            else:
-                self.undo()
-                self.emit(token, TokenType.PLUS, c)
+            self.scan_plus(c)
         elif c == '-':
             c2 = self.next()
             if c2 =='-':
-                self.emit(token, TokenType.MINUSMINUS, c + c2)
+                self.emit(TokenType.MINUSMINUS, c + c2)
             else:
                 self.undo()
-                self.emit(token, TokenType.MINUS, c)
+                self.emit(TokenType.MINUS, c)
         elif c == ';':
-            self.emit(token, TokenType.SEMI, c)
+            self.emit(TokenType.SEMI, c)
         else:
             if c.isdigit():
                 ttype = TokenType.INT_LIT
@@ -178,26 +186,26 @@ class Scan:
                     c = self.next()
                     if c == '.':
                         if ttype != TokenType.INVALID:
-                            self.emit(token, ttype, val)
-                        self.emit(token, TokenType.ELLIPSIS, "...")
+                            self.emit(ttype, val)
+                        self.emit(TokenType.ELLIPSIS, "...")
                     else:
                         raise SyntaxError("Got two dots, invalid syntax")
                 elif c.isdigit() or self.is_space(c):
                     frac = self.scan_fraction(c)
                     if val == '.':
                         val = 0
-                    self.emit(token, TokenType.DEC_LIT, [val, frac])
+                    self.emit(TokenType.DEC_LIT, [val, frac])
                 else:
                     self.undo()
                     if ttype != TokenType.INVALID:
-                        self.emit(token, ttype, val)
-                    self.emit(token, TokenType.DOT, ".")
+                        self.emit(ttype, val)
+                    self.emit(TokenType.DOT, ".")
             elif ttype != TokenType.INVALID:
                 self.undo()
-                self.emit(token, ttype, val)
+                self.emit(ttype, val)
             elif c.isalpha() or c == '_':
                 val = self.scan_identifier(c)
-                self.emit(token, TokenType.IDENTIFIER, val)
+                self.emit(TokenType.IDENTIFIER, val)
             else:
                 raise SyntaxError("Invalid token: {}".format(c))
 
