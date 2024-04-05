@@ -55,6 +55,7 @@ class Scan:
         self.idx = 0
         self.line = 0
         self.col = 0
+        #self.colstack = []
         self.token_line = 0
         self.token_col = 0
         self.tokens = []
@@ -166,6 +167,26 @@ class Scan:
     def skip(self):
         """
         Take next markable character
+
+        >>> s = Scan("", b"  1 2  3   4     5\\t6\\n7")
+        >>> s.skip()
+        '1'
+        >>> s.skip()
+        '2'
+        >>> s.skip()
+        '3'
+        >>> s.skip()
+        '4'
+        >>> s.skip()
+        '5'
+        >>> s.skip()
+        '6'
+        >>> s.skip()
+        '7'
+        >>> s.skip()
+        Traceback (most recent call last):
+         ...
+        sic.EOFError
         """
         c = self.next()
         while self.is_space(c):
@@ -173,6 +194,50 @@ class Scan:
         return c
 
     def undo(self):
+        """
+        Go back one character
+
+        >>> s = Scan("", b"123456")
+        >>> s.next()
+        '1'
+        >>> s.next()
+        '2'
+        >>> s.undo()
+        >>> s.next()
+        '2'
+        >>> s.undo()
+        >>> s.undo()
+        >>> s.next()
+        '1'
+        >>> s.undo()
+        >>> s.undo()
+        Traceback (most recent call last):
+         ...
+        ValueError: Invalid undo
+        >>> s = Scan("", b"1\\n2\\n3")
+        >>> s.next()
+        '1'
+        >>> s.next()
+        '\\n'
+        >>> s.next()
+        '2'
+        >>> s.line
+        1
+        >>> s.next()
+        '\\n'
+        >>> s.line
+        2
+        >>> s.col
+        0
+        >>> s.undo()
+        >>> s.line
+        1
+        """
+        """
+        FIXME
+        >>> s.col
+        1
+        """
         if self.idx == 0:
             raise ValueError("Invalid undo")
         self.idx -= 1
