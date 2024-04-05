@@ -130,6 +130,35 @@ class Scan:
         return chr(self.data[self.idx])
 
     def is_space(self, c):
+        """
+        Check if character is whitespace
+
+        >>> s = Scan("", b"a")
+        >>> s.is_space(" ")
+        True
+        >>> s.is_space("\\t")
+        True
+        >>> s.is_space("\\n")
+        True
+        >>> s.is_space("\\r")
+        True
+        >>> s.is_space("\\f")
+        True
+        >>> s.is_space("1")
+        False
+        >>> s.is_space("a")
+        False
+        >>> s.is_space(None)
+        False
+        >>> s.is_space("\\n\\t")
+        Traceback (most recent call last):
+         ...
+        sic.ParserError: Expected one character
+        """
+        if c is None:
+            return False
+        if len(c) != 1:
+            raise ParserError("Expected one character")
         if c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\f':
             return True
         return False
