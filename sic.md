@@ -1022,7 +1022,7 @@ on target architectures supporting it.
     printf("%d\n", a); // prints 20
     printf("%d\n", b); // prints 6
 
-Types of the value swapped should be the same or trivial conversion.
+Types of the values swapped should be the same or trivial conversion.
 Complex casting is not supported. However one can manually cast:
 
     int64 a = 5;
@@ -1032,3 +1032,88 @@ Complex casting is not supported. However one can manually cast:
 
     // a <> (int64)b; // This would cause error since 64-bit "a" can't fit into
                       // 32-bit "b". This would be the default as well.
+
+## Errors and exceptions
+
+We have been talking about errors and exceptions earlier in this document, but haven't yet specified how they work.
+In case of SIC most errors are actually just bit better error codes. Let's take an example:
+
+    int readbyte(&mut std.File f) {
+        return f.read(1);
+    }
+
+This simple function tries to read one byte from a file. We get the file as reference, read one byte from there and return the value.
+Instead of C API we use SIC API and it's `std.File` interface which implements SIC style errors.
+
+When we try to compile that example it fails. Reason is that we didn't actually handle the possible exception.
+For that we have two options: handle it locally, or pass it forward. Here's an example to just handle it there:
+
+    int readbyte(&mut std.File f) {
+        std.Result<int, string> res = f.read(1);
+
+        match (res) {
+            Ok(val): return val;
+            Err(msg): printf("Can't read from file!\n");
+        }
+    }
+
+As you can see the error in this case is actually just wrapper around an enum. In order to pass it forward one just:
+
+    std.Result<int, string> readbyte(&mut std.File f) {
+        return f.read(1);
+    }
+
+Which passes the result forward and it's caller's responsibility to handle it.
+
+There's exceptions that may be triggered by some operations. For example divide by zero in unsafe mode
+(Remark that in normal mode result would be `0` instead without any exceptions):
+
+    int dodiv(int a, int b) {
+        unsafe {
+            return a / b;
+        }
+    }
+
+    printf("Res: %d\n", dodiv(10, 0));
+
+On these primitive exceptions the program in question is terminated. Stack trace might be printed, or some other error message.
+In order to handle the exeption instead of crashing the program one can use specific exception keywords: `overflow`, `divide_by_zero` and `exception`:
+
+    int dodiv(int a, int b) {
+        unsafe {
+            int res:
+            if (divide_by_zero { res = a / b }) {
+                return 0;
+            }
+            return res;
+        }
+    }
+
+    printf("Res: %d\n", dodiv(10, 0));
+
+On this case the example works exacly as it would in normal mode without the manual handling.
+
+## Multine strings
+
+We're borrowing multiline string syntax from Python:
+
+    string multistring = """This is multine string.
+        It starts with three quotation marks, and ends
+        until three quotations marks are found.
+        Thus it's valid to insert " or ' inside here.
+        In case one would like to have three quotation marks,
+        one can always escape it like \"\"\" this.
+        One escape would also work: \""""
+
+        Inside this quotation newlines and indent is NOT saved unless
+        the string is marked as raw string.
+        That happens by giving identifier r before fist quotation mark.
+        """;
+
+    string raw_multistring = r"""This is raw multiline string.
+
+        All formatting, newlines, etc. is preserved.
+        Suitable for making templates that should be printed or written as-is.
+        """;
+
+Those strings can be used like any strings.
