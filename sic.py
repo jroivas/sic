@@ -170,28 +170,40 @@ class Scan:
 
         >>> s = Scan("", b"  1 2  3   4     5\\t6\\n7")
         >>> s.skip()
+        >>> s.next()
         '1'
         >>> s.skip()
+        >>> s.next()
         '2'
         >>> s.skip()
+        >>> s.next()
         '3'
         >>> s.skip()
+        >>> s.next()
         '4'
         >>> s.skip()
+        >>> s.next()
         '5'
         >>> s.skip()
+        >>> s.next()
         '6'
         >>> s.skip()
+        >>> s.next()
         '7'
         >>> s.skip()
         Traceback (most recent call last):
          ...
         sic.EOFError
         """
-        c = self.next()
+        c = self.peek()
+        if c is None:
+            raise EOFError
+        if not self.is_space(c):
+            return None
         while self.is_space(c):
             c = self.next()
-        return c
+        self.undo()
+        return None
 
     def undo(self):
         """
@@ -246,46 +258,107 @@ class Scan:
         elif self.col:
             self.col -= 1
 
-    def scan_fraction(self, c):
+    def scan_fraction(self):
+        """
+        Scan fraction part of the number, return dividend and the divisor as list
+
+        >>> s = Scan("", b"1234")
+        >>> s.scan_fraction()
+        [1234, 10000]
+        >>> s = Scan("", b"555")
+        >>> s.scan_fraction()
+        [555, 1000]
+        >>> s = Scan("", b"555.")
+        >>> s.scan_fraction()
+        [555, 1000]
+        >>> s = Scan("", b"543 5")
+        >>> s.scan_fraction()
+        [543, 1000]
+        >>> s = Scan("", b"0")
+        >>> s.scan_fraction()
+        [0, 10]
+        """
         tmp = '0'
         div = 1
 
-        while c.lower() in self.numbers:
-            tmp += c
-            c = self.next()
+        c = self.peek()
+        while c is not None and c.lower() in self.numbers:
+            tmp += self.next()
+            c = self.peek()
             div *= 10
-        self.undo()
 
         return [int(tmp), div]
 
-    def scan_decimal(self, c):
+    def scan_decimal(self):
+        """
+        Scan decimal number
+
+        >>> s = Scan("", b"1234")
+        >>> s.scan_decimal()
+        1234
+        >>> s = Scan("", b"0x123")
+        >>> s.scan_decimal()
+        291
+        >>> s = Scan("", b"0123")
+        >>> s.scan_decimal()
+        83
+        >>> s = Scan("", b"0o124")
+        >>> s.scan_decimal()
+        84
+        >>> s = Scan("", b"0")
+        >>> s.scan_decimal()
+        0
+        """
         radix = 10
         tmp = ''
 
+        c = self.peek()
+        if c is None:
+            return None
         if c == '0':
-            tmp += c
-            c = self.next()
+            tmp += self.next()
+            c = self.peek()
             if c == 'x':
-                tmp += c
+                tmp += self.next()
+                c = self.peek()
                 radix = 16
-                c = self.next()
+            elif c == 'o':
+                self.next()
+                c = self.peek()
+                radix = 8
             else:
                 radix = 8
 
-        while c.lower() in self.numbers:
-            tmp += c
-            c = self.next()
-        self.undo()
+        while c is not None and c.lower() in self.numbers:
+            tmp += self.next()
+            c = self.peek()
 
         return int(tmp, radix)
 
-    def scan_identifier(self, c):
+    def scan_identifier(self):
+        """
+        Scan identifier
+
+        >>> s = Scan("", b"tst")
+        >>> s.scan_identifier()
+        'tst'
+        >>> s = Scan("", b"some other identifier")
+        >>> s.scan_identifier()
+        'some'
+        >>> s.skip()
+        >>> s.scan_identifier()
+        'other'
+        >>> s.skip()
+        >>> s.scan_identifier()
+        'identifier'
+        """
         tmp = ''
 
-        while c.isalpha() or c.isdigit() or c == '_':
-            tmp += c
-            c = self.next()
-        c.undo()
+        c = self.peek()
+        while c is not None and (c.isalpha() or c.isdigit() or c == '_'):
+            tmp += self.next()
+            c = self.peek()
+
         return tmp
 
     def emit(self, tokentype, value):
@@ -295,40 +368,53 @@ class Scan:
         self.token_col = self.col
 
     def get_token(self):
+        """
+        Get token from the queue
+
+        >>> s = Scan("", b"tst")
+        >>> s.get_token()
+        >>> s.emit(TokenType.IDENTIFIER, "tst")
+        >>> s.get_token()
+        Token(TokenType.IDENTIFIER, tst @0,0)
+        """
         if not self.tokens:
             return None
         return self.tokens.pop(0)
 
-    def scan_plus(self, c):
-        c2 = self.next()
+    def scan_plus(self):
+        c = self.next()
+        c2 = self.peek()
         if c2 =='+':
+            c2 = self.next()
             self.emit(TokenType.PLUSPLUS, c + c2)
         else:
             self.undo()
             self.emit(TokenType.PLUS, c)
 
-    def scan_minus(self, c):
-        c2 = self.next()
+    def scan_minus(self):
+        c = self.next()
+        c2 = self.peek()
         if c2 =='-':
+            c2 = self.next()
             self.emit(TokenType.MINUSMINUS, c + c2)
         else:
             self.undo()
             self.emit(TokenType.MINUS, c)
 
-    def scan_number(self, c):
-        val = c
+    def scan_number(self):
         ttype = TokenType.INVALID
 
+        c = self.peek()
+        val = c
         if c.isdigit():
             ttype = TokenType.INT_LIT
-            val = self.scan_decimal(c)
-            c = self.next()
+            val = self.scan_decimal()
+            c = self.peek()
 
         if c == '.':
             p = self.peek()
             if p is not None and (p.isdigit() or self.is_space(p)):
-                c = self.next()
-                frac = self.scan_fraction(c)
+                frac = self.scan_fraction()
                 if val == '.':
                     val = 0
                 self.emit(TokenType.DEC_LIT, [val, frac])
@@ -340,7 +426,7 @@ class Scan:
 
         return False
 
-    def scan_identifier(self, c):
+    def scan_ellips_identifier(self, c):
         if c == '.':
             c = self.next()
             if c == '.':
@@ -355,7 +441,7 @@ class Scan:
                 self.undo()
                 self.emit(TokenType.DOT, ".")
         elif c.isalpha() or c == '_':
-            val = self.scan_identifier(c)
+            val = self.scan_identifier()
             self.emit(TokenType.IDENTIFIER, val)
         else:
             return False
@@ -367,23 +453,25 @@ class Scan:
             return self.get_token()
 
         try:
-            c = self.skip()
+            self.skip()
         except EOFError:
             return None
 
         self.token_line = self.line
         self.token_col = self.col
         ttype = TokenType.INVALID
+        c = self.peek()
 
         if c == '+':
-            self.scan_plus(c)
+            self.scan_plus()
         elif c == '-':
-            self.scan_minus(c)
+            self.scan_minus()
         elif c == ';':
+            c = self.next()
             self.emit(TokenType.SEMI, c)
-        elif self.scan_number(c):
+        elif self.scan_number():
             pass
-        elif self.scan_identifier(c):
+        elif self.scan_ellips_identifier():
             pass
         else:
             raise SyntaxError("Invalid token: {}".format(c))
