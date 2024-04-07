@@ -27,6 +27,9 @@ class TokenType(Enum):
     DOT = 9
     IDENTIFIER = 10
     ELLIPSIS = 11
+    STAR = 12
+    SLASH = 13
+    COMMENT = 14
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -532,6 +535,53 @@ class Scan:
 
         return True
 
+    def scan_slash(self):
+        """
+        >>> s = Scan("", b"// tst\\nnewline")
+        >>> s.scan_slash()
+        >>> s.get_token()
+        Token(TokenType.COMMENT, // tst @0,0)
+        >>> s = Scan("", b"/* multi line\\ncomment */")
+        >>> s.scan_slash()
+        >>> s.get_token()
+        Token(TokenType.COMMENT, /* multi line
+        comment */ @0,0)
+        >>> s = Scan("", b"/")
+        >>> s.scan_slash()
+        >>> s.get_token()
+        Token(TokenType.SLASH, / @0,0)
+        """
+        c = self.next()
+        c = self.peek()
+        if c == "/":
+            txt = "/"
+            # This is comment until the end of line
+            while c != "\n" and c != "\r":
+                txt += self.next()
+                c = self.peek()
+            c = self.next()
+            self.emit(TokenType.COMMENT, txt)
+        elif c == "*":
+            txt = "/*"
+            # Comment until we get */
+            c = self.next()
+            while c is not None:
+                c = self.peek()
+                if c is None:
+                    return
+                if c == "*":
+                    self.next()
+                    c = self.peek()
+                    if c == "/":
+                        txt += '*/'
+                        break
+                c = self.next()
+                txt += c
+            self.emit(TokenType.COMMENT, txt)
+        else:
+            self.emit(TokenType.SLASH, "/")
+
+
     def scan(self):
         """
         >>> s = Scan("", b"some test 42 5.4 +")
@@ -565,8 +615,11 @@ class Scan:
         elif c == '-':
             self.scan_minus()
         elif c == ';':
-            c = self.next()
-            self.emit(TokenType.SEMI, c)
+            self.emit(TokenType.SEMI, self.next())
+        elif c == '*':
+            self.emit(TokenType.STAR, self.next())
+        elif c == '/':
+            self.scan_slash()
         elif self.scan_number():
             pass
         elif self.scan_ellipsis_identifier():
