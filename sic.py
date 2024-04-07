@@ -23,9 +23,10 @@ class TokenType(Enum):
     MINUSMINUS = 5
     SEMI = 6
     INT_LIT = 7
-    DEC_LIT = 8
+    FRAC_LIT = 8
     DOT = 9
     IDENTIFIER = 10
+    ELLIPSIS = 11
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -362,6 +363,19 @@ class Scan:
         return tmp
 
     def emit(self, tokentype, value):
+        """
+        Emit new token, place it into queue
+
+        >>> s = Scan("", b"tst")
+        >>> len(s.tokens)
+        0
+        >>> s.emit(TokenType.PLUS, "+")
+        >>> len(s.tokens)
+        1
+        >>> s.emit(TokenType.MINUS, "-")
+        >>> len(s.tokens)
+        2
+        """
         token = Token(self.token_line, self.token_col, tokentype, value)
         self.tokens.append(token)
         self.token_line = self.line
@@ -382,26 +396,70 @@ class Scan:
         return self.tokens.pop(0)
 
     def scan_plus(self):
+        """
+        Scan plus and plusplus
+
+        >>> s = Scan("", b"+")
+        >>> s.scan_plus()
+        >>> s.get_token()
+        Token(TokenType.PLUS, + @0,0)
+        >>> s = Scan("", b"++")
+        >>> s.scan_plus()
+        >>> s.get_token()
+        Token(TokenType.PLUSPLUS, ++ @0,0)
+        >>> s = Scan("", b"+=")
+        >>> s.scan_plus()
+        >>> s.get_token()
+        Token(TokenType.PLUS, + @0,0)
+        """
         c = self.next()
         c2 = self.peek()
         if c2 =='+':
             c2 = self.next()
             self.emit(TokenType.PLUSPLUS, c + c2)
         else:
-            self.undo()
             self.emit(TokenType.PLUS, c)
 
     def scan_minus(self):
+        """
+        Scan minus and minusminus
+
+        >>> s = Scan("", b"-")
+        >>> s.scan_minus()
+        >>> s.get_token()
+        Token(TokenType.MINUS, - @0,0)
+        >>> s = Scan("", b"--")
+        >>> s.scan_minus()
+        >>> s.get_token()
+        Token(TokenType.MINUSMINUS, -- @0,0)
+        >>> s = Scan("", b"-+")
+        >>> s.scan_minus()
+        >>> s.get_token()
+        Token(TokenType.MINUS, - @0,0)
+        """
         c = self.next()
         c2 = self.peek()
         if c2 =='-':
             c2 = self.next()
             self.emit(TokenType.MINUSMINUS, c + c2)
         else:
-            self.undo()
             self.emit(TokenType.MINUS, c)
 
     def scan_number(self):
+        """
+        Read number, decimal or fraction
+
+        >>> s = Scan("", b"1.5")
+        >>> s.scan_number()
+        True
+        >>> s.get_token()
+        Token(TokenType.FRAC_LIT, [1, [5, 10]] @0,0)
+        >>> s = Scan("", b"66.66.66")
+        >>> s.scan_number()
+        True
+        >>> s.get_token()
+        Token(TokenType.FRAC_LIT, [66, [66, 100]] @0,0)
+        """
         ttype = TokenType.INVALID
 
         c = self.peek()
@@ -412,25 +470,52 @@ class Scan:
             c = self.peek()
 
         if c == '.':
+            p = self.next()
             p = self.peek()
             if p is not None and (p.isdigit() or self.is_space(p)):
                 frac = self.scan_fraction()
                 if val == '.':
                     val = 0
-                self.emit(TokenType.DEC_LIT, [val, frac])
+                self.emit(TokenType.FRAC_LIT, [val, frac])
                 return True
         elif ttype != TokenType.INVALID:
-            self.undo()
             self.emit(ttype, val)
             return True
 
         return False
 
-    def scan_ellips_identifier(self, c):
+    def scan_ellipsis_identifier(self):
+        """
+        Scan ellipsis or identifier
+
+        >>> s = Scan("", b"...")
+        >>> s.scan_ellipsis_identifier()
+        True
+        >>> s.get_token()
+        Token(TokenType.ELLIPSIS, ... @0,0)
+        >>> s = Scan("", b"some123 other third42")
+        >>> s.scan_ellipsis_identifier()
+        True
+        >>> s.skip()
+        >>> s.scan_ellipsis_identifier()
+        True
+        >>> s.skip()
+        >>> s.scan_ellipsis_identifier()
+        True
+        >>> s.get_token()
+        Token(TokenType.IDENTIFIER, some123 @0,0)
+        >>> s.get_token()
+        Token(TokenType.IDENTIFIER, other @0,7)
+        >>> s.get_token()
+        Token(TokenType.IDENTIFIER, third42 @0,13)
+        """
+        c = self.peek()
         if c == '.':
             c = self.next()
+            c = self.peek()
             if c == '.':
                 c = self.next()
+                c = self.peek()
                 if c == '.':
                     self.emit(TokenType.ELLIPSIS, "...")
                 else:
@@ -438,7 +523,6 @@ class Scan:
             elif c.isdigit() or self.is_space(c):
                 raise ParserError("Expected non number, compiler error")
             else:
-                self.undo()
                 self.emit(TokenType.DOT, ".")
         elif c.isalpha() or c == '_':
             val = self.scan_identifier()
@@ -449,6 +533,20 @@ class Scan:
         return True
 
     def scan(self):
+        """
+        >>> s = Scan("", b"some test 42 5.4 +")
+        >>> s.scan()
+        Token(TokenType.IDENTIFIER, some @0,0)
+        >>> s.scan()
+        Token(TokenType.IDENTIFIER, test @0,5)
+        >>> s.scan()
+        Token(TokenType.INT_LIT, 42 @0,10)
+        >>> s.scan()
+        Token(TokenType.FRAC_LIT, [5, [4, 10]] @0,13)
+        >>> s.scan()
+        Token(TokenType.PLUS, + @0,17)
+        >>> s.scan()
+        """
         if self.tokens:
             return self.get_token()
 
@@ -471,10 +569,11 @@ class Scan:
             self.emit(TokenType.SEMI, c)
         elif self.scan_number():
             pass
-        elif self.scan_ellips_identifier():
+        elif self.scan_ellipsis_identifier():
             pass
         else:
-            raise SyntaxError("Invalid token: {}".format(c))
+            self.emit(TokenType.INVALID, self.next())
+            #raise SyntaxError("Invalid token: {}".format(c))
 
         return self.get_token()
 
