@@ -508,6 +508,9 @@ class Scan:
                     val = 0
                 self.emit(TokenType.FRAC_LIT, [val, frac])
                 return True
+            else:
+                # Next one is not digit or space, undo the dot
+                self.undo()
         elif ttype != TokenType.INVALID:
             self.emit(ttype, val)
             return True
@@ -763,6 +766,11 @@ class Scan:
         >>> s.scan()
         Token(TokenType.PLUS, + @0,17)
         >>> s.scan()
+        >>> s = Scan("", b",...")
+        >>> s.scan()
+        Token(TokenType.COMMA, , @0,0)
+        >>> s.scan()
+        Token(TokenType.ELLIPSIS, ... @0,1)
         """
         if self.tokens:
             return self.get_token()
