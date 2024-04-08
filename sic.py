@@ -30,6 +30,17 @@ class TokenType(Enum):
     STAR = 12
     SLASH = 13
     COMMENT = 14
+    MOD = 15
+    XOR = 16
+    COMMA = 17
+    ROUND_OPEN = 18
+    ROUND_CLOSE = 19
+    CURLY_OPEN = 20
+    CURLY_CLOSE = 21
+    SQUARE_OPEN = 22
+    SQUARE_CLOSE = 23
+    TILDE = 24
+    COLON = 25
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -46,6 +57,30 @@ class Token:
 
 class Scan:
     numbers = "0123456789abcdef"
+
+    token_map = {
+        ';': TokenType.SEMI,
+        '*': TokenType.STAR,
+        '%': TokenType.MOD,
+        '^': TokenType.XOR,
+        ',': TokenType.COMMA,
+        '(': TokenType.ROUND_OPEN,
+        ')': TokenType.ROUND_CLOSE,
+        '{': TokenType.CURLY_OPEN,
+        '}': TokenType.CURLY_CLOSE,
+        '[': TokenType.SQUARE_OPEN,
+        ']': TokenType.SQUARE_CLOSE,
+        '~': TokenType.TILDE,
+        ':': TokenType.COLON,
+        '+': {
+            '': TokenType.PLUS,
+            '+': TokenType.PLUSPLUS,
+        },
+        '-': {
+            '': TokenType.MINUS,
+            '-': TokenType.MINUSMINUS,
+        }
+    }
 
     def __init__(self, filename, data=[]):
         self.fname = filename
@@ -398,56 +433,6 @@ class Scan:
             return None
         return self.tokens.pop(0)
 
-    def scan_plus(self):
-        """
-        Scan plus and plusplus
-
-        >>> s = Scan("", b"+")
-        >>> s.scan_plus()
-        >>> s.get_token()
-        Token(TokenType.PLUS, + @0,0)
-        >>> s = Scan("", b"++")
-        >>> s.scan_plus()
-        >>> s.get_token()
-        Token(TokenType.PLUSPLUS, ++ @0,0)
-        >>> s = Scan("", b"+=")
-        >>> s.scan_plus()
-        >>> s.get_token()
-        Token(TokenType.PLUS, + @0,0)
-        """
-        c = self.next()
-        c2 = self.peek()
-        if c2 =='+':
-            c2 = self.next()
-            self.emit(TokenType.PLUSPLUS, c + c2)
-        else:
-            self.emit(TokenType.PLUS, c)
-
-    def scan_minus(self):
-        """
-        Scan minus and minusminus
-
-        >>> s = Scan("", b"-")
-        >>> s.scan_minus()
-        >>> s.get_token()
-        Token(TokenType.MINUS, - @0,0)
-        >>> s = Scan("", b"--")
-        >>> s.scan_minus()
-        >>> s.get_token()
-        Token(TokenType.MINUSMINUS, -- @0,0)
-        >>> s = Scan("", b"-+")
-        >>> s.scan_minus()
-        >>> s.get_token()
-        Token(TokenType.MINUS, - @0,0)
-        """
-        c = self.next()
-        c2 = self.peek()
-        if c2 =='-':
-            c2 = self.next()
-            self.emit(TokenType.MINUSMINUS, c + c2)
-        else:
-            self.emit(TokenType.MINUS, c)
-
     def scan_number(self):
         """
         Read number, decimal or fraction
@@ -582,6 +567,63 @@ class Scan:
             self.emit(TokenType.SLASH, "/")
 
 
+    def scan_token(self):
+        """
+        Scan plus and plusplus
+
+        >>> s = Scan("", b"+")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.PLUS, + @0,0)
+        >>> s = Scan("", b"++")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.PLUSPLUS, ++ @0,0)
+        >>> s = Scan("", b"+=")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.PLUS, + @0,0)
+        >>> s = Scan("", b"-")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.MINUS, - @0,0)
+        >>> s = Scan("", b"--")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.MINUSMINUS, -- @0,0)
+        >>> s = Scan("", b"-+")
+        >>> s.scan_token()
+        True
+        >>> s.get_token()
+        Token(TokenType.MINUS, - @0,0)
+        """
+        c = self.peek()
+        ttype = self.token_map.get(c, None)
+
+        if ttype is None:
+            return False
+        val = self.next()
+
+        if type(ttype) == dict:
+            c2 = self.peek()
+            ttype2 = ttype.get(c2, None)
+            if ttype2 == None:
+                # Default
+                ttype = ttype.get('', None)
+                if ttype is None:
+                    raise ParserError("Compiler bug, can't find token")
+            else:
+                ttype = ttype2
+                val += self.next()
+
+        self.emit(ttype, val)
+        return True
+
     def scan(self):
         """
         >>> s = Scan("", b"some test 42 5.4 +")
@@ -610,16 +652,10 @@ class Scan:
         ttype = TokenType.INVALID
         c = self.peek()
 
-        if c == '+':
-            self.scan_plus()
-        elif c == '-':
-            self.scan_minus()
-        elif c == ';':
-            self.emit(TokenType.SEMI, self.next())
-        elif c == '*':
-            self.emit(TokenType.STAR, self.next())
-        elif c == '/':
+        if c == '/':
             self.scan_slash()
+        elif self.scan_token():
+            pass
         elif self.scan_number():
             pass
         elif self.scan_ellipsis_identifier():
