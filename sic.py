@@ -56,6 +56,7 @@ class TokenType(Enum):
     LOG_OR = 38
     QUESTION = 39
     STR_LIT = 40
+    PREPROCESS = 41
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -730,6 +731,24 @@ class Scan:
         self.emit(ttype, val)
         return True
 
+    def scan_preprocessor(self):
+        """
+        >>> s = Scan("", b"#include <stdio.h>")
+        >>> s.scan_preprocessor()
+        >>> s.get_token()
+        Token(TokenType.PREPROCESS, include <stdio.h> @0,0)
+        >>> s = Scan("", b"#    include <stdio.h>")
+        >>> s.scan_preprocessor()
+        >>> s.get_token()
+        Token(TokenType.PREPROCESS, include <stdio.h> @0,0)
+        """
+        c = self.next()
+        res = ""
+        while c is not None and c != "\n" and c != "\r":
+            res += self.next()
+            c = self.peek()
+        self.emit(TokenType.PREPROCESS, res.lstrip())
+
     def scan(self):
         """
         >>> s = Scan("", b"some test 42 5.4 +")
@@ -764,6 +783,8 @@ class Scan:
             self.scan_string()
         elif c == "'":
             self.scan_string("'", TokenType.INT_LIT)
+        elif c == '#':
+            self.scan_preprocessor()
         elif self.scan_token():
             pass
         elif self.scan_number():
