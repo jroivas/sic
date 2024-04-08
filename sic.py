@@ -41,6 +41,20 @@ class TokenType(Enum):
     SQUARE_CLOSE = 23
     TILDE = 24
     COLON = 25
+    PTR_OP = 26
+    AMP = 27
+    LOG_AND = 28
+    EQ = 29
+    EQ_EQ = 30
+    NOT = 31
+    EQ_NE = 32
+    LT = 33
+    SH_LEFT = 34
+    GT = 35
+    SH_RIGHT = 36
+    OR = 37
+    LOG_OR = 38
+    QUESTION = 39
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -72,6 +86,7 @@ class Scan:
         ']': TokenType.SQUARE_CLOSE,
         '~': TokenType.TILDE,
         ':': TokenType.COLON,
+        '?': TokenType.QUESTION,
         '+': {
             '': TokenType.PLUS,
             '+': TokenType.PLUSPLUS,
@@ -79,7 +94,32 @@ class Scan:
         '-': {
             '': TokenType.MINUS,
             '-': TokenType.MINUSMINUS,
-        }
+            '>': TokenType.PTR_OP,
+        },
+        '&': {
+            '': TokenType.AMP,
+            '&': TokenType.LOG_AND,
+        },
+        '=': {
+            '': TokenType.EQ,
+            '=': TokenType.EQ_EQ,
+        },
+        '!': {
+            '': TokenType.NOT,
+            '=': TokenType.EQ_NE,
+        },
+        '<': {
+            '': TokenType.LT,
+            '<': TokenType.SH_LEFT,
+        },
+        '>': {
+            '': TokenType.GT,
+            '>': TokenType.SH_RIGHT,
+        },
+        '|': {
+            '': TokenType.OR,
+            '|': TokenType.LOG_OR,
+        },
     }
 
     def __init__(self, filename, data=[]):
