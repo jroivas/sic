@@ -55,6 +55,7 @@ class TokenType(Enum):
     OR = 37
     LOG_OR = 38
     QUESTION = 39
+    STR_LIT = 40
 
 class Token:
     def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
@@ -560,6 +561,71 @@ class Scan:
 
         return True
 
+    def solve_escape(self, val):
+        v = val.encode("utf-8")
+        if not v or v == 0:
+            return -1
+
+        if v[0] != ord("\\"):
+            return v[0]
+
+        nc = v[1]
+        if nc == ord("n"):
+            return ord("\n")
+        elif nc == ord("r"):
+            return ord("\r")
+        elif nc == ord("t"):
+            return ord("\t")
+        elif nc == ord("0"):
+            return 0
+        elif nc == ord("\\"):
+            return ord("\\")
+        elif nc == ord("a"):
+            return ord("\a")
+        elif nc == ord("b"):
+            return ord("\b")
+        elif nc == ord("f"):
+            return ord("\f")
+        elif nc == ord("v"):
+            return ord("\v")
+        elif nc == ord("'"):
+            return ord("\'")
+        elif nc == ord("\""):
+            return ord("\"")
+
+        return -3
+
+    def scan_string(self, end_char="\"", tokentype=TokenType.STR_LIT):
+        """
+        >>> s = Scan("", b"\\"test\\"")
+        >>> s.scan_string()
+        >>> s.get_token()
+        Token(TokenType.STR_LIT, test @0,0)
+        >>> s = Scan("", b"\\"some str 42 lit 4.4\\"")
+        >>> s.scan_string()
+        >>> s.get_token()
+        Token(TokenType.STR_LIT, some str 42 lit 4.4 @0,0)
+        >>> s = Scan("", b"'c'")
+        >>> s.scan_string("'", TokenType.INT_LIT)
+        >>> s.get_token()
+        Token(TokenType.INT_LIT, 99 @0,0)
+        >>> s = Scan("", b"'\\n'")
+        >>> s.scan_string("'", TokenType.INT_LIT)
+        >>> s.get_token()
+        Token(TokenType.INT_LIT, 10 @0,0)
+        """
+        self.next()
+        c = self.peek()
+        val = ""
+        while c is not None and c != end_char:
+            val += self.next()
+            c = self.peek()
+        if c == end_char:
+            self.next()
+        if tokentype == TokenType.INT_LIT:
+            val = self.solve_escape(val)
+        self.emit(tokentype, val)
+
     def scan_slash(self):
         """
         >>> s = Scan("", b"// tst\\nnewline")
@@ -609,7 +675,7 @@ class Scan:
 
     def scan_token(self):
         """
-        Scan plus and plusplus
+        Scan token defined in token_map
 
         >>> s = Scan("", b"+")
         >>> s.scan_token()
@@ -694,6 +760,10 @@ class Scan:
 
         if c == '/':
             self.scan_slash()
+        elif c == '"':
+            self.scan_string()
+        elif c == "'":
+            self.scan_string("'", TokenType.INT_LIT)
         elif self.scan_token():
             pass
         elif self.scan_number():
