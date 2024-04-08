@@ -3,16 +3,20 @@
 import sys
 from enum import Enum
 
+
 class EOFError(Exception):
     pass
+
 
 class SyntaxError(Exception):
     def __init__(self, msg):
         Exception.__init__(self, msg)
 
+
 class ParserError(Exception):
     def __init__(self, msg):
         Exception.__init__(self, msg)
+
 
 class TokenType(Enum):
     INVALID = 0
@@ -58,8 +62,9 @@ class TokenType(Enum):
     STR_LIT = 40
     PREPROCESS = 41
 
+
 class Token:
-    def __init__(self, line, col, tokentype=TokenType.INVALID, value=''):
+    def __init__(self, line, col, tokentype=TokenType.INVALID, value=""):
         self.line = line
         self.col = col
         self.tokentype = tokentype
@@ -69,74 +74,77 @@ class Token:
         self.value = value
 
     def __repr__(self):
-        return 'Token({}, {} @{},{})'.format(self.tokentype, self.value, self.line, self.col)
+        return "Token({}, {} @{},{})".format(
+            self.tokentype, self.value, self.line, self.col
+        )
+
 
 class Scan:
     numbers = "0123456789abcdef"
 
     token_map = {
-        ';': TokenType.SEMI,
-        '*': TokenType.STAR,
-        '%': TokenType.MOD,
-        '^': TokenType.XOR,
-        ',': TokenType.COMMA,
-        '(': TokenType.ROUND_OPEN,
-        ')': TokenType.ROUND_CLOSE,
-        '{': TokenType.CURLY_OPEN,
-        '}': TokenType.CURLY_CLOSE,
-        '[': TokenType.SQUARE_OPEN,
-        ']': TokenType.SQUARE_CLOSE,
-        '~': TokenType.TILDE,
-        ':': TokenType.COLON,
-        '?': TokenType.QUESTION,
-        '+': {
-            '': TokenType.PLUS,
-            '+': TokenType.PLUSPLUS,
+        ";": TokenType.SEMI,
+        "*": TokenType.STAR,
+        "%": TokenType.MOD,
+        "^": TokenType.XOR,
+        ",": TokenType.COMMA,
+        "(": TokenType.ROUND_OPEN,
+        ")": TokenType.ROUND_CLOSE,
+        "{": TokenType.CURLY_OPEN,
+        "}": TokenType.CURLY_CLOSE,
+        "[": TokenType.SQUARE_OPEN,
+        "]": TokenType.SQUARE_CLOSE,
+        "~": TokenType.TILDE,
+        ":": TokenType.COLON,
+        "?": TokenType.QUESTION,
+        "+": {
+            "": TokenType.PLUS,
+            "+": TokenType.PLUSPLUS,
         },
-        '-': {
-            '': TokenType.MINUS,
-            '-': TokenType.MINUSMINUS,
-            '>': TokenType.PTR_OP,
+        "-": {
+            "": TokenType.MINUS,
+            "-": TokenType.MINUSMINUS,
+            ">": TokenType.PTR_OP,
         },
-        '&': {
-            '': TokenType.AMP,
-            '&': TokenType.LOG_AND,
+        "&": {
+            "": TokenType.AMP,
+            "&": TokenType.LOG_AND,
         },
-        '=': {
-            '': TokenType.EQ,
-            '=': TokenType.EQ_EQ,
+        "=": {
+            "": TokenType.EQ,
+            "=": TokenType.EQ_EQ,
         },
-        '!': {
-            '': TokenType.NOT,
-            '=': TokenType.EQ_NE,
+        "!": {
+            "": TokenType.NOT,
+            "=": TokenType.EQ_NE,
         },
-        '<': {
-            '': TokenType.LT,
-            '<': TokenType.SH_LEFT,
+        "<": {
+            "": TokenType.LT,
+            "<": TokenType.SH_LEFT,
         },
-        '>': {
-            '': TokenType.GT,
-            '>': TokenType.SH_RIGHT,
+        ">": {
+            "": TokenType.GT,
+            ">": TokenType.SH_RIGHT,
         },
-        '|': {
-            '': TokenType.OR,
-            '|': TokenType.LOG_OR,
+        "|": {
+            "": TokenType.OR,
+            "|": TokenType.LOG_OR,
         },
     }
 
     def __init__(self, filename, data=[]):
         self.fname = filename
-        self.data = r''
+        self.data = r""
         if data:
             self.data = data
         else:
-            with open(self.fname, 'rb') as fd:
+            with open(self.fname, "rb") as fd:
                 self.data = fd.read()
         self.data_len = len(self.data)
         self.idx = 0
         self.line = 0
         self.col = 0
-        #self.colstack = []
+        # self.colstack = []
         self.token_line = 0
         self.token_col = 0
         self.tokens = []
@@ -188,7 +196,7 @@ class Scan:
             raise EOFError
         c = self.data[self.idx]
         self.col += 1
-        if chr(c) == '\n':
+        if chr(c) == "\n":
             self.line += 1
             self.col = 0
         self.idx += 1
@@ -241,7 +249,7 @@ class Scan:
             return False
         if len(c) != 1:
             raise ParserError("Expected one character")
-        if c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\f':
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "\f":
             return True
         return False
 
@@ -334,7 +342,7 @@ class Scan:
         if self.idx == 0:
             raise ValueError("Invalid undo")
         self.idx -= 1
-        if chr(self.data[self.idx]) == '\n':
+        if chr(self.data[self.idx]) == "\n":
             self.line -= 1
         elif self.col:
             self.col -= 1
@@ -359,7 +367,7 @@ class Scan:
         >>> s.scan_fraction()
         [0, 10]
         """
-        tmp = '0'
+        tmp = "0"
         div = 1
 
         c = self.peek()
@@ -391,19 +399,19 @@ class Scan:
         0
         """
         radix = 10
-        tmp = ''
+        tmp = ""
 
         c = self.peek()
         if c is None:
             return None
-        if c == '0':
+        if c == "0":
             tmp += self.next()
             c = self.peek()
-            if c == 'x':
+            if c == "x":
                 tmp += self.next()
                 c = self.peek()
                 radix = 16
-            elif c == 'o':
+            elif c == "o":
                 self.next()
                 c = self.peek()
                 radix = 8
@@ -433,10 +441,10 @@ class Scan:
         >>> s.scan_identifier()
         'identifier'
         """
-        tmp = ''
+        tmp = ""
 
         c = self.peek()
-        while c is not None and (c.isalpha() or c.isdigit() or c == '_'):
+        while c is not None and (c.isalpha() or c.isdigit() or c == "_"):
             tmp += self.next()
             c = self.peek()
 
@@ -499,12 +507,12 @@ class Scan:
             val = self.scan_decimal()
             c = self.peek()
 
-        if c == '.':
+        if c == ".":
             p = self.next()
             p = self.peek()
             if p is not None and (p.isdigit() or self.is_space(p)):
                 frac = self.scan_fraction()
-                if val == '.':
+                if val == ".":
                     val = 0
                 self.emit(TokenType.FRAC_LIT, [val, frac])
                 return True
@@ -543,13 +551,13 @@ class Scan:
         Token(TokenType.IDENTIFIER, third42 @0,13)
         """
         c = self.peek()
-        if c == '.':
+        if c == ".":
             c = self.next()
             c = self.peek()
-            if c == '.':
+            if c == ".":
                 c = self.next()
                 c = self.peek()
-                if c == '.':
+                if c == ".":
                     self.emit(TokenType.ELLIPSIS, "...")
                 else:
                     raise SyntaxError("Got two dots, invalid syntax")
@@ -557,7 +565,7 @@ class Scan:
                 raise ParserError("Expected non number, compiler error")
             else:
                 self.emit(TokenType.DOT, ".")
-        elif c.isalpha() or c == '_':
+        elif c.isalpha() or c == "_":
             val = self.scan_identifier()
             self.emit(TokenType.IDENTIFIER, val)
         else:
@@ -593,13 +601,13 @@ class Scan:
         elif nc == ord("v"):
             return ord("\v")
         elif nc == ord("'"):
-            return ord("\'")
-        elif nc == ord("\""):
-            return ord("\"")
+            return ord("'")
+        elif nc == ord('"'):
+            return ord('"')
 
         return -3
 
-    def scan_string(self, end_char="\"", tokentype=TokenType.STR_LIT):
+    def scan_string(self, end_char='"', tokentype=TokenType.STR_LIT):
         """
         >>> s = Scan("", b"\\"test\\"")
         >>> s.scan_string()
@@ -668,14 +676,13 @@ class Scan:
                     self.next()
                     c = self.peek()
                     if c == "/":
-                        txt += '*/'
+                        txt += "*/"
                         break
                 c = self.next()
                 txt += c
             self.emit(TokenType.COMMENT, txt)
         else:
             self.emit(TokenType.SLASH, "/")
-
 
     def scan_token(self):
         """
@@ -724,7 +731,7 @@ class Scan:
             ttype2 = ttype.get(c2, None)
             if ttype2 == None:
                 # Default
-                ttype = ttype.get('', None)
+                ttype = ttype.get("", None)
                 if ttype is None:
                     raise ParserError("Compiler bug, can't find token")
             else:
@@ -785,13 +792,13 @@ class Scan:
         ttype = TokenType.INVALID
         c = self.peek()
 
-        if c == '/':
+        if c == "/":
             self.scan_slash()
         elif c == '"':
             self.scan_string()
         elif c == "'":
             self.scan_string("'", TokenType.INT_LIT)
-        elif c == '#':
+        elif c == "#":
             self.scan_preprocessor()
         elif self.scan_token():
             pass
@@ -801,12 +808,12 @@ class Scan:
             pass
         else:
             self.emit(TokenType.INVALID, self.next())
-            #raise SyntaxError("Invalid token: {}".format(c))
+            # raise SyntaxError("Invalid token: {}".format(c))
 
         return self.get_token()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     s = Scan(sys.argv[1])
     while True:
         t = s.scan()
