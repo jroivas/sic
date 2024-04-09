@@ -21,6 +21,14 @@ class ParserItem:
 
         return False
 
+    def get(self):
+        if self.reduced:
+            return self.reduced[-1]
+        return self.val
+
+    def __repr__(self):
+        return "ParserItem({})".format(self.get())
+
 
 class Parser:
     def __init__(self, scan, lang):
@@ -62,14 +70,68 @@ class Parser:
                 for a,b in zip(rule, item):
                     if a == b:
                         continue
-                    if self.can_reduce(b, a):
+                    #if self.can_reduce(b, a):
+                    if type(b) == ParserItem and b.matches(a):
                         continue
                     err = True
                 if not err:
                     return case
         return None
 
-    def can_reduce(self, item, tgt):
+    def reduce(self, item, tgt=None):
+        if item is None:
+            return None
+        #if type(item) == ParserItem and item.matches(tgt):
+        #    return item
+
+        if type(item) == ParserItem:
+            mapped = item.get()
+            print ("MP", mapped)
+            while True:
+                mapped = self.map_one_item(mapped)
+                if mapped is None:
+                    break
+                item.reduce(mapped)
+            return item
+        elif type(item) == list or type(item) == tuple:
+            mapped = [self.reduce(i) for i in item]
+            print("MPL", mapped)
+            item = self.map_list_item(mapped)
+            print("ITM", item)
+            #item = mapped
+            #mapped = self.map_list_item(item)
+        else:
+            raise ValueError("Invalid type in reduction: {}, item: {}".format(type(item), item))
+        if mapped is None or not mapped:
+            return item
+
+        return item
+
+        """
+        if type(item) == Token:
+            mapped = self.map_one_item(item.tokentype)
+        elif type(item) == TokenType:
+            mapped = self.map_one_item(item)
+        elif type(item) == str:
+            mapped = self.map_one_item(item)
+        elif type(item) == list or type(item) == tuple:
+            mapped = self.map_list_item(item)
+        else:
+            raise ValueError("Invalid type in reduction: {}, item: {}".format(type(item), item))
+        if mapped is None or not mapped:
+            return item
+        if mapped == tgt:
+            return mapped
+
+        # Reduce as much as possible
+        re = self.can_reduce(mapped, tgt)
+        if re is not None:
+            return re
+
+        return mapped
+        """
+
+        """
         if item is None:
             return None
         if item == tgt:
@@ -96,9 +158,7 @@ class Parser:
             return re
 
         return mapped
-
-    def reduce(self, item):
-        return self.can_reduce(item, None)
+        """
 
     def parse(self):
         stack = []
@@ -106,7 +166,7 @@ class Parser:
             item = self.scan.scan()
             if item is None:
                 break
-            stack.append(item)
+            stack.append(ParserItem(item))
             print(">INPUT", stack)
             nstack = self.reduce(stack)
             if nstack is None:
