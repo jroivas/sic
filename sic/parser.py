@@ -26,7 +26,20 @@ class ParserItem:
             return self.reduced[-1]
         return self.val
 
+    def __eq__(self, b):
+        if type(b) == ParserItem:
+            if self.val == b.val:
+                return True
+            if self.matches(b.get()):
+                return True
+            return False
+        if self.matches(b):
+            return True
+        return False
+
     def __repr__(self):
+        if self.reduced:
+            return "ParserItem({})".format("-".join(self.reduced))
         return "ParserItem({})".format(self.get())
 
 
@@ -57,9 +70,12 @@ class Parser:
         return None
 
     def map_list_item(self, item):
-        litem = len(item)
+        if item is None:
+            return None
+
         if type(item) != tuple:
             item = tuple(item)
+        litem = len(item)
 
         for case, rules in self.language.items():
             for rule in rules:
@@ -67,13 +83,14 @@ class Parser:
                     continue
 
                 err = False
-                df = len(item) - len(rule)
-                for pos in range(0, df):
-                    print("MM", pos, rule, item[pos:])
-                    for a,b in zip(rule, item[pos:]):
+                lr = len(rule)
+                df = litem - lr
+                for pos in range(0, df + 1):
+                    print("MM", pos, rule, item[pos:pos+lr])
+                    for a,b in zip(rule, item[pos:pos+lr]):
                         if a == b:
                             continue
-                        if type(b) == ParserItem and b.matches(a):
+                        if b == a:
                             continue
                         err = True
                     if not err:
@@ -95,6 +112,49 @@ class Parser:
                 """
         return None
 
+    def list_resolve(self, data):
+        if type(data) != list and type(data) != tuple:
+            return data
+
+        print("ENT ", data)
+        item = data
+        litem = len(item)
+
+        for case, rules in self.language.items():
+            for rule in rules:
+                if len(rule) > litem:
+                    continue
+
+                lr = len(rule)
+                df = litem - lr
+                for pos in range(0, df + 1):
+                    err = False
+                    print("MM", pos, rule, item[pos:pos+lr])
+                    for a,b in zip(rule, item[pos:pos+lr]):
+                        if a == b:
+                            continue
+                        if type(b) == ParserItem and b.matches(a):
+                            continue
+                        err = True
+                    if not err:
+                        ntmp = None
+                        if lr == 1:
+                            if type(item[pos]) == ParserItem:
+                                ntmp = item[pos]
+                        if ntmp is None:
+                            ntmp = ParserItem(item[pos:pos+lr])
+                            ntmp.reduce(case)
+                        nl = item[:pos] + [ntmp] + item[pos+lr:]
+                        print("MATCH", case, pos, rule, item, "-> ", nl)
+                        print("MP1", item[:pos])
+                        print("MP2", case, ntmp)
+                        print("MP3", item[pos+lr:])
+                        print(" NL", nl)
+                        if nl == item:
+                            return nl
+                        return self.list_resolve(nl)
+        return data
+
     def reduce(self, item, tgt=None):
         if item is None:
             return None
@@ -113,10 +173,16 @@ class Parser:
         elif type(item) == list or type(item) == tuple:
             mapped = [self.reduce(i) for i in item]
             print("MPL", mapped)
-            nitem = self.map_list_item(mapped)
-            if nitem is not None:
-                item = ParserItem(item)
-                item.reduce(nitem)
+            res = ParserItem(item)
+            nitem = self.list_resolve(mapped)
+            print("NITEM", nitem)
+            """
+            nitem = mapped
+            while nitem is not None:
+                nitem = self.map_list_item(nitem)
+                if nitem is not None:
+                    res.reduce(nitem)
+            """
             print("ITM", item)
             #item = mapped
             #mapped = self.map_list_item(item)
