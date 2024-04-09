@@ -61,6 +61,11 @@ class TokenType(Enum):
     QUESTION = 39
     STR_LIT = 40
     PREPROCESS = 41
+    PLUS_EQ = 42
+    MINUS_EQ = 43
+    AND_EQ = 44
+    OR_EQ = 45
+    XOR_EQ = 46
 
 
 class Token:
@@ -86,7 +91,10 @@ class Scan:
         ";": TokenType.SEMI,
         "*": TokenType.STAR,
         "%": TokenType.MOD,
-        "^": TokenType.XOR,
+        "^": {
+            "": TokenType.XOR,
+            "=": TokenType.XOR_EQ,
+        },
         ",": TokenType.COMMA,
         "(": TokenType.ROUND_OPEN,
         ")": TokenType.ROUND_CLOSE,
@@ -100,15 +108,18 @@ class Scan:
         "+": {
             "": TokenType.PLUS,
             "+": TokenType.PLUSPLUS,
+            "=": TokenType.PLUS_EQ,
         },
         "-": {
             "": TokenType.MINUS,
             "-": TokenType.MINUSMINUS,
             ">": TokenType.PTR_OP,
+            "=": TokenType.MINUS_EQ,
         },
         "&": {
             "": TokenType.AMP,
             "&": TokenType.LOG_AND,
+            "=": TokenType.AND_EQ,
         },
         "=": {
             "": TokenType.EQ,
@@ -129,6 +140,7 @@ class Scan:
         "|": {
             "": TokenType.OR,
             "|": TokenType.LOG_OR,
+            "=": TokenType.OR_EQ,
         },
     }
 
