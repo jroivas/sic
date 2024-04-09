@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class TokenType(Enum):
     INVALID = 0
     PLUS = 1
@@ -64,4 +65,3 @@ class Token:
         return "Token({}, {} @{},{})".format(
             self.tokentype, self.value, self.line, self.col
         )
-

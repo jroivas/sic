@@ -1,6 +1,7 @@
 from sic.token import Token, TokenType
 from sic.errors import EOFError, SyntaxError, ParserError
 
+
 class Scan:
     numbers = "0123456789abcdef"
 
@@ -745,6 +746,3 @@ class Scan:
             # raise SyntaxError("Invalid token: {}".format(c))
 
         return self.get_token()
-
-
-
