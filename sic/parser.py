@@ -63,6 +63,22 @@ class Parser:
 
         for case, rules in self.language.items():
             for rule in rules:
+                if len(rule) > litem:
+                    continue
+
+                err = False
+                df = len(item) - len(rule)
+                for pos in range(0, df):
+                    print("MM", pos, rule, item[pos:])
+                    for a,b in zip(rule, item[pos:]):
+                        if a == b:
+                            continue
+                        if type(b) == ParserItem and b.matches(a):
+                            continue
+                        err = True
+                    if not err:
+                        return case
+                """
                 if len(rule) != litem:
                     continue
 
@@ -76,6 +92,7 @@ class Parser:
                     err = True
                 if not err:
                     return case
+                """
         return None
 
     def reduce(self, item, tgt=None):
@@ -96,7 +113,10 @@ class Parser:
         elif type(item) == list or type(item) == tuple:
             mapped = [self.reduce(i) for i in item]
             print("MPL", mapped)
-            item = self.map_list_item(mapped)
+            nitem = self.map_list_item(mapped)
+            if nitem is not None:
+                item = ParserItem(item)
+                item.reduce(nitem)
             print("ITM", item)
             #item = mapped
             #mapped = self.map_list_item(item)
