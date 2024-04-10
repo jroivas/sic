@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import json
 
 from sic.token import TokenType
 from sic.scan import Scan
@@ -82,5 +83,7 @@ if __name__ == "__main__":
     r = p.parse(args.filename)
     #r = parse()
     print(r)
+    print(r.to_json())
+    print(json.dumps(r.to_json(), indent=2))
     if not p.success():
         sys.exit(1)

@@ -39,9 +39,9 @@ class Parser:
                              | empty
         """
         if p[1] is None:
-            p[0] = []
+            p[0] = AstNode(AstType.ROOT, [])
         else:
-            p[0] = {"ROOT": p[1]}
+            p[0] = AstNode(AstType.ROOT, p[1])
 
     def p_external_declarations_1(self, p):
         """ external_declarations : external_declaration """
@@ -61,7 +61,7 @@ class Parser:
 
     def p_declaration_1(self, p):
         """ declaration : declaration_specifiers SEMI """
-        p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_declaration_2(self, p):
         """ declaration : declaration_specifiers init_declarator_list SEMI """
@@ -71,16 +71,21 @@ class Parser:
         """ declaration_specifiers : type_specifier """
         p[0] = p[1]
 
+    def p_declaration_specifiers_2(self, p):
+        """ declaration_specifiers : type_specifier declaration_specifiers"""
+        p[0] = [p[1], p[2]]
+
     def p_type_specifier(self, p):
         """ type_specifier : VOID
                            | CHAR
+                           | SHORT
                            | INT
                            | LONG
                            | FLOAT
                            | DOUBLE
                            | SIGNED
                            | UNSIGNED"""
-        p[0] = p[1]
+        p[0] = AstNode(AstType.TYPE, p[1])
 
     def p_init_declarator_list_1(self, p):
         """ init_declarator_list : init_declarator"""
@@ -160,13 +165,13 @@ class Parser:
 
     def p_expression_statement_1(self, p):
         """ expression_statement : expression SEMI """
-        p[0] = [p[1], p[2]]
+        p[0] = p[1]
 
     def p_expression_statement_2(self, p):
         """ expression_statement : expression_statement expression SEMI """
         #p[1].extend(p[2])
         #p[1].extend(p[3])
-        p[0] = [p[1], p[2], p[3]]
+        p[0] = [p[1], p[2]]
 
     def p_expression(self, p):
         """ expression : conditional_expression """
@@ -269,11 +274,11 @@ class Parser:
 
     def p_unary_expression_2(self, p):
         """ unary_expression : PLUS cast_expression """
-        p[0] = AstOpNode(p[1], 0, p[2])
+        p[0] = AstOpNode(p[1], "0", p[2])
 
     def p_unary_expression_3(self, p):
         """ unary_expression : MINUS cast_expression """
-        p[0] = AstOpNode(p[1], 0, p[2])
+        p[0] = AstOpNode(p[1], "0", p[2])
 
     def p_postfix_expression(self, p):
         """ postfix_expression : primary_expression """
