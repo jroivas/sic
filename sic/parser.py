@@ -5,13 +5,14 @@ from sic.ast import AstType, AstNode, AstOpNode
 from ply import yacc
 
 class Parser:
-    def __init__(self, scanner):
+    def __init__(self, scanner, debug=False):
         self.tokens = scanner.tokens
         self.scanner = scanner
         self.yacc = yacc.yacc(
             module=self,
             start='translation_unit'
             )
+        self.debug = debug
 
     def success(self):
         return self.scanner.success
@@ -26,7 +27,8 @@ class Parser:
             data = self.readfile(filename)
         return self.yacc.parse(
             input=data,
-            lexer=self.scanner.lexer)
+            lexer=self.scanner.lexer,
+            debug=self.debug)
 
     def p_empty(self, p):
         """ empty : """
@@ -47,16 +49,93 @@ class Parser:
 
     def p_external_declarations_2(self, p):
         """ external_declarations : external_declarations external_declaration """
-        p[1].extend(p[2])
+        p[0] = [p[1], p[2]]
+
+    def p_external_declaration_1(self, p):
+        """ external_declaration : declaration """
         p[0] = p[1]
 
-    def p_external_declaration(self, p):
+    def p_external_declaration_2(self, p):
         """ external_declaration : statement_list """
+        p[0] = p[1]
+
+    def p_declaration_1(self, p):
+        """ declaration : declaration_specifiers SEMI """
+        p[0] = [p[1]]
+
+    def p_declaration_2(self, p):
+        """ declaration : declaration_specifiers init_declarator_list SEMI """
+        p[0] = [p[1], p[2]]
+
+    def p_declaration_specifiers_1(self, p):
+        """ declaration_specifiers : type_specifier """
+        p[0] = p[1]
+
+    def p_type_specifier(self, p):
+        """ type_specifier : VOID
+                           | CHAR
+                           | INT
+                           | LONG
+                           | FLOAT
+                           | DOUBLE
+                           | SIGNED
+                           | UNSIGNED"""
+        p[0] = p[1]
+
+    def p_init_declarator_list_1(self, p):
+        """ init_declarator_list : init_declarator"""
+        p[0] = [p[1]]
+
+    def p_init_declarator_list_2(self, p):
+        """ init_declarator_list : init_declarator_list COMMA init_declarator"""
+        p[1].extend(p[3])
+        p[0] = p[1]
+
+    def p_init_declarator_1(self, p):
+        """ init_declarator : declarator"""
+        p[0] = p[1]
+
+    def p_init_declarator_2(self, p):
+        """ init_declarator : declarator EQ initializer"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_declarator_1(self, p):
+        """ declarator : pointer direct_declarator"""
+        p[0] = AstNode(AstType.POINTER, p[2])
+
+    def p_declarator_2(self, p):
+        """ declarator : direct_declarator"""
+        p[0] = p[1]
+
+    def p_pointer_1(self, p):
+        """ pointer : STAR"""
+        p[0] = AstNode(AstType.POINTER, None)
+
+    def p_pointer_2(self, p):
+        """ pointer : STAR pointer"""
+        p[0] = AstNode(AstType.POINTER, p[2])
+
+    #def p_pointer_3(self, p):
+    #    """ pointer : STAR type_qualifier_list"""
+
+    #def p_pointer_4(self, p):
+    #    """ pointer : STAR type_qualifier_list pointer"""
+
+    def p_direct_declarator_1(self, p):
+        """ direct_declarator : IDENTIFIER"""
+        p[0] = AstNode(AstType.IDENTIFIER, p[1])
+
+    def p_direct_declarator_2(self, p):
+        """ direct_declarator : ROUND_OPEN declarator ROUND_CLOSE"""
+        p[0] = [p[2]]
+
+    def p_initializer(self, p):
+        """ initializer : assignment_expression"""
         p[0] = p[1]
 
     def p_statement_list_1(self, p):
         """ statement_list : statement """
-        p[0] = p[1]
+        p[0] = [p[1]]
 
     def p_statement_list_2(self, p):
         """ statement_list : statement_list statement """
@@ -64,12 +143,20 @@ class Parser:
         p[0] = p[1]
 
     def p_statement_1(self, p):
-        """ statement : SEMI """
+        """ statement : compound_statement """
         p[0] = p[1]
 
     def p_statement_2(self, p):
         """ statement : expression_statement """
         p[0] = p[1]
+
+    def p_compound_statement_1(self, p):
+        """ compound_statement : CURLY_OPEN CURLY_CLOSE """
+        p[0] = AstNode(AstType.Block, [])
+
+    def p_compound_statement_2(self, p):
+        """ compound_statement : CURLY_OPEN statement_list CURLY_CLOSE """
+        p[0] = AstNode(AstType.Block, p[2])
 
     def p_expression_statement_1(self, p):
         """ expression_statement : expression SEMI """
@@ -85,8 +172,27 @@ class Parser:
         """ expression : conditional_expression """
         p[0] = p[1]
 
-    def p_assignment_expression(self, p):
-        """ assignment_expression : unary_expression """
+    def p_assignment_expression_1(self, p):
+        """ assignment_expression : conditional_expression"""
+        p[0] = p[1]
+
+    def p_assignment_expression_2(self, p):
+        """ assignment_expression : unary_expression assignment_operator assignment_expression"""
+        p[0] = p[1]
+
+    def p_assignment_operator(self, p):
+        """ assignment_operator : EQ
+                                | MUL_EQ
+                                | DIV_EQ
+                                | MOD_EQ
+                                | PLUS_EQ
+                                | MINUS_EQ
+                                | LEFT_EQ
+                                | RIGHT_EQ
+                                | AND_EQ
+                                | XOR_EQ
+                                | OR_EQ
+                                """
         p[0] = p[1]
 
     def p_conditional_expression(self, p):

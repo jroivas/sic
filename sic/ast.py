@@ -7,6 +7,7 @@ class AstType(Enum):
     IDENTIFIER = 4
     NODE = 5
     OP = 6
+    POINTER = 7
 
 class AstNode(object):
     def __init__(self, nodetype, value):

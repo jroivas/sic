@@ -69,6 +69,7 @@ if __name__ == "__main__":
     #p.parse()
     parser = argparse.ArgumentParser(prog="sic")
     parser.add_argument("-o", "--output")
+    parser.add_argument("-d", "--debug", action='store_true')
     parser.add_argument("filename")
 
     args = parser.parse_args()
@@ -77,7 +78,7 @@ if __name__ == "__main__":
     scan(args.filename)
     """
     s = Scan()
-    p = Parser(s)
+    p = Parser(s, debug=args.debug)
     r = p.parse(args.filename)
     #r = parse()
     print(r)

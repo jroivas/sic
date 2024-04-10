@@ -7,61 +7,81 @@ class Scan:
     def __init__(self, fname=""):
         self.fname = fname
         self.success = True
-        self.tokens = [
-            'PLUS',
-            'PLUSPLUS',
-            'MINUS',
-            'MINUSMINUS',
-            'SEMI',
-            'INT_LIT',
-            'FRAC_LIT',
-            'DOT',
-            'IDENTIFIER',
-            'ELLIPSIS',
-            'STAR',
-            'SLASH',
-            'COMMENT',
-            'MOD',
-            'XOR',
-            'COMMA',
-            'ROUND_OPEN',
-            'ROUND_CLOSE',
-            'CURLY_OPEN',
-            'CURLY_CLOSE',
-            'SQUARE_OPEN',
-            'SQUARE_CLOSE',
-            'TILDE',
-            'COLON',
-            'PTR_OP',
-            'AMP',
-            'LOG_AND',
-            'EQ',
-            'EQ_EQ',
-            'NOT',
-            'EQ_NE',
-            'LT',
-            'SH_LEFT',
-            'GT',
-            'SH_RIGHT',
-            'OR',
-            'LOG_OR',
-            'QUESTION',
-            'STR_LIT',
-            'PREPROCESS',
-            'PLUS_EQ',
-            'MINUS_EQ',
-            'AND_EQ',
-            'OR_EQ',
-            'XOR_EQ',
-            'IDENTIFIER',
-        ]
 
         self.lexer = lex.lex(object=self)
         if fname:
             with open(fname, "r") as fd:
                 self.lexer.input(fd.read())
 
+    keywords = [
+        "VOID",
+        "CHAR",
+        "SHORT",
+        "INT",
+        "LONG",
+        "FLOAT",
+        "DOUBLE",
+        "SIGNED",
+        "UNSIGNED",
+    ]
 
+    keyword_map = {}
+    for kw in keywords:
+        keyword_map[kw.lower()] = kw
+
+    tokens = keywords + [
+        'PLUS',
+        'PLUSPLUS',
+        'MINUS',
+        'MINUSMINUS',
+        'SEMI',
+        'INT_LIT',
+        'FRAC_LIT',
+        'DOT',
+        'IDENTIFIER',
+        'ELLIPSIS',
+        'STAR',
+        'SLASH',
+        'COMMENT',
+        'MOD',
+        'XOR',
+        'COMMA',
+        'ROUND_OPEN',
+        'ROUND_CLOSE',
+        'CURLY_OPEN',
+        'CURLY_CLOSE',
+        'SQUARE_OPEN',
+        'SQUARE_CLOSE',
+        'TILDE',
+        'COLON',
+        'PTR_OP',
+        'AMP',
+        'LOG_AND',
+        'EQ',
+        'EQ_EQ',
+        'NOT',
+        'EQ_NE',
+        'LT',
+        'SH_LEFT',
+        'GT',
+        'SH_RIGHT',
+        'OR',
+        'LOG_OR',
+        'QUESTION',
+        'STR_LIT',
+        'PREPROCESS',
+        'PLUS_EQ',
+        'MINUS_EQ',
+        'AND_EQ',
+        'OR_EQ',
+        'XOR_EQ',
+        'MUL_EQ',
+        'DIV_EQ',
+        'LEFT_EQ',
+        'MOD_EQ',
+        'RIGHT_EQ',
+        'IDENTIFIER',
+    ]
     t_PLUS = r'\+'
     t_MINUS = r'-'
     t_PLUSPLUS = r'\+\+'
@@ -100,7 +120,11 @@ class Scan:
     t_AND_EQ = r'\&='
     t_OR_EQ = r'\|='
     t_XOR_EQ = r'\^='
-    t_IDENTIFIER = r'[a-zA-Z][0-9a-zA-Z]*'
+    t_MUL_EQ = r'\*='
+    t_DIV_EQ = r'/='
+    t_MOD_EQ = r'%='
+    t_LEFT_EQ = r'<<='
+    t_RIGHT_EQ = r'>>='
 
     t_ignore = " \t\r\f"
     #" " or c == "\t" or c == "\n" or c == "\r" or c == "\f"
@@ -127,6 +151,12 @@ class Scan:
     def t_INT_LIT(self, t):
         r'(0[xX][0-9a-fA-F]+)|(\d+)'
         #t.value = int(t.value)
+        return t
+
+    def t_IDENTIFIER(self, t):
+        r'[a-zA-Z][0-9a-zA-Z]*'
+        t.type = self.keyword_map.get(t.value, "IDENTIFIER")
+        #print("IDENTIFIER", t.value, t.type)
         return t
 
     """
