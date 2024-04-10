@@ -76,5 +76,10 @@ if __name__ == "__main__":
     """
     scan(args.filename)
     """
-    r = parse(args.filename)
+    s = Scan()
+    p = Parser(s)
+    r = p.parse(args.filename)
+    #r = parse()
     print(r)
+    if not p.success():
+        sys.exit(1)

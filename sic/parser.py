@@ -1,5 +1,6 @@
 from sic.token import TokenType, Token
 from sic.scan import Scan
+from sic.ast import AstType, AstNode, AstOpNode
 
 from ply import yacc
 
@@ -11,6 +12,9 @@ class Parser:
             module=self,
             start='translation_unit'
             )
+
+    def success(self):
+        return self.scanner.success
 
     def readfile(self, fname):
         with open(fname, "r") as fd:
@@ -73,9 +77,9 @@ class Parser:
 
     def p_expression_statement_2(self, p):
         """ expression_statement : expression_statement expression SEMI """
-        p[1].extend(p[2])
-        p[1].extend(p[3])
-        p[0] = p[1]
+        #p[1].extend(p[2])
+        #p[1].extend(p[3])
+        p[0] = [p[1], p[2], p[3]]
 
     def p_expression(self, p):
         """ expression : conditional_expression """
@@ -127,40 +131,63 @@ class Parser:
 
     def p_additive_expression_2(self, p):
         """ additive_expression : additive_expression PLUS multiplicative_expression"""
-        p[0] = [p[1], p[2], p[3]]
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_additive_expression_3(self, p):
         """ additive_expression : additive_expression MINUS multiplicative_expression"""
-        p[0] = [p[1], p[2], p[3]]
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
-    def p_multiplicative_expression(self, p):
+    def p_multiplicative_expression_1(self, p):
         """ multiplicative_expression : cast_expression"""
         p[0] = p[1]
+
+    def p_multiplicative_expression_2(self, p):
+        """ multiplicative_expression : multiplicative_expression STAR cast_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_multiplicative_expression_3(self, p):
+        """ multiplicative_expression : multiplicative_expression SLASH cast_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_multiplicative_expression_4(self, p):
+        """ multiplicative_expression : multiplicative_expression MOD cast_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_cast_expression(self, p):
         """ cast_expression : unary_expression"""
         p[0] = p[1]
-
 
     def p_unary_expression_1(self, p):
         """ unary_expression : postfix_expression """
         p[0] = p[1]
 
     def p_unary_expression_2(self, p):
-        """ unary_expression : PLUS cast_expression
-                             | MINUS cast_expression
-                             """
-        p[0] = [p[1], p[2]]
+        """ unary_expression : PLUS cast_expression """
+        p[0] = AstOpNode(p[1], 0, p[2])
+
+    def p_unary_expression_3(self, p):
+        """ unary_expression : MINUS cast_expression """
+        p[0] = AstOpNode(p[1], 0, p[2])
 
     def p_postfix_expression(self, p):
         """ postfix_expression : primary_expression """
         p[0] = p[1]
 
-    def p_primary_expression(self, p):
-        """ primary_expression : FRAC_LIT
-                               | INT_LIT
-                               | STR_LIT """
-        p[0] = p[1]
+    def p_primary_expression_1(self, p):
+        """ primary_expression : FRAC_LIT"""
+        p[0] = AstNode(AstType.FRAC_LIT, p[1])
+
+    def p_primary_expression_2(self, p):
+        """ primary_expression : INT_LIT """
+        p[0] = AstNode(AstType.INT_LIT, p[1])
+
+    def p_primary_expression_3(self, p):
+        """ primary_expression : STR_LIT """
+        p[0] = AstNode(AstType.STR_LIT, p[1])
+
+    def p_primary_expression_4(self, p):
+        """ primary_expression : IDENTIFIER """
+        p[0] = AstNode(AstType.IDENTIFIER, p[1])
 
 
 class ParserItem:

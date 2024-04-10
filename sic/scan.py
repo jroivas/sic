@@ -6,6 +6,7 @@ from ply import lex
 class Scan:
     def __init__(self, fname=""):
         self.fname = fname
+        self.success = True
         self.tokens = [
             'PLUS',
             'PLUSPLUS',
@@ -52,6 +53,7 @@ class Scan:
             'AND_EQ',
             'OR_EQ',
             'XOR_EQ',
+            'IDENTIFIER',
         ]
 
         self.lexer = lex.lex(object=self)
@@ -98,6 +100,7 @@ class Scan:
     t_AND_EQ = r'\&='
     t_OR_EQ = r'\|='
     t_XOR_EQ = r'\^='
+    t_IDENTIFIER = r'[a-zA-Z][0-9a-zA-Z]*'
 
     t_ignore = " \t\r\f"
     #" " or c == "\t" or c == "\n" or c == "\r" or c == "\f"
@@ -112,6 +115,7 @@ class Scan:
 
     def t_error(self, t):
         print("Illegal character '%s'" % t.value[0])
+        self.success = False
         t.lexer.skip(1)
 
     def t_FRAC_LIT(self, t):
