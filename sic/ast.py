@@ -11,6 +11,8 @@ class AstType(Enum):
     POINTER = 7
     BLOCK = 8
     TYPE = 9
+    FUNCDEF = 10
+    SQUARE = 11
 
 class AstNode(object):
     def __init__(self, nodetype, value):

@@ -52,12 +52,32 @@ class Parser:
         p[0] = [p[1], p[2]]
 
     def p_external_declaration_1(self, p):
-        """ external_declaration : declaration """
+        """ external_declaration : function_definition """
         p[0] = p[1]
 
     def p_external_declaration_2(self, p):
+        """ external_declaration : declaration """
+        p[0] = p[1]
+
+    def p_external_declaration_3(self, p):
         """ external_declaration : statement_list """
         p[0] = p[1]
+
+    def p_function_definition_1(self, p):
+        """ function_definition : declaration_specifiers declarator declaration_list compound_statement"""
+        p[0] = AstNode(AstType.FUNCDEF, [p[1], p[2], p[3], p[4]])
+
+    def p_function_definition_2(self, p):
+        """ function_definition : declaration_specifiers declarator compound_statement"""
+        p[0] = AstNode(AstType.FUNCDEF, [p[1], p[2], p[3]])
+
+    def p_function_definition_3(self, p):
+        """ function_definition : declarator declaration_list compound_statement"""
+        p[0] = AstNode(AstType.FUNCDEF, [p[1], p[2], p[3]])
+
+    def p_function_definition_4(self, p):
+        """ function_definition : declarator compound_statement"""
+        p[0] = AstNode(AstType.FUNCDEF, [p[1], p[2]])
 
     def p_declaration_1(self, p):
         """ declaration : declaration_specifiers SEMI """
@@ -126,6 +146,80 @@ class Parser:
     #def p_pointer_4(self, p):
     #    """ pointer : STAR type_qualifier_list pointer"""
 
+    def p_parameter_type_list_1(self, p):
+        """ parameter_type_list : parameter_list"""
+        p[0] = [p[1]]
+
+    def p_parameter_type_list_2(self, p):
+        """ parameter_type_list : parameter_list COMMA ELLIPSIS"""
+        p[1].extend(p[2])
+        p[0] = p[1]
+
+    def p_parameter_list_1(self, p):
+        """ parameter_list : parameter_declaration"""
+        p[0] = [p[1]]
+
+    def p_parameter_list_2(self, p):
+        """ parameter_list : parameter_list COMMA parameter_declaration"""
+        p[1].extend(p[2])
+        p[0] = p[1]
+
+    def p_parameter_declaration_1(self, p):
+        """ parameter_declaration : declaration_specifiers declarator"""
+        p[0] = [p[1], p[2]]
+
+    def p_parameter_declaration_2(self, p):
+        """ parameter_declaration : declaration_specifiers abstract_declarator"""
+        p[0] = [p[1], p[2]]
+
+    def p_parameter_declaration_3(self, p):
+        """ parameter_declaration : declaration_specifiers"""
+        p[0] = p[1]
+
+    def p_abstract_declarator_1(self, p):
+        """ abstract_declarator : pointer"""
+        p[0] = p[1]
+
+    def p_abstract_declarator_2(self, p):
+        """ abstract_declarator : direct_abstract_declarator"""
+        p[0] = p[1]
+
+    def p_abstract_declarator_3(self, p):
+        """ abstract_declarator : pointer direct_abstract_declarator"""
+        p[0] = [p[1], p[2]]
+
+    def p_direct_abstract_declarator_1(self, p):
+        """ direct_abstract_declarator : ROUND_OPEN abstract_declarator ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_direct_abstract_declarator_2(self, p):
+        """ direct_abstract_declarator : SQUARE_OPEN SQUARE_CLOSE"""
+        p[0] = [p[1], p[2]]
+
+    def p_direct_abstract_declarator_3(self, p):
+        """ direct_abstract_declarator : SQUARE_OPEN constant_expression SQUARE_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_direct_abstract_declarator_4(self, p):
+        """ direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN constant_expression SQUARE_CLOSE"""
+        p[0] = [p[1], p[2], p[3], p[4]]
+
+    def p_direct_abstract_declarator_5(self, p):
+        """ direct_abstract_declarator : ROUND_OPEN ROUND_CLOSE"""
+        p[0] = [p[1], p[2]]
+
+    def p_direct_abstract_declarator_6(self, p):
+        """ direct_abstract_declarator : ROUND_OPEN parameter_type_list ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_direct_abstract_declarator_7(self, p):
+        """ direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_direct_abstract_declarator_8(self, p):
+        """ direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN parameter_type_list ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3], p[4]]
+
     def p_direct_declarator_1(self, p):
         """ direct_declarator : IDENTIFIER"""
         p[0] = AstNode(AstType.IDENTIFIER, p[1])
@@ -133,6 +227,36 @@ class Parser:
     def p_direct_declarator_2(self, p):
         """ direct_declarator : ROUND_OPEN declarator ROUND_CLOSE"""
         p[0] = [p[2]]
+
+    def p_direct_declarator_3(self, p):
+        """ direct_declarator : direct_declarator SQUARE_OPEN constant_expression SQUARE_CLOSE"""
+        p[0] = [p[1], p[2], p[3], p[4]]
+        #p[0] = AstNode(AstType.SQUARE, [p[1], p]
+
+    def p_direct_declarator_4(self, p):
+        """ direct_declarator : direct_declarator SQUARE_OPEN SQUARE_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_direct_declarator_5(self, p):
+        """ direct_declarator : direct_declarator ROUND_OPEN parameter_type_list ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3], p[4]]
+
+    def p_direct_declarator_6(self, p):
+        """ direct_declarator : direct_declarator ROUND_OPEN identifier_list ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3], p[4]]
+
+    def p_direct_declarator_8(self, p):
+        """ direct_declarator : direct_declarator ROUND_OPEN ROUND_CLOSE"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_identifier_list_1(self, p):
+        """ identifier_list : IDENTIFIER"""
+        p[0] = [p[1]]
+
+    def p_identifier_list_2(self, p):
+        """ identifier_list : identifier_list COMMA IDENTIFIER"""
+        p[1].extend(p[2])
+        p[0] = p[1]
 
     def p_initializer(self, p):
         """ initializer : assignment_expression"""
@@ -144,6 +268,15 @@ class Parser:
 
     def p_statement_list_2(self, p):
         """ statement_list : statement_list statement """
+        p[1].extend(p[2])
+        p[0] = p[1]
+
+    def p_declaration_list_1(self, p):
+        """ declaration_list : declaration"""
+        p[0] = [p[1]]
+
+    def p_declaration_list_2(self, p):
+        """ declaration_list : declaration_list declaration"""
         p[1].extend(p[2])
         p[0] = p[1]
 
@@ -169,8 +302,6 @@ class Parser:
 
     def p_expression_statement_2(self, p):
         """ expression_statement : expression_statement expression SEMI """
-        #p[1].extend(p[2])
-        #p[1].extend(p[3])
         p[0] = [p[1], p[2]]
 
     def p_expression(self, p):
@@ -198,6 +329,10 @@ class Parser:
                                 | XOR_EQ
                                 | OR_EQ
                                 """
+        p[0] = p[1]
+
+    def p_constant_expression(self, p):
+        """ constant_expression : conditional_expression """
         p[0] = p[1]
 
     def p_conditional_expression(self, p):
