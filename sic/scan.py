@@ -1,8 +1,154 @@
 from sic.token import Token, TokenType
 from sic.errors import EOFError, SyntaxError, ParserError
 
+from ply import lex
 
 class Scan:
+    def __init__(self, fname=""):
+        self.fname = fname
+        self.tokens = [
+            'PLUS',
+            'PLUSPLUS',
+            'MINUS',
+            'MINUSMINUS',
+            'SEMI',
+            'INT_LIT',
+            'FRAC_LIT',
+            'DOT',
+            'IDENTIFIER',
+            'ELLIPSIS',
+            'STAR',
+            'SLASH',
+            'COMMENT',
+            'MOD',
+            'XOR',
+            'COMMA',
+            'ROUND_OPEN',
+            'ROUND_CLOSE',
+            'CURLY_OPEN',
+            'CURLY_CLOSE',
+            'SQUARE_OPEN',
+            'SQUARE_CLOSE',
+            'TILDE',
+            'COLON',
+            'PTR_OP',
+            'AMP',
+            'LOG_AND',
+            'EQ',
+            'EQ_EQ',
+            'NOT',
+            'EQ_NE',
+            'LT',
+            'SH_LEFT',
+            'GT',
+            'SH_RIGHT',
+            'OR',
+            'LOG_OR',
+            'QUESTION',
+            'STR_LIT',
+            'PREPROCESS',
+            'PLUS_EQ',
+            'MINUS_EQ',
+            'AND_EQ',
+            'OR_EQ',
+            'XOR_EQ',
+        ]
+
+        self.lexer = lex.lex(object=self)
+        if fname:
+            with open(fname, "r") as fd:
+                self.lexer.input(fd.read())
+
+
+    t_PLUS = r'\+'
+    t_MINUS = r'-'
+    t_PLUSPLUS = r'\+\+'
+    t_MINUSMINUS = r'--'
+    t_SEMI = r';'
+    t_DOT = r'\.'
+    t_STAR = r'\*'
+    t_ELLIPSIS = r'\.\.\.'
+    t_SLASH = r'/'
+    t_COMMENT = r'//.*'
+    t_MOD = r'%'
+    t_XOR = r'\^'
+    t_COMMA = r'\,'
+    t_ROUND_OPEN = r'\('
+    t_ROUND_CLOSE = r'\]'
+    t_CURLY_OPEN = r'\{'
+    t_CURLY_CLOSE = r'\}'
+    t_SQUARE_OPEN = r'\['
+    t_SQUARE_CLOSE = r'\]'
+    t_TILDE = r'\~'
+    t_COLON = r':'
+    t_PTR_OP = r'->'
+    t_AMP = r'\&'
+    t_LOG_AND = r'\&\&'
+    t_EQ = r'='
+    t_EQ_EQ = r'=='
+    t_NOT = r'!'
+    t_EQ_NE = r'!='
+    t_LT = r'<'
+    t_SH_LEFT = r'<<'
+    t_OR = r'\|'
+    t_LOG_OR = r'\|\|'
+    t_QUESTION = r'\?'
+    t_PLUS_EQ = r'\+='
+    t_MINUS_EQ = r'-='
+    t_AND_EQ = r'\&='
+    t_OR_EQ = r'\|='
+    t_XOR_EQ = r'\^='
+
+    t_ignore = " \t\r\f"
+    #" " or c == "\t" or c == "\n" or c == "\r" or c == "\f"
+
+    escape_sequence_start_in_string = r"""(\\[0-9a-zA-Z._~!=&\^\-\\?'"])"""
+    string_char = r"""([^"\\\n]|"""+escape_sequence_start_in_string+')'
+    t_STR_LIT = '"'+ string_char+ '*"'
+
+    def t_newline(self, t):
+        r'\n+'
+        t.lexer.lineno += len(t.value)
+
+    def t_error(self, t):
+        print("Illegal character '%s'" % t.value[0])
+        t.lexer.skip(1)
+
+    def t_FRAC_LIT(self, t):
+        r'(\d*\.\d+)|(\d+\.)'
+        #print("FL", t.value)
+        #t.value = float(t.value)
+        return t
+
+    def t_INT_LIT(self, t):
+        r'(0[xX][0-9a-fA-F]+)|(\d+)'
+        #t.value = int(t.value)
+        return t
+
+    """
+    def t_FRAC_LIT_1(self, t):
+        r'\.\d+'
+        print("FL1", t.value)
+        t.value = float(t.value)
+        return t
+
+    def t_FRAC_LIT_2(self, t):
+        r'\d+\.'
+        print("FL2", t.value)
+        t.value = float(t.value)
+        return t
+
+    def t_FRAC_LIT_3(self, t):
+        r'\d+\.\d+'
+        print("FL3", t.value)
+        t.value = float(t.value)
+        return t
+    """
+
+    def scan(self):
+        return self.lexer.token()
+
+class oldScan:
     numbers = "0123456789abcdef"
 
     token_map = {
