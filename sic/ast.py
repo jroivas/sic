@@ -16,6 +16,8 @@ class AstType(Enum):
     KEYWORD = 12
     TYPE_QUAL = 13
     UNARY = 14
+    IF = 16
+    CMP = 17
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -53,6 +55,11 @@ class AstNode(object):
             raise ValueError("Daa", self.value)
         return res
 
+    def obj_to_json(self, val):
+        if isinstance(val, AstNode):
+            val = val.to_json()
+        return val
+
 class AstOpNode(AstNode):
     def __init__(self, optype, a, b):
         self.op = optype
@@ -64,20 +71,13 @@ class AstOpNode(AstNode):
         return "AstOpNode({} {} {})".format(self.left, self.op, self.right)
 
     def to_json(self):
-        ljs = self.left
-        rjs = self.right
-        if isinstance(ljs, AstNode):
-            ljs = ljs.to_json()
-        if isinstance(rjs, AstNode):
-            rjs = rjs.to_json()
-
         res = {
             "type": "{}".format(self.nodetype),
             "value": self.op,
             self.op:
             {
-                "left": ljs,
-                "right": rjs,
+                "left": self.obj_to_json(self.left),
+                "right": self.obj_to_json(self.right),
             }
         }
         return res
@@ -91,13 +91,28 @@ class AstPointer(AstNode):
         return "AstPointer({} {})".format(self.lvl, self.value)
 
     def to_json(self):
-        val = self.value
-        if isinstance(val, AstNode):
-            val = val.to_json()
-
         res = {
             "type": "{}".format(self.nodetype),
             "level": self.lvl,
-            "value": val
+            "value": self.obj_to_json(self.value)
+        }
+        return res
+
+class AstIf(AstNode):
+    def __init__(self, cond, true, false=None):
+        super().__init__(AstType.IF, [cond, true, false])
+        self.cond = cond
+        self.true = true
+        self.false = false
+
+    def __repr__(self):
+        return "AstIf({} {})".format(self.cond, self.true, self.false)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "cond": self.obj_to_json(self.cond),
+            "true": self.obj_to_json(self.true),
+            "false": self.obj_to_json(self.false)
         }
         return res

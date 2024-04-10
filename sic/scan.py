@@ -37,6 +37,11 @@ class Scan:
 
         "CONST",
         "VOLATILE",
+
+        "IF",
+        "ELSE",
+        "SWITCH",
+        "CASE",
     ]
 
     keyword_map = {}

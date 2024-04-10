@@ -1,6 +1,6 @@
 from sic.token import TokenType, Token
 from sic.scan import Scan
-from sic.ast import AstType, AstNode, AstOpNode, AstPointer
+from sic.ast import AstType, AstNode, AstOpNode, AstPointer, AstIf
 
 from ply import yacc
 
@@ -296,8 +296,8 @@ class Parser:
 
     def p_statement_list_2(self, p):
         """ statement_list : statement_list statement """
-        p[1].extend(p[2])
-        p[0] = p[1]
+        #p[1].extend(p[2])
+        p[0] = [p[1], p[2]]
 
     def p_declaration_list_1(self, p):
         """ declaration_list : declaration"""
@@ -305,7 +305,11 @@ class Parser:
 
     def p_declaration_list_2(self, p):
         """ declaration_list : declaration_list declaration"""
-        p[1].extend(p[2])
+        #p[0] = [p[1], p[2]]
+        if type(p[2]) == list:
+            p[1].extend(p[2])
+        else:
+            p[1] += [p[2]]
         p[0] = p[1]
 
     #def p_statement_1(self, p):
@@ -320,9 +324,9 @@ class Parser:
         """ statement : expression_statement """
         p[0] = p[1]
 
-    #def p_statement_4(self, p):
-    #    """ statement : selection_statement """
-    #    p[0] = p[1]
+    def p_statement_4(self, p):
+        """ statement : selection_statement """
+        p[0] = p[1]
 
     #def p_statement_5(self, p):
     #    """ statement : iteration_statement """
@@ -331,6 +335,14 @@ class Parser:
     def p_statement_6(self, p):
         """ statement : jump_statement """
         p[0] = p[1]
+
+    def p_selection_statement_1(self, p):
+        """ selection_statement : IF ROUND_OPEN expression ROUND_CLOSE statement"""
+        p[0] = AstIf(p[3], p[5])
+
+    def p_selection_statement_2(self, p):
+        """ selection_statement : IF ROUND_OPEN expression ROUND_CLOSE statement ELSE statement"""
+        p[0] = AstIf(p[3], p[5], p[7])
 
     def p_jump_statement_1(self, p):
         """ jump_statement : RETURN SEMI"""
@@ -357,16 +369,20 @@ class Parser:
         p[0] = AstNode(AstType.BLOCK, [p[2], p[3]])
 
     def p_expression_statement_1(self, p):
-        """ expression_statement : expression SEMI """
+        """ expression_statement : SEMI """
         p[0] = p[1]
 
     def p_expression_statement_2(self, p):
-        """ expression_statement : expression_statement expression SEMI """
-        p[0] = [p[1], p[2]]
-
-    def p_expression(self, p):
-        """ expression : conditional_expression """
+        """ expression_statement : expression SEMI """
         p[0] = p[1]
+
+    def p_expression_1(self, p):
+        """ expression : assignment_expression """
+        p[0] = p[1]
+
+    def p_expression_2(self, p):
+        """ expression : expression COMMA assignment_expression"""
+        p[0] = [p[1], p[3]]
 
     def p_assignment_expression_1(self, p):
         """ assignment_expression : conditional_expression"""
@@ -419,9 +435,17 @@ class Parser:
         """ and_expression : equality_expression """
         p[0] = p[1]
 
-    def p_equality_expression(self, p):
+    def p_equality_expression_1(self, p):
         """ equality_expression : relational_expression """
         p[0] = p[1]
+
+    def p_equality_expression_2(self, p):
+        """ equality_expression : equality_expression EQ_EQ relational_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_equality_expression_3(self, p):
+        """ equality_expression : equality_expression EQ_NE relational_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_relational_expression(self, p):
         """ relational_expression : shift_expression"""
