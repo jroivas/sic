@@ -451,9 +451,17 @@ class Parser:
         """ relational_expression : shift_expression"""
         p[0] = p[1]
 
-    def p_shift_expression(self, p):
+    def p_shift_expression_1(self, p):
         """ shift_expression : additive_expression """
         p[0] = p[1]
+
+    def p_shift_expression_2(self, p):
+        """ shift_expression : shift_expression SH_LEFT additive_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_shift_expression_3(self, p):
+        """ shift_expression : shift_expression SH_RIGHT additive_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_additive_expression_1(self, p):
         """ additive_expression : multiplicative_expression"""
@@ -491,7 +499,15 @@ class Parser:
         """ unary_expression : postfix_expression """
         p[0] = p[1]
 
+    def p_unary_expression_2(self, p):
+        """ unary_expression : PLUSPLUS unary_expression """
+        p[0] = [p[1], p[2]]
+
     def p_unary_expression_3(self, p):
+        """ unary_expression : MINUSMINUS unary_expression """
+        p[0] = [p[1], p[2]]
+
+    def p_unary_expression_4(self, p):
         """ unary_expression : unary_operator cast_expression """
         p[0] = [p[1], p[2]]
 
