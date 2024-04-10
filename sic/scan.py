@@ -127,7 +127,6 @@ class Scan:
     t_RIGHT_EQ = r'>>='
 
     t_ignore = " \t\r\f"
-    #" " or c == "\t" or c == "\n" or c == "\r" or c == "\f"
 
     escape_sequence_start_in_string = r"""(\\[0-9a-zA-Z._~!=&\^\-\\?'"])"""
     string_char = r"""([^"\\\n]|"""+escape_sequence_start_in_string+')'
@@ -158,26 +157,6 @@ class Scan:
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
         #print("IDENTIFIER", t.value, t.type)
         return t
-
-    """
-    def t_FRAC_LIT_1(self, t):
-        r'\.\d+'
-        print("FL1", t.value)
-        t.value = float(t.value)
-        return t
-
-    def t_FRAC_LIT_2(self, t):
-        r'\d+\.'
-        print("FL2", t.value)
-        t.value = float(t.value)
-        return t
-
-    def t_FRAC_LIT_3(self, t):
-        r'\d+\.\d+'
-        print("FL3", t.value)
-        t.value = float(t.value)
-        return t
-    """
 
     def scan(self):
         return self.lexer.token()
