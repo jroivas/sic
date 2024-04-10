@@ -13,6 +13,7 @@ class AstType(Enum):
     TYPE = 9
     FUNCDEF = 10
     SQUARE = 11
+    KEYWORD = 12
 
 class AstNode(object):
     def __init__(self, nodetype, value):

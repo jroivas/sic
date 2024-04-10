@@ -23,6 +23,11 @@ class Scan:
         "DOUBLE",
         "SIGNED",
         "UNSIGNED",
+
+        "GOTO",
+        "CONTINUE",
+        "BREAK",
+        "RETURN",
     ]
 
     keyword_map = {}
@@ -96,7 +101,7 @@ class Scan:
     t_XOR = r'\^'
     t_COMMA = r'\,'
     t_ROUND_OPEN = r'\('
-    t_ROUND_CLOSE = r'\]'
+    t_ROUND_CLOSE = r'\)'
     t_CURLY_OPEN = r'\{'
     t_CURLY_CLOSE = r'\}'
     t_SQUARE_OPEN = r'\['

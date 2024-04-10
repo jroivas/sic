@@ -49,6 +49,8 @@ class Parser:
 
     def p_external_declarations_2(self, p):
         """ external_declarations : external_declarations external_declaration """
+        #p[1].extend(p[2])
+        #p[0] = p[1]
         p[0] = [p[1], p[2]]
 
     def p_external_declaration_1(self, p):
@@ -245,7 +247,7 @@ class Parser:
         """ direct_declarator : direct_declarator ROUND_OPEN identifier_list ROUND_CLOSE"""
         p[0] = [p[1], p[2], p[3], p[4]]
 
-    def p_direct_declarator_8(self, p):
+    def p_direct_declarator_7(self, p):
         """ direct_declarator : direct_declarator ROUND_OPEN ROUND_CLOSE"""
         p[0] = [p[1], p[2], p[3]]
 
@@ -280,21 +282,53 @@ class Parser:
         p[1].extend(p[2])
         p[0] = p[1]
 
-    def p_statement_1(self, p):
+    #def p_statement_1(self, p):
+    #    """ statement : labeled_statement """
+    #    p[0] = p[1]
+
+    def p_statement_2(self, p):
         """ statement : compound_statement """
         p[0] = p[1]
 
-    def p_statement_2(self, p):
+    def p_statement_3(self, p):
         """ statement : expression_statement """
         p[0] = p[1]
 
+    #def p_statement_4(self, p):
+    #    """ statement : selection_statement """
+    #    p[0] = p[1]
+
+    #def p_statement_5(self, p):
+    #    """ statement : iteration_statement """
+    #    p[0] = p[1]
+
+    def p_statement_6(self, p):
+        """ statement : jump_statement """
+        p[0] = p[1]
+
+    def p_jump_statement_1(self, p):
+        """ jump_statement : RETURN SEMI"""
+        p[0] = AstNode(AstType.KEYWORD, p[1])
+
+    def p_jump_statement_2(self, p):
+        """ jump_statement : RETURN expression SEMI"""
+        p[0] = AstNode(AstType.KEYWORD, [p[1], p[2]])
+
     def p_compound_statement_1(self, p):
         """ compound_statement : CURLY_OPEN CURLY_CLOSE """
-        p[0] = AstNode(AstType.Block, [])
+        p[0] = AstNode(AstType.BLOCK, [])
 
     def p_compound_statement_2(self, p):
         """ compound_statement : CURLY_OPEN statement_list CURLY_CLOSE """
-        p[0] = AstNode(AstType.Block, p[2])
+        p[0] = AstNode(AstType.BLOCK, p[2])
+
+    def p_compound_statement_3(self, p):
+        """ compound_statement : CURLY_OPEN declaration_list CURLY_CLOSE """
+        p[0] = AstNode(AstType.BLOCK, p[2])
+
+    def p_compound_statement_4(self, p):
+        """ compound_statement : CURLY_OPEN declaration_list statement_list CURLY_CLOSE """
+        p[0] = AstNode(AstType.BLOCK, [p[2], p[3]])
 
     def p_expression_statement_1(self, p):
         """ expression_statement : expression SEMI """
