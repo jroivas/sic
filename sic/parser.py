@@ -89,12 +89,12 @@ class Parser:
 
     def p_init_declarator_list_1(self, p):
         """ init_declarator_list : init_declarator"""
-        p[0] = [p[1]]
+        #p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_init_declarator_list_2(self, p):
         """ init_declarator_list : init_declarator_list COMMA init_declarator"""
-        p[1].extend(p[3])
-        p[0] = p[1]
+        p[0] = [p[1], p[3]]
 
     def p_init_declarator_1(self, p):
         """ init_declarator : declarator"""
