@@ -58,6 +58,8 @@ class AstNode(object):
     def obj_to_json(self, val):
         if isinstance(val, AstNode):
             val = val.to_json()
+        elif type(val) == list or type(val) == tuple:
+            val = self.list_to_json(val)
         return val
 
 class AstOpNode(AstNode):

@@ -504,9 +504,45 @@ class Parser:
                            | NOT """
         p[0] = AstNode(AstType.UNARY, p[1])
 
-    def p_postfix_expression(self, p):
+    def p_argument_expression_list_1(self, p):
+        """ argument_expression_list : assignment_expression"""
+        p[0] = p[1]
+
+    def p_argument_expression_list_2(self, p):
+        """ argument_expression_list : argument_expression_list COMMA assignment_expression"""
+        p[0] = [p[1], p[3]]
+
+    def p_postfix_expression_1(self, p):
         """ postfix_expression : primary_expression """
         p[0] = p[1]
+
+    def p_postfix_expression_2(self, p):
+        """ postfix_expression : postfix_expression SQUARE_OPEN expression SQUARE_CLOSE """
+        p[0] = [p[1], p[2], p[3], p[4]]
+
+    def p_postfix_expression_3(self, p):
+        """ postfix_expression : postfix_expression ROUND_OPEN ROUND_CLOSE """
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_postfix_expression_4(self, p):
+        """ postfix_expression : postfix_expression ROUND_OPEN argument_expression_list ROUND_CLOSE """
+        p[0] = [p[1], p[2], p[3], p[4]]
+
+    def p_postfix_expression_5(self, p):
+        """ postfix_expression : postfix_expression DOT IDENTIFIER"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_postfix_expression_6(self, p):
+        """ postfix_expression : postfix_expression PTR_OP IDENTIFIER"""
+        p[0] = [p[1], p[2], p[3]]
+
+    def p_postfix_expression_7(self, p):
+        """ postfix_expression : postfix_expression PLUSPLUS"""
+        p[0] = [p[1], p[2]]
+
+    def p_postfix_expression_8(self, p):
+        """ postfix_expression : postfix_expression MINUSMINUS"""
+        p[0] = [p[1], p[2]]
 
     def p_primary_expression_1(self, p):
         """ primary_expression : FRAC_LIT"""
@@ -524,3 +560,6 @@ class Parser:
         """ primary_expression : IDENTIFIER """
         p[0] = AstNode(AstType.IDENTIFIER, p[1])
 
+    def p_primary_expression_5(self, p):
+        """ primary_expression : ROUND_OPEN expression ROUND_CLOSE """
+        p[0] = [p[1], p[2], p[3]]
