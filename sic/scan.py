@@ -28,6 +28,15 @@ class Scan:
         "CONTINUE",
         "BREAK",
         "RETURN",
+
+        "TYPEDEF",
+        "EXTERN",
+        "STATIC",
+        "AUTO",
+        "REGISTER",
+
+        "CONST",
+        "VOLATILE",
     ]
 
     keyword_map = {}

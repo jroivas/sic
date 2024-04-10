@@ -14,6 +14,8 @@ class AstType(Enum):
     FUNCDEF = 10
     SQUARE = 11
     KEYWORD = 12
+    TYPE_QUAL = 13
+    UNARY = 14
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -77,5 +79,25 @@ class AstOpNode(AstNode):
                 "left": ljs,
                 "right": rjs,
             }
+        }
+        return res
+
+class AstPointer(AstNode):
+    def __init__(self, value, lvl=1):
+        super().__init__(AstType.POINTER, value)
+        self.lvl = lvl
+
+    def __repr__(self):
+        return "AstPointer({} {})".format(self.lvl, self.value)
+
+    def to_json(self):
+        val = self.value
+        if isinstance(val, AstNode):
+            val = val.to_json()
+
+        res = {
+            "type": "{}".format(self.nodetype),
+            "level": self.lvl,
+            "value": val
         }
         return res

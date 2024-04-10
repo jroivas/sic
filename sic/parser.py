@@ -1,6 +1,6 @@
 from sic.token import TokenType, Token
 from sic.scan import Scan
-from sic.ast import AstType, AstNode, AstOpNode
+from sic.ast import AstType, AstNode, AstOpNode, AstPointer
 
 from ply import yacc
 
@@ -97,6 +97,14 @@ class Parser:
         """ declaration_specifiers : type_specifier declaration_specifiers"""
         p[0] = [p[1], p[2]]
 
+    def p_declaration_specifiers_3(self, p):
+        """ declaration_specifiers : type_qualifier """
+        p[0] = p[1]
+
+    def p_declaration_specifiers_4(self, p):
+        """ declaration_specifiers : type_qualifier declaration_specifiers"""
+        p[0] = [p[1], p[2]]
+
     def p_type_specifier(self, p):
         """ type_specifier : VOID
                            | CHAR
@@ -128,7 +136,7 @@ class Parser:
 
     def p_declarator_1(self, p):
         """ declarator : pointer direct_declarator"""
-        p[0] = AstNode(AstType.POINTER, p[2])
+        p[0] = [p[1], p[2]]
 
     def p_declarator_2(self, p):
         """ declarator : direct_declarator"""
@@ -136,17 +144,35 @@ class Parser:
 
     def p_pointer_1(self, p):
         """ pointer : STAR"""
-        p[0] = AstNode(AstType.POINTER, None)
+        p[0] = AstPointer(None)
 
     def p_pointer_2(self, p):
+        """ pointer : STAR type_qualifier_list"""
+        p[0] = AstPointer(p[2])
+
+    def p_pointer_3(self, p):
         """ pointer : STAR pointer"""
-        p[0] = AstNode(AstType.POINTER, p[2])
+        if type(p[2]) != AstPointer:
+            raise ValueError("Invalid pointer")
+        p[2].lvl += 1
+        p[0] = p[2]
 
-    #def p_pointer_3(self, p):
-    #    """ pointer : STAR type_qualifier_list"""
+    def p_pointer_4(self, p):
+        """ pointer : STAR type_qualifier_list pointer"""
+        p[0] = AstPointer([p[2], p[3]])
 
-    #def p_pointer_4(self, p):
-    #    """ pointer : STAR type_qualifier_list pointer"""
+    def p_type_qualifier_list_1(self, p):
+        """ type_qualifier_list : type_qualifier """
+        p[0] = p[1]
+
+    def p_type_qualifier_list_2(self, p):
+        """ type_qualifier_list : type_qualifier_list type_qualifier """
+        p[0] = [p[1], p[2]]
+
+    def p_type_qualifier(self, p):
+        """ type_qualifier : CONST
+                           | VOLATILE """
+        p[0] = AstNode(AstType.TYPE_QUAL, p[1])
 
     def p_parameter_type_list_1(self, p):
         """ parameter_type_list : parameter_list"""
@@ -441,13 +467,18 @@ class Parser:
         """ unary_expression : postfix_expression """
         p[0] = p[1]
 
-    def p_unary_expression_2(self, p):
-        """ unary_expression : PLUS cast_expression """
-        p[0] = AstOpNode(p[1], "0", p[2])
-
     def p_unary_expression_3(self, p):
-        """ unary_expression : MINUS cast_expression """
-        p[0] = AstOpNode(p[1], "0", p[2])
+        """ unary_expression : unary_operator cast_expression """
+        p[0] = [p[1], p[2]]
+
+    def p_unary_operator(self, p):
+        """ unary_operator : AMP
+                           | STAR
+                           | PLUS
+                           | MINUS
+                           | TILDE
+                           | NOT """
+        p[0] = AstNode(AstType.UNARY, p[1])
 
     def p_postfix_expression(self, p):
         """ postfix_expression : primary_expression """
