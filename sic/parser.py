@@ -390,7 +390,8 @@ class Parser:
 
     def p_assignment_expression_2(self, p):
         """ assignment_expression : unary_expression assignment_operator assignment_expression"""
-        p[0] = p[1]
+        #p[0] = [p[1], p[2], p[3]]
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_assignment_operator(self, p):
         """ assignment_operator : EQ
@@ -423,17 +424,29 @@ class Parser:
         """ logical_and_expression : inclusive_or_expression """
         p[0] = p[1]
 
-    def p_inclusive_or_expression(self, p):
+    def p_inclusive_or_expression_1(self, p):
         """ inclusive_or_expression : exclusive_or_expression """
         p[0] = p[1]
 
-    def p_exclusive_or_expression(self, p):
+    def p_inclusive_or_expression_2(self, p):
+        """ inclusive_or_expression : inclusive_or_expression OR exclusive_or_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_exclusive_or_expression_1(self, p):
         """ exclusive_or_expression : and_expression """
         p[0] = p[1]
 
-    def p_and_expression(self, p):
+    def p_exclusive_or_expression_2(self, p):
+        """ exclusive_or_expression : exclusive_or_expression XOR and_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_and_expression_1(self, p):
         """ and_expression : equality_expression """
         p[0] = p[1]
+
+    def p_and_expression_2(self, p):
+        """ and_expression : and_expression AMP equality_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_equality_expression_1(self, p):
         """ equality_expression : relational_expression """
