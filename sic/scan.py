@@ -82,8 +82,10 @@ class Scan:
         'NOT',
         'EQ_NE',
         'LT',
+        'LE',
         'SH_LEFT',
         'GT',
+        'GE',
         'SH_RIGHT',
         'OR',
         'LOG_OR',
@@ -134,7 +136,9 @@ class Scan:
     t_SH_LEFT = r'<<'
     t_SH_RIGHT = r'>>'
     t_LT = r'<'
+    t_LE = r'<='
     t_GT = r'>'
+    t_GE = r'>='
     t_OR = r'\|'
     t_LOG_OR = r'\|\|'
     t_QUESTION = r'\?'

@@ -34,6 +34,9 @@ class Parser:
         """ empty : """
         p[0] = None
 
+    def p_error(self, p):
+        print("ERROR: '%s'" % p)
+
     def p_translation_unit(self, p):
         """ translation_unit : external_declarations
                              | empty
@@ -467,9 +470,25 @@ class Parser:
         """ equality_expression : equality_expression EQ_NE relational_expression """
         p[0] = AstOpNode(p[2], p[1], p[3])
 
-    def p_relational_expression(self, p):
+    def p_relational_expression_1(self, p):
         """ relational_expression : shift_expression"""
         p[0] = p[1]
+
+    def p_relational_expression_2(self, p):
+        """ relational_expression : relational_expression LT shift_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_relational_expression_3(self, p):
+        """ relational_expression : relational_expression GT shift_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_relational_expression_4(self, p):
+        """ relational_expression : relational_expression LE shift_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_relational_expression_5(self, p):
+        """ relational_expression : relational_expression GE shift_expression"""
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_shift_expression_1(self, p):
         """ shift_expression : additive_expression """
