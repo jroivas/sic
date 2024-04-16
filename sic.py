@@ -4,6 +4,7 @@ import argparse
 import sys
 import json
 
+from sic.preprocess import Preprocess
 from sic.scan import Scan
 from sic.parser import Parser
 
@@ -54,9 +55,12 @@ if __name__ == "__main__":
     """
     scan(args.filename)
     """
+    pre = Preprocess(args.filename)
+    pre.process()
+    #print("PRE", pre.processed)
     s = Scan()
     p = Parser(s, debug=args.debug)
-    r = p.parse(args.filename)
+    r = p.parse(args.filename, pre.processed)
     #r = parse()
     print(r)
     print(r.to_json())

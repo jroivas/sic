@@ -21,9 +21,13 @@ int main()
     c <<= 31;
     c >>= 31;
 
+    d /* daa */ = 42;
+
+    // The single line of comment
     d = 1;
     d <<= 31;
     d >>= 31;
+
 
     /* Unsigned shifting should not sign fill */
     if (c != 1)
