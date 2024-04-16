@@ -414,9 +414,14 @@ class Parser:
         """ constant_expression : conditional_expression """
         p[0] = p[1]
 
-    def p_conditional_expression(self, p):
+    def p_conditional_expression_1(self, p):
         """ conditional_expression : logical_or_expression """
         p[0] = p[1]
+
+    def p_conditional_expression_2(self, p):
+        """ conditional_expression : logical_or_expression QUESTION expression COLON conditional_expression"""
+        #p[0] = AstOpNode(p[2], p[1], [p[3], p[4]])
+        p[0] = AstIf(p[1], p[3], p[5], ternary=True)
 
     def p_logical_or_expression_1(self, p):
         """ logical_or_expression : logical_and_expression """

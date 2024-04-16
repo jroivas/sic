@@ -19,6 +19,7 @@ class AstType(Enum):
     IF = 16
     CMP = 17
     TYPE_LIST = 18
+    TERNARY = 19
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -102,8 +103,11 @@ class AstPointer(AstNode):
         return res
 
 class AstIf(AstNode):
-    def __init__(self, cond, true, false=None):
-        super().__init__(AstType.IF, [cond, true, false])
+    def __init__(self, cond, true, false=None, ternary=False):
+        op = AstType.IF
+        if ternary:
+            op = AstType.TERNARY
+        super().__init__(op, [cond, true, false])
         self.cond = cond
         self.true = true
         self.false = false
