@@ -18,6 +18,7 @@ class AstType(Enum):
     UNARY = 14
     IF = 16
     CMP = 17
+    TYPE_LIST = 18
 
 class AstNode(object):
     def __init__(self, nodetype, value):

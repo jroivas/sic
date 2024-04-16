@@ -511,8 +511,37 @@ class Parser:
         """ multiplicative_expression : multiplicative_expression MOD cast_expression"""
         p[0] = AstOpNode(p[2], p[1], p[3])
 
-    def p_cast_expression(self, p):
+    def p_cast_expression_1(self, p):
         """ cast_expression : unary_expression"""
+        p[0] = p[1]
+
+    def p_cast_expression_2(self, p):
+        """ cast_expression : ROUND_OPEN type_name ROUND_CLOSE cast_expression"""
+        # FIXME Cast op
+        p[0] = AstOpNode("cast", p[2], p[4])
+
+    def p_type_name_1(self, p):
+        """ type_name : specifier_qualifier_list """
+        p[0] = p[1]
+
+    def p_type_name_2(self, p):
+        """ type_name : specifier_qualifier_list abstract_declarator"""
+        p[0] = p[1]
+
+    def p_specifier_qualifier_list_1(self, p):
+        """ specifier_qualifier_list : type_specifier specifier_qualifier_list"""
+        p[0] = AstNode(AstType.TYPE_LIST, [p[1], p[2]])
+
+    def p_specifier_qualifier_list_2(self, p):
+        """ specifier_qualifier_list : type_specifier"""
+        p[0] = p[1]
+
+    def p_specifier_qualifier_list_3(self, p):
+        """ specifier_qualifier_list : type_qualifier specifier_qualifier_list"""
+        p[0] = AstNode(AstType.TYPE_LIST, [p[1], p[2]])
+
+    def p_specifier_qualifier_list_4(self, p):
+        """ specifier_qualifier_list : type_qualifier"""
         p[0] = p[1]
 
     def p_unary_expression_1(self, p):
