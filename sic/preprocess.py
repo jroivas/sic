@@ -28,10 +28,10 @@ class Preprocess:
             if c == "/":
                 c2 = self.peek()
                 if c2 == "*":
+                    # Multiline comment like /* */
                     c = self.next()
-                    # Comment
-                    c = self.peek()
-                    while c != '*' and c2 != "/":
+                    c2 = self.peek()
+                    while c != '*' or c2 != "/":
                         c = self.next()
                         c2 = self.peek()
                         if c is None or c2 is None:

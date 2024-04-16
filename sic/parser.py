@@ -390,7 +390,6 @@ class Parser:
 
     def p_assignment_expression_2(self, p):
         """ assignment_expression : unary_expression assignment_operator assignment_expression"""
-        #p[0] = [p[1], p[2], p[3]]
         p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_assignment_operator(self, p):
@@ -416,13 +415,21 @@ class Parser:
         """ conditional_expression : logical_or_expression """
         p[0] = p[1]
 
-    def p_logical_or_expression(self, p):
+    def p_logical_or_expression_1(self, p):
         """ logical_or_expression : logical_and_expression """
         p[0] = p[1]
 
-    def p_logical_and_expression(self, p):
+    def p_logical_or_expression_2(self, p):
+        """ logical_or_expression : logical_or_expression LOG_OR logical_and_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_logical_and_expression_1(self, p):
         """ logical_and_expression : inclusive_or_expression """
         p[0] = p[1]
+
+    def p_logical_and_expression_2(self, p):
+        """ logical_and_expression : logical_and_expression LOG_AND inclusive_or_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_inclusive_or_expression_1(self, p):
         """ inclusive_or_expression : exclusive_or_expression """
