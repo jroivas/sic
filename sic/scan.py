@@ -42,6 +42,8 @@ class Scan:
         "ELSE",
         "SWITCH",
         "CASE",
+        "WHILE",
+        "DO",
     ]
 
     keyword_map = {}
