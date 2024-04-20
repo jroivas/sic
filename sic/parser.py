@@ -404,6 +404,42 @@ class Parser:
         """ iteration_statement : DO statement WHILE ROUND_OPEN expression ROUND_CLOSE SEMI"""
         p[0] = AstLoop(AstType.DO, p[5], p[2])
 
+    def p_iteration_statement_3(self, p):
+        """ iteration_statement : FOR ROUND_OPEN expression SEMI expression SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, p[5], p[9], p[3], p[7])
+
+    def p_iteration_statement_4(self, p):
+        """ iteration_statement : FOR ROUND_OPEN SEMI expression SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, p[4], p[8], None, p[6])
+
+    def p_iteration_statement_4(self, p):
+        """ iteration_statement : FOR ROUND_OPEN SEMI SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, None, p[7], None, p[5])
+
+    def p_iteration_statement_5(self, p):
+        """ iteration_statement : FOR ROUND_OPEN expression SEMI SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, None, p[8], p[3], p[6])
+
+    def p_iteration_statement_6(self, p):
+        """ iteration_statement : FOR ROUND_OPEN expression SEMI expression SEMI ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, p[5], p[8], p[3])
+
+    def p_iteration_statement_7(self, p):
+        """ iteration_statement : FOR ROUND_OPEN declaration expression SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, p[4], p[8], p[3], p[6])
+
+    def p_iteration_statement_8(self, p):
+        """ iteration_statement : FOR ROUND_OPEN declaration expression SEMI ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, p[4], p[7], p[3])
+
+    def p_iteration_statement_9(self, p):
+        """ iteration_statement : FOR ROUND_OPEN declaration SEMI expression ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, [], p[7], p[3], p[5])
+
+    def p_iteration_statement_10(self, p):
+        """ iteration_statement : FOR ROUND_OPEN declaration SEMI ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, [], p[7], p[3])
+
 
     def p_selection_statement_1(self, p):
         """ selection_statement : IF ROUND_OPEN expression ROUND_CLOSE statement"""
@@ -458,7 +494,7 @@ class Parser:
 
     def p_expression_statement_1(self, p):
         """ expression_statement : SEMI """
-        p[0] = p[1]
+        p[0] = []
 
     def p_expression_statement_2(self, p):
         """ expression_statement : expression SEMI """

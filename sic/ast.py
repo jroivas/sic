@@ -22,6 +22,7 @@ class AstType(Enum):
     TERNARY = 19
     WHILE = 20
     DO = 21
+    FOR = 22
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -127,21 +128,25 @@ class AstIf(AstNode):
         return res
 
 class AstLoop(AstNode):
-    def __init__(self, looptype, cond, loop, elseblock=None):
+    def __init__(self, looptype, cond, loop, init=None, post=None):
         op = looptype
         super().__init__(op, [cond, loop])
         self.cond = cond
         self.loop = loop
+        self.init = init
+        self.post = post
         #self.elseblock = elseblock
 
     def __repr__(self):
-        return "AstLoop({} {})".format(self.nodetype, self.cond, self.cond, self.loop)
+        return "AstLoop({} {})".format(self.nodetype, self.cond, self.cond, self.loop, self.post)
 
     def to_json(self):
         res = {
             "type": "{}".format(self.nodetype),
             "cond": self.obj_to_json(self.cond),
             "loop": self.obj_to_json(self.loop),
+            "init": self.obj_to_json(self.init),
+            "post": self.obj_to_json(self.post),
             #"else": self.obj_to_json(self.elseblock)
         }
         return res

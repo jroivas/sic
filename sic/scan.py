@@ -44,6 +44,7 @@ class Scan:
         "CASE",
         "WHILE",
         "DO",
+        "FOR",
     ]
 
     keyword_map = {}
@@ -104,7 +105,6 @@ class Scan:
         'LEFT_EQ',
         'MOD_EQ',
         'RIGHT_EQ',
-        'IDENTIFIER',
     ]
     t_PLUS = r'\+'
     t_MINUS = r'-'
@@ -182,7 +182,7 @@ class Scan:
         return t
 
     def t_IDENTIFIER(self, t):
-        r'[a-zA-Z][0-9a-zA-Z]*'
+        r'[a-zA-Z_][0-9a-zA-Z_]*'
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
         #print("IDENTIFIER", t.value, t.type)
         return t
