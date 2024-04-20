@@ -59,6 +59,7 @@ class Preprocess:
             else:
                 self.processed += c
 
+
 def apply_defines(pre, defines):
     if defines is None:
         return
