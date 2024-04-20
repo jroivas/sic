@@ -9,10 +9,19 @@ tests=0
 success=0
 while read test; do
     tests=$((tests+1))
-    if diff -q <("${CPP}" "${test}"|grep -v "^#"|grep -v "^$") "${test}.res"; then
-        success=$((success+1))
+    if [ -e "${test}.res" ]; then
+        if diff -q <("${CPP}" "${test}"|grep -v "^#"|grep -v "^$") "${test}.res" > /dev/null; then
+            success=$((success+1))
+        else
+            echo "*** FAILED ${test}"
+        fi
     else
-        echo "*** FAILED ${test}"
+        # Expect it to fail if .res file not found
+        if "${CPP}" "${test}" > /dev/null 2>&1; then
+            echo "*** FAILED ${test}"
+        else
+            success=$((success+1))
+        fi
     fi
 done <<<$(ls "${SCRIPT_DIR}/../tests/preprocess"*.sic)
 
