@@ -45,6 +45,8 @@ class Scan:
         "WHILE",
         "DO",
         "FOR",
+
+        "SIZEOF",
     ]
 
     keyword_map = {}

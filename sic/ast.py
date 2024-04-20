@@ -23,6 +23,7 @@ class AstType(Enum):
     WHILE = 20
     DO = 21
     FOR = 22
+    SIZEOF = 23
 
 class AstNode(object):
     def __init__(self, nodetype, value):

@@ -709,6 +709,14 @@ class Parser:
         #p[0] = [p[1], p[2]]
         p[0] = self.make_list(p[1], p[2])
 
+    def p_unary_expression_5(self, p):
+        """ unary_expression : SIZEOF unary_expression """
+        p[0] = AstNode(AstType.SIZEOF, p[2])
+
+    def p_unary_expression_6(self, p):
+        """ unary_expression : SIZEOF ROUND_OPEN type_name ROUND_CLOSE """
+        p[0] = AstNode(AstType.SIZEOF, p[3])
+
     def p_unary_operator(self, p):
         """ unary_operator : AMP
                            | STAR
