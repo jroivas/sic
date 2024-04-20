@@ -1,20 +1,20 @@
 #!/bin/bash
 
-set -e
-set -u
+set -eu
 
-PWD=$(pwd)
+CPP=${CPP:-cpp}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
 tests=0
 success=0
 while read test; do
     tests=$((tests+1))
-    if ! "${SCRIPT_DIR}/run-test.sh" "$test"; then
-        continue
+    if diff -q <("${CPP}" "${test}"|grep -v "^#"|grep -v "^$") "${test}.res"; then
+        success=$((success+1))
+    else
+        echo "*** FAILED ${test}"
     fi
-    success=$((success+1))
-done <<<$(ls "${SCRIPT_DIR}/../tests/test"*.sic)
+done <<<$(ls "${SCRIPT_DIR}/../tests/preprocess"*.sic)
 
 failed=$((tests-success))
 echo "*** Passed ${success}/${tests} (failed ${failed})"

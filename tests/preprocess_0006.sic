@@ -1,0 +1,6 @@
+#define VAL
+#if defined(NOTDEF) || defined(VAL)
+SUCCESS
+#else
+ERROR
+#endif

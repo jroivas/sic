@@ -1,0 +1,6 @@
+#define VAL
+#ifdef VAL
+SUCCESS
+#else
+ERROR
+#endif
