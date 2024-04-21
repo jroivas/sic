@@ -1,0 +1,6 @@
+#if defined(VAL)a
+SUCCESS
+#else
+ERROR
+#endif
+

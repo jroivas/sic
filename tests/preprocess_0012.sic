@@ -1,0 +1,7 @@
+#define TST
+#if defined(VAL) \
+    || defined(TST)
+SUCCESS
+#else
+ERROR
+#endif
