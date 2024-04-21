@@ -37,7 +37,128 @@ class Preprocess:
             return None
         return self.data[self.idx]
 
+    def applyval(self, curstack, val):
+        if val:
+            curstack.append(val)
+            val = ""
+        return curstack, val
+
+    def macros(self, data):
+        i = 0
+        len_data = len(data)
+        res = []
+        while i < len_data:
+            if type(data[i]) == list:
+                res.append(self.macros(data[i]))
+            elif data[i] == "defined":
+                if i + 1 >= len_data:
+                    raise ValueError("Invalid preprocessor directive: defined without param")
+                parm = data[i + 1]
+                print("DEFF", data[i], parm)
+
+                if type(parm) == tuple:
+                    parm = list(parm)
+                if type(parm) != list:
+                    raise ValueError("Invalid preprocessor directive: defined with invalid param: {}".format(parm))
+                if len(parm) == 1:
+                    d = self.defines.get(parm[0], None)
+                    if d is None:
+                        res.append("False")
+                    else:
+                        res.append("True")
+                    i += 1
+                else:
+                    raise ValueError("Invalid defined")
+            else:
+                res.append(data[i])
+
+            i += 1
+        return res
+
+    def flatten(self, data):
+        res = []
+        for i in data:
+            if type(i) == list:
+                res.append(self.flatten(i))
+            else:
+                res.append(i)
+        print("RES", res)
+        return "({})".format(" ".join(res))
+
     def evaluate(self, cond):
+        print("COND", cond)
+        i = 0
+        len_cond = len(cond)
+        stack = []
+        curstack = []
+        #res = []
+        num = ""
+        val = ""
+        while i < len_cond:
+            if cond[i].isdigit():
+                num += cond[i]
+                i += 1
+                continue
+
+            if num:
+                # TODO
+                #curstack.append(int(num))
+                curstack.append(num)
+                num = ""
+
+            if cond[i] == ' ':
+                curstack, val = self.applyval(curstack, val)
+            elif cond[i] == '(':
+                curstack, val = self.applyval(curstack, val)
+                stack.append(curstack)
+                curstack = []
+            elif cond[i] == ")":
+                curstack, val = self.applyval(curstack, val)
+                if not stack:
+                    raise ValueError("Closing ) without opening (")
+                #res.append(curstack)
+                prevstack = stack.pop()
+                prevstack.append(curstack)
+                curstack = prevstack
+            elif cond[i] == "!":
+                curstack, val = self.applyval(curstack, val)
+                curstack.append("not")
+            elif cond[i] == "|":
+                curstack, val = self.applyval(curstack, val)
+                if i + 1 >= len_cond:
+                    raise ValueError("Invalid preprocessor directive: |")
+                if cond[i + 1] != "|":
+                    raise ValueError("Invalid preprocessor directive: |{}".format(cond[i + 1]))
+                curstack.append("or")
+                i += 1
+            elif cond[i] == "&":
+                curstack, val = self.applyval(curstack, val)
+                if i + 1 >= len_cond:
+                    raise ValueError("Invalid preprocessor directive: &")
+                if cond[i + 1] != "&":
+                    raise ValueError("Invalid preprocessor directive: &{}".format(cond[i + 1]))
+                curstack.append("and")
+                i += 1
+            else:
+                val += cond[i]
+
+            i += 1
+
+        #if curstack:
+        #    res.append(curstack)
+        if num:
+            #curstack.append(int(num))
+            curstack.append(num)
+        curstack, val = self.applyval(curstack, val)
+
+        print("CURSTACK", curstack)
+        curstack = self.macros(curstack)
+        curstack = self.flatten(curstack)
+
+        print("macroder", curstack)
+        return eval(curstack)
+
+        """
         res = []
         for c in cond:
             # TODO macros
@@ -73,7 +194,9 @@ class Preprocess:
         estr = " ".join([str(x) for x in res])
         res = eval(estr)
         return res
+        """
 
+        """
     def eval_macro(self, macrodef):
         if '(' not in macrodef:
             return macrodef
@@ -89,6 +212,7 @@ class Preprocess:
             return self.evaluate([parts[1][:rpart]])
 
         raise ValueError("Invalid macro: {} from {}".format(macro, macrodef))
+        """
 
     def getdefine(self, key):
         return self.defines.get(key, False)
@@ -150,11 +274,11 @@ class Preprocess:
             raise ValueError("Invalid preprocessor directive")
 
         if parts[0].lower() == "if":
-            cond = self.evaluate(parts[1:])
+            cond = self.evaluate(" ".join(parts[1:]))
             self.ignore.append(not cond)
         elif parts[0].lower() == "ifdef":
             # FIXME: Overflow cond
-            cond = self.evaluate([self.getdefine(parts[1])])
+            cond = self.evaluate(self.getdefine(parts[1]))
             self.ignore.append(not cond)
         elif parts[0].lower() == "else":
             cond = self.ignore.pop()
