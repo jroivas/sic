@@ -294,13 +294,20 @@ class Preprocess:
             self.ignore.append(not cond)
         elif parts[0].lower() == "endif":
             self.ignore.pop()
-        elif not self.ignore and parts[0].lower() == "define":
-            self.define(*parts[1:])
-        elif not self.ignore and parts[0].lower() == "include":
-            self.include(parts[1:])
+        elif parts[0].lower() == "define":
+            if not self.ignore:
+                self.define(*parts[1:])
+        elif parts[0].lower() == "include":
+            if not self.ignore:
+                self.include(parts[1:])
         else:
             raise ValueError("Unknown directive {}".format(parts[0]))
 
+    def isignore(self):
+        for i in self.ignore:
+            if i:
+                return True
+        return False
 
     def process(self):
         linestart = True
@@ -330,7 +337,7 @@ class Preprocess:
                 self.processed += c
                 continue
 
-            if self.ignore and self.ignore[-1]:
+            if self.isignore():
                 continue
 
             linestart = False
