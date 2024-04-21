@@ -54,7 +54,6 @@ class Preprocess:
                 if i + 1 >= len_data:
                     raise ValueError("Invalid preprocessor directive: defined without param")
                 parm = data[i + 1]
-                print("DEFF", data[i], parm)
 
                 if type(parm) == tuple:
                     parm = list(parm)
@@ -82,11 +81,17 @@ class Preprocess:
                 res.append(self.flatten(i))
             else:
                 res.append(i)
-        print("RES", res)
+        if self.debug:
+            print("DEBUG: flatten result: ", res)
         return "({})".format(" ".join(res))
 
     def evaluate(self, cond):
-        print("COND", cond)
+        if self.debug:
+            print("DEBUG: evaluate: ", cond)
+        if type(cond) != bool and not cond:
+            raise ValueError("Nothing to evaluate")
+        if type(cond) != str:
+            return cond
         i = 0
         len_cond = len(cond)
         stack = []
@@ -151,11 +156,13 @@ class Preprocess:
             curstack.append(num)
         curstack, val = self.applyval(curstack, val)
 
-        print("CURSTACK", curstack)
+        if self.debug:
+            print("DEBUG: evaluate before macros: ", curstack)
         curstack = self.macros(curstack)
         curstack = self.flatten(curstack)
 
-        print("macroder", curstack)
+        if self.debug:
+            print("DEBUG: evaluate after macros and flatten: ", curstack)
         return eval(curstack)
 
         """
@@ -277,17 +284,19 @@ class Preprocess:
             cond = self.evaluate(" ".join(parts[1:]))
             self.ignore.append(not cond)
         elif parts[0].lower() == "ifdef":
-            # FIXME: Overflow cond
             cond = self.evaluate(self.getdefine(parts[1]))
             self.ignore.append(not cond)
+        elif parts[0].lower() == "ifndef":
+            cond = self.evaluate(self.getdefine(parts[1]))
+            self.ignore.append(cond)
         elif parts[0].lower() == "else":
             cond = self.ignore.pop()
             self.ignore.append(not cond)
         elif parts[0].lower() == "endif":
             self.ignore.pop()
-        elif parts[0].lower() == "define":
+        elif not self.ignore and parts[0].lower() == "define":
             self.define(*parts[1:])
-        elif parts[0].lower() == "include":
+        elif not self.ignore and parts[0].lower() == "include":
             self.include(parts[1:])
         else:
             raise ValueError("Unknown directive {}".format(parts[0]))
@@ -317,7 +326,6 @@ class Preprocess:
                         directive = directive[:-1]
                         c = self.next()
                         slash = False
-                #print("DIR", directive)
                 self.handle_directive(directive)
                 self.processed += c
                 continue

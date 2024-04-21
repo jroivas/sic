@@ -4,7 +4,7 @@ import argparse
 import sys
 import json
 
-from sic.preprocess import Preprocess
+from sic.preprocess import Preprocess, apply_inc_dirs, apply_defines, apply_default_inc_dirs
 from sic.scan import Scan
 from sic.parser import Parser
 
@@ -45,18 +45,22 @@ if __name__ == "__main__":
         ],
     }
     """
+
     parser = argparse.ArgumentParser(prog="sic")
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--debug", action='store_true')
+    parser.add_argument("-D", nargs="*", action="append")
+    parser.add_argument("-I", nargs="*", action="append")
     parser.add_argument("filename")
 
     args = parser.parse_args()
 
-    """
-    scan(args.filename)
-    """
     pre = Preprocess(args.filename)
+    apply_default_inc_dirs(pre)
+    apply_inc_dirs(pre, args.I)
+    apply_defines(pre, args.D)
     preprocessed = pre.process()
+
     #print("PRE", preprocessed)
     s = Scan()
     p = Parser(s, debug=args.debug)
