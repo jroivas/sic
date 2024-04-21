@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 
+import os
+
 class Preprocess:
-    def __init__(self, fname, data=""):
+    def __init__(self, fname, data="", debug=False):
         self.data = data
         if not data:
             with open(fname, "r") as fd:
                 self.data = fd.read()
+        self.datalen = len(self.data)
         self.processed = ""
         self.idx = 0
         self.defines = {}
         self.ignore = []
+        self.include_paths = []
+        self.debug = debug
+
+    def add_include_path(self, pth):
+        self.include_paths.append(pth)
 
     def define(self, key, val=True):
         self.defines[key] = val
@@ -18,14 +26,14 @@ class Preprocess:
         del self.defines[key]
 
     def next(self):
-        if self.idx >= len(self.data):
+        if self.idx >= self.datalen:
             return None
         c = self.data[self.idx]
         self.idx += 1
         return c
 
     def peek(self):
-        if self.idx >= len(self.data):
+        if self.idx >= self.datalen:
             return None
         return self.data[self.idx]
 
@@ -51,6 +59,8 @@ class Preprocess:
             elif d == "||":
                 res.append("and")
             elif type(d) == str:
+                if not d.isalnum() and not d.replace("(","").replace(")","").isalnum():
+                    raise ValueError("Invalid preprocessor directive: {}".format(d))
                 # Not found so evaluate to false
                 rr = self.eval_macro(d)
                 if type(rr) == bool:
@@ -78,10 +88,60 @@ class Preprocess:
                 raise ValueError("Invalid def")
             return self.evaluate([parts[1][:rpart]])
 
-        raise ValueError("Invalid macro: {}".format(macro))
+        raise ValueError("Invalid macro: {} from {}".format(macro, macrodef))
 
     def getdefine(self, key):
         return self.defines.get(key, False)
+
+    def do_include(self, fname):
+        if self.debug:
+            print("++ Include: {}".format(fname))
+        # Include the file in place
+        databak = self.data
+        with open(fname, "r") as fd:
+            newdata = fd.read()
+        self.data = databak[:self.idx] + newdata + databak[self.idx:]
+        self.datalen = len(self.data)
+
+    def include_file(self, incfile, local):
+        if local:
+            tmp = os.path.join(".", incfile)
+            if os.path.exists(tmp):
+                self.do_include(tmp)
+                return True
+
+        for pth in self.include_paths:
+            tmp = os.path.join(pth, incfile)
+            if os.path.exists(tmp):
+                self.do_include(tmp)
+                return True
+
+        return False
+
+    def include(self, inclist):
+        local = False
+
+        # We can have "" or <>
+        if not inclist or len(inclist) != 1:
+            raise ValueError("Missing/invalid include: {}".format(inc))
+
+        inc = inclist[0].strip()
+        if not inc or len(inc) <= 2:
+            raise ValueError("Missing include: {}".format(inc))
+
+        if inc[0] == "<":
+            if inc[-1] != ">":
+                raise ValueError("Invalid include: {}".format(inc))
+        elif inc[0] == "\"":
+            if inc[-1] != "\"":
+                raise ValueError("Invalid include: {}".format(inc))
+            local = True
+        else:
+            raise ValueError("Invalid include: {}".format(inc))
+
+        inc = inc[1:-1]
+        if not self.include_file(inc, local):
+            raise ValueError("Can't find include {}".format(inc))
 
     def handle_directive(self, directive):
         directive = directive.strip()
@@ -103,6 +163,8 @@ class Preprocess:
             self.ignore.pop()
         elif parts[0].lower() == "define":
             self.define(*parts[1:])
+        elif parts[0].lower() == "include":
+            self.include(parts[1:])
         else:
             raise ValueError("Unknown directive {}".format(parts[0]))
 
@@ -119,9 +181,19 @@ class Preprocess:
             if linestart and c == "#":
                 directive = ""
                 c = self.next()
+                slash = False
                 while c != '\n':
                     directive += c
+                    if c == "\\":
+                        slash = True
+                    else:
+                        slash = False
                     c = self.next()
+                    if slash and c == "\n":
+                        directive = directive[:-1]
+                        c = self.next()
+                        slash = False
+                #print("DIR", directive)
                 self.handle_directive(directive)
                 self.processed += c
                 continue
@@ -164,6 +236,15 @@ class Preprocess:
         return self.processed
 
 
+def apply_inc_dirs(pre, incdirs):
+    if incdirs is None:
+        return
+
+    for i in incdirs:
+        i = i.strip()
+        pre.add_include_path(i)
+
+
 def apply_defines(pre, defines):
     if defines is None:
         return
@@ -176,17 +257,30 @@ def apply_defines(pre, defines):
         else:
             pre.define(d)
 
+def apply_default_inc_dirs(pre):
+    incdef = [
+        "/usr/lib/gcc/x86_64-linux-gnu/13/include",
+        "/usr/local/include",
+        "/usr/include/x86_64-linux-gnu",
+        "/usr/include"
+    ]
+    apply_inc_dirs(pre, incdef)
+
 if __name__ == '__main__':
     import argparse
     import sys
 
     parser = argparse.ArgumentParser(prog="sicpp")
     parser.add_argument("-D", nargs="*", action="append")
+    parser.add_argument("-I", nargs="*", action="append")
+    parser.add_argument("-d", "--debug", action='store_true')
     parser.add_argument("filename")
 
     args = parser.parse_args()
 
-    pre = Preprocess(args.filename)
+    pre = Preprocess(args.filename, debug=args.debug)
+    apply_default_inc_dirs(pre)
+    apply_inc_dirs(pre, args.I)
     apply_defines(pre, args.D)
     res = pre.process()
     print(res)

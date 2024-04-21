@@ -2,9 +2,10 @@
 
 set -eu
 
-CPP=${CPP:-cpp}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+CPP=${CPP:-${SCRIPT_DIR}/../sic/preprocess.py}
 
+echo "*** CPP ${CPP}"
 tests=0
 success=0
 while read test; do
