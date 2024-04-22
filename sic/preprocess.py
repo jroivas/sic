@@ -23,7 +23,8 @@ class Preprocess:
         self.defines[key] = val
 
     def undef(self, key):
-        del self.defines[key]
+        if key in self.defines:
+            del self.defines[key]
 
     def next(self):
         if self.idx >= self.datalen:
@@ -69,7 +70,10 @@ class Preprocess:
                 else:
                     raise ValueError("Invalid defined")
             else:
-                res.append(data[i])
+                d = self.defines.get(data[i], "False")
+                print("RR {} -> {}".format(data[i], d))
+                res.append(d)
+                #res.append(data[i])
 
             i += 1
         return res
@@ -149,10 +153,7 @@ class Preprocess:
 
             i += 1
 
-        #if curstack:
-        #    res.append(curstack)
         if num:
-            #curstack.append(int(num))
             curstack.append(num)
         curstack, val = self.applyval(curstack, val)
 
@@ -164,62 +165,6 @@ class Preprocess:
         if self.debug:
             print("DEBUG: evaluate after macros and flatten: ", curstack)
         return eval(curstack)
-
-        """
-        res = []
-        for c in cond:
-            # TODO macros
-            d = self.defines.get(c, None)
-            if d is None:
-                d = c
-            if type(d) == bool:
-                res.append(d)
-            elif d.isdigit():
-                res.append(bool(int(d)))
-            elif type(d) == int:
-                res.append(bool(d))
-            elif d == "(" or d == ")":
-                res.append(d)
-            elif d == "!":
-                res.append("not")
-            elif d == "||":
-                res.append("or")
-            elif d == "||":
-                res.append("and")
-            elif type(d) == str:
-                if not d.isalnum() and not d.replace("(","").replace(")","").isalnum():
-                    raise ValueError("Invalid preprocessor directive: {}".format(d))
-                # Not found so evaluate to false
-                rr = self.eval_macro(d)
-                if type(rr) == bool:
-                    res.append(rr)
-                else:
-                    res.append(False)
-            else:
-                raise ValueError("Unknown type {} for {}".format(type(d), d))
-        # Now we should have booleans, conditions and braces, join and eval
-        estr = " ".join([str(x) for x in res])
-        res = eval(estr)
-        return res
-        """
-
-        """
-    def eval_macro(self, macrodef):
-        if '(' not in macrodef:
-            return macrodef
-        if ')' not in macrodef:
-            raise ValueError("Macro missing closing ')'")
-
-        parts = macrodef.split('(', 2)
-        macro = parts[0].strip().lower()
-        if macro == 'defined':
-            rpart = parts[1].rindex(')')
-            if parts[1][rpart:] != ')':
-                raise ValueError("Invalid def")
-            return self.evaluate([parts[1][:rpart]])
-
-        raise ValueError("Invalid macro: {} from {}".format(macro, macrodef))
-        """
 
     def getdefine(self, key):
         return self.defines.get(key, False)
@@ -286,6 +231,12 @@ class Preprocess:
         elif parts[0].lower() == "ifdef":
             cond = self.evaluate(self.getdefine(parts[1]))
             self.ignore.append(not cond)
+        elif parts[0].lower() == "undef":
+            if len(parts[1:]) != 1:
+                raise ValueError("Invalid undef: {}".format(directive))
+            self.undef(parts[1])
+            #print("UNDEF", parts[1])
+            #cond = self.evaluate(" ".join(parts[1:]))
         elif parts[0].lower() == "ifndef":
             cond = self.evaluate(self.getdefine(parts[1]))
             self.ignore.append(cond)

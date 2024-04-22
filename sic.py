@@ -55,7 +55,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    pre = Preprocess(args.filename)
+    pre = Preprocess(args.filename, debug=args.debug)
     apply_default_inc_dirs(pre)
     apply_inc_dirs(pre, args.I)
     apply_defines(pre, args.D)
