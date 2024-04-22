@@ -2,6 +2,20 @@
 
 import os
 
+class Op:
+    def __init__(self, op):
+        self.op = op
+
+    def __repr__(self):
+        return "{}".format(self.op)
+
+class Num:
+    def __init__(self, num):
+        self.num = num
+
+    def __repr__(self):
+        return "{}".format(self.num)
+
 class Preprocess:
     def __init__(self, fname, data="", debug=False):
         self.data = data
@@ -51,6 +65,10 @@ class Preprocess:
         while i < len_data:
             if type(data[i]) == list:
                 res.append(self.macros(data[i]))
+            elif type(data[i]) == Op:
+                res.append(data[i])
+            elif type(data[i]) == Num:
+                res.append(data[i])
             elif data[i] == "defined":
                 if i + 1 >= len_data:
                     raise ValueError("Invalid preprocessor directive: defined without param")
@@ -71,7 +89,6 @@ class Preprocess:
                     raise ValueError("Invalid defined")
             else:
                 d = self.defines.get(data[i], "False")
-                print("RR {} -> {}".format(data[i], d))
                 res.append(d)
                 #res.append(data[i])
 
@@ -83,6 +100,10 @@ class Preprocess:
         for i in data:
             if type(i) == list:
                 res.append(self.flatten(i))
+            elif type(i) == Op:
+                res.append(str(i))
+            elif type(i) == Num:
+                res.append(str(i))
             else:
                 res.append(i)
         if self.debug:
@@ -110,9 +131,7 @@ class Preprocess:
                 continue
 
             if num:
-                # TODO
-                #curstack.append(int(num))
-                curstack.append(num)
+                curstack.append(Num(num))
                 num = ""
 
             if cond[i] == ' ':
@@ -125,20 +144,19 @@ class Preprocess:
                 curstack, val = self.applyval(curstack, val)
                 if not stack:
                     raise ValueError("Closing ) without opening (")
-                #res.append(curstack)
                 prevstack = stack.pop()
                 prevstack.append(curstack)
                 curstack = prevstack
             elif cond[i] == "!":
                 curstack, val = self.applyval(curstack, val)
-                curstack.append("not")
+                curstack.append(Op("not"))
             elif cond[i] == "|":
                 curstack, val = self.applyval(curstack, val)
                 if i + 1 >= len_cond:
                     raise ValueError("Invalid preprocessor directive: |")
                 if cond[i + 1] != "|":
                     raise ValueError("Invalid preprocessor directive: |{}".format(cond[i + 1]))
-                curstack.append("or")
+                curstack.append(Op("or"))
                 i += 1
             elif cond[i] == "&":
                 curstack, val = self.applyval(curstack, val)
@@ -146,7 +164,7 @@ class Preprocess:
                     raise ValueError("Invalid preprocessor directive: &")
                 if cond[i + 1] != "&":
                     raise ValueError("Invalid preprocessor directive: &{}".format(cond[i + 1]))
-                curstack.append("and")
+                curstack.append(Op("and"))
                 i += 1
             else:
                 val += cond[i]
@@ -154,7 +172,7 @@ class Preprocess:
             i += 1
 
         if num:
-            curstack.append(num)
+            curstack.append(Num(num))
         curstack, val = self.applyval(curstack, val)
 
         if self.debug:
