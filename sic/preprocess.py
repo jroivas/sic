@@ -291,7 +291,30 @@ class Preprocess:
                 directive = ""
                 c = self.next()
                 slash = False
+                in_comment = False
                 while c != '\n':
+                    if c == "/":
+                        c2 = self.peek()
+                        if c2 == "*":
+                            c = self.next()
+                            c2 = self.peek()
+                            while c != '*' or c2 != "/":
+                                c = self.next()
+                                c2 = self.peek()
+                                if c is None or c2 is None:
+                                    break
+                            if c == "*" and c2 == "/":
+                                c = self.next()
+                            c = self.next()
+                            if c == "\n":
+                                break
+                        elif c2 == "/":
+                            c = self.next()
+                            while c != "\n":
+                                c = self.next()
+                                if c is None:
+                                    break
+                            break
                     directive += c
                     if c == "\\":
                         slash = True
@@ -302,6 +325,8 @@ class Preprocess:
                         directive = directive[:-1]
                         c = self.next()
                         slash = False
+                if self.debug:
+                    print("DIRECTIVE: {}".format(directive))
                 self.handle_directive(directive)
                 self.processed += c
                 continue
