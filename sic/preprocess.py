@@ -150,6 +150,20 @@ class Preprocess:
             elif cond[i] == "!":
                 curstack, val = self.applyval(curstack, val)
                 curstack.append(Op("not"))
+            elif cond[i] == "<":
+                curstack, val = self.applyval(curstack, val)
+                if i + 1 < len_cond and cond[i + 1] == "=":
+                    i += 1
+                    curstack.append(Op("<="))
+                else:
+                    curstack.append(Op("<"))
+            elif cond[i] == ">":
+                curstack, val = self.applyval(curstack, val)
+                if i + 1 < len_cond and cond[i + 1] == "=":
+                    i += 1
+                    curstack.append(Op(">="))
+                else:
+                    curstack.append(Op(">"))
             elif cond[i] == "|":
                 curstack, val = self.applyval(curstack, val)
                 if i + 1 >= len_cond:

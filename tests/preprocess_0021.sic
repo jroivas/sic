@@ -1,0 +1,5 @@
+#if !defined (_ANSI_SOURCE) && !defined (_POSIX_SOURCE) // test
+SUCCESS
+#else
+ERROR
+#endif

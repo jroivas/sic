@@ -1,0 +1,7 @@
+#if defined(NOTDEF)
+#if 1
+ERROR
+#endif
+#else
+SUCCESS
+#endif

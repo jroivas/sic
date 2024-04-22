@@ -1,0 +1,36 @@
+#if defined (VERSION) && (VERSION > 5)
+ERROR
+#else
+SUCCESS1
+#endif
+#define VERSION 6
+#if defined (VERSION) && (VERSION > 5)
+SUCCESS2
+#else
+ERROR
+#endif
+#if defined (VERSION) && (VERSION >= 6)
+SUCCESS3
+#else
+ERROR
+#endif
+#if defined (VERSION) && (VERSION > 6)
+ERROR
+#else
+SUCCESS4
+#endif
+#if defined (VERSION) && (VERSION < 10)
+SUCCESS5
+#else
+ERROR
+#endif
+#if defined (VERSION) && (VERSION < 6)
+ERROR
+#else
+SUCCESS6
+#endif
+#if defined (VERSION) && (VERSION <= 6)
+SUCCESS7
+#else
+ERROR
+#endif

@@ -1,0 +1,5 @@
+#if __TEST
+ERROR
+#else
+SUCCESS
+#endif

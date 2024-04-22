@@ -1,0 +1,5 @@
+#if defined (__FreeBSD__) && (__FreeBSD__ < 5)
+ERROR
+#else
+SUCCESS
+#endif

@@ -1,0 +1,5 @@
+#ifndef NOTDEF
+SUCCESS
+#else
+ERROR
+#endif
