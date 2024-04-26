@@ -16,6 +16,15 @@ class Num:
     def __repr__(self):
         return "{}".format(self.num)
 
+class Macro:
+    def __init__(self, name, params, body):
+        self.name = name
+        self.params = params
+        self.body = body
+
+    def __repr__(self):
+        return "{}({}) = {}".format(self.name, self.params, self.body)
+
 class Preprocess:
     def __init__(self, fname, data="", debug=False):
         self.data = data
@@ -29,6 +38,7 @@ class Preprocess:
         self.ignore = []
         self.include_paths = []
         self.debug = debug
+        self.macros = {}
 
     def add_include_path(self, pth):
         self.include_paths.append(pth)
@@ -58,13 +68,13 @@ class Preprocess:
             val = ""
         return curstack, val
 
-    def macros(self, data):
+    def parse_macros(self, data):
         i = 0
         len_data = len(data)
         res = []
         while i < len_data:
             if type(data[i]) == list:
-                res.append(self.macros(data[i]))
+                res.append(self.parse_macros(data[i]))
             elif type(data[i]) == Op:
                 res.append(data[i])
             elif type(data[i]) == Num:
@@ -100,6 +110,8 @@ class Preprocess:
         for i in data:
             if type(i) == list:
                 res.append(self.flatten(i))
+            elif type(i) == bool:
+                res.append(str(i))
             elif type(i) == Op:
                 res.append(str(i))
             elif type(i) == Num:
@@ -191,7 +203,7 @@ class Preprocess:
 
         if self.debug:
             print("DEBUG: evaluate before macros: ", curstack)
-        curstack = self.macros(curstack)
+        curstack = self.parse_macros(curstack)
         curstack = self.flatten(curstack)
 
         if self.debug:
@@ -251,6 +263,52 @@ class Preprocess:
         if not self.include_file(inc, local):
             raise ValueError("Can't find include {}".format(inc))
 
+    def handle_define(self, define):
+        key = ""
+        params = ""
+        stack = []
+        tmp = ""
+        is_macro = False
+        for k in define:
+            #print(stack, key, params, tmp, k)
+            if not stack and k == " ":
+                break
+            if k == "(":
+                is_macro = True
+                if not key and tmp:
+                    key = tmp
+                    tmp = ""
+                stack.append(k)
+            elif k == ")":
+                if not stack:
+                    raise ValueError("Unbalanced ) in macro")
+                stack.pop()
+                if not stack:
+                    params = tmp
+                    tmp = ""
+            else:
+                tmp += k
+        if is_macro:
+            if tmp:
+                raise ValueError("ERR tmp", tmp)
+            rpos = len(key) + len(params) + 2
+            body = define[rpos + 1:]
+            self.macros[key.lower()] = Macro(key, params, body)
+            #print("KEY : |{}|".format(key))
+            #print("PARM: |{}|".format(params))
+            #print("BODY: |{}|".format(body))
+        else:
+            key = tmp
+            rpos = len(key)
+            body = define[rpos + 1:]
+            #print("KEY : |{}|".format(key))
+            #print("BODY: |{}|".format(body))
+            if body:
+                self.define(tmp, body)
+            else:
+                self.define(tmp)
+
+
     def handle_directive(self, directive):
         directive = directive.strip()
         parts = [x.strip() for x in directive.split()]
@@ -279,7 +337,7 @@ class Preprocess:
             self.ignore.pop()
         elif parts[0].lower() == "define":
             if not self.ignore:
-                self.define(*parts[1:])
+                self.handle_define(" ".join(parts[1:]))
         elif parts[0].lower() == "include":
             if not self.ignore:
                 self.include(parts[1:])
