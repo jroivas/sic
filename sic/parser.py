@@ -13,9 +13,10 @@ class Parser:
             start='translation_unit'
             )
         self.debug = debug
+        self.error = False
 
     def success(self):
-        return self.scanner.success
+        return self.scanner.success and not self.error
 
     def readfile(self, fname):
         with open(fname, "r") as fd:
@@ -56,6 +57,7 @@ class Parser:
 
     def p_error(self, p):
         print("ERROR: '%s'" % p)
+        self.error = True
 
     def p_translation_unit(self, p):
         """ translation_unit : external_declarations
