@@ -72,8 +72,6 @@ class Parser:
 
     def p_external_declarations_2(self, p):
         """ external_declarations : external_declarations external_declaration """
-        #p[1].extend(p[2])
-        #p[0] = p[1]
         p[0] = [p[1], p[2]]
 
     def p_external_declaration_1(self, p):

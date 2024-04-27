@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import subprocess
 
 class Op:
     def __init__(self, op):
@@ -25,7 +26,7 @@ class Macro:
     def __repr__(self):
         return "{}({}) = {}".format(self.name, self.params, self.body)
 
-class Preprocess:
+class SicPreprocessor:
     def __init__(self, fname, data="", debug=False):
         self.data = data
         if not data:
@@ -440,6 +441,59 @@ class Preprocess:
     def get(self):
         return self.processed
 
+class WrapPreprocessor:
+    def __init__(self, cpp, fname, data="", debug=False):
+        self.cpp = cpp
+        self.include_paths = []
+        self.defines = {}
+        self.fname = fname
+        self.data = ""
+
+    def add_include_path(self, pth):
+        self.include_paths.append(pth)
+
+    def define(self, key, val=True):
+        self.defines[key] = val
+
+    def process(self):
+        if self.fname:
+            "{cpp} -std=c99 -D__extension__= -D__restrict= {fname}"
+            cmd = [
+                self.cpp,
+                "-std=c99",
+                "-D__extension__=",
+                "-D__restrict=",
+            ]
+            for d in self.defines:
+                v = self.defines[d]
+                if v is None:
+                    cmd.append("-D{}".format(d))
+                else:
+                    cmd.append("-D{}={}".format(d, v))
+            cmd.append(self.fname)
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, err = process.communicate()
+            return out.decode('utf-8')
+        else:
+            raise ValueError("fff")
+
+class Preprocess:
+    def __init__(self, fname, data="", debug=False, cpp=None):
+        self.fname = fname
+        if cpp:
+            self.wrap = WrapPreprocessor(cpp, fname, data, debug)
+        else:
+            self.wrap = SicPreprocessor(fname, data, debug)
+
+    def add_include_path(self, pth):
+        return self.wrap.add_include_path(pth)
+
+    def define(self, key, val=True):
+        return self.wrap.define(key, val)
+
+    def process(self):
+        return self.wrap.process()
+
 
 def apply_inc_dirs(pre, incdirs):
     if incdirs is None:
@@ -479,11 +533,12 @@ if __name__ == '__main__':
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
     parser.add_argument("-d", "--debug", action='store_true')
+    parser.add_argument("--cpp")
     parser.add_argument("filename")
 
     args = parser.parse_args()
 
-    pre = Preprocess(args.filename, debug=args.debug)
+    pre = Preprocess(args.filename, debug=args.debug, cpp=args.cpp)
     apply_default_inc_dirs(pre)
     apply_inc_dirs(pre, args.I)
     apply_defines(pre, args.D)

@@ -107,6 +107,7 @@ class Scan:
         'LEFT_EQ',
         'MOD_EQ',
         'RIGHT_EQ',
+        'PREPROCESSOR',
     ]
     t_PLUS = r'\+'
     t_MINUS = r'-'
@@ -117,8 +118,6 @@ class Scan:
     t_STAR = r'\*'
     t_ELLIPSIS = r'\.\.\.'
     t_SLASH = r'/'
-    t_COMMENT = r'//.*'
-    t_MULTICOMMENT = r'/\*[^*]*\*/'
     t_MOD = r'%'
     t_XOR = r'\^'
     t_COMMA = r'\,'
@@ -188,6 +187,18 @@ class Scan:
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
         #print("IDENTIFIER", t.value, t.type)
         return t
+
+    def t_PREPROCESSOR(self, t):
+        r'\#.*'
+        pass
+
+    def t_COMMENT(self, t):
+        r'//.*'
+        pass
+
+    def t_MULTICOMMENT(self, t):
+        r'/\*[^*]*\*/'
+        pass
 
     def scan(self):
         return self.lexer.token()
