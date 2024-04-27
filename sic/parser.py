@@ -114,22 +114,36 @@ class Parser:
         p[0] = self.make_list(p[1], p[2])
 
     def p_declaration_specifiers_1(self, p):
-        """ declaration_specifiers : type_specifier """
+        """ declaration_specifiers : storage_class_specifier """
         p[0] = p[1]
 
     def p_declaration_specifiers_2(self, p):
-        """ declaration_specifiers : type_specifier declaration_specifiers"""
-        #p[0] = [p[1], p[2]]
+        """ declaration_specifiers : storage_class_specifier declaration_specifiers"""
         p[0] = self.make_list(p[1], p[2])
 
     def p_declaration_specifiers_3(self, p):
-        """ declaration_specifiers : type_qualifier """
+        """ declaration_specifiers : type_specifier """
         p[0] = p[1]
 
     def p_declaration_specifiers_4(self, p):
-        """ declaration_specifiers : type_qualifier declaration_specifiers"""
-        #p[0] = [p[1], p[2]]
+        """ declaration_specifiers : type_specifier declaration_specifiers"""
         p[0] = self.make_list(p[1], p[2])
+
+    def p_declaration_specifiers_5(self, p):
+        """ declaration_specifiers : type_qualifier """
+        p[0] = p[1]
+
+    def p_declaration_specifiers_6(self, p):
+        """ declaration_specifiers : type_qualifier declaration_specifiers"""
+        p[0] = self.make_list(p[1], p[2])
+
+    def p_storage_class_specifier(self, p):
+        """ storage_class_specifier : TYPEDEF
+                                    | EXTERN
+                                    | STATIC
+                                    | AUTO
+                                    | REGISTER"""
+        p[0] = AstNode(AstType.TYPE_STORAGE, p[1])
 
     def p_type_specifier(self, p):
         """ type_specifier : VOID
