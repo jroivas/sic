@@ -1,6 +1,6 @@
 from sic.token import TokenType, Token
 from sic.scan import Scan
-from sic.ast import AstType, AstNode, AstOpNode, AstPointer, AstIf, AstLoop
+from sic.ast import AstType, AstNode, AstOpNode, AstPointer, AstIf, AstLoop, AstStruct
 
 from ply import yacc
 
@@ -154,8 +154,61 @@ class Parser:
                            | FLOAT
                            | DOUBLE
                            | SIGNED
-                           | UNSIGNED"""
+                           | UNSIGNED
+                           | struct_or_union_specifier"""
         p[0] = AstNode(AstType.TYPE, p[1])
+
+    def p_struct_or_union_specifier_1(self, p):
+        """ struct_or_union_specifier : struct_or_union IDENTIFIER CURLY_OPEN struct_declaration_list CURLY_CLOSE"""
+        p[0] = AstStruct(p[1], p[2], p[4])
+
+    def p_struct_or_union_specifier_2(self, p):
+        """ struct_or_union_specifier : struct_or_union CURLY_OPEN struct_declaration_list CURLY_CLOSE"""
+        p[0] = AstStruct(p[1], None, p[3])
+
+    def p_struct_or_union_specifier_3(self, p):
+        """ struct_or_union_specifier : struct_or_union IDENTIFIER"""
+        p[0] = AstStruct(p[1], p[2], None)
+
+    def p_struct_or_union_1(self, p):
+        """ struct_or_union : STRUCT"""
+        p[0] = AstNode(AstType.STRUCT, p[1])
+
+    def p_struct_or_union_2(self, p):
+        """ struct_or_union : UNION"""
+        p[0] = AstNode(AstType.UNION, p[1])
+
+    def p_struct_declaration_list_1(self, p):
+        """ struct_declaration_list : struct_declaration"""
+        p[0] = p[1]
+
+    def p_struct_declaration_list_2(self, p):
+        """ struct_declaration_list : struct_declaration struct_declaration_list"""
+        p[0] = self.make_list(p[1], p[2])
+
+    def p_struct_declaration(self, p):
+        """ struct_declaration : specifier_qualifier_list struct_declarator_list SEMI"""
+        p[0] = self.make_list(p[1], p[2])
+
+    def p_struct_declarator_list_1(self, p):
+        """ struct_declarator_list : struct_declarator"""
+        p[0] = p[1]
+
+    def p_struct_declarator_list_2(self, p):
+        """ struct_declarator_list : struct_declarator_list COMMA struct_declarator"""
+        p[0] = self.make_list(p[1], p[3])
+
+    def p_struct_declarator_1(self, p):
+        """ struct_declarator : declarator"""
+        p[0] = p[1]
+
+    def p_struct_declarator_2(self, p):
+        """ struct_declarator : COLON constant_expression"""
+        p[0] = self.make_list(p[1], p[2])
+
+    def p_struct_declarator_3(self, p):
+        """ struct_declarator : declarator COLON constant_expression"""
+        p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_init_declarator_list_1(self, p):
         """ init_declarator_list : init_declarator"""
@@ -426,31 +479,31 @@ class Parser:
         """ iteration_statement : FOR ROUND_OPEN SEMI expression SEMI expression ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, p[4], p[8], None, p[6])
 
-    def p_iteration_statement_4(self, p):
+    def p_iteration_statement_5(self, p):
         """ iteration_statement : FOR ROUND_OPEN SEMI SEMI expression ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, None, p[7], None, p[5])
 
-    def p_iteration_statement_5(self, p):
+    def p_iteration_statement_6(self, p):
         """ iteration_statement : FOR ROUND_OPEN expression SEMI SEMI expression ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, None, p[8], p[3], p[6])
 
-    def p_iteration_statement_6(self, p):
+    def p_iteration_statement_7(self, p):
         """ iteration_statement : FOR ROUND_OPEN expression SEMI expression SEMI ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, p[5], p[8], p[3])
 
-    def p_iteration_statement_7(self, p):
+    def p_iteration_statement_8(self, p):
         """ iteration_statement : FOR ROUND_OPEN declaration expression SEMI expression ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, p[4], p[8], p[3], p[6])
 
-    def p_iteration_statement_8(self, p):
+    def p_iteration_statement_9(self, p):
         """ iteration_statement : FOR ROUND_OPEN declaration expression SEMI ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, p[4], p[7], p[3])
 
-    def p_iteration_statement_9(self, p):
+    def p_iteration_statement_10(self, p):
         """ iteration_statement : FOR ROUND_OPEN declaration SEMI expression ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, [], p[7], p[3], p[5])
 
-    def p_iteration_statement_10(self, p):
+    def p_iteration_statement_11(self, p):
         """ iteration_statement : FOR ROUND_OPEN declaration SEMI ROUND_CLOSE statement"""
         p[0] = AstLoop(AstType.FOR, [], p[7], p[3])
 

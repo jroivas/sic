@@ -47,6 +47,9 @@ class Scan:
         "FOR",
 
         "SIZEOF",
+
+        "STRUCT",
+        "UNION",
     ]
 
     keyword_map = {}

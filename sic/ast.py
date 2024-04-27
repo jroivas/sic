@@ -25,6 +25,8 @@ class AstType(Enum):
     FOR = 22
     SIZEOF = 23
     TYPE_STORAGE = 24
+    STRUCT = 25
+    UNION = 26
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -150,5 +152,25 @@ class AstLoop(AstNode):
             "init": self.obj_to_json(self.init),
             "post": self.obj_to_json(self.post),
             #"else": self.obj_to_json(self.elseblock)
+        }
+        return res
+
+class AstStruct(AstNode):
+    def __init__(self, union_struct, name, data):
+        tpe = AstType.STRUCT
+        super().__init__(tpe, [union_struct, name, data])
+        self.union_struct = union_struct
+        self.name = name
+        self.data = data
+
+    def __repr__(self):
+        return "AstStruct({} {})".format(self.union_struct, self.name)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "union_struct": self.obj_to_json(self.union_struct),
+            "name": self.name if self.name else "",
+            "data": self.obj_to_json(self.data),
         }
         return res
