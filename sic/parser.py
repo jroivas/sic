@@ -1,6 +1,6 @@
 from sic.token import TokenType, Token
 from sic.scan import Scan
-from sic.ast import AstType, AstNode, AstOpNode, AstPointer, AstIf, AstLoop, AstStruct
+from sic.ast import AstType, AstNode, AstOpNode, AstPointer, AstIf, AstLoop, AstStruct, AstEnum
 
 from ply import yacc
 
@@ -34,11 +34,13 @@ class Parser:
     def make_list(self, *items):
         if not items:
             return []
+        #print("LL0", type(items))
         if type(items) == tuple:
-            return list(items)
+            items = list(items)
         if type(items) != list:
             return [items]
 
+        #print("LL1", items)
         if type(items[0]) == list:
             base = items[0]
         else:
@@ -49,6 +51,7 @@ class Parser:
                 base += i
             else:
                 base.append(i)
+        #print("LL2", base)
         return base
 
     def p_empty(self, p):
@@ -155,8 +158,37 @@ class Parser:
                            | DOUBLE
                            | SIGNED
                            | UNSIGNED
-                           | struct_or_union_specifier"""
+                           | struct_or_union_specifier
+                           | enum_specifier"""
         p[0] = AstNode(AstType.TYPE, p[1])
+
+    def p_enum_specifier_1(self, p):
+        """ enum_specifier : ENUM CURLY_OPEN enumerator_list CURLY_CLOSE """
+        p[0] = AstEnum(None, p[3])
+
+    def p_enum_specifier_2(self, p):
+        """ enum_specifier : ENUM IDENTIFIER CURLY_OPEN enumerator_list CURLY_CLOSE """
+        p[0] = AstEnum(p[1], p[4])
+
+    def p_enum_specifier_3(self, p):
+        """ enum_specifier : ENUM IDENTIFIER"""
+        p[0] = AstEnum(p[1], None)
+
+    def p_enumerator_list_1(self, p):
+        """ enumerator_list : enumerator"""
+        p[0] = p[1]
+
+    def p_enumerator_list_2(self, p):
+        """ enumerator_list : enumerator_list COMMA enumerator"""
+        p[0] = self.make_list(p[1], p[3])
+
+    def p_enumerator_1(self, p):
+        """ enumerator : IDENTIFIER"""
+        p[0] = p[1]
+
+    def p_enumerator_2(self, p):
+        """ enumerator : IDENTIFIER EQ constant_expression """
+        p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_struct_or_union_specifier_1(self, p):
         """ struct_or_union_specifier : struct_or_union IDENTIFIER CURLY_OPEN struct_declaration_list CURLY_CLOSE"""

@@ -50,6 +50,7 @@ class Scan:
 
         "STRUCT",
         "UNION",
+        "ENUM",
     ]
 
     keyword_map = {}

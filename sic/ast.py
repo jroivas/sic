@@ -27,6 +27,7 @@ class AstType(Enum):
     TYPE_STORAGE = 24
     STRUCT = 25
     UNION = 26
+    ENUM = 27
 
 class AstNode(object):
     def __init__(self, nodetype, value):
@@ -170,6 +171,23 @@ class AstStruct(AstNode):
         res = {
             "type": "{}".format(self.nodetype),
             "union_struct": self.obj_to_json(self.union_struct),
+            "name": self.name if self.name else "",
+            "data": self.obj_to_json(self.data),
+        }
+        return res
+
+class AstEnum(AstNode):
+    def __init__(self, name, data):
+        super().__init__(AstType.ENUM, [name, data])
+        self.name = name
+        self.data = data
+
+    def __repr__(self):
+        return "AstEnum({} {})".format(self.name, self.data)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
             "name": self.name if self.name else "",
             "data": self.obj_to_json(self.data),
         }
