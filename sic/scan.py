@@ -107,6 +107,7 @@ class Scan:
         "MOD_EQ",
         "RIGHT_EQ",
         "PREPROCESSOR",
+        "CONSTANT_CHAR",
     ]
     t_PLUS = r"\+"
     t_MINUS = r"-"
@@ -154,6 +155,7 @@ class Scan:
     t_MOD_EQ = r"%="
     t_LEFT_EQ = r"<<="
     t_RIGHT_EQ = r">>="
+    t_CONSTANT_CHAR = r"'[^\']+'"
 
     t_ignore = " \t\r\f"
 

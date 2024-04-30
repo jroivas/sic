@@ -425,10 +425,6 @@ class Parser:
         """statement_list : statement_list statement"""
         p[0] = self.make_list(p[1], p[2])
 
-    def rem_p_statement_list_2(self, p):
-        """statement_list : statement_list declaration"""
-        p[0] = self.make_list(p[1], p[2])
-
     def p_declaration_list_1(self, p):
         """declaration_list : declaration"""
         p[0] = self.make_list(p[1])
@@ -833,7 +829,7 @@ class Parser:
         p[0] = AstNode(AstType.INT_LIT, p[1])
 
     def p_primary_expression_3(self, p):
-        """primary_expression : STR_LIT"""
+        """primary_expression : string_literals"""
         p[0] = AstNode(AstType.STR_LIT, p[1])
 
     def p_primary_expression_4(self, p):
@@ -843,3 +839,55 @@ class Parser:
     def p_primary_expression_5(self, p):
         """primary_expression : ROUND_OPEN expression ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2], p[3])
+
+    def p_primary_expression_6(self, p):
+        """primary_expression : CONSTANT_CHAR"""
+        res = None
+        if type(p[1]) == str and len(p[1]) >= 3 and p[1][0] == "'":
+            tmp = p[1][1:-1]
+            if tmp:
+                if len(tmp) == 1:
+                    res = ord(tmp)
+                elif len(tmp) == 2 and tmp[0] == '\\':
+                    if tmp[1] == 'n':
+                        res = ord("\n")
+                    elif tmp[1] == 'r':
+                        res = ord("\r")
+                    elif tmp[1] == 't':
+                        res = ord("\t")
+                    elif tmp[1] == '0':
+                        res = 0
+                    elif tmp[1] == '\\':
+                        res = ord("\\")
+                    elif tmp[1] == 'a':
+                        res = ord("\a")
+                    elif tmp[1] == 'b':
+                        res = ord("\b")
+                    elif tmp[1] == 'f':
+                        res = ord("\f")
+                    elif tmp[1] == 'v':
+                        res = ord("\v")
+                    elif tmp[1] == '\'':
+                        res = ord("'")
+                    elif tmp[1] == "\"":
+                        res = ord("\"")
+
+        if res is None:
+            raise ValueError("Invalid char: {}".format(p[1]))
+        p[0] = AstNode(AstType.INT_LIT, str(res))
+
+    def p_string_literals_1(self, p):
+        """string_literals : STR_LIT"""
+        p[0] = AstNode(AstType.STR_LIT, p[1])
+
+    def p_string_literals_2(self, p):
+        """string_literals : string_literals STR_LIT"""
+        if type(p[1]) == AstNode and p[1].nodetype == AstType.STR_LIT and type(p[2]) == str:
+            v2 = p[1].value
+            if v2 and v2[-1] == "\"" and p[2] and p[2][-1] == "\"":
+                p[1].value = v2[:-1] + p[2][1:]
+            else:
+                p[1].value += p[2]
+            p[0] = p[1]
+        else:
+            p[0] = AstNode(AstType.STR_LIT, p[1] + p[2])
