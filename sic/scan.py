@@ -3,6 +3,7 @@ from sic.errors import EOFError, SyntaxError, ParserError
 
 from ply import lex
 
+
 class Scan:
     def __init__(self, fname=""):
         self.fname = fname
@@ -23,21 +24,17 @@ class Scan:
         "DOUBLE",
         "SIGNED",
         "UNSIGNED",
-
         "GOTO",
         "CONTINUE",
         "BREAK",
         "RETURN",
-
         "TYPEDEF",
         "EXTERN",
         "STATIC",
         "AUTO",
         "REGISTER",
-
         "CONST",
         "VOLATILE",
-
         "IF",
         "ELSE",
         "SWITCH",
@@ -45,9 +42,7 @@ class Scan:
         "WHILE",
         "DO",
         "FOR",
-
         "SIZEOF",
-
         "STRUCT",
         "UNION",
         "ENUM",
@@ -58,116 +53,116 @@ class Scan:
         keyword_map[kw.lower()] = kw
 
     tokens = keywords + [
-        'PLUS',
-        'PLUSPLUS',
-        'MINUS',
-        'MINUSMINUS',
-        'SEMI',
-        'INT_LIT',
-        'FRAC_LIT',
-        'DOT',
-        'IDENTIFIER',
-        'ELLIPSIS',
-        'STAR',
-        'SLASH',
-        'COMMENT',
-        'MULTICOMMENT',
-        'MOD',
-        'XOR',
-        'COMMA',
-        'ROUND_OPEN',
-        'ROUND_CLOSE',
-        'CURLY_OPEN',
-        'CURLY_CLOSE',
-        'SQUARE_OPEN',
-        'SQUARE_CLOSE',
-        'TILDE',
-        'COLON',
-        'PTR_OP',
-        'AMP',
-        'LOG_AND',
-        'EQ',
-        'EQ_EQ',
-        'NOT',
-        'EQ_NE',
-        'LT',
-        'LE',
-        'SH_LEFT',
-        'GT',
-        'GE',
-        'SH_RIGHT',
-        'OR',
-        'LOG_OR',
-        'QUESTION',
-        'STR_LIT',
-        'PREPROCESS',
-        'PLUS_EQ',
-        'MINUS_EQ',
-        'AND_EQ',
-        'OR_EQ',
-        'XOR_EQ',
-        'MUL_EQ',
-        'DIV_EQ',
-        'LEFT_EQ',
-        'MOD_EQ',
-        'RIGHT_EQ',
-        'PREPROCESSOR',
+        "PLUS",
+        "PLUSPLUS",
+        "MINUS",
+        "MINUSMINUS",
+        "SEMI",
+        "INT_LIT",
+        "FRAC_LIT",
+        "DOT",
+        "IDENTIFIER",
+        "ELLIPSIS",
+        "STAR",
+        "SLASH",
+        "COMMENT",
+        "MULTICOMMENT",
+        "MOD",
+        "XOR",
+        "COMMA",
+        "ROUND_OPEN",
+        "ROUND_CLOSE",
+        "CURLY_OPEN",
+        "CURLY_CLOSE",
+        "SQUARE_OPEN",
+        "SQUARE_CLOSE",
+        "TILDE",
+        "COLON",
+        "PTR_OP",
+        "AMP",
+        "LOG_AND",
+        "EQ",
+        "EQ_EQ",
+        "NOT",
+        "EQ_NE",
+        "LT",
+        "LE",
+        "SH_LEFT",
+        "GT",
+        "GE",
+        "SH_RIGHT",
+        "OR",
+        "LOG_OR",
+        "QUESTION",
+        "STR_LIT",
+        "PREPROCESS",
+        "PLUS_EQ",
+        "MINUS_EQ",
+        "AND_EQ",
+        "OR_EQ",
+        "XOR_EQ",
+        "MUL_EQ",
+        "DIV_EQ",
+        "LEFT_EQ",
+        "MOD_EQ",
+        "RIGHT_EQ",
+        "PREPROCESSOR",
     ]
-    t_PLUS = r'\+'
-    t_MINUS = r'-'
-    t_PLUSPLUS = r'\+\+'
-    t_MINUSMINUS = r'--'
-    t_SEMI = r';'
-    t_DOT = r'\.'
-    t_STAR = r'\*'
-    t_ELLIPSIS = r'\.\.\.'
-    t_SLASH = r'/'
-    t_MOD = r'%'
-    t_XOR = r'\^'
-    t_COMMA = r'\,'
-    t_ROUND_OPEN = r'\('
-    t_ROUND_CLOSE = r'\)'
-    t_CURLY_OPEN = r'\{'
-    t_CURLY_CLOSE = r'\}'
-    t_SQUARE_OPEN = r'\['
-    t_SQUARE_CLOSE = r'\]'
-    t_TILDE = r'\~'
-    t_COLON = r':'
-    t_PTR_OP = r'->'
-    t_AMP = r'\&'
-    t_LOG_AND = r'\&\&'
-    t_EQ = r'='
-    t_EQ_EQ = r'=='
-    t_NOT = r'!'
-    t_EQ_NE = r'!='
-    t_SH_LEFT = r'<<'
-    t_SH_RIGHT = r'>>'
-    t_LT = r'<'
-    t_LE = r'<='
-    t_GT = r'>'
-    t_GE = r'>='
-    t_OR = r'\|'
-    t_LOG_OR = r'\|\|'
-    t_QUESTION = r'\?'
-    t_PLUS_EQ = r'\+='
-    t_MINUS_EQ = r'-='
-    t_AND_EQ = r'\&='
-    t_OR_EQ = r'\|='
-    t_XOR_EQ = r'\^='
-    t_MUL_EQ = r'\*='
-    t_DIV_EQ = r'/='
-    t_MOD_EQ = r'%='
-    t_LEFT_EQ = r'<<='
-    t_RIGHT_EQ = r'>>='
+    t_PLUS = r"\+"
+    t_MINUS = r"-"
+    t_PLUSPLUS = r"\+\+"
+    t_MINUSMINUS = r"--"
+    t_SEMI = r";"
+    t_DOT = r"\."
+    t_STAR = r"\*"
+    t_ELLIPSIS = r"\.\.\."
+    t_SLASH = r"/"
+    t_MOD = r"%"
+    t_XOR = r"\^"
+    t_COMMA = r"\,"
+    t_ROUND_OPEN = r"\("
+    t_ROUND_CLOSE = r"\)"
+    t_CURLY_OPEN = r"\{"
+    t_CURLY_CLOSE = r"\}"
+    t_SQUARE_OPEN = r"\["
+    t_SQUARE_CLOSE = r"\]"
+    t_TILDE = r"\~"
+    t_COLON = r":"
+    t_PTR_OP = r"->"
+    t_AMP = r"\&"
+    t_LOG_AND = r"\&\&"
+    t_EQ = r"="
+    t_EQ_EQ = r"=="
+    t_NOT = r"!"
+    t_EQ_NE = r"!="
+    t_SH_LEFT = r"<<"
+    t_SH_RIGHT = r">>"
+    t_LT = r"<"
+    t_LE = r"<="
+    t_GT = r">"
+    t_GE = r">="
+    t_OR = r"\|"
+    t_LOG_OR = r"\|\|"
+    t_QUESTION = r"\?"
+    t_PLUS_EQ = r"\+="
+    t_MINUS_EQ = r"-="
+    t_AND_EQ = r"\&="
+    t_OR_EQ = r"\|="
+    t_XOR_EQ = r"\^="
+    t_MUL_EQ = r"\*="
+    t_DIV_EQ = r"/="
+    t_MOD_EQ = r"%="
+    t_LEFT_EQ = r"<<="
+    t_RIGHT_EQ = r">>="
 
     t_ignore = " \t\r\f"
 
     escape_sequence_start_in_string = r"""(\\[0-9a-zA-Z._~!=&\^\-\\?'"])"""
-    string_char = r"""([^"\\\n]|"""+escape_sequence_start_in_string+')'
-    t_STR_LIT = '"'+ string_char+ '*"'
+    string_char = r"""([^"\\\n]|""" + escape_sequence_start_in_string + ")"
+    t_STR_LIT = '"' + string_char + '*"'
 
     def t_newline(self, t):
-        r'\n+'
+        r"\n+"
         t.lexer.lineno += len(t.value)
 
     def t_error(self, t):
@@ -176,36 +171,37 @@ class Scan:
         t.lexer.skip(1)
 
     def t_FRAC_LIT(self, t):
-        r'(\d*\.\d+)|(\d+\.)'
-        #print("FL", t.value)
-        #t.value = float(t.value)
+        r"(\d*\.\d+)|(\d+\.)"
+        # print("FL", t.value)
+        # t.value = float(t.value)
         return t
 
     def t_INT_LIT(self, t):
-        r'(0[xX][0-9a-fA-F]+)|(\d+)'
-        #t.value = int(t.value)
+        r"(0[xX][0-9a-fA-F]+)|(\d+)"
+        # t.value = int(t.value)
         return t
 
     def t_IDENTIFIER(self, t):
-        r'[a-zA-Z_][0-9a-zA-Z_]*'
+        r"[a-zA-Z_][0-9a-zA-Z_]*"
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
-        #print("IDENTIFIER", t.value, t.type)
+        # print("IDENTIFIER", t.value, t.type)
         return t
 
     def t_PREPROCESSOR(self, t):
-        r'\#.*'
+        r"\#.*"
         pass
 
     def t_COMMENT(self, t):
-        r'//.*'
+        r"//.*"
         pass
 
     def t_MULTICOMMENT(self, t):
-        r'/\*[^*]*\*/'
+        r"/\*[^*]*\*/"
         pass
 
     def scan(self):
         return self.lexer.token()
+
 
 class oldScan:
     numbers = "0123456789abcdef"

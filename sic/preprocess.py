@@ -3,6 +3,7 @@
 import os
 import subprocess
 
+
 class Op:
     def __init__(self, op):
         self.op = op
@@ -10,12 +11,14 @@ class Op:
     def __repr__(self):
         return "{}".format(self.op)
 
+
 class Num:
     def __init__(self, num):
         self.num = num
 
     def __repr__(self):
         return "{}".format(self.num)
+
 
 class Macro:
     def __init__(self, name, params, body):
@@ -25,6 +28,7 @@ class Macro:
 
     def __repr__(self):
         return "{}({}) = {}".format(self.name, self.params, self.body)
+
 
 class SicPreprocessor:
     def __init__(self, fname, data="", debug=False):
@@ -82,13 +86,19 @@ class SicPreprocessor:
                 res.append(data[i])
             elif data[i] == "defined":
                 if i + 1 >= len_data:
-                    raise ValueError("Invalid preprocessor directive: defined without param")
+                    raise ValueError(
+                        "Invalid preprocessor directive: defined without param"
+                    )
                 parm = data[i + 1]
 
                 if type(parm) == tuple:
                     parm = list(parm)
                 if type(parm) != list:
-                    raise ValueError("Invalid preprocessor directive: defined with invalid param: {}".format(parm))
+                    raise ValueError(
+                        "Invalid preprocessor directive: defined with invalid param: {}".format(
+                            parm
+                        )
+                    )
                 if len(parm) == 1:
                     d = self.defines.get(parm[0], None)
                     if d is None:
@@ -101,7 +111,7 @@ class SicPreprocessor:
             else:
                 d = self.defines.get(data[i], "False")
                 res.append(d)
-                #res.append(data[i])
+                # res.append(data[i])
 
             i += 1
         return res
@@ -134,7 +144,7 @@ class SicPreprocessor:
         len_cond = len(cond)
         stack = []
         curstack = []
-        #res = []
+        # res = []
         num = ""
         val = ""
         while i < len_cond:
@@ -147,9 +157,9 @@ class SicPreprocessor:
                 curstack.append(Num(num))
                 num = ""
 
-            if cond[i] == ' ':
+            if cond[i] == " ":
                 curstack, val = self.applyval(curstack, val)
-            elif cond[i] == '(':
+            elif cond[i] == "(":
                 curstack, val = self.applyval(curstack, val)
                 stack.append(curstack)
                 curstack = []
@@ -182,7 +192,9 @@ class SicPreprocessor:
                 if i + 1 >= len_cond:
                     raise ValueError("Invalid preprocessor directive: |")
                 if cond[i + 1] != "|":
-                    raise ValueError("Invalid preprocessor directive: |{}".format(cond[i + 1]))
+                    raise ValueError(
+                        "Invalid preprocessor directive: |{}".format(cond[i + 1])
+                    )
                 curstack.append(Op("or"))
                 i += 1
             elif cond[i] == "&":
@@ -190,7 +202,9 @@ class SicPreprocessor:
                 if i + 1 >= len_cond:
                     raise ValueError("Invalid preprocessor directive: &")
                 if cond[i + 1] != "&":
-                    raise ValueError("Invalid preprocessor directive: &{}".format(cond[i + 1]))
+                    raise ValueError(
+                        "Invalid preprocessor directive: &{}".format(cond[i + 1])
+                    )
                 curstack.append(Op("and"))
                 i += 1
             else:
@@ -221,7 +235,7 @@ class SicPreprocessor:
         databak = self.data
         with open(fname, "r") as fd:
             newdata = fd.read()
-        self.data = databak[:self.idx] + newdata + databak[self.idx:]
+        self.data = databak[: self.idx] + newdata + databak[self.idx :]
         self.datalen = len(self.data)
 
     def include_file(self, incfile, local):
@@ -253,8 +267,8 @@ class SicPreprocessor:
         if inc[0] == "<":
             if inc[-1] != ">":
                 raise ValueError("Invalid include: {}".format(inc))
-        elif inc[0] == "\"":
-            if inc[-1] != "\"":
+        elif inc[0] == '"':
+            if inc[-1] != '"':
                 raise ValueError("Invalid include: {}".format(inc))
             local = True
         else:
@@ -271,7 +285,7 @@ class SicPreprocessor:
         tmp = ""
         is_macro = False
         for k in define:
-            #print(stack, key, params, tmp, k)
+            # print(stack, key, params, tmp, k)
             if not stack and k == " ":
                 break
             if k == "(":
@@ -293,22 +307,21 @@ class SicPreprocessor:
             if tmp:
                 raise ValueError("ERR tmp", tmp)
             rpos = len(key) + len(params) + 2
-            body = define[rpos + 1:]
+            body = define[rpos + 1 :]
             self.macros[key.lower()] = Macro(key, params, body)
-            #print("KEY : |{}|".format(key))
-            #print("PARM: |{}|".format(params))
-            #print("BODY: |{}|".format(body))
+            # print("KEY : |{}|".format(key))
+            # print("PARM: |{}|".format(params))
+            # print("BODY: |{}|".format(body))
         else:
             key = tmp
             rpos = len(key)
-            body = define[rpos + 1:]
-            #print("KEY : |{}|".format(key))
-            #print("BODY: |{}|".format(body))
+            body = define[rpos + 1 :]
+            # print("KEY : |{}|".format(key))
+            # print("BODY: |{}|".format(body))
             if body:
                 self.define(tmp, body)
             else:
                 self.define(tmp)
-
 
     def handle_directive(self, directive):
         directive = directive.strip()
@@ -326,8 +339,8 @@ class SicPreprocessor:
             if len(parts[1:]) != 1:
                 raise ValueError("Invalid undef: {}".format(directive))
             self.undef(parts[1])
-            #print("UNDEF", parts[1])
-            #cond = self.evaluate(" ".join(parts[1:]))
+            # print("UNDEF", parts[1])
+            # cond = self.evaluate(" ".join(parts[1:]))
         elif parts[0].lower() == "ifndef":
             cond = self.evaluate(self.getdefine(parts[1]))
             self.ignore.append(cond)
@@ -357,7 +370,7 @@ class SicPreprocessor:
             c = self.next()
             if c is None:
                 break
-            if c == ' ' or c == '\t':
+            if c == " " or c == "\t":
                 self.processed += c
                 continue
             if linestart and c == "#":
@@ -365,13 +378,13 @@ class SicPreprocessor:
                 c = self.next()
                 slash = False
                 in_comment = False
-                while c != '\n':
+                while c != "\n":
                     if c == "/":
                         c2 = self.peek()
                         if c2 == "*":
                             c = self.next()
                             c2 = self.peek()
-                            while c != '*' or c2 != "/":
+                            while c != "*" or c2 != "/":
                                 c = self.next()
                                 c2 = self.peek()
                                 if c is None or c2 is None:
@@ -414,7 +427,7 @@ class SicPreprocessor:
                     # Multiline comment like /* */
                     c = self.next()
                     c2 = self.peek()
-                    while c != '*' or c2 != "/":
+                    while c != "*" or c2 != "/":
                         c = self.next()
                         c2 = self.peek()
                         if c is None or c2 is None:
@@ -433,13 +446,14 @@ class SicPreprocessor:
                     self.processed += c
             else:
                 self.processed += c
-            if c == '\n':
+            if c == "\n":
                 linestart = True
 
         return self.processed
 
     def get(self):
         return self.processed
+
 
 class WrapPreprocessor:
     def __init__(self, cpp, fname, data="", debug=False):
@@ -471,11 +485,14 @@ class WrapPreprocessor:
                 else:
                     cmd.append("-D{}={}".format(d, v))
             cmd.append(self.fname)
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
             out, err = process.communicate()
-            return out.decode('utf-8')
+            return out.decode("utf-8")
         else:
             raise ValueError("fff")
+
 
 class Preprocess:
     def __init__(self, fname, data="", debug=False, cpp=None):
@@ -510,29 +527,31 @@ def apply_defines(pre, defines):
 
     for d in defines:
         d = d.strip()
-        if '=' in d:
+        if "=" in d:
             spl = d.split("=", 2)
             pre.define(*spl)
         else:
             pre.define(d)
+
 
 def apply_default_inc_dirs(pre):
     incdef = [
         "/usr/lib/gcc/x86_64-linux-gnu/13/include",
         "/usr/local/include",
         "/usr/include/x86_64-linux-gnu",
-        "/usr/include"
+        "/usr/include",
     ]
     apply_inc_dirs(pre, incdef)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     import argparse
     import sys
 
     parser = argparse.ArgumentParser(prog="sicpp")
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
-    parser.add_argument("-d", "--debug", action='store_true')
+    parser.add_argument("-d", "--debug", action="store_true")
     parser.add_argument("--cpp")
     parser.add_argument("filename")
 
