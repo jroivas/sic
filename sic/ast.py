@@ -29,6 +29,13 @@ class AstType(Enum):
     STRUCT = 25
     UNION = 26
     ENUM = 27
+    GOTO = 28
+    BREAK = 29
+    CONTINUE = 30
+    LABEL = 31
+    CASE = 32
+    OP_PRE = 33
+    OP_POST = 34
 
 
 class AstNode(object):
@@ -65,6 +72,8 @@ class AstNode(object):
         return res
 
     def obj_to_json(self, val):
+        #if val is None:
+        #    return None
         if isinstance(val, AstNode):
             val = val.to_json()
         elif type(val) == list or type(val) == tuple:
@@ -90,6 +99,28 @@ class AstOpNode(AstNode):
                 "left": self.obj_to_json(self.left),
                 "right": self.obj_to_json(self.right),
             },
+        }
+        return res
+
+class AstPrePostOp(AstNode):
+    def __init__(self, optype, val, pre=False):
+        self.op = optype
+        self.val = val
+        self.pre = pre
+        super().__init__(AstType.OP_PRE if pre else AstType.OP_POST, [optype, val])
+
+    def __repr__(self):
+        if self.pre:
+            return "AstPreOp({} {}) ".format(self.op, self.val)
+        else:
+            return "AstPostOp({} {})".format(self.val, self.op)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "op": self.op,
+            "value": self.obj_to_json(self.val),
+            "pre": self.pre,
         }
         return res
 
@@ -196,5 +227,46 @@ class AstEnum(AstNode):
             "type": "{}".format(self.nodetype),
             "name": self.name if self.name else "",
             "data": self.obj_to_json(self.data),
+        }
+        return res
+
+class AstGoto(AstNode):
+    def __init__(self, gtype, target=None):
+        self.target = target
+        super().__init__(gtype, target)
+
+    def __repr__(self):
+        return "AstGoto({} {})".format(self.nodetype, self.target)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "target": self.obj_to_json(self.target),
+        }
+        return res
+
+class AstLabel(AstNode):
+    def __init__(self, name, value=None, case=False):
+        self.name = name
+        self.value = value
+        tt = AstType.LABEL
+        if case:
+            tt = AstType.CASE
+        if value:
+            super().__init__(tt, name)
+        else:
+            super().__init__(tt, [name, value])
+
+    def __repr__(self):
+        if self.nodetype == AstType.CASE:
+            return "AstCase({} {})".format(self.name, self.value)
+        else:
+            return "AstLabel({} {})".format(self.name, self.value)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "name": "{}".format(self.name),
+            "value": self.obj_to_json(self.value),
         }
         return res

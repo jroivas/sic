@@ -9,6 +9,9 @@ from sic.ast import (
     AstLoop,
     AstStruct,
     AstEnum,
+    AstGoto,
+    AstLabel,
+    AstPrePostOp,
 )
 
 from ply import yacc
@@ -46,6 +49,7 @@ class Parser:
 
         # print("LL1", items)
         if type(items[0]) == list:
+            #base = [items[0]]
             base = items[0]
         else:
             base = [items[0]]
@@ -311,15 +315,17 @@ class Parser:
 
     def p_parameter_type_list_2(self, p):
         """parameter_type_list : parameter_list COMMA ELLIPSIS"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_list(p[1], p[3])
 
     def p_parameter_list_1(self, p):
         """parameter_list : parameter_declaration"""
-        p[0] = self.make_list(p[1])
+        #p[0] = self.make_list(p[1])
+        p[0] = [p[1]]
 
     def p_parameter_list_2(self, p):
         """parameter_list : parameter_list COMMA parameter_declaration"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_list(p[1], [p[3]])
+        #p[0] = [p[1], p[3]]
 
     def p_parameter_declaration_1(self, p):
         """parameter_declaration : declaration_specifiers declarator"""
@@ -433,9 +439,9 @@ class Parser:
         """declaration_list : declaration_list declaration"""
         p[0] = self.make_list(p[1], p[2])
 
-    # def p_statement_1(self, p):
-    #    """ statement : labeled_statement """
-    #    p[0] = p[1]
+    def p_statement_1(self, p):
+        """ statement : labeled_statement """
+        p[0] = p[1]
 
     def p_statement_2(self, p):
         """statement : compound_statement"""
@@ -456,6 +462,18 @@ class Parser:
     def p_statement_6(self, p):
         """statement : jump_statement"""
         p[0] = p[1]
+
+    def p_labeled_statement_1(self, p):
+        """labeled_statement : IDENTIFIER COLON statement"""
+        p[0] = AstLabel(p[1], p[3])
+
+    def p_labeled_statement_2(self, p):
+        """labeled_statement : CASE IDENTIFIER COLON statement"""
+        p[0] = AstLabel(p[2], p[4], case=True)
+
+    def p_labeled_statement_3(self, p):
+        """labeled_statement : DEFAULT COLON statement"""
+        p[0] = AstLabel("default", p[3], case=True)
 
     def p_iteration_statement_1(self, p):
         """iteration_statement : WHILE ROUND_OPEN expression ROUND_CLOSE statement"""
@@ -499,7 +517,11 @@ class Parser:
 
     def p_iteration_statement_11(self, p):
         """iteration_statement : FOR ROUND_OPEN declaration SEMI ROUND_CLOSE statement"""
-        p[0] = AstLoop(AstType.FOR, [], p[7], p[3])
+        p[0] = AstLoop(AstType.FOR, [], p[6], p[3])
+
+    def p_iteration_statement_12(self, p):
+        """iteration_statement : FOR ROUND_OPEN SEMI SEMI ROUND_CLOSE statement"""
+        p[0] = AstLoop(AstType.FOR, [], p[6])
 
     def p_selection_statement_1(self, p):
         """selection_statement : IF ROUND_OPEN expression ROUND_CLOSE statement"""
@@ -510,10 +532,22 @@ class Parser:
         p[0] = AstIf(p[3], p[5], p[7])
 
     def p_jump_statement_1(self, p):
+        """jump_statement : GOTO IDENTIFIER SEMI"""
+        p[0] = AstGoto(AstType.GOTO, p[2])
+
+    def p_jump_statement_2(self, p):
+        """jump_statement : CONTINUE SEMI"""
+        p[0] = AstGoto(AstType.CONTINUE, None)
+
+    def p_jump_statement_3(self, p):
+        """jump_statement : BREAK SEMI"""
+        p[0] = AstGoto(AstType.BREAK, None)
+
+    def p_jump_statement_4(self, p):
         """jump_statement : RETURN SEMI"""
         p[0] = AstNode(AstType.KEYWORD, p[1])
 
-    def p_jump_statement_2(self, p):
+    def p_jump_statement_5(self, p):
         """jump_statement : RETURN expression SEMI"""
         p[0] = AstNode(AstType.KEYWORD, [p[1], p[2]])
 
@@ -752,11 +786,11 @@ class Parser:
 
     def p_unary_expression_2(self, p):
         """unary_expression : PLUSPLUS unary_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = AstPrePostOp(p[1], p[2], pre=True)
 
     def p_unary_expression_3(self, p):
         """unary_expression : MINUSMINUS unary_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = AstPrePostOp(p[1], p[2], pre=True)
 
     def p_unary_expression_4(self, p):
         """unary_expression : unary_operator cast_expression"""
@@ -786,7 +820,7 @@ class Parser:
 
     def p_argument_expression_list_2(self, p):
         """argument_expression_list : argument_expression_list COMMA assignment_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_list(p[1], p[3])
 
     def p_postfix_expression_1(self, p):
         """postfix_expression : primary_expression"""
@@ -814,11 +848,11 @@ class Parser:
 
     def p_postfix_expression_7(self, p):
         """postfix_expression : postfix_expression PLUSPLUS"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = AstPrePostOp(p[2], p[1], pre=False)
 
     def p_postfix_expression_8(self, p):
         """postfix_expression : postfix_expression MINUSMINUS"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = AstPrePostOp(p[2], p[1], pre=False)
 
     def p_primary_expression_1(self, p):
         """primary_expression : FRAC_LIT"""
@@ -876,9 +910,46 @@ class Parser:
             raise ValueError("Invalid char: {}".format(p[1]))
         p[0] = AstNode(AstType.INT_LIT, str(res))
 
+    def handle_escapes(self, s):
+        res = ""
+        in_escape = False
+        for c in s:
+            if in_escape:
+                if c == 'n':
+                    res += "\n"
+                elif c == 'r':
+                    res += "\r"
+                elif c == 't':
+                    res += "\t"
+                elif c == '0':
+                    res += '\0'
+                elif c == '\\':
+                    res += "\\"
+                elif c == 'a':
+                    res += "\a"
+                elif c == 'b':
+                    res += "\b"
+                elif c == 'f':
+                    res += "\f"
+                elif c == 'v':
+                    res += "\v"
+                elif c == '\'':
+                    res += "'"
+                elif c == "\"":
+                    res += "\""
+                else:
+                    res += "\\" + c
+                in_escape = False
+            elif c == "\\":
+                in_escape = True
+            else:
+                in_escape = False
+                res += c
+        return res
+
     def p_string_literals_1(self, p):
         """string_literals : STR_LIT"""
-        p[0] = AstNode(AstType.STR_LIT, p[1])
+        p[0] = AstNode(AstType.STR_LIT, self.handle_escapes(p[1][1:-1]))
 
     def p_string_literals_2(self, p):
         """string_literals : string_literals STR_LIT"""
