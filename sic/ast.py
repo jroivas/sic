@@ -72,7 +72,7 @@ class AstNode(object):
         return res
 
     def obj_to_json(self, val):
-        #if val is None:
+        # if val is None:
         #    return None
         if isinstance(val, AstNode):
             val = val.to_json()
@@ -101,6 +101,7 @@ class AstOpNode(AstNode):
             },
         }
         return res
+
 
 class AstPrePostOp(AstNode):
     def __init__(self, optype, val, pre=False):
@@ -230,6 +231,7 @@ class AstEnum(AstNode):
         }
         return res
 
+
 class AstGoto(AstNode):
     def __init__(self, gtype, target=None):
         self.target = target
@@ -244,6 +246,7 @@ class AstGoto(AstNode):
             "target": self.obj_to_json(self.target),
         }
         return res
+
 
 class AstLabel(AstNode):
     def __init__(self, name, value=None, case=False):

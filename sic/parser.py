@@ -39,6 +39,18 @@ class Parser:
         return self.yacc.parse(input=data, lexer=self.scanner.lexer, debug=self.debug)
 
     def make_list(self, *items):
+        """
+        >>> s = Scan()
+        >>> p = Parser(s)
+        >>> p.make_list(4)
+        [4]
+        >>> p.make_list(4, 8)
+        [4, 8]
+        >>> p.make_list({"a": 4, "b": 5}, 8)
+        [{'a': 4, 'b': 5}, 8]
+        >>> p.make_list({"a": 4, "b": 5}, {"c": 8})
+        [{'a': 4, 'b': 5}, {'c': 8}]
+        """
         if not items:
             return []
         # print("LL0", type(items))
@@ -120,8 +132,64 @@ class Parser:
         """declaration : declaration_specifiers SEMI"""
         p[0] = p[1]
 
+    def has_typedef(self, ast):
+        if not ast:
+            return False
+
+        lst = []
+        if type(ast) == list:
+            lst = ast
+        elif isinstance(ast, AstNode):
+            if ast.nodetype == AstType.TYPE_STORAGE and ast.value == "typedef":
+                return True
+            else:
+                lst = ast.value
+                if isinstance(lst, AstNode):
+                    lst = [lst.value]
+        else:
+            return None
+
+        for ch in lst:
+            if isinstance(ch, AstNode):
+                if self.has_typedef(ch):
+                    return True
+
+        return False
+
+    def resolve_value(self, ast):
+        if not ast:
+            return None
+
+        #print("AST", ast)
+        lst = []
+        if type(ast) == list:
+            lst = ast
+        elif isinstance(ast, AstNode):
+            if ast.nodetype == AstType.IDENTIFIER:
+                return ast.value
+            else:
+                lst = ast.value
+        else:
+            return None
+
+        for ch in lst:
+            if isinstance(ch, AstNode):
+                tmp = self.resolve_value(ch)
+                if tmp is not None:
+                    return tmp
+
+        return None
+
     def p_declaration_2(self, p):
         """declaration : declaration_specifiers init_declarator_list SEMI"""
+        #print("DECLA1", p[1])
+        #print("DECLA2", p[2])
+        ht = self.has_typedef(p[1])
+        if ht:
+            val = self.resolve_value(p[2])
+            if val is not None:
+                print("DECLAA", val, p[1])
+                self.scanner.add_type(val)
         p[0] = self.make_list(p[1], p[2])
 
     def p_declaration_specifiers_1(self, p):
@@ -130,7 +198,8 @@ class Parser:
 
     def p_declaration_specifiers_2(self, p):
         """declaration_specifiers : storage_class_specifier declaration_specifiers"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = [p[1], p[2]]
 
     def p_declaration_specifiers_3(self, p):
         """declaration_specifiers : type_specifier"""
@@ -138,7 +207,8 @@ class Parser:
 
     def p_declaration_specifiers_4(self, p):
         """declaration_specifiers : type_specifier declaration_specifiers"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = [p[1], p[2]]
 
     def p_declaration_specifiers_5(self, p):
         """declaration_specifiers : type_qualifier"""
@@ -146,7 +216,8 @@ class Parser:
 
     def p_declaration_specifiers_6(self, p):
         """declaration_specifiers : type_qualifier declaration_specifiers"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = [p[1], p[2]]
 
     def p_storage_class_specifier(self, p):
         """
@@ -169,7 +240,8 @@ class Parser:
                        | SIGNED
                        | UNSIGNED
                        | struct_or_union_specifier
-                       | enum_specifier"""
+                       | enum_specifier
+                       | TYPE_NAME"""
         p[0] = AstNode(AstType.TYPE, p[1])
 
     def p_enum_specifier_1(self, p):
@@ -190,7 +262,8 @@ class Parser:
 
     def p_enumerator_list_2(self, p):
         """enumerator_list : enumerator_list COMMA enumerator"""
-        p[0] = self.make_list(p[1], p[3])
+        #p[0] = self.make_list(p[1], p[3])
+        p[0] = [p[1], p[3]]
 
     def p_enumerator_1(self, p):
         """enumerator : IDENTIFIER"""
@@ -226,11 +299,20 @@ class Parser:
 
     def p_struct_declaration_list_2(self, p):
         """struct_declaration_list : struct_declaration struct_declaration_list"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = [p[1], p[2]]
+        """
+        if type(p[1]) == list:
+            p[0] = p[1][:]
+            p[0].append(p[2])
+        else:
+            p[0] = [p[1], p[2]]
+        """
 
     def p_struct_declaration(self, p):
         """struct_declaration : specifier_qualifier_list struct_declarator_list SEMI"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = [p[1], p[2]]
 
     def p_struct_declarator_list_1(self, p):
         """struct_declarator_list : struct_declarator"""
@@ -239,6 +321,7 @@ class Parser:
     def p_struct_declarator_list_2(self, p):
         """struct_declarator_list : struct_declarator_list COMMA struct_declarator"""
         p[0] = self.make_list(p[1], p[3])
+        #p[0] = [p[1], p[3]]
 
     def p_struct_declarator_1(self, p):
         """struct_declarator : declarator"""
@@ -319,13 +402,13 @@ class Parser:
 
     def p_parameter_list_1(self, p):
         """parameter_list : parameter_declaration"""
-        #p[0] = self.make_list(p[1])
+        # p[0] = self.make_list(p[1])
         p[0] = [p[1]]
 
     def p_parameter_list_2(self, p):
         """parameter_list : parameter_list COMMA parameter_declaration"""
         p[0] = self.make_list(p[1], [p[3]])
-        #p[0] = [p[1], p[3]]
+        # p[0] = [p[1], p[3]]
 
     def p_parameter_declaration_1(self, p):
         """parameter_declaration : declaration_specifiers declarator"""
@@ -440,7 +523,7 @@ class Parser:
         p[0] = self.make_list(p[1], p[2])
 
     def p_statement_1(self, p):
-        """ statement : labeled_statement """
+        """statement : labeled_statement"""
         p[0] = p[1]
 
     def p_statement_2(self, p):
@@ -882,29 +965,29 @@ class Parser:
             if tmp:
                 if len(tmp) == 1:
                     res = ord(tmp)
-                elif len(tmp) == 2 and tmp[0] == '\\':
-                    if tmp[1] == 'n':
+                elif len(tmp) == 2 and tmp[0] == "\\":
+                    if tmp[1] == "n":
                         res = ord("\n")
-                    elif tmp[1] == 'r':
+                    elif tmp[1] == "r":
                         res = ord("\r")
-                    elif tmp[1] == 't':
+                    elif tmp[1] == "t":
                         res = ord("\t")
-                    elif tmp[1] == '0':
+                    elif tmp[1] == "0":
                         res = 0
-                    elif tmp[1] == '\\':
+                    elif tmp[1] == "\\":
                         res = ord("\\")
-                    elif tmp[1] == 'a':
+                    elif tmp[1] == "a":
                         res = ord("\a")
-                    elif tmp[1] == 'b':
+                    elif tmp[1] == "b":
                         res = ord("\b")
-                    elif tmp[1] == 'f':
+                    elif tmp[1] == "f":
                         res = ord("\f")
-                    elif tmp[1] == 'v':
+                    elif tmp[1] == "v":
                         res = ord("\v")
-                    elif tmp[1] == '\'':
+                    elif tmp[1] == "'":
                         res = ord("'")
-                    elif tmp[1] == "\"":
-                        res = ord("\"")
+                    elif tmp[1] == '"':
+                        res = ord('"')
 
         if res is None:
             raise ValueError("Invalid char: {}".format(p[1]))
@@ -915,28 +998,28 @@ class Parser:
         in_escape = False
         for c in s:
             if in_escape:
-                if c == 'n':
+                if c == "n":
                     res += "\n"
-                elif c == 'r':
+                elif c == "r":
                     res += "\r"
-                elif c == 't':
+                elif c == "t":
                     res += "\t"
-                elif c == '0':
-                    res += '\0'
-                elif c == '\\':
+                elif c == "0":
+                    res += "\0"
+                elif c == "\\":
                     res += "\\"
-                elif c == 'a':
+                elif c == "a":
                     res += "\a"
-                elif c == 'b':
+                elif c == "b":
                     res += "\b"
-                elif c == 'f':
+                elif c == "f":
                     res += "\f"
-                elif c == 'v':
+                elif c == "v":
                     res += "\v"
-                elif c == '\'':
+                elif c == "'":
                     res += "'"
-                elif c == "\"":
-                    res += "\""
+                elif c == '"':
+                    res += '"'
                 else:
                     res += "\\" + c
                 in_escape = False
@@ -953,9 +1036,13 @@ class Parser:
 
     def p_string_literals_2(self, p):
         """string_literals : string_literals STR_LIT"""
-        if type(p[1]) == AstNode and p[1].nodetype == AstType.STR_LIT and type(p[2]) == str:
+        if (
+            type(p[1]) == AstNode
+            and p[1].nodetype == AstType.STR_LIT
+            and type(p[2]) == str
+        ):
             v2 = p[1].value
-            if v2 and v2[-1] == "\"" and p[2] and p[2][-1] == "\"":
+            if v2 and v2[-1] == '"' and p[2] and p[2][-1] == '"':
                 p[1].value = v2[:-1] + p[2][1:]
             else:
                 p[1].value += p[2]

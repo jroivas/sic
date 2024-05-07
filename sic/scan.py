@@ -8,11 +8,15 @@ class Scan:
     def __init__(self, fname=""):
         self.fname = fname
         self.success = True
+        self.types = []
 
         self.lexer = lex.lex(object=self)
         if fname:
             with open(fname, "r") as fd:
                 self.lexer.input(fd.read())
+
+    def add_type(self, new_type):
+        self.types.append(new_type)
 
     keywords = [
         "VOID",
@@ -47,6 +51,7 @@ class Scan:
         "STRUCT",
         "UNION",
         "ENUM",
+        "TYPE_NAME",
     ]
 
     keyword_map = {}
@@ -187,7 +192,11 @@ class Scan:
     def t_IDENTIFIER(self, t):
         r"[a-zA-Z_][0-9a-zA-Z_]*"
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
-        # print("IDENTIFIER", t.value, t.type)
+        if t.value in self.types:
+            #print("MATCH", t.value)
+            #t.type = ""
+            t.type = "TYPE_NAME"
+        #print("IDENTIFIER", t.value, t.type, type(t.type))
         return t
 
     def t_PREPROCESSOR(self, t):
