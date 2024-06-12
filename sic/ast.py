@@ -36,6 +36,8 @@ class AstType(Enum):
     CASE = 32
     OP_PRE = 33
     OP_POST = 34
+    CAST = 35
+    INITIALIZER = 36
 
 
 class AstNode(object):
@@ -271,5 +273,23 @@ class AstLabel(AstNode):
             "type": "{}".format(self.nodetype),
             "name": "{}".format(self.name),
             "value": self.obj_to_json(self.value),
+        }
+        return res
+
+class AstCast(AstNode):
+    def __init__(self, target, src):
+        self.target = target
+        self.src = src
+
+        super().__init__(AstType.CAST, [target, src])
+
+    def __repr__(self):
+        return "AstCast({} {})".format(self.target, self.src)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "to": "{}".format(self.target),
+            "src": self.obj_to_json(self.src),
         }
         return res

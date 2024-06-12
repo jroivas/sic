@@ -39,6 +39,7 @@ class Scan:
         "AUTO",
         "REGISTER",
         "CONST",
+        "RESTRICT",
         "VOLATILE",
         "IF",
         "ELSE",
@@ -52,13 +53,20 @@ class Scan:
         "UNION",
         "ENUM",
         "TYPE_NAME",
+        "INLINE",
+    ]
+    keywords_as_is = [
+        "_Bool",
+        "_Complex",
     ]
 
     keyword_map = {}
     for kw in keywords:
         keyword_map[kw.lower()] = kw
+    for kw in keywords_as_is:
+        keyword_map[kw] = kw
 
-    tokens = keywords + [
+    tokens = keywords + keywords_as_is + [
         "PLUS",
         "PLUSPLUS",
         "MINUS",
@@ -201,6 +209,9 @@ class Scan:
 
     def t_PREPROCESSOR(self, t):
         r"\#.*"
+        # Jump over all preprocessor directives, they're most likely added weight
+        #if t.lexer.lineno > 0:
+        #    t.lexer.lineno -= 1
         pass
 
     def t_COMMENT(self, t):

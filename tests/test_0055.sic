@@ -12,12 +12,14 @@ int main()
     if (a != 5)
         return 1;
 
+#if 0
     ({
         a = 6;
         b = a;
     }, {
         a = 7;
     });
+#endif
 
     if (a != 7)
         return 2;

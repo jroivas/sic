@@ -49,6 +49,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="sic")
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--debug", action='store_true')
+    parser.add_argument("--ast", action='store_true')
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
     parser.add_argument("filename")
@@ -66,8 +67,9 @@ if __name__ == "__main__":
     p = Parser(s, debug=args.debug)
     r = p.parse(args.filename, preprocessed)
     #r = parse()
-    print(r)
-    print(r.to_json())
-    print(json.dumps(r.to_json(), indent=2))
+    #print(r)
+    #print(r.to_json())
+    if args.ast:
+        print(json.dumps(r.to_json(), indent=2))
     if not p.success():
         sys.exit(1)
