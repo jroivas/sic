@@ -706,11 +706,11 @@ class Parser:
 
     def p_block_item_list_1(self, p):
         """ block_item_list : block_item"""
-        p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_block_item_list_2(self, p):
         """ block_item_list : block_item_list block_item"""
-        p[0] = [p[1]]
+        p[0] = [p[1], p[2]]
 
     def p_block_item_1(self, p):
         """ block_item : declaration"""
@@ -759,6 +759,24 @@ class Parser:
     def p_assignment_expression_2(self, p):
         """assignment_expression : unary_expression assignment_operator assignment_expression"""
         p[0] = AstOpNode(p[2], p[1], p[3])
+
+    def p_assignment_expression_3(self, p):
+        """assignment_expression : ROUND_OPEN compound_statement_list ROUND_CLOSE"""
+        p[0] = p[2]
+
+    def p_compound_statement_list_1(self, p):
+        """compound_statement_list : compound_statement"""
+        p[0] = p[1]
+
+    def p_compound_statement_list_2(self, p):
+        """compound_statement_list : compound_statement_list COMMA compound_statement"""
+        if type(p[1]) != list:
+            p[1] = [p[1]]
+        if type(p[3]) == list:
+            p[1] += p[3]
+        else:
+            p[1] = [p[1], p[3]]
+        p[0] = p[1]
 
     def p_assignment_operator(self, p):
         """
@@ -906,8 +924,6 @@ class Parser:
 
     def p_cast_expression_2(self, p):
         """cast_expression : ROUND_OPEN type_name ROUND_CLOSE cast_expression"""
-        # FIXME Cast op
-        #p[0] = AstOpNode("cast", p[2], p[4])
         p[0] = AstCast(p[2], p[4])
 
     def p_type_name_1(self, p):
@@ -1048,6 +1064,7 @@ class Parser:
 
     def p_primary_expression_6(self, p):
         """primary_expression : CONSTANT_CHAR"""
+        # TODO Constants
         res = None
         if type(p[1]) == str and len(p[1]) >= 3 and p[1][0] == "'":
             tmp = p[1][1:-1]
