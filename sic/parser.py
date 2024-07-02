@@ -33,6 +33,9 @@ class Parser:
         with open(fname, "r") as fd:
             return fd.read()
 
+    def define_type(self, typename):
+        self.scanner.add_type(typename)
+
     def parse(self, filename, data=None):
         self.scanner.fname = filename
         if data is None and filename:
@@ -187,7 +190,7 @@ class Parser:
         if ht:
             val = self.resolve_value(p[2])
             if val is not None:
-                print("DECLAA", val, p[1])
+                print("DECLARE", val, p[1])
                 self.scanner.add_type(val)
         p[0] = self.make_list(p[1], p[2])
 
@@ -536,8 +539,13 @@ class Parser:
         """direct_declarator : direct_declarator ROUND_OPEN ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2], p[3])
 
+    def p_identifier(self, p):
+        """identifier : IDENTIFIER
+                      | TYPE_NAME"""
+        p[0] = p[1]
+
     def p_identifier_list_1(self, p):
-        """identifier_list : IDENTIFIER"""
+        """identifier_list : identifier"""
         p[0] = [p[1]]
 
     def p_identifier_list_2(self, p):

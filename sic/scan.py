@@ -2,6 +2,7 @@ from sic.token import Token, TokenType
 from sic.errors import EOFError, SyntaxError, ParserError
 
 from ply import lex
+from ply.lex import TOKEN
 
 
 class Scan:
@@ -9,6 +10,7 @@ class Scan:
         self.fname = fname
         self.success = True
         self.types = []
+        self.filestack = []
 
         self.lexer = lex.lex(object=self)
         if fname:
@@ -180,6 +182,7 @@ class Scan:
     def t_newline(self, t):
         r"\n+"
         t.lexer.lineno += len(t.value)
+        #print("LINENO", t.lexer.lineno)
 
     def t_error(self, t):
         print("Illegal character '%s'" % t.value[0])
@@ -197,8 +200,10 @@ class Scan:
         # t.value = int(t.value)
         return t
 
+    identifier = r"[a-zA-Z_][0-9a-zA-Z_]*"
+    @TOKEN(identifier)
     def t_IDENTIFIER(self, t):
-        r"[a-zA-Z_][0-9a-zA-Z_]*"
+        #r"[a-zA-Z_][0-9a-zA-Z_]*"
         t.type = self.keyword_map.get(t.value, "IDENTIFIER")
         if t.value in self.types:
             #print("MATCH", t.value)
@@ -208,11 +213,20 @@ class Scan:
         return t
 
     def t_PREPROCESSOR(self, t):
-        r"\#.*"
-        # Jump over all preprocessor directives, they're most likely added weight
-        #if t.lexer.lineno > 0:
-        #    t.lexer.lineno -= 1
-        pass
+        r"\#.*\n+"
+        # FIXME simple parse of linemarkers
+        vals = t.value.strip().split(" ")
+        if len(vals) >= 3 and vals[1].isnumeric():
+            lineno = int(vals[1])
+            fname = vals[2]
+            flags = vals[3:]
+            if "1" in flags:
+                self.filestack.append(fname)
+            elif "2" in flags:
+                self.filestack.pop()
+            #print(lineno, fname, flags, self.filestack)
+            if not self.filestack:
+                t.lexer.lineno = lineno
 
     def t_COMMENT(self, t):
         r"//.*"

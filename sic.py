@@ -65,6 +65,7 @@ if __name__ == "__main__":
     #print("PRE", preprocessed)
     s = Scan()
     p = Parser(s, debug=args.debug)
+    p.define_type("__builtin_va_list")
     r = p.parse(args.filename, preprocessed)
     #r = parse()
     #print(r)
