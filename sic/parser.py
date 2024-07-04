@@ -14,6 +14,7 @@ from sic.ast import (
     AstPrePostOp,
     AstCast,
     AstTypedef,
+    AstPair,
 )
 
 from ply import yacc
@@ -65,6 +66,33 @@ class Parser:
         return self.yacc.parse(input=data, lexer=self.scanner.lexer, debug=self.debug)
 
     def make_list(self, *items):
+        if not items:
+            return []
+        print(items)
+        if type(items) == tuple:
+            items = list(items)
+        if type(items) != list:
+            return items[0]
+
+        if len(items) == 1:
+            return AstPair(items[0])
+        elif len(items) >= 2:
+            #res = AstNode(AstType.PAIR, items[0], items[1])
+            st = []
+            p2 = items.pop()
+            while items:
+                p1 = items.pop()
+                p2 = AstPair(p1, p2)
+            res = p2
+            """
+            res = AstPair(items[0], items[1])
+            for i in items[2:]:
+                res.set_right(i)
+            """
+            return res
+        raise ValueError("Invalid list")
+
+    def old_make_list(self, *items):
         """
         >>> s = Scan()
         >>> p = Parser(s)
@@ -109,20 +137,20 @@ class Parser:
         self.error = True
 
     def p_translation_unit_1(self, p):
-        """ translation_unit : external_declaration """
+        """ translation_unit : external_declarations"""
         p[0] = AstNode(AstType.ROOT, p[1])
 
-    def p_translation_unit_2(self, p):
-        """ translation_unit : translation_unit external_declaration """
-        p[0] = AstNode(AstType.ROOT, [p[1], p[2]])
+    def p_external_declarations_1(self, p):
+        """external_declarations : external_declaration"""
+        p[0] = p[1]
 
-    #def p_external_declarations_1(self, p):
-    #    """external_declarations : external_declaration"""
-    #    p[0] = p[1]
-
-    #def p_external_declarations_2(self, p):
-    #    """external_declarations : external_declarations external_declaration"""
-    #    p[0] = [p[1], p[2]]
+    def p_external_declarations_2(self, p):
+        """external_declarations : external_declarations external_declaration"""
+        if isinstance(p[1], AstPair):
+            p[1].set_right(p[2])
+            p[0] = p[1]
+        else:
+            p[0] = self.make_pair(p[1], p[2])
 
     def p_external_declaration_1(self, p):
         """external_declaration : function_definition"""
@@ -161,6 +189,11 @@ class Parser:
             lst = ast
         elif isinstance(ast, AstTypedef):
             return True
+        elif isinstance(ast, AstPair):
+            if ast.r:
+                lst = [ast.l, ast.r]
+            else:
+                lst = [ast.l]
         elif isinstance(ast, AstNode):
             if ast.nodetype == AstType.TYPEDEF:
                 return True
@@ -214,6 +247,21 @@ class Parser:
         #p[0] = AstNode(AstType.DECLARATION, p[1])
         p[0] = p[1]
 
+    def make_pair(self, a, b):
+        #return self.make_list([a, b])
+        """
+        if isinstance(a, AstNode) and a.nodetype == AstType.PAIR:
+            a.set_right(b)
+            return a
+        else:
+            return AstNode(AstType.PAIR, a, b)
+        """
+        #return AstNode(AstType.PAIR, a, b)
+        return AstPair(a, b)
+
+    def keyword(self, kw):
+        return AstNode(AstType.KEYWORD, kw)
+
     def p_declaration_2(self, p):
         """declaration : declaration_specifiers init_declarator_list SEMI"""
         #print("DECLA1", p[1])
@@ -224,7 +272,8 @@ class Parser:
             if val is not None:
                 #print("DECLARE", val, p[1])
                 self.scanner.add_type(val)
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
         #p[0] = AstNode(AstType.DECLARATION, self.make_list(p[1], p[2]))
 
     def p_declaration_specifiers_1(self, p):
@@ -241,7 +290,7 @@ class Parser:
             p[1].add_def(p[2])
             p[0] = p[1]
         else:
-            p[0] = [p[1], p[2]]
+            p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_specifiers_3(self, p):
         """declaration_specifiers : type_specifier"""
@@ -250,7 +299,7 @@ class Parser:
     def p_declaration_specifiers_4(self, p):
         """declaration_specifiers : type_specifier declaration_specifiers"""
         #p[0] = self.make_list(p[1], p[2])
-        p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_specifiers_5(self, p):
         """declaration_specifiers : type_qualifier"""
@@ -259,7 +308,7 @@ class Parser:
     def p_declaration_specifiers_6(self, p):
         """declaration_specifiers : type_qualifier declaration_specifiers"""
         #p[0] = self.make_list(p[1], p[2])
-        p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_specifiers_7(self, p):
         """declaration_specifiers : function_specifier"""
@@ -267,15 +316,15 @@ class Parser:
 
     def p_declaration_specifiers_8(self, p):
         """declaration_specifiers : function_specifier declaration_specifiers"""
-        p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_specifiers_9(self, p):
         """declaration_specifiers : alignment_specifier"""
-        p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_specifiers_10(self, p):
         """declaration_specifiers : alignment_specifier declaration_specifiers"""
-        p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_alignment_specifier(self, p):
         """alignment_specifier : _Alignas ROUND_OPEN type_name ROUND_CLOSE
@@ -349,7 +398,8 @@ class Parser:
     def p_enumerator_list_2(self, p):
         """enumerator_list : enumerator_list COMMA enumerator"""
         #p[0] = self.make_list(p[1], p[3])
-        p[0] = [p[1], p[3]]
+        #p[0] = [p[1], p[3]]
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_enumerator_1(self, p):
         """enumerator : IDENTIFIER"""
@@ -386,7 +436,8 @@ class Parser:
     def p_struct_declaration_list_2(self, p):
         """struct_declaration_list : struct_declaration struct_declaration_list"""
         #p[0] = self.make_list(p[1], p[2])
-        p[0] = [p[1], p[2]]
+        #p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
         """
         if type(p[1]) == list:
             p[0] = p[1][:]
@@ -398,7 +449,8 @@ class Parser:
     def p_struct_declaration(self, p):
         """struct_declaration : specifier_qualifier_list struct_declarator_list SEMI"""
         #p[0] = self.make_list(p[1], p[2])
-        p[0] = [p[1], p[2]]
+        #p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_struct_declarator_list_1(self, p):
         """struct_declarator_list : struct_declarator"""
@@ -406,7 +458,8 @@ class Parser:
 
     def p_struct_declarator_list_2(self, p):
         """struct_declarator_list : struct_declarator_list COMMA struct_declarator"""
-        p[0] = self.make_list(p[1], p[3])
+        #p[0] = self.make_list(p[1], p[3])
+        p[0] = self.make_pair(p[1], p[3])
         #p[0] = [p[1], p[3]]
 
     def p_struct_declarator_1(self, p):
@@ -415,11 +468,13 @@ class Parser:
 
     def p_struct_declarator_2(self, p):
         """struct_declarator : COLON constant_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_struct_declarator_3(self, p):
         """struct_declarator : declarator COLON constant_expression"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        #p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_init_declarator_list_1(self, p):
         """init_declarator_list : init_declarator"""
@@ -427,7 +482,8 @@ class Parser:
 
     def p_init_declarator_list_2(self, p):
         """init_declarator_list : init_declarator_list COMMA init_declarator"""
-        p[0] = self.make_list(p[1], p[3])
+        #p[0] = self.make_list(p[1], p[3])
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_init_declarator_1(self, p):
         """init_declarator : declarator"""
@@ -439,7 +495,8 @@ class Parser:
 
     def p_declarator_1(self, p):
         """declarator : pointer direct_declarator"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declarator_2(self, p):
         """declarator : direct_declarator"""
@@ -470,7 +527,8 @@ class Parser:
 
     def p_type_qualifier_list_2(self, p):
         """type_qualifier_list : type_qualifier_list type_qualifier"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_type_qualifier(self, p):
         """
@@ -482,30 +540,36 @@ class Parser:
 
     def p_parameter_type_list_1(self, p):
         """parameter_type_list : parameter_list"""
-        p[0] = self.make_list(p[1])
+        #p[0] = self.make_list(p[1])
+        p[0] = self.make_pair(p[1], None)
 
     def p_parameter_type_list_2(self, p):
         """parameter_type_list : parameter_list COMMA ELLIPSIS"""
-        p[0] = self.make_list(p[1], p[3])
+        #p[0] = self.make_list(p[1], p[3])
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_parameter_list_1(self, p):
         """parameter_list : parameter_declaration"""
         # p[0] = self.make_list(p[1])
-        p[0] = [p[1]]
+        #p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_parameter_list_2(self, p):
         """parameter_list : parameter_list COMMA parameter_declaration"""
-        p[0] = self.make_list(p[1], [p[3]])
+        #p[0] = self.make_list(p[1], [p[3]])
+        p[0] = self.make_pair(p[1], p[3])
         # p[0] = [p[1], p[3]]
 
     def p_parameter_declaration_1(self, p):
         """parameter_declaration : declaration_specifiers declarator"""
-        spec = p[1]
-        p[0] = self.make_list(p[1], p[2])
+        #spec = p[1]
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_parameter_declaration_2(self, p):
         """parameter_declaration : declaration_specifiers abstract_declarator"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_parameter_declaration_3(self, p):
         """parameter_declaration : declaration_specifiers"""
@@ -521,8 +585,8 @@ class Parser:
 
     def p_abstract_declarator_3(self, p):
         """abstract_declarator : pointer direct_abstract_declarator"""
-        p[0] = self.make_list(p[1], p[2])
-
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_direct_abstract_declarator_1(self, p):
         """direct_abstract_declarator : ROUND_OPEN abstract_declarator ROUND_CLOSE"""
@@ -531,94 +595,139 @@ class Parser:
 
     def p_direct_abstract_declarator_square_1(self, p):
         """direct_abstract_declarator : SQUARE_OPEN SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_direct_abstract_declarator_square_2(self, p):
         """direct_abstract_declarator : SQUARE_OPEN type_qualifier_list SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = AstNode(AstType.SQUARE, p[2])
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_square_3(self, p):
         """direct_abstract_declarator : SQUARE_OPEN assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        #p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = AstNode(AstType.SQUARE, p[2])
 
     def p_direct_abstract_declarator_square_4(self, p):
         """direct_abstract_declarator : SQUARE_OPEN type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        lst = self.make_pair(p[2], p[3])
+        p[0] = AstNode(AstType.SQUARE, lst)
 
     def p_direct_abstract_declarator_square_5(self, p):
         """direct_abstract_declarator : SQUARE_OPEN STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        lst = self.make_pair(self.keyword(p[2]), p[3])
+        p[0] = AstNode(AstType.SQUARE, lst)
 
     def p_direct_abstract_declarator_square_6(self, p):
         """direct_abstract_declarator : SQUARE_OPEN STATIC type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst2 = self.make_pair(p[3], p[4])
+        lst = self.make_pair(self.keyword(p[2]), lst2)
+        p[0] = AstNode(AstType.SQUARE, lst)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_abstract_declarator_square_7(self, p):
         """direct_abstract_declarator : SQUARE_OPEN type_qualifier_list STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst2 = self.make_pair(self.keyword(p[3]), p[4])
+        lst = self.make_pair(p[2], lst2)
+        p[0] = AstNode(AstType.SQUARE, lst)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
 
     def p_direct_abstract_declarator_square_o1(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        sq = AstNode(AstType.SQUARE, None)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_square_o2(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN type_qualifier_list SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        sq = AstNode(AstType.SQUARE, p[3])
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_abstract_declarator_square_o3(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[4])
+        sq = AstNode(AstType.SQUARE, p[3])
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_abstract_declarator_square_o4(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst = self.make_pair(p[3], p[4])
+        sq = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_abstract_declarator_square_o5(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst = self.make_pair(self.keyword(p[3]), p[4])
+        sq = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_abstract_declarator_square_o6(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN STATIC type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        lst2 = self.make_pair(p[4], p[5])
+        lst = self.make_pair(self.keyword(p[3]), lst2)
+        sq = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
     def p_direct_abstract_declarator_square_o7(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN type_qualifier_list STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        lst2 = self.make_pair(self.keyword(p[4]), p[5])
+        lst = self.make_pair(p[3], lst2)
+        sq = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
     def p_direct_abstract_declarator_square_p1(self, p):
         """direct_abstract_declarator : SQUARE_OPEN STAR SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        p[0] = AstNode(AstType.SQUARE, AstNode(AstType.STAR, p[3]))
+        #p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
     def p_direct_abstract_declarator_square_p2(self, p):
         """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN STAR SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        sq = AstNode(AstType.SQUARE, AstNode(AstType.STAR, p[3]))
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
 
     def p_direct_abstract_declarator_round_1(self, p):
         """direct_abstract_declarator : ROUND_OPEN ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = AstNode(AstType.PARENTHESIS, None)
+        #p[0] = self.make_pair(p[1], p[2])
 
     def p_direct_abstract_declarator_round_2(self, p):
         """direct_abstract_declarator : ROUND_OPEN parameter_type_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = AstNode(AstType.PARENTHESIS, p[2])
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_round_3(self, p):
         """direct_abstract_declarator : ROUND_OPEN identifier_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = AstNode(AstType.PARENTHESIS, p[2])
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_round_4(self, p):
         """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        pp = AstNode(AstType.PARENTHESIS, None)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_round_5(self, p):
         """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN parameter_type_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.PARENTHESIS, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_abstract_declarator_round_6(self, p):
         """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN identifier_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
-
+        pp = AstNode(AstType.PARENTHESIS, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
 
     def p_direct_declarator_1(self, p):
@@ -636,68 +745,104 @@ class Parser:
 
     def p_direct_declarator_3_1(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst = self.make_pair(p[3], p[4])
+        pp = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_declarator_3_2(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN type_qualifier_list SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.SQUARE, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_declarator_3_3(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.SQUARE, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_declarator_3_4(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN STATIC type_qualifier_list assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        lst2 = self.make_pair(p[4], p[5])
+        lst = self.make_pair(self.keyword(p[3]), lst2)
+        pp = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
     def p_direct_declarator_3_5(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst = self.make_pair(self.keyword(p[3]), p[4])
+        pp = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_declarator_3_6(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN type_qualifier_list STATIC assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
+        lst2 = self.make_pair(self.keyword(p[4]), p[5])
+        lst = self.make_pair(p[3], lst2)
+        pp = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
     def p_direct_declarator_3_7(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN type_qualifier_list STAR SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
+        lst = self.make_pair(p[3], AstNode(AstType.STAR, p[4]))
+        pp = AstNode(AstType.SQUARE, lst)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5])
 
     def p_direct_declarator_3_8(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN STAR SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.SQUARE, AstNode(AstType.STAR, p[4]))
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_declarator_4(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        pp = AstNode(AstType.SQUARE, None)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_declarator_5(self, p):
         """direct_declarator : direct_declarator ROUND_OPEN parameter_type_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.PARENTHESIS, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_declarator_6(self, p):
         """direct_declarator : direct_declarator ROUND_OPEN identifier_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        pp = AstNode(AstType.PARENTHESIS, p[3])
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_direct_declarator_7(self, p):
         """direct_declarator : direct_declarator ROUND_OPEN ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        pp = AstNode(AstType.PARENTHESIS, None)
+        p[0] = self.make_pair(p[1], pp)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_identifier(self, p):
         """identifier : IDENTIFIER"""
-        p[0] = p[1]
+        p[0] = AstNode(AstType.IDENTIFIER, p[1])
+
+    def p_identifier_or_type_name_1(self, p):
+        """identifier_or_type_name : IDENTIFIER """
+        p[0] = AstNode(AstType.IDENTIFIER, p[1])
 
     def p_identifier_or_type_name(self, p):
-        """identifier_or_type_name : IDENTIFIER
-                                   | TYPE_NAME"""
-        p[0] = p[1]
+        """identifier_or_type_name : TYPE_NAME"""
+        p[0] = AstNode(AstType.TYPE_NAME, p[1])
 
     def p_identifier_list_1(self, p):
         """identifier_list : identifier"""
-        p[0] = [p[1]]
+        #p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_identifier_list_2(self, p):
         """identifier_list : identifier_list COMMA IDENTIFIER"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], AstNode(AstType.IDENTIFIER, p[3]))
 
     def p_initializer_1(self, p):
         """initializer : assignment_expression"""
@@ -713,19 +858,23 @@ class Parser:
 
     def p_statement_list_1(self, p):
         """statement_list : statement"""
-        p[0] = self.make_list(p[1])
+        #p[0] = self.make_list(p[1])
+        p[0] = p[1]
 
     def p_statement_list_2(self, p):
         """statement_list : statement_list statement"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
 
     def p_declaration_list_1(self, p):
         """declaration_list : declaration"""
-        p[0] = self.make_list(p[1])
+        #p[0] = self.make_list(p[1])
+        p[0] = p[1]
 
     def p_declaration_list_2(self, p):
         """declaration_list : declaration_list declaration"""
-        p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
 
     def p_statement_1(self, p):
         """statement : labeled_statement"""
@@ -841,7 +990,7 @@ class Parser:
 
     def p_compound_statement_1(self, p):
         """compound_statement : CURLY_OPEN CURLY_CLOSE"""
-        p[0] = AstNode(AstType.BLOCK, [])
+        p[0] = AstNode(AstType.BLOCK, None)
 
     def p_compound_statement_2(self, p):
         """compound_statement : CURLY_OPEN block_item_list CURLY_CLOSE"""
@@ -865,7 +1014,8 @@ class Parser:
 
     def p_block_item_list_2(self, p):
         """ block_item_list : block_item_list block_item"""
-        p[0] = [p[1], p[2]]
+        #p[0] = [p[1], p[2]]
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_block_item_1(self, p):
         """ block_item : declaration"""
@@ -885,15 +1035,19 @@ class Parser:
 
     def p_declaration_statement_list_3(self, p):
         """declaration_statement_list : declaration_statement_list declaration_list"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_declaration_statement_list_4(self, p):
         """declaration_statement_list : declaration_statement_list statement_list"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_expression_statement_1(self, p):
         """expression_statement : SEMI"""
-        p[0] = []
+        #p[0] = []
+        # FIXME
+        p[0] = AstNode(AstType.NO_OP, None)
 
     def p_expression_statement_2(self, p):
         """expression_statement : expression SEMI"""
@@ -905,7 +1059,8 @@ class Parser:
 
     def p_expression_2(self, p):
         """expression : expression COMMA assignment_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_assignment_expression_1(self, p):
         """assignment_expression : va_arg_expression"""
@@ -921,6 +1076,7 @@ class Parser:
 
     def p_assignment_expression_4(self, p):
         """assignment_expression : ROUND_OPEN compound_statement_list ROUND_CLOSE"""
+        #p[0] = AstNode(AstType.PARENTHESIS, p[2])
         p[0] = p[2]
 
     def p_va_arg_type(self, p):
@@ -938,6 +1094,8 @@ class Parser:
 
     def p_compound_statement_list_2(self, p):
         """compound_statement_list : compound_statement_list COMMA compound_statement"""
+        p[0] = self.make_pair(p[1], p[3])
+        """
         if type(p[1]) != list:
             p[1] = [p[1]]
         if type(p[3]) == list:
@@ -945,6 +1103,7 @@ class Parser:
         else:
             p[1] = [p[1], p[3]]
         p[0] = p[1]
+        """
 
     def p_assignment_operator(self, p):
         """
@@ -960,7 +1119,7 @@ class Parser:
                             | XOR_EQ
                             | OR_EQ
         """
-        p[0] = p[1]
+        p[0] = AstNode(AstType.ASSIGNMENT, p[1])
 
     def p_constant_expression(self, p):
         """constant_expression : conditional_expression"""
@@ -1132,7 +1291,8 @@ class Parser:
 
     def p_unary_expression_4(self, p):
         """unary_expression : unary_operator cast_expression"""
-        p[0] = self.make_list(p[1], p[2])
+        #p[0] = self.make_list(p[1], p[2])
+        p[0] = self.make_pair(p[1], p[2])
 
     def p_unary_expression_5(self, p):
         """unary_expression : SIZEOF unary_expression"""
@@ -1158,7 +1318,8 @@ class Parser:
 
     def p_argument_expression_list_2(self, p):
         """argument_expression_list : argument_expression_list COMMA assignment_expression"""
-        p[0] = self.make_list(p[1], p[3])
+        p[0] = self.make_pair(p[1], p[3])
+        #p[0] = self.make_list(p[1], p[3])
 
     def p_postfix_expression_1(self, p):
         """postfix_expression : primary_expression"""
@@ -1166,23 +1327,33 @@ class Parser:
 
     def p_postfix_expression_2(self, p):
         """postfix_expression : postfix_expression SQUARE_OPEN expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        sq = AstNode(AstType.SQUARE, p[3])
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_postfix_expression_3(self, p):
         """postfix_expression : postfix_expression ROUND_OPEN ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        sq = AstNode(AstType.PARENTHESIS, None)
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_postfix_expression_4(self, p):
         """postfix_expression : postfix_expression ROUND_OPEN argument_expression_list ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        sq = AstNode(AstType.PARENTHESIS, p[3])
+        p[0] = self.make_pair(p[1], sq)
+        #p[0] = self.make_list(p[1], p[2], p[3], p[4])
 
     def p_postfix_expression_5(self, p):
         """postfix_expression : postfix_expression DOT identifier_or_type_name"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        pr = self.make_pair(p[1], p[3])
+        p[0] = AstNode(AstType.OBJ_ACCESS_DOT, pr)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_postfix_expression_6(self, p):
         """postfix_expression : postfix_expression PTR_OP identifier_or_type_name"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        pr = self.make_pair(p[1], p[3])
+        p[0] = AstNode(AstType.OBJ_ACCESS_PTR, pr)
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_postfix_expression_7(self, p):
         """postfix_expression : postfix_expression PLUSPLUS"""
@@ -1194,21 +1365,28 @@ class Parser:
 
     def p_postfix_expression_9(self, p):
         """postfix_expression : ROUND_OPEN type_name ROUND_CLOSE CURLY_OPEN initializer_list CURLY_CLOSE"""
-        p[0] = AstCast(p[2], [p[4], p[5], p[6]])
+        src = AstNode(AstType.INITIALIZER, p[5])
+        p[0] = AstCast(p[2], src)
+        #p[0] = AstCast(p[2], [p[4], p[5], p[6]])
 
     def p_postfix_expression_10(self, p):
         """postfix_expression : ROUND_OPEN type_name ROUND_CLOSE CURLY_OPEN initializer_list COMMA CURLY_CLOSE"""
-        p[0] = self.AstCast(p[2], [p[4], p[5], p[7]])
+        pr = self.make_pair(p[5], None)
+        src = AstNode(AstType.INITIALIZER, pr)
+        p[0] = AstCast(p[2], src)
+        #p[0] = self.AstCast(p[2], [p[4], p[5], p[7]])
 
     def p_initializer_list_1(self, p):
         """ initializer_list : initializer """
-        p[0] = [p[1]]
+        #p[0] = [p[1]]
+        p[0] = p[1]
 
     def p_initializer_list_2(self, p):
         """ initializer_list : initializer_list COMMA initializer """
         # TODO designation
-        p[1].append(p[3])
-        p[0] = p[1]
+        p[0] = self.make_pair(p[1], p[3])
+        #p[1].append(p[3])
+        #p[0] = p[1]
 
     def p_primary_expression_1(self, p):
         """primary_expression : FRAC_LIT"""

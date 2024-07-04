@@ -479,6 +479,8 @@ class WrapPreprocessor:
                 "-D__restrict=",
                 # FIXME Attributes not supported
                 "-D__attribute__(x)=",
+                # FIXME Function name export
+                "-D__asm__(x)=",
             ]
             for d in self.defines:
                 v = self.defines[d]

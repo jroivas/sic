@@ -45,12 +45,29 @@ class AstType(Enum):
     TYPEDEF = 41
     TYPE_NAME = 42
     DECLARATION = 43
+    PAIR = 44
+    STAR = 45
+    NO_OP = 46
+    ASSIGNMENT = 47
+    OBJ_ACCESS_DOT = 48
+    OBJ_ACCESS_PTR = 49
 
+
+print_pair = False
+#print_pair = True
+
+def set_pair(val):
+    global print_pair
+    if val:
+        print_pair = True
+    else:
+        print_pair = False
 
 class AstNode(object):
     def __init__(self, nodetype, value):
         self.nodetype = nodetype
         self.value = value
+        #self.r = r
         self.attributes = {}
 
     def __repr__(self):
@@ -69,16 +86,21 @@ class AstNode(object):
                 raise ValueError("unk", type(i))
         return res
 
+    def format_val(self, value):
+        if type(value) == list or type(value) == tuple:
+            return self.list_to_json(value)
+        elif isinstance(value, AstNode):
+            return value.to_json()
+        elif type(value) == str:
+            return  value
+        else:
+            raise ValueError("Invalid value", value)
+
     def to_json(self):
         res = {"type": "{}".format(self.nodetype), "value": []}
-        if type(self.value) == list or type(self.value) == tuple:
-            res["value"] = self.list_to_json(self.value)
-        elif isinstance(self.value, AstNode):
-            res["value"] = self.value.to_json()
-        elif type(self.value) == str:
-            res["value"] = self.value
-        else:
-            raise ValueError("Daa", self.value)
+        res["value"] = self.obj_to_json(self.value)
+        #if self.r:
+        #    res["right"] = self.obj_to_json(self.r)
         return res
 
     def attribute_add(self, attr, val):
@@ -221,7 +243,7 @@ class AstStruct(AstNode):
         res = {
             "type": "{}".format(self.nodetype),
             "union_struct": self.obj_to_json(self.union_struct),
-            "name": self.name if self.name else "",
+            "name": self.obj_to_json(self.name) if self.name else "",
             "data": self.obj_to_json(self.data),
         }
         return res
@@ -239,7 +261,7 @@ class AstEnum(AstNode):
     def to_json(self):
         res = {
             "type": "{}".format(self.nodetype),
-            "name": self.name if self.name else "",
+            "name": self.obj_to_json(self.name) if self.name else "",
             "data": self.obj_to_json(self.data),
         }
         return res
@@ -323,3 +345,39 @@ class AstTypedef(AstNode):
         }
         return res
 
+class AstPair(AstNode):
+    def __init__(self, a, b = None):
+        #super().__init__(AstType.PAIR, a)
+        super().__init__(AstType.PAIR, None)
+        self.l = a
+        self.r = b
+
+    def __repr__(self):
+        return "AstPair({}, {})".format(self.l, self.r)
+
+    def set_right(self, value):
+        t = self
+        while isinstance(t, AstNode) and t.r and isinstance(t.r, AstNode):
+            # Convert to pair if it's not yet
+            if not isinstance(t.r, AstPair):
+                t.r = AstPair(t.r, None)
+            t = t.r
+        if t.r:
+            raise ValueError("Problem", t.l, t.r)
+        if not isinstance(value, AstPair):
+            value = AstPair(value, None)
+        t.r = value
+
+    def to_json(self):
+        global print_pair
+        if print_pair:
+            return {
+                "type": "{}".format(self.nodetype),
+                "left": self.obj_to_json(self.l),
+                "right": self.obj_to_json(self.r),
+            }
+        else:
+            return [
+                self.obj_to_json(self.l),
+                self.obj_to_json(self.r),
+            ]

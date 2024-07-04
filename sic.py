@@ -7,6 +7,7 @@ import json
 from sic.preprocess import Preprocess, apply_inc_dirs, apply_defines, apply_default_inc_dirs
 from sic.scan import Scan
 from sic.parser import Parser
+import sic.ast
 
 
 def scan(fname):
@@ -50,11 +51,15 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--debug", action='store_true')
     parser.add_argument("--ast", action='store_true')
+    parser.add_argument("--print-pair", action='store_true')
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
     parser.add_argument("filename")
 
     args = parser.parse_args()
+
+    if args.print_pair:
+        sic.ast.set_pair(args.print_pair)
 
     pre = Preprocess(args.filename, debug=args.debug, cpp="cpp")
     apply_default_inc_dirs(pre)
@@ -70,7 +75,12 @@ if __name__ == "__main__":
     #r = parse()
     #print(r)
     #print(r.to_json())
+    #import beeprint
+    sys.setrecursionlimit(6500)
     if args.ast and r:
         print(json.dumps(r.to_json(), indent=2))
+        #pprint.pprint(r.to_json())
+        #beeprint.pp(r.to_json(), max_depth=6000)
+        #print(r.to_json())
     if not p.success():
         sys.exit(1)
