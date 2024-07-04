@@ -13,6 +13,7 @@ from sic.ast import (
     AstLabel,
     AstPrePostOp,
     AstCast,
+    AstTypedef,
 )
 
 from ply import yacc
@@ -30,7 +31,6 @@ class Parser:
         self.debug = debug
         self.error = False
         self.scopes = [dict()]
-        self.is_typedef = False
 
     def success(self):
         return self.scanner.success and not self.error
@@ -159,8 +159,12 @@ class Parser:
         lst = []
         if type(ast) == list:
             lst = ast
+        elif isinstance(ast, AstTypedef):
+            return True
         elif isinstance(ast, AstNode):
-            if ast.nodetype == AstType.TYPE_STORAGE and ast.value == "typedef":
+            if ast.nodetype == AstType.TYPEDEF:
+                return True
+            elif ast.nodetype == AstType.TYPE_STORAGE and ast.value == "typedef":
                 return True
             else:
                 lst = ast.value
@@ -194,6 +198,9 @@ class Parser:
         if lst is None:
             return None
 
+        if isinstance(lst, AstNode):
+            return self.resolve_value(lst)
+
         for ch in lst:
             if isinstance(ch, AstNode):
                 tmp = self.resolve_value(ch)
@@ -204,6 +211,7 @@ class Parser:
 
     def p_declaration_1(self, p):
         """declaration : declaration_specifiers SEMI"""
+        #p[0] = AstNode(AstType.DECLARATION, p[1])
         p[0] = p[1]
 
     def p_declaration_2(self, p):
@@ -217,15 +225,23 @@ class Parser:
                 print("DECLARE", val, p[1])
                 self.scanner.add_type(val)
         p[0] = self.make_list(p[1], p[2])
+        #p[0] = AstNode(AstType.DECLARATION, self.make_list(p[1], p[2]))
 
     def p_declaration_specifiers_1(self, p):
         """declaration_specifiers : storage_class_specifier"""
+        #if isinstance(p[1], AstNode) and p[1].nodetype == AstType.TYPEDEF:
+        #    p[0] = p[1]
+        #else:
         p[0] = p[1]
 
     def p_declaration_specifiers_2(self, p):
         """declaration_specifiers : storage_class_specifier declaration_specifiers"""
         #p[0] = self.make_list(p[1], p[2])
-        p[0] = [p[1], p[2]]
+        if isinstance(p[1], AstTypedef):
+            p[1].add_def(p[2])
+            p[0] = p[1]
+        else:
+            p[0] = [p[1], p[2]]
 
     def p_declaration_specifiers_3(self, p):
         """declaration_specifiers : type_specifier"""
@@ -278,8 +294,9 @@ class Parser:
                                 | AUTO
                                 | REGISTER"""
         if p[1] == "typedef":
-            self.is_typedef = True
-        p[0] = AstNode(AstType.TYPE_STORAGE, p[1])
+            p[0] = AstTypedef(p[1])
+        else:
+            p[0] = AstNode(AstType.TYPE_STORAGE, p[1])
 
     def p_type_specifier_no_type_name(self, p):
         """
@@ -610,7 +627,7 @@ class Parser:
 
     def __REM_p_direct_declarator_1_type(self, p):
         """direct_declarator : TYPE_NAME"""
-        p[0] = AstNode(AstType.TYPE, p[1])
+        p[0] = AstNode(AstType.TYPE_NAME, p[1])
 
     def p_direct_declarator_2(self, p):
         """direct_declarator : ROUND_OPEN declarator ROUND_CLOSE"""
@@ -877,7 +894,6 @@ class Parser:
     def p_expression_statement_1(self, p):
         """expression_statement : SEMI"""
         p[0] = []
-        self.is_typedef = False
 
     def p_expression_statement_2(self, p):
         """expression_statement : expression SEMI"""

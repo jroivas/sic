@@ -70,7 +70,7 @@ if __name__ == "__main__":
     #r = parse()
     #print(r)
     #print(r.to_json())
-    if args.ast:
+    if args.ast and r:
         print(json.dumps(r.to_json(), indent=2))
     if not p.success():
         sys.exit(1)

@@ -42,12 +42,16 @@ class AstType(Enum):
     ALIGN_AS = 38
     VA_ARG = 39
     PARENTHESIS = 40
+    TYPEDEF = 41
+    TYPE_NAME = 42
+    DECLARATION = 43
 
 
 class AstNode(object):
     def __init__(self, nodetype, value):
         self.nodetype = nodetype
         self.value = value
+        self.attributes = {}
 
     def __repr__(self):
         return "AstNode({},{})".format(self.nodetype, self.value)
@@ -76,6 +80,9 @@ class AstNode(object):
         else:
             raise ValueError("Daa", self.value)
         return res
+
+    def attribute_add(self, attr, val):
+        self.attributes[attr] = val
 
     def obj_to_json(self, val):
         # if val is None:
@@ -297,3 +304,22 @@ class AstCast(AstNode):
             "src": self.obj_to_json(self.src),
         }
         return res
+
+class AstTypedef(AstNode):
+    def __init__(self, val):
+        self.defs = []
+        super().__init__(AstType.TYPEDEF, val)
+
+    def add_def(self, val):
+        self.defs.append(val)
+
+    def __repr__(self):
+        return "AstTypedef({})".format(self.defs)
+
+    def to_json(self):
+        res = {
+            "type": "{}".format(self.nodetype),
+            "def": self.obj_to_json(self.defs),
+        }
+        return res
+
