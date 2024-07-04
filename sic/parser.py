@@ -520,7 +520,7 @@ class Parser:
 
     def p_direct_abstract_declarator_square_3(self, p):
         """direct_abstract_declarator : SQUARE_OPEN assignment_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+        p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_direct_abstract_declarator_square_4(self, p):
         """direct_abstract_declarator : SQUARE_OPEN type_qualifier_list assignment_expression SQUARE_CLOSE"""
@@ -606,7 +606,7 @@ class Parser:
         """direct_declarator : IDENTIFIER"""
         p[0] = AstNode(AstType.IDENTIFIER, p[1])
 
-    def p_direct_declarator_1_type(self, p):
+    def __REM_p_direct_declarator_1_type(self, p):
         """direct_declarator : TYPE_NAME"""
         p[0] = AstNode(AstType.TYPE, p[1])
 
@@ -889,16 +889,29 @@ class Parser:
         p[0] = self.make_list(p[1], p[2])
 
     def p_assignment_expression_1(self, p):
-        """assignment_expression : conditional_expression"""
+        """assignment_expression : va_arg_expression"""
         p[0] = p[1]
 
     def p_assignment_expression_2(self, p):
+        """assignment_expression : conditional_expression"""
+        p[0] = p[1]
+
+    def p_assignment_expression_3(self, p):
         """assignment_expression : unary_expression assignment_operator assignment_expression"""
         p[0] = AstOpNode(p[2], p[1], p[3])
 
-    def p_assignment_expression_3(self, p):
+    def p_assignment_expression_4(self, p):
         """assignment_expression : ROUND_OPEN compound_statement_list ROUND_CLOSE"""
         p[0] = p[2]
+
+    def p_va_arg_type(self, p):
+        """va_arg_type : type_specifier"""
+        p[0] = p[1]
+
+    def p_va_arg_expression(self, p):
+        """va_arg_expression : VA_ARG ROUND_OPEN expression COMMA va_arg_type ROUND_CLOSE
+                             | __BUILTIN_VA_ARG ROUND_OPEN expression COMMA va_arg_type ROUND_CLOSE"""
+        p[0] = AstNode(AstType.VA_ARG, [p[3], p[5]])
 
     def p_compound_statement_list_1(self, p):
         """compound_statement_list : compound_statement"""

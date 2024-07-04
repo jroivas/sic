@@ -40,6 +40,7 @@ class AstType(Enum):
     INITIALIZER = 36
     ATOMIC = 37
     ALIGN_AS = 38
+    VA_ARG = 39
 
 
 class AstNode(object):

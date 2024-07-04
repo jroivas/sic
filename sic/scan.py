@@ -57,6 +57,8 @@ class Scan:
         "ENUM",
         "TYPE_NAME",
         "INLINE",
+        "__BUILTIN_VA_ARG",
+        "VA_ARG",
     ]
     keywords_as_is = [
         "_Bool",
