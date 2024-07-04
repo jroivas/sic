@@ -1194,7 +1194,7 @@ class Parser:
 
     def p_postfix_expression_9(self, p):
         """postfix_expression : ROUND_OPEN type_name ROUND_CLOSE CURLY_OPEN initializer_list CURLY_CLOSE"""
-        p[0] = self.AstCast(p[2], [p[4], p[5], p[6]])
+        p[0] = AstCast(p[2], [p[4], p[5], p[6]])
 
     def p_postfix_expression_10(self, p):
         """postfix_expression : ROUND_OPEN type_name ROUND_CLOSE CURLY_OPEN initializer_list COMMA CURLY_CLOSE"""
