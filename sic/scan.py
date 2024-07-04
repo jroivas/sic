@@ -11,6 +11,7 @@ class Scan:
         self.success = True
         self.types = []
         self.filestack = []
+        self.origname = ""
 
         self.lexer = lex.lex(object=self)
         if fname:
@@ -60,6 +61,8 @@ class Scan:
     keywords_as_is = [
         "_Bool",
         "_Complex",
+        "_Atomic",
+        "_Alignas",
     ]
 
     keyword_map = {}
@@ -220,12 +223,14 @@ class Scan:
             lineno = int(vals[1])
             fname = vals[2]
             flags = vals[3:]
+            if not self.origname and not flags:
+                self.origname = fname
             if "1" in flags:
                 self.filestack.append(fname)
             elif "2" in flags:
                 self.filestack.pop()
             #print(lineno, fname, flags, self.filestack)
-            if not self.filestack:
+            if fname == self.origname:
                 t.lexer.lineno = lineno
 
     def t_COMMENT(self, t):

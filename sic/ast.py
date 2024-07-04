@@ -38,6 +38,8 @@ class AstType(Enum):
     OP_POST = 34
     CAST = 35
     INITIALIZER = 36
+    ATOMIC = 37
+    ALIGN_AS = 38
 
 
 class AstNode(object):
