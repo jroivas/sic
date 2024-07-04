@@ -222,7 +222,7 @@ class Parser:
         if ht:
             val = self.resolve_value(p[2])
             if val is not None:
-                print("DECLARE", val, p[1])
+                #print("DECLARE", val, p[1])
                 self.scanner.add_type(val)
         p[0] = self.make_list(p[1], p[2])
         #p[0] = AstNode(AstType.DECLARATION, self.make_list(p[1], p[2]))
@@ -360,7 +360,7 @@ class Parser:
         p[0] = AstOpNode(p[2], p[1], p[3])
 
     def p_struct_or_union_specifier_1(self, p):
-        """struct_or_union_specifier : struct_or_union identifier_or_type_name struct_declaration_list CURLY_CLOSE"""
+        """struct_or_union_specifier : struct_or_union identifier_or_type_name CURLY_OPEN struct_declaration_list CURLY_CLOSE"""
         p[0] = AstStruct(p[1], p[2], p[4])
 
     def p_struct_or_union_specifier_2(self, p):
