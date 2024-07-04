@@ -191,6 +191,8 @@ class Parser:
                 lst = ast.value
         else:
             return None
+        if lst is None:
+            return None
 
         for ch in lst:
             if isinstance(ch, AstNode):
@@ -612,7 +614,8 @@ class Parser:
 
     def p_direct_declarator_2(self, p):
         """direct_declarator : ROUND_OPEN declarator ROUND_CLOSE"""
-        p[0] = self.make_list(p[2])
+        #p[0] = self.make_list(p[2])
+        p[0] = AstNode(AstType.PARENTHESIS, p[2])
 
     def p_direct_declarator_3_1(self, p):
         """direct_declarator : direct_declarator SQUARE_OPEN type_qualifier_list assignment_expression SQUARE_CLOSE"""

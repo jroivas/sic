@@ -41,6 +41,7 @@ class AstType(Enum):
     ATOMIC = 37
     ALIGN_AS = 38
     VA_ARG = 39
+    PARENTHESIS = 40
 
 
 class AstNode(object):
