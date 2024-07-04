@@ -471,12 +471,14 @@ class WrapPreprocessor:
 
     def process(self):
         if self.fname:
-            "{cpp} -std=c99 -D__extension__= -D__restrict= {fname}"
+            #"{cpp} -std=c99 -D__extension__= -D__restrict= {fname}"
             cmd = [
                 self.cpp,
                 "-std=c99",
                 "-D__extension__=",
                 "-D__restrict=",
+                # FIXME Attributes not supported
+                "-D__attribute__(x)=",
             ]
             for d in self.defines:
                 v = self.defines[d]

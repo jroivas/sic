@@ -59,6 +59,7 @@ class Scan:
         "INLINE",
         "__BUILTIN_VA_ARG",
         "VA_ARG",
+        "__ATTRIBUTE__",
     ]
     keywords_as_is = [
         "_Bool",
