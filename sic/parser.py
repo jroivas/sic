@@ -576,33 +576,30 @@ class Parser:
         p[0] = self.make_list(p[1], p[2], p[3], p[4], p[5], p[6])
 
 
-
-
-    def __REM_p_direct_abstract_declarator_3(self, p):
-        """direct_abstract_declarator : SQUARE_OPEN constant_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
-
-    def __REM_p_direct_abstract_declarator_4(self, p):
-        """direct_abstract_declarator : direct_abstract_declarator SQUARE_OPEN constant_expression SQUARE_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3], p[4])
-
-
-
-    def p_direct_abstract_declarator_5(self, p):
+    def p_direct_abstract_declarator_round_1(self, p):
         """direct_abstract_declarator : ROUND_OPEN ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2])
 
-    def p_direct_abstract_declarator_6(self, p):
+    def p_direct_abstract_declarator_round_2(self, p):
         """direct_abstract_declarator : ROUND_OPEN parameter_type_list ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2], p[3])
 
-    def p_direct_abstract_declarator_7(self, p):
+    def p_direct_abstract_declarator_round_3(self, p):
+        """direct_abstract_declarator : ROUND_OPEN identifier_list ROUND_CLOSE"""
+        p[0] = self.make_list(p[1], p[2], p[3])
+
+    def p_direct_abstract_declarator_round_4(self, p):
         """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2], p[3])
 
-    def p_direct_abstract_declarator_8(self, p):
+    def p_direct_abstract_declarator_round_5(self, p):
         """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN parameter_type_list ROUND_CLOSE"""
         p[0] = self.make_list(p[1], p[2], p[3], p[4])
+
+    def p_direct_abstract_declarator_round_6(self, p):
+        """direct_abstract_declarator : direct_abstract_declarator ROUND_OPEN identifier_list ROUND_CLOSE"""
+        p[0] = self.make_list(p[1], p[2], p[3], p[4])
+
 
 
     def p_direct_declarator_1(self, p):
