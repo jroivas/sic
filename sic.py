@@ -51,6 +51,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--debug", action='store_true')
     parser.add_argument("--ast", action='store_true')
+    parser.add_argument("--raw-dict", action='store_true')
     parser.add_argument("--print-pair", action='store_true')
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
@@ -75,12 +76,13 @@ if __name__ == "__main__":
     #r = parse()
     #print(r)
     #print(r.to_json())
-    #import beeprint
     sys.setrecursionlimit(6500)
+    if args.raw_dict and r:
+        import beeprint
+        #pprint.pprint(r.to_json())
+        beeprint.pp(r.to_json(), max_depth=6000)
+        #print(r.to_json())
     if args.ast and r:
         print(json.dumps(r.to_json(), indent=2))
-        #pprint.pprint(r.to_json())
-        #beeprint.pp(r.to_json(), max_depth=6000)
-        #print(r.to_json())
     if not p.success():
         sys.exit(1)

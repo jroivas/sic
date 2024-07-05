@@ -54,7 +54,6 @@ class AstType(Enum):
 
 
 print_pair = False
-#print_pair = True
 
 def set_pair(val):
     global print_pair
@@ -127,10 +126,13 @@ class AstOpNode(AstNode):
         return "AstOpNode({} {} {})".format(self.left, self.op, self.right)
 
     def to_json(self):
+        if not isinstance(self.op, AstNode):
+            raise ValueError("Expected AstNode op, got {}".format(self.op))
+        opname = self.op.value
         res = {
             "type": "{}".format(self.nodetype),
-            "value": self.op,
-            self.op: {
+            "value": "{}".format(opname),
+            opname: {
                 "left": self.obj_to_json(self.left),
                 "right": self.obj_to_json(self.right),
             },
@@ -154,7 +156,7 @@ class AstPrePostOp(AstNode):
     def to_json(self):
         res = {
             "type": "{}".format(self.nodetype),
-            "op": self.op,
+            "op": self.obj_to_json(self.op),
             "value": self.obj_to_json(self.val),
             "pre": self.pre,
         }

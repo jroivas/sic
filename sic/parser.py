@@ -407,7 +407,9 @@ class Parser:
 
     def p_enumerator_2(self, p):
         """enumerator : IDENTIFIER EQ constant_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        idt = AstNode(AstType.IDENTIFIER, p[1])
+        p[0] = AstOpNode(op, idt, p[3])
 
     def p_struct_or_union_specifier_1(self, p):
         """struct_or_union_specifier : struct_or_union identifier_or_type_name CURLY_OPEN struct_declaration_list CURLY_CLOSE"""
@@ -491,7 +493,8 @@ class Parser:
 
     def p_init_declarator_2(self, p):
         """init_declarator : declarator EQ initializer"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_declarator_1(self, p):
         """declarator : pointer direct_declarator"""
@@ -1179,11 +1182,13 @@ class Parser:
 
     def p_equality_expression_2(self, p):
         """equality_expression : equality_expression EQ_EQ relational_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_equality_expression_3(self, p):
         """equality_expression : equality_expression EQ_NE relational_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_relational_expression_1(self, p):
         """relational_expression : shift_expression"""
@@ -1191,19 +1196,23 @@ class Parser:
 
     def p_relational_expression_2(self, p):
         """relational_expression : relational_expression LT shift_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_relational_expression_3(self, p):
         """relational_expression : relational_expression GT shift_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_relational_expression_4(self, p):
         """relational_expression : relational_expression LE shift_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_relational_expression_5(self, p):
         """relational_expression : relational_expression GE shift_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_shift_expression_1(self, p):
         """shift_expression : additive_expression"""
@@ -1211,11 +1220,13 @@ class Parser:
 
     def p_shift_expression_2(self, p):
         """shift_expression : shift_expression SH_LEFT additive_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_shift_expression_3(self, p):
         """shift_expression : shift_expression SH_RIGHT additive_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_additive_expression_1(self, p):
         """additive_expression : multiplicative_expression"""
@@ -1223,11 +1234,13 @@ class Parser:
 
     def p_additive_expression_2(self, p):
         """additive_expression : additive_expression PLUS multiplicative_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_additive_expression_3(self, p):
         """additive_expression : additive_expression MINUS multiplicative_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_multiplicative_expression_1(self, p):
         """multiplicative_expression : cast_expression"""
@@ -1235,15 +1248,18 @@ class Parser:
 
     def p_multiplicative_expression_2(self, p):
         """multiplicative_expression : multiplicative_expression STAR cast_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_multiplicative_expression_3(self, p):
         """multiplicative_expression : multiplicative_expression SLASH cast_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_multiplicative_expression_4(self, p):
         """multiplicative_expression : multiplicative_expression MOD cast_expression"""
-        p[0] = AstOpNode(p[2], p[1], p[3])
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstOpNode(op, p[1], p[3])
 
     def p_cast_expression_1(self, p):
         """cast_expression : unary_expression"""
@@ -1283,11 +1299,13 @@ class Parser:
 
     def p_unary_expression_2(self, p):
         """unary_expression : PLUSPLUS unary_expression"""
-        p[0] = AstPrePostOp(p[1], p[2], pre=True)
+        op = AstNode(AstType.ASSIGNMENT, p[1])
+        p[0] = AstPrePostOp(op, p[2], pre=True)
 
     def p_unary_expression_3(self, p):
         """unary_expression : MINUSMINUS unary_expression"""
-        p[0] = AstPrePostOp(p[1], p[2], pre=True)
+        op = AstNode(AstType.ASSIGNMENT, p[1])
+        p[0] = AstPrePostOp(op, p[2], pre=True)
 
     def p_unary_expression_4(self, p):
         """unary_expression : unary_operator cast_expression"""
@@ -1357,11 +1375,13 @@ class Parser:
 
     def p_postfix_expression_7(self, p):
         """postfix_expression : postfix_expression PLUSPLUS"""
-        p[0] = AstPrePostOp(p[2], p[1], pre=False)
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstPrePostOp(op, p[1], pre=False)
 
     def p_postfix_expression_8(self, p):
         """postfix_expression : postfix_expression MINUSMINUS"""
-        p[0] = AstPrePostOp(p[2], p[1], pre=False)
+        op = AstNode(AstType.ASSIGNMENT, p[2])
+        p[0] = AstPrePostOp(op, p[1], pre=False)
 
     def p_postfix_expression_9(self, p):
         """postfix_expression : ROUND_OPEN type_name ROUND_CLOSE CURLY_OPEN initializer_list CURLY_CLOSE"""
@@ -1406,7 +1426,8 @@ class Parser:
 
     def p_primary_expression_5(self, p):
         """primary_expression : ROUND_OPEN expression ROUND_CLOSE"""
-        p[0] = self.make_list(p[1], p[2], p[3])
+        p[0] = AstNode(AstType.PARENTHESIS, p[2])
+        #p[0] = self.make_list(p[1], p[2], p[3])
 
     def p_primary_expression_6(self, p):
         """primary_expression : CONSTANT_CHAR"""
