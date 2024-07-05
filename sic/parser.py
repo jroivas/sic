@@ -40,6 +40,12 @@ class Parser:
         with open(fname, "r") as fd:
             return fd.read()
 
+    def dump_tree(self, name, *trees):
+        import beeprint
+        print("Dtree {}".format(name))
+        for tree in trees:
+            beeprint.pp(tree.to_json(), max_depth=6000)
+
     def scope_new(self):
         self.scopes.append(dict())
 
@@ -68,7 +74,6 @@ class Parser:
     def make_list(self, *items):
         if not items:
             return []
-        print(items)
         if type(items) == tuple:
             items = list(items)
         if type(items) != list:
@@ -107,13 +112,11 @@ class Parser:
         """
         if not items:
             return []
-        # print("LL0", type(items))
         if type(items) == tuple:
             items = list(items)
         if type(items) != list:
             return [items]
 
-        # print("LL1", items)
         if type(items[0]) == list:
             #base = [items[0]]
             base = items[0]
@@ -125,7 +128,6 @@ class Parser:
                 base += i
             else:
                 base.append(i)
-        # print("LL2", base)
         return base
 
     def p_empty(self, p):
@@ -192,7 +194,6 @@ class Parser:
         if not ast:
             return False
 
-        #print("ast", ast)
         lst = []
         if type(ast) == list:
             lst = ast
@@ -218,7 +219,6 @@ class Parser:
         else:
             return None
 
-        #print("lst", ast, lst)
         for ch in lst:
             if isinstance(ch, AstNode):
                 if self.has_typedef(ch):
@@ -230,10 +230,14 @@ class Parser:
         if not ast:
             return None
 
-        #print("AST", ast)
         lst = []
         if type(ast) == list:
             lst = ast
+        elif isinstance(ast, AstPair):
+            if ast.l:
+                lst.append(ast.l)
+            if ast.r:
+                lst.append(ast.r)
         elif isinstance(ast, AstNode):
             if ast.nodetype == AstType.IDENTIFIER:
                 return ast.value
@@ -241,6 +245,7 @@ class Parser:
                 lst = ast.value
         else:
             return None
+
         if lst is None:
             return None
 
@@ -282,6 +287,7 @@ class Parser:
         ht = self.has_typedef(p[1])
         if ht:
             val = self.resolve_value(p[2])
+            #print("HasType", p[1], p[2], ht, val)
             if val is not None:
                 #print("DECLARE", val, p[1])
                 self.scanner.add_type(val)
@@ -1115,7 +1121,6 @@ class Parser:
 
     def p_compound_statement_list_2(self, p):
         """compound_statement_list : compound_statement_list COMMA compound_statement"""
-        p[0] = self.make_pair(p[1], p[3])
         """
         if type(p[1]) != list:
             p[1] = [p[1]]
@@ -1125,6 +1130,7 @@ class Parser:
             p[1] = [p[1], p[3]]
         p[0] = p[1]
         """
+        p[0] = self.make_pair(p[1], p[3])
 
     def p_assignment_operator(self, p):
         """
