@@ -57,6 +57,42 @@ class LLVMLiteCodegen(BaseCodegen):
         self.gen_idx += 1
         return "__{}".format(self.gen_idx)
 
+    def convert(self, target, val):
+        if target == val.type:
+            return val
+
+        if target == ll.DoubleType():
+            if isinstance(val.type, ll.IntType):
+                # FIXME Signed
+                return self.builder.uitofp(val, target)
+        elif isinstance(target, ll.IntType):
+            if isinstance(val.type, ll.DoubleType):
+                return self.builder.fptoui(val, target)
+
+        raise ValueError("Unknown convert to {} from {}".format(target, val))
+
+    def load(self, val):
+        if isinstance(val.type, ll.PointerType):
+            return self.builder.load(val)
+
+        return val
+
+    def ttype(self, a, b):
+        ta = a.type
+        tb = b.type
+        if ta == tb:
+            return ta
+        if isinstance(ta, ll.IntType) and isinstance(tb, ll.IntType):
+            if ta.width >= tb.width:
+                return ta
+            return tb
+        if isinstance(ta, ll.DoubleType) and isinstance(tb, ll.IntType):
+            return ta
+        if isinstance(tb, ll.DoubleType) and isinstance(ta, ll.IntType):
+            return tb
+
+        raise ValueError("Invalid type determination {} and {}".format(ta, tb))
+
     def _generate(self, val):
         if val is None:
             return None
@@ -76,22 +112,24 @@ class LLVMLiteCodegen(BaseCodegen):
             #print(a_val)
             #print(b_val)
 
-            if isinstance(a_val.type, ll.PointerType):
-                a = self.builder.load(a_val)
-            else:
-                a = a_val
-
-            if isinstance(b_val.type, ll.PointerType):
-                b = self.builder.load(b_val)
-            else:
-                b = b_val
+            a = self.load(a_val)
+            b = self.load(b_val)
+            ttype = self.ttype(a, b)
+            a = self.convert(ttype, a)
+            b = self.convert(ttype, b)
 
             if op == "+":
-                sv = self.builder.add(a, b)
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.fadd(a, b)
+                else:
+                    sv = self.builder.add(a, b)
                 self.last_initializer = sv
                 return sv
             elif op == "-":
-                sv = self.builder.sub(a, b)
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.fsub(a, b)
+                else:
+                    sv = self.builder.sub(a, b)
                 self.last_initializer = sv
                 return sv
             else:
@@ -102,28 +140,26 @@ class LLVMLiteCodegen(BaseCodegen):
                 return [val.op, a, b]
                 """
         elif type(val) == AstLiteral:
-            if val.nodetype == AstType.INT_LIT:
+            if val.nodetype == AstType.INT_LIT or val.nodetype == AstType.FRAC_LIT:
                 # TODO Different sizes
-                cv = ll.Constant(ll.IntType(32), int(val.value))
+                if val.nodetype == AstType.INT_LIT:
+                    thetype = ll.IntType(32)
+                    cv = ll.Constant(thetype, int(val.value))
+                elif val.nodetype == AstType.FRAC_LIT:
+                    # FIXME Float
+                    thetype = ll.DoubleType()
+                    cv = ll.Constant(thetype, float(val.value))
 
                 if self.is_global:
-                    iv = ll.GlobalVariable(self.module, ll.IntType(32), self.gen_name())
+                    iv = ll.GlobalVariable(self.module, thetype, self.gen_name())
                     iv.global_constant = True
                     iv.initializer = cv
                     self.last_initializer = iv
                     return iv
                 else:
-                    iv = self.builder.alloca(ll.IntType(32))
+                    iv = self.builder.alloca(thetype)
                     self.builder.store(cv, iv)
                     return builder.load(iv)
-                """
-                if self.is_global:
-                    iv = ll.()
-                else:
-                    iv = self.builder.alloca(ll.IntType(32))
-                    self.builder.store(ll.Constant(iv.type.pointee, int(val.value)), iv)
-                    return builder.load(iv)
-                """
             else:
                 raise ValueError("Unsupported literal: {}".format(val))
             #return val.value
@@ -156,7 +192,8 @@ class LLVMLiteCodegen(BaseCodegen):
 
         if self.last_initializer:
             self.builder.position_at_end(self.init_entry)
-            self.builder.ret(self.last_initializer)
+            lastval = self.convert(ll.IntType(32), self.last_initializer)
+            self.builder.ret(lastval)
 
         if not self.got_main:
             self.fake_main()
