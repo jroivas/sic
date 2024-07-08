@@ -14,6 +14,7 @@ from sic.ast import (
     AstTypedef,
     AstPair,
     AstLiteral,
+    AstUnary,
 )
 import llvmlite.ir as ll
 from llvmlite import binding
@@ -52,6 +53,8 @@ class LLVMLiteCodegen(BaseCodegen):
         self.target = binding.Target.from_default_triple()
         self.target_machine = self.target.create_target_machine()
         self.module.triple = self.target_machine.triple
+
+        self.typemap = {}
 
     def gen_name(self):
         self.gen_idx += 1
@@ -93,6 +96,15 @@ class LLVMLiteCodegen(BaseCodegen):
 
         raise ValueError("Invalid type determination {} and {}".format(ta, tb))
 
+    def to_int(self, val):
+        if type(val) == str:
+            if len(val) > 2 and val[0] == "0" and val[1] == "x":
+                return int(val, 16)
+            elif len(val) >= 2 and val[0] == "0" and (val[1] == "o" or val[1].isdigit()):
+                return int(val, 8)
+            else:
+                return int(val)
+
     def _generate(self, val):
         if val is None:
             return None
@@ -132,19 +144,28 @@ class LLVMLiteCodegen(BaseCodegen):
                     sv = self.builder.sub(a, b)
                 self.last_initializer = sv
                 return sv
+            elif op == "*":
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.fmul(a, b)
+                else:
+                    sv = self.builder.mul(a, b)
+                self.last_initializer = sv
+                return sv
+            elif op == "/":
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.fdiv(a, b)
+                else:
+                    sv = self.builder.udiv(a, b)
+                self.last_initializer = sv
+                return sv
             else:
-                raise ValueError("Unsupported op: {} (orig {])".format(op, val.op))
-                """
-                a = self._generate(val.left)
-                b = self._generate(val.right)
-                return [val.op, a, b]
-                """
+                raise ValueError("Unsupported op: {} (orig {})".format(op, val.op))
         elif type(val) == AstLiteral:
             if val.nodetype == AstType.INT_LIT or val.nodetype == AstType.FRAC_LIT:
                 # TODO Different sizes
                 if val.nodetype == AstType.INT_LIT:
                     thetype = ll.IntType(32)
-                    cv = ll.Constant(thetype, int(val.value))
+                    cv = ll.Constant(thetype, self.to_int(val.value))
                 elif val.nodetype == AstType.FRAC_LIT:
                     # FIXME Float
                     thetype = ll.DoubleType()
@@ -162,7 +183,18 @@ class LLVMLiteCodegen(BaseCodegen):
                     return builder.load(iv)
             else:
                 raise ValueError("Unsupported literal: {}".format(val))
-            #return val.value
+        elif type(val) == AstUnary:
+            a_val = self._generate(val.value)
+            a = self.load(a_val)
+            ttype = a.type
+
+            if val.op.value == "-":
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.fneg(a)
+                else:
+                    sv = self.builder.neg(a)
+                self.last_initializer = sv
+                return sv
         elif isinstance(val, AstNode):
             if val.value:
                 return self._generate(val.value)

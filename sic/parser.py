@@ -16,6 +16,7 @@ from sic.ast import (
     AstTypedef,
     AstPair,
     AstLiteral,
+    AstUnary,
 )
 
 from ply import yacc
@@ -1178,7 +1179,8 @@ class Parser:
 
     def p_unary_expression_4(self, p):
         """unary_expression : unary_operator cast_expression"""
-        p[0] = self.make_pair(p[1], p[2])
+        #p[0] = self.make_pair(p[1], p[2])
+        p[0] = AstUnary(p[1], p[2])
 
     def p_unary_expression_5(self, p):
         """unary_expression : SIZEOF unary_expression"""

@@ -114,6 +114,17 @@ class AstNode(object):
             val = self.list_to_json(val)
         return val
 
+class AstUnary(AstNode):
+    def __init__(self, op, val):
+        self.op = op
+        super().__init__(AstType.UNARY, val)
+
+    def to_json(self):
+        return {
+            "type": "{}".format(self.nodetype),
+            "op": self.obj_to_json(self.op),
+            "value": self.obj_to_json(self.value),
+        }
 
 class AstOpNode(AstNode):
     def __init__(self, optype, a, b):
