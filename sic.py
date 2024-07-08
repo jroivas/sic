@@ -8,6 +8,7 @@ from sic.preprocess import Preprocess, apply_inc_dirs, apply_defines, apply_defa
 from sic.scan import Scan
 from sic.parser import Parser
 from sic.codegen import Codegen
+from sic.optimize import Optimize
 import sic.ast
 
 
@@ -55,6 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("--gen", action='store_true')
     parser.add_argument("--raw-dict", action='store_true')
     parser.add_argument("--print-pair", action='store_true')
+    parser.add_argument("-O", "--opt", action='store')
     parser.add_argument("-D", nargs="*", action="append")
     parser.add_argument("-I", nargs="*", action="append")
     parser.add_argument("filename")
@@ -78,6 +80,9 @@ if __name__ == "__main__":
     #r = parse()
     #print(r)
     #print(r.to_json())
+    if args.opt and int(args.opt) > 0:
+        sys.stderr.write("Optimizing, level {}\n".format(args.opt))
+        r = Optimize(r, args.opt).run()
     sys.setrecursionlimit(6500)
     if args.raw_dict and r:
         import beeprint

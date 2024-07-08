@@ -16,6 +16,7 @@ from sic.ast import (
     AstLiteral,
     AstUnary,
 )
+import sic.tools
 import llvmlite.ir as ll
 from llvmlite import binding
 
@@ -72,6 +73,8 @@ class LLVMLiteCodegen(BaseCodegen):
             if isinstance(val.type, ll.DoubleType):
                 return self.builder.fptoui(val, target)
 
+        print(isinstance(target, ll.IntType))
+        print(isinstance(val.type, ll.DoubleType))
         raise ValueError("Unknown convert to {} from {}".format(target, val))
 
     def load(self, val):
@@ -97,13 +100,7 @@ class LLVMLiteCodegen(BaseCodegen):
         raise ValueError("Invalid type determination {} and {}".format(ta, tb))
 
     def to_int(self, val):
-        if type(val) == str:
-            if len(val) > 2 and val[0] == "0" and val[1] == "x":
-                return int(val, 16)
-            elif len(val) >= 2 and val[0] == "0" and (val[1] == "o" or val[1].isdigit()):
-                return int(val, 8)
-            else:
-                return int(val)
+        return sic.tools.to_int(val)
 
     def _generate(self, val):
         if val is None:
@@ -158,14 +155,30 @@ class LLVMLiteCodegen(BaseCodegen):
                     sv = self.builder.udiv(a, b)
                 self.last_initializer = sv
                 return sv
+            elif op == "%":
+                if isinstance(ttype, ll.DoubleType):
+                    sv = self.builder.frem(a, b)
+                else:
+                    sv = self.builder.urem(a, b)
+                self.last_initializer = sv
+                return sv
             else:
                 raise ValueError("Unsupported op: {} (orig {})".format(op, val.op))
         elif type(val) == AstLiteral:
             if val.nodetype == AstType.INT_LIT or val.nodetype == AstType.FRAC_LIT:
                 # TODO Different sizes
                 if val.nodetype == AstType.INT_LIT:
-                    thetype = ll.IntType(32)
-                    cv = ll.Constant(thetype, self.to_int(val.value))
+                    ival = self.to_int(val.value)
+                    bl = ival.bit_length()
+                    if bl <= 32:
+                        thetype = ll.IntType(32)
+                    elif bl <= 64:
+                        thetype = ll.IntType(64)
+                    else:
+                        raise ValueError("Integer overflow bits: {}".format(bl))
+                    if ival < 0:
+                        neg = True
+                    cv = ll.Constant(thetype, ival)
                 elif val.nodetype == AstType.FRAC_LIT:
                     # FIXME Float
                     thetype = ll.DoubleType()
@@ -224,7 +237,8 @@ class LLVMLiteCodegen(BaseCodegen):
 
         if self.last_initializer:
             self.builder.position_at_end(self.init_entry)
-            lastval = self.convert(ll.IntType(32), self.last_initializer)
+            last = self.load(self.last_initializer)
+            lastval = self.convert(ll.IntType(32), last)
             self.builder.ret(lastval)
 
         if not self.got_main:
