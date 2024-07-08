@@ -15,6 +15,7 @@ from sic.ast import (
     AstCast,
     AstTypedef,
     AstPair,
+    AstLiteral,
 )
 
 from ply import yacc
@@ -1266,15 +1267,15 @@ class Parser:
 
     def p_primary_expression_1(self, p):
         """primary_expression : FRAC_LIT"""
-        p[0] = AstNode(AstType.FRAC_LIT, p[1])
+        p[0] = AstLiteral(AstType.FRAC_LIT, p[1])
 
     def p_primary_expression_2(self, p):
         """primary_expression : INT_LIT"""
-        p[0] = AstNode(AstType.INT_LIT, p[1])
+        p[0] = AstLiteral(AstType.INT_LIT, p[1])
 
     def p_primary_expression_3(self, p):
         """primary_expression : string_literals"""
-        p[0] = AstNode(AstType.STR_LIT, p[1])
+        p[0] = AstLiteral(AstType.STR_LIT, p[1])
 
     def p_primary_expression_4(self, p):
         """primary_expression : IDENTIFIER"""

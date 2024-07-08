@@ -7,6 +7,7 @@ import json
 from sic.preprocess import Preprocess, apply_inc_dirs, apply_defines, apply_default_inc_dirs
 from sic.scan import Scan
 from sic.parser import Parser
+from sic.codegen import Codegen
 import sic.ast
 
 
@@ -51,6 +52,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output")
     parser.add_argument("-d", "--debug", action='store_true')
     parser.add_argument("--ast", action='store_true')
+    parser.add_argument("--gen", action='store_true')
     parser.add_argument("--raw-dict", action='store_true')
     parser.add_argument("--print-pair", action='store_true')
     parser.add_argument("-D", nargs="*", action="append")
@@ -86,3 +88,6 @@ if __name__ == "__main__":
         print(json.dumps(r.to_json(), indent=2))
     if not p.success():
         sys.exit(1)
+    if r and args.gen:
+        gen = Codegen(r, args.filename)
+        print(gen.generate())

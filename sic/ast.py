@@ -347,6 +347,16 @@ class AstTypedef(AstNode):
         }
         return res
 
+class AstLiteral(AstNode):
+    def __init__(self, nodetype, val):
+        super().__init__(nodetype, val)
+
+    def to_json(self):
+        return {
+            "type": "{}".format(self.nodetype),
+            "value": self.obj_to_json(self.value),
+        }
+
 class AstPair(AstNode):
     def __init__(self, a, b = None):
         #super().__init__(AstType.PAIR, a)
