@@ -20,6 +20,36 @@ import sic.tools
 import llvmlite.ir as ll
 from llvmlite import binding
 
+#class SignedIntType(object):
+#class SignedIntType(ll.Type):
+class SignedIntType(ll.IntType):
+    """
+    The type for signed integers.
+    """
+    _instance_cache = {}
+    width: int
+
+    def __new__(cls, bits):
+        # Cache all common integer types
+        if 0 <= bits <= 128:
+            try:
+                return cls._instance_cache[bits]
+            except KeyError:
+                inst = cls._instance_cache[bits] = cls.__new(bits)
+                return inst
+        return cls.__new(bits)
+
+    @classmethod
+    def __new(cls, bits):
+        assert isinstance(bits, int) and bits >= 0
+        self = super(SignedIntType, cls).__new__(cls, bits)
+        self.width = bits
+        return self
+
+    def _to_string(self):
+        return 'i%u' % (self.width,)
+
+
 class BaseCodegen(object):
     def __init__(self, ast, name):
         self.ast = ast
@@ -66,12 +96,24 @@ class LLVMLiteCodegen(BaseCodegen):
             return val
 
         if target == ll.DoubleType():
-            if isinstance(val.type, ll.IntType):
-                # FIXME Signed
+            if isinstance(val.type, SignedIntType):
+                return self.builder.sitofp(val, target)
+            elif isinstance(val.type, ll.IntType):
                 return self.builder.uitofp(val, target)
+        elif isinstance(target, SignedIntType):
+            if isinstance(val.type, ll.DoubleType):
+                return self.builder.fptosi(val, target)
+            elif isinstance(val.type, ll.IntType):
+                # FIXME bits
+                val.type = target
+                return val
         elif isinstance(target, ll.IntType):
             if isinstance(val.type, ll.DoubleType):
                 return self.builder.fptoui(val, target)
+            elif isinstance(val.type, SignedIntType):
+                # FIXME bits
+                val.type = target
+                return val
 
         print(isinstance(target, ll.IntType))
         print(isinstance(val.type, ll.DoubleType))
@@ -88,13 +130,21 @@ class LLVMLiteCodegen(BaseCodegen):
         tb = b.type
         if ta == tb:
             return ta
-        if isinstance(ta, ll.IntType) and isinstance(tb, ll.IntType):
+        if isinstance(ta, SignedIntType) and isinstance(tb, ll.IntType):
+            if ta.width >= tb.width:
+                return ta
+            return SignedIntType(tb.width)
+        elif isinstance(ta, ll.IntType) and isinstance(tb, SignedIntType):
+            if tb.width >= ta.width:
+                return tb
+            return SignedIntType(ta.width)
+        elif isinstance(ta, ll.IntType) and isinstance(tb, ll.IntType):
             if ta.width >= tb.width:
                 return ta
             return tb
-        if isinstance(ta, ll.DoubleType) and isinstance(tb, ll.IntType):
+        elif isinstance(ta, ll.DoubleType) and isinstance(tb, ll.IntType):
             return ta
-        if isinstance(tb, ll.DoubleType) and isinstance(ta, ll.IntType):
+        elif isinstance(tb, ll.DoubleType) and isinstance(ta, ll.IntType):
             return tb
 
         raise ValueError("Invalid type determination {} and {}".format(ta, tb))
@@ -151,6 +201,9 @@ class LLVMLiteCodegen(BaseCodegen):
             elif op == "/":
                 if isinstance(ttype, ll.DoubleType):
                     sv = self.builder.fdiv(a, b)
+                elif isinstance(ttype, SignedIntType):
+                    # FIXME
+                    sv = self.builder.sdiv(a, b)
                 else:
                     sv = self.builder.udiv(a, b)
                 self.last_initializer = sv
@@ -171,11 +224,20 @@ class LLVMLiteCodegen(BaseCodegen):
                     ival = self.to_int(val.value)
                     bl = ival.bit_length()
                     if bl <= 32:
-                        thetype = ll.IntType(32)
+                        if ival < 0:
+                            thetype = SignedIntType(32)
+                            #print("TT2", thetype)
+                        else:
+                            thetype = ll.IntType(32)
                     elif bl <= 64:
-                        thetype = ll.IntType(64)
+                        if ival < 0:
+                            thetype = SignedIntType(64)
+                        else:
+                            thetype = ll.IntType(64)
                     else:
                         raise ValueError("Integer overflow bits: {}".format(bl))
+                    #print("TYPE", thetype, str(thetype), repr(thetype))
+                    #print(" DD", dir(thetype))
                     if ival < 0:
                         neg = True
                     cv = ll.Constant(thetype, ival)
@@ -205,7 +267,11 @@ class LLVMLiteCodegen(BaseCodegen):
                 if isinstance(ttype, ll.DoubleType):
                     sv = self.builder.fneg(a)
                 else:
+                    # Force type to signed if not
+                    if not isinstance(ttype, SignedIntType):
+                        a.type = SignedIntType(a.type.width)
                     sv = self.builder.neg(a)
+                    #print("sv" ,sv.type, sv)
                 self.last_initializer = sv
                 return sv
         elif isinstance(val, AstNode):
@@ -230,6 +296,7 @@ class LLVMLiteCodegen(BaseCodegen):
         self.builder.position_at_end(self.main_entry)
 
         res = self.builder.call(self.init_func, [])
+        res = self.convert(SignedIntType(32), res)
         self.builder.ret(res)
 
     def generate(self):
@@ -238,7 +305,7 @@ class LLVMLiteCodegen(BaseCodegen):
         if self.last_initializer:
             self.builder.position_at_end(self.init_entry)
             last = self.load(self.last_initializer)
-            lastval = self.convert(ll.IntType(32), last)
+            lastval = self.convert(SignedIntType(32), last)
             self.builder.ret(lastval)
 
         if not self.got_main:
