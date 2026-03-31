@@ -75,11 +75,13 @@ class LLVMLiteCodegen(BaseCodegen):
         self.last_initializer = None
 
         self.got_main = False
+        self.globals = {}
+        self.current_decl_type = None
 
         # TODO Configurable target
-        binding.initialize()
         #binding.initialize_all_targets()
         binding.initialize_native_target()
+        binding.initialize_native_asmprinter()
 
         self.target = binding.Target.from_default_triple()
         self.target_machine = self.target.create_target_machine()
@@ -104,16 +106,27 @@ class LLVMLiteCodegen(BaseCodegen):
             if isinstance(val.type, ll.DoubleType):
                 return self.builder.fptosi(val, target)
             elif isinstance(val.type, ll.IntType):
-                # FIXME bits
-                val.type = target
-                return val
+                if val.type.width < target.width:
+                    if isinstance(val.type, SignedIntType):
+                        return self.builder.sext(val, target)
+                    else:
+                        return self.builder.zext(val, target)
+                elif val.type.width > target.width:
+                    return self.builder.trunc(val, target)
+                else:
+                    val.type = target
+                    return val
         elif isinstance(target, ll.IntType):
             if isinstance(val.type, ll.DoubleType):
                 return self.builder.fptoui(val, target)
             elif isinstance(val.type, SignedIntType):
-                # FIXME bits
-                val.type = target
-                return val
+                if val.type.width < target.width:
+                    return self.builder.zext(val, target)
+                elif val.type.width > target.width:
+                    return self.builder.trunc(val, target)
+                else:
+                    val.type = target
+                    return val
 
         print(isinstance(target, ll.IntType))
         print(isinstance(val.type, ll.DoubleType))
@@ -152,18 +165,96 @@ class LLVMLiteCodegen(BaseCodegen):
     def to_int(self, val):
         return sic.tools.to_int(val)
 
+    def _is_type_spec(self, val):
+        if isinstance(val, AstNode) and val.nodetype == AstType.TYPE:
+            return True
+        if type(val) == AstPair:
+            return self._is_type_spec(val.l) and self._is_type_spec(val.r)
+        if type(val) == list:
+            return bool(val) and all(self._is_type_spec(i) for i in val)
+        return False
+
+    def _collect_type_keywords(self, val):
+        if isinstance(val, AstNode) and val.nodetype == AstType.TYPE:
+            inner = val.value
+            if isinstance(inner, AstNode) and inner.nodetype == AstType.TYPE:
+                return [inner.value]
+            elif isinstance(inner, str):
+                return [inner]
+            return []
+        if type(val) == AstPair:
+            return self._collect_type_keywords(val.l) + self._collect_type_keywords(val.r)
+        if type(val) == list:
+            result = []
+            for item in val:
+                result.extend(self._collect_type_keywords(item))
+            return result
+        return []
+
+    def _llvm_type_from_keywords(self, keywords):
+        unsigned = 'unsigned' in keywords
+        if 'char' in keywords:
+            return ll.IntType(8) if unsigned else SignedIntType(8)
+        elif 'short' in keywords:
+            return ll.IntType(16) if unsigned else SignedIntType(16)
+        elif 'long' in keywords:
+            return ll.IntType(64) if unsigned else SignedIntType(64)
+        elif 'double' in keywords:
+            return ll.DoubleType()
+        elif 'float' in keywords:
+            return ll.FloatType()
+        else:  # int, unsigned, or unsigned int
+            return ll.IntType(32) if unsigned else SignedIntType(32)
+
+    def _resolve_type_spec(self, spec):
+        return self._llvm_type_from_keywords(self._collect_type_keywords(spec))
+
+    def _get_initializer_const(self, val, target_type):
+        """Return an ll.Constant for use as a global initializer, without side effects."""
+        if type(val) == AstLiteral and val.nodetype == AstType.INT_LIT:
+            return ll.Constant(target_type, self.to_int(val.value))
+        elif type(val) == AstLiteral and val.nodetype == AstType.FRAC_LIT:
+            return ll.Constant(target_type, float(val.value))
+        return None
+
     def _generate(self, val):
         if val is None:
             return None
 
         if type(val) == AstPair:
+            if self._is_type_spec(val.l):
+                self.current_decl_type = self._resolve_type_spec(val.l)
+                return self._generate(val.r)
             a = self._generate(val.l)
             b = self._generate(val.r)
             return [a, b]
-        elif type(val) == AstNode and val.nodetype == AstType.OP:
+        elif type(val) == AstNode and val.nodetype in (AstType.OP, AstType.ASSIGNMENT):
             return val.value
         elif type(val) == AstOpNode:
             op = self._generate(val.op)
+
+            if op == "=":
+                if isinstance(val.left, AstNode) and val.left.nodetype == AstType.IDENTIFIER:
+                    name = val.left.value
+                    if name not in self.globals:
+                        decl_type = self.current_decl_type or ll.IntType(32)
+                        gv = ll.GlobalVariable(self.module, decl_type, name)
+                        init = self._get_initializer_const(val.right, decl_type)
+                        if init is None:
+                            rhs = self._generate(val.right)
+                            init = self.load(rhs)
+                        gv.initializer = init
+                        self.globals[name] = gv
+                        self.last_initializer = gv
+                        return gv
+                    else:
+                        gv = self.globals[name]
+                        rhs = self._generate(val.right)
+                        self.builder.store(self.load(rhs), gv)
+                        return gv
+                else:
+                    raise ValueError("Unsupported = target: {}".format(val.left))
+
             a_val = self._generate(val.left)
             b_val = self._generate(val.right)
             #print(dir(a_val))
@@ -274,6 +365,11 @@ class LLVMLiteCodegen(BaseCodegen):
                     #print("sv" ,sv.type, sv)
                 self.last_initializer = sv
                 return sv
+        elif type(val) == AstNode and val.nodetype == AstType.IDENTIFIER:
+            name = val.value
+            if name in self.globals:
+                return self.globals[name]
+            raise ValueError("Undefined identifier: {}".format(name))
         elif isinstance(val, AstNode):
             if val.value:
                 return self._generate(val.value)
