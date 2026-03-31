@@ -369,6 +369,14 @@ class LLVMLiteCodegen(BaseCodegen):
             name = val.value
             if name in self.globals:
                 return self.globals[name]
+            # Bare declarator (no initializer) in a declaration context
+            if self.current_decl_type is not None:
+                decl_type = self.current_decl_type
+                gv = ll.GlobalVariable(self.module, decl_type, name)
+                gv.initializer = ll.Constant(decl_type, 0)
+                self.globals[name] = gv
+                self.last_initializer = gv
+                return gv
             raise ValueError("Undefined identifier: {}".format(name))
         elif isinstance(val, AstNode):
             if val.value:
