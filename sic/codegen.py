@@ -301,7 +301,7 @@ class LLVMLiteCodegen(BaseCodegen):
                     self.builder.store(self.load(rhs), gv)
                     return gv
 
-            if op in ('+=', '-=', '*=', '/=', '%='):
+            if op in ('+=', '-=', '*=', '/=', '%=', '<<=', '>>=' ):
                 ptr = self._generate(val.left)
                 a = self.load(ptr)
                 b = self.load(self._generate(val.right))
@@ -324,6 +324,10 @@ class LLVMLiteCodegen(BaseCodegen):
                         sv = self.builder.udiv(a, b)
                 elif base_op == '%':
                     sv = self.builder.frem(a, b) if isinstance(ttype, (ll.DoubleType, ll.FloatType)) else self.builder.urem(a, b)
+                elif base_op == '<':
+                    sv = self.builder.shl(a, b)
+                elif base_op == '>':
+                    sv = self.builder.ashr(a, b) if isinstance(ttype, SignedIntType) else self.builder.lshr(a, b)
                 self.builder.store(sv, ptr)
                 self.last_initializer = sv
                 return sv
@@ -373,6 +377,14 @@ class LLVMLiteCodegen(BaseCodegen):
                     sv = self.builder.frem(a, b)
                 else:
                     sv = self.builder.urem(a, b)
+                self.last_initializer = sv
+                return sv
+            elif op == "<<":
+                sv = self.builder.shl(a, b)
+                self.last_initializer = sv
+                return sv
+            elif op == ">>":
+                sv = self.builder.ashr(a, b) if isinstance(ttype, SignedIntType) else self.builder.lshr(a, b)
                 self.last_initializer = sv
                 return sv
             elif op in ("==", "!=", "<", ">", "<=", ">="):
