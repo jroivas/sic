@@ -380,7 +380,7 @@ class LLVMLiteCodegen(BaseCodegen):
                 else:
                     iv = self.builder.alloca(thetype)
                     self.builder.store(cv, iv)
-                    return builder.load(iv)
+                    return self.builder.load(iv)
             elif val.nodetype == AstType.STR_LIT:
                 inner = val.value
                 if isinstance(inner, AstNode) and inner.nodetype == AstType.STR_LIT:
@@ -490,6 +490,43 @@ class LLVMLiteCodegen(BaseCodegen):
             elif val.value == 'return':
                 self.builder.ret(ll.Constant(self.current_func_ret_type, 0))
                 return None
+
+        elif isinstance(val, AstIf):
+            cond_val = self._generate(val.cond)
+            cond_loaded = self.load(cond_val)
+            cond_type = cond_loaded.type
+            if isinstance(cond_type, (ll.DoubleType, ll.FloatType)):
+                zero = ll.Constant(cond_type, 0.0)
+                cond_i1 = self.builder.fcmp_unordered('!=', cond_loaded, zero)
+            elif isinstance(cond_type, ll.PointerType):
+                null = ll.Constant(cond_type, None)
+                cond_i1 = self.builder.icmp_unsigned('!=', cond_loaded, null)
+            else:
+                zero = ll.Constant(cond_type, 0)
+                cond_i1 = self.builder.icmp_unsigned('!=', cond_loaded, zero)
+
+            func = self.builder.block.function
+            then_block = func.append_basic_block()
+            end_block = func.append_basic_block()
+            if val.false:
+                else_block = func.append_basic_block()
+                self.builder.cbranch(cond_i1, then_block, else_block)
+            else:
+                self.builder.cbranch(cond_i1, then_block, end_block)
+
+            self.builder.position_at_end(then_block)
+            self._generate(val.true)
+            if not self.builder.block.is_terminated:
+                self.builder.branch(end_block)
+
+            if val.false:
+                self.builder.position_at_end(else_block)
+                self._generate(val.false)
+                if not self.builder.block.is_terminated:
+                    self.builder.branch(end_block)
+
+            self.builder.position_at_end(end_block)
+            return None
 
         elif isinstance(val, AstNode):
             if val.value:
