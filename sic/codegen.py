@@ -301,12 +301,35 @@ class LLVMLiteCodegen(BaseCodegen):
                     self.builder.store(self.load(rhs), gv)
                     return gv
 
+            if op in ('+=', '-=', '*=', '/=', '%='):
+                ptr = self._generate(val.left)
+                a = self.load(ptr)
+                b = self.load(self._generate(val.right))
+                ttype = self.ttype(a, b)
+                a = self.convert(ttype, a)
+                b = self.convert(ttype, b)
+                base_op = op[0]
+                if base_op == '+':
+                    sv = self.builder.fadd(a, b) if isinstance(ttype, (ll.DoubleType, ll.FloatType)) else self.builder.add(a, b)
+                elif base_op == '-':
+                    sv = self.builder.fsub(a, b) if isinstance(ttype, (ll.DoubleType, ll.FloatType)) else self.builder.sub(a, b)
+                elif base_op == '*':
+                    sv = self.builder.fmul(a, b) if isinstance(ttype, (ll.DoubleType, ll.FloatType)) else self.builder.mul(a, b)
+                elif base_op == '/':
+                    if isinstance(ttype, (ll.DoubleType, ll.FloatType)):
+                        sv = self.builder.fdiv(a, b)
+                    elif isinstance(ttype, SignedIntType):
+                        sv = self.builder.sdiv(a, b)
+                    else:
+                        sv = self.builder.udiv(a, b)
+                elif base_op == '%':
+                    sv = self.builder.frem(a, b) if isinstance(ttype, (ll.DoubleType, ll.FloatType)) else self.builder.urem(a, b)
+                self.builder.store(sv, ptr)
+                self.last_initializer = sv
+                return sv
+
             a_val = self._generate(val.left)
             b_val = self._generate(val.right)
-            #print(dir(a_val))
-            #print(a_val.type)
-            #print(a_val)
-            #print(b_val)
 
             a = self.load(a_val)
             b = self.load(b_val)
