@@ -77,6 +77,7 @@ class LLVMLiteCodegen(BaseCodegen):
         self.got_main = False
         self.globals = {}
         self.current_decl_type = None
+        self.current_func_ret_type = SignedIntType(32)
 
         # TODO Configurable target
         #binding.initialize_all_targets()
@@ -217,6 +218,13 @@ class LLVMLiteCodegen(BaseCodegen):
             return ll.Constant(target_type, float(val.value))
         return None
 
+    def _extract_func_name(self, declarator):
+        if type(declarator) == AstPair:
+            return self._extract_func_name(declarator.l)
+        if isinstance(declarator, AstNode) and declarator.nodetype == AstType.IDENTIFIER:
+            return declarator.value
+        return None
+
     def _generate(self, val):
         if val is None:
             return None
@@ -242,8 +250,11 @@ class LLVMLiteCodegen(BaseCodegen):
                         init = self._get_initializer_const(val.right, decl_type)
                         if init is None:
                             rhs = self._generate(val.right)
-                            init = self.load(rhs)
-                        gv.initializer = init
+                            rhs_val = self.load(rhs)
+                            gv.initializer = ll.Constant(decl_type, 0)
+                            self.builder.store(rhs_val, gv)
+                        else:
+                            gv.initializer = init
                         self.globals[name] = gv
                         self.last_initializer = gv
                         return gv
@@ -378,6 +389,61 @@ class LLVMLiteCodegen(BaseCodegen):
                 self.last_initializer = gv
                 return gv
             raise ValueError("Undefined identifier: {}".format(name))
+        elif type(val) == AstNode and val.nodetype == AstType.FUNCDEF:
+            parts = val.value
+            body = parts[-1]
+            if len(parts) >= 3:
+                decl_spec = parts[0]
+                declarator = parts[1]
+            else:
+                decl_spec = None
+                declarator = parts[0]
+
+            if decl_spec is not None and self._is_type_spec(decl_spec):
+                ret_type = self._resolve_type_spec(decl_spec)
+            else:
+                ret_type = SignedIntType(32)
+
+            name = self._extract_func_name(declarator)
+            if name is None:
+                return None
+
+            if name == 'main':
+                self.got_main = True
+
+            saved_last = self.last_initializer
+            saved_is_global = self.is_global
+            saved_decl_type = self.current_decl_type
+            saved_ret_type = self.current_func_ret_type
+
+            fntype = ll.FunctionType(ret_type, [])
+            func = ll.Function(self.module, fntype, name=name)
+            entry = func.append_basic_block()
+            self.builder.position_at_end(entry)
+            self.is_global = False
+            self.current_func_ret_type = ret_type
+            self._generate(body)
+
+            self.last_initializer = saved_last
+            self.is_global = saved_is_global
+            self.current_decl_type = saved_decl_type
+            self.current_func_ret_type = saved_ret_type
+            return func
+
+        elif type(val) == AstNode and val.nodetype == AstType.BLOCK:
+            return self._generate(val.value)
+
+        elif type(val) == AstNode and val.nodetype == AstType.KEYWORD:
+            if isinstance(val.value, list) and len(val.value) >= 2 and val.value[0] == 'return':
+                expr = self._generate(val.value[1])
+                ret_val = self.load(expr)
+                ret_val = self.convert(self.current_func_ret_type, ret_val)
+                self.builder.ret(ret_val)
+                return ret_val
+            elif val.value == 'return':
+                self.builder.ret(ll.Constant(self.current_func_ret_type, 0))
+                return None
+
         elif isinstance(val, AstNode):
             if val.value:
                 return self._generate(val.value)
