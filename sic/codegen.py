@@ -222,6 +222,8 @@ class LLVMLiteCodegen(BaseCodegen):
 
     def _extract_func_name(self, declarator):
         if type(declarator) == AstPair:
+            if isinstance(declarator.l, AstPointer):
+                return self._extract_func_name(declarator.r)
             return self._extract_func_name(declarator.l)
         if isinstance(declarator, AstNode) and declarator.nodetype == AstType.IDENTIFIER:
             return declarator.value
@@ -246,8 +248,29 @@ class LLVMLiteCodegen(BaseCodegen):
             if op == "=":
                 if isinstance(val.left, AstNode) and val.left.nodetype == AstType.IDENTIFIER:
                     name = val.left.value
-                    if name not in self.globals:
-                        decl_type = self.current_decl_type or ll.IntType(32)
+                    ptr_lvl = 0
+                elif type(val.left) == AstPair and isinstance(val.left.l, AstPointer):
+                    name = self._extract_func_name(val.left)
+                    ptr_lvl = val.left.l.lvl
+                else:
+                    raise ValueError("Unsupported = target: {}".format(val.left))
+
+                if name not in self.globals:
+                    decl_type = self.current_decl_type or ll.IntType(32)
+                    if ptr_lvl > 0:
+                        rhs = self._generate(val.right)
+                        if rhs is not None and isinstance(rhs, ll.GlobalVariable):
+                            zero = ll.Constant(ll.IntType(32), 0)
+                            ptr_const = rhs.gep([zero, zero])
+                            gv = ll.GlobalVariable(self.module, ptr_const.type, name)
+                            gv.initializer = ptr_const
+                        else:
+                            full_type = decl_type
+                            for _ in range(ptr_lvl):
+                                full_type = ll.PointerType(full_type)
+                            gv = ll.GlobalVariable(self.module, full_type, name)
+                            gv.initializer = ll.Constant(full_type, None)
+                    else:
                         gv = ll.GlobalVariable(self.module, decl_type, name)
                         init = self._get_initializer_const(val.right, decl_type)
                         if init is None:
@@ -257,16 +280,14 @@ class LLVMLiteCodegen(BaseCodegen):
                             self.builder.store(rhs_val, gv)
                         else:
                             gv.initializer = init
-                        self.globals[name] = gv
-                        self.last_initializer = gv
-                        return gv
-                    else:
-                        gv = self.globals[name]
-                        rhs = self._generate(val.right)
-                        self.builder.store(self.load(rhs), gv)
-                        return gv
+                    self.globals[name] = gv
+                    self.last_initializer = gv
+                    return gv
                 else:
-                    raise ValueError("Unsupported = target: {}".format(val.left))
+                    gv = self.globals[name]
+                    rhs = self._generate(val.right)
+                    self.builder.store(self.load(rhs), gv)
+                    return gv
 
             a_val = self._generate(val.left)
             b_val = self._generate(val.right)
@@ -360,6 +381,21 @@ class LLVMLiteCodegen(BaseCodegen):
                     iv = self.builder.alloca(thetype)
                     self.builder.store(cv, iv)
                     return builder.load(iv)
+            elif val.nodetype == AstType.STR_LIT:
+                inner = val.value
+                if isinstance(inner, AstNode) and inner.nodetype == AstType.STR_LIT:
+                    s = inner.value
+                elif isinstance(inner, str):
+                    s = inner
+                else:
+                    s = str(inner)
+                s_bytes = s.encode('latin-1') + b'\x00'
+                str_type = ll.ArrayType(ll.IntType(8), len(s_bytes))
+                str_gv = ll.GlobalVariable(self.module, str_type, self.gen_name())
+                str_gv.global_constant = True
+                str_gv.initializer = ll.Constant(str_type, bytearray(s_bytes))
+                self.last_initializer = str_gv
+                return str_gv
             else:
                 raise ValueError("Unsupported literal: {}".format(val))
         elif type(val) == AstUnary:
