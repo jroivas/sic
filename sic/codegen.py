@@ -167,7 +167,7 @@ class LLVMLiteCodegen(BaseCodegen):
         return sic.tools.to_int(val)
 
     def _is_type_spec(self, val):
-        if isinstance(val, AstNode) and val.nodetype == AstType.TYPE:
+        if isinstance(val, AstNode) and val.nodetype in (AstType.TYPE, AstType.TYPE_QUAL):
             return True
         if type(val) == AstPair:
             return self._is_type_spec(val.l) and self._is_type_spec(val.r)
@@ -176,6 +176,8 @@ class LLVMLiteCodegen(BaseCodegen):
         return False
 
     def _collect_type_keywords(self, val):
+        if isinstance(val, AstNode) and val.nodetype == AstType.TYPE_QUAL:
+            return []  # qualifiers (const, volatile, etc.) don't affect the base type
         if isinstance(val, AstNode) and val.nodetype == AstType.TYPE:
             inner = val.value
             if isinstance(inner, AstNode) and inner.nodetype == AstType.TYPE:
@@ -422,7 +424,16 @@ class LLVMLiteCodegen(BaseCodegen):
             self.builder.position_at_end(entry)
             self.is_global = False
             self.current_func_ret_type = ret_type
+            self.last_initializer = None
             self._generate(body)
+
+            if not self.builder.block.is_terminated:
+                if self.last_initializer is not None:
+                    ret_val = self.load(self.last_initializer)
+                    ret_val = self.convert(ret_type, ret_val)
+                    self.builder.ret(ret_val)
+                else:
+                    self.builder.ret(ll.Constant(ret_type, 0))
 
             self.last_initializer = saved_last
             self.is_global = saved_is_global
@@ -472,11 +483,13 @@ class LLVMLiteCodegen(BaseCodegen):
     def generate(self):
         genres = self._generate(self.ast)
 
+        self.builder.position_at_end(self.init_entry)
         if self.last_initializer:
-            self.builder.position_at_end(self.init_entry)
             last = self.load(self.last_initializer)
             lastval = self.convert(SignedIntType(32), last)
             self.builder.ret(lastval)
+        elif not self.init_entry.is_terminated:
+            self.builder.ret(ll.Constant(ll.IntType(32), 0))
 
         if not self.got_main:
             self.fake_main()
