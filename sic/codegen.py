@@ -553,6 +553,21 @@ class LLVMLiteCodegen(BaseCodegen):
             self.builder.position_at_end(end_block)
             return None
 
+        elif isinstance(val, AstPrePostOp):
+            op = val.op.value if isinstance(val.op, AstNode) else str(val.op)
+            ptr = self._generate(val.val)
+            old_val = self.load(ptr)
+            vtype = old_val.type
+            if isinstance(vtype, (ll.DoubleType, ll.FloatType)):
+                one = ll.Constant(vtype, 1.0)
+                new_val = self.builder.fadd(old_val, one) if op == '++' else self.builder.fsub(old_val, one)
+            else:
+                one = ll.Constant(vtype, 1)
+                new_val = self.builder.add(old_val, one) if op == '++' else self.builder.sub(old_val, one)
+            self.builder.store(new_val, ptr)
+            # postfix returns old value, prefix returns new value
+            return old_val if not val.pre else new_val
+
         elif isinstance(val, AstNode):
             if val.value:
                 return self._generate(val.value)
