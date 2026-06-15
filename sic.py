@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 
 import argparse
-import sys
 import json
+import os
+import subprocess
+import sys
+import tempfile
 
 from sic.preprocess import Preprocess, apply_inc_dirs, apply_defines, apply_default_inc_dirs
 from sic.scan import Scan
@@ -12,48 +15,45 @@ from sic.optimize import Optimize
 import sic.ast
 
 
-def scan(fname):
-    s = Scan(fname)
+def _run(cmd):
+    result = subprocess.run(cmd, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr.decode(errors='replace'))
+        sys.exit(result.returncode)
 
-    while True:
-        t = s.scan()
-        if t is None:
-            break
-        #if t.tokentype == TokenType.INVALID:
-        #    print("*** ERROR INVALID")
-        print(t)
 
-def parse(fname):
-    s = Scan()
-    p = Parser(s)
-    return p.parse(fname)
+def _ir_to_obj(ir_string, obj_path):
+    """Compile an LLVM IR string to a native object file via llvm-as + llc."""
+    with tempfile.NamedTemporaryFile(suffix='.ir', mode='w', delete=False) as ir_f:
+        ir_f.write(ir_string)
+        ir_path = ir_f.name
+    bc_path = ir_path + '.bc'
+    try:
+        _run(['llvm-as', ir_path, '-o', bc_path])
+        _run(['llc', '-O0', '-relocation-model=pic', '-filetype=obj', bc_path, '-o', obj_path])
+    finally:
+        try:
+            os.unlink(ir_path)
+        except OSError:
+            pass
+        try:
+            os.unlink(bc_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
-    """
-    test_lang = {
-        "expression": [
-            ("expression", TokenType.PLUS, "term"),
-            ("expression", TokenType.MINUS, "term"),
-            ("term",),
-        ],
-        "term": [
-            ("term", TokenType.STAR, "factor"),
-            ("term", TokenType.SLASH, "factor"),
-            ("factor",),
-        ],
-        "factor": [
-            (TokenType.INT_LIT,),
-            (TokenType.ROUND_OPEN, "expression", TokenType.ROUND_CLOSE),
-        ],
-    }
-    """
-
     parser = argparse.ArgumentParser(prog="sic")
-    parser.add_argument("-o", "--output")
+    parser.add_argument("-o", "--output", dest="output")
     parser.add_argument("-d", "--debug", action='store_true')
+    parser.add_argument("-S", action='store_true', dest='emit_ir',
+                        help="Output LLVM IR (default: stdout)")
+    parser.add_argument("-c", action='store_true', dest='emit_obj',
+                        help="Compile to object file, do not link")
+    # Legacy flag kept for backward compatibility
+    parser.add_argument("--gen", action='store_true',
+                        help="Output LLVM IR to stdout (same as -S)")
     parser.add_argument("--ast", action='store_true')
-    parser.add_argument("--gen", action='store_true')
     parser.add_argument("--raw-dict", action='store_true')
     parser.add_argument("--print-pair", action='store_true')
     parser.add_argument("-O", "--opt", action='store')
@@ -72,27 +72,65 @@ if __name__ == "__main__":
     apply_defines(pre, args.D)
     preprocessed = pre.process()
 
-    #print("PRE", preprocessed)
     s = Scan()
     p = Parser(s, debug=args.debug)
     p.define_type("__builtin_va_list")
     r = p.parse(args.filename, preprocessed)
-    #r = parse()
-    #print(r)
-    #print(r.to_json())
+
     if args.opt and int(args.opt) > 0:
         sys.stderr.write("Optimizing, level {}\n".format(args.opt))
         r = Optimize(r, args.opt).run()
+
     sys.setrecursionlimit(6500)
+
     if args.raw_dict and r:
         import beeprint
-        #pprint.pprint(r.to_json())
         beeprint.pp(r.to_json(), max_depth=6000)
-        #print(r.to_json())
+
     if args.ast and r:
         print(json.dumps(r.to_json(), indent=2))
+
     if not p.success():
         sys.exit(1)
-    if r and args.gen:
-        gen = Codegen(r, args.filename)
-        print(gen.generate())
+
+    if not r:
+        sys.exit(0)
+
+    gen = Codegen(r, args.filename)
+    ir_string = gen.generate()
+
+    if not ir_string:
+        sys.exit(1)
+
+    emit_ir = args.emit_ir or args.gen
+
+    if emit_ir:
+        # -S / --gen: output LLVM IR
+        if args.output:
+            with open(args.output, 'w') as f:
+                f.write(ir_string)
+        else:
+            print(ir_string)
+
+    elif args.emit_obj:
+        # -c: compile to object file only
+        if args.output:
+            obj_path = args.output
+        else:
+            base = os.path.splitext(os.path.basename(args.filename))[0]
+            obj_path = base + '.o'
+        _ir_to_obj(ir_string, obj_path)
+
+    else:
+        # Default: compile and link into a binary
+        out_path = args.output or 'a.out'
+        with tempfile.NamedTemporaryFile(suffix='.o', delete=False) as obj_f:
+            obj_path = obj_f.name
+        try:
+            _ir_to_obj(ir_string, obj_path)
+            _run([os.environ.get('CC', 'cc'), obj_path, '-o', out_path, '-lm'])
+        finally:
+            try:
+                os.unlink(obj_path)
+            except OSError:
+                pass
