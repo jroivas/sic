@@ -340,6 +340,15 @@ class LLVMLiteCodegen(BaseCodegen):
                     sv = self.builder.urem(a, b)
                 self.last_initializer = sv
                 return sv
+            elif op in ("==", "!=", "<", ">", "<=", ">="):
+                if isinstance(ttype, (ll.DoubleType, ll.FloatType)):
+                    sv = self.builder.fcmp_ordered(op, a, b)
+                elif isinstance(ttype, SignedIntType):
+                    sv = self.builder.icmp_signed(op, a, b)
+                else:
+                    sv = self.builder.icmp_unsigned(op, a, b)
+                self.last_initializer = sv
+                return sv
             else:
                 raise ValueError("Unsupported op: {} (orig {})".format(op, val.op))
         elif type(val) == AstLiteral:
@@ -495,7 +504,9 @@ class LLVMLiteCodegen(BaseCodegen):
             cond_val = self._generate(val.cond)
             cond_loaded = self.load(cond_val)
             cond_type = cond_loaded.type
-            if isinstance(cond_type, (ll.DoubleType, ll.FloatType)):
+            if isinstance(cond_type, ll.IntType) and cond_type.width == 1:
+                cond_i1 = cond_loaded
+            elif isinstance(cond_type, (ll.DoubleType, ll.FloatType)):
                 zero = ll.Constant(cond_type, 0.0)
                 cond_i1 = self.builder.fcmp_unordered('!=', cond_loaded, zero)
             elif isinstance(cond_type, ll.PointerType):
