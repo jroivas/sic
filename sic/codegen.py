@@ -237,6 +237,18 @@ class LLVMLiteCodegen(BaseCodegen):
             if self._is_type_spec(val.l):
                 self.current_decl_type = self._resolve_type_spec(val.l)
                 return self._generate(val.r)
+            # Function call: AstPair(callee, AstNode(PARENTHESIS, args))
+            if isinstance(val.r, AstNode) and val.r.nodetype == AstType.PARENTHESIS:
+                callee = self._generate(val.l)
+                if isinstance(callee, ll.Function):
+                    args = []
+                    if val.r.value is not None:
+                        arg_result = self._generate(val.r.value)
+                        if isinstance(arg_result, list):
+                            args = [self.load(v) for v in arg_result if v is not None]
+                        elif arg_result is not None:
+                            args = [self.load(arg_result)]
+                    return self.builder.call(callee, args)
             a = self._generate(val.l)
             b = self._generate(val.r)
             return [a, b]
@@ -465,10 +477,12 @@ class LLVMLiteCodegen(BaseCodegen):
 
             fntype = ll.FunctionType(ret_type, [])
             func = ll.Function(self.module, fntype, name=name)
+            self.globals[name] = func
             entry = func.append_basic_block()
             self.builder.position_at_end(entry)
             self.is_global = False
             self.current_func_ret_type = ret_type
+            self.current_decl_type = None
             self.last_initializer = None
             self._generate(body)
 
