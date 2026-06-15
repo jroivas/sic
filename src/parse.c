@@ -941,8 +941,8 @@ struct node *enumerator(struct scanfile *f, struct token *token)
     scan(f, token);
 
     if (accept(f, token, T_EQ)) {
-        struct node *constexpr = constant_expression(f, token);
-        ident = make_node(token, A_ASSIGN, ident, NULL, constexpr);
+        struct node *cconstexpr = constant_expression(f, token);
+        ident = make_node(token, A_ASSIGN, ident, NULL, cconstexpr);
     }
     return ident;
 }
