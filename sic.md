@@ -261,7 +261,10 @@ However null terminated strings are of course still supported...
 Built-in strings supports natively UTF-8.
 
 Conversion to traditional null terminated can be performed easily,
-with certain constraints.
+with certain constraints. For example strings might not be null terminated,
+and conversion to null terminated string may cause a copy.
+
+This allows indexes and ranged to be just plain offsets to the original data.
 
 Strings support concatenate and substring:
 
@@ -959,15 +962,17 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         printf("Combined2 length: %d\n", (values + tail).length);
     }
 
-Thus arrays (and strings) has both `size` and `length` values, which are calculated usually at compile time,
-but might get updated at runtime.
+Thus arrays (and strings) has both `size` and `length` values, which are
+calculated usually at compile time, but might get updated at runtime.
 Recommendation is to use `length` to determine number of elements.
 Value of `size` depend on the element size.
-For example int takes 4 bytes thus `values.size` is 5 * 4 = 20, while `values.length` is 5.
-In case of string `length` tells number of unicode characters (or code points) in the string,
-but string `size` is the size of all the characters in bytes.
+For example int takes 4 bytes thus `values.size` is 5 * 4 = 20,
+while `values.length` is 5.
+In case of string `length` tells number of unicode characters (or code points)
+in the string, but string `size` is the size of all the characters in bytes.
 
-The values are also used to perform runtime bound checks for extra safety and to prevent out of bounds errors.
+The values are also used to perform runtime bound checks for extra safety and
+to prevent out of bounds errors.
 
 ## Tuples
 
