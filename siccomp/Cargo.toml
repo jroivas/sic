@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/sic-ir",
+    "crates/sic-frontend",
+    "crates/sic-opt",
+    "crates/sic-cranelift",
+    "crates/sic",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

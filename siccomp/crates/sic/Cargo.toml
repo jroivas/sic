@@ -1,0 +1,16 @@
+[package]
+name = "sic"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "sic"
+path = "src/main.rs"
+
+[dependencies]
+sic-ir        = { path = "../sic-ir" }
+sic-frontend  = { path = "../sic-frontend" }
+sic-opt       = { path = "../sic-opt" }
+sic-cranelift = { path = "../sic-cranelift" }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

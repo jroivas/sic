@@ -1,0 +1,7 @@
+[package]
+name = "sic-frontend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sic-ir = { path = "../sic-ir" }
