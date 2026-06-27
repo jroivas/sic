@@ -102,7 +102,7 @@ Thus operations must be wrapped inside `unsafe` block:
         a++;
     }
 
-That would cause exception instead of becoming MIN_INT.
+That would cause exception instead of becoming `MIN_INT`.
 Only way to guard and prevent exception inside `unsafe` block is to
 enclose operation into `overflow` keyword.
 The usage of `overflow` is not limited to `unsafe` blocks
@@ -130,7 +130,7 @@ ended with an exception. Now it just iterates first from
 MAX_INT - 5 to MAX_INT, then assigns a = 0, and continues
 iteration until 5.
 
-However this example is perfectly valid:
+By default the rules applies and this example is perfectly valid:
 
     int main()
     {
@@ -143,10 +143,9 @@ However this example is perfectly valid:
         return 0;
     }
 
-That would turn from MAX_INT to MIN_INT, and then continue
-until would reach 5. However on functionality way it's not
-same as the first example.
-Thus most logical way to use `overflow` is just:
+That would turn from MAX_INT to MIN_INT, and then continue until would reach 5.
+On functionality way it's not same as the first example.
+Thus most logical way to use `overflow` is without unsafe:
 
     int main()
     {
@@ -162,7 +161,7 @@ Thus most logical way to use `overflow` is just:
     }
 
 
-On case of overflow no values are changed.
+In case of overflow no values are changed.
 Thus let's consider this example:
 
     int main()
@@ -174,9 +173,10 @@ Thus let's consider this example:
             overflow { a++ };
             // Value of a is unchanged, so it's still MAX_INT
             int c = overflow {
-                b = 1;
+                b = 1;   // This is always performed
                 a += 10; // This will overflow and
                          // break out from overflow block
+                // None of following are done:
                 b = 2;
                 a += 20;
                 b = 3;
@@ -222,8 +222,10 @@ and `b` is max meaningful digits for fraction part.
 
 One can use plain `fixed` but it's in most cases sub-optimal.
 Compiler tries to determine maximum value, but sometimes that's just impossible.
-On these cases plain `fixed` can be extended to bigger precision.
-Unfortunately that might be expensive and compiler is unable to produce optimal code.
+On these cases plain `fixed` needs to be extended during runtime to a bigger precision,
+and in practice this is always based on bigint.
+That might be expensive and compiler is unable to produce optimal code, which iw could be allowed
+in case the values would have fit inside of traditional integers.
 It's always recommended to define precision for fixed types.
 
 On can perform operations on different sized fixed numbers with certain constraints.
@@ -252,11 +254,15 @@ One just need to keep in mind, that compiler can generate way much more optimal 
 exceed certain limits.
 Otherwise it might need to rely on bigint feature, which means most of the time a performance hit.
 
+Fixed point number may overflow and that can be cheked with `overflow` operator.
+Without the overflow operator fixed point math causes exception. This differs
+from integer math.
+
 
 ## Built-in string
 
 We have built in string type, which creates optimal code to target.
-However null terminated strings are of course still supported...
+Traditional null terminated strings are of course still supported as well...
 
 Built-in strings supports natively UTF-8.
 
@@ -264,7 +270,8 @@ Conversion to traditional null terminated can be performed easily,
 with certain constraints. For example strings might not be null terminated,
 and conversion to null terminated string may cause a copy.
 
-This allows indexes and ranged to be just plain offsets to the original data.
+This allows indexes and ranged from string to be just plain offsets to the
+original data.
 
 Strings support concatenate and substring:
 
@@ -474,11 +481,11 @@ When passing a reference as a parameter a new reference is formed, and the refer
 
 ## Strict mode
 
-As another addition we add more rusty like features, which however are optional.
+As another addition we add more rusty like features, which are optional by default.
 In order to enable those a new strict mode is introduced.
-This can be applied per function, or per compile unit.
+This can be applied per function, or per compilation unit.
 
-To enable it for whole compile unit do:
+To enable it for whole compilation unit do:
 
     using strict;
 
@@ -612,9 +619,22 @@ Since `text` is not mutable, one can't assign the return value back to it,
 but need to reserve new variable for it.
 Rules state also that `text` is moved and not useable after the call.
 
+Instead of moving ownership, reference can be passed:
+
+    void print_ref(@char *s) {
+        printf("Passed: %s\n", s);
+    }
+
+    char *text = "Hello";
+    print_ref(@text);
+    // "text" is still usable after the function call returns
+    // since it was passed as a reference
+
+    printf("Returned: %s\n", @text);
+
 ## Assignment and equals
 
-There's make clear rules for assignment and equals operators,
+We define clear rules for assignment and equals operators,
 which is not always the case in C.
 
 Example in C:
@@ -654,7 +674,7 @@ First case would then be:
         c = getc(in);
     }
 
-Second solution would cause compiler error if intended that way.
+This solution would cause compiler error on assignment inside conditionals.
 
 Third option is to keep with what we have, for example `for` statement would be:
 
@@ -665,7 +685,7 @@ But we still have our repeated calls to `getc`.
 
 This leads to conclusion, that our solutions so far might not be the best ones.
 Better is to mandate usage of braces with assignment operators when using
-in evaluation expression. Thus this is fully valid:
+in evaluation expression. Mandate to write the assignment as this:
 
     while ((c = getc(in)) != EOF)
         putc(c, out);
@@ -709,10 +729,10 @@ Proper way would be:
     if (test) {
         if (second_test)
             do_something();
-    } else
+    } else
         do_other();
 
-Now it's clear to which `if`the `else` belongs to.
+Now it's clear to which `if` the `else` branch belongs to.
 
 ## Imports
 
@@ -768,9 +788,9 @@ We can import specific symbols from module, or assign a new local identifier to 
         printf("%d\n", my_power(5));
     }
 
-Idea of modules is to be separate compile units, which can be tested and exported separately.
+Idea of modules is to be separate compilation units, which can be tested and exported separately.
 Modules could be described as libraries.
-For C compatibility normal header files are autogenerated from module.
+For C compatibility normal header files can be generated from the module.
 On that case, module usage would be (in C):
 
     #include "module_test.h"
@@ -781,13 +801,43 @@ On that case, module usage would be (in C):
         printf("%d\n", test_power(5));
     }
 
-Module can spread into multiple compile units.
-Files of the module must be located in one folder,
+Module can spread into multiple compilation units.
+Files of the module must be located under one folder (subfolders not allowed),
 and it's considered to be different module if files located in different folder.
 Headers and other files can be included still with preprocessor `#include`
 from outside the module folder.
 
-When compiling a module, it produces these outputs (in Linux system):
+Example of multi file module. First `test.sic`:
+
+    module test;
+
+    int meaning = 42;
+
+
+Then `support.sic`:
+
+    module test;
+
+    int double_power(int x)
+    {
+        return power(x) * power(x);
+    }
+
+And `power.sic`
+
+    module test;
+
+    int power(int x)
+    {
+        return x * x;
+    }
+
+While these all are under same folder they can form a module. The folder may
+contain other files, but in case they're not marked with same `module` tag
+they're not counted in.
+
+When compiling a module in C compatiblae mode, it produces these outputs
+(in Linux system):
 
 - [module\_name]\_[file\_name].o
 - [module\_name].a
@@ -797,7 +847,7 @@ When compiling a module, it produces these outputs (in Linux system):
 ## Match
 
 New alternative to traditional `switch` and `case`.
-Match takes an instance of `enum`.
+Match takes an instance of `enum`. It follows largely Rust syntax.
 Old C style enums are imporoved a bit:
 
     enum Option {
@@ -815,11 +865,13 @@ Type is defined after the name inside < and >.
 
 With these two we can make something like:
 
-    Option a = Some(5);
-    Option b = None;
+    Option a = Option::Some(5);
+    Option b = Option::None;
 
     function check_option(Option opt) {
         match (opt) {
+            // We can use Option::None here, but not needed since type
+            // can be resolved from `opt`
             Some(val): printf("Some value: %d\n", val);
             None: printf("None value");
         }
@@ -827,6 +879,8 @@ With these two we can make something like:
     check_option(a);
     check_option(b);
 
+    // Same here, type is Result, and even Ok would be defined on another
+    // enum, Result::Ok is used.
     Result r = Ok(5);
     Result e = Err("Some error");
 
@@ -847,6 +901,43 @@ Thus enum itself may contain type of the value.
 All entries in the enum contains name, and optionally a type.
 Instances of enums can contain value value of the defined type.
 All entries may have different type.
+
+Old C enums works as it. And the new format follows it still. Every item has
+it's integer value like enums in C. For example:
+
+    enum Test {
+        NONE,
+        BLACK = 1,
+        RED = 2,
+        GREEN = 3,
+        CUSTOM(int)
+    }
+
+When using traditional print:
+
+    Test b = BLACK;
+    Test c = CUSTOM(42);
+
+    printf("Val b: %d\n", (int)b);
+    printf("Val c: %d\n", (int)c);
+
+This prints out:
+
+    Val b: 1
+    Val c: 4
+
+This is because enumeration value of c is 4 (after GREEN = 3). In order to get
+get value inside of `c` one must use the wrapper:
+
+    printf("Val of c: %d\n", Test::CUSTOM(c));
+
+The Test::CUSTOM will unwrap the value from c. It will cause exception if value
+of c in not CUSTOM. Better is to use:
+
+    if (int cv = Test::CUSTOM(c))
+    {
+        printf("Val of c: %d\n", cv);
+    }
 
 ## Switch - case
 
@@ -946,8 +1037,8 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
         string test = "Hello world!"
 
         for (int i = 0; i < values.length; i++) {
-            values[i] = i;
-            tail[i] = i + values.size;
+            values[i] = i;
+            tail[i] = i + values.size;
         }
 
         printf("String: %s, len: %d\n", test, test.length);
