@@ -24,15 +24,20 @@ pub fn compile_function(
     let target_config = obj_module.target_config();
 
     // Pre-declare all callees and globals inside this function's IR.
+    // Sort by key for deterministic ordering (avoids HashMap non-determinism).
     let mut callee_refs: HashMap<u32, cir::FuncRef> = HashMap::new();
-    for (fref_idx, func_id) in func_ids {
-        let fref = obj_module.declare_func_in_func(*func_id, builder.func);
-        callee_refs.insert(*fref_idx, fref);
+    let mut sorted_funcs: Vec<(u32, FuncId)> = func_ids.iter().map(|(&k, &v)| (k, v)).collect();
+    sorted_funcs.sort_by_key(|(k, _)| *k);
+    for (fref_idx, func_id) in sorted_funcs {
+        let fref = obj_module.declare_func_in_func(func_id, builder.func);
+        callee_refs.insert(fref_idx, fref);
     }
     let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::new();
-    for (gidx, data_id) in global_ids {
-        let gv = obj_module.declare_data_in_func(*data_id, builder.func);
-        data_refs.insert(*gidx, gv);
+    let mut sorted_globals: Vec<(u32, DataId)> = global_ids.iter().map(|(&k, &v)| (k, v)).collect();
+    sorted_globals.sort_by_key(|(k, _)| *k);
+    for (gidx, data_id) in sorted_globals {
+        let gv = obj_module.declare_data_in_func(data_id, builder.func);
+        data_refs.insert(gidx, gv);
     }
 
     // Create all CL blocks.
@@ -143,8 +148,7 @@ fn emit_instr(
                 UnOp::BoolNot => {
                     let vty = builder.func.dfg.value_type(v);
                     let zero = builder.ins().iconst(vty, 0);
-                    let cmp = builder.ins().icmp(cir::condcodes::IntCC::Equal, v, zero);
-                    builder.ins().uextend(ct::I8, cmp)
+                    builder.ins().icmp(cir::condcodes::IntCC::Equal, v, zero)
                 }
             };
             val_map.insert(dest.0, result);
@@ -201,18 +205,23 @@ fn emit_instr(
             if let Some(d) = dest { val_map.insert(d.0, v); }
         }
 
-        Instr::GetElemPtr { dest, base, index } => {
+        Instr::GetElemPtr { dest, base, index, elem_size } => {
             let bv = rval(base, val_map, data_refs, builder, ptr_ty, ptr_ty);
             let iv = rval(index, val_map, data_refs, builder, ptr_ty, ptr_ty);
             let ic = coerce(iv, ptr_ty, builder, ptr_ty);
-            let addr = builder.ins().iadd(bv, ic);
+            let addr = if *elem_size <= 1 {
+                builder.ins().iadd(bv, ic)
+            } else {
+                let size_val = builder.ins().iconst(ptr_ty, *elem_size as i64);
+                let scaled = builder.ins().imul(ic, size_val);
+                builder.ins().iadd(bv, scaled)
+            };
             val_map.insert(dest.0, addr);
         }
 
-        Instr::GetFieldPtr { dest, base, .. } => {
+        Instr::GetFieldPtr { dest, base, byte_offset, .. } => {
             let bv = rval(base, val_map, data_refs, builder, ptr_ty, ptr_ty);
-            // TODO: compute real field offset from struct layout
-            let addr = builder.ins().iadd_imm(bv, 0);
+            let addr = builder.ins().iadd_imm(bv, *byte_offset as i64);
             val_map.insert(dest.0, addr);
         }
 

@@ -38,6 +38,7 @@ impl<'m> FuncCtx<'m> {
                     dest: ptr_id,
                     base: Val::Global(gref),
                     index: Constant::zero(),
+                    elem_size: 1,
                 });
                 Ok(Val::Local(ptr_id))
             }
@@ -46,12 +47,20 @@ impl<'m> FuncCtx<'m> {
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {
                         let ty = ty.clone();
+                        // Arrays and structs decay to pointer-to-first-element in rvalue context
+                        if matches!(ty, Type::Array { .. }) {
+                            return Ok(Val::Local(vid));
+                        }
                         let dest = self.alloc_val();
                         self.push_instr(Instr::Load { dest, ptr: Val::Local(vid), ty });
                         Ok(Val::Local(dest))
                     }
                     Some(LookupResult::Global(ty, gref)) => {
                         let ty = ty.clone();
+                        // Arrays decay to pointer in rvalue context
+                        if matches!(ty, Type::Array { .. }) {
+                            return Ok(Val::Global(gref));
+                        }
                         let dest = self.alloc_val();
                         self.push_instr(Instr::Load { dest, ptr: Val::Global(gref), ty });
                         Ok(Val::Local(dest))
@@ -145,21 +154,23 @@ impl<'m> FuncCtx<'m> {
                 use crate::lower::func::FuncCtx;
                 // lower each initializer
                 for (i, item) in init.iter().enumerate() {
-                    match &ir_ty {
+                    match &ir_ty.clone() {
                         Type::Struct(st) if i < st.fields.len() => {
                             let fty = st.fields[i].1.clone();
+                            let byte_offset = st.field_offset(i, self.ptr_size());
                             let fptr = self.alloc_val();
                             self.push_instr(Instr::GetFieldPtr {
                                 dest: fptr, base: ptr.clone(), field_idx: i,
-                                struct_name: st.name.clone(),
+                                struct_name: st.name.clone(), byte_offset,
                             });
                             self.lower_init_item(item, Val::Local(fptr), &fty)?;
                         }
                         Type::Array { elem, len } if i < *len || *len == 0 => {
                             let eptr = self.alloc_val();
                             let elem = *elem.clone();
+                            let elem_size = elem.size_of(self.ptr_size());
                             self.push_instr(Instr::GetElemPtr {
-                                dest: eptr, base: ptr.clone(), index: Constant::int(i as i64),
+                                dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
                             });
                             self.lower_init_item(item, Val::Local(eptr), &elem)?;
                         }
@@ -204,9 +215,21 @@ impl<'m> FuncCtx<'m> {
                     match ty {
                         Type::Struct(st) if i < st.fields.len() => {
                             let fty = st.fields[i].1.clone();
+                            let byte_offset = st.field_offset(i, self.ptr_size());
                             let fptr = self.alloc_val();
-                            self.push_instr(Instr::GetFieldPtr { dest: fptr, base: ptr.clone(), field_idx: i, struct_name: st.name.clone() });
+                            self.push_instr(Instr::GetFieldPtr {
+                                dest: fptr, base: ptr.clone(), field_idx: i,
+                                struct_name: st.name.clone(), byte_offset,
+                            });
                             self.lower_init_item(it, Val::Local(fptr), &fty)?;
+                        }
+                        Type::Array { elem, .. } => {
+                            let elem_size = elem.size_of(self.ptr_size());
+                            let eptr = self.alloc_val();
+                            self.push_instr(Instr::GetElemPtr {
+                                dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
+                            });
+                            self.lower_init_item(it, Val::Local(eptr), elem)?;
                         }
                         _ => {}
                     }
@@ -570,14 +593,19 @@ impl<'m> FuncCtx<'m> {
         let idx_i64 = self.coerce(idx_val, &Type::i64())?;
 
         let base_ty = self.val_type(&base_val);
+        // Unwrap the pointer target; if it's an array (alloca of array), take the element type
         let elem_ty = match &base_ty {
-            Type::Pointer(t) => *t.clone(),
+            Type::Pointer(t) => match t.as_ref() {
+                Type::Array { elem, .. } => *elem.clone(),
+                other => other.clone(),
+            },
             Type::Array { elem, .. } => *elem.clone(),
             _ => Type::i32(),
         };
 
+        let elem_size = elem_ty.size_of(self.ptr_size());
         let dest = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64 });
+        self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size });
         Ok(LValue { ptr: Val::Local(dest), ty: elem_ty })
     }
 
@@ -623,9 +651,14 @@ impl<'m> FuncCtx<'m> {
             lv.ptr
         };
 
+        let byte_offset = match &struct_ty {
+            Type::Struct(st) => st.field_offset(field_idx, self.ptr_size()),
+            _ => 0,
+        };
+
         let dest = self.alloc_val();
         self.push_instr(Instr::GetFieldPtr {
-            dest, base: base_ptr, field_idx, struct_name,
+            dest, base: base_ptr, field_idx, struct_name, byte_offset,
         });
         Ok(LValue { ptr: Val::Local(dest), ty: field_ty })
     }
@@ -649,14 +682,6 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Cast { ty, .. } => self.lower_type(ty),
             ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_) => Ok(Type::u64()),
-            ExprKind::Index { base, .. } => {
-                let bt = self.infer_expr_type(base)?;
-                Ok(match bt {
-                    Type::Pointer(t) => *t,
-                    Type::Array { elem, .. } => *elem,
-                    _ => Type::i32(),
-                })
-            }
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(Type::Pointer(Box::new(inner_ty)))
@@ -665,6 +690,37 @@ impl<'m> FuncCtx<'m> {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(match inner_ty {
                     Type::Pointer(t) => *t,
+                    _ => Type::i32(),
+                })
+            }
+            ExprKind::Field { base, name } => {
+                let base_ty = self.infer_expr_type(base)?;
+                if let Some((_, fty, _)) = find_field(&base_ty, name, &self.lowerer.struct_types) {
+                    Ok(fty)
+                } else {
+                    Ok(Type::i32())
+                }
+            }
+            ExprKind::Arrow { base, name } => {
+                let base_ty = self.infer_expr_type(base)?;
+                let struct_ty = match base_ty {
+                    Type::Pointer(t) => *t,
+                    other => other,
+                };
+                if let Some((_, fty, _)) = find_field(&struct_ty, name, &self.lowerer.struct_types) {
+                    Ok(fty)
+                } else {
+                    Ok(Type::i32())
+                }
+            }
+            ExprKind::Index { base, .. } => {
+                let bt = self.infer_expr_type(base)?;
+                Ok(match bt {
+                    Type::Pointer(t) => match *t {
+                        Type::Array { elem, .. } => *elem,
+                        other => other,
+                    },
+                    Type::Array { elem, .. } => *elem,
                     _ => Type::i32(),
                 })
             }

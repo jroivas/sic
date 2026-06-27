@@ -1180,13 +1180,15 @@ fn parse_int_literal(text: &str) -> (i64, bool) {
     let is_u = text.to_lowercase().contains('u');
 
     if s.starts_with("0x") || s.starts_with("0X") {
-        let v = i64::from_str_radix(&s[2..], 16).unwrap_or(0);
+        // Parse as u64 first to handle values like 0xFFFFFFFFFFFFFFFF
+        let v = u64::from_str_radix(&s[2..], 16).unwrap_or(0) as i64;
         return (v, is_u);
     }
     if s.len() > 1 && s.starts_with('0') {
-        let v = i64::from_str_radix(&s[1..], 8).unwrap_or(0);
+        let v = u64::from_str_radix(&s[1..], 8).unwrap_or(0) as i64;
         return (v, is_u);
     }
-    let v: i64 = s.parse().unwrap_or(0);
+    // For decimal, allow i64 range; large unsigned values handled by 'u' suffix
+    let v: i64 = s.parse::<u64>().unwrap_or(0) as i64;
     (v, is_u)
 }

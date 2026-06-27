@@ -115,11 +115,11 @@ impl fmt::Display for Instr {
                 }
                 write!(f, ")")
             }
-            Instr::GetFieldPtr { dest, base, field_idx, struct_name } =>
-                write!(f, "  %{} = gfp {}.{} {}", dest.0,
-                    struct_name.as_deref().unwrap_or("?"), field_idx, base),
-            Instr::GetElemPtr { dest, base, index } =>
-                write!(f, "  %{} = gep {}, {}", dest.0, base, index),
+            Instr::GetFieldPtr { dest, base, field_idx, struct_name, byte_offset } =>
+                write!(f, "  %{} = gfp {}.{} {} +{}", dest.0,
+                    struct_name.as_deref().unwrap_or("?"), field_idx, base, byte_offset),
+            Instr::GetElemPtr { dest, base, index, elem_size } =>
+                write!(f, "  %{} = gep {}, {} *{}", dest.0, base, index, elem_size),
             Instr::PtrOffset { dest, base, offset } =>
                 write!(f, "  %{} = ptroff {}, {}", dest.0, base, offset),
             Instr::Select { dest, cond, on_true, on_false, ty } =>

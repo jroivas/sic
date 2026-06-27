@@ -184,13 +184,30 @@ impl Lowerer {
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType) -> Result<()> {
+        // Skip duplicate declarations (e.g. `int a;` declared twice)
+        if self.globals_map.contains_key(&d.name) {
+            return Ok(());
+        }
         let ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         let init = match &d.init {
             Some(Initializer::Expr(e)) => {
-                // Try constant evaluation
+                // Try integer constant evaluation first
                 match eval_const_expr(e, &self.enum_consts) {
                     Ok(v) => Some(Constant::Int(v)),
-                    Err(_) => None, // runtime init, will be done in __sic_init_func
+                    Err(_) => {
+                        // Try float literal
+                        match &e.kind {
+                            ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
+                            ExprKind::Cast { expr: inner, .. } => {
+                                if let ExprKind::FloatLit(f) = &inner.kind {
+                                    Some(Constant::Float(*f))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    }
                 }
             }
             _ => None,

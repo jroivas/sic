@@ -10,6 +10,9 @@ pub fn preprocess(
     let mut cmd = Command::new("cpp");
     cmd.arg("-undef");
     cmd.arg("-std=c99");
+    // Define common macros that tests rely on
+    cmd.arg("-DNULL=((void*)0)");
+    cmd.arg("-D__attribute__(x)=");
 
     for d in defines {
         cmd.arg(format!("-D{}", d));

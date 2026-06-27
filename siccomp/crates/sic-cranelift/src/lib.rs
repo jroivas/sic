@@ -114,6 +114,14 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
                 }
                 desc.define(bytes.into_boxed_slice());
             }
+            Some(sic_ir::Constant::Float(v)) => {
+                let bytes = if size <= 4 {
+                    (*v as f32).to_le_bytes().to_vec()
+                } else {
+                    v.to_le_bytes().to_vec()
+                };
+                desc.define(bytes.into_boxed_slice());
+            }
             _ => {
                 // zero-initialize
                 desc.define_zeroinit(size.max(1));

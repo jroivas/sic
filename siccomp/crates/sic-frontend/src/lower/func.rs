@@ -25,6 +25,8 @@ pub struct FuncCtx<'m> {
     pub switch_stack: Vec<(BlockId, BlockId)>, // (default_bb, end_bb)
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
     pub pending_gotos: Vec<(String, BlockId)>,
+    /// Last initialized local variable (for implicit return in sic)
+    pub last_init_local: Option<(ValId, Type)>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -48,6 +50,7 @@ impl<'m> FuncCtx<'m> {
             loop_stack: Vec::new(),
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
+            last_init_local: None,
         }
     }
 
@@ -219,10 +222,16 @@ impl<'m> Lowerer {
             fc.lower_stmt(stmt)?;
         }
 
-        // If function didn't return, add implicit ret void / ret 0
+        // If function didn't return, add implicit return
         if !fc.is_terminated() {
             let ret_val = if ir_ret == Type::Void {
                 None
+            } else if let Some((last_vid, last_ty)) = fc.last_init_local.clone() {
+                // sic implicit return: last initialized local variable
+                let load_dest = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: load_dest, ptr: Val::Local(last_vid), ty: last_ty });
+                let coerced = fc.coerce(Val::Local(load_dest), &ir_ret)?;
+                Some(coerced)
             } else {
                 Some(Constant::zero())
             };
@@ -268,7 +277,7 @@ impl<'m> FuncCtx<'m> {
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
             Stmt::Break(_) => {
-                if let Some(&(_, end)) = self.loop_stack.last() {
+                if let Some(&(end, _)) = self.loop_stack.last() {
                     self.set_terminator(Terminator::Jump(end));
                 } else if let Some(&(_, end)) = self.switch_stack.last() {
                     self.set_terminator(Terminator::Jump(end));
@@ -379,6 +388,10 @@ impl<'m> FuncCtx<'m> {
                             });
                         }
                     }
+                    // Track last declared scalar local for implicit return
+                    if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Pointer(_) | Type::Bool) {
+                        self.last_init_local = Some((vid, ty.clone()));
+                    }
                     self.define_local(d.name.clone(), ty, vid);
                 }
             }
@@ -404,26 +417,29 @@ impl<'m> FuncCtx<'m> {
             Initializer::List(items) => {
                 match ty {
                     Type::Array { elem, len } => {
+                        let elem_size = elem.size_of(self.ptr_size());
                         for (i, item) in items.iter().enumerate() {
                             if i >= *len && *len > 0 { break; }
                             let idx_val = Constant::int(i as i64);
                             let elem_ptr = self.alloc_val();
                             self.push_instr(Instr::GetElemPtr {
-                                dest: elem_ptr, base: ptr.clone(), index: idx_val,
+                                dest: elem_ptr, base: ptr.clone(), index: idx_val, elem_size,
                             });
                             self.lower_initializer(item, Val::Local(elem_ptr), elem)?;
                         }
                     }
                     Type::Struct(st) => {
+                        let st = st.clone();
                         for (i, item) in items.iter().enumerate() {
                             if i >= st.fields.len() { break; }
-                            let field_ty = &st.fields[i].1;
+                            let field_ty = st.fields[i].1.clone();
+                            let byte_offset = st.field_offset(i, self.ptr_size());
                             let field_ptr = self.alloc_val();
                             self.push_instr(Instr::GetFieldPtr {
                                 dest: field_ptr, base: ptr.clone(), field_idx: i,
-                                struct_name: st.name.clone(),
+                                struct_name: st.name.clone(), byte_offset,
                             });
-                            self.lower_initializer(item, Val::Local(field_ptr), field_ty)?;
+                            self.lower_initializer(item, Val::Local(field_ptr), &field_ty)?;
                         }
                     }
                     _ => {

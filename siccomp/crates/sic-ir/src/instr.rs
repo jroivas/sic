@@ -81,10 +81,10 @@ pub enum Instr {
     CallIndirect { dest: Option<ValId>, fptr: Val, args: Vec<Val>, ret_ty: Type, func_ty: Box<crate::FunctionType> },
 
     /// Get a pointer to a struct field: `base` is a pointer to the struct.
-    GetFieldPtr { dest: ValId, base: Val, field_idx: usize, struct_name: Option<String> },
+    GetFieldPtr { dest: ValId, base: Val, field_idx: usize, struct_name: Option<String>, byte_offset: u64 },
 
     /// Get a pointer to an array element.
-    GetElemPtr { dest: ValId, base: Val, index: Val },
+    GetElemPtr { dest: ValId, base: Val, index: Val, elem_size: u64 },
 
     /// Pointer offset (byte-level): `dest = base + offset_bytes`.
     PtrOffset { dest: ValId, base: Val, offset: Val },
