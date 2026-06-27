@@ -98,6 +98,9 @@ pub enum Instr {
     /// MemSet (used for zeroinit).
     MemSet { dst: Val, val: Val, size: u64, align: u64 },
 
+    /// Byte-swap an integer value.
+    BSwap { dest: ValId, val: Val, ty: Type },
+
     /// Variable-argument: va_start, va_arg, va_end.
     VaStart { list_ptr: Val },
     VaArg   { dest: ValId, list_ptr: Val, ty: Type },

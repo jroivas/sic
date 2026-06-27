@@ -6,6 +6,7 @@ use cranelift_module::{FuncId, DataId, Module};
 use cranelift_object::ObjectModule;
 use sic_ir::*;
 use super::types::{cl_type, ptr_cl};
+use super::build_cl_sig;
 
 pub fn compile_function(
     f: &Function,
@@ -76,7 +77,7 @@ pub fn compile_function(
                 ptr_ty, target_config, ptr_size,
             );
         }
-        emit_terminator(&bb.terminator, &mut builder, &val_map, &data_refs, &bb_map, ptr_ty);
+        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty);
     }
 
     builder.seal_all_blocks();
@@ -112,26 +113,26 @@ fn emit_instr(
         }
 
         Instr::Load { dest, ptr, ty } => {
-            let pv = rval(ptr, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let v = builder.ins().load(cl_ty, MemFlags::new(), pv, 0);
             val_map.insert(dest.0, v);
         }
 
         Instr::Store { val, ptr } => {
-            let pv = rval(ptr, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             // Infer hint from existing value if available
             let hint = if let Val::Local(id) = val {
                 val_map.get(&id.0).map(|&v| builder.func.dfg.value_type(v)).unwrap_or(ct::I32)
             } else { ct::I32 };
-            let sv = rval(val, val_map, data_refs, builder, ptr_ty, hint);
+            let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
             builder.ins().store(MemFlags::new(), sv, pv, 0);
         }
 
         Instr::BinOp { dest, op, lhs, rhs, ty } => {
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let l = rval(lhs, val_map, data_refs, builder, ptr_ty, cl_ty);
-            let r = rval(rhs, val_map, data_refs, builder, ptr_ty, cl_ty);
+            let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let l = coerce(l, cl_ty, builder, ptr_ty);
             let r = coerce(r, cl_ty, builder, ptr_ty);
             let v = emit_binop(op, l, r, builder);
@@ -140,7 +141,7 @@ fn emit_instr(
 
         Instr::UnaryOp { dest, op, val, ty } => {
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let v = rval(val, val_map, data_refs, builder, ptr_ty, cl_ty);
+            let v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let result = match op {
                 UnOp::Neg     => builder.ins().ineg(v),
                 UnOp::FNeg    => builder.ins().fneg(v),
@@ -156,15 +157,21 @@ fn emit_instr(
 
         Instr::Cast { dest, op, val, to_ty } => {
             let dst_cl = cl_type(to_ty, ptr_size).unwrap_or(ct::I32);
-            let src_v = rval(val, val_map, data_refs, builder, ptr_ty, dst_cl);
+            // Hint the source with a compatible type for the cast operation
+            let src_hint = match op {
+                CastOp::SIToFP | CastOp::UIToFP => ct::I64,  // source must be integer
+                CastOp::FPToSI | CastOp::FPToUI | CastOp::FPExt | CastOp::FPTrunc => ct::F64,  // source must be float
+                _ => dst_cl,
+            };
+            let src_v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, src_hint);
             let src_ty = builder.func.dfg.value_type(src_v);
             let result = emit_cast(src_v, src_ty, *op, dst_cl, builder, ptr_ty);
             val_map.insert(dest.0, result);
         }
 
         Instr::Cmp { dest, op, lhs, rhs } => {
-            let l = rval(lhs, val_map, data_refs, builder, ptr_ty, ct::I32);
-            let r = rval(rhs, val_map, data_refs, builder, ptr_ty, ct::I32);
+            let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I32);
+            let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I32);
             let lty = builder.func.dfg.value_type(l);
             let l = coerce(l, lty, builder, ptr_ty);
             let r = coerce(r, lty, builder, ptr_ty);
@@ -190,7 +197,7 @@ fn emit_instr(
 
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
                 let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
-                let v = rval(a, val_map, data_refs, builder, ptr_ty, hint);
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
                 coerce(v, hint, builder, ptr_ty)
             }).collect();
 
@@ -215,15 +222,29 @@ fn emit_instr(
             }
         }
 
-        Instr::CallIndirect { dest, ret_ty, .. } => {
-            let cl_ty = cl_type(ret_ty, ptr_size).unwrap_or(ct::I32);
-            let v = builder.ins().iconst(cl_ty, 0);
-            if let Some(d) = dest { val_map.insert(d.0, v); }
+        Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
+            let sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
+            let sig_ref = builder.func.import_signature(sig);
+            let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let param_tys: Vec<cir::Type> = builder.func.stencil.dfg.signatures[sig_ref]
+                .params.iter().map(|p| p.value_type).collect();
+            let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
+                let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
+                coerce(v, hint, builder, ptr_ty)
+            }).collect();
+            let inst = builder.ins().call_indirect(sig_ref, fp, &arg_vals);
+            if let Some(d) = dest {
+                let results = builder.inst_results(inst).to_vec();
+                if !results.is_empty() {
+                    val_map.insert(d.0, results[0]);
+                }
+            }
         }
 
         Instr::GetElemPtr { dest, base, index, elem_size } => {
-            let bv = rval(base, val_map, data_refs, builder, ptr_ty, ptr_ty);
-            let iv = rval(index, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let bv = rval(base, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let iv = rval(index, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let ic = coerce(iv, ptr_ty, builder, ptr_ty);
             let addr = if *elem_size <= 1 {
                 builder.ins().iadd(bv, ic)
@@ -236,14 +257,14 @@ fn emit_instr(
         }
 
         Instr::GetFieldPtr { dest, base, byte_offset, .. } => {
-            let bv = rval(base, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let bv = rval(base, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let addr = builder.ins().iadd_imm(bv, *byte_offset as i64);
             val_map.insert(dest.0, addr);
         }
 
         Instr::PtrOffset { dest, base, offset } => {
-            let bv = rval(base, val_map, data_refs, builder, ptr_ty, ptr_ty);
-            let ov = rval(offset, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let bv = rval(base, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let ov = rval(offset, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let oc = coerce(ov, ptr_ty, builder, ptr_ty);
             let addr = builder.ins().iadd(bv, oc);
             val_map.insert(dest.0, addr);
@@ -251,9 +272,9 @@ fn emit_instr(
 
         Instr::Select { dest, cond, on_true, on_false, ty } => {
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let cv = rval(cond, val_map, data_refs, builder, ptr_ty, ct::I8);
-            let tv = rval(on_true, val_map, data_refs, builder, ptr_ty, cl_ty);
-            let fv = rval(on_false, val_map, data_refs, builder, ptr_ty, cl_ty);
+            let cv = rval(cond, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I8);
+            let tv = rval(on_true, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let fv = rval(on_false, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let cb = builder.ins().icmp_imm(cir::condcodes::IntCC::NotEqual, cv, 0);
             let tv = coerce(tv, cl_ty, builder, ptr_ty);
             let fv = coerce(fv, cl_ty, builder, ptr_ty);
@@ -262,18 +283,26 @@ fn emit_instr(
         }
 
         Instr::MemCopy { dst, src, size, .. } => {
-            let dv = rval(dst, val_map, data_refs, builder, ptr_ty, ptr_ty);
-            let sv = rval(src, val_map, data_refs, builder, ptr_ty, ptr_ty);
+            let dv = rval(dst, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let sv = rval(src, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let szv = builder.ins().iconst(ptr_ty, *size as i64);
             builder.call_memcpy(target_config, dv, sv, szv);
         }
 
         Instr::MemSet { dst, val, size, .. } => {
-            let dv = rval(dst, val_map, data_refs, builder, ptr_ty, ptr_ty);
-            let vv = rval(val, val_map, data_refs, builder, ptr_ty, ct::I8);
+            let dv = rval(dst, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let vv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I8);
             let vb = coerce(vv, ct::I8, builder, ptr_ty);
             let szv = builder.ins().iconst(ptr_ty, *size as i64);
             builder.call_memset(target_config, dv, vb, szv);
+        }
+
+        Instr::BSwap { dest, val, ty } => {
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let v = coerce(v, cl_ty, builder, ptr_ty);
+            let result = builder.ins().bswap(v);
+            val_map.insert(dest.0, result);
         }
 
         Instr::VaStart { .. } | Instr::VaEnd { .. } => {}
@@ -290,6 +319,7 @@ fn emit_terminator(
     term: &Terminator,
     builder: &mut FunctionBuilder<'_>,
     val_map: &HashMap<u32, cir::Value>,
+    callee_refs: &HashMap<u32, cir::FuncRef>,
     data_refs: &HashMap<u32, cir::GlobalValue>,
     bb_map: &HashMap<u32, cir::Block>,
     ptr_ty: cir::Type,
@@ -299,7 +329,7 @@ fn emit_terminator(
         Terminator::Ret(Some(v)) => {
             let hint = builder.func.signature.returns
                 .first().map(|p| p.value_type).unwrap_or(ct::I32);
-            let rv = rval(v, val_map, data_refs, builder, ptr_ty, hint);
+            let rv = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
             let rv = coerce(rv, hint, builder, ptr_ty);
             builder.ins().return_(&[rv]);
         }
@@ -308,13 +338,13 @@ fn emit_terminator(
             builder.ins().jump(cl_bb, &[]);
         }
         Terminator::CondJump { cond, then_bb, else_bb } => {
-            let cv = rval(cond, val_map, data_refs, builder, ptr_ty, ct::I8);
+            let cv = rval(cond, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I8);
             let then_cl = bb_map[&then_bb.0];
             let else_cl = bb_map[&else_bb.0];
             builder.ins().brif(cv, then_cl, &[], else_cl, &[]);
         }
         Terminator::Switch { val, default, arms } => {
-            let v = rval(val, val_map, data_refs, builder, ptr_ty, ct::I32);
+            let v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I32);
             let default_cl = bb_map[&default.0];
             for (arm_val, arm_bb) in arms {
                 let arm_cl = bb_map[&arm_bb.0];
@@ -337,6 +367,7 @@ fn emit_terminator(
 fn rval(
     val: &Val,
     val_map: &HashMap<u32, cir::Value>,
+    callee_refs: &HashMap<u32, cir::FuncRef>,
     data_refs: &HashMap<u32, cir::GlobalValue>,
     builder: &mut FunctionBuilder<'_>,
     ptr_ty: cir::Type,
@@ -354,7 +385,13 @@ fn rval(
                 builder.ins().iconst(ptr_ty, 0)
             }
         }
-        Val::Func(_) => builder.ins().iconst(ptr_ty, 0),
+        Val::Func(fref) => {
+            if let Some(&cl_fref) = callee_refs.get(&fref.0) {
+                builder.ins().func_addr(ptr_ty, cl_fref)
+            } else {
+                builder.ins().iconst(ptr_ty, 0)
+            }
+        }
     }
 }
 
@@ -419,7 +456,13 @@ fn emit_binop(op: &BinOp, l: cir::Value, r: cir::Value, builder: &mut FunctionBu
         BinOp::FSub => builder.ins().fsub(l, r),
         BinOp::FMul => builder.ins().fmul(l, r),
         BinOp::FDiv => builder.ins().fdiv(l, r),
-        BinOp::FRem => builder.ins().fsub(l, l), // stub: fmod not natively available
+        BinOp::FRem => {
+            // fmod(a,b) = a - trunc(a/b) * b
+            let q = builder.ins().fdiv(l, r);
+            let t = builder.ins().trunc(q);
+            let p = builder.ins().fmul(t, r);
+            builder.ins().fsub(l, p)
+        }
         BinOp::And  => builder.ins().band(l, r),
         BinOp::Or   => builder.ins().bor(l, r),
         BinOp::Xor  => builder.ins().bxor(l, r),

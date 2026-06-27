@@ -81,6 +81,16 @@ impl Lowerer {
                 Decl::TypeDef { names, .. } => {
                     for (name, ty) in names {
                         if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
+                            // Also register named struct/union by their own name
+                            match &ty.ty {
+                                AstType::Struct(s) if s.name.is_some() && s.fields.is_some() => {
+                                    self.struct_types.insert(s.name.clone().unwrap(), ir_ty.clone());
+                                }
+                                AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
+                                    self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
+                                }
+                                _ => {}
+                            }
                             self.struct_types.insert(name.clone(), ir_ty);
                         }
                     }
@@ -174,6 +184,16 @@ impl Lowerer {
             Decl::TypeDef { names, .. } => {
                 for (name, ty) in names {
                     if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
+                        // Also register named struct/union by their own name
+                        match &ty.ty {
+                            AstType::Struct(s) if s.name.is_some() && s.fields.is_some() => {
+                                self.struct_types.insert(s.name.clone().unwrap(), ir_ty.clone());
+                            }
+                            AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
+                                self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
+                            }
+                            _ => {}
+                        }
                         self.struct_types.insert(name.clone(), ir_ty);
                     }
                 }

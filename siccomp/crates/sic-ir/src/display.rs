@@ -128,6 +128,8 @@ impl fmt::Display for Instr {
                 write!(f, "  memcopy {}, {}, size={}, align={}", dst, src, size, align),
             Instr::MemSet { dst, val, size, align } =>
                 write!(f, "  memset {}, {}, size={}, align={}", dst, val, size, align),
+            Instr::BSwap { dest, val, ty } =>
+                write!(f, "  %{} = bswap {} {}", dest.0, ty, val),
             Instr::VaStart { list_ptr } => write!(f, "  va_start {}", list_ptr),
             Instr::VaArg { dest, list_ptr, ty } =>
                 write!(f, "  %{} = va_arg {} {}", dest.0, ty, list_ptr),

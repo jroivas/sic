@@ -208,10 +208,23 @@ impl<'m> Lowerer {
                 let pty = ir_params[i].clone();
                 let ptr_vid = fc.alloc_val();
                 fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone() });
-                fc.push_instr(Instr::Store {
-                    val: Val::Local(ValId(i as u32 + 0x10000)),
-                    ptr: Val::Local(ptr_vid),
-                });
+                if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    // Struct/union params are passed as pointer; copy into local alloca
+                    let ps = fc.ptr_size();
+                    let size = pty.size_of(ps);
+                    let align = pty.align_of(ps) as u64;
+                    fc.push_instr(Instr::MemCopy {
+                        dst: Val::Local(ptr_vid),
+                        src: Val::Local(ValId(i as u32 + 0x10000)),
+                        size,
+                        align,
+                    });
+                } else {
+                    fc.push_instr(Instr::Store {
+                        val: Val::Local(ValId(i as u32 + 0x10000)),
+                        ptr: Val::Local(ptr_vid),
+                    });
+                }
                 fc.define_local(pname.clone(), pty, ptr_vid);
             }
         }
@@ -690,6 +703,7 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
         Instr::GetFieldPtr { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::GetElemPtr { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::PtrOffset { dest, .. } => Some((*dest, Type::void_ptr())),
+        Instr::BSwap { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::Select { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::VaArg { dest, ty, .. } => Some((*dest, ty.clone())),
         _ => None,

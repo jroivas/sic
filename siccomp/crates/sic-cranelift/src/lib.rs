@@ -75,7 +75,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
 
     // Defined functions
     for (i, f) in ir_module.functions.iter().enumerate() {
-        let sig = build_cl_sig(&f.sig, &obj_module, ptr_size);
+        let sig = build_cl_sig(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         let linkage = ir_linkage(f.linkage);
         let fid = obj_module.declare_function(&f.name, linkage, &sig)?;
         func_ids.insert(i as u32, fid);
@@ -83,7 +83,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
 
     // Extern functions
     for (i, e) in ir_module.externs.iter().enumerate() {
-        let sig = build_cl_sig(&e.sig, &obj_module, ptr_size);
+        let sig = build_cl_sig(&e.sig, ptr_size, obj_module.target_config().default_call_conv);
         let fid = obj_module.declare_function(&e.name, CLinkage::Import, &sig)?;
         func_ids.insert((ir_module.functions.len() + i) as u32, fid);
     }
@@ -134,7 +134,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
     let mut ctx = cranelift_codegen::Context::new();
     for (i, f) in ir_module.functions.iter().enumerate() {
         let fid = func_ids[&(i as u32)];
-        ctx.func.signature = build_cl_sig(&f.sig, &obj_module, ptr_size);
+        ctx.func.signature = build_cl_sig(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
         func::compile_function(
@@ -157,10 +157,9 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
 
 pub fn build_cl_sig(
     sig: &sic_ir::FunctionType,
-    module: &ObjectModule,
     ptr_size: u32,
+    call_conv: CallConv,
 ) -> cir::Signature {
-    let call_conv = module.target_config().default_call_conv;
     let mut cl_sig = cir::Signature::new(call_conv);
 
     for p in &sig.params {

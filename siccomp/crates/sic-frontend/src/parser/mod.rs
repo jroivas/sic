@@ -163,7 +163,7 @@ impl Parser {
 
     fn is_expr_start_not_decl(&self) -> bool {
         // If the current token cannot start a declaration, it's a top-level expr.
-        !matches!(self.peek_kind(),
+        if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
@@ -171,7 +171,12 @@ impl Parser {
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::TypeName | TokenKind::Eof | TokenKind::LBrace
-        )
+        ) { return false; }
+        // Ident that's a typedef name also starts a declaration
+        if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
+            return false;
+        }
+        true
     }
 
     // ─── Typedef ──────────────────────────────────────────────────────────────
@@ -237,6 +242,10 @@ impl Parser {
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
                 TokenKind::TypeName => {
+                    let name = self.advance().text.clone();
+                    base = Some(AstType::Named(name));
+                }
+                TokenKind::Ident if base.is_none() && self.typedefs.contains(self.peek().text.as_str()) => {
                     let name = self.advance().text.clone();
                     base = Some(AstType::Named(name));
                 }
@@ -388,19 +397,46 @@ impl Parser {
         let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             self.advance().text.clone()
         } else if self.at(TokenKind::LParen) {
-            // Could be function declarator or grouped declarator: skip for now
-            // Handle grouped declarators: `(*name)` or `(*)(params)`
-            // We'll do a simple approach: consume inner and use it
+            // Grouped declarator: `(*name)(suffix)` or abstract
             self.advance(); // (
-            let (inner_name, inner_ty) = if self.at(TokenKind::Star) {
-                self.parse_declarator(base.clone())?
+            if self.at(TokenKind::Star) {
+                // Pointer grouped declarator: (*name)(suffix) or (**name)(suffix)
+                // Collect pointer stars from the inner part
+                let mut ptr_quals: Vec<Vec<TypeQual>> = Vec::new();
+                while self.eat(TokenKind::Star) {
+                    let mut pq = Vec::new();
+                    loop {
+                        match self.peek_kind() {
+                            TokenKind::Const    => { pq.push(TypeQual::Const);    self.advance(); }
+                            TokenKind::Volatile => { pq.push(TypeQual::Volatile); self.advance(); }
+                            TokenKind::Restrict => { pq.push(TypeQual::Restrict); self.advance(); }
+                            _ => break,
+                        }
+                    }
+                    ptr_quals.push(pq);
+                }
+                let inner_name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
+                    self.advance().text.clone()
+                } else {
+                    String::new()
+                };
+                self.expect(TokenKind::RParen)?;
+                // Apply suffix to BASE type first, then wrap with collected pointers
+                let mut ty = self.parse_declarator_suffix(base)?;
+                for pq in ptr_quals.into_iter().rev() {
+                    ty = QualType {
+                        ty: AstType::Pointer { base: Box::new(ty), quals: pq },
+                        qualifiers: vec![],
+                        storage: None,
+                    };
+                }
+                return Ok((inner_name, ty));
             } else {
-                (String::new(), base.clone())
-            };
-            self.expect(TokenKind::RParen)?;
-            // Now parse array/function suffix
-            let ty = self.parse_declarator_suffix(inner_ty)?;
-            return Ok((inner_name, ty));
+                let (inner_name, inner_ty) = (String::new(), base.clone());
+                self.expect(TokenKind::RParen)?;
+                let ty = self.parse_declarator_suffix(inner_ty)?;
+                return Ok((inner_name, ty));
+            }
         } else {
             String::new() // abstract declarator
         };
@@ -551,7 +587,7 @@ impl Parser {
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::TypeName
-        )
+        ) || (self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()))
     }
 
     fn parse_compound_stmt_as_stmts(&mut self) -> Result<Vec<Stmt>> {
@@ -892,13 +928,26 @@ impl Parser {
     }
 
     fn parse_cast(&mut self) -> Result<Expr> {
-        // `(type) expr` — need to distinguish from `(expr)`
+        // `(type) expr` or `(type){ init }` (compound literal)
         if self.at(TokenKind::LParen) && self.is_cast() {
             let sp = self.span();
             self.advance(); // (
             let (ty, _) = self.parse_decl_specifiers()?;
             let (_, ty) = self.parse_declarator(ty)?;
             self.expect(TokenKind::RParen)?;
+            if self.at(TokenKind::LBrace) {
+                // Compound literal: (type){ initializer-list }
+                self.advance(); // {
+                let mut inits = Vec::new();
+                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                    inits.push(self.parse_initializer()?);
+                    if !self.eat(TokenKind::Comma) { break; }
+                }
+                self.expect(TokenKind::RBrace)?;
+                let mut e = Expr::new(ExprKind::CompoundLiteral { ty, init: inits }, sp.clone());
+                e = self.parse_postfix_ops(e)?;
+                return Ok(e);
+            }
             let expr = self.parse_cast()?;
             return Ok(Expr::new(ExprKind::Cast { ty, expr: Box::new(expr) }, sp));
         }
@@ -908,12 +957,13 @@ impl Parser {
     fn is_cast(&self) -> bool {
         // Look ahead: `( type-specifier ...`
         if self.pos + 1 >= self.tokens.len() { return false; }
-        matches!(self.tokens[self.pos + 1].kind,
+        let tok = &self.tokens[self.pos + 1];
+        matches!(tok.kind,
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
             | TokenKind::Enum | TokenKind::TypeName | TokenKind::Const | TokenKind::Volatile
-        )
+        ) || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()))
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {

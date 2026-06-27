@@ -529,6 +529,25 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // Handle __builtin_bswap* before evaluating args
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            let bits: Option<u32> = match name.as_str() {
+                "__builtin_bswap16" => Some(16),
+                "__builtin_bswap32" => Some(32),
+                "__builtin_bswap64" => Some(64),
+                _ => None,
+            };
+            if let Some(bits) = bits {
+                if let Some(arg) = args.first() {
+                    let v = self.lower_expr(arg)?;
+                    let ty = Type::Int { bits, signed: false };
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::BSwap { dest, val: v, ty });
+                    return Ok(Val::Local(dest));
+                }
+            }
+        }
+
         // Evaluate arguments
         let mut arg_vals = Vec::new();
         for a in args {
@@ -540,6 +559,29 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
                     Some(LookupResult::Func(fr)) => fr,
+                    Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)) => {
+                        // local/global function pointer variable: fall through to indirect call
+                        let fptr = self.lower_expr(func_expr)?;
+                        let fptr_ty = self.val_type(&fptr);
+                        let func_ty = match &fptr_ty {
+                            Type::Pointer(inner) => match inner.as_ref() {
+                                Type::Function(ft) => *ft.clone(),
+                                _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                            },
+                            _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                        };
+                        let ret_ty = func_ty.ret.clone();
+                        let is_void = ret_ty == Type::Void;
+                        let dest = if !is_void { Some(self.alloc_val()) } else { None };
+                        self.push_instr(Instr::CallIndirect {
+                            dest,
+                            fptr,
+                            args: arg_vals,
+                            ret_ty: ret_ty.clone(),
+                            func_ty: Box::new(func_ty),
+                        });
+                        return Ok(if let Some(d) = dest { Val::Local(d) } else { Constant::zero() });
+                    }
                     _ => {
                         return Err(CompileError::at(
                             format!("unknown function '{}'", name),
@@ -549,20 +591,27 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             _ => {
-                // Indirect call through function pointer
+                // Indirect call through function pointer expression
                 let fptr = self.lower_expr(func_expr)?;
-                let dest_opt = None::<ValId>; // void result placeholder
-                let ret_val = self.alloc_val();
+                let fptr_ty = self.val_type(&fptr);
+                let func_ty = match &fptr_ty {
+                    Type::Pointer(inner) => match inner.as_ref() {
+                        Type::Function(ft) => *ft.clone(),
+                        _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                    },
+                    _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                };
+                let ret_ty = func_ty.ret.clone();
+                let is_void = ret_ty == Type::Void;
+                let dest = if !is_void { Some(self.alloc_val()) } else { None };
                 self.push_instr(Instr::CallIndirect {
-                    dest: Some(ret_val),
+                    dest,
                     fptr,
                     args: arg_vals,
-                    ret_ty: Type::i32(),
-                    func_ty: Box::new(sic_ir::FunctionType {
-                        ret: Type::i32(), params: vec![], variadic: true,
-                    }),
+                    ret_ty: ret_ty.clone(),
+                    func_ty: Box::new(func_ty),
                 });
-                return Ok(Val::Local(ret_val));
+                return Ok(if let Some(d) = dest { Val::Local(d) } else { Constant::zero() });
             }
         };
 
