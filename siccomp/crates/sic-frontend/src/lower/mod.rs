@@ -7,7 +7,7 @@ use crate::ast::*;
 use crate::{Result, CompileError};
 use sic_ir::*;
 
-pub use types::lower_type;
+pub use types::{lower_type, lower_param_type};
 
 /// State shared across the lowering of one module.
 pub struct Lowerer {
@@ -56,7 +56,7 @@ impl Lowerer {
                     // Forward declaration / extern
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-                        lower_type(&p.ty, &self.struct_types, self.ptr_size)
+                        lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
                     let sig = FunctionType { ret: ir_ret, params: ir_params?, variadic: *variadic };
                     if self.module.func_ref_by_name(name).is_none() {
@@ -67,7 +67,7 @@ impl Lowerer {
                     // Function definition — pre-register with empty body for stable FuncRef
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-                        lower_type(&p.ty, &self.struct_types, self.ptr_size)
+                        lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
                     let sig = FunctionType { ret: ir_ret, params: ir_params?, variadic: *variadic };
                     if self.module.func_ref_by_name(name).is_none() {
@@ -193,26 +193,50 @@ impl Lowerer {
         if self.globals_map.contains_key(&d.name) {
             return Ok(());
         }
-        let ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         let init = match &d.init {
             Some(Initializer::Expr(e)) => {
-                // Try integer constant evaluation first
                 match eval_const_expr(e, &self.enum_consts) {
                     Ok(v) => Some(Constant::Int(v)),
-                    Err(_) => {
-                        // Try float literal
-                        match &e.kind {
-                            ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
-                            ExprKind::Cast { expr: inner, .. } => {
-                                if let ExprKind::FloatLit(f) = &inner.kind {
-                                    Some(Constant::Float(*f))
-                                } else {
-                                    None
-                                }
+                    Err(_) => match &e.kind {
+                        ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
+                        ExprKind::Cast { expr: inner, .. } => {
+                            if let ExprKind::FloatLit(f) = &inner.kind {
+                                Some(Constant::Float(*f))
+                            } else {
+                                None
                             }
-                            _ => None,
+                        }
+                        _ => None,
+                    }
+                }
+            }
+            Some(Initializer::List(items)) => {
+                // Serialize a constant array initializer to bytes.
+                if let Type::Array { elem: ref elem_ty, ref mut len } = ir_ty {
+                    let elem_size = elem_ty.size_of(self.ptr_size) as usize;
+                    let count = items.len();
+                    if *len == 0 { *len = count; }
+                    let total = (*len) * elem_size;
+                    let mut bytes = vec![0u8; total];
+                    for (i, item) in items.iter().enumerate() {
+                        if i >= *len { break; }
+                        let v = match item {
+                            Initializer::Expr(e) => eval_const_expr(e, &self.enum_consts).unwrap_or(0),
+                            _ => 0,
+                        };
+                        let start = i * elem_size;
+                        match elem_size {
+                            1 => bytes[start] = v as u8,
+                            2 => bytes[start..start+2].copy_from_slice(&(v as i16).to_le_bytes()),
+                            4 => bytes[start..start+4].copy_from_slice(&(v as i32).to_le_bytes()),
+                            8 => bytes[start..start+8].copy_from_slice(&v.to_le_bytes()),
+                            _ => {}
                         }
                     }
+                    Some(Constant::Bytes(bytes))
+                } else {
+                    None
                 }
             }
             _ => None,
@@ -222,10 +246,10 @@ impl Lowerer {
             Some(StorageClass::Extern) => Linkage::External,
             _ => Linkage::External,
         };
+        let ty_for_map = ir_ty.clone();
         let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: base_ty.is_const() };
         let gref = self.module.add_global(g);
-        let ir_ty2 = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
-        self.globals_map.insert(d.name.clone(), (ir_ty2, gref));
+        self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
         Ok(())
     }
 

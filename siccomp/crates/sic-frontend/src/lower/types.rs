@@ -9,6 +9,15 @@ pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -
     lower_ast_type(&qt.ty, named, ptr_size)
 }
 
+/// Like lower_type, but array parameters decay to pointer-to-element (C semantics).
+pub fn lower_param_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
+    let ty = lower_type(qt, named, ptr_size)?;
+    Ok(match ty {
+        Type::Array { elem, .. } => Type::Pointer(elem),
+        other => other,
+    })
+}
+
 pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     Ok(match ty {
         AstType::Void        => Type::Void,
@@ -55,8 +64,23 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Enum(_)   => Type::Int { bits: 32, signed: true }, // enum → i32
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
-                // va_list is a pointer to a special struct; represent as void*
                 return Ok(Type::Pointer(Box::new(Type::Void)));
+            }
+            // sic/Rust-style primitive type aliases
+            match n.as_str() {
+                "int8"   | "i8"   => return Ok(Type::Int { bits: 8,   signed: true  }),
+                "int16"  | "i16"  => return Ok(Type::Int { bits: 16,  signed: true  }),
+                "int32"  | "i32"  => return Ok(Type::Int { bits: 32,  signed: true  }),
+                "int64"  | "i64"  => return Ok(Type::Int { bits: 64,  signed: true  }),
+                "int128" | "i128" => return Ok(Type::Int { bits: 128, signed: true  }),
+                "uint8"  | "u8"   => return Ok(Type::Int { bits: 8,   signed: false }),
+                "uint16" | "u16"  => return Ok(Type::Int { bits: 16,  signed: false }),
+                "uint32" | "u32"  => return Ok(Type::Int { bits: 32,  signed: false }),
+                "uint64" | "u64"  => return Ok(Type::Int { bits: 64,  signed: false }),
+                "uint128"| "u128" => return Ok(Type::Int { bits: 128, signed: false }),
+                "isize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: true  }),
+                "usize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: false }),
+                _ => {}
             }
             named.get(n).cloned().ok_or_else(|| {
                 CompileError::new(format!("unknown type '{}'", n))

@@ -352,6 +352,12 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
         "__builtin_va_list" => TokenKind::TypeName,
+        // sic primitive type aliases
+        "int8" | "int16" | "int32" | "int64" | "int128" |
+        "uint8" | "uint16" | "uint32" | "uint64" | "uint128" |
+        "i8" | "i16" | "i32" | "i64" | "i128" |
+        "u8" | "u16" | "u32" | "u64" | "u128" |
+        "isize" | "usize" => TokenKind::TypeName,
         "__attribute__"  => TokenKind::Attribute,
         "__extension__"  => TokenKind::Extension,
         "__asm__" | "asm" => TokenKind::Asm,

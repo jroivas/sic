@@ -3,7 +3,7 @@ use crate::ast::{self, Decl, Stmt, Expr, ExprKind, ForInit, StorageClass, AstTyp
 use crate::ast::Param as AstParam;
 use crate::{Result, CompileError};
 use sic_ir::*;
-use super::{Lowerer, lower_type, eval_const_expr};
+use super::{Lowerer, lower_type, lower_param_type, eval_const_expr};
 
 /// Per-function lowering context.
 pub struct FuncCtx<'m> {
@@ -173,7 +173,7 @@ impl<'m> Lowerer {
     ) -> Result<()> {
         let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
         let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-            lower_type(&p.ty, &self.struct_types, self.ptr_size)
+            lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
         }).collect();
         let ir_params = ir_params?;
 

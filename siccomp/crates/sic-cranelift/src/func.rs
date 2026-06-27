@@ -181,16 +181,32 @@ fn emit_instr(
             };
 
             let sig_ref = builder.func.dfg.ext_funcs[cl_fref].signature;
-            let param_tys: Vec<cir::Type> = builder.func.stencil.dfg.signatures[sig_ref]
-                .params.iter().map(|p| p.value_type).collect();
+            let (param_tys, declared_count) = {
+                let sig = &builder.func.stencil.dfg.signatures[sig_ref];
+                let tys: Vec<cir::Type> = sig.params.iter().map(|p| p.value_type).collect();
+                let n = tys.len();
+                (tys, n)
+            };
 
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                let hint = param_tys.get(i).copied().unwrap_or(ct::I32);
+                let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
                 let v = rval(a, val_map, data_refs, builder, ptr_ty, hint);
                 coerce(v, hint, builder, ptr_ty)
             }).collect();
 
-            let inst = builder.ins().call(cl_fref, &arg_vals);
+            let inst = if arg_vals.len() > declared_count {
+                // Variadic call with extra args: build extended sig and use call_indirect
+                let mut new_sig = builder.func.stencil.dfg.signatures[sig_ref].clone();
+                for v in &arg_vals[declared_count..] {
+                    let ty = builder.func.dfg.value_type(*v);
+                    new_sig.params.push(cir::AbiParam::new(ty));
+                }
+                let new_sig_ref = builder.func.import_signature(new_sig);
+                let faddr = builder.ins().func_addr(ptr_ty, cl_fref);
+                builder.ins().call_indirect(new_sig_ref, faddr, &arg_vals)
+            } else {
+                builder.ins().call(cl_fref, &arg_vals)
+            };
             if let Some(d) = dest {
                 let results = builder.inst_results(inst).to_vec();
                 if !results.is_empty() {
