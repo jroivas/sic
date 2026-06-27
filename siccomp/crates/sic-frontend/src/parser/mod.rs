@@ -376,8 +376,11 @@ impl Parser {
 
     /// Parse a declarator, returning (name, fully-qualified type).
     fn parse_declarator(&mut self, base: QualType) -> Result<(String, QualType)> {
-        // Collect pointer levels
-        let mut pointers: Vec<Vec<TypeQual>> = Vec::new();
+        // Collect pointer levels and apply them to the base type immediately (forward order).
+        // This ensures T *f(params) produces Function{ret:Pointer(T), params} rather than
+        // Pointer(Function{ret:T, params}), matching C's right-left declarator rule where
+        // postfix () and [] bind tighter than prefix *.
+        let mut new_base = base;
         while self.eat(TokenKind::Star) {
             let mut pq = Vec::new();
             loop {
@@ -388,20 +391,25 @@ impl Parser {
                     _ => break,
                 }
             }
-            pointers.push(pq);
+            new_base = QualType {
+                ty: AstType::Pointer { base: Box::new(new_base), quals: pq },
+                qualifiers: vec![],
+                storage: None,
+            };
         }
 
         self.skip_attributes();
 
-        // Direct declarator: name or (abstract)
-        let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
-            self.advance().text.clone()
+        // Direct declarator: name, grouped, or abstract
+        if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
+            let name = self.advance().text.clone();
+            let ty = self.parse_declarator_suffix(new_base)?;
+            return Ok((name, ty));
         } else if self.at(TokenKind::LParen) {
             // Grouped declarator: `(*name)(suffix)` or abstract
             self.advance(); // (
             if self.at(TokenKind::Star) {
                 // Pointer grouped declarator: (*name)(suffix) or (**name)(suffix)
-                // Collect pointer stars from the inner part
                 let mut ptr_quals: Vec<Vec<TypeQual>> = Vec::new();
                 while self.eat(TokenKind::Star) {
                     let mut pq = Vec::new();
@@ -421,8 +429,8 @@ impl Parser {
                     String::new()
                 };
                 self.expect(TokenKind::RParen)?;
-                // Apply suffix to BASE type first, then wrap with collected pointers
-                let mut ty = self.parse_declarator_suffix(base)?;
+                // Apply suffix to new_base (outer pointers already applied), then wrap with inner pointers
+                let mut ty = self.parse_declarator_suffix(new_base)?;
                 for pq in ptr_quals.into_iter().rev() {
                     ty = QualType {
                         ty: AstType::Pointer { base: Box::new(ty), quals: pq },
@@ -432,28 +440,15 @@ impl Parser {
                 }
                 return Ok((inner_name, ty));
             } else {
-                let (inner_name, inner_ty) = (String::new(), base.clone());
                 self.expect(TokenKind::RParen)?;
-                let ty = self.parse_declarator_suffix(inner_ty)?;
-                return Ok((inner_name, ty));
+                let ty = self.parse_declarator_suffix(new_base)?;
+                return Ok((String::new(), ty));
             }
-        } else {
-            String::new() // abstract declarator
-        };
-
-        // Suffix: `[size]` or `(params)`
-        let mut ty = self.parse_declarator_suffix(base)?;
-
-        // Apply pointer levels (innermost first)
-        for pq in pointers.into_iter().rev() {
-            ty = QualType {
-                ty: AstType::Pointer { base: Box::new(ty), quals: pq },
-                qualifiers: vec![],
-                storage: None,
-            };
         }
 
-        Ok((name, ty))
+        // Abstract declarator (no name)
+        let ty = self.parse_declarator_suffix(new_base)?;
+        Ok((String::new(), ty))
     }
 
     fn parse_declarator_suffix(&mut self, mut ty: QualType) -> Result<QualType> {
