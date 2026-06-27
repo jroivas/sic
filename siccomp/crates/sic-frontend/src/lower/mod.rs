@@ -63,15 +63,20 @@ impl Lowerer {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
                 }
-                Decl::Func { name, ret_ty, params, variadic, body: Some(_), .. } => {
-                    // Function definition — register its prototype
+                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, .. } => {
+                    // Function definition — pre-register with empty body for stable FuncRef
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
                     let sig = FunctionType { ret: ir_ret, params: ir_params?, variadic: *variadic };
-                    // Don't add yet — will be added in second pass
-                    let _ = sig; // just validate types parse OK
+                    if self.module.func_ref_by_name(name).is_none() {
+                        let linkage = match storage {
+                            Some(StorageClass::Static) => Linkage::Internal,
+                            _ => Linkage::External,
+                        };
+                        self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
+                    }
                 }
                 Decl::TypeDef { names, .. } => {
                     for (name, ty) in names {

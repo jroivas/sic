@@ -466,7 +466,11 @@ fn emit_cast(
         CastOp::SIToFP  => builder.ins().fcvt_from_sint(dst, val),
         CastOp::UIToFP  => builder.ins().fcvt_from_uint(dst, val),
         CastOp::FPToSI  => builder.ins().fcvt_to_sint_sat(dst, val),
-        CastOp::FPToUI  => builder.ins().fcvt_to_uint_sat(dst, val),
+        CastOp::FPToUI  => {
+            // C (unsigned T)x where x is negative is UB; most platforms treat it
+            // as sign-conversion: cast to signed then reinterpret as unsigned.
+            builder.ins().fcvt_to_sint_sat(dst, val)
+        }
         CastOp::FPExt   => builder.ins().fpromote(dst, val),
         CastOp::FPTrunc => builder.ins().fdemote(dst, val),
     }

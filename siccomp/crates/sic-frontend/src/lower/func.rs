@@ -240,7 +240,12 @@ impl<'m> Lowerer {
 
         fc.exit_scope();
 
-        self.module.add_function(func);
+        // Replace the pre-registered placeholder, or add if not pre-registered
+        if let Some(idx) = self.module.functions.iter().position(|f| f.name == name) {
+            self.module.functions[idx] = func;
+        } else {
+            self.module.add_function(func);
+        }
         Ok(())
     }
 }
@@ -293,14 +298,19 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             Stmt::Goto(label, _) => {
-                let placeholder = self.alloc_block();
-                let bb = BasicBlock::new(placeholder);
-                self.func_mut().blocks.push(bb);
-                self.pending_gotos.push((label.clone(), self.current_bb));
-                self.set_terminator(Terminator::Jump(placeholder));
-                // Will be patched later
-                let _ = placeholder;
-                self.switch_to_block(placeholder);
+                if let Some(&target_bb) = self.labels.get(label) {
+                    // Backward goto: label already seen
+                    self.set_terminator(Terminator::Jump(target_bb));
+                    // Switch to a fresh (unreachable) block so we can continue
+                    let dead = self.new_block_after_current();
+                    self.switch_to_block(dead);
+                } else {
+                    // Forward goto: create placeholder, patch when label is found
+                    let placeholder = self.new_block_after_current();
+                    self.pending_gotos.push((label.clone(), self.current_bb));
+                    self.set_terminator(Terminator::Jump(placeholder));
+                    self.switch_to_block(placeholder);
+                }
             }
             Stmt::Label(name, inner, _) => {
                 // Create a new block for this label
@@ -373,7 +383,15 @@ impl<'m> FuncCtx<'m> {
                     _ => {}
                 }
                 for d in declarators {
-                    let ty = self.lower_type(&d.ty)?;
+                    let mut ty = self.lower_type(&d.ty)?;
+                    // Handle VLA (variable-length array): size was 0 because expr isn't constant
+                    // Try to evaluate the size expr at compile time or use a conservative fallback
+                    if let (Type::Array { elem: ref elem_ty, len: 0 }, AstType::Array { size: Some(sz_expr), .. }) = (&ty, &d.ty.ty) {
+                        let resolved_len = eval_const_expr(sz_expr, &self.lowerer.enum_consts)
+                            .unwrap_or(1024) as usize; // fallback: 1024 elements
+                        let resolved_len = resolved_len.max(1);
+                        ty = Type::Array { elem: elem_ty.clone(), len: resolved_len };
+                    }
                     let vid = self.alloc_val();
                     self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone() });
 

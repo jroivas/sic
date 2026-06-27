@@ -253,6 +253,53 @@ impl<'m> FuncCtx<'m> {
     pub fn emit_binop(&mut self, op: BinOpKind, l: Val, r: Val) -> Result<Val> {
         let lt = self.val_type(&l);
         let rt = self.val_type(&r);
+
+        // Handle pointer arithmetic: ptr + int, int + ptr, ptr - int
+        if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+            match (&lt, &rt) {
+                (Type::Pointer(elem), _) if !matches!(rt, Type::Pointer(_)) => {
+                    let inner = match elem.as_ref() { Type::Array { elem: e, .. } => *e.clone(), t => t.clone() };
+                    let elem_size = inner.size_of(self.ptr_size()) as i64;
+                    let idx = self.coerce(r, &Type::i64())?;
+                    let idx = if op == BinOpKind::Sub {
+                        let neg = self.alloc_val();
+                        self.push_instr(Instr::UnaryOp { dest: neg, op: UnOp::Neg, val: idx, ty: Type::i64() });
+                        Val::Local(neg)
+                    } else { idx };
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::GetElemPtr { dest, base: l, index: idx, elem_size: elem_size.unsigned_abs() });
+                    self.val_types.insert(dest.0, Type::Pointer(Box::new(inner)));
+                    return Ok(Val::Local(dest));
+                }
+                (_, Type::Pointer(elem)) if op == BinOpKind::Add => {
+                    let inner = match elem.as_ref() { Type::Array { elem: e, .. } => *e.clone(), t => t.clone() };
+                    let elem_size = inner.size_of(self.ptr_size());
+                    let idx = self.coerce(l, &Type::i64())?;
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::GetElemPtr { dest, base: r, index: idx, elem_size });
+                    self.val_types.insert(dest.0, Type::Pointer(Box::new(inner)));
+                    return Ok(Val::Local(dest));
+                }
+                (Type::Pointer(elem), Type::Pointer(_)) if op == BinOpKind::Sub => {
+                    // ptr - ptr → (ptr - ptr) / elem_size
+                    let inner = match elem.as_ref() { Type::Array { elem: e, .. } => e.as_ref(), t => t };
+                    let elem_size = inner.size_of(self.ptr_size()) as i64;
+                    let lp = self.coerce(l, &Type::i64())?;
+                    let rp = self.coerce(r, &Type::i64())?;
+                    let diff = self.alloc_val();
+                    self.push_instr(Instr::BinOp { dest: diff, op: BinOp::Sub, lhs: lp, rhs: rp, ty: Type::i64() });
+                    if elem_size > 1 {
+                        let elem_size_val = Constant::int(elem_size);
+                        let quot = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: quot, op: BinOp::SDiv, lhs: Val::Local(diff), rhs: elem_size_val, ty: Type::i64() });
+                        return Ok(Val::Local(quot));
+                    }
+                    return Ok(Val::Local(diff));
+                }
+                _ => {}
+            }
+        }
+
         let common = usual_arith_conv(&lt, &rt);
 
         let lc = self.coerce(l, &common)?;
@@ -434,12 +481,10 @@ impl<'m> FuncCtx<'m> {
         let cur = self.alloc_val();
         let ty = lv.ty.clone();
         self.push_instr(Instr::Load { dest: cur, ptr: lv.ptr.clone(), ty: ty.clone() });
-        let one = self.coerce(Constant::int(1), &ty)?;
-        let result = self.alloc_val();
-        let op = inc_op(&ty, inc);
-        self.push_instr(Instr::BinOp { dest: result, op, lhs: Val::Local(cur), rhs: one, ty: ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(result), ptr: lv.ptr });
-        Ok(Val::Local(result))
+        let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+        let result = self.emit_binop(op, Val::Local(cur), Constant::int(1))?;
+        self.push_instr(Instr::Store { val: result.clone(), ptr: lv.ptr });
+        Ok(result)
     }
 
     fn lower_post_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
@@ -447,11 +492,9 @@ impl<'m> FuncCtx<'m> {
         let old = self.alloc_val();
         let ty = lv.ty.clone();
         self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: ty.clone() });
-        let one = self.coerce(Constant::int(1), &ty)?;
-        let result = self.alloc_val();
-        let op = inc_op(&ty, inc);
-        self.push_instr(Instr::BinOp { dest: result, op, lhs: Val::Local(old), rhs: one, ty: ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(result), ptr: lv.ptr });
+        let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+        let result = self.emit_binop(op, Val::Local(old), Constant::int(1))?;
+        self.push_instr(Instr::Store { val: result, ptr: lv.ptr });
         Ok(Val::Local(old))
     }
 
