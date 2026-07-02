@@ -11,6 +11,31 @@ struct LValue {
 }
 
 impl<'m> FuncCtx<'m> {
+    /// Emit a NUL-terminated string as a private global and return a pointer to
+    /// its first element (the decayed `char *` value).
+    pub fn emit_cstring(&mut self, s: &str) -> Val {
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0); // null terminate
+        let name = format!(".str.{}", self.lowerer.module.globals.len());
+        let len = bytes.len();
+        let g = Global {
+            name,
+            ty: Type::Array { elem: Box::new(Type::i8()), len },
+            init: Some(Constant::Bytes(bytes)),
+            linkage: Linkage::Private,
+            constant: true,
+        };
+        let gref = self.lowerer.module.add_global(g);
+        let ptr_id = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: ptr_id,
+            base: Val::Global(gref),
+            index: Constant::zero(),
+            elem_size: 1,
+        });
+        Val::Local(ptr_id)
+    }
+
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         match &expr.kind {
@@ -18,30 +43,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::UIntLit(v) => Ok(Constant::uint(*v)),
             ExprKind::FloatLit(v) => Ok(Val::Const(Constant::Float(*v))),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
-            ExprKind::StringLit(s) => {
-                // String literals become global byte arrays.
-                let mut bytes = s.as_bytes().to_vec();
-                bytes.push(0); // null terminate
-                let name = format!(".str.{}", self.lowerer.module.globals.len());
-                let len = bytes.len();
-                let g = Global {
-                    name: name.clone(),
-                    ty: Type::Array { elem: Box::new(Type::i8()), len },
-                    init: Some(Constant::Bytes(bytes)),
-                    linkage: Linkage::Private,
-                    constant: true,
-                };
-                let gref = self.lowerer.module.add_global(g);
-                // Return pointer to first element
-                let ptr_id = self.alloc_val();
-                self.push_instr(Instr::GetElemPtr {
-                    dest: ptr_id,
-                    base: Val::Global(gref),
-                    index: Constant::zero(),
-                    elem_size: 1,
-                });
-                Ok(Val::Local(ptr_id))
-            }
+            ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
 
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
@@ -68,6 +70,21 @@ impl<'m> FuncCtx<'m> {
                     Some(LookupResult::EnumConst(v)) => Ok(Constant::int(v)),
                     Some(LookupResult::Func(fref)) => Ok(Val::Func(fref)),
                     None => {
+                        // Compiler-provided predefined identifiers that expand to a
+                        // string literal naming the enclosing function. Unlike
+                        // __FILE__/__LINE__ these are not preprocessor macros, so we
+                        // synthesize them here natively.
+                        match name.as_str() {
+                            "__func__" | "__FUNCTION__" => {
+                                let fname = self.func_ref().name.clone();
+                                return Ok(self.emit_cstring(&fname));
+                            }
+                            "__PRETTY_FUNCTION__" => {
+                                let pretty = self.pretty_func.clone();
+                                return Ok(self.emit_cstring(&pretty));
+                            }
+                            _ => {}
+                        }
                         Err(CompileError::at(
                             format!("undefined name '{}'", name),
                             expr.span.file.clone(), expr.span.line, expr.span.col,

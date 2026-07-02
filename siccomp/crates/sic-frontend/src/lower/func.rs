@@ -27,6 +27,8 @@ pub struct FuncCtx<'m> {
     pub pending_gotos: Vec<(String, BlockId)>,
     /// Last initialized local variable (for implicit return in sic)
     pub last_init_local: Option<(ValId, Type)>,
+    /// GCC-style signature string for __PRETTY_FUNCTION__
+    pub pretty_func: String,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -51,6 +53,7 @@ impl<'m> FuncCtx<'m> {
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
             last_init_local: None,
+            pretty_func: String::new(),
         }
     }
 
@@ -198,7 +201,24 @@ impl<'m> Lowerer {
         let entry = BasicBlock::new(entry_id);
         func.blocks.push(entry);
 
+        // Build the GCC-style signature used by __PRETTY_FUNCTION__:
+        //   "<ret> <name>(<param types>)"
+        let pretty = {
+            let params_str = params.iter()
+                .map(|p| c_type_string(&p.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let params_str = if variadic {
+                if params_str.is_empty() { "...".to_string() }
+                else { format!("{}, ...", params_str) }
+            } else {
+                params_str
+            };
+            format!("{} {}({})", c_type_string(ret_ty), name, params_str)
+        };
+
         let mut fc = FuncCtx::new_with_func(self, &mut func);
+        fc.pretty_func = pretty;
 
         // Alloca for each parameter and store the param sentinel value.
         // The backend maps ValId(0x10000 + i) → the i-th function parameter.
@@ -752,5 +772,51 @@ fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut V
         Stmt::Label(_, inner, _) => collect_cases_in(inner, enum_consts, out),
         Stmt::Default(inner, _)  => collect_cases_in(inner, enum_consts, out),
         _ => {}
+    }
+}
+
+// ─── C type formatting (for __PRETTY_FUNCTION__) ────────────────────────────────
+
+/// Render a `QualType` as a GCC-style C type string, e.g. "const char *".
+fn c_type_string(qt: &QualType) -> String {
+    use crate::ast::TypeQual;
+    let mut s = String::new();
+    if qt.qualifiers.contains(&TypeQual::Const) {
+        s.push_str("const ");
+    }
+    if qt.qualifiers.contains(&TypeQual::Volatile) {
+        s.push_str("volatile ");
+    }
+    s.push_str(&ast_type_string(&qt.ty));
+    s
+}
+
+fn ast_type_string(t: &AstType) -> String {
+    match t {
+        AstType::Void => "void".to_string(),
+        AstType::Char { signed: None } => "char".to_string(),
+        AstType::Char { signed: Some(true) } => "signed char".to_string(),
+        AstType::Char { signed: Some(false) } => "unsigned char".to_string(),
+        AstType::Short { signed: true } => "short".to_string(),
+        AstType::Short { signed: false } => "unsigned short".to_string(),
+        AstType::Int { signed: true } => "int".to_string(),
+        AstType::Int { signed: false } => "unsigned int".to_string(),
+        AstType::Long { signed: true } => "long".to_string(),
+        AstType::Long { signed: false } => "unsigned long".to_string(),
+        AstType::LongLong { signed: true } => "long long".to_string(),
+        AstType::LongLong { signed: false } => "unsigned long long".to_string(),
+        AstType::Float => "float".to_string(),
+        AstType::Double => "double".to_string(),
+        AstType::LongDouble => "long double".to_string(),
+        AstType::Bool => "_Bool".to_string(),
+        AstType::Complex => "_Complex".to_string(),
+        AstType::Pointer { base, .. } => format!("{} *", c_type_string(base)),
+        AstType::Array { base, .. } => format!("{} []", c_type_string(base)),
+        AstType::Named(n) => n.clone(),
+        AstType::Builtin(n) => n.clone(),
+        AstType::Struct(s) => format!("struct {}", s.name.clone().unwrap_or_default()),
+        AstType::Union(u) => format!("union {}", u.name.clone().unwrap_or_default()),
+        AstType::Enum(e) => format!("enum {}", e.name.clone().unwrap_or_default()),
+        AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
     }
 }
