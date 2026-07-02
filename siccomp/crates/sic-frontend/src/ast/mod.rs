@@ -235,6 +235,10 @@ pub enum ExprKind {
     /// Comma expression: a, b
     Comma(BoxExpr, BoxExpr),
 
+    /// GCC statement expression: ({ stmts... }). Value is the last statement
+    /// when it is an expression statement, otherwise void.
+    StmtExpr(Vec<Stmt>),
+
     /// Compound literal: (Type){ ... }
     CompoundLiteral { ty: QualType, init: Vec<Initializer> },
 

@@ -16,7 +16,6 @@ int main()
     ({
         a = 6;
         b = a;
-    }, {
         a = 7;
     });
 #endif
@@ -30,6 +29,12 @@ int main()
 
     if (a == 3);
     else;
+
+    int c = ({
+        b;
+    });
+    if (c != 6)
+        return 4;
 
     ({if (a == 3); else;});
 

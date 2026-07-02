@@ -1145,6 +1145,12 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
+                // GCC statement expression: ({ stmts... })
+                if self.at(TokenKind::LBrace) {
+                    let stmts = self.parse_compound_stmt_as_stmts()?;
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expr::new(ExprKind::StmtExpr(stmts), sp));
+                }
                 let e = self.parse_expr()?;
                 self.expect(TokenKind::RParen)?;
                 Ok(e)

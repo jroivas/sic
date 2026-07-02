@@ -155,6 +155,26 @@ impl<'m> FuncCtx<'m> {
                 self.lower_expr(rhs)
             }
 
+            ExprKind::StmtExpr(stmts) => {
+                // GCC statement expression: the value is that of the last
+                // statement when it is an expression statement, else void (0).
+                self.enter_scope();
+                let mut result = Constant::zero();
+                let n = stmts.len();
+                for (i, stmt) in stmts.iter().enumerate() {
+                    if self.is_terminated() { break; }
+                    if i + 1 == n {
+                        if let ast::Stmt::Expr(e, _) = stmt {
+                            result = self.lower_expr(e)?;
+                            continue;
+                        }
+                    }
+                    self.lower_stmt(stmt)?;
+                }
+                self.exit_scope();
+                Ok(result)
+            }
+
             ExprKind::CompoundLiteral { ty, init } => {
                 let ir_ty = self.lower_type(ty)?;
                 let vid = self.alloc_val();
