@@ -56,12 +56,31 @@ pub fn compile_function(
     let mut val_map: HashMap<u32, cir::Value> = HashMap::new();
 
     // Map param sentinels ValId(0x10000+i) → actual entry-block param values.
+    // For variadic functions the signature was padded with extra trailing i64
+    // params (see `build_cl_sig_def`); spill those into a contiguous save area
+    // that `va_start`/`va_arg` walk with a single cursor pointer.
+    let mut va_save_area: Option<cir::Value> = None;
     {
         let params = builder.block_params(entry_cl).to_vec();
-        for (i, _) in f.params.iter().enumerate() {
+        let fixed = f.params.len();
+        for i in 0..fixed {
             if i < params.len() {
                 val_map.insert(0x10000 + i as u32, params[i]);
             }
+        }
+        if f.sig.variadic && params.len() > fixed {
+            let n = params.len() - fixed;
+            let size = (n * 8) as u32;
+            let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                cir::StackSlotKind::ExplicitSlot,
+                size,
+                3, // align = 2^3 = 8 bytes
+            ));
+            let base = builder.ins().stack_addr(ptr_ty, slot, 0);
+            for i in 0..n {
+                builder.ins().store(MemFlags::new(), params[fixed + i], base, (i * 8) as i32);
+            }
+            va_save_area = Some(base);
         }
     }
 
@@ -74,7 +93,7 @@ pub fn compile_function(
         for instr in &bb.instrs {
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
-                ptr_ty, target_config, ptr_size,
+                ptr_ty, target_config, ptr_size, va_save_area,
             );
         }
         emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty);
@@ -96,6 +115,7 @@ fn emit_instr(
     ptr_ty: cir::Type,
     target_config: cranelift_codegen::isa::TargetFrontendConfig,
     ptr_size: u32,
+    va_save_area: Option<cir::Value>,
 ) {
     match instr {
         Instr::Alloca { dest, ty } => {
@@ -305,11 +325,26 @@ fn emit_instr(
             val_map.insert(dest.0, result);
         }
 
-        Instr::VaStart { .. } | Instr::VaEnd { .. } => {}
+        Instr::VaStart { list_ptr } => {
+            // Point the va_list cursor at the start of the spilled variadic
+            // save area. The va_list object stores a single walking pointer.
+            if let Some(base) = va_save_area {
+                let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                builder.ins().store(MemFlags::new(), base, lp, 0);
+            }
+        }
 
-        Instr::VaArg { dest, ty, .. } => {
+        Instr::VaEnd { .. } => {}
+
+        Instr::VaArg { dest, list_ptr, ty } => {
+            // Load the cursor, read the argument, then advance the cursor by one
+            // 8-byte slot (integer/pointer varargs are stored one per slot).
+            let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cursor = builder.ins().load(ptr_ty, MemFlags::new(), lp, 0);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let v = builder.ins().iconst(cl_ty, 0);
+            let v = builder.ins().load(cl_ty, MemFlags::new(), cursor, 0);
+            let next = builder.ins().iadd_imm(cursor, 8);
+            builder.ins().store(MemFlags::new(), next, lp, 0);
             val_map.insert(dest.0, v);
         }
     }

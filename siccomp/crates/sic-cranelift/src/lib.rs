@@ -134,7 +134,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
     let mut ctx = cranelift_codegen::Context::new();
     for (i, f) in ir_module.functions.iter().enumerate() {
         let fid = func_ids[&(i as u32)];
-        ctx.func.signature = build_cl_sig(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
+        ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
         func::compile_function(
@@ -172,5 +172,31 @@ pub fn build_cl_sig(
         cl_sig.returns.push(cir::AbiParam::new(t));
     }
 
+    cl_sig
+}
+
+/// Number of integer-register/stack slots we materialize for the variadic tail
+/// of a variadic function *definition*. Cranelift has no native variadic
+/// support, so we over-declare trailing integer params to capture the varargs
+/// (in registers first, then the stack overflow area) and spill them into a
+/// contiguous save area that `va_arg` walks. See `func::compile_function`.
+pub const VARARG_SLOTS: usize = 16;
+
+/// Build the signature used to *compile* a function body. Identical to
+/// [`build_cl_sig`] except that variadic functions gain `VARARG_SLOTS` extra
+/// trailing `i64` params so the callee can read the passed variadic arguments.
+/// The module-level declaration keeps the plain (unpadded) signature so calls
+/// still append the actual argument types per the platform ABI.
+pub fn build_cl_sig_def(
+    sig: &sic_ir::FunctionType,
+    ptr_size: u32,
+    call_conv: CallConv,
+) -> cir::Signature {
+    let mut cl_sig = build_cl_sig(sig, ptr_size, call_conv);
+    if sig.variadic {
+        for _ in 0..VARARG_SLOTS {
+            cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
+        }
+    }
     cl_sig
 }
