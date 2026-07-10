@@ -66,21 +66,36 @@ struct Args {
     /// Enable debug output
     #[arg(short = 'd', long = "debug")]
     debug: bool,
+
+    /// Generate debug information (`-g` and variants). Set from the argv pre-pass
+    /// rather than parsed by clap. sic emits an ELF symbol table (function-level
+    /// backtraces work); full DWARF line/variable info is not yet produced.
+    #[arg(skip)]
+    debug_info: bool,
 }
 
 fn main() {
-    // Accept GCC-style single-dash `-std=c99` in addition to clap's `--std=c99`
-    // by rewriting the leading dash before parsing.
-    let argv = std::env::args().map(|a| {
+    // Normalize a few GCC-style flags before clap sees them.
+    let mut want_debug = false;
+    let mut argv: Vec<String> = Vec::new();
+    for a in std::env::args() {
         if a == "-std" {
-            "--std".to_string()
+            // Accept `-std c99` in addition to clap's `--std c99`.
+            argv.push("--std".to_string());
         } else if let Some(rest) = a.strip_prefix("-std=") {
-            format!("--std={}", rest)
+            // Accept GCC-style single-dash `-std=c99`.
+            argv.push(format!("--std={}", rest));
+        } else if a.starts_with("-g") {
+            // Debug-info flags: `-g`, `-g0..3`, `-ggdb`, `-gdwarf-4`, ... These
+            // are always attached in GCC/Clang, so a plain prefix match is safe
+            // and avoids clap swallowing the following filename as a value.
+            want_debug = true;
         } else {
-            a
+            argv.push(a);
         }
-    });
-    let args = Args::parse_from(argv);
+    }
+    let mut args = Args::parse_from(argv);
+    args.debug_info = want_debug;
 
     if let Err(e) = run(&args) {
         eprintln!("{}", e);
@@ -223,6 +238,11 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         link.arg(obj);
     }
     link.arg("-o").arg(out_path);
+
+    // Preserve debug info through the link step when `-g` was requested.
+    if args.debug_info {
+        link.arg("-g");
+    }
 
     // User-specified library search paths and libraries.
     for dir in &args.lib_dirs {
