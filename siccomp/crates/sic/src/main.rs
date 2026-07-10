@@ -40,6 +40,10 @@ struct Args {
     #[arg(short = 'I', action = clap::ArgAction::Append, value_name = "DIR")]
     includes: Vec<String>,
 
+    /// C standard to preprocess against (e.g. c99, c11, c17, c23)
+    #[arg(long = "std", value_name = "STD", default_value = "c23")]
+    std: String,
+
     /// Dump AST
     #[arg(long = "ast")]
     ast: bool,
@@ -50,7 +54,18 @@ struct Args {
 }
 
 fn main() {
-    let args = Args::parse();
+    // Accept GCC-style single-dash `-std=c99` in addition to clap's `--std=c99`
+    // by rewriting the leading dash before parsing.
+    let argv = std::env::args().map(|a| {
+        if a == "-std" {
+            "--std".to_string()
+        } else if let Some(rest) = a.strip_prefix("-std=") {
+            format!("--std={}", rest)
+        } else {
+            a
+        }
+    });
+    let args = Args::parse_from(argv);
 
     if let Err(e) = run(&args) {
         eprintln!("{}", e);
@@ -60,7 +75,7 @@ fn main() {
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // ── Preprocess ────────────────────────────────────────────────────────────
-    let preprocessed = preprocess(&args.filename, &args.defines, &args.includes)
+    let preprocessed = preprocess(&args.filename, &args.defines, &args.includes, &args.std)
         .map_err(|e| format!("{}", e))?;
 
     // ── Lex ───────────────────────────────────────────────────────────────────

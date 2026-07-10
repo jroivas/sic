@@ -6,10 +6,14 @@ pub fn preprocess(
     file: &str,
     defines: &[String],
     include_dirs: &[String],
+    std: &str,
 ) -> Result<String> {
     let mut cmd = Command::new("cpp");
     cmd.arg("-undef");
-    cmd.arg("-std=c99");
+    // Default to C23 so newer library features (e.g. C23's `timespec_get`
+    // bases like `TIME_MONOTONIC`) are exposed by the system headers. Callers
+    // can request an older standard via `-std=` (e.g. `c99`, `c11`).
+    cmd.arg(format!("-std={}", std));
     // Define common macros that tests rely on
     cmd.arg("-DNULL=((void*)0)");
     cmd.arg("-D__attribute__(x)=");
