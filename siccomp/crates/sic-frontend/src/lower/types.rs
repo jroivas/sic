@@ -43,11 +43,15 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Array { base, size } => {
             let elem = lower_type(base, named, ptr_size)?;
             let len = if let Some(sz) = size {
-                match &sz.kind {
-                    crate::ast::ExprKind::IntLit(v) => *v as usize,
-                    crate::ast::ExprKind::UIntLit(v) => *v as usize,
-                    _ => 0, // variable-length array — treat as 0
-                }
+                // Fold the (constant) length expression — handles arithmetic like
+                // `3 << 27` or `800 * 512 * 4`, not just bare literals. Genuine
+                // VLAs / non-constant sizes evaluate to 0, as before. (Enum
+                // constants aren't in scope here, so those still fall back to 0.)
+                super::eval_const_expr(sz, &HashMap::new())
+                    .ok()
+                    .filter(|&v| v >= 0)
+                    .map(|v| v as usize)
+                    .unwrap_or(0)
             } else {
                 0 // incomplete array type
             };

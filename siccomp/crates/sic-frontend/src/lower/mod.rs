@@ -89,6 +89,7 @@ impl Lowerer {
                                 AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
                                     self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
                                 }
+                                AstType::Enum(e) => { self.register_enum(e)?; }
                                 _ => {}
                             }
                             self.struct_types.insert(name.clone(), ir_ty);
@@ -192,6 +193,7 @@ impl Lowerer {
                             AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
                                 self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
                             }
+                            AstType::Enum(e) => { self.register_enum(e)?; }
                             _ => {}
                         }
                         self.struct_types.insert(name.clone(), ir_ty);
