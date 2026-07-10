@@ -29,7 +29,8 @@ struct Args {
     #[arg(short = 'c', long = "emit-obj")]
     emit_obj: bool,
 
-    /// Optimization level (0 = none, 1 = const fold)
+    /// Optimization level: 0 = none, 1 = const fold, 2 = + Cranelift optimizer
+    /// (speed), 3 = + Cranelift optimizer (speed_and_size)
     #[arg(short = 'O', long = "opt", default_value = "0")]
     opt: u32,
 
@@ -176,7 +177,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
 /// Compile one C source all the way to object-file bytes.
 fn compile_source(path: &str, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let ir_module = build_ir(path, args)?;
-    let mut backend = CraneliftBackend::new();
+    let mut backend = CraneliftBackend::new().with_opt_level(args.opt);
     backend.compile_module(&ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }
