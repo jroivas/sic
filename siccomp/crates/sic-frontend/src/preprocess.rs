@@ -26,6 +26,14 @@ pub fn preprocess(
         cmd.arg(format!("-D{}", m));
     }
 
+    // `-undef` also strips numeric/type predefined macros like `__INT_MAX__`,
+    // `__LONG_LONG_MAX__`, `__SIZEOF_LONG__`, and `__*_TYPE__` that <limits.h>,
+    // <stdint.h>, <float.h> etc. rely on. Re-supply them from the host compiler
+    // (filtered to safe value-only macros — never feature flags like __GNUC__).
+    for (name, value) in host_numeric_predefines(std) {
+        cmd.arg(format!("-D{}={}", name, value));
+    }
+
     for d in defines {
         cmd.arg(format!("-D{}", d));
     }
@@ -74,4 +82,55 @@ fn target_predefines() -> Vec<&'static str> {
     }
 
     defs
+}
+
+/// Query the host C compiler for its predefined macros and return the safe,
+/// value-only numeric/type ones (limits, type sizes, underlying types, byte
+/// order). These are needed by `<limits.h>`, `<stdint.h>`, `<float.h>` etc. but
+/// are stripped by `-undef`. Feature-flag macros (`__GNUC__`, `__STDC_*`,
+/// `__has_*`, ...) are deliberately excluded so we don't re-enable header code
+/// paths that assume a full GCC/Clang frontend.
+fn host_numeric_predefines(std: &str) -> Vec<(String, String)> {
+    let cc = std::env::var("SIC_CC").ok().filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cc".to_string());
+    let output = Command::new(&cc)
+        .args(["-dM", "-E", &format!("-std={}", std), "-x", "c", "/dev/null"])
+        .output();
+    let stdout = match output {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return Vec::new(), // best effort: headers may still work
+    };
+
+    let mut defs = Vec::new();
+    for line in String::from_utf8_lossy(&stdout).lines() {
+        // Lines look like: `#define NAME VALUE` (object-like) or
+        // `#define NAME(args) ...` (function-like — skipped).
+        let rest = match line.strip_prefix("#define ") {
+            Some(r) => r,
+            None => continue,
+        };
+        let (name, value) = match rest.split_once(' ') {
+            Some((n, v)) => (n, v),
+            None => continue, // valueless (e.g. `#define NAME`) — skip
+        };
+        if name.contains('(') { continue; } // function-like macro
+        if is_safe_predefine(name) {
+            defs.push((name.to_string(), value.to_string()));
+        }
+    }
+    defs
+}
+
+/// Whether a predefined macro name is a safe value-only numeric/type macro to
+/// forward (as opposed to a compiler feature flag).
+fn is_safe_predefine(name: &str) -> bool {
+    name == "__CHAR_BIT__"
+        || name == "__BYTE_ORDER__"
+        || name == "__FLOAT_WORD_ORDER__"
+        || name.starts_with("__ORDER_")
+        || name.starts_with("__SIZEOF_")
+        || name.ends_with("_MAX__")
+        || name.ends_with("_MIN__")
+        || name.ends_with("_WIDTH__")
+        || name.ends_with("_TYPE__")
 }

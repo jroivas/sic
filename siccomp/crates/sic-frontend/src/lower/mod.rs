@@ -317,9 +317,16 @@ impl Lowerer {
     /// Synthesize `int main() { ...; return <last>; }` for SIC files without main.
     /// Returns the value of the last top-level item (expr or var decl).
     fn synthesize_fake_main(&mut self, tu: &TranslationUnit) -> Result<()> {
-        // Only synthesize if the file has no regular function bodies and has at least some content.
+        // Synthesize a `main` only for sic REPL-style inputs: files made up of
+        // bare top-level expressions and/or variable declarations, with no
+        // function definitions of their own. A normal C translation unit that
+        // *defines* functions but happens to lack `main` is a library unit —
+        // fabricating a `main` there causes "multiple definition of main" when
+        // several such objects are linked together.
+        let defines_functions = tu.decls.iter()
+            .any(|d| matches!(d, Decl::Func { body: Some(_), .. }));
         let has_content = tu.decls.iter().any(|d| !matches!(d, Decl::Func { .. }));
-        if !has_content { return Ok(()); }
+        if defines_functions || !has_content { return Ok(()); }
 
         let sig = FunctionType { ret: Type::i32(), params: vec![], variadic: false };
         let mut func = Function::new("main".to_string(), sig, vec![], Linkage::External);
