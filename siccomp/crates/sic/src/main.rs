@@ -53,6 +53,12 @@ struct Args {
     #[arg(short = 'L', action = clap::ArgAction::Append, value_name = "DIR")]
     lib_dirs: Vec<String>,
 
+    /// Warning flags (`-Wall`, `-Wextra`, `-Werror`, `-Wno-...`, ...). Accepted
+    /// for gcc/clang compatibility. Most are no-ops for now (sic does not yet
+    /// emit diagnostics); `-Wl,<args>` is forwarded to the linker.
+    #[arg(short = 'W', action = clap::ArgAction::Append, value_name = "WARNING")]
+    warnings: Vec<String>,
+
     /// Dump AST
     #[arg(long = "ast")]
     ast: bool,
@@ -224,6 +230,14 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     for lib in &args.libs {
         link.arg(format!("-l{}", lib));
+    }
+    // `-Wl,a,b,c` passes a, b, c straight through to the linker.
+    for w in &args.warnings {
+        if let Some(rest) = w.strip_prefix("l,") {
+            for opt in rest.split(',') {
+                link.arg(format!("-Wl,{}", opt));
+            }
+        }
     }
 
     let status = link.status()?;
