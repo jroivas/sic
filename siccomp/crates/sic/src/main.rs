@@ -197,8 +197,6 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     for lib in &args.libs {
         link.arg(format!("-l{}", lib));
     }
-    // Always link the math library (many tests rely on it).
-    link.arg("-lm");
 
     let status = link.status()?;
     if !status.success() {
