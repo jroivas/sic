@@ -42,6 +42,8 @@ pub enum TokenKind {
     Register, Restrict, Return, Short, Signed, Sizeof, Static,
     Struct, Switch, Typedef, Union, Unsigned, Void, Volatile, While,
     Bool, Complex, Atomic,
+    Typeof,   // typeof / __typeof__ (GNU / C23)
+    Nullptr,  // nullptr (C23)
 
     // --- GCC extensions ---
     Attribute, Extension, Asm,

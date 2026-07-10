@@ -842,7 +842,7 @@ When compiling a module in C compatiblae mode, it produces these outputs
 - [module\_name]\_[file\_name].o
 - [module\_name].a
 - module\_[module\_name].h
-- module\_[module\_name].def
+- module\_[module\_name].sicmod
 
 ## Match
 

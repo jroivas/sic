@@ -44,6 +44,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::FloatLit(v) => Ok(Val::Const(Constant::Float(*v))),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
             ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
+            ExprKind::Nullptr => Ok(Constant::null()),
 
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
@@ -884,6 +885,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::UIntLit(_) => Ok(Type::u32()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             ExprKind::StringLit(_) => Ok(Type::char_ptr()),
+            ExprKind::Nullptr => Ok(Type::void_ptr()),
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, _)) => Ok(ty.clone()),

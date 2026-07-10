@@ -184,7 +184,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Eof | TokenKind::LBrace
+            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Eof | TokenKind::LBrace
         ) { return false; }
         // Ident that's a typedef name also starts a declaration
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
@@ -262,6 +262,22 @@ impl Parser {
                 TokenKind::Ident if base.is_none() && self.typedefs.contains(self.peek().text.as_str()) => {
                     let name = self.advance().text.clone();
                     base = Some(AstType::Named(name));
+                }
+                // typeof(type-name) / typeof(expr) — GNU / C23.
+                TokenKind::Typeof if base.is_none() => {
+                    self.advance();
+                    self.expect(TokenKind::LParen)?;
+                    if self.starts_decl_specifier() {
+                        // typeof(type-name): use the named type directly.
+                        let (ty, _) = self.parse_decl_specifiers()?;
+                        let (_, ty) = self.parse_declarator(ty)?;
+                        base = Some(ty.ty);
+                    } else {
+                        // typeof(expr): resolved to the operand's type later.
+                        let e = self.parse_expr()?;
+                        base = Some(AstType::Typeof(Box::new(e)));
+                    }
+                    self.expect(TokenKind::RParen)?;
                 }
                 _ => break,
             }
@@ -532,7 +548,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName
+            | TokenKind::TypeName | TokenKind::Typeof
         ) || (self.peek_kind() == TokenKind::Ident
               && self.typedefs.contains(self.peek().text.as_str()))
     }
@@ -633,7 +649,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName
+            | TokenKind::TypeName | TokenKind::Typeof
         ) || (self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()))
     }
 
@@ -1010,6 +1026,7 @@ impl Parser {
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
             | TokenKind::Enum | TokenKind::TypeName | TokenKind::Const | TokenKind::Volatile
+            | TokenKind::Typeof
         ) || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()))
     }
 
@@ -1154,6 +1171,10 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr> {
         let sp = self.span();
         match self.peek_kind() {
+            TokenKind::Nullptr => {
+                self.advance();
+                Ok(Expr::new(ExprKind::Nullptr, sp))
+            }
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();
                 let (val, is_u) = parse_int_literal(&text);

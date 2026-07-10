@@ -357,6 +357,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "while"          => TokenKind::While,
         "_Bool"          => TokenKind::Bool,
         "bool"           => TokenKind::Bool,
+        "typeof" | "__typeof__" | "__typeof" => TokenKind::Typeof,
+        "nullptr"        => TokenKind::Nullptr,
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
         "__builtin_va_list" => TokenKind::TypeName,

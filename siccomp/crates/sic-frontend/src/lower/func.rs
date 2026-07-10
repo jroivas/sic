@@ -820,5 +820,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Union(u) => format!("union {}", u.name.clone().unwrap_or_default()),
         AstType::Enum(e) => format!("enum {}", e.name.clone().unwrap_or_default()),
         AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
+        AstType::Typeof(_) => "typeof(...)".to_string(),
     }
 }

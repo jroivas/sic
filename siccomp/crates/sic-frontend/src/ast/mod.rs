@@ -48,6 +48,7 @@ pub enum AstType {
     Enum(EnumDef),
     Named(String),    // typedef name
     Builtin(String),  // __builtin_va_list etc.
+    Typeof(BoxExpr),  // typeof(expr) — resolved to the operand's type
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
@@ -194,6 +195,7 @@ pub enum ExprKind {
     StringLit(String),
     CharLit(i32),
     Ident(String),
+    Nullptr,           // C23 null pointer constant
 
     /// Binary operation
     BinOp { op: BinOpKind, lhs: BoxExpr, rhs: BoxExpr },

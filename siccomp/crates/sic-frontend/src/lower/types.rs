@@ -67,6 +67,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Struct(s) => lower_struct(s, named, ptr_size)?,
         AstType::Union(u)  => lower_union(u, named, ptr_size)?,
         AstType::Enum(_)   => Type::Int { bits: 32, signed: true }, // enum → i32
+        AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
                 return Ok(Type::Pointer(Box::new(Type::Void)));
@@ -134,4 +135,31 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
         ir_fields.push((fname, fty));
     }
     Ok(Type::Union(UnionType { name: u.name.clone(), fields: ir_fields }))
+}
+
+/// Best-effort standalone type of a `typeof(expr)` operand, used when resolving
+/// types outside a function body (typedefs, globals) where no variable scope is
+/// available. Covers the constant/literal cases that appear in system headers
+/// (notably `typeof(nullptr)` in C23 `<stddef.h>`); unknown expressions fall
+/// back to `int`.
+fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Type {
+    match &e.kind {
+        ExprKind::Nullptr => Type::void_ptr(),
+        ExprKind::IntLit(_) | ExprKind::CharLit(_) => Type::i32(),
+        ExprKind::UIntLit(_) => Type::u32(),
+        ExprKind::FloatLit(_) => Type::Float64,
+        ExprKind::StringLit(_) => Type::char_ptr(),
+        ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).unwrap_or_else(|_| Type::i32()),
+        ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_) => Type::u64(),
+        ExprKind::Unary { op: UnOpKind::Addr, expr } => {
+            Type::Pointer(Box::new(typeof_expr_type(expr, named, ptr_size)))
+        }
+        ExprKind::Unary { op: UnOpKind::Deref, expr } => {
+            match typeof_expr_type(expr, named, ptr_size) {
+                Type::Pointer(inner) => *inner,
+                other => other,
+            }
+        }
+        _ => Type::i32(),
+    }
 }
