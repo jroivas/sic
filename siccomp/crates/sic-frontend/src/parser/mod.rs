@@ -118,11 +118,25 @@ impl Parser {
 
         // If `(` follows and it's a function — function definition or prototype
         if let AstType::Function { ref params, variadic, ref ret } = ty.ty.clone() {
-            let params = params.clone();
+            let mut params = params.clone();
             let variadic = variadic;
             let ret_ty = *ret.clone();
 
             self.skip_attributes();
+
+            // K&R (old-style) definition: the parameter list held only names,
+            // and their declarations follow before the `{` body, e.g.
+            //   int main(argc, argv) int argc; char *argv[]; { ... }
+            if !self.at(TokenKind::LBrace) && !self.at(TokenKind::Semi)
+                && !self.at(TokenKind::Eof) && self.starts_decl_specifier()
+            {
+                self.parse_kr_param_decls(&mut params)?;
+                let body = self.parse_compound_stmt_as_stmts()?;
+                return Ok(Decl::Func {
+                    name, ret_ty, params, variadic,
+                    body: Some(body), storage, span: sp,
+                });
+            }
 
             if self.at(TokenKind::LBrace) {
                 // Function definition
@@ -505,6 +519,44 @@ impl Parser {
         }
         self.expect(TokenKind::RParen)?;
         Ok((params, variadic))
+    }
+
+    /// True if the current token can begin a declaration specifier (a type
+    /// keyword/name, qualifier, or storage class). Used to detect K&R-style
+    /// parameter declarations following an old-style function header.
+    fn starts_decl_specifier(&self) -> bool {
+        matches!(self.peek_kind(),
+            TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+            | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+            | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
+            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
+            | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
+            | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+            | TokenKind::TypeName
+        ) || (self.peek_kind() == TokenKind::Ident
+              && self.typedefs.contains(self.peek().text.as_str()))
+    }
+
+    /// Parse the K&R parameter declaration list that sits between an old-style
+    /// function header's `)` and its `{` body, applying the declared types back
+    /// onto the (name-only) parameters parsed from the header.
+    fn parse_kr_param_decls(&mut self, params: &mut [Param]) -> Result<()> {
+        while !self.at(TokenKind::LBrace) && !self.at(TokenKind::Eof)
+            && self.starts_decl_specifier()
+        {
+            let (base_ty, _) = self.parse_decl_specifiers()?;
+            loop {
+                let (pname, pty) = self.parse_declarator(base_ty.clone())?;
+                if !pname.is_empty() {
+                    if let Some(p) = params.iter_mut().find(|p| p.name.as_deref() == Some(&pname)) {
+                        p.ty = pty;
+                    }
+                }
+                if !self.eat(TokenKind::Comma) { break; }
+            }
+            self.eat(TokenKind::Semi);
+        }
+        Ok(())
     }
 
     // ─── Initializer ──────────────────────────────────────────────────────────
