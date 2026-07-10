@@ -44,6 +44,14 @@ struct Args {
     #[arg(long = "std", value_name = "STD", default_value = "c23")]
     std: String,
 
+    /// Link against a library (passed to the linker as -l<LIB>)
+    #[arg(short = 'l', action = clap::ArgAction::Append, value_name = "LIB")]
+    libs: Vec<String>,
+
+    /// Add a directory to the library search path (passed as -L<DIR>)
+    #[arg(short = 'L', action = clap::ArgAction::Append, value_name = "DIR")]
+    lib_dirs: Vec<String>,
+
     /// Dump AST
     #[arg(long = "ast")]
     ast: bool,
@@ -157,12 +165,20 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let tmp_obj = tmp2.path().to_owned();
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let status = Command::new(&cc)
-        .arg(tmp_obj.as_os_str())
+    let mut link = Command::new(&cc);
+    link.arg(tmp_obj.as_os_str())
         .arg("-o")
-        .arg(out_path)
-        .arg("-lm")
-        .status()?;
+        .arg(out_path);
+    // User-specified library search paths and libraries.
+    for dir in &args.lib_dirs {
+        link.arg(format!("-L{}", dir));
+    }
+    for lib in &args.libs {
+        link.arg(format!("-l{}", lib));
+    }
+    // Always link the math library (many tests rely on it).
+    link.arg("-lm");
+    let status = link.status()?;
 
     if !status.success() {
         return Err(format!("linker failed with exit code {:?}", status.code()).into());
