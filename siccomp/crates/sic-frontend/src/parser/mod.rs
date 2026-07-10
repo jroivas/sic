@@ -255,11 +255,16 @@ impl Parser {
                 TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
-                TokenKind::TypeName => {
+                // A type-name (typedef or sic alias like `u32`) is only a type
+                // specifier when no other type info has been seen yet. Otherwise
+                // it is the declarator name — e.g. `uint32_t u32;` where the
+                // second token is a field/variable named `u32`, not a type.
+                TokenKind::TypeName if base.is_none() && signed.is_none() && long_count == 0 => {
                     let name = self.advance().text.clone();
                     base = Some(AstType::Named(name));
                 }
-                TokenKind::Ident if base.is_none() && self.typedefs.contains(self.peek().text.as_str()) => {
+                TokenKind::Ident if base.is_none() && signed.is_none() && long_count == 0
+                    && self.typedefs.contains(self.peek().text.as_str()) => {
                     let name = self.advance().text.clone();
                     base = Some(AstType::Named(name));
                 }
