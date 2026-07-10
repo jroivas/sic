@@ -82,6 +82,34 @@ fn main() {
     }
 }
 
+/// Resolve the external C driver used to perform the final link.
+///
+/// We deliberately do NOT honor `$CC` here: build systems (CMake, autotools)
+/// commonly set `CC=sic` to use sic as *their* compiler, and if sic then read
+/// `$CC` to find its own linker it would invoke itself recursively forever.
+/// Precedence: `SIC_CC`, then `LD`, then the system `cc`. Whatever is chosen,
+/// we refuse anything that resolves back to this very executable (e.g. a build
+/// system that also set `LD=sic`) and fall back to `cc`.
+fn resolve_linker() -> String {
+    let choice = std::env::var("SIC_CC").ok().filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("LD").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "cc".to_string());
+
+    if resolves_to_self(&choice) { "cc".to_string() } else { choice }
+}
+
+/// True if `prog` names this very executable — by file stem (`sic`) or by
+/// resolving to the same canonical path as the running binary.
+fn resolves_to_self(prog: &str) -> bool {
+    if PathBuf::from(prog).file_stem().and_then(|s| s.to_str()) == Some("sic") {
+        return true;
+    }
+    match (std::env::current_exe(), std::fs::canonicalize(prog)) {
+        (Ok(exe), Ok(p)) => p == exe,
+        _ => false,
+    }
+}
+
 /// An input file is a linker input (object/archive/shared lib) rather than a
 /// C source to compile, based on its extension.
 fn is_link_input(path: &str) -> bool {
@@ -178,7 +206,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let out_path = args.output.as_deref().unwrap_or("a.out");
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let cc = resolve_linker();
     let mut link = Command::new(&cc);
 
     // Compiled sources (temp objects) and user-provided object files.
