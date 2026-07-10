@@ -109,7 +109,22 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
         let size = g.ty.size_of(ptr_size) as usize;
         match &g.init {
             Some(sic_ir::Constant::Bytes(b)) => {
-                desc.define(b.clone().into_boxed_slice());
+                // Pad (or use as-is) to the declared object size so a string
+                // initializer shorter than the array still reserves full space.
+                let mut bytes = b.clone();
+                if bytes.len() < size { bytes.resize(size, 0); }
+                desc.define(bytes.into_boxed_slice());
+            }
+            Some(sic_ir::Constant::GlobalAddr(target)) => {
+                // Pointer initialized to the address of another global (e.g.
+                // `char *p = "..."`): reserve a real (non-zeroinit) pointer slot
+                // in .data so it can carry a load-time relocation, then point it
+                // at the target global. A zeroinit slot would land in .bss,
+                // which cannot hold relocations.
+                desc.define(vec![0u8; ptr_size as usize].into_boxed_slice());
+                let target_did = global_ids[&target.0];
+                let gv = obj_module.declare_data_in_data(target_did, &mut desc);
+                desc.write_data_addr(0, gv, 0);
             }
             Some(sic_ir::Constant::Int(v)) => {
                 let mut bytes = vec![0u8; size.max(4)];

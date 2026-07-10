@@ -447,6 +447,9 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
         Constant::Bool(b) => builder.ins().iconst(ct::I8, if *b { 1 } else { 0 }),
         Constant::Null | Constant::Undef | Constant::Zeroinit => builder.ins().iconst(hint, 0),
         Constant::Bytes(_) => builder.ins().iconst(ptr_ty, 0),
+        // Only appears in global initializers (handled in the data section);
+        // never emitted into a function body.
+        Constant::GlobalAddr(_) => builder.ins().iconst(ptr_ty, 0),
     }
 }
 

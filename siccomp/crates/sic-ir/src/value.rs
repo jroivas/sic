@@ -34,6 +34,7 @@ pub enum Constant {
     Undef,
     Bytes(Vec<u8>),          // string data (null-terminated)
     Zeroinit,                // zero-initialized aggregate
+    GlobalAddr(GlobalRef),   // address of another global (pointer initializer)
 }
 
 impl Constant {

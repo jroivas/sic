@@ -55,6 +55,7 @@ impl fmt::Display for Constant {
             Constant::Undef => write!(f, "undef"),
             Constant::Bytes(b) => write!(f, "\"{}\"", String::from_utf8_lossy(b).escape_default()),
             Constant::Zeroinit => write!(f, "zeroinit"),
+            Constant::GlobalAddr(g) => write!(f, "&global{}", g.0),
         }
     }
 }

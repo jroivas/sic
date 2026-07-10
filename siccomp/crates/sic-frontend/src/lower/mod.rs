@@ -139,6 +139,21 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Emit `bytes` (already NUL-terminated) as a private, constant global and
+    /// return a reference to it. Used for string-literal pointer initializers.
+    fn add_cstring_global(&mut self, bytes: Vec<u8>) -> GlobalRef {
+        let name = format!(".str.{}", self.module.globals.len());
+        let len = bytes.len();
+        let g = Global {
+            name,
+            ty: Type::Array { elem: Box::new(Type::i8()), len },
+            init: Some(Constant::Bytes(bytes)),
+            linkage: Linkage::Private,
+            constant: true,
+        };
+        self.module.add_global(g)
+    }
+
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
         if let Some(variants) = &e.variants {
             let mut counter = 0i64;
@@ -217,6 +232,26 @@ impl Lowerer {
         }
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         let init = match &d.init {
+            // `char arr[] = "..."` / `char *p = "..."`.
+            Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::StringLit(_)) => {
+                let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
+                let mut bytes = s.clone().into_bytes();
+                bytes.push(0); // NUL terminator
+                match &mut ir_ty {
+                    // Array target: store the bytes inline, sizing an
+                    // unspecified length to fit the string.
+                    Type::Array { len, .. } => {
+                        if *len == 0 { *len = bytes.len(); }
+                        Some(Constant::Bytes(bytes))
+                    }
+                    // Pointer target: emit the string as a private global and
+                    // point at it.
+                    _ => {
+                        let gref = self.add_cstring_global(bytes);
+                        Some(Constant::GlobalAddr(gref))
+                    }
+                }
+            }
             Some(Initializer::Expr(e)) => {
                 match eval_const_expr(e, &self.enum_consts) {
                     Ok(v) => Some(Constant::Int(v)),
