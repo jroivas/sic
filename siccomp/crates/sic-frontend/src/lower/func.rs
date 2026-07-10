@@ -21,8 +21,11 @@ pub struct FuncCtx<'m> {
     pub labels: HashMap<String, BlockId>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
-    /// Stack of switch default/end blocks
-    pub switch_stack: Vec<(BlockId, BlockId)>, // (default_bb, end_bb)
+    /// Stack of active switches: (default block, end block, case-value → block).
+    /// `case:`/`default:` labels resolve to these pre-created blocks so the
+    /// `Switch` terminator's arms and the emitted case bodies share the same
+    /// blocks (and C fall-through between cases works).
+    pub switch_stack: Vec<(BlockId, BlockId, std::collections::HashMap<i64, BlockId>)>,
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
     pub pending_gotos: Vec<(String, BlockId)>,
     /// Last initialized local variable (for implicit return in sic)
@@ -249,9 +252,10 @@ impl<'m> Lowerer {
             }
         }
 
-        // Lower body
+        // Lower body. Statements after a terminator are dead code, except
+        // labels / case / default, which are jump targets that begin new blocks.
         for stmt in body {
-            if fc.is_terminated() { break; }
+            if fc.is_terminated() && !stmt_is_jump_target(stmt) { continue; }
             fc.lower_stmt(stmt)?;
         }
 
@@ -293,7 +297,7 @@ impl<'m> FuncCtx<'m> {
             Stmt::Block(stmts, _) => {
                 self.enter_scope();
                 for s in stmts {
-                    if self.is_terminated() { break; }
+                    if self.is_terminated() && !stmt_is_jump_target(s) { continue; }
                     self.lower_stmt(s)?;
                 }
                 self.exit_scope();
@@ -317,7 +321,7 @@ impl<'m> FuncCtx<'m> {
             Stmt::Break(_) => {
                 if let Some(&(end, _)) = self.loop_stack.last() {
                     self.set_terminator(Terminator::Jump(end));
-                } else if let Some(&(_, end)) = self.switch_stack.last() {
+                } else if let Some(end) = self.switch_stack.last().map(|s| s.1) {
                     self.set_terminator(Terminator::Jump(end));
                 } else {
                     return Err(CompileError::new("break outside loop/switch"));
@@ -359,20 +363,24 @@ impl<'m> FuncCtx<'m> {
                 self.lower_stmt(inner)?;
             }
             Stmt::Case(val, body, _) => {
-                // Case is handled by the switch lowering
-                // When we encounter a case statement in the body of a switch,
-                // we emit it as a labeled block
-                let case_bb = self.new_block_after_current();
+                // Switch to the block the enclosing switch pre-created for this
+                // case value; falling through from the previous case jumps here.
+                let const_val = eval_const_expr(val, &self.lowerer.enum_consts).unwrap_or(0);
+                let case_bb = self.switch_stack.last()
+                    .and_then(|(_, _, cases)| cases.get(&const_val).copied())
+                    .unwrap_or_else(|| self.new_block_after_current());
                 if !self.is_terminated() {
                     self.set_terminator(Terminator::Jump(case_bb));
                 }
                 self.switch_to_block(case_bb);
-                let const_val = eval_const_expr(val, &self.lowerer.enum_consts).unwrap_or(0);
                 self.func_mut().block_mut(case_bb).label = Some(format!("case_{}", const_val));
                 self.lower_stmt(body)?;
             }
             Stmt::Default(body, _) => {
-                let default_bb = self.new_block_after_current();
+                // Use the enclosing switch's pre-created default block.
+                let default_bb = self.switch_stack.last()
+                    .map(|(d, _, _)| *d)
+                    .unwrap_or_else(|| self.new_block_after_current());
                 if !self.is_terminated() {
                     self.set_terminator(Terminator::Jump(default_bb));
                 }
@@ -629,26 +637,38 @@ impl<'m> FuncCtx<'m> {
         let v = self.lower_expr(val)?;
         let v_i32 = self.coerce(v, &Type::i32())?;
 
-        // We'll collect cases as we go (they appear as Case stmts in body).
-        // For simplicity: use a two-pass approach where we scan for const case values.
         let end_bb = self.new_block_after_current();
-        let body_bb = self.new_block_after_current();
-        // Collect case values from the body
-        let cases = collect_switch_cases(body, &self.lowerer.enum_consts);
         let default_bb = self.new_block_after_current();
 
+        // Pre-create one block per case value; the `Switch` terminator's arms and
+        // the emitted case bodies must be the *same* blocks.
+        let cases = collect_switch_cases(body, &self.lowerer.enum_consts);
         let mut arms: Vec<(i64, BlockId)> = Vec::new();
+        let mut case_blocks: std::collections::HashMap<i64, BlockId> = std::collections::HashMap::new();
         for (case_val, _) in &cases {
+            // Duplicate case values shouldn't happen in valid C; keep the first.
+            if case_blocks.contains_key(case_val) { continue; }
             let case_bb = self.new_block_after_current();
             arms.push((*case_val, case_bb));
+            case_blocks.insert(*case_val, case_bb);
         }
 
-        self.set_terminator(Terminator::Switch { val: v_i32, default: default_bb, arms: arms.clone() });
-        self.switch_stack.push((default_bb, end_bb));
-        self.switch_to_block(body_bb);
+        self.set_terminator(Terminator::Switch { val: v_i32, default: default_bb, arms });
+        self.switch_stack.push((default_bb, end_bb, case_blocks));
+
+        // Statements before the first label are unreachable but may declare
+        // locals — lower them into a throwaway block.
+        let pre = self.new_block_after_current();
+        self.switch_to_block(pre);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
         self.switch_stack.pop();
+
+        // A switch with no `default:` leaves the default block empty — route it
+        // straight to the end.
+        if matches!(self.func_mut().block_mut(default_bb).terminator, Terminator::Unreachable) {
+            self.func_mut().block_mut(default_bb).terminator = Terminator::Jump(end_bb);
+        }
 
         self.switch_to_block(end_bb);
         Ok(())
@@ -754,6 +774,13 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
 }
 
 /// Collect case values from a switch body (shallow scan).
+/// A statement that begins a new basic block reachable by a jump (a `case:`,
+/// `default:`, or `label:`), so it must be lowered even when the preceding code
+/// already terminated the current block.
+fn stmt_is_jump_target(s: &Stmt) -> bool {
+    matches!(s, Stmt::Case(..) | Stmt::Default(..) | Stmt::Label(..))
+}
+
 fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> Vec<(i64, usize)> {
     let mut cases = Vec::new();
     collect_cases_in(stmt, enum_consts, &mut cases);
