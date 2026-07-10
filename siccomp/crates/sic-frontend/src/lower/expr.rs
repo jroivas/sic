@@ -583,6 +583,19 @@ impl<'m> FuncCtx<'m> {
                     return Ok(Val::Local(dest));
                 }
             }
+
+            // Overflow-checked arithmetic builtins:
+            //   bool __builtin_{add,mul}_overflow(a, b, *res)
+            // Compute `a op b`, store the wrapped result through `*res`, and
+            // return whether the mathematical result overflowed the result type.
+            let ovf_op = match name.as_str() {
+                "__builtin_add_overflow" => Some(BinOp::Add),
+                "__builtin_mul_overflow" => Some(BinOp::Mul),
+                _ => None,
+            };
+            if let (Some(op), [a_expr, b_expr, res_expr]) = (ovf_op, args) {
+                return self.lower_overflow_builtin(op, a_expr, b_expr, res_expr);
+            }
         }
 
         // Evaluate arguments
@@ -672,6 +685,77 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty });
             Ok(Val::Local(dest))
         }
+    }
+
+    /// Lower `__builtin_{add,mul}_overflow(a, b, *res)`: compute `a op b` in the
+    /// result type, store the wrapped value through `*res`, and return an i1
+    /// indicating whether the true result overflowed that type.
+    fn lower_overflow_builtin(
+        &mut self,
+        op: BinOp,
+        a_expr: &Expr,
+        b_expr: &Expr,
+        res_expr: &Expr,
+    ) -> Result<Val> {
+        let a = self.lower_expr(a_expr)?;
+        let b = self.lower_expr(b_expr)?;
+        let res_ptr = self.lower_expr(res_expr)?;
+
+        // The result type is whatever `*res` points at.
+        let ty = match self.val_type(&res_ptr) {
+            Type::Pointer(inner) => *inner,
+            _ => self.val_type(&a),
+        };
+        let signed = matches!(ty, Type::Int { signed: true, .. });
+
+        // Coerce operands to the result type so the arithmetic is well-typed.
+        let a = self.coerce(a, &ty)?;
+        let b = self.coerce(b, &ty)?;
+
+        // result = a op b (wrapping), stored through *res.
+        let result = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: result, op, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
+        let result = Val::Local(result);
+        self.push_instr(Instr::Store { val: result.clone(), ptr: res_ptr });
+
+        let zero = Constant::zero();
+        let ovf = self.alloc_val();
+        match op {
+            BinOp::Add if signed => {
+                // Overflow iff a and b share a sign that differs from the sum:
+                // ((a ^ sum) & (b ^ sum)) < 0.
+                let t1 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t1, op: BinOp::Xor, lhs: a.clone(), rhs: result.clone(), ty: ty.clone() });
+                let t2 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t2, op: BinOp::Xor, lhs: b.clone(), rhs: result.clone(), ty: ty.clone() });
+                let t3 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t3, op: BinOp::And, lhs: Val::Local(t1), rhs: Val::Local(t2), ty: ty.clone() });
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::ISLt, lhs: Val::Local(t3), rhs: zero });
+            }
+            BinOp::Add => {
+                // Unsigned add overflows iff the sum wrapped below an operand.
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::IULt, lhs: result.clone(), rhs: a.clone() });
+            }
+            _ => {
+                // Multiply: overflow iff a != 0 and result / a != b.
+                let a_nz = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero });
+                let quot = self.alloc_val();
+                let div = if signed { BinOp::SDiv } else { BinOp::UDiv };
+                self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
+                let mism = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: mism, op: CmpOp::INe, lhs: Val::Local(quot), rhs: b.clone() });
+                // ovf = a_nz ? mism : false
+                self.push_instr(Instr::Select {
+                    dest: ovf,
+                    cond: Val::Local(a_nz),
+                    on_true: Val::Local(mism),
+                    on_false: Val::Const(Constant::Bool(false)),
+                    ty: Type::Bool,
+                });
+            }
+        }
+        Ok(Val::Local(ovf))
     }
 
     // ─── LValue lowering ─────────────────────────────────────────────────────

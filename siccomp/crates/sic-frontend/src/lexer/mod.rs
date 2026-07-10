@@ -155,6 +155,13 @@ impl Lexer {
         while self.pos < self.src.len() && (self.src[self.pos].is_alphanumeric() || self.src[self.pos] == '_') {
             text.push(self.advance());
         }
+        // C23 boolean literals are keywords equivalent to the integer
+        // constants 1 and 0; lower them here so the parser sees plain IntLits.
+        match text.as_str() {
+            "true"  => return Token::new(TokenKind::IntLit, "1".to_string(), sp),
+            "false" => return Token::new(TokenKind::IntLit, "0".to_string(), sp),
+            _ => {}
+        }
         let kind = keyword_or_ident(&text, &self.typedefs);
         Token::new(kind, text, sp)
     }
@@ -349,6 +356,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "volatile"       => TokenKind::Volatile,
         "while"          => TokenKind::While,
         "_Bool"          => TokenKind::Bool,
+        "bool"           => TokenKind::Bool,
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
         "__builtin_va_list" => TokenKind::TypeName,
