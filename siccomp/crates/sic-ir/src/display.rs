@@ -1,6 +1,13 @@
 use std::fmt;
 use crate::*;
 
+/// Human-readable label for a function reference: `@f<i>` for defined functions,
+/// `@fe<i>` for externs (the raw ref carries EXTERN_BIT which is not meaningful
+/// to print).
+fn func_label(fr: FuncRef) -> String {
+    if fr.is_extern() { format!("@fe{}", fr.index()) } else { format!("@f{}", fr.index()) }
+}
+
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -38,7 +45,7 @@ impl fmt::Display for Val {
         match self {
             Val::Local(id) => write!(f, "%{}", id.0),
             Val::Global(g) => write!(f, "@g{}", g.0),
-            Val::Func(fr) => write!(f, "@f{}", fr.0),
+            Val::Func(fr) => write!(f, "{}", func_label(*fr)),
             Val::Const(c) => write!(f, "{}", c),
         }
     }
@@ -110,7 +117,7 @@ impl fmt::Display for Instr {
                 write!(f, "  %{} = {} {}, {}", dest.0, op, lhs, rhs),
             Instr::Call { dest, func, args, ret_ty } => {
                 if let Some(d) = dest { write!(f, "  %{} = ", d.0)?; } else { write!(f, "  ")?; }
-                write!(f, "call {} @f{}(", ret_ty, func.0)?;
+                write!(f, "call {} {}(", ret_ty, func_label(*func))?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 { write!(f, ", ")?; }
                     write!(f, "{}", a)?;

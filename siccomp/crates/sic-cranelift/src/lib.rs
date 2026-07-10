@@ -82,11 +82,11 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
         func_ids.insert(i as u32, fid);
     }
 
-    // Extern functions
+    // Extern functions — keyed by their EXTERN_BIT-tagged FuncRef encoding.
     for (i, e) in ir_module.externs.iter().enumerate() {
         let sig = build_cl_sig(&e.sig, ptr_size, obj_module.target_config().default_call_conv);
         let fid = obj_module.declare_function(&e.name, CLinkage::Import, &sig)?;
-        func_ids.insert((ir_module.functions.len() + i) as u32, fid);
+        func_ids.insert(FuncRef::extern_(i).0, fid);
     }
 
     // ── Declare globals ──────────────────────────────────────────────────────

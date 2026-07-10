@@ -7,8 +7,25 @@ pub struct ValId(pub u32);
 pub struct BlockId(pub u32);
 
 /// A reference to a function by index in the module.
+///
+/// Defined functions are encoded as their plain index into `Module::functions`.
+/// Externs set [`FuncRef::EXTERN_BIT`] with the low bits holding the index into
+/// `Module::externs`. This keeps a ref stable regardless of how many functions
+/// are added afterwards (the two index spaces never overlap or shift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FuncRef(pub u32);
+
+impl FuncRef {
+    /// Set on a `FuncRef` that refers to an extern rather than a defined function.
+    pub const EXTERN_BIT: u32 = 0x8000_0000;
+
+    pub fn defined(idx: usize) -> FuncRef { FuncRef(idx as u32) }
+    pub fn extern_(idx: usize) -> FuncRef { FuncRef(Self::EXTERN_BIT | idx as u32) }
+
+    pub fn is_extern(self) -> bool { self.0 & Self::EXTERN_BIT != 0 }
+    /// Index into the relevant list (`functions` or `externs`).
+    pub fn index(self) -> usize { (self.0 & !Self::EXTERN_BIT) as usize }
+}
 
 /// A reference to a global variable by index in the module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

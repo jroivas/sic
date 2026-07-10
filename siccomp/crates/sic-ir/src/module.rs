@@ -136,35 +136,34 @@ impl Module {
     pub fn add_function(&mut self, f: Function) -> FuncRef {
         let idx = self.functions.len();
         self.functions.push(f);
-        FuncRef(idx as u32)
+        FuncRef::defined(idx)
     }
 
     pub fn add_extern(&mut self, e: ExternFunc) -> FuncRef {
-        // externs live in a separate list; we encode them as
-        // FuncRef(functions.len() + externs_idx) for the backend to distinguish.
-        let idx = self.functions.len() + self.externs.len();
+        // Externs live in a separate list and are encoded with EXTERN_BIT so the
+        // ref stays stable no matter how many functions are added later.
+        let idx = self.externs.len();
         self.externs.push(e);
-        FuncRef(idx as u32)
+        FuncRef::extern_(idx)
     }
 
     /// Look up a function by name — searches functions then externs.
     pub fn func_ref_by_name(&self, name: &str) -> Option<FuncRef> {
         for (i, f) in self.functions.iter().enumerate() {
-            if f.name == name { return Some(FuncRef(i as u32)); }
+            if f.name == name { return Some(FuncRef::defined(i)); }
         }
         for (i, e) in self.externs.iter().enumerate() {
-            if e.name == name { return Some(FuncRef((self.functions.len() + i) as u32)); }
+            if e.name == name { return Some(FuncRef::extern_(i)); }
         }
         None
     }
 
     /// Resolve a FuncRef to either a defined function or an extern.
     pub fn resolve_func(&self, r: FuncRef) -> FuncDecl<'_> {
-        let idx = r.0 as usize;
-        if idx < self.functions.len() {
-            FuncDecl::Defined(&self.functions[idx])
+        if r.is_extern() {
+            FuncDecl::Extern(&self.externs[r.index()])
         } else {
-            FuncDecl::Extern(&self.externs[idx - self.functions.len()])
+            FuncDecl::Defined(&self.functions[r.index()])
         }
     }
 
