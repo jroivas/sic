@@ -33,7 +33,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         }
         AstType::LongLong { signed } => Type::Int { bits: 64, signed: *signed },
         AstType::Float       => Type::Float32,
-        AstType::Double | AstType::LongDouble => Type::Float64,
+        AstType::Double      => Type::Float64,
+        AstType::LongDouble  => Type::Float80,
         AstType::Complex     => Type::Float64, // simplified
         AstType::Pointer { base, .. } => {
             let inner = lower_type(base, named, ptr_size)?;

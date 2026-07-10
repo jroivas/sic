@@ -440,7 +440,7 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                     // Track last declared scalar local for implicit return
-                    if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Pointer(_) | Type::Bool) {
+                    if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_) | Type::Bool) {
                         self.last_init_local = Some((vid, ty.clone()));
                     }
                     self.define_local(d.name.clone(), ty, vid);
@@ -679,7 +679,7 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         let zero = match &ty {
             Type::Int { .. } | Type::Bool => Constant::zero(),
-            Type::Float32 | Type::Float64 => Val::Const(Constant::Float(0.0)),
+            Type::Float32 | Type::Float64 | Type::Float80 => Val::Const(Constant::Float(0.0)),
             Type::Pointer(_) => Constant::null(),
             _ => Constant::zero(),
         };
@@ -738,12 +738,14 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
             else { CastOp::BitCast }
         }
         (Type::Bool, Type::Int { .. }) => CastOp::ZExt,
-        (Type::Int { signed: true, .. }, Type::Float32 | Type::Float64) => CastOp::SIToFP,
-        (Type::Int { signed: false, .. }, Type::Float32 | Type::Float64) => CastOp::UIToFP,
-        (Type::Float32 | Type::Float64, Type::Int { signed: true, .. }) => CastOp::FPToSI,
-        (Type::Float32 | Type::Float64, Type::Int { signed: false, .. }) => CastOp::FPToUI,
-        (Type::Float32, Type::Float64) => CastOp::FPExt,
-        (Type::Float64, Type::Float32) => CastOp::FPTrunc,
+        (Type::Int { signed: true, .. }, Type::Float32 | Type::Float64 | Type::Float80) => CastOp::SIToFP,
+        (Type::Int { signed: false, .. }, Type::Float32 | Type::Float64 | Type::Float80) => CastOp::UIToFP,
+        (Type::Float32 | Type::Float64 | Type::Float80, Type::Int { signed: true, .. }) => CastOp::FPToSI,
+        (Type::Float32 | Type::Float64 | Type::Float80, Type::Int { signed: false, .. }) => CastOp::FPToUI,
+        (Type::Float32, Type::Float64 | Type::Float80) => CastOp::FPExt,
+        (Type::Float64 | Type::Float80, Type::Float32) => CastOp::FPTrunc,
+        // f64 <-> f80 are both codegen'd as f64: no conversion needed.
+        (Type::Float64, Type::Float80) | (Type::Float80, Type::Float64) => CastOp::BitCast,
         (Type::Pointer(_), Type::Pointer(_)) => CastOp::BitCast,
         (Type::Pointer(_), Type::Int { .. }) => CastOp::PtrToInt,
         (Type::Int { .. }, Type::Pointer(_)) => CastOp::IntToPtr,

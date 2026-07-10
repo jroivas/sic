@@ -45,6 +45,7 @@ fn ir_linkage(l: Linkage) -> CLinkage {
         Linkage::External => CLinkage::Export,
         Linkage::Internal => CLinkage::Local,
         Linkage::Private  => CLinkage::Local,
+        Linkage::Import   => CLinkage::Import,
     }
 }
 
@@ -99,6 +100,10 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32) -> Result<Vec<u8>, Craneli
 
     // ── Define globals ───────────────────────────────────────────────────────
     for (i, g) in ir_module.globals.iter().enumerate() {
+        // Imports are defined in another module (libc etc.); only declared here.
+        if g.linkage == Linkage::Import {
+            continue;
+        }
         let did = global_ids[&(i as u32)];
         let mut desc = DataDescription::new();
         let size = g.ty.size_of(ptr_size) as usize;

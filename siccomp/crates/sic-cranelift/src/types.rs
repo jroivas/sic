@@ -17,6 +17,8 @@ pub fn cl_type(ty: &Type, ptr_size: u32) -> Option<ClType> {
         }),
         Type::Float32 => Some(ct::F32),
         Type::Float64 => Some(ct::F64),
+        // No x87/f80 support in Cranelift; long double is computed as f64.
+        Type::Float80 => Some(ct::F64),
         Type::Pointer(_) | Type::Function(_) => Some(ptr_cl(ptr_size)),
         // Arrays and structs: passed in memory (by pointer) when needed.
         // In our IR they're always stored on the stack and accessed via ptr.

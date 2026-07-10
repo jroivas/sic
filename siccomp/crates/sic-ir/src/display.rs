@@ -9,6 +9,7 @@ impl fmt::Display for Type {
             Type::Int { bits, signed } => write!(f, "{}{}", if *signed { 'i' } else { 'u' }, bits),
             Type::Float32 => write!(f, "f32"),
             Type::Float64 => write!(f, "f64"),
+            Type::Float80 => write!(f, "f80"),
             Type::Pointer(inner) => write!(f, "{}*", inner),
             Type::Array { elem, len } => write!(f, "[{}; {}]", elem, len),
             Type::Struct(s) => {

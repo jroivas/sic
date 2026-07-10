@@ -263,6 +263,10 @@ impl Lowerer {
         };
         let linkage = match base_ty.storage {
             Some(StorageClass::Static) => Linkage::Internal,
+            // `extern T x;` with no initializer is a pure declaration: the
+            // object lives in another translation unit (e.g. libc's `stdout`).
+            // Emit it as an import so we don't shadow it with a zero definition.
+            Some(StorageClass::Extern) if init.is_none() => Linkage::Import,
             Some(StorageClass::Extern) => Linkage::External,
             _ => Linkage::External,
         };

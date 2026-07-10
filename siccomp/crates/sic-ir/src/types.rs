@@ -6,6 +6,10 @@ pub enum Type {
     Int { bits: u32, signed: bool },
     Float32,
     Float64,
+    /// x86-64 `long double`: 80-bit extended precision stored in 16 bytes.
+    /// Codegen currently treats it as f64 (Cranelift has no x87/f80 support),
+    /// so only its size/alignment differ from `Float64`.
+    Float80,
     Pointer(Box<Type>),
     Array { elem: Box<Type>, len: usize },
     Struct(StructType),
@@ -42,6 +46,7 @@ impl Type {
             Type::Int { bits, .. } => (*bits as u64 + 7) / 8,
             Type::Float32 => 4,
             Type::Float64 => 8,
+            Type::Float80 => 16,
             Type::Pointer(_) => ptr_size as u64,
             Type::Array { elem, len } => elem.size_of(ptr_size) * (*len as u64),
             Type::Struct(s) => s.size_of(ptr_size),
@@ -57,6 +62,7 @@ impl Type {
             Type::Int { bits, .. } => ((*bits as u64 + 7) / 8).min(ptr_size as u64),
             Type::Float32 => 4,
             Type::Float64 => 8,
+            Type::Float80 => 16,
             Type::Pointer(_) => ptr_size as u64,
             Type::Array { elem, .. } => elem.align_of(ptr_size),
             Type::Struct(s) => s.align_of(ptr_size),
@@ -69,7 +75,7 @@ impl Type {
     }
 
     pub fn is_float(&self) -> bool {
-        matches!(self, Type::Float32 | Type::Float64)
+        matches!(self, Type::Float32 | Type::Float64 | Type::Float80)
     }
 
     pub fn is_pointer(&self) -> bool {
@@ -190,7 +196,8 @@ pub fn usual_arith_conv(a: &Type, b: &Type) -> Type {
         return a.clone();
     }
     match (a, b) {
-        // float wins
+        // float wins (long double ranks highest)
+        (Type::Float80, _) | (_, Type::Float80) => Type::Float80,
         (Type::Float64, _) | (_, Type::Float64) => Type::Float64,
         (Type::Float32, _) | (_, Type::Float32) => Type::Float32,
         // integer promotions

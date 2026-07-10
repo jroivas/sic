@@ -6,6 +6,7 @@ pub enum Linkage {
     External,    // visible outside the module (default for functions)
     Internal,    // static, not exported
     Private,     // not even named in object
+    Import,      // declared here but defined elsewhere (e.g. libc `stdout`)
 }
 
 /// A global variable.
