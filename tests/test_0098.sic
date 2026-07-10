@@ -1,0 +1,29 @@
+#include <SDL3/SDL.h>
+#include <unistd.h>
+
+#define FB_WIDTH  800
+#define FB_HEIGHT 512
+
+SDL_Window *window;
+SDL_Surface *screen;
+
+int main(int argc, char *argv[]) {
+
+    SDL_Init(SDL_INIT_VIDEO);
+    window = SDL_CreateWindow("ESI Virtual Machine", FB_WIDTH, FB_HEIGHT, 0);
+    screen = SDL_GetWindowSurface(window);
+
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_EVENT_KEY_DOWN)
+            ;
+        else if (e.type == SDL_EVENT_KEY_UP)
+            ;
+        else if (e.type == SDL_EVENT_QUIT)
+            ;
+    }
+
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
