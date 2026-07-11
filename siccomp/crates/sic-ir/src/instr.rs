@@ -71,8 +71,10 @@ pub enum Instr {
     /// Type cast.
     Cast { dest: ValId, op: CastOp, val: Val, to_ty: Type },
 
-    /// Comparison — result is i1 (Bool).
-    Cmp { dest: ValId, op: CmpOp, lhs: Val, rhs: Val },
+    /// Comparison — result is i1 (Bool). `ty` is the (common) type the operands
+    /// are compared at, so the backend can materialize constant operands at the
+    /// correct width instead of guessing.
+    Cmp { dest: ValId, op: CmpOp, lhs: Val, rhs: Val, ty: Type },
 
     /// Function call.
     Call { dest: Option<ValId>, func: FuncRef, args: Vec<Val>, ret_ty: Type },

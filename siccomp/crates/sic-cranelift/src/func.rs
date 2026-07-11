@@ -189,13 +189,15 @@ fn emit_instr(
             val_map.insert(dest.0, result);
         }
 
-        Instr::Cmp { dest, op, lhs, rhs } => {
-            let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I32);
-            let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I32);
-            let lty = builder.func.dfg.value_type(l);
-            let l = coerce(l, lty, builder, ptr_ty);
-            let r = coerce(r, lty, builder, ptr_ty);
-            let v = emit_cmp(op, l, r, lty, builder);
+        Instr::Cmp { dest, op, lhs, rhs, ty } => {
+            // Materialize both operands at the comparison's declared type so a
+            // constant operand isn't truncated to a narrower guessed width.
+            let cmp_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, cmp_ty);
+            let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, cmp_ty);
+            let l = coerce(l, cmp_ty, builder, ptr_ty);
+            let r = coerce(r, cmp_ty, builder, ptr_ty);
+            let v = emit_cmp(op, l, r, cmp_ty, builder);
             val_map.insert(dest.0, v);
         }
 
@@ -430,15 +432,39 @@ fn rval(
     }
 }
 
+/// Choose an integer type that can hold `v` without truncation. If the value
+/// fits the requested `hint` width it is used as-is; otherwise it is widened to
+/// i64. This prevents a 64-bit constant from being silently masked to 32 bits
+/// when a caller passes a narrow hint.
+fn int_const_type(fits: bool, hint: cir::Type) -> cir::Type {
+    if fits { hint } else { ct::I64 }
+}
+
 fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
     match c {
         Constant::Int(v) => {
             if hint.is_float() { builder.ins().f64const(*v as f64) }
-            else { builder.ins().iconst(hint, *v) }
+            else {
+                let fits = match hint.bits() {
+                    8  => *v >= i8::MIN as i64 && *v <= u8::MAX as i64,
+                    16 => *v >= i16::MIN as i64 && *v <= u16::MAX as i64,
+                    32 => *v >= i32::MIN as i64 && *v <= u32::MAX as i64,
+                    _  => true,
+                };
+                builder.ins().iconst(int_const_type(fits, hint), *v)
+            }
         }
         Constant::UInt(v) => {
             if hint.is_float() { builder.ins().f64const(*v as f64) }
-            else { builder.ins().iconst(hint, *v as i64) }
+            else {
+                let fits = match hint.bits() {
+                    8  => *v <= u8::MAX as u64,
+                    16 => *v <= u16::MAX as u64,
+                    32 => *v <= u32::MAX as u64,
+                    _  => true,
+                };
+                builder.ins().iconst(int_const_type(fits, hint), *v as i64)
+            }
         }
         Constant::Float(v) => {
             if hint == ct::F32 { builder.ins().f32const(*v as f32) }

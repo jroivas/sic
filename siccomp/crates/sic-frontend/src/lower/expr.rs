@@ -39,8 +39,19 @@ impl<'m> FuncCtx<'m> {
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         match &expr.kind {
-            ExprKind::IntLit(v) => Ok(Constant::int(*v)),
-            ExprKind::UIntLit(v) => Ok(Constant::uint(*v)),
+            // Widen a 64-bit literal to its declared width so its runtime type
+            // isn't the default 32-bit (needed for e.g. `1LL << 40`). For a
+            // large-magnitude value `val_type` already reports 64-bit, so the
+            // coercion is a no-op there and only kicks in for small-valued but
+            // suffix-typed literals.
+            ExprKind::IntLit(v, is64) => {
+                let c = Constant::int(*v);
+                if *is64 { self.coerce(c, &Type::i64()) } else { Ok(c) }
+            }
+            ExprKind::UIntLit(v, is64) => {
+                let c = Constant::uint(*v);
+                if *is64 { self.coerce(c, &Type::Int { bits: 64, signed: false }) } else { Ok(c) }
+            }
             ExprKind::FloatLit(v) => Ok(Val::Const(Constant::Float(*v))),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
             ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
@@ -389,7 +400,7 @@ impl<'m> FuncCtx<'m> {
                     }
                 };
                 let cmp_dest = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: cmp_dest, op: cmp_op, lhs: lc, rhs: rc });
+                self.push_instr(Instr::Cmp { dest: cmp_dest, op: cmp_op, lhs: lc, rhs: rc, ty: common.clone() });
                 // Extend bool to i32
                 let ext_dest = self.alloc_val();
                 self.push_instr(Instr::Cast { dest: ext_dest, op: CastOp::ZExt, val: Val::Local(cmp_dest), to_ty: Type::i32() });
@@ -731,21 +742,21 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::BinOp { dest: t2, op: BinOp::Xor, lhs: b.clone(), rhs: result.clone(), ty: ty.clone() });
                 let t3 = self.alloc_val();
                 self.push_instr(Instr::BinOp { dest: t3, op: BinOp::And, lhs: Val::Local(t1), rhs: Val::Local(t2), ty: ty.clone() });
-                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::ISLt, lhs: Val::Local(t3), rhs: zero });
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::ISLt, lhs: Val::Local(t3), rhs: zero, ty: ty.clone() });
             }
             BinOp::Add => {
                 // Unsigned add overflows iff the sum wrapped below an operand.
-                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::IULt, lhs: result.clone(), rhs: a.clone() });
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::IULt, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
             }
             _ => {
                 // Multiply: overflow iff a != 0 and result / a != b.
                 let a_nz = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero });
+                self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero, ty: ty.clone() });
                 let quot = self.alloc_val();
                 let div = if signed { BinOp::SDiv } else { BinOp::UDiv };
                 self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
                 let mism = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: mism, op: CmpOp::INe, lhs: Val::Local(quot), rhs: b.clone() });
+                self.push_instr(Instr::Cmp { dest: mism, op: CmpOp::INe, lhs: Val::Local(quot), rhs: b.clone(), ty: ty.clone() });
                 // ovf = a_nz ? mism : false
                 self.push_instr(Instr::Select {
                     dest: ovf,
@@ -881,8 +892,9 @@ impl<'m> FuncCtx<'m> {
 
     pub fn infer_expr_type(&self, expr: &Expr) -> Result<Type> {
         match &expr.kind {
-            ExprKind::IntLit(_) | ExprKind::CharLit(_) => Ok(Type::i32()),
-            ExprKind::UIntLit(_) => Ok(Type::u32()),
+            ExprKind::CharLit(_) => Ok(Type::i32()),
+            ExprKind::IntLit(_, is64) => Ok(if *is64 { Type::i64() } else { Type::i32() }),
+            ExprKind::UIntLit(_, is64) => Ok(if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             ExprKind::StringLit(_) => Ok(Type::char_ptr()),
             ExprKind::Nullptr => Ok(Type::void_ptr()),

@@ -704,7 +704,7 @@ impl<'m> FuncCtx<'m> {
             _ => Constant::zero(),
         };
         let cmp_op = if ty.is_float() { CmpOp::FONe } else { CmpOp::INe };
-        self.push_instr(Instr::Cmp { dest, op: cmp_op, lhs: val, rhs: zero });
+        self.push_instr(Instr::Cmp { dest, op: cmp_op, lhs: val, rhs: zero, ty: ty.clone() });
         Ok(Val::Local(dest))
     }
 
@@ -712,8 +712,21 @@ impl<'m> FuncCtx<'m> {
     pub fn val_type(&self, val: &Val) -> Type {
         match val {
             Val::Const(c) => match c {
-                Constant::Int(_) => Type::i32(),
-                Constant::UInt(_) => Type::u32(),
+                // A bare integer constant is 32-bit when its value fits in some
+                // 32-bit type ([i32::MIN, u32::MAX]); larger magnitudes force
+                // 64-bit. This keeps `0xFFFFFFFF` 32-bit while typing 5000000000
+                // as 64-bit. (Suffix-only widths like `1LL` are widened in
+                // `lower_expr` via an explicit coercion.)
+                Constant::Int(v) => if *v >= i32::MIN as i64 && *v <= u32::MAX as i64 {
+                    Type::i32()
+                } else {
+                    Type::i64()
+                },
+                Constant::UInt(v) => if *v <= u32::MAX as u64 {
+                    Type::u32()
+                } else {
+                    Type::Int { bits: 64, signed: false }
+                },
                 Constant::Float(_) => Type::Float64,
                 Constant::Bool(_) => Type::Bool,
                 Constant::Null => Type::void_ptr(),

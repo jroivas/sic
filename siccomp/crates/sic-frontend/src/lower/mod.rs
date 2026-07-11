@@ -371,8 +371,8 @@ impl Lowerer {
 /// Evaluate a constant expression (only literals and simple arithmetic).
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
     match &e.kind {
-        ExprKind::IntLit(v) => Ok(*v),
-        ExprKind::UIntLit(v) => Ok(*v as i64),
+        ExprKind::IntLit(v, _) => Ok(*v),
+        ExprKind::UIntLit(v, _) => Ok(*v as i64),
         ExprKind::CharLit(v) => Ok(*v as i64),
         ExprKind::Ident(name) => {
             enum_consts.get(name.as_str()).copied().ok_or_else(|| {

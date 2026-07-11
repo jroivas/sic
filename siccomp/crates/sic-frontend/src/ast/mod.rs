@@ -189,8 +189,10 @@ impl Expr {
 
 #[derive(Debug, Clone)]
 pub enum ExprKind {
-    IntLit(i64),
-    UIntLit(u64),
+    /// Integer literal; the bool is `true` when its C type is 64-bit (from an
+    /// `L`/`LL` suffix or a value that doesn't fit any 32-bit type).
+    IntLit(i64, bool),
+    UIntLit(u64, bool),
     FloatLit(f64),
     StringLit(String),
     CharLit(i32),

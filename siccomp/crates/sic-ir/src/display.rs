@@ -113,8 +113,8 @@ impl fmt::Display for Instr {
                 write!(f, "  %{} = {:?} {} {}", dest.0, op, ty, val),
             Instr::Cast { dest, op, val, to_ty } =>
                 write!(f, "  %{} = {:?} {} to {}", dest.0, op, val, to_ty),
-            Instr::Cmp { dest, op, lhs, rhs } =>
-                write!(f, "  %{} = {} {}, {}", dest.0, op, lhs, rhs),
+            Instr::Cmp { dest, op, lhs, rhs, ty } =>
+                write!(f, "  %{} = {} {} {}, {}", dest.0, op, ty, lhs, rhs),
             Instr::Call { dest, func, args, ret_ty } => {
                 if let Some(d) = dest { write!(f, "  %{} = ", d.0)?; } else { write!(f, "  ")?; }
                 write!(f, "call {} {}(", ret_ty, func_label(*func))?;

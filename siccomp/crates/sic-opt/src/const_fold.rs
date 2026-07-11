@@ -68,8 +68,8 @@ impl ConstFold {
                 Self::fold_expr(lhs);
                 Self::fold_expr(rhs);
                 let op = *op;
-                if let (ExprKind::IntLit(l), ExprKind::IntLit(r)) = (&lhs.kind, &rhs.kind) {
-                    let l = *l; let r = *r;
+                if let (ExprKind::IntLit(l, lw), ExprKind::IntLit(r, rw)) = (&lhs.kind, &rhs.kind) {
+                    let l = *l; let r = *r; let operand_64 = *lw || *rw;
                     let result = match op {
                         BinOpKind::Add => Some(l.wrapping_add(r)),
                         BinOpKind::Sub => Some(l.wrapping_sub(r)),
@@ -84,7 +84,10 @@ impl ConstFold {
                         _ => None,
                     };
                     if let Some(v) = result {
-                        e.kind = ExprKind::IntLit(v);
+                        // The folded literal is 64-bit if either operand was, or
+                        // the result no longer fits in a 32-bit type.
+                        let is64 = operand_64 || v < i32::MIN as i64 || v > u32::MAX as i64;
+                        e.kind = ExprKind::IntLit(v, is64);
                     }
                 } else if let (ExprKind::FloatLit(l), ExprKind::FloatLit(r)) = (&lhs.kind, &rhs.kind) {
                     let l = *l; let r = *r;
@@ -103,11 +106,11 @@ impl ConstFold {
             ExprKind::Unary { op, expr: inner } => {
                 Self::fold_expr(inner);
                 let op = *op;
-                if let ExprKind::IntLit(v) = inner.kind {
+                if let ExprKind::IntLit(v, w) = inner.kind {
                     match op {
-                        UnOpKind::Neg    => { e.kind = ExprKind::IntLit(v.wrapping_neg()); }
-                        UnOpKind::BitNot => { e.kind = ExprKind::IntLit(!v); }
-                        UnOpKind::Not    => { e.kind = ExprKind::IntLit(if v == 0 { 1 } else { 0 }); }
+                        UnOpKind::Neg    => { e.kind = ExprKind::IntLit(v.wrapping_neg(), w); }
+                        UnOpKind::BitNot => { e.kind = ExprKind::IntLit(!v, w); }
+                        UnOpKind::Not    => { e.kind = ExprKind::IntLit(if v == 0 { 1 } else { 0 }, false); }
                         _ => {}
                     }
                 }

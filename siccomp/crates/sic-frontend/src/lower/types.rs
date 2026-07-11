@@ -145,8 +145,9 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
 fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Type {
     match &e.kind {
         ExprKind::Nullptr => Type::void_ptr(),
-        ExprKind::IntLit(_) | ExprKind::CharLit(_) => Type::i32(),
-        ExprKind::UIntLit(_) => Type::u32(),
+        ExprKind::CharLit(_) => Type::i32(),
+        ExprKind::IntLit(_, is64) => if *is64 { Type::i64() } else { Type::i32() },
+        ExprKind::UIntLit(_, is64) => if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() },
         ExprKind::FloatLit(_) => Type::Float64,
         ExprKind::StringLit(_) => Type::char_ptr(),
         ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).unwrap_or_else(|_| Type::i32()),

@@ -84,7 +84,7 @@ impl Parser {
         // __asm__ at top level: skip
         if self.at(TokenKind::Asm) {
             self.parse_asm_skip()?;
-            return Ok(Decl::ExprStmt(Expr::new(ExprKind::IntLit(0), sp.clone()), sp));
+            return Ok(Decl::ExprStmt(Expr::new(ExprKind::IntLit(0, false), sp.clone()), sp));
         }
 
         // Check for a bare expression statement (SIC mode: top-level expressions).
@@ -1182,8 +1182,8 @@ impl Parser {
             }
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();
-                let (val, is_u) = parse_int_literal(&text);
-                let kind = if is_u { ExprKind::UIntLit(val as u64) } else { ExprKind::IntLit(val) };
+                let (val, is_u, is_64) = parse_int_literal(&text);
+                let kind = if is_u { ExprKind::UIntLit(val as u64, is_64) } else { ExprKind::IntLit(val, is_64) };
                 Ok(Expr::new(kind, sp))
             }
             TokenKind::FloatLit => {
@@ -1304,20 +1304,25 @@ impl Parser {
 
 // ─── Integer literal parsing ──────────────────────────────────────────────────
 
-fn parse_int_literal(text: &str) -> (i64, bool) {
+/// Parse an integer literal into `(value, is_unsigned, is_64bit)`. `is_unsigned`
+/// comes from a `u`/`U` suffix. A literal is 64-bit when it carries an `l`/`L`
+/// suffix (on LP64 both `long` and `long long` are 64-bit) or its value doesn't
+/// fit in *any* 32-bit type — so a bare `0xFFFFFFFF` (a 32-bit `unsigned int`
+/// in C) stays 32-bit.
+fn parse_int_literal(text: &str) -> (i64, bool, bool) {
     let s = text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
-    let is_u = text.to_lowercase().contains('u');
+    let lower = text.to_lowercase();
+    let is_u = lower.contains('u');
+    let suffix_l = lower.contains('l');
 
-    if s.starts_with("0x") || s.starts_with("0X") {
-        // Parse as u64 first to handle values like 0xFFFFFFFFFFFFFFFF
-        let v = u64::from_str_radix(&s[2..], 16).unwrap_or(0) as i64;
-        return (v, is_u);
-    }
-    if s.len() > 1 && s.starts_with('0') {
-        let v = u64::from_str_radix(&s[1..], 8).unwrap_or(0) as i64;
-        return (v, is_u);
-    }
-    // For decimal, allow i64 range; large unsigned values handled by 'u' suffix
-    let v: i64 = s.parse::<u64>().unwrap_or(0) as i64;
-    (v, is_u)
+    let raw: u64 = if s.starts_with("0x") || s.starts_with("0X") {
+        u64::from_str_radix(&s[2..], 16).unwrap_or(0)
+    } else if s.len() > 1 && s.starts_with('0') {
+        u64::from_str_radix(&s[1..], 8).unwrap_or(0)
+    } else {
+        s.parse::<u64>().unwrap_or(0)
+    };
+
+    let is_64 = suffix_l || raw > u32::MAX as u64;
+    (raw as i64, is_u, is_64)
 }
