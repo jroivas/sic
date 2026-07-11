@@ -29,10 +29,10 @@ struct Args {
     #[arg(short = 'c', long = "emit-obj")]
     emit_obj: bool,
 
-    /// Optimization level: 0 = none, 1 = const fold, 2 = + Cranelift optimizer
-    /// (speed), 3 = + Cranelift optimizer (speed_and_size)
-    #[arg(short = 'O', long = "opt", default_value = "0")]
-    opt: u32,
+    /// Optimization level: 0 = none, 1 = const fold, 2/3 = + Cranelift optimizer
+    /// (speed), s/z = optimize for size (Cranelift speed_and_size)
+    #[arg(short = 'O', long = "opt", default_value = "0", value_name = "LEVEL")]
+    opt: String,
 
     /// Preprocessor defines
     #[arg(short = 'D', action = clap::ArgAction::Append, value_name = "MACRO")]
@@ -91,6 +91,9 @@ fn main() {
             // are always attached in GCC/Clang, so a plain prefix match is safe
             // and avoids clap swallowing the following filename as a value.
             want_debug = true;
+        } else if a == "-O" {
+            // Bare `-O` means `-O1` in GCC/Clang; clap requires an attached value.
+            argv.push("-O1".to_string());
         } else {
             argv.push(a);
         }
@@ -132,6 +135,27 @@ fn resolves_to_self(prog: &str) -> bool {
     }
 }
 
+/// Whether the given `-O` level runs the frontend constant-folding pass — every
+/// level except `-O0`.
+fn opt_runs_constfold(opt: &str) -> bool {
+    opt != "0"
+}
+
+/// Map a GCC-style `-O` level to a Cranelift `opt_level` setting.
+///   0/1        → none        (no Cranelift optimizer)
+///   2/3/higher → speed       (optimize for speed)
+///   s/z        → speed_and_size (optimize for size)
+fn opt_cranelift_level(opt: &str) -> &'static str {
+    match opt {
+        "s" | "z" => "speed_and_size",
+        _ => match opt.parse::<u32>() {
+            Ok(0) | Ok(1) => "none",
+            Ok(_) => "speed",
+            Err(_) => "none", // unrecognized level: stay safe
+        },
+    }
+}
+
 /// An input file is a linker input (object/archive/shared lib) rather than a
 /// C source to compile, based on its extension.
 fn is_link_input(path: &str) -> bool {
@@ -155,7 +179,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         eprintln!("{:#?}", tu);
     }
 
-    if args.opt >= 1 {
+    if opt_runs_constfold(&args.opt) {
         ConstFold::fold_tu(&mut tu);
     }
 
@@ -177,7 +201,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
 /// Compile one C source all the way to object-file bytes.
 fn compile_source(path: &str, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let ir_module = build_ir(path, args)?;
-    let mut backend = CraneliftBackend::new().with_opt_level(args.opt);
+    let mut backend = CraneliftBackend::new().with_opt_level(opt_cranelift_level(&args.opt));
     backend.compile_module(&ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }

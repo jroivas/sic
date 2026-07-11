@@ -24,17 +24,18 @@ pub enum CraneliftError {
 
 pub struct CraneliftBackend {
     pub ptr_size: u32,
-    /// Optimization level from the driver (`-O<n>`).
-    pub opt_level: u32,
+    /// Cranelift `opt_level` setting: "none", "speed", or "speed_and_size".
+    pub opt_level: String,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: 0 }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string() }
     }
 
-    pub fn with_opt_level(mut self, opt_level: u32) -> Self {
-        self.opt_level = opt_level;
+    /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
+    pub fn with_opt_level(mut self, opt_level: &str) -> Self {
+        self.opt_level = opt_level.to_string();
         self
     }
 }
@@ -43,17 +44,7 @@ impl Backend for CraneliftBackend {
     type Error = CraneliftError;
 
     fn compile_module(&mut self, module: &sic_ir::Module) -> Result<Vec<u8>, CraneliftError> {
-        compile(module, self.ptr_size, self.opt_level)
-    }
-}
-
-/// Map the driver's numeric `-O` level to a Cranelift `opt_level` setting.
-/// Cranelift's optimizer has three tiers; we enable it at -O2 and above.
-fn cranelift_opt_level(opt: u32) -> &'static str {
-    match opt {
-        0 | 1 => "none",
-        2 => "speed",
-        _ => "speed_and_size", // -O3 and higher
+        compile(module, self.ptr_size, &self.opt_level)
     }
 }
 
@@ -66,12 +57,12 @@ fn ir_linkage(l: Linkage) -> CLinkage {
     }
 }
 
-fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: u32) -> Result<Vec<u8>, CraneliftError> {
+fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str) -> Result<Vec<u8>, CraneliftError> {
     // Build settings
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "true").unwrap();
-    flag_builder.set("opt_level", cranelift_opt_level(opt_level)).unwrap();
+    flag_builder.set("opt_level", opt_level).unwrap();
     let flags = settings::Flags::new(flag_builder);
 
     // Native ISA
