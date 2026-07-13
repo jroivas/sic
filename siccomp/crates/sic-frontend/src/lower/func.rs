@@ -433,6 +433,25 @@ impl<'m> FuncCtx<'m> {
                         let resolved_len = resolved_len.max(1);
                         ty = Type::Array { elem: elem_ty.clone(), len: resolved_len };
                     }
+                    // Array size inferred from its initializer: `T a[] = {...}`
+                    // or `char s[] = "..."`. Without this the array would have
+                    // length 0, and the element stores would overflow the stack.
+                    let inferred = if let Type::Array { elem, len: 0 } = &ty {
+                        let n = match &d.init {
+                            Some(Initializer::List(items)) => items.len(),
+                            Some(Initializer::Expr(e)) => match &e.kind {
+                                ExprKind::StringLit(s) => s.len() + 1, // + NUL terminator
+                                _ => 0,
+                            },
+                            None => 0,
+                        };
+                        if n > 0 { Some((elem.clone(), n)) } else { None }
+                    } else {
+                        None
+                    };
+                    if let Some((elem, len)) = inferred {
+                        ty = Type::Array { elem, len };
+                    }
                     let vid = self.alloc_val();
                     self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone() });
 
@@ -468,6 +487,23 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
         match init {
+            // `char buf[] = "..."` / `char buf[N] = "..."`: copy the string bytes
+            // into the array (not the pointer). Zero-fill any remaining space.
+            Initializer::Expr(e)
+                if matches!(ty, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }))
+                    && matches!(&e.kind, ExprKind::StringLit(_)) =>
+            {
+                let (elem_len, s) = match (ty, &e.kind) {
+                    (Type::Array { len, .. }, ExprKind::StringLit(s)) => (*len, s.clone()),
+                    _ => unreachable!(),
+                };
+                let src = self.emit_cstring(&s);           // pointer to the bytes ("...\0")
+                let copy = (s.len() + 1).min(elem_len.max(1)) as u64;
+                let total = (elem_len as u64).max(copy);
+                // Zero the whole array first so unused tail bytes are 0, then copy.
+                self.push_instr(Instr::MemSet { dst: ptr.clone(), val: Constant::zero(), size: total, align: 1 });
+                self.push_instr(Instr::MemCopy { dst: ptr, src, size: copy, align: 1 });
+            }
             Initializer::Expr(e) => {
                 let val = self.lower_expr(e)?;
                 let coerced = self.coerce(val, ty)?;
