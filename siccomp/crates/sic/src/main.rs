@@ -14,7 +14,7 @@ use sic_opt::ConstFold;
 #[command(name = "sic", about = "SIC compiler (Rust/Cranelift)")]
 struct Args {
     /// Input files: C sources to compile and/or object files to link
-    #[arg(required = true, value_name = "FILE")]
+    #[arg(value_name = "FILE")]
     filenames: Vec<String>,
 
     /// Output file
@@ -327,7 +327,41 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // ── Compile sources, then link everything ──────────────────────────────────
+    // ── Link ───────────────────────────────────────────────────────────────────
+    let cc = resolve_linker();
+
+    // Collect linker pass-through flags: search paths, libraries, and `-Wl,`.
+    let mut link_flags: Vec<String> = Vec::new();
+    for dir in &args.lib_dirs {
+        link_flags.push(format!("-L{}", dir));
+    }
+    for lib in &args.libs {
+        link_flags.push(format!("-l{}", lib));
+    }
+    // `-Wl,a,b,c` passes a, b, c straight through to the linker.
+    for w in &args.warnings {
+        if let Some(rest) = w.strip_prefix("l,") {
+            for opt in rest.split(',') {
+                link_flags.push(format!("-Wl,{}", opt));
+            }
+        }
+    }
+
+    // No input files: this is a linker query/utility invocation such as
+    // `-Wl,--version` (which asks the linker to print its version and exit).
+    // Forward the linker flags to the driver and let it respond, like gcc/clang.
+    if sources.is_empty() && objects.is_empty() {
+        if link_flags.is_empty() {
+            return Err("no input files".into());
+        }
+        let status = Command::new(&cc).args(&link_flags).status()?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("linker failed with exit code {:?}", status.code()).into())
+        };
+    }
+
     // Compile each source to a temp object; keep the handles alive until linking.
     let mut tmp_objs: Vec<tempfile::NamedTempFile> = Vec::new();
     for src in &sources {
@@ -338,7 +372,6 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let out_path = args.output.as_deref().unwrap_or("a.out");
-    let cc = resolve_linker();
     let mut link = Command::new(&cc);
 
     // Compiled sources (temp objects) and user-provided object files.
@@ -355,21 +388,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         link.arg("-g");
     }
 
-    // User-specified library search paths and libraries.
-    for dir in &args.lib_dirs {
-        link.arg(format!("-L{}", dir));
-    }
-    for lib in &args.libs {
-        link.arg(format!("-l{}", lib));
-    }
-    // `-Wl,a,b,c` passes a, b, c straight through to the linker.
-    for w in &args.warnings {
-        if let Some(rest) = w.strip_prefix("l,") {
-            for opt in rest.split(',') {
-                link.arg(format!("-Wl,{}", opt));
-            }
-        }
-    }
+    link.args(&link_flags);
 
     let status = link.status()?;
     if !status.success() {
