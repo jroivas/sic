@@ -6,7 +6,7 @@ use std::process::Command;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
-use sic_frontend::{preprocess, Lexer, Parser, Lowerer};
+use sic_frontend::{preprocess, preprocess_ex, Lexer, Parser, Lowerer};
 use sic_ir::{Backend, display::print_module};
 use sic_opt::ConstFold;
 
@@ -73,6 +73,16 @@ struct Args {
     /// backtraces work); full DWARF line/variable info is not yet produced.
     #[arg(skip)]
     debug_info: bool,
+
+    /// Preprocess only (`-E`): write the preprocessed source and stop. Set from
+    /// the argv pre-pass.
+    #[arg(skip)]
+    preprocess_only: bool,
+
+    /// GCC `-d<letters>` dump flag (e.g. `-dM` to dump macros) forwarded to the
+    /// preprocessor. Implies preprocess-only. Set from the argv pre-pass.
+    #[arg(skip)]
+    dump_flag: Option<String>,
 }
 
 /// GCC/Clang-style target triple describing this build's host.
@@ -90,7 +100,7 @@ fn handle_version_query(args: &[String]) -> bool {
         match a.as_str() {
             "--version" => {
                 // clang-like banner.
-                println!("sic version {} (SIC Compiler, Rust/Cranelift)", version);
+                println!("sic version {} (SIC Compiler, clang compatible, Cranelift)", version);
                 println!("Target: {}", target_triple());
                 println!("Thread model: posix");
                 return true;
@@ -118,8 +128,11 @@ fn main() {
 
     // Normalize a few GCC-style flags before clap sees them.
     let mut want_debug = false;
+    let mut preprocess_only = false;
+    let mut dump_flag: Option<String> = None;
     let mut argv: Vec<String> = Vec::new();
-    for a in std::env::args() {
+    let mut iter = std::env::args().peekable();
+    while let Some(a) = iter.next() {
         if a == "-std" {
             // Accept `-std c99` in addition to clap's `--std c99`.
             argv.push("--std".to_string());
@@ -134,12 +147,29 @@ fn main() {
         } else if a == "-O" {
             // Bare `-O` means `-O1` in GCC/Clang; clap requires an attached value.
             argv.push("-O1".to_string());
+        } else if a == "-E" {
+            // Preprocess only.
+            preprocess_only = true;
+        } else if a == "-x" {
+            // `-x <lang>` selects the input language. sic only handles C, so
+            // accept and ignore the language argument (consume it).
+            let _lang = iter.next();
+        } else if a.starts_with("-x") && a.len() > 2 {
+            // Attached form `-xc` — likewise ignored.
+        } else if a.len() > 2 && a.starts_with("-d") && !a.starts_with("-dump") {
+            // GCC `-d<letters>` dump flags (`-dM`, `-dD`, `-dN`, ...). `-d` alone
+            // is sic's own --debug (handled by clap), and `-dump*` are separate
+            // (handled earlier). These dump macros/defines and imply -E output.
+            dump_flag = Some(a.clone());
+            preprocess_only = true;
         } else {
             argv.push(a);
         }
     }
     let mut args = Args::parse_from(argv);
     args.debug_info = want_debug;
+    args.preprocess_only = preprocess_only;
+    args.dump_flag = dump_flag;
 
     if let Err(e) = run(&args) {
         eprintln!("{}", e);
@@ -250,6 +280,22 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Split inputs into C sources (compiled) and object files (linked as-is).
     let sources: Vec<&String> = args.filenames.iter().filter(|f| !is_link_input(f)).collect();
     let objects: Vec<&String> = args.filenames.iter().filter(|f| is_link_input(f)).collect();
+
+    // ── Preprocess only (-E / -dM / -dD ...) ───────────────────────────────────
+    if args.preprocess_only || args.dump_flag.is_some() {
+        // Forward a GCC `-d<letters>` dump flag (e.g. `-dM`) to cpp verbatim.
+        let extra: Vec<&str> = args.dump_flag.as_deref().into_iter().collect();
+        let mut out_text = String::new();
+        for src in &sources {
+            out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &extra)
+                .map_err(|e| format!("{}", e))?);
+        }
+        match &args.output {
+            Some(o) if o != "-" => fs::write(o, out_text)?,
+            _ => print!("{}", out_text),
+        }
+        return Ok(());
+    }
 
     // ── Emit IR (-S) ───────────────────────────────────────────────────────────
     if args.emit_ir {

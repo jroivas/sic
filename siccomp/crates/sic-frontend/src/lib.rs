@@ -4,7 +4,7 @@ pub mod ast;
 pub mod parser;
 pub mod lower;
 
-pub use preprocess::preprocess;
+pub use preprocess::{preprocess, preprocess_ex};
 pub use lexer::Lexer;
 pub use parser::Parser;
 pub use lower::Lowerer;

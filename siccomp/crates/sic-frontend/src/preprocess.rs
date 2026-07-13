@@ -8,6 +8,18 @@ pub fn preprocess(
     include_dirs: &[String],
     std: &str,
 ) -> Result<String> {
+    preprocess_ex(file, defines, include_dirs, std, &[])
+}
+
+/// Like [`preprocess`], but forwards extra flags to `cpp` (e.g. `-dM` to dump
+/// macro definitions). Used to implement the driver's `-E`/`-dM` options.
+pub fn preprocess_ex(
+    file: &str,
+    defines: &[String],
+    include_dirs: &[String],
+    std: &str,
+    extra_flags: &[&str],
+) -> Result<String> {
     let mut cmd = Command::new("cpp");
     cmd.arg("-undef");
     // Default to C23 so newer library features (e.g. C23's `timespec_get`
@@ -41,7 +53,17 @@ pub fn preprocess(
         cmd.arg(format!("-I{}", i));
     }
 
+    for f in extra_flags {
+        cmd.arg(f);
+    }
+
     cmd.arg(file);
+
+    // For `-` (read from standard input), `cpp` must see our stdin. `Command`'s
+    // `output()` otherwise defaults stdin to null, so the child would read EOF.
+    if file == "-" {
+        cmd.stdin(std::process::Stdio::inherit());
+    }
 
     let output = cmd.output().map_err(|e| {
         CompileError::new(format!("failed to run cpp: {}", e))
