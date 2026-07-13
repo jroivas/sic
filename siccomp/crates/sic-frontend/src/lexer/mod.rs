@@ -177,6 +177,13 @@ impl Lexer {
             while self.pos < self.src.len() && self.src[self.pos].is_ascii_hexdigit() {
                 text.push(self.advance());
             }
+        // binary (C23 / GNU extension: 0b1010)
+        } else if self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B') {
+            text.push(self.advance()); // 0
+            text.push(self.advance()); // b
+            while self.pos < self.src.len() && matches!(self.src[self.pos], '0' | '1') {
+                text.push(self.advance());
+            }
         } else {
             while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
                 text.push(self.advance());

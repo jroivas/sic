@@ -1317,6 +1317,9 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
 
     let raw: u64 = if s.starts_with("0x") || s.starts_with("0X") {
         u64::from_str_radix(&s[2..], 16).unwrap_or(0)
+    } else if s.starts_with("0b") || s.starts_with("0B") {
+        // Binary literal (C23 / GNU extension).
+        u64::from_str_radix(&s[2..], 2).unwrap_or(0)
     } else if s.len() > 1 && s.starts_with('0') {
         u64::from_str_radix(&s[1..], 8).unwrap_or(0)
     } else {
