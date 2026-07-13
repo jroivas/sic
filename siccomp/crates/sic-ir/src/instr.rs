@@ -107,6 +107,10 @@ pub enum Instr {
     VaStart { list_ptr: Val },
     VaArg   { dest: ValId, list_ptr: Val, ty: Type },
     VaEnd   { list_ptr: Val },
+
+    /// Debug marker: the source line number that the following instructions
+    /// correspond to. Emits no machine code; drives the DWARF line table.
+    SrcLine(u32),
 }
 
 /// Every basic block ends with exactly one terminator.

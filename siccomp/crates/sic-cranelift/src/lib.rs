@@ -1,5 +1,6 @@
 mod types;
 mod func;
+mod dwarf;
 
 use std::collections::HashMap;
 use cranelift_codegen::ir as cir;
@@ -26,16 +27,24 @@ pub struct CraneliftBackend {
     pub ptr_size: u32,
     /// Cranelift `opt_level` setting: "none", "speed", or "speed_and_size".
     pub opt_level: String,
+    /// Emit DWARF debug info (line table + compile unit) when set (`-g`).
+    pub debug_info: bool,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string() }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false }
     }
 
     /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
     pub fn with_opt_level(mut self, opt_level: &str) -> Self {
         self.opt_level = opt_level.to_string();
+        self
+    }
+
+    /// Enable DWARF debug-info emission.
+    pub fn with_debug_info(mut self, debug_info: bool) -> Self {
+        self.debug_info = debug_info;
         self
     }
 }
@@ -44,7 +53,7 @@ impl Backend for CraneliftBackend {
     type Error = CraneliftError;
 
     fn compile_module(&mut self, module: &sic_ir::Module) -> Result<Vec<u8>, CraneliftError> {
-        compile(module, self.ptr_size, &self.opt_level)
+        compile(module, self.ptr_size, &self.opt_level, self.debug_info)
     }
 }
 
@@ -57,7 +66,7 @@ fn ir_linkage(l: Linkage) -> CLinkage {
     }
 }
 
-fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str) -> Result<Vec<u8>, CraneliftError> {
+fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_info: bool) -> Result<Vec<u8>, CraneliftError> {
     // Build settings
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
@@ -159,6 +168,8 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str) -> Result
     }
 
     // ── Compile defined functions ─────────────────────────────────────────────
+    // (FuncId, code size, [(offset, line)]) collected for DWARF when -g is set.
+    let mut func_line_info: Vec<(FuncId, String, u64, Vec<(u64, u32)>)> = Vec::new();
     let mut ctx = cranelift_codegen::Context::new();
     for (i, f) in ir_module.functions.iter().enumerate() {
         let fid = func_ids[&(i as u32)];
@@ -175,11 +186,50 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str) -> Result
             eprintln!("{}", cranelift_codegen::ir::Function::display(&ctx.func));
             return Err(e.into());
         }
+
+        if debug_info {
+            if let Some(cc) = ctx.compiled_code() {
+                let size = cc.code_info().total_size as u64;
+                let mut rows: Vec<(u64, u32)> = Vec::new();
+                for s in cc.buffer.get_srclocs_sorted() {
+                    if s.loc.is_default() {
+                        continue;
+                    }
+                    let line = s.loc.bits();
+                    // Collapse consecutive rows with the same line.
+                    if rows.last().map(|r| r.1) != Some(line) {
+                        // Extend the first line entry back to the function start
+                        // (offset 0) so the prologue is attributed to a source
+                        // line — this lets `break <func>` land on a real line.
+                        let offset = if rows.is_empty() { 0 } else { s.start as u64 };
+                        rows.push((offset, line));
+                    }
+                }
+                if !rows.is_empty() {
+                    func_line_info.push((fid, f.name.clone(), size, rows));
+                }
+            }
+        }
         ctx.clear();
     }
 
-    // ── Emit object ──────────────────────────────────────────────────────────
-    let product = obj_module.finish();
+    // ── Emit object (+ DWARF debug info when -g) ───────────────────────────────
+    let mut product = obj_module.finish();
+    if debug_info {
+        if let Some(src) = &ir_module.source_file {
+            let funcs: Vec<dwarf::FuncLines> = func_line_info
+                .iter()
+                .map(|(fid, name, size, rows)| dwarf::FuncLines {
+                    sym: product.function_symbol(*fid),
+                    size: *size,
+                    name: name.clone(),
+                    rows: rows.clone(),
+                })
+                .collect();
+            dwarf::emit_dwarf(&mut product.object, src, &funcs, ptr_size as u8)
+                .map_err(CraneliftError::Unsupported)?;
+        }
+    }
     Ok(product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
 }
 

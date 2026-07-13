@@ -93,19 +93,21 @@ impl Lexer {
         }
     }
 
-    /// Handle a preprocessor line marker like `# 42 "foo.c" 1`.
+    /// Handle a preprocessor line marker like `# 42 "foo.c" 1`. The directive
+    /// states that the line *following* it is line `N` of the named file.
     fn handle_line_marker(&mut self) {
         // consume '#'
         self.advance();
         // skip spaces
         while self.pos < self.src.len() && self.src[self.pos] == ' ' { self.advance(); }
         // read digits for line number
+        let mut target_line = self.line;
         if self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
             let mut num = String::new();
             while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
                 num.push(self.advance());
             }
-            if let Ok(n) = num.parse::<u32>() { self.line = n; self.col = 1; }
+            if let Ok(n) = num.parse::<u32>() { target_line = n; }
         }
         // skip to optional filename
         while self.pos < self.src.len() && self.src[self.pos] == ' ' { self.advance(); }
@@ -118,8 +120,13 @@ impl Lexer {
             if self.pos < self.src.len() && self.src[self.pos] == '"' { self.advance(); }
             self.file = Some(name);
         }
-        // skip rest of line
+        // Skip the rest of the directive line *including* its newline, then set
+        // the line counter — so the following content is line `target_line`
+        // (rather than `target_line + 1` after the newline bumps the counter).
         while self.pos < self.src.len() && self.src[self.pos] != '\n' { self.advance(); }
+        if self.pos < self.src.len() && self.src[self.pos] == '\n' { self.advance(); }
+        self.line = target_line;
+        self.col = 1;
     }
 
     fn next_token(&mut self) -> Result<Token> {

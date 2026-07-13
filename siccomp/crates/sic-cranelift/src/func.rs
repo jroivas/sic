@@ -349,6 +349,13 @@ fn emit_instr(
             builder.ins().store(MemFlags::new(), next, lp, 0);
             val_map.insert(dest.0, v);
         }
+
+        // Debug marker: tag subsequently-emitted instructions with this source
+        // line. Cranelift records it per machine instruction, which we later
+        // read back (`get_srclocs_sorted`) to build the DWARF line table.
+        Instr::SrcLine(line) => {
+            builder.set_srcloc(cir::SourceLoc::new(*line));
+        }
     }
 }
 

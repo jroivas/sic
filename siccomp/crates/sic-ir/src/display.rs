@@ -152,6 +152,7 @@ impl fmt::Display for Instr {
                 }
                 write!(f, ")")
             }
+            Instr::SrcLine(line) => write!(f, "  .loc {}", line),
         }
     }
 }

@@ -361,7 +361,8 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .to_string();
 
     let lowerer = Lowerer::new(module_name);
-    let ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
+    let mut ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
+    ir_module.source_file = Some(path.to_string());
 
     if args.debug {
         eprintln!("{}", print_module(&ir_module));
@@ -372,7 +373,9 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
 /// Compile one C source all the way to object-file bytes.
 fn compile_source(path: &str, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let ir_module = build_ir(path, args)?;
-    let mut backend = CraneliftBackend::new().with_opt_level(opt_cranelift_level(&args.opt));
+    let mut backend = CraneliftBackend::new()
+        .with_opt_level(opt_cranelift_level(&args.opt))
+        .with_debug_info(args.debug_info);
     backend.compile_module(&ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }

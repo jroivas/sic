@@ -32,6 +32,8 @@ pub struct FuncCtx<'m> {
     pub last_init_local: Option<(ValId, Type)>,
     /// GCC-style signature string for __PRETTY_FUNCTION__
     pub pretty_func: String,
+    /// Last source line emitted as a debug marker (avoids redundant markers).
+    pub last_line: u32,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -57,6 +59,16 @@ impl<'m> FuncCtx<'m> {
             pending_gotos: Vec::new(),
             last_init_local: None,
             pretty_func: String::new(),
+            last_line: 0,
+        }
+    }
+
+    /// Emit a source-line debug marker for `line` if it differs from the last
+    /// one, so the DWARF line table can map addresses back to source.
+    pub fn mark_line(&mut self, line: u32) {
+        if line != 0 && line != self.last_line && !self.is_terminated() {
+            self.last_line = line;
+            self.push_instr(Instr::SrcLine(line));
         }
     }
 
@@ -291,6 +303,7 @@ impl<'m> Lowerer {
 
 impl<'m> FuncCtx<'m> {
     pub fn lower_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        self.mark_line(stmt_line(stmt));
         match stmt {
             Stmt::Null(_) => {}
             Stmt::Expr(e, _) => { self.lower_expr(e)?; }
@@ -828,6 +841,27 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
 /// already terminated the current block.
 fn stmt_is_jump_target(s: &Stmt) -> bool {
     matches!(s, Stmt::Case(..) | Stmt::Default(..) | Stmt::Label(..))
+}
+
+/// Source line a statement begins on (for DWARF line markers). 0 = unknown.
+fn stmt_line(stmt: &Stmt) -> u32 {
+    match stmt {
+        Stmt::Decl(d) => decl_line(d),
+        Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
+        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
+        | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
+        | Stmt::Default(_, s) => s.line,
+        Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
+        | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,
+    }
+}
+
+fn decl_line(d: &Decl) -> u32 {
+    match d {
+        Decl::Var { span, .. } | Decl::Func { span, .. }
+        | Decl::TypeDef { span, .. } | Decl::ExprStmt(_, span) => span.line,
+        _ => 0,
+    }
 }
 
 fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> Vec<(i64, usize)> {

@@ -114,6 +114,8 @@ pub struct Module {
     pub externs: Vec<ExternFunc>,
     /// Named struct/union types registered in this module.
     pub type_defs: Vec<(String, Type)>,
+    /// Source file path this module was compiled from (for DWARF debug info).
+    pub source_file: Option<String>,
 }
 
 impl Module {
@@ -124,6 +126,7 @@ impl Module {
             functions: Vec::new(),
             externs: Vec::new(),
             type_defs: Vec::new(),
+            source_file: None,
         }
     }
 
