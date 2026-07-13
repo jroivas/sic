@@ -260,6 +260,9 @@ impl<'m> Lowerer {
                         ptr: Val::Local(ptr_vid),
                     });
                 }
+                fc.push_instr(Instr::DbgVar {
+                    name: pname.clone(), ty: pty.clone(), slot: ptr_vid, is_param: true,
+                });
                 fc.define_local(pname.clone(), pty, ptr_vid);
             }
         }
@@ -482,6 +485,11 @@ impl<'m> FuncCtx<'m> {
                     // Track last declared scalar local for implicit return
                     if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_) | Type::Bool) {
                         self.last_init_local = Some((vid, ty.clone()));
+                    }
+                    if !d.name.is_empty() {
+                        self.push_instr(Instr::DbgVar {
+                            name: d.name.clone(), ty: ty.clone(), slot: vid, is_param: false,
+                        });
                     }
                     self.define_local(d.name.clone(), ty, vid);
                 }

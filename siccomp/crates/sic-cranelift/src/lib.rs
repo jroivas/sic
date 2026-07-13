@@ -72,6 +72,11 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "true").unwrap();
     flag_builder.set("opt_level", opt_level).unwrap();
+    if debug_info {
+        // Keep a real frame pointer (RBP) so DWARF can describe variable
+        // locations as fixed frame-relative offsets.
+        flag_builder.set("preserve_frame_pointers", "true").unwrap();
+    }
     let flags = settings::Flags::new(flag_builder);
 
     // Native ISA
@@ -168,16 +173,20 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     }
 
     // ── Compile defined functions ─────────────────────────────────────────────
-    // (FuncId, code size, [(offset, line)]) collected for DWARF when -g is set.
-    let mut func_line_info: Vec<(FuncId, String, u64, Vec<(u64, u32)>)> = Vec::new();
+    // Per-function debug info collected for DWARF when -g is set.
+    // rows: (code offset, source line, prologue_end).
+    let mut func_line_info: Vec<(FuncId, String, u64, Vec<(u64, u32, bool)>, Vec<dwarf::VarInfo>)> =
+        Vec::new();
     let mut ctx = cranelift_codegen::Context::new();
     for (i, f) in ir_module.functions.iter().enumerate() {
         let fid = func_ids[&(i as u32)];
         ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
+        let mut var_dbg: Vec<func::VarDbg> = Vec::new();
         func::compile_function(
             f, ir_module, &mut obj_module, &func_ids, &global_ids, &mut ctx.func, ptr_size,
+            &mut var_dbg,
         )?;
 
         if let Err(e) = obj_module.define_function(fid, &mut ctx) {
@@ -190,23 +199,48 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         if debug_info {
             if let Some(cc) = ctx.compiled_code() {
                 let size = cc.code_info().total_size as u64;
-                let mut rows: Vec<(u64, u32)> = Vec::new();
+                let mut raw: Vec<(u64, u32)> = Vec::new();
                 for s in cc.buffer.get_srclocs_sorted() {
                     if s.loc.is_default() {
                         continue;
                     }
                     let line = s.loc.bits();
                     // Collapse consecutive rows with the same line.
-                    if rows.last().map(|r| r.1) != Some(line) {
-                        // Extend the first line entry back to the function start
-                        // (offset 0) so the prologue is attributed to a source
-                        // line — this lets `break <func>` land on a real line.
-                        let offset = if rows.is_empty() { 0 } else { s.start as u64 };
-                        rows.push((offset, line));
+                    if raw.last().map(|r| r.1) != Some(line) {
+                        raw.push((s.start as u64, line));
+                    }
+                }
+                // Emit an entry row at offset 0 covering the prologue, then mark
+                // the first *real* statement row `prologue_end` so `break <func>`
+                // skips the prologue and lands there (with params already stored).
+                let mut rows: Vec<(u64, u32, bool)> = Vec::new();
+                if let Some(&(first_off, first_line)) = raw.first() {
+                    if first_off > 0 {
+                        rows.push((0, first_line, false));
+                    }
+                    rows.push((first_off, first_line, true));
+                    for &(off, line) in &raw[1..] {
+                        rows.push((off, line, false));
+                    }
+                }
+                // Resolve each variable's stack slot to a frame-pointer-relative
+                // offset. Slots are laid out from the post-prologue SP, and RBP
+                // sits `frame_size` bytes above it, so the RBP-relative offset is
+                // `slot_offset - frame_size`.
+                let frame = cc.frame_size as i64;
+                let mut vars: Vec<dwarf::VarInfo> = Vec::new();
+                for v in &var_dbg {
+                    if let Some(slot_off) = cc.sized_stackslot_offsets.get(v.slot) {
+                        vars.push(dwarf::VarInfo {
+                            name: v.name.clone(),
+                            ty: v.ty.clone(),
+                            fp_offset: *slot_off as i64 - frame,
+                            is_param: v.is_param,
+                        });
                     }
                 }
                 if !rows.is_empty() {
-                    func_line_info.push((fid, f.name.clone(), size, rows));
+                    func_line_info.push((fid, f.name.clone(), size, rows, vars));
                 }
             }
         }
@@ -219,11 +253,12 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         if let Some(src) = &ir_module.source_file {
             let funcs: Vec<dwarf::FuncLines> = func_line_info
                 .iter()
-                .map(|(fid, name, size, rows)| dwarf::FuncLines {
+                .map(|(fid, name, size, rows, vars)| dwarf::FuncLines {
                     sym: product.function_symbol(*fid),
                     size: *size,
                     name: name.clone(),
                     rows: rows.clone(),
+                    vars: vars.clone(),
                 })
                 .collect();
             dwarf::emit_dwarf(&mut product.object, src, &funcs, ptr_size as u8)

@@ -153,6 +153,10 @@ impl fmt::Display for Instr {
                 write!(f, ")")
             }
             Instr::SrcLine(line) => write!(f, "  .loc {}", line),
+            Instr::DbgVar { name, ty, slot, is_param } => write!(
+                f, "  .dbgvar {} {} %{}{}", ty, name, slot.0,
+                if *is_param { " (param)" } else { "" },
+            ),
         }
     }
 }

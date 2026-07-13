@@ -8,6 +8,15 @@ use sic_ir::*;
 use super::types::{cl_type, ptr_cl};
 use super::build_cl_sig;
 
+/// A source variable's debug info collected during codegen: its name, IR type,
+/// the Cranelift stack slot it lives in, and whether it is a formal parameter.
+pub struct VarDbg {
+    pub name: String,
+    pub ty: sic_ir::Type,
+    pub slot: cir::StackSlot,
+    pub is_param: bool,
+}
+
 pub fn compile_function(
     f: &Function,
     module_ir: &sic_ir::Module,
@@ -16,6 +25,7 @@ pub fn compile_function(
     global_ids: &HashMap<u32, DataId>,
     cl_func: &mut cir::Function,
     ptr_size: u32,
+    var_dbg: &mut Vec<VarDbg>,
 ) -> Result<(), super::CraneliftError> {
     if f.blocks.is_empty() { return Ok(()); }
 
@@ -85,6 +95,9 @@ pub fn compile_function(
     }
 
     // Emit all blocks.
+    // ValId → stack slot (for `Alloca`s), so `DbgVar` can resolve a variable's
+    // storage to a Cranelift stack slot for the DWARF location.
+    let mut slot_map: HashMap<u32, cir::StackSlot> = HashMap::new();
     for (bi, bb) in f.blocks.iter().enumerate() {
         if bi > 0 {
             let cl_bb = bb_map[&bb.id.0];
@@ -94,6 +107,7 @@ pub fn compile_function(
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
                 ptr_ty, target_config, ptr_size, va_save_area,
+                &mut slot_map, var_dbg,
             );
         }
         emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty);
@@ -116,6 +130,8 @@ fn emit_instr(
     target_config: cranelift_codegen::isa::TargetFrontendConfig,
     ptr_size: u32,
     va_save_area: Option<cir::Value>,
+    slot_map: &mut HashMap<u32, cir::StackSlot>,
+    var_dbg: &mut Vec<VarDbg>,
 ) {
     match instr {
         Instr::Alloca { dest, ty } => {
@@ -129,6 +145,7 @@ fn emit_instr(
                 align_shift,
             ));
             let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+            slot_map.insert(dest.0, slot);
             val_map.insert(dest.0, addr);
         }
 
@@ -355,6 +372,18 @@ fn emit_instr(
         // read back (`get_srclocs_sorted`) to build the DWARF line table.
         Instr::SrcLine(line) => {
             builder.set_srcloc(cir::SourceLoc::new(*line));
+        }
+
+        // Record the variable→stack-slot association for DWARF (no code).
+        Instr::DbgVar { name, ty, slot, is_param } => {
+            if let Some(&stack_slot) = slot_map.get(&slot.0) {
+                var_dbg.push(VarDbg {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    slot: stack_slot,
+                    is_param: *is_param,
+                });
+            }
         }
     }
 }

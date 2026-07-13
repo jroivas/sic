@@ -111,6 +111,12 @@ pub enum Instr {
     /// Debug marker: the source line number that the following instructions
     /// correspond to. Emits no machine code; drives the DWARF line table.
     SrcLine(u32),
+
+    /// Debug marker: associate a source variable `name` of type `ty` with the
+    /// stack allocation `slot` (an `Alloca`'s dest ValId). Emits no machine
+    /// code; drives the DWARF variable/parameter DIEs so debuggers can inspect
+    /// locals. `is_param` distinguishes formal parameters from locals.
+    DbgVar { name: String, ty: Type, slot: ValId, is_param: bool },
 }
 
 /// Every basic block ends with exactly one terminator.
