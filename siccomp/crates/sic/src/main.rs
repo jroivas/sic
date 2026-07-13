@@ -6,7 +6,7 @@ use std::process::Command;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
-use sic_frontend::{preprocess, preprocess_ex, Lexer, Parser, Lowerer};
+use sic_frontend::{preprocess_ex, Lexer, Parser, Lowerer};
 use sic_ir::{Backend, display::print_module};
 use sic_opt::ConstFold;
 
@@ -102,6 +102,36 @@ struct Args {
     /// Set from the argv pre-pass.
     #[arg(skip)]
     f_options: std::collections::HashMap<String, FOption>,
+
+    /// Dependency-generation flags (`-MD`, `-MMD`, `-MF <file>`, `-MT`/`-MQ
+    /// <target>`, `-MP`, ...) forwarded verbatim to the preprocessor. Set from
+    /// the argv pre-pass.
+    #[arg(skip)]
+    dep_flags: Vec<String>,
+
+    /// Dependency-only mode (`-M` / `-MM`): emit make rules and don't compile.
+    #[arg(skip)]
+    deps_only: bool,
+}
+
+/// The dependency-generation flags to hand to cpp. When the user didn't give a
+/// `-MT`/`-MQ` target but did give an output (`-o`), default the rule's target
+/// to that output — matching gcc, which otherwise derives it from the input.
+fn effective_dep_flags(args: &Args) -> Vec<String> {
+    // Nothing to do unless dependency generation was actually requested.
+    if args.dep_flags.is_empty() {
+        return Vec::new();
+    }
+    let mut flags = args.dep_flags.clone();
+    let has_target = flags.iter()
+        .any(|f| f.starts_with("-MT") || f.starts_with("-MQ"));
+    if !has_target {
+        if let Some(out) = &args.output {
+            flags.push("-MQ".to_string());
+            flags.push(out.clone());
+        }
+    }
+    flags
 }
 
 /// Parse a `-f<...>` argument into its (name, value) map entry. Returns `None`
@@ -169,6 +199,8 @@ fn main() {
     let mut preprocess_only = false;
     let mut dump_flag: Option<String> = None;
     let mut f_options: std::collections::HashMap<String, FOption> = std::collections::HashMap::new();
+    let mut dep_flags: Vec<String> = Vec::new();
+    let mut deps_only = false;
     let mut argv: Vec<String> = Vec::new();
     let mut iter = std::env::args().peekable();
     while let Some(a) = iter.next() {
@@ -201,6 +233,23 @@ fn main() {
             if let Some((name, value)) = parse_f_option(&a) {
                 f_options.insert(name, value);
             }
+        } else if a == "-M" || a == "-MM" {
+            // Dependency-only: emit make rules and don't compile.
+            deps_only = true;
+            dep_flags.push(a);
+        } else if a == "-MD" || a == "-MMD" || a == "-MG" || a == "-MP" {
+            // Generate dependencies as a side effect of compilation.
+            dep_flags.push(a);
+        } else if a == "-MF" || a == "-MT" || a == "-MQ" || a == "-MJ" {
+            // These take a following argument (dep file / target name).
+            dep_flags.push(a);
+            if let Some(v) = iter.next() {
+                dep_flags.push(v);
+            }
+        } else if a.len() > 3
+            && (a.starts_with("-MF") || a.starts_with("-MT") || a.starts_with("-MQ")) {
+            // Attached forms `-MF<file>`, `-MT<target>`, `-MQ<target>`.
+            dep_flags.push(a);
         } else if a.len() > 2 && a.starts_with("-d") && !a.starts_with("-dump") {
             // GCC `-d<letters>` dump flags (`-dM`, `-dD`, `-dN`, ...). `-d` alone
             // is sic's own --debug (handled by clap), and `-dump*` are separate
@@ -216,6 +265,8 @@ fn main() {
     args.preprocess_only = preprocess_only;
     args.dump_flag = dump_flag;
     args.f_options = f_options;
+    args.dep_flags = dep_flags;
+    args.deps_only = deps_only;
 
     if let Err(e) = run(&args) {
         eprintln!("{}", e);
@@ -282,7 +333,11 @@ fn is_link_input(path: &str) -> bool {
 
 /// Compile one C source through the front end to an IR module.
 fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
-    let preprocessed = preprocess(path, &args.defines, &args.includes, &args.std)
+    // Forward dependency-generation flags (`-MD`/`-MF`/...) so cpp writes the
+    // `.d` file as a side effect of preprocessing.
+    let dep_owned = effective_dep_flags(args);
+    let dep_extra: Vec<&str> = dep_owned.iter().map(|s| s.as_str()).collect();
+    let preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &dep_extra)
         .map_err(|e| format!("{}", e))?;
 
     let mut lexer = Lexer::new(&preprocessed, HashSet::new());
@@ -331,15 +386,19 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let sources: Vec<&String> = args.filenames.iter().filter(|f| !is_link_input(f)).collect();
     let objects: Vec<&String> = args.filenames.iter().filter(|f| is_link_input(f)).collect();
 
-    // ── Preprocess only (-E / -dM / -dD ...) ───────────────────────────────────
-    if args.preprocess_only || args.dump_flag.is_some() {
-        // Forward a GCC `-d<letters>` dump flag (e.g. `-dM`) to cpp verbatim.
-        let extra: Vec<&str> = args.dump_flag.as_deref().into_iter().collect();
+    // ── Preprocess only (-E / -dM ...) or dependency-only (-M / -MM) ────────────
+    if args.preprocess_only || args.deps_only || args.dump_flag.is_some() {
+        // Forward a `-d<letters>` dump flag and any dependency-generation flags
+        // (`-M`, `-MF <file>`, `-MT`, ...) to cpp verbatim.
+        let dep_owned = effective_dep_flags(args);
+        let mut extra: Vec<&str> = args.dump_flag.as_deref().into_iter().collect();
+        extra.extend(dep_owned.iter().map(|s| s.as_str()));
         let mut out_text = String::new();
         for src in &sources {
             out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &extra)
                 .map_err(|e| format!("{}", e))?);
         }
+        // With `-MF`/`-o` cpp writes to that file itself; otherwise emit here.
         match &args.output {
             Some(o) if o != "-" => fs::write(o, out_text)?,
             _ => print!("{}", out_text),
