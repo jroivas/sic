@@ -10,6 +10,17 @@ use sic_frontend::{preprocess, preprocess_ex, Lexer, Parser, Lowerer};
 use sic_ir::{Backend, display::print_module};
 use sic_opt::ConstFold;
 
+/// Value of a GCC/Clang-style `-f<name>` option.
+#[derive(Debug, Clone, PartialEq)]
+enum FOption {
+    /// `-f<name>` — the feature is enabled.
+    Enabled,
+    /// `-fno-<name>` — the feature is disabled.
+    Disabled,
+    /// `-f<name>=<value>` — the feature carries a value.
+    Value(String),
+}
+
 #[derive(ClapParser, Debug)]
 #[command(name = "sic", about = "SIC compiler (Rust/Cranelift)")]
 struct Args {
@@ -83,6 +94,33 @@ struct Args {
     /// preprocessor. Implies preprocess-only. Set from the argv pre-pass.
     #[arg(skip)]
     dump_flag: Option<String>,
+
+    /// GCC/Clang-style `-f<name>[=<value>]` options, parsed into a map. Accepted
+    /// for compatibility and stored (mostly no-ops for now); e.g. `-fPIC` →
+    /// `{"PIC": Enabled}`, `-fno-builtin` → `{"builtin": Disabled}`,
+    /// `-fdiagnostics-color=always` → `{"diagnostics-color": Value("always")}`.
+    /// Set from the argv pre-pass.
+    #[arg(skip)]
+    f_options: std::collections::HashMap<String, FOption>,
+}
+
+/// Parse a `-f<...>` argument into its (name, value) map entry. Returns `None`
+/// for a bare `-f` with no name.
+fn parse_f_option(arg: &str) -> Option<(String, FOption)> {
+    let rest = arg.strip_prefix("-f")?;
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some((name, value)) = rest.split_once('=') {
+        // `-fname=value`
+        Some((name.to_string(), FOption::Value(value.to_string())))
+    } else if let Some(name) = rest.strip_prefix("no-") {
+        // `-fno-name` disables the feature (canonical key is the base name).
+        Some((name.to_string(), FOption::Disabled))
+    } else {
+        // `-fname`
+        Some((rest.to_string(), FOption::Enabled))
+    }
 }
 
 /// GCC/Clang-style target triple describing this build's host.
@@ -130,6 +168,7 @@ fn main() {
     let mut want_debug = false;
     let mut preprocess_only = false;
     let mut dump_flag: Option<String> = None;
+    let mut f_options: std::collections::HashMap<String, FOption> = std::collections::HashMap::new();
     let mut argv: Vec<String> = Vec::new();
     let mut iter = std::env::args().peekable();
     while let Some(a) = iter.next() {
@@ -156,6 +195,12 @@ fn main() {
             let _lang = iter.next();
         } else if a.starts_with("-x") && a.len() > 2 {
             // Attached form `-xc` — likewise ignored.
+        } else if a.starts_with("-f") && a.len() > 2 {
+            // GCC/Clang `-f<name>[=<value>]` options: parse and store. Accepted
+            // for compatibility; acted upon only where sic implements them.
+            if let Some((name, value)) = parse_f_option(&a) {
+                f_options.insert(name, value);
+            }
         } else if a.len() > 2 && a.starts_with("-d") && !a.starts_with("-dump") {
             // GCC `-d<letters>` dump flags (`-dM`, `-dD`, `-dN`, ...). `-d` alone
             // is sic's own --debug (handled by clap), and `-dump*` are separate
@@ -170,6 +215,7 @@ fn main() {
     args.debug_info = want_debug;
     args.preprocess_only = preprocess_only;
     args.dump_flag = dump_flag;
+    args.f_options = f_options;
 
     if let Err(e) = run(&args) {
         eprintln!("{}", e);
@@ -277,6 +323,10 @@ fn compile_source(path: &str, args: &Args) -> Result<Vec<u8>, Box<dyn std::error
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    if args.debug && !args.f_options.is_empty() {
+        eprintln!("-f options: {:?}", args.f_options);
+    }
+
     // Split inputs into C sources (compiled) and object files (linked as-is).
     let sources: Vec<&String> = args.filenames.iter().filter(|f| !is_link_input(f)).collect();
     let objects: Vec<&String> = args.filenames.iter().filter(|f| is_link_input(f)).collect();
