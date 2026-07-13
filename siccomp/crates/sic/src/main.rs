@@ -75,7 +75,47 @@ struct Args {
     debug_info: bool,
 }
 
+/// GCC/Clang-style target triple describing this build's host.
+fn target_triple() -> String {
+    format!("{}-unknown-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Handle GCC/Clang-style version queries that short-circuit compilation:
+/// `--version`, `-dumpversion`, `-dumpmachine`. Returns true if one was handled
+/// (and the program should exit 0). These are checked before clap so they work
+/// without any input files, exactly as gcc/clang do.
+fn handle_version_query(args: &[String]) -> bool {
+    let version = env!("CARGO_PKG_VERSION");
+    for a in args {
+        match a.as_str() {
+            "--version" => {
+                // clang-like banner.
+                println!("sic version {} (SIC Compiler, Rust/Cranelift)", version);
+                println!("Target: {}", target_triple());
+                println!("Thread model: posix");
+                return true;
+            }
+            "-dumpversion" | "--dumpversion" => {
+                // Just the version number — build systems (e.g. CMake) parse this.
+                println!("{}", version);
+                return true;
+            }
+            "-dumpmachine" | "--dumpmachine" => {
+                println!("{}", target_triple());
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 fn main() {
+    let raw_args: Vec<String> = std::env::args().collect();
+    if handle_version_query(&raw_args) {
+        return;
+    }
+
     // Normalize a few GCC-style flags before clap sees them.
     let mut want_debug = false;
     let mut argv: Vec<String> = Vec::new();
