@@ -112,6 +112,11 @@ struct Args {
     /// Dependency-only mode (`-M` / `-MM`): emit make rules and don't compile.
     #[arg(skip)]
     deps_only: bool,
+
+    /// `-pthread`: compile with `_REENTRANT` defined and link the pthread
+    /// library. Set from the argv pre-pass.
+    #[arg(skip)]
+    pthread: bool,
 }
 
 /// The dependency-generation flags to hand to cpp. When the user didn't give a
@@ -201,10 +206,14 @@ fn main() {
     let mut f_options: std::collections::HashMap<String, FOption> = std::collections::HashMap::new();
     let mut dep_flags: Vec<String> = Vec::new();
     let mut deps_only = false;
+    let mut pthread = false;
     let mut argv: Vec<String> = Vec::new();
     let mut iter = std::env::args().peekable();
     while let Some(a) = iter.next() {
-        if a == "-std" {
+        if a == "-pthread" || a == "-pthreads" {
+            // Compile with `_REENTRANT` and link the pthread library.
+            pthread = true;
+        } else if a == "-std" {
             // Accept `-std c99` in addition to clap's `--std c99`.
             argv.push("--std".to_string());
         } else if let Some(rest) = a.strip_prefix("-std=") {
@@ -266,6 +275,7 @@ fn main() {
     args.dump_flag = dump_flag;
     args.f_options = f_options;
     args.dep_flags = dep_flags;
+    args.pthread = pthread;
     args.deps_only = deps_only;
 
     if let Err(e) = run(&args) {
@@ -336,8 +346,12 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // Forward dependency-generation flags (`-MD`/`-MF`/...) so cpp writes the
     // `.d` file as a side effect of preprocessing.
     let dep_owned = effective_dep_flags(args);
-    let dep_extra: Vec<&str> = dep_owned.iter().map(|s| s.as_str()).collect();
-    let preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &dep_extra)
+    let mut extra: Vec<&str> = dep_owned.iter().map(|s| s.as_str()).collect();
+    // `-pthread` compiles with `_REENTRANT` defined.
+    if args.pthread {
+        extra.push("-D_REENTRANT");
+    }
+    let preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
     let mut lexer = Lexer::new(&preprocessed, HashSet::new());
@@ -444,6 +458,10 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Collect linker pass-through flags: search paths, libraries, and `-Wl,`.
     let mut link_flags: Vec<String> = Vec::new();
+    // `-pthread` links the pthread library (the driver handles the specifics).
+    if args.pthread {
+        link_flags.push("-pthread".to_string());
+    }
     for dir in &args.lib_dirs {
         link_flags.push(format!("-L{}", dir));
     }
