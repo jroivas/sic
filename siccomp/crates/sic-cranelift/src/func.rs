@@ -98,6 +98,31 @@ pub fn compile_function(
     // ValId → stack slot (for `Alloca`s), so `DbgVar` can resolve a variable's
     // storage to a Cranelift stack slot for the DWARF location.
     let mut slot_map: HashMap<u32, cir::StackSlot> = HashMap::new();
+
+    // Materialize every `Alloca`'s address in the entry block up front. A stack
+    // slot is function-global, but its `stack_addr` value must dominate all
+    // uses — and an `Alloca` can appear inside a non-entry block (e.g. a local
+    // declared in a `switch` case), whose address would otherwise be referenced
+    // from sibling blocks it does not dominate. The current fill block here is
+    // still the entry block.
+    for bb in &f.blocks {
+        for instr in &bb.instrs {
+            if let Instr::Alloca { dest, ty, align } = instr {
+                let size = ty.size_of(ptr_size).max(1) as u32;
+                let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
+                if let Some(req) = align { align_bytes = align_bytes.max(*req); }
+                let align_bytes = align_bytes.next_power_of_two();
+                let align_shift = align_bytes.trailing_zeros() as u8;
+                let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                    cir::StackSlotKind::ExplicitSlot, size, align_shift,
+                ));
+                let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+                slot_map.insert(dest.0, slot);
+                val_map.insert(dest.0, addr);
+            }
+        }
+    }
+
     for (bi, bb) in f.blocks.iter().enumerate() {
         if bi > 0 {
             let cl_bb = bb_map[&bb.id.0];
@@ -135,6 +160,8 @@ fn emit_instr(
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
+            // Already materialized in the entry block by the up-front pre-pass.
+            if slot_map.contains_key(&dest.0) { return; }
             let size = ty.size_of(ptr_size).max(1) as u32;
             // `_Alignas` overrides the natural alignment (take the larger).
             let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
@@ -267,16 +294,25 @@ fn emit_instr(
         }
 
         Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
-            let sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
-            let sig_ref = builder.func.import_signature(sig);
+            let _ = ret_ty;
+            let base_sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
+            let declared_count = base_sig.params.len();
+            let param_tys: Vec<cir::Type> = base_sig.params.iter().map(|p| p.value_type).collect();
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let param_tys: Vec<cir::Type> = builder.func.stencil.dfg.signatures[sig_ref]
-                .params.iter().map(|p| p.value_type).collect();
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
                 let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
                 let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
                 coerce(v, hint, builder, ptr_ty)
             }).collect();
+            // A variadic function pointer (e.g. `int(*)(int,int,...)`) declares
+            // only its fixed params; extend the call signature with the actual
+            // trailing argument types so the call verifies.
+            let mut sig = base_sig;
+            for v in &arg_vals[declared_count.min(arg_vals.len())..] {
+                let ty = builder.func.dfg.value_type(*v);
+                sig.params.push(cir::AbiParam::new(ty));
+            }
+            let sig_ref = builder.func.import_signature(sig);
             let inst = builder.ins().call_indirect(sig_ref, fp, &arg_vals);
             if let Some(d) = dest {
                 let results = builder.inst_results(inst).to_vec();

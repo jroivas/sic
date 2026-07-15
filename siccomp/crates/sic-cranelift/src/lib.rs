@@ -191,7 +191,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
 
         if let Err(e) = obj_module.define_function(fid, &mut ctx) {
             // Print the Cranelift IR to stderr for debugging
-            eprintln!("Cranelift error in function '{}': {}", f.name, e);
+            eprintln!("Cranelift error in function '{}': {:?}", f.name, e);
             eprintln!("{}", cranelift_codegen::ir::Function::display(&ctx.func));
             return Err(e.into());
         }
