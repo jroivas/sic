@@ -513,6 +513,13 @@ impl<'m> FuncCtx<'m> {
     fn lower_unary(&mut self, op: UnOpKind, inner: &Expr) -> Result<Val> {
         match op {
             UnOpKind::Addr => {
+                // `&func` yields a function pointer — functions aren't lvalues
+                // but are addressable, and `&func` is equivalent to `func`.
+                if let ExprKind::Ident(name) = &inner.kind {
+                    if let Some(LookupResult::Func(fref)) = self.lookup(name) {
+                        return Ok(Val::Func(fref));
+                    }
+                }
                 let lv = self.lower_lvalue(inner)?;
                 Ok(lv.ptr)
             }
