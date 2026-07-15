@@ -137,6 +137,10 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Field { base, name } => {
                 let lv = self.lower_lvalue_field(base, name)?;
+                // An array member decays to a pointer to its first element.
+                if matches!(lv.ty, Type::Array { .. }) {
+                    return Ok(lv.ptr);
+                }
                 let dest = self.alloc_val();
                 let ty = lv.ty.clone();
                 self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
@@ -145,6 +149,9 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Arrow { base, name } => {
                 let lv = self.lower_lvalue_arrow(base, name)?;
+                if matches!(lv.ty, Type::Array { .. }) {
+                    return Ok(lv.ptr);
+                }
                 let dest = self.alloc_val();
                 let ty = lv.ty.clone();
                 self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
@@ -923,11 +930,16 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_arrow(&mut self, base: &Expr, name: &str) -> Result<LValue> {
-        // base is a pointer to struct
+        // base is a pointer to struct — or an array, which decays to a pointer
+        // to its first element (`arr->field` ≡ `arr[0].field`).
         let ptr = self.lower_expr(base)?;
         let ptr_ty = self.val_type(&ptr);
         let struct_ty = match &ptr_ty {
-            Type::Pointer(t) => *t.clone(),
+            Type::Pointer(t) => match t.as_ref() {
+                Type::Array { elem, .. } => (**elem).clone(),
+                _ => (**t).clone(),
+            },
+            Type::Array { elem, .. } => (**elem).clone(),
             _ => return Err(CompileError::at(
                 format!("-> applied to non-pointer (field '{}')", name),
                 base.span.file.clone(), base.span.line, base.span.col)),
