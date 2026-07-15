@@ -545,6 +545,7 @@ impl<'m> FuncCtx<'m> {
                             let elem_ptr = self.alloc_val();
                             self.push_instr(Instr::GetElemPtr {
                                 dest: elem_ptr, base: ptr.clone(), index: idx_val, elem_size,
+                                result_ty: Type::Pointer(elem.clone()),
                             });
                             self.lower_initializer(item, Val::Local(elem_ptr), elem)?;
                         }
@@ -817,7 +818,7 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
         Instr::Call { dest: Some(d), ret_ty, .. } => Some((*d, ret_ty.clone())),
         Instr::CallIndirect { dest: Some(d), ret_ty, .. } => Some((*d, ret_ty.clone())),
         Instr::GetFieldPtr { dest, result_ty, .. } => Some((*dest, result_ty.clone())),
-        Instr::GetElemPtr { dest, .. } => Some((*dest, Type::void_ptr())),
+        Instr::GetElemPtr { dest, result_ty, .. } => Some((*dest, result_ty.clone())),
         Instr::PtrOffset { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::BSwap { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::Select { dest, ty, .. } => Some((*dest, ty.clone())),

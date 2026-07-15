@@ -89,8 +89,9 @@ pub enum Instr {
     /// degrade to `void*` and a following `->`/`*` would lose the field type.
     GetFieldPtr { dest: ValId, base: Val, field_idx: usize, struct_name: Option<String>, byte_offset: u64, result_ty: Type },
 
-    /// Get a pointer to an array element.
-    GetElemPtr { dest: ValId, base: Val, index: Val, elem_size: u64 },
+    /// Get a pointer to an array element. `result_ty` is the pointer-to-element
+    /// type so `&arr[i]` keeps the element type (see `GetFieldPtr::result_ty`).
+    GetElemPtr { dest: ValId, base: Val, index: Val, elem_size: u64, result_ty: Type },
 
     /// Pointer offset (byte-level): `dest = base + offset_bytes`.
     PtrOffset { dest: ValId, base: Val, offset: Val },

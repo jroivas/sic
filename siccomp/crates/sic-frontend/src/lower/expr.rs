@@ -32,6 +32,7 @@ impl<'m> FuncCtx<'m> {
             base: Val::Global(gref),
             index: Constant::zero(),
             elem_size: 1,
+            result_ty: Type::char_ptr(),
         });
         Val::Local(ptr_id)
     }
@@ -229,6 +230,7 @@ impl<'m> FuncCtx<'m> {
                             let elem_size = elem.size_of(self.ptr_size());
                             self.push_instr(Instr::GetElemPtr {
                                 dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
+                                result_ty: Type::Pointer(Box::new(elem.clone())),
                             });
                             self.lower_init_item(item, Val::Local(eptr), &elem)?;
                         }
@@ -287,6 +289,7 @@ impl<'m> FuncCtx<'m> {
                             let eptr = self.alloc_val();
                             self.push_instr(Instr::GetElemPtr {
                                 dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
+                                result_ty: Type::Pointer(elem.clone()),
                             });
                             self.lower_init_item(it, Val::Local(eptr), elem)?;
                         }
@@ -326,7 +329,7 @@ impl<'m> FuncCtx<'m> {
                         Val::Local(neg)
                     } else { idx };
                     let dest = self.alloc_val();
-                    self.push_instr(Instr::GetElemPtr { dest, base: l, index: idx, elem_size: elem_size.unsigned_abs() });
+                    self.push_instr(Instr::GetElemPtr { dest, base: l, index: idx, elem_size: elem_size.unsigned_abs(), result_ty: Type::Pointer(Box::new(inner.clone())) });
                     self.val_types.insert(dest.0, Type::Pointer(Box::new(inner)));
                     return Ok(Val::Local(dest));
                 }
@@ -335,7 +338,7 @@ impl<'m> FuncCtx<'m> {
                     let elem_size = inner.size_of(self.ptr_size());
                     let idx = self.coerce(l, &Type::i64())?;
                     let dest = self.alloc_val();
-                    self.push_instr(Instr::GetElemPtr { dest, base: r, index: idx, elem_size });
+                    self.push_instr(Instr::GetElemPtr { dest, base: r, index: idx, elem_size, result_ty: Type::Pointer(Box::new(inner.clone())) });
                     self.val_types.insert(dest.0, Type::Pointer(Box::new(inner)));
                     return Ok(Val::Local(dest));
                 }
@@ -570,9 +573,22 @@ impl<'m> FuncCtx<'m> {
         let cond_val = self.lower_expr(cond)?;
         let cond_bool = self.to_bool(cond_val)?;
 
+        // Result type of `a ? b : c`: prefer a pointer/float/wider branch so the
+        // value (and its type — needed for a following `->`, `*`, arithmetic)
+        // survives. Both branches are coerced to it.
+        let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
+        let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+        let ty = match (&tty, &ety) {
+            (Type::Pointer(_), _) | (Type::Void, _) => tty.clone(),
+            (_, Type::Pointer(_)) => ety.clone(),
+            _ if tty.is_float() => tty.clone(),
+            _ if ety.is_float() => ety.clone(),
+            _ if ety.size_of(self.ptr_size()) > tty.size_of(self.ptr_size()) => ety.clone(),
+            _ => tty.clone(),
+        };
+
         let result_ptr = self.alloc_val();
-        // Defer type until we know both branches — use i32 for now
-        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32(), align: None });
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: ty.clone(), align: None });
 
         let then_bb  = self.new_block_after_current();
         let else_bb  = self.new_block_after_current();
@@ -582,17 +598,19 @@ impl<'m> FuncCtx<'m> {
 
         self.switch_to_block(then_bb);
         let tv = self.lower_expr(then)?;
+        let tv = self.coerce(tv, &ty)?;
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(else_bb);
         let ev = self.lower_expr(else_)?;
+        let ev = self.coerce(ev, &ty)?;
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(merge_bb);
         let dest = self.alloc_val();
-        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: Type::i32() });
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
         Ok(Val::Local(dest))
     }
 
@@ -893,7 +911,8 @@ impl<'m> FuncCtx<'m> {
 
         let elem_size = elem_ty.size_of(self.ptr_size());
         let dest = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size });
+        let result_ty = Type::Pointer(Box::new(elem_ty.clone()));
+        self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size, result_ty });
         Ok(LValue { ptr: Val::Local(dest), ty: elem_ty })
     }
 
@@ -909,7 +928,9 @@ impl<'m> FuncCtx<'m> {
         let ptr_ty = self.val_type(&ptr);
         let struct_ty = match &ptr_ty {
             Type::Pointer(t) => *t.clone(),
-            _ => return Err(CompileError::new("-> applied to non-pointer")),
+            _ => return Err(CompileError::at(
+                format!("-> applied to non-pointer (field '{}')", name),
+                base.span.file.clone(), base.span.line, base.span.col)),
         };
         let lv = LValue { ptr, ty: struct_ty };
         self.field_ptr_from(lv, name, true, &base.span)

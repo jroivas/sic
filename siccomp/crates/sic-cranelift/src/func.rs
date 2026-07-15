@@ -286,7 +286,7 @@ fn emit_instr(
             }
         }
 
-        Instr::GetElemPtr { dest, base, index, elem_size } => {
+        Instr::GetElemPtr { dest, base, index, elem_size, .. } => {
             let bv = rval(base, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let iv = rval(index, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let ic = coerce(iv, ptr_ty, builder, ptr_ty);

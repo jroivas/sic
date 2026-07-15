@@ -120,10 +120,18 @@ impl Lowerer {
                 if s.name.is_some() && s.fields.is_some() {
                     self.register_struct_type_from_def(s)?;
                 }
+                // Recurse into the body so deeper tagged definitions (even inside
+                // anonymous structs/unions) are registered too.
+                if let Some(fields) = &s.fields {
+                    for f in fields { self.register_nested_struct_defs(&f.ty.ty)?; }
+                }
             }
             AstType::Union(u) => {
                 if u.name.is_some() && u.fields.is_some() {
                     self.register_union_type_from_def(u)?;
+                }
+                if let Some(fields) = &u.fields {
+                    for f in fields { self.register_nested_struct_defs(&f.ty.ty)?; }
                 }
             }
             AstType::Pointer { base, .. } | AstType::Array { base, .. } => {
