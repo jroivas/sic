@@ -117,6 +117,11 @@ struct Args {
     /// library. Set from the argv pre-pass.
     #[arg(skip)]
     pthread: bool,
+
+    /// `-shared`: produce a shared object (`.so`) instead of an executable.
+    /// Passed through to the linker; implies position-independent code.
+    #[arg(skip)]
+    shared: bool,
 }
 
 /// The dependency-generation flags to hand to cpp. When the user didn't give a
@@ -207,12 +212,16 @@ fn main() {
     let mut dep_flags: Vec<String> = Vec::new();
     let mut deps_only = false;
     let mut pthread = false;
+    let mut shared = false;
     let mut argv: Vec<String> = Vec::new();
     let mut iter = std::env::args().peekable();
     while let Some(a) = iter.next() {
         if a == "-pthread" || a == "-pthreads" {
             // Compile with `_REENTRANT` and link the pthread library.
             pthread = true;
+        } else if a == "-shared" {
+            // Produce a shared object; pass through to the linker.
+            shared = true;
         } else if a == "-std" {
             // Accept `-std c99` in addition to clap's `--std c99`.
             argv.push("--std".to_string());
@@ -276,6 +285,7 @@ fn main() {
     args.f_options = f_options;
     args.dep_flags = dep_flags;
     args.pthread = pthread;
+    args.shared = shared;
     args.deps_only = deps_only;
 
     if let Err(e) = run(&args) {
@@ -512,6 +522,11 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         link.arg(obj);
     }
     link.arg("-o").arg(out_path);
+
+    // Produce a shared object rather than an executable.
+    if args.shared {
+        link.arg("-shared");
+    }
 
     // Preserve debug info through the link step when `-g` was requested.
     if args.debug_info {
