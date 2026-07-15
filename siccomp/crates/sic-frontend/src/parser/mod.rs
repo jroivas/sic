@@ -1209,9 +1209,10 @@ impl Parser {
                 let name = self.advance().text.clone();
                 // Handle va builtins
                 match name.as_str() {
-                    "__builtin_va_start" => return self.parse_va_builtin_start(sp),
-                    "__builtin_va_arg"   => return self.parse_va_builtin_arg(sp),
-                    "__builtin_va_end"   => return self.parse_va_builtin_end(sp),
+                    "__builtin_va_start"     => return self.parse_va_builtin_start(sp),
+                    "__builtin_c23_va_start" => return self.parse_va_builtin_c23_start(sp),
+                    "__builtin_va_arg"       => return self.parse_va_builtin_arg(sp),
+                    "__builtin_va_end"       => return self.parse_va_builtin_end(sp),
                     _ => {}
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
@@ -1249,6 +1250,22 @@ impl Parser {
         self.expect(TokenKind::Comma)?;
         let last = self.parse_assign_expr()?;
         self.expect(TokenKind::RParen)?;
+        Ok(Expr::new(ExprKind::VaStart { list: Box::new(list), last: Box::new(last) }, sp))
+    }
+
+    /// C23 `__builtin_c23_va_start(ap, ...)`: the last named-parameter argument
+    /// is optional (and, on this target, unused). Accept `(ap)` or `(ap, ...)`
+    /// and discard any trailing arguments.
+    fn parse_va_builtin_c23_start(&mut self, sp: Span) -> Result<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let list = self.parse_assign_expr()?;
+        let mut last: Option<Expr> = None;
+        while self.eat(TokenKind::Comma) {
+            let e = self.parse_assign_expr()?;
+            if last.is_none() { last = Some(e); }
+        }
+        self.expect(TokenKind::RParen)?;
+        let last = last.unwrap_or_else(|| Expr::new(ExprKind::IntLit(0, false), sp.clone()));
         Ok(Expr::new(ExprKind::VaStart { list: Box::new(list), last: Box::new(last) }, sp))
     }
 

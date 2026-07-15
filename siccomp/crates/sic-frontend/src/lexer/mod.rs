@@ -389,7 +389,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "__const__"      => TokenKind::Const,
         "__volatile__"   => TokenKind::Volatile,
         "__restrict__"   => TokenKind::Restrict,
-        "__builtin_va_start" | "__builtin_va_end" | "__builtin_va_arg" => TokenKind::Ident,
+        "__builtin_va_start" | "__builtin_c23_va_start"
+        | "__builtin_va_end" | "__builtin_va_arg" => TokenKind::Ident,
         _ if typedefs.contains(s) => TokenKind::TypeName,
         _ => TokenKind::Ident,
     }
