@@ -84,7 +84,10 @@ pub enum Instr {
     CallIndirect { dest: Option<ValId>, fptr: Val, args: Vec<Val>, ret_ty: Type, func_ty: Box<crate::FunctionType> },
 
     /// Get a pointer to a struct field: `base` is a pointer to the struct.
-    GetFieldPtr { dest: ValId, base: Val, field_idx: usize, struct_name: Option<String>, byte_offset: u64 },
+    /// `result_ty` is the pointer-to-field type, so the field's type survives
+    /// taking its address (e.g. `&s.field`) — without it, address-of would
+    /// degrade to `void*` and a following `->`/`*` would lose the field type.
+    GetFieldPtr { dest: ValId, base: Val, field_idx: usize, struct_name: Option<String>, byte_offset: u64, result_ty: Type },
 
     /// Get a pointer to an array element.
     GetElemPtr { dest: ValId, base: Val, index: Val, elem_size: u64 },

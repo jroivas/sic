@@ -45,6 +45,7 @@ pub enum TokenKind {
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)
+    Generic,  // _Generic (C11)
 
     // --- GCC extensions ---
     Attribute, Extension, Asm,

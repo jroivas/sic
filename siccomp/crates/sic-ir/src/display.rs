@@ -127,7 +127,7 @@ impl fmt::Display for Instr {
                 }
                 write!(f, ")")
             }
-            Instr::GetFieldPtr { dest, base, field_idx, struct_name, byte_offset } =>
+            Instr::GetFieldPtr { dest, base, field_idx, struct_name, byte_offset, .. } =>
                 write!(f, "  %{} = gfp {}.{} {} +{}", dest.0,
                     struct_name.as_deref().unwrap_or("?"), field_idx, base, byte_offset),
             Instr::GetElemPtr { dest, base, index, elem_size } =>

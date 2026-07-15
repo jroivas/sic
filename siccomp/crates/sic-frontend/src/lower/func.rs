@@ -559,6 +559,7 @@ impl<'m> FuncCtx<'m> {
                             self.push_instr(Instr::GetFieldPtr {
                                 dest: field_ptr, base: ptr.clone(), field_idx: i,
                                 struct_name: st.name.clone(), byte_offset,
+                                result_ty: Type::Pointer(Box::new(field_ty.clone())),
                             });
                             self.lower_initializer(item, Val::Local(field_ptr), &field_ty)?;
                         }
@@ -815,7 +816,7 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
         Instr::Cmp { dest, .. } => Some((*dest, Type::Bool)),
         Instr::Call { dest: Some(d), ret_ty, .. } => Some((*d, ret_ty.clone())),
         Instr::CallIndirect { dest: Some(d), ret_ty, .. } => Some((*d, ret_ty.clone())),
-        Instr::GetFieldPtr { dest, .. } => Some((*dest, Type::void_ptr())),
+        Instr::GetFieldPtr { dest, result_ty, .. } => Some((*dest, result_ty.clone())),
         Instr::GetElemPtr { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::PtrOffset { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::BSwap { dest, ty, .. } => Some((*dest, ty.clone())),

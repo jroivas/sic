@@ -151,6 +151,8 @@ fn is_safe_predefine(name: &str) -> bool {
         || name == "__FLOAT_WORD_ORDER__"
         || name.starts_with("__ORDER_")
         || name.starts_with("__SIZEOF_")
+        // Memory-order constants for the `__atomic_*` builtins (integer 0..5).
+        || name.starts_with("__ATOMIC_")
         || name.ends_with("_MAX__")
         || name.ends_with("_MIN__")
         || name.ends_with("_WIDTH__")

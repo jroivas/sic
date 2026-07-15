@@ -428,6 +428,21 @@ impl Parser {
 
     // ─── Declarators ──────────────────────────────────────────────────────────
 
+    /// With the current token at `(`, decide whether it opens a *grouped
+    /// declarator* `( declarator )` rather than a function parameter list.
+    /// A grouped declarator's first inner token is `*`, another `(`, or an
+    /// identifier that is a declarator name (not a typedef/type). A `(` that is
+    /// immediately followed by a type, `)`, or `void` is a function suffix and
+    /// is handled by `parse_declarator_suffix` instead.
+    fn grouped_declarator_ahead(&self) -> bool {
+        let next = &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)];
+        match next.kind {
+            TokenKind::Star | TokenKind::LParen | TokenKind::LBracket => true,
+            TokenKind::Ident => !self.typedefs.contains(next.text.as_str()),
+            _ => false,
+        }
+    }
+
     /// Parse a declarator, returning (name, fully-qualified type).
     fn parse_declarator(&mut self, base: QualType) -> Result<(String, QualType)> {
         // Collect pointer levels and apply them to the base type immediately (forward order).
@@ -459,45 +474,23 @@ impl Parser {
             let name = self.advance().text.clone();
             let ty = self.parse_declarator_suffix(new_base)?;
             return Ok((name, ty));
-        } else if self.at(TokenKind::LParen) {
-            // Grouped declarator: `(*name)(suffix)` or abstract
+        } else if self.at(TokenKind::LParen) && self.grouped_declarator_ahead() {
+            // Grouped declarator: `( declarator )` followed by array/function
+            // suffixes. Handles arbitrary nesting, e.g. a function pointer that
+            // returns a function pointer: `void (*(*f)(A))(B)`.
+            //
+            // The C rule is that the trailing suffixes apply to `new_base`
+            // *first*, then the inner declarator wraps that. We parse the inner
+            // declarator against a fresh sentinel leaf, then splice the suffixed
+            // base into the sentinel's place.
+            let sentinel = format!("\0decl{}", self.pos);
             self.advance(); // (
-            if self.at(TokenKind::Star) {
-                // Pointer grouped declarator: (*name)(suffix) or (**name)(suffix)
-                let mut ptr_quals: Vec<Vec<TypeQual>> = Vec::new();
-                while self.eat(TokenKind::Star) {
-                    let mut pq = Vec::new();
-                    loop {
-                        match self.peek_kind() {
-                            TokenKind::Const    => { pq.push(TypeQual::Const);    self.advance(); }
-                            TokenKind::Volatile => { pq.push(TypeQual::Volatile); self.advance(); }
-                            TokenKind::Restrict => { pq.push(TypeQual::Restrict); self.advance(); }
-                            _ => break,
-                        }
-                    }
-                    ptr_quals.push(pq);
-                }
-                let inner_name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
-                    self.advance().text.clone()
-                } else {
-                    String::new()
-                };
-                self.expect(TokenKind::RParen)?;
-                // Apply suffix to new_base (outer pointers already applied), then wrap with inner pointers
-                let mut ty = self.parse_declarator_suffix(new_base)?;
-                for pq in ptr_quals.into_iter().rev() {
-                    ty = QualType {
-                        ty: AstType::Pointer { base: Box::new(ty), quals: pq },
-                        qualifiers: vec![],
-                        storage: None,
-                    };
-                }
-                return Ok((inner_name, ty));
-            } else {
-                self.expect(TokenKind::RParen)?;
-                let ty = self.parse_declarator_suffix(new_base)?;
-                return Ok((String::new(), ty));
-            }
+            let sent_qt = QualType::new(AstType::Named(sentinel.clone()));
+            let (name, inner_ty) = self.parse_declarator(sent_qt)?;
+            self.expect(TokenKind::RParen)?;
+            let outer_base = self.parse_declarator_suffix(new_base)?;
+            let ty = subst_sentinel(inner_ty, &sentinel, &outer_base);
+            return Ok((name, ty));
         }
 
         // Abstract declarator (no name)
@@ -1110,6 +1103,27 @@ impl Parser {
                     Ok(Expr::new(ExprKind::SizeofExpr(Box::new(e)), sp))
                 }
             }
+            TokenKind::Generic => {
+                // C11 `_Generic(controlling, T1: e1, ..., default: eN)`.
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let controlling = Box::new(self.parse_assign_expr()?);
+                let mut assocs = Vec::new();
+                while self.eat(TokenKind::Comma) {
+                    let ty = if self.eat(TokenKind::Default) {
+                        None
+                    } else {
+                        let (base, _) = self.parse_decl_specifiers()?;
+                        let (_, qt) = self.parse_declarator(base)?;
+                        Some(qt)
+                    };
+                    self.expect(TokenKind::Colon)?;
+                    let e = Box::new(self.parse_assign_expr()?);
+                    assocs.push((ty, e));
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::new(ExprKind::Generic { controlling, assocs }, sp))
+            }
             _ => self.parse_postfix()
         }
     }
@@ -1232,6 +1246,7 @@ impl Parser {
                     "__builtin_c23_va_start" => return self.parse_va_builtin_c23_start(sp),
                     "__builtin_va_arg"       => return self.parse_va_builtin_arg(sp),
                     "__builtin_va_end"       => return self.parse_va_builtin_end(sp),
+                    "__builtin_offsetof"     => return self.parse_offsetof(sp),
                     _ => {}
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
@@ -1261,6 +1276,32 @@ impl Parser {
                 ))
             }
         }
+    }
+
+    /// `__builtin_offsetof(type-name, member-designator)` where the designator
+    /// is `identifier ( .identifier | [ expr ] )*`.
+    fn parse_offsetof(&mut self, sp: Span) -> Result<Expr> {
+        use crate::ast::OffsetDesignator;
+        self.expect(TokenKind::LParen)?;
+        let (base, _) = self.parse_decl_specifiers()?;
+        let (_, ty) = self.parse_declarator(base)?;
+        self.expect(TokenKind::Comma)?;
+        let mut designators = Vec::new();
+        // First member is a bare identifier.
+        designators.push(OffsetDesignator::Field(self.expect(TokenKind::Ident)?.text));
+        loop {
+            if self.eat(TokenKind::Dot) {
+                designators.push(OffsetDesignator::Field(self.expect(TokenKind::Ident)?.text));
+            } else if self.eat(TokenKind::LBracket) {
+                let idx = self.parse_assign_expr()?;
+                self.expect(TokenKind::RBracket)?;
+                designators.push(OffsetDesignator::Index(Box::new(idx)));
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(Expr::new(ExprKind::OffsetOf { ty, designators }, sp))
     }
 
     fn parse_va_builtin_start(&mut self, sp: Span) -> Result<Expr> {
@@ -1357,6 +1398,28 @@ fn ast_type_alignment(ty: &AstType) -> u32 {
         AstType::LongDouble => 16,
         AstType::Array { base, .. } => ast_type_alignment(&base.ty),
         _ => 8,
+    }
+}
+
+/// Replace the sentinel leaf type (a `Named` placeholder) inside a declarator
+/// type with `repl`. Used to splice a grouped declarator's suffixed base into
+/// the position occupied by its inner declarator's placeholder leaf.
+fn subst_sentinel(ty: QualType, sentinel: &str, repl: &QualType) -> QualType {
+    match ty.ty {
+        AstType::Named(ref n) if n == sentinel => repl.clone(),
+        AstType::Pointer { base, quals } => QualType {
+            ty: AstType::Pointer { base: Box::new(subst_sentinel(*base, sentinel, repl)), quals },
+            qualifiers: ty.qualifiers, storage: ty.storage,
+        },
+        AstType::Function { ret, params, variadic } => QualType {
+            ty: AstType::Function { ret: Box::new(subst_sentinel(*ret, sentinel, repl)), params, variadic },
+            qualifiers: ty.qualifiers, storage: ty.storage,
+        },
+        AstType::Array { base, size } => QualType {
+            ty: AstType::Array { base: Box::new(subst_sentinel(*base, sentinel, repl)), size },
+            qualifiers: ty.qualifiers, storage: ty.storage,
+        },
+        _ => ty,
     }
 }
 

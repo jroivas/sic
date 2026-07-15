@@ -238,6 +238,15 @@ pub enum ExprKind {
     /// Cast: (type)expr
     Cast { ty: QualType, expr: BoxExpr },
 
+    /// C11 `_Generic(controlling, T1: e1, ..., default: eN)`. Each association
+    /// pairs an optional type (`None` for `default`) with an expression; the
+    /// one whose type matches the controlling expression's type is selected.
+    Generic { controlling: BoxExpr, assocs: Vec<(Option<QualType>, BoxExpr)> },
+
+    /// `__builtin_offsetof(type, member)` — byte offset of `member` within
+    /// `type`. `designators` is the member path (`.field` / `[index]`).
+    OffsetOf { ty: QualType, designators: Vec<OffsetDesignator> },
+
     /// Comma expression: a, b
     Comma(BoxExpr, BoxExpr),
 
@@ -252,6 +261,13 @@ pub enum ExprKind {
     VaStart { list: BoxExpr, last: BoxExpr },
     VaArg { list: BoxExpr, ty: QualType },
     VaEnd { list: BoxExpr },
+}
+
+/// A member designator step inside `__builtin_offsetof(type, member)`.
+#[derive(Debug, Clone)]
+pub enum OffsetDesignator {
+    Field(String),
+    Index(BoxExpr),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

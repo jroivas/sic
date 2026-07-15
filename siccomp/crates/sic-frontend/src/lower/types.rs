@@ -38,7 +38,13 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Complex     => Type::Float64, // simplified
         AstType::Pointer { base, .. } => {
             let inner = lower_type(base, named, ptr_size)?;
-            Type::Pointer(Box::new(inner))
+            // Keep pointee aggregates *opaque* (name only, no fields). A pointer
+            // is always `ptr_size` bytes, so the pointee's layout is not needed
+            // here — and fully expanding it makes densely pointer-connected
+            // struct graphs blow up (each shared pointee is cloned into every
+            // referrer, an exponential in the DAG). Field access / sizeof of the
+            // pointee re-resolves the full definition by name via `named`.
+            Type::Pointer(Box::new(opaque_aggregate(inner)))
         }
         AstType::Array { base, size } => {
             let elem = lower_type(base, named, ptr_size)?;
@@ -93,6 +99,30 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             })?
         }
     })
+}
+
+/// Reduce a named struct/union to an opaque (field-less) reference. Used for
+/// pointer pointees so the type graph stays small; the full definition is
+/// recovered on demand with [`resolve_aggregate`].
+pub fn opaque_aggregate(t: Type) -> Type {
+    match t {
+        Type::Struct(st) if st.name.is_some() =>
+            Type::Struct(StructType { name: st.name, fields: vec![], packed: st.packed }),
+        Type::Union(u) if u.name.is_some() =>
+            Type::Union(UnionType { name: u.name, fields: vec![] }),
+        other => other,
+    }
+}
+
+/// If `ty` is an opaque (field-less) named struct/union, return its full
+/// definition from the type table; otherwise return `ty` unchanged.
+pub fn resolve_aggregate(ty: &Type, named: &HashMap<String, Type>) -> Type {
+    let name = match ty {
+        Type::Struct(st) if st.fields.is_empty() && st.name.is_some() => st.name.as_ref().unwrap(),
+        Type::Union(u)  if u.fields.is_empty()  && u.name.is_some()  => u.name.as_ref().unwrap(),
+        _ => return ty.clone(),
+    };
+    named.get(name).cloned().unwrap_or_else(|| ty.clone())
 }
 
 fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {

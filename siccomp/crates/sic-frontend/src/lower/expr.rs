@@ -39,6 +39,14 @@ impl<'m> FuncCtx<'m> {
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         match &expr.kind {
+            ExprKind::Generic { controlling, assocs } => {
+                let idx = self.select_generic(controlling, assocs)?;
+                self.lower_expr(&assocs[idx].1)
+            }
+            ExprKind::OffsetOf { ty, designators } => {
+                let off = self.compute_offsetof(ty, designators)?;
+                self.coerce(Constant::int(off as i64), &Type::u64())
+            }
             // Widen a 64-bit literal to its declared width so its runtime type
             // isn't the default 32-bit (needed for e.g. `1LL << 40`). For a
             // large-magnitude value `val_type` already reports 64-bit, so the
@@ -211,6 +219,7 @@ impl<'m> FuncCtx<'m> {
                             self.push_instr(Instr::GetFieldPtr {
                                 dest: fptr, base: ptr.clone(), field_idx: i,
                                 struct_name: st.name.clone(), byte_offset,
+                                result_ty: Type::Pointer(Box::new(fty.clone())),
                             });
                             self.lower_init_item(item, Val::Local(fptr), &fty)?;
                         }
@@ -269,6 +278,7 @@ impl<'m> FuncCtx<'m> {
                             self.push_instr(Instr::GetFieldPtr {
                                 dest: fptr, base: ptr.clone(), field_idx: i,
                                 struct_name: st.name.clone(), byte_offset,
+                                result_ty: Type::Pointer(Box::new(fty.clone())),
                             });
                             self.lower_init_item(it, Val::Local(fptr), &fty)?;
                         }
@@ -461,6 +471,18 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(lhs)?;
+
+        // Aggregate (struct/union) assignment is a byte copy, not a scalar
+        // load/store — the latter would truncate anything wider than a register.
+        if op.is_none() && matches!(lv.ty, Type::Struct(_) | Type::Union(_)) {
+            if let Ok(src) = self.lower_lvalue(rhs) {
+                let size = lv.ty.size_of(self.ptr_size());
+                let align = lv.ty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src: src.ptr, size, align });
+                return Ok(lv.ptr);
+            }
+        }
+
         let rhs_val = self.lower_expr(rhs)?;
 
         let store_val = if let Some(bin_op) = op {
@@ -489,10 +511,7 @@ impl<'m> FuncCtx<'m> {
                 let dest = self.alloc_val();
                 // Determine pointee type
                 let ptr_ty = self.val_type(&ptr);
-                let inner_ty = match &ptr_ty {
-                    Type::Pointer(t) => *t.clone(),
-                    _ => Type::i32(), // fallback
-                };
+                let inner_ty = self.pointee_of(&ptr_ty);
                 self.push_instr(Instr::Load { dest, ptr, ty: inner_ty });
                 Ok(Val::Local(dest))
             }
@@ -607,6 +626,43 @@ impl<'m> FuncCtx<'m> {
             };
             if let (Some(op), [a_expr, b_expr, res_expr]) = (ovf_op, args) {
                 return self.lower_overflow_builtin(op, a_expr, b_expr, res_expr);
+            }
+
+            // Atomic builtins. We lower these to plain (non-atomic) load/store
+            // and treat fences as no-ops. This is functionally correct for
+            // single-threaded execution and the relaxed-ordering uses sqlite
+            // makes; it is not a true multi-threaded atomic implementation.
+            match name.as_str() {
+                // T __atomic_load_n(const T *ptr, int memorder)
+                "__atomic_load_n" => {
+                    if let Some(ptr_expr) = args.first() {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let ty = match self.val_type(&ptr) {
+                            Type::Pointer(t) => *t,
+                            _ => Type::i32(),
+                        };
+                        let dest = self.alloc_val();
+                        self.push_instr(Instr::Load { dest, ptr, ty });
+                        return Ok(Val::Local(dest));
+                    }
+                }
+                // void __atomic_store_n(T *ptr, T val, int memorder)
+                "__atomic_store_n" => {
+                    if let [ptr_expr, val_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let val = self.lower_expr(val_expr)?;
+                        let ty = match self.val_type(&ptr) {
+                            Type::Pointer(t) => *t,
+                            _ => self.val_type(&val),
+                        };
+                        let cv = self.coerce(val, &ty)?;
+                        self.push_instr(Instr::Store { val: cv, ptr });
+                        return Ok(Constant::zero());
+                    }
+                }
+                // void __sync_synchronize(void) — full memory barrier; no-op here.
+                "__sync_synchronize" => return Ok(Constant::zero()),
+                _ => {}
             }
         }
 
@@ -772,6 +828,16 @@ impl<'m> FuncCtx<'m> {
 
     // ─── LValue lowering ─────────────────────────────────────────────────────
 
+    /// Extract a pointer's pointee type, resolving an opaque pointee aggregate
+    /// to its full definition. Pointees are stored opaque (see `lower_ast_type`);
+    /// dereferencing needs the real layout for loads/stores/copies.
+    fn pointee_of(&self, ptr_ty: &Type) -> Type {
+        match ptr_ty {
+            Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
+            _ => Type::i32(),
+        }
+    }
+
     fn lower_lvalue(&mut self, expr: &Expr) -> Result<LValue> {
         match &expr.kind {
             ExprKind::Ident(name) => {
@@ -793,10 +859,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => {
                 let ptr = self.lower_expr(inner)?;
                 let ptr_ty = self.val_type(&ptr);
-                let inner_ty = match ptr_ty {
-                    Type::Pointer(t) => *t,
-                    _ => Type::i32(),
-                };
+                let inner_ty = self.pointee_of(&ptr_ty);
                 Ok(LValue { ptr, ty: inner_ty })
             }
             ExprKind::Index { base, index } => self.lower_lvalue_index(base, index),
@@ -822,7 +885,7 @@ impl<'m> FuncCtx<'m> {
         let elem_ty = match &base_ty {
             Type::Pointer(t) => match t.as_ref() {
                 Type::Array { elem, .. } => *elem.clone(),
-                other => other.clone(),
+                other => super::types::resolve_aggregate(other, &self.lowerer.struct_types),
             },
             Type::Array { elem, .. } => *elem.clone(),
             _ => Type::i32(),
@@ -849,7 +912,7 @@ impl<'m> FuncCtx<'m> {
             _ => return Err(CompileError::new("-> applied to non-pointer")),
         };
         let lv = LValue { ptr, ty: struct_ty };
-        self.field_ptr_from(lv, name, true, &crate::lexer::Span::default())
+        self.field_ptr_from(lv, name, true, &base.span)
     }
 
     fn field_ptr_from(&mut self, lv: LValue, field_name: &str, via_ptr: bool, sp: &crate::lexer::Span) -> Result<LValue> {
@@ -876,22 +939,98 @@ impl<'m> FuncCtx<'m> {
             lv.ptr
         };
 
-        let byte_offset = match &struct_ty {
+        // Resolve an opaque pointee aggregate to its full definition so field
+        // offsets are computed from the real layout.
+        let resolved_ty = super::types::resolve_aggregate(&struct_ty, &self.lowerer.struct_types);
+        let byte_offset = match &resolved_ty {
             Type::Struct(st) => st.field_offset(field_idx, self.ptr_size()),
             _ => 0,
         };
 
         let dest = self.alloc_val();
+        let result_ty = Type::Pointer(Box::new(field_ty.clone()));
         self.push_instr(Instr::GetFieldPtr {
-            dest, base: base_ptr, field_idx, struct_name, byte_offset,
+            dest, base: base_ptr, field_idx, struct_name, byte_offset, result_ty,
         });
         Ok(LValue { ptr: Val::Local(dest), ty: field_ty })
     }
 
     // ─── Type inference ───────────────────────────────────────────────────────
 
+    /// Resolve a `_Generic` selection to the index of the matching association.
+    /// The controlling expression's type undergoes lvalue conversion (array /
+    /// function decay); it is compared against each association's lowered type,
+    /// falling back to the `default` association. Matching is done on the IR
+    /// `Type`, which is qualifier-insensitive — adequate because only the
+    /// selected branch is ever lowered.
+    fn select_generic(&self, controlling: &Expr, assocs: &[(Option<crate::ast::QualType>, Box<Expr>)]) -> Result<usize> {
+        fn decay(t: Type) -> Type {
+            match t {
+                Type::Array { elem, .. } => Type::Pointer(elem),
+                Type::Function(_) => Type::void_ptr(),
+                other => other,
+            }
+        }
+        let ctrl_ty = decay(self.infer_expr_type(controlling)?);
+        let mut default_idx = None;
+        for (i, (aty, _)) in assocs.iter().enumerate() {
+            match aty {
+                None => default_idx = Some(i),
+                Some(qt) => {
+                    if decay(self.lower_type(qt)?) == ctrl_ty {
+                        return Ok(i);
+                    }
+                }
+            }
+        }
+        let sp = &controlling.span;
+        default_idx.ok_or_else(|| CompileError::at(
+            "no matching association in _Generic selection",
+            sp.file.clone(), sp.line, sp.col,
+        ))
+    }
+
+    /// Compute the byte offset of a member designator within a type, for
+    /// `__builtin_offsetof`. Walks `.field` (struct/union) and `[index]` (array)
+    /// steps, summing struct field offsets and array element strides.
+    fn compute_offsetof(&self, ty: &crate::ast::QualType, designators: &[crate::ast::OffsetDesignator]) -> Result<u64> {
+        use crate::ast::OffsetDesignator;
+        let mut cur = self.lower_type(ty)?;
+        let mut offset: u64 = 0;
+        for d in designators {
+            match d {
+                OffsetDesignator::Field(name) => {
+                    let resolved = super::types::resolve_aggregate(&cur, &self.lowerer.struct_types);
+                    let (idx, fty, _) = find_field(&resolved, name, &self.lowerer.struct_types)
+                        .ok_or_else(|| CompileError::new(format!("no field '{}' in offsetof", name)))?;
+                    if let Type::Struct(st) = &resolved {
+                        offset += st.field_offset(idx, self.ptr_size());
+                    }
+                    // union members are all at offset 0
+                    cur = fty;
+                }
+                OffsetDesignator::Index(e) => {
+                    let i = super::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0);
+                    let elem = match &cur {
+                        Type::Array { elem, .. } => *elem.clone(),
+                        Type::Pointer(t) => *t.clone(),
+                        other => other.clone(),
+                    };
+                    offset += (i as u64).wrapping_mul(elem.size_of(self.ptr_size()));
+                    cur = elem;
+                }
+            }
+        }
+        Ok(offset)
+    }
+
     pub fn infer_expr_type(&self, expr: &Expr) -> Result<Type> {
         match &expr.kind {
+            ExprKind::Generic { controlling, assocs } => {
+                let idx = self.select_generic(controlling, assocs)?;
+                self.infer_expr_type(&assocs[idx].1)
+            }
+            ExprKind::OffsetOf { .. } => Ok(Type::u64()),
             ExprKind::CharLit(_) => Ok(Type::i32()),
             ExprKind::IntLit(_, is64) => Ok(if *is64 { Type::i64() } else { Type::i32() }),
             ExprKind::UIntLit(_, is64) => Ok(if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
@@ -916,7 +1055,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(match inner_ty {
-                    Type::Pointer(t) => *t,
+                    Type::Pointer(t) => self.pointee_of(&Type::Pointer(t)),
                     _ => Type::i32(),
                 })
             }
@@ -972,8 +1111,10 @@ fn inc_op(ty: &Type, inc: bool) -> BinOp {
     }
 }
 
-fn find_field(ty: &Type, name: &str, _named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {
-    match ty {
+fn find_field(ty: &Type, name: &str, named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {
+    // A pointee aggregate is stored opaque (no fields); recover its definition.
+    let resolved = super::types::resolve_aggregate(ty, named);
+    match &resolved {
         Type::Struct(st) => {
             for (i, (fname, fty)) in st.fields.iter().enumerate() {
                 if fname == name {

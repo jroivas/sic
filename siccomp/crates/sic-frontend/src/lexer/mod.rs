@@ -374,6 +374,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "typeof" | "__typeof__" | "__typeof" => TokenKind::Typeof,
         "nullptr"        => TokenKind::Nullptr,
         "_Alignas" | "alignas" => TokenKind::Alignas,
+        "_Generic"       => TokenKind::Generic,
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
         "__builtin_va_list" => TokenKind::TypeName,

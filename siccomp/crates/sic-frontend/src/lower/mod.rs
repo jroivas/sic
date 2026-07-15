@@ -111,10 +111,34 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Register any tagged struct/union definitions nested inside a type so they
+    /// resolve when later referenced standalone by tag — e.g. a `struct _ht {...}
+    /// *ht;` member whose `struct _ht` is used elsewhere as a parameter type.
+    fn register_nested_struct_defs(&mut self, ty: &AstType) -> Result<()> {
+        match ty {
+            AstType::Struct(s) => {
+                if s.name.is_some() && s.fields.is_some() {
+                    self.register_struct_type_from_def(s)?;
+                }
+            }
+            AstType::Union(u) => {
+                if u.name.is_some() && u.fields.is_some() {
+                    self.register_union_type_from_def(u)?;
+                }
+            }
+            AstType::Pointer { base, .. } | AstType::Array { base, .. } => {
+                self.register_nested_struct_defs(&base.ty)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn register_struct_type_from_def(&mut self, s: &StructDef) -> Result<()> {
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
             let mut ir_fields = Vec::new();
             for f in fields {
+                self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
                 ir_fields.push((fname, fty));
@@ -129,6 +153,7 @@ impl Lowerer {
         if let (Some(name), Some(fields)) = (&u.name, &u.fields) {
             let mut ir_fields = Vec::new();
             for f in fields {
+                self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
                 ir_fields.push((fname, fty));
@@ -404,10 +429,22 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
                 BinOpKind::Le     => if l <= r { 1 } else { 0 },
                 BinOpKind::Gt     => if l > r  { 1 } else { 0 },
                 BinOpKind::Ge     => if l >= r { 1 } else { 0 },
+                BinOpKind::LogAnd => if l != 0 && r != 0 { 1 } else { 0 },
+                BinOpKind::LogOr  => if l != 0 || r != 0 { 1 } else { 0 },
                 _ => return Err(CompileError::new("non-constant expression")),
             })
         }
+        ExprKind::Ternary { cond, then, else_ } => {
+            if eval_const_expr(cond, enum_consts)? != 0 {
+                eval_const_expr(then, enum_consts)
+            } else {
+                eval_const_expr(else_, enum_consts)
+            }
+        }
         ExprKind::Cast { expr, .. } => eval_const_expr(expr, enum_consts),
-        _ => Err(CompileError::new("non-constant expression")),
+        _ => {
+            let sp = &e.span;
+            Err(CompileError::at("non-constant expression", sp.file.clone(), sp.line, sp.col))
+        }
     }
 }
