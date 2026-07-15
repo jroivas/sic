@@ -183,6 +183,32 @@ impl Module {
             FuncDecl::Extern(e) => &e.name,
         }
     }
+
+    /// Indices (into `externs`) of externs actually referenced by some function
+    /// — as a call target or as a function-address value. System headers
+    /// declare hundreds of prototypes that are never used; emitting an undefined
+    /// symbol for each pollutes the object and can leave unresolvable references
+    /// (e.g. glibc's internal `__asinhf`), so only referenced externs matter.
+    pub fn used_externs(&self) -> std::collections::HashSet<usize> {
+        let mut used = std::collections::HashSet::new();
+        let note_val = |v: &Val, used: &mut std::collections::HashSet<usize>| {
+            if let Val::Func(fr) = v {
+                if fr.is_extern() { used.insert(fr.index()); }
+            }
+        };
+        for f in &self.functions {
+            for bb in &f.blocks {
+                for instr in &bb.instrs {
+                    if let Instr::Call { func, .. } = instr {
+                        if func.is_extern() { used.insert(func.index()); }
+                    }
+                    instr.for_each_val(|v| note_val(v, &mut used));
+                }
+                bb.terminator.for_each_val(|v| note_val(v, &mut used));
+            }
+        }
+        used
+    }
 }
 
 pub enum FuncDecl<'a> {

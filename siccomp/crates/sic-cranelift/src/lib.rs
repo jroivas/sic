@@ -105,7 +105,12 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     }
 
     // Extern functions — keyed by their EXTERN_BIT-tagged FuncRef encoding.
+    // Only declare those actually referenced; system headers pull in hundreds
+    // of unused prototypes, and declaring each as an import emits an undefined
+    // symbol (some of which, like glibc's internal `__asinhf`, don't exist).
+    let used_externs = ir_module.used_externs();
     for (i, e) in ir_module.externs.iter().enumerate() {
+        if !used_externs.contains(&i) { continue; }
         let sig = build_cl_sig(&e.sig, ptr_size, obj_module.target_config().default_call_conv);
         let fid = obj_module.declare_function(&e.name, CLinkage::Import, &sig)?;
         func_ids.insert(FuncRef::extern_(i).0, fid);
