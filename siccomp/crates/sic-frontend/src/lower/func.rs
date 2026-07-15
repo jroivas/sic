@@ -242,7 +242,7 @@ impl<'m> Lowerer {
             if let Some(pname) = &p.name {
                 let pty = ir_params[i].clone();
                 let ptr_vid = fc.alloc_val();
-                fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone() });
+                fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone(), align: None });
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {
                     // Struct/union params are passed as pointer; copy into local alloca
                     let ps = fc.ptr_size();
@@ -427,6 +427,11 @@ impl<'m> FuncCtx<'m> {
     fn lower_local_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
             Decl::Var { base_ty, declarators, .. } => {
+                // `_Alignas(N)` / `alignas(N)` requested alignment, if any.
+                let explicit_align = base_ty.qualifiers.iter().find_map(|q| match q {
+                    crate::ast::TypeQual::Align(n) => Some(*n),
+                    _ => None,
+                });
                 match &base_ty.ty {
                     AstType::Struct(s) => {
                         self.lowerer.register_struct_type_from_def(s)?;
@@ -469,7 +474,7 @@ impl<'m> FuncCtx<'m> {
                         ty = Type::Array { elem, len };
                     }
                     let vid = self.alloc_val();
-                    self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone() });
+                    self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: explicit_align });
 
                     if let Some(init) = &d.init {
                         self.lower_initializer(init, Val::Local(vid), &ty)?;
@@ -802,7 +807,7 @@ impl<'m> FuncCtx<'m> {
 /// Extract the (dest ValId, result Type) from instructions that produce a value.
 fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
     match instr {
-        Instr::Alloca { dest, ty } => Some((*dest, Type::Pointer(Box::new(ty.clone())))),
+        Instr::Alloca { dest, ty, .. } => Some((*dest, Type::Pointer(Box::new(ty.clone())))),
         Instr::Load { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::BinOp { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::UnaryOp { dest, ty, .. } => Some((*dest, ty.clone())),

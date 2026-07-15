@@ -44,6 +44,7 @@ pub enum TokenKind {
     Bool, Complex, Atomic,
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
+    Alignas,  // _Alignas / alignas (C11 / C23)
 
     // --- GCC extensions ---
     Attribute, Extension, Asm,

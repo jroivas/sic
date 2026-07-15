@@ -190,7 +190,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::CompoundLiteral { ty, init } => {
                 let ir_ty = self.lower_type(ty)?;
                 let vid = self.alloc_val();
-                self.push_instr(Instr::Alloca { dest: vid, ty: ir_ty.clone() });
+                self.push_instr(Instr::Alloca { dest: vid, ty: ir_ty.clone(), align: None });
                 // Zero first
                 let size = ir_ty.size_of(self.ptr_size());
                 if size > 0 {
@@ -416,7 +416,7 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_logical(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let result_ptr = self.alloc_val();
-        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32() });
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32(), align: None });
         let zero = Constant::zero();
         let one = Constant::int(1);
 
@@ -553,7 +553,7 @@ impl<'m> FuncCtx<'m> {
 
         let result_ptr = self.alloc_val();
         // Defer type until we know both branches — use i32 for now
-        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32() });
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32(), align: None });
 
         let then_bb  = self.new_block_after_current();
         let else_bb  = self.new_block_after_current();

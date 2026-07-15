@@ -20,6 +20,8 @@ impl QualType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeQual {
     Const, Volatile, Restrict, Atomic,
+    /// `_Alignas(N)` / `alignas(N)` — the requested alignment in bytes.
+    Align(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

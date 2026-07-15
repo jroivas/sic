@@ -134,11 +134,16 @@ fn emit_instr(
     var_dbg: &mut Vec<VarDbg>,
 ) {
     match instr {
-        Instr::Alloca { dest, ty } => {
+        Instr::Alloca { dest, ty, align } => {
             let size = ty.size_of(ptr_size).max(1) as u32;
-            let align_bytes = ty.align_of(ptr_size).max(1);
+            // `_Alignas` overrides the natural alignment (take the larger).
+            let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
+            if let Some(req) = align {
+                align_bytes = align_bytes.max(*req);
+            }
+            let align_bytes = align_bytes.next_power_of_two();
             // StackSlotData takes align as log2(bytes), not bytes
-            let align_shift = (align_bytes as u32).trailing_zeros() as u8;
+            let align_shift = align_bytes.trailing_zeros() as u8;
             let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
                 cir::StackSlotKind::ExplicitSlot,
                 size,

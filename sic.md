@@ -293,6 +293,31 @@ This is not valid:
 
     char test[];
 
+## Struct reordering
+
+Unlike C, the SIC compiler is allowed to reorder the struct to get optimal
+alignment. This means that struct like
+
+    struct test {
+        uint32 val;
+        uint64 val2;
+        uint8  val3;
+        uint32 val4;
+    }
+
+Is internally reorganized by type size:
+
+    struct test {
+        uint64 val2;
+        uint32 val;
+        uint32 val4;
+        uint8  val3;
+    }
+
+Types define the primary sorting, and the order is kept inside the type.
+
+To prevent this, use the packed struct with ` __attribute__((__packed__))`
+or new ` __attribute__((__order__))` attribute to keep the original order.
 
 # Memory safety
 

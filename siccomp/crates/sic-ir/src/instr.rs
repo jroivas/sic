@@ -54,7 +54,8 @@ pub enum CastOp {
 #[derive(Debug, Clone)]
 pub enum Instr {
     /// Allocate stack storage; `dest` holds a pointer to the allocation.
-    Alloca { dest: ValId, ty: Type },
+    /// `align`, if set, overrides the type's natural alignment (`_Alignas`).
+    Alloca { dest: ValId, ty: Type, align: Option<u32> },
 
     /// Load a value from a pointer.
     Load { dest: ValId, ptr: Val, ty: Type },

@@ -184,7 +184,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Eof | TokenKind::LBrace
+            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Eof | TokenKind::LBrace
         ) { return false; }
         // Ident that's a typedef name also starts a declaration
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
@@ -230,6 +230,25 @@ impl Parser {
                 TokenKind::Volatile => { quals.push(TypeQual::Volatile); self.advance(); }
                 TokenKind::Restrict => { quals.push(TypeQual::Restrict); self.advance(); }
                 TokenKind::Atomic   => { quals.push(TypeQual::Atomic);   self.advance(); }
+                // `_Alignas(N)` / `alignas(N)` / `_Alignas(type)`.
+                TokenKind::Alignas  => {
+                    self.advance();
+                    self.expect(TokenKind::LParen)?;
+                    let align = if self.starts_decl_specifier() {
+                        // Alignment of a type.
+                        let (base, _) = self.parse_decl_specifiers()?;
+                        let (_, qt) = self.parse_declarator(base)?;
+                        ast_type_alignment(&qt.ty)
+                    } else {
+                        // Constant alignment expression.
+                        let e = self.parse_assign_expr()?;
+                        crate::lower::eval_const_expr(&e, &std::collections::HashMap::new())
+                            .unwrap_or(0)
+                            .max(0) as u32
+                    };
+                    self.expect(TokenKind::RParen)?;
+                    if align > 0 { quals.push(TypeQual::Align(align)); }
+                }
                 // inline (ignored)
                 TokenKind::Inline   => { self.advance(); }
                 // signedness
@@ -553,7 +572,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof
+            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas
         ) || (self.peek_kind() == TokenKind::Ident
               && self.typedefs.contains(self.peek().text.as_str()))
     }
@@ -654,7 +673,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof
+            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas
         ) || (self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()))
     }
 
@@ -1031,7 +1050,7 @@ impl Parser {
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
             | TokenKind::Enum | TokenKind::TypeName | TokenKind::Const | TokenKind::Volatile
-            | TokenKind::Typeof
+            | TokenKind::Typeof | TokenKind::Alignas
         ) || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()))
     }
 
@@ -1326,6 +1345,21 @@ impl Parser {
 /// suffix (on LP64 both `long` and `long long` are 64-bit) or its value doesn't
 /// fit in *any* 32-bit type — so a bare `0xFFFFFFFF` (a 32-bit `unsigned int`
 /// in C) stays 32-bit.
+/// Natural alignment (bytes) of a type, for `_Alignas(type)`. Covers scalars
+/// and pointers exactly; aggregates/typedefs fall back to a conservative value.
+fn ast_type_alignment(ty: &AstType) -> u32 {
+    match ty {
+        AstType::Char { .. } | AstType::Bool => 1,
+        AstType::Short { .. } => 2,
+        AstType::Int { .. } | AstType::Float => 4,
+        AstType::Long { .. } | AstType::LongLong { .. }
+        | AstType::Double | AstType::Pointer { .. } => 8,
+        AstType::LongDouble => 16,
+        AstType::Array { base, .. } => ast_type_alignment(&base.ty),
+        _ => 8,
+    }
+}
+
 fn parse_int_literal(text: &str) -> (i64, bool, bool) {
     let s = text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
     let lower = text.to_lowercase();

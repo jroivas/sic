@@ -101,8 +101,11 @@ impl fmt::Display for CmpOp {
 impl fmt::Display for Instr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Instr::Alloca { dest, ty } =>
-                write!(f, "  %{} = alloca {}", dest.0, ty),
+            Instr::Alloca { dest, ty, align } => {
+                write!(f, "  %{} = alloca {}", dest.0, ty)?;
+                if let Some(a) = align { write!(f, " align {}", a)?; }
+                Ok(())
+            }
             Instr::Load { dest, ptr, ty } =>
                 write!(f, "  %{} = load {} {}", dest.0, ty, ptr),
             Instr::Store { val, ptr } =>
