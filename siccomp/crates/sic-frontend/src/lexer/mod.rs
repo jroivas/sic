@@ -237,8 +237,8 @@ impl Lexer {
                 if self.pos >= self.src.len() {
                     return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
                 }
-                let esc = self.advance();
-                s.push(unescape_char(esc));
+                let val = self.read_escape_value();
+                s.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
             } else {
                 s.push(c);
             }
@@ -253,17 +253,51 @@ impl Lexer {
             return Err(CompileError::at("unterminated char literal", sp.file.clone(), sp.line, sp.col));
         }
         let c = self.advance();
-        let ch = if c == '\\' {
+        let val = if c == '\\' {
             if self.pos >= self.src.len() {
                 return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
             }
-            unescape_char(self.advance())
+            self.read_escape_value()
         } else {
-            c
+            c as u32
         };
         // closing '
         if self.pos < self.src.len() && self.src[self.pos] == '\'' { self.advance(); }
-        Ok(Token::new(TokenKind::CharLit, (ch as u32).to_string(), sp))
+        Ok(Token::new(TokenKind::CharLit, val.to_string(), sp))
+    }
+
+    /// Read an escape sequence's value, with the leading `\` already consumed.
+    /// Handles single-char escapes, octal (`\ooo`, 1–3 digits) and hex (`\xH…`).
+    fn read_escape_value(&mut self) -> u32 {
+        let c = self.advance();
+        match c {
+            '0'..='7' => {
+                // Octal: this digit plus up to two more.
+                let mut val = c as u32 - '0' as u32;
+                let mut count = 1;
+                while count < 3 && self.pos < self.src.len() {
+                    let d = self.src[self.pos];
+                    if ('0'..='7').contains(&d) {
+                        val = val * 8 + (d as u32 - '0' as u32);
+                        self.advance();
+                        count += 1;
+                    } else { break; }
+                }
+                val
+            }
+            'x' | 'X' => {
+                // Hex: one or more hex digits.
+                let mut val = 0u32;
+                while self.pos < self.src.len() {
+                    if let Some(h) = self.src[self.pos].to_digit(16) {
+                        val = val.wrapping_mul(16).wrapping_add(h);
+                        self.advance();
+                    } else { break; }
+                }
+                val
+            }
+            other => unescape_char(other) as u32,
+        }
     }
 
     fn scan_punct(&mut self, sp: Span) -> Result<Token> {
