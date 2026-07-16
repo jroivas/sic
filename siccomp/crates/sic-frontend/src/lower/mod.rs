@@ -145,13 +145,23 @@ impl Lowerer {
     fn register_struct_type_from_def(&mut self, s: &StructDef) -> Result<()> {
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
             let mut ir_fields = Vec::new();
+            let mut bitfields = Vec::new();
+            let mut any_bitfield = false;
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
+                let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
+                if bw.is_some() { any_bitfield = true; }
                 ir_fields.push((fname, fty));
+                bitfields.push(bw);
             }
-            let ir_ty = Type::Struct(StructType { name: Some(name.clone()), fields: ir_fields, packed: false });
+            let ir_ty = Type::Struct(StructType {
+                name: Some(name.clone()),
+                fields: ir_fields,
+                packed: false,
+                bitfields: if any_bitfield { bitfields } else { Vec::new() },
+            });
             self.struct_types.insert(name.clone(), ir_ty);
         }
         Ok(())
@@ -264,13 +274,46 @@ impl Lowerer {
             return Ok(());
         }
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
-        let init = match &d.init {
+        let init = self.build_global_init(d, &mut ir_ty);
+        let linkage = match base_ty.storage {
+            Some(StorageClass::Static) => Linkage::Internal,
+            // `extern T x;` with no initializer is a pure declaration: the
+            // object lives in another translation unit (e.g. libc's `stdout`).
+            // Emit it as an import so we don't shadow it with a zero definition.
+            Some(StorageClass::Extern) if init.is_none() => Linkage::Import,
+            Some(StorageClass::Extern) => Linkage::External,
+            _ => Linkage::External,
+        };
+        let ty_for_map = ir_ty.clone();
+        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty) };
+        let gref = self.module.add_global(g);
+        self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
+        Ok(())
+    }
+
+    /// Create an internal global backing a function-scope `static` local, and
+    /// return its type and ref. Uses the same constant-initializer serialization
+    /// as file-scope globals; the caller binds the local name to this global.
+    fn add_static_local_global(&mut self, name: String, d: &Declarator, _base_ty: &QualType) -> Result<(Type, GlobalRef)> {
+        let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        let init = self.build_global_init(d, &mut ir_ty);
+        let ty_for_map = ir_ty.clone();
+        let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty) };
+        let gref = self.module.add_global(g);
+        Ok((ty_for_map, gref))
+    }
+
+    /// Serialize a variable's constant initializer to an IR `Constant`, adjusting
+    /// `ir_ty` for inferred array lengths. Shared by file-scope globals and
+    /// function-scope `static` locals.
+    fn build_global_init(&mut self, d: &Declarator, ir_ty: &mut Type) -> Option<Constant> {
+        match &d.init {
             // `char arr[] = "..."` / `char *p = "..."`.
             Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::StringLit(_)) => {
                 let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
                 let mut bytes = s.clone().into_bytes();
                 bytes.push(0); // NUL terminator
-                match &mut ir_ty {
+                match &mut *ir_ty {
                     // Array target: store the bytes inline, sizing an
                     // unspecified length to fit the string.
                     Type::Array { len, .. } => {
@@ -288,63 +331,289 @@ impl Lowerer {
             Some(Initializer::Expr(e)) => {
                 match eval_const_expr(e, &self.enum_consts) {
                     Ok(v) => Some(Constant::Int(v)),
-                    Err(_) => match &e.kind {
-                        ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
-                        ExprKind::Cast { expr: inner, .. } => {
-                            if let ExprKind::FloatLit(f) = &inner.kind {
-                                Some(Constant::Float(*f))
-                            } else {
-                                None
+                    Err(_) => {
+                        // A pointer global initialized with a symbolic address:
+                        // another array/function name, `&x`, or a string.
+                        if matches!(&*ir_ty, Type::Pointer(_)) {
+                            if let Some(reloc) = self.eval_ptr_reloc(e) {
+                                return match reloc {
+                                    RelocTarget::Global(g, 0) => Some(Constant::GlobalAddr(g)),
+                                    other => {
+                                        let ps = self.ptr_size as usize;
+                                        Some(Constant::Aggregate {
+                                            bytes: vec![0u8; ps],
+                                            relocs: vec![(0, other)],
+                                        })
+                                    }
+                                };
                             }
                         }
-                        _ => None,
+                        match &e.kind {
+                            ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
+                            ExprKind::Cast { expr: inner, .. } => {
+                                if let ExprKind::FloatLit(f) = &inner.kind {
+                                    Some(Constant::Float(*f))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
                     }
                 }
             }
             Some(Initializer::List(items)) => {
-                // Serialize a constant array initializer to bytes.
-                if let Type::Array { elem: ref elem_ty, ref mut len } = ir_ty {
-                    let elem_size = elem_ty.size_of(self.ptr_size) as usize;
-                    let count = items.len();
-                    if *len == 0 { *len = count; }
-                    let total = (*len) * elem_size;
-                    let mut bytes = vec![0u8; total];
-                    for (i, item) in items.iter().enumerate() {
-                        if i >= *len { break; }
-                        let v = match item {
-                            Initializer::Expr(e) => eval_const_expr(e, &self.enum_consts).unwrap_or(0),
-                            _ => 0,
-                        };
-                        let start = i * elem_size;
-                        match elem_size {
-                            1 => bytes[start] = v as u8,
-                            2 => bytes[start..start+2].copy_from_slice(&(v as i16).to_le_bytes()),
-                            4 => bytes[start..start+4].copy_from_slice(&(v as i32).to_le_bytes()),
-                            8 => bytes[start..start+8].copy_from_slice(&v.to_le_bytes()),
-                            _ => {}
-                        }
+                // Infer an unspecified top-level array length from the brace list.
+                if let Type::Array { len, .. } = &mut *ir_ty {
+                    if *len == 0 { *len = items.len(); }
+                }
+                let total = ir_ty.size_of(self.ptr_size) as usize;
+                let ty_snapshot = ir_ty.clone();
+                let init = d.init.as_ref().unwrap();
+                let mut buf = vec![0u8; total.max(1)];
+                let mut relocs = Vec::new();
+                if self.serialize_const(init, &ty_snapshot, &mut buf, 0, &mut relocs) {
+                    buf.truncate(total);
+                    if relocs.is_empty() {
+                        Some(Constant::Bytes(buf))
+                    } else {
+                        Some(Constant::Aggregate { bytes: buf, relocs })
                     }
-                    Some(Constant::Bytes(bytes))
                 } else {
-                    None
+                    // Couldn't fully serialize as a constant; zero-fill rather
+                    // than emit garbage.
+                    Some(Constant::Zeroinit)
                 }
             }
             _ => None,
-        };
-        let linkage = match base_ty.storage {
-            Some(StorageClass::Static) => Linkage::Internal,
-            // `extern T x;` with no initializer is a pure declaration: the
-            // object lives in another translation unit (e.g. libc's `stdout`).
-            // Emit it as an import so we don't shadow it with a zero definition.
-            Some(StorageClass::Extern) if init.is_none() => Linkage::Import,
-            Some(StorageClass::Extern) => Linkage::External,
-            _ => Linkage::External,
-        };
-        let ty_for_map = ir_ty.clone();
-        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: base_ty.is_const() };
-        let gref = self.module.add_global(g);
-        self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
-        Ok(())
+        }
+    }
+
+    /// Recursively serialize `init` for a value of `ty` into `buf[base..]`,
+    /// collecting pointer relocations for embedded symbol addresses. Returns
+    /// false if some component isn't a translation-time constant.
+    fn serialize_const(
+        &mut self,
+        init: &Initializer,
+        ty: &Type,
+        buf: &mut [u8],
+        base: usize,
+        relocs: &mut Vec<(usize, RelocTarget)>,
+    ) -> bool {
+        let ty = types::resolve_aggregate(ty, &self.struct_types);
+        match &ty {
+            Type::Struct(st) => {
+                let Initializer::List(items) = init else { return false };
+                let (offsets, _) = st.layout(self.ptr_size);
+                for (i, item) in items.iter().enumerate() {
+                    if i >= st.fields.len() { break; }
+                    let foff = base + offsets[i] as usize;
+                    if !self.serialize_const(item, &st.fields[i].1.clone(), buf, foff, relocs) {
+                        return false;
+                    }
+                }
+                true
+            }
+            Type::Union(u) => {
+                // C initializes only the first member of a union.
+                let Initializer::List(items) = init else { return false };
+                match (items.first(), u.fields.first()) {
+                    (Some(item), Some((_, fty))) => {
+                        self.serialize_const(item, &fty.clone(), buf, base, relocs)
+                    }
+                    _ => true,
+                }
+            }
+            Type::Array { elem, len } => match init {
+                // `char arr[] = "..."` inside a larger aggregate.
+                Initializer::Expr(e) => {
+                    if let ExprKind::StringLit(s) = &e.kind {
+                        if elem.size_of(self.ptr_size) == 1 {
+                            let mut bytes = s.clone().into_bytes();
+                            bytes.push(0);
+                            let n = bytes.len().min(buf.len().saturating_sub(base));
+                            buf[base..base + n].copy_from_slice(&bytes[..n]);
+                            return true;
+                        }
+                    }
+                    false
+                }
+                Initializer::List(items) => {
+                    let esize = elem.size_of(self.ptr_size) as usize;
+                    for (i, item) in items.iter().enumerate() {
+                        if i >= *len { break; }
+                        if !self.serialize_const(item, elem, buf, base + i * esize, relocs) {
+                            return false;
+                        }
+                    }
+                    true
+                }
+            },
+            _ => {
+                // Scalar leaf. A braced scalar (`{ x }`) is also accepted.
+                let e = match init {
+                    Initializer::Expr(e) => e,
+                    Initializer::List(items) => match items.first() {
+                        Some(Initializer::Expr(e)) => e,
+                        _ => return false,
+                    },
+                };
+                self.serialize_scalar(e, &ty, buf, base, relocs)
+            }
+        }
+    }
+
+    /// Serialize a scalar constant expression into `buf[base..base+size]`.
+    fn serialize_scalar(
+        &mut self,
+        e: &Expr,
+        ty: &Type,
+        buf: &mut [u8],
+        base: usize,
+        relocs: &mut Vec<(usize, RelocTarget)>,
+    ) -> bool {
+        let size = ty.size_of(self.ptr_size) as usize;
+        if size == 0 || base + size > buf.len() { return false; }
+        match ty {
+            Type::Float32 => match self.eval_const_float(e) {
+                Some(f) => { buf[base..base + 4].copy_from_slice(&(f as f32).to_le_bytes()); true }
+                None => false,
+            },
+            Type::Float64 | Type::Float80 => match self.eval_const_float(e) {
+                Some(f) => { buf[base..base + 8].copy_from_slice(&f.to_le_bytes()); true }
+                None => false,
+            },
+            Type::Pointer(_) => {
+                if let Some(reloc) = self.eval_ptr_reloc(e) {
+                    relocs.push((base, reloc));
+                    return true;
+                }
+                // NULL or an integer cast to a pointer.
+                match self.eval_const_int(e) {
+                    Some(v) => { buf[base..base + size].copy_from_slice(&v.to_le_bytes()[..size]); true }
+                    None => false,
+                }
+            }
+            _ => match self.eval_const_int(e) {
+                Some(v) => { buf[base..base + size].copy_from_slice(&v.to_le_bytes()[..size]); true }
+                None => false,
+            },
+        }
+    }
+
+    /// Evaluate a constant integer expression, extending [`eval_const_expr`] with
+    /// type-dependent operators (`sizeof`) that need the type table. Recurses so
+    /// `sizeof(T)` nested in arithmetic still folds.
+    fn eval_const_int(&self, e: &Expr) -> Option<i64> {
+        if let Ok(v) = eval_const_expr(e, &self.enum_consts) {
+            return Some(v);
+        }
+        match &e.kind {
+            ExprKind::SizeofType(qt) => {
+                lower_type(qt, &self.struct_types, self.ptr_size).ok()
+                    .map(|t| t.size_of(self.ptr_size) as i64)
+            }
+            ExprKind::Cast { expr, .. } => self.eval_const_int(expr),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_int(expr).map(|v| v.wrapping_neg()),
+            ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_int(expr).map(|v| !v),
+            ExprKind::Unary { op: UnOpKind::Not, expr } => self.eval_const_int(expr).map(|v| (v == 0) as i64),
+            ExprKind::BinOp { op, lhs, rhs } => {
+                let l = self.eval_const_int(lhs)?;
+                let r = self.eval_const_int(rhs)?;
+                Some(match op {
+                    BinOpKind::Add => l.wrapping_add(r),
+                    BinOpKind::Sub => l.wrapping_sub(r),
+                    BinOpKind::Mul => l.wrapping_mul(r),
+                    BinOpKind::Div => if r != 0 { l.wrapping_div(r) } else { 0 },
+                    BinOpKind::Rem => if r != 0 { l.wrapping_rem(r) } else { 0 },
+                    BinOpKind::Shl => l.wrapping_shl(r as u32),
+                    BinOpKind::Shr => l.wrapping_shr(r as u32),
+                    BinOpKind::BitAnd => l & r,
+                    BinOpKind::BitOr => l | r,
+                    BinOpKind::BitXor => l ^ r,
+                    _ => return None,
+                })
+            }
+            ExprKind::Ternary { cond, then, else_ } => {
+                if self.eval_const_int(cond)? != 0 { self.eval_const_int(then) } else { self.eval_const_int(else_) }
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a constant floating-point expression.
+    fn eval_const_float(&self, e: &Expr) -> Option<f64> {
+        match &e.kind {
+            ExprKind::FloatLit(f) => Some(*f),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_float(expr).map(|f| -f),
+            ExprKind::Cast { expr, .. } => self.eval_const_float(expr),
+            _ => eval_const_expr(e, &self.enum_consts).ok().map(|v| v as f64),
+        }
+    }
+
+    /// Evaluate a constant expression producing a pointer to a symbol.
+    fn eval_ptr_reloc(&mut self, e: &Expr) -> Option<RelocTarget> {
+        match &e.kind {
+            ExprKind::Cast { expr, .. } => self.eval_ptr_reloc(expr),
+            ExprKind::StringLit(s) => {
+                let mut bytes = s.clone().into_bytes();
+                bytes.push(0);
+                let g = self.add_cstring_global(bytes);
+                Some(RelocTarget::Global(g, 0))
+            }
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => self.addr_of_reloc(expr),
+            // A bare function or array name decays to its own address.
+            ExprKind::Ident(name) => {
+                if let Some(fref) = self.module.func_ref_by_name(name) {
+                    return Some(RelocTarget::Func(fref));
+                }
+                if let Some((ty, gref)) = self.globals_map.get(name) {
+                    if matches!(ty, Type::Array { .. }) {
+                        return Some(RelocTarget::Global(*gref, 0));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve `&expr` to a relocation target.
+    fn addr_of_reloc(&mut self, e: &Expr) -> Option<RelocTarget> {
+        if let ExprKind::Ident(name) = &e.kind {
+            if let Some(fref) = self.module.func_ref_by_name(name) {
+                return Some(RelocTarget::Func(fref));
+            }
+        }
+        let (gref, off, _) = self.base_addr(e)?;
+        Some(RelocTarget::Global(gref, off))
+    }
+
+    /// Resolve a constant lvalue expression to (global, byte offset, type).
+    fn base_addr(&self, e: &Expr) -> Option<(GlobalRef, i64, Type)> {
+        match &e.kind {
+            ExprKind::Ident(name) => {
+                let (ty, gref) = self.globals_map.get(name)?;
+                Some((*gref, 0, ty.clone()))
+            }
+            ExprKind::Index { base, index } => {
+                let (gref, off, bty) = self.base_addr(base)?;
+                let elem = match types::resolve_aggregate(&bty, &self.struct_types) {
+                    Type::Array { elem, .. } => *elem,
+                    _ => return None,
+                };
+                let idx = eval_const_expr(index, &self.enum_consts).ok()?;
+                let esize = elem.size_of(self.ptr_size) as i64;
+                Some((gref, off + idx * esize, elem))
+            }
+            ExprKind::Field { base, name } => {
+                let (gref, off, bty) = self.base_addr(base)?;
+                let st = types::resolve_aggregate(&bty, &self.struct_types);
+                let (foff, fty) = field_offset_by_name(&st, name, self.ptr_size)?;
+                Some((gref, off + foff as i64, fty))
+            }
+            _ => None,
+        }
     }
 
     /// Synthesize `int main() { ...; return <last>; }` for SIC files without main.
@@ -398,6 +667,33 @@ impl Lowerer {
 
         self.module.add_function(func);
         Ok(())
+    }
+}
+
+/// Whether an object of this declared type belongs in read-only storage.
+/// A `const` qualifier makes the object read-only; for arrays the qualification
+/// applies to the element type, so `const char arr[]` is read-only but
+/// `const char *arr[]` (array of pointers to const char) is writable.
+fn type_is_const(qt: &QualType) -> bool {
+    if qt.is_const() { return true; }
+    if let AstType::Array { base, .. } = &qt.ty {
+        return type_is_const(base);
+    }
+    false
+}
+
+/// Look up a struct/union field by name, returning its byte offset and type.
+fn field_offset_by_name(st: &Type, name: &str, ptr_size: u32) -> Option<(u64, Type)> {
+    match st {
+        Type::Struct(s) => {
+            let idx = s.fields.iter().position(|(n, _)| n == name)?;
+            Some((s.field_offset(idx, ptr_size), s.fields[idx].1.clone()))
+        }
+        Type::Union(u) => {
+            let (_, fty) = u.fields.iter().find(|(n, _)| n == name)?;
+            Some((0, fty.clone()))
+        }
+        _ => None,
     }
 }
 

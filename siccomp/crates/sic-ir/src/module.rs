@@ -1,4 +1,4 @@
-use crate::{Type, FunctionType, Val, ValId, BlockId, FuncRef, GlobalRef, Instr, Terminator, Constant};
+use crate::{Type, FunctionType, Val, ValId, BlockId, FuncRef, GlobalRef, Instr, Terminator, Constant, RelocTarget};
 
 /// Linkage for globals and functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +205,17 @@ impl Module {
                     instr.for_each_val(|v| note_val(v, &mut used));
                 }
                 bb.terminator.for_each_val(|v| note_val(v, &mut used));
+            }
+        }
+        // Extern functions referenced only via a static aggregate initializer
+        // (e.g. a function-pointer table pointing at an extern).
+        for g in &self.globals {
+            if let Some(Constant::Aggregate { relocs, .. }) = &g.init {
+                for (_, target) in relocs {
+                    if let RelocTarget::Func(fr) = target {
+                        if fr.is_extern() { used.insert(fr.index()); }
+                    }
+                }
             }
         }
         used

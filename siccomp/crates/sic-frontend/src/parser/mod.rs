@@ -259,7 +259,13 @@ impl Parser {
                 TokenKind::Char     => { base = Some(AstType::Char { signed }); self.advance(); }
                 TokenKind::Short    => { base = Some(AstType::Short { signed: signed.unwrap_or(true) }); self.advance(); }
                 TokenKind::Int      => {
-                    base = Some(AstType::Int { signed: signed.unwrap_or(true) });
+                    // `int` is redundant in `short int` / `long int` /
+                    // `long long int`: only establish `int` as the base when no
+                    // width keyword (short/long) has been seen yet, otherwise it
+                    // would clobber `short` back to a 4-byte `int`.
+                    if base.is_none() {
+                        base = Some(AstType::Int { signed: signed.unwrap_or(true) });
+                    }
                     self.advance();
                 }
                 TokenKind::Long     => {

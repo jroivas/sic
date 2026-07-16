@@ -22,6 +22,21 @@ pub struct StructType {
     pub name: Option<String>,
     pub fields: Vec<(String, Type)>,
     pub packed: bool,
+    /// Parallel to `fields`: `Some(width)` marks a bit-field of the given width
+    /// (in bits); its `fields` entry holds the declared storage integer type.
+    /// Empty means no bit-fields (default). A zero width forces alignment.
+    pub bitfields: Vec<Option<u32>>,
+}
+
+impl StructType {
+    /// Construct a plain (bit-field-free) struct.
+    pub fn plain(name: Option<String>, fields: Vec<(String, Type)>, packed: bool) -> Self {
+        StructType { name, fields, packed, bitfields: Vec::new() }
+    }
+
+    fn bitfield_width(&self, idx: usize) -> Option<u32> {
+        self.bitfields.get(idx).copied().flatten()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -129,27 +144,58 @@ impl Type {
 impl StructType {
     /// Compute field byte offsets respecting alignment. Returns (offsets, total_size).
     pub fn layout(&self, ptr_size: u32) -> (Vec<u64>, u64) {
-        let mut offsets = Vec::with_capacity(self.fields.len());
-        let mut offset = 0u64;
+        let (offs, _, size) = self.layout_full(ptr_size);
+        (offs, size)
+    }
+
+    /// Full layout: byte offsets, bit offsets (within each field's storage unit;
+    /// 0 for non-bit-fields), and total size. Implements the System V x86-64
+    /// bit-field packing rules (small consecutive bit-fields share a storage
+    /// unit; a field that would cross a unit boundary starts a new unit).
+    pub fn layout_full(&self, ptr_size: u32) -> (Vec<u64>, Vec<u32>, u64) {
+        let mut byte_offsets = Vec::with_capacity(self.fields.len());
+        let mut bit_offsets = Vec::with_capacity(self.fields.len());
+        let mut bit_pos: u64 = 0; // running position in bits
         let mut max_align = 1u64;
 
-        for (_, ty) in &self.fields {
-            let align = if self.packed { 1 } else { ty.align_of(ptr_size) };
-            max_align = max_align.max(align);
-            // Pad to alignment
-            if align > 0 {
-                offset = (offset + align - 1) / align * align;
+        for (i, (_, ty)) in self.fields.iter().enumerate() {
+            let align = if self.packed { 1 } else { ty.align_of(ptr_size).max(1) };
+            let size = ty.size_of(ptr_size);
+            match self.bitfield_width(i) {
+                Some(width) => {
+                    max_align = max_align.max(align);
+                    let width = width as u64;
+                    if width == 0 {
+                        // Zero-width bit-field: align the next field to `align`.
+                        bit_pos = round_up_bits(bit_pos, align * 8);
+                        byte_offsets.push(bit_pos / 8);
+                        bit_offsets.push(0);
+                        continue;
+                    }
+                    let unit_bits = size * 8;
+                    if unit_bits > 0 && (bit_pos % unit_bits) + width > unit_bits {
+                        bit_pos = round_up_bits(bit_pos, unit_bits);
+                    }
+                    let unit_start = if unit_bits > 0 { (bit_pos / unit_bits) * unit_bits } else { bit_pos };
+                    byte_offsets.push(unit_start / 8);
+                    bit_offsets.push((bit_pos - unit_start) as u32);
+                    bit_pos += width;
+                }
+                None => {
+                    max_align = max_align.max(align);
+                    bit_pos = round_up_bits(bit_pos, align * 8);
+                    byte_offsets.push(bit_pos / 8);
+                    bit_offsets.push(0);
+                    bit_pos += size * 8;
+                }
             }
-            offsets.push(offset);
-            offset += ty.size_of(ptr_size);
         }
 
-        // Round total size up to struct alignment
+        let mut total = bit_pos;
         if max_align > 0 && !self.packed {
-            offset = (offset + max_align - 1) / max_align * max_align;
+            total = round_up_bits(total, max_align * 8);
         }
-
-        (offsets, offset)
+        (byte_offsets, bit_offsets, (total + 7) / 8)
     }
 
     pub fn size_of(&self, ptr_size: u32) -> u64 {
@@ -170,6 +216,16 @@ impl StructType {
     pub fn field_offset(&self, idx: usize, ptr_size: u32) -> u64 {
         self.layout(ptr_size).0[idx]
     }
+
+    /// Bit offset of bit-field `idx` within its storage unit (0 for a normal field).
+    pub fn field_bit_offset(&self, idx: usize, ptr_size: u32) -> u32 {
+        self.layout_full(ptr_size).1[idx]
+    }
+}
+
+fn round_up_bits(pos: u64, align: u64) -> u64 {
+    if align == 0 { return pos; }
+    (pos + align - 1) / align * align
 }
 
 impl UnionType {

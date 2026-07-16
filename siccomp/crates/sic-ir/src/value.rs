@@ -52,6 +52,18 @@ pub enum Constant {
     Bytes(Vec<u8>),          // string data (null-terminated)
     Zeroinit,                // zero-initialized aggregate
     GlobalAddr(GlobalRef),   // address of another global (pointer initializer)
+    /// Aggregate initializer: raw bytes with embedded pointer relocations, each
+    /// patching a pointer-sized slot at `offset` with a symbol's address.
+    Aggregate { bytes: Vec<u8>, relocs: Vec<(usize, RelocTarget)> },
+}
+
+/// The target of a pointer relocation inside an aggregate initializer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RelocTarget {
+    /// Address of a global (with a byte addend), e.g. `&arr[2]` or a string.
+    Global(GlobalRef, i64),
+    /// Address of a function, e.g. `&func` or a bare function name.
+    Func(FuncRef),
 }
 
 impl Constant {

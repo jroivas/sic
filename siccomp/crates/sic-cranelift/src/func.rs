@@ -1,12 +1,27 @@
 use std::collections::HashMap;
 use cranelift_codegen::ir::{self as cir, InstBuilder, MemFlags};
 use cranelift_codegen::ir::types as ct;
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, DataId, Module};
 use cranelift_object::ObjectModule;
 use sic_ir::*;
 use super::types::{cl_type, ptr_cl};
-use super::build_cl_sig;
+use super::{build_cl_sig, va_named_reg_counts, VA_GP_REGS, VA_FP_REGS, VA_OVERFLOW_SLOTS};
+
+/// Runtime handles for a variadic function's System V register save area, used
+/// by `va_start`/`va_arg`. See `compile_function`'s prologue.
+#[derive(Clone, Copy)]
+struct VaInfo {
+    /// Pointer to the 176-byte register save area (48B GP + 128B XMM).
+    reg_save: cir::Value,
+    /// Pointer to the captured stack overflow area.
+    overflow: cir::Value,
+    /// Initial `gp_offset`: named GP args * 8.
+    gp_start: u32,
+    /// Initial `fp_offset`: 48 + named FP args * 16.
+    fp_start: u32,
+}
 
 /// A source variable's debug info collected during codegen: its name, IR type,
 /// the Cranelift stack slot it lives in, and whether it is a formal parameter.
@@ -69,7 +84,7 @@ pub fn compile_function(
     // For variadic functions the signature was padded with extra trailing i64
     // params (see `build_cl_sig_def`); spill those into a contiguous save area
     // that `va_start`/`va_arg` walk with a single cursor pointer.
-    let mut va_save_area: Option<cir::Value> = None;
+    let mut va_info: Option<VaInfo> = None;
     {
         let params = builder.block_params(entry_cl).to_vec();
         let fixed = f.params.len();
@@ -78,19 +93,48 @@ pub fn compile_function(
                 val_map.insert(0x10000 + i as u32, params[i]);
             }
         }
-        if f.sig.variadic && params.len() > fixed {
-            let n = params.len() - fixed;
-            let size = (n * 8) as u32;
-            let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
-                cir::StackSlotKind::ExplicitSlot,
-                size,
-                3, // align = 2^3 = 8 bytes
+        if f.sig.variadic {
+            // Reconstruct the System V register save area from the over-declared
+            // trailing params (see `build_cl_sig_def`): GP fillers, then FP
+            // fillers, then stack-overflow slots. Only the *vararg* slots need
+            // correct values — `va_arg`/glibc never read below `gp_offset`/
+            // `fp_offset`, which start past the named params.
+            let (n_gp, n_fp) = va_named_reg_counts(&f.sig, ptr_size);
+            let rsa_slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                cir::StackSlotKind::ExplicitSlot, 176, 4, // 16-byte aligned
             ));
-            let base = builder.ins().stack_addr(ptr_ty, slot, 0);
-            for i in 0..n {
-                builder.ins().store(MemFlags::new(), params[fixed + i], base, (i * 8) as i32);
+            let reg_save = builder.ins().stack_addr(ptr_ty, rsa_slot, 0);
+            let ovf_slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                cir::StackSlotKind::ExplicitSlot, (VA_OVERFLOW_SLOTS * 8) as u32, 3,
+            ));
+            let overflow = builder.ins().stack_addr(ptr_ty, ovf_slot, 0);
+
+            let n_gp_fill = VA_GP_REGS - n_gp;
+            let n_fp_fill = VA_FP_REGS - n_fp;
+            let mut idx = fixed;
+            for k in 0..n_gp_fill {
+                if idx < params.len() {
+                    builder.ins().store(MemFlags::new(), params[idx], reg_save, ((n_gp + k) * 8) as i32);
+                }
+                idx += 1;
             }
-            va_save_area = Some(base);
+            for k in 0..n_fp_fill {
+                if idx < params.len() {
+                    builder.ins().store(MemFlags::new(), params[idx], reg_save, (48 + (n_fp + k) * 16) as i32);
+                }
+                idx += 1;
+            }
+            for k in 0..VA_OVERFLOW_SLOTS {
+                if idx < params.len() {
+                    builder.ins().store(MemFlags::new(), params[idx], overflow, (k * 8) as i32);
+                }
+                idx += 1;
+            }
+            va_info = Some(VaInfo {
+                reg_save, overflow,
+                gp_start: (n_gp * 8) as u32,
+                fp_start: (48 + n_fp * 16) as u32,
+            });
         }
     }
 
@@ -131,7 +175,7 @@ pub fn compile_function(
         for instr in &bb.instrs {
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
-                ptr_ty, target_config, ptr_size, va_save_area,
+                ptr_ty, target_config, ptr_size, va_info,
                 &mut slot_map, var_dbg,
             );
         }
@@ -154,7 +198,7 @@ fn emit_instr(
     ptr_ty: cir::Type,
     target_config: cranelift_codegen::isa::TargetFrontendConfig,
     ptr_size: u32,
-    va_save_area: Option<cir::Value>,
+    va_info: Option<VaInfo>,
     slot_map: &mut HashMap<u32, cir::StackSlot>,
     var_dbg: &mut Vec<VarDbg>,
 ) {
@@ -267,9 +311,16 @@ fn emit_instr(
             };
 
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
-                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-                coerce(v, hint, builder, ptr_ty)
+                if i < declared_count {
+                    let hint = param_tys[i];
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
+                    coerce(v, hint, builder, ptr_ty)
+                } else {
+                    // Variadic argument: apply C default promotions (float→double)
+                    // but keep the natural class so floats land in XMM registers.
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
+                    va_promote(v, builder)
+                }
             }).collect();
 
             let inst = if arg_vals.len() > declared_count {
@@ -300,9 +351,14 @@ fn emit_instr(
             let param_tys: Vec<cir::Type> = base_sig.params.iter().map(|p| p.value_type).collect();
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                let hint = param_tys.get(i).copied().unwrap_or(ct::I64);
-                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-                coerce(v, hint, builder, ptr_ty)
+                if i < declared_count {
+                    let hint = param_tys[i];
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
+                    coerce(v, hint, builder, ptr_ty)
+                } else {
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
+                    va_promote(v, builder)
+                }
             }).collect();
             // A variadic function pointer (e.g. `int(*)(int,int,...)`) declares
             // only its fixed params; extend the call signature with the actual
@@ -386,25 +442,54 @@ fn emit_instr(
         }
 
         Instr::VaStart { list_ptr } => {
-            // Point the va_list cursor at the start of the spilled variadic
-            // save area. The va_list object stores a single walking pointer.
-            if let Some(base) = va_save_area {
+            // Initialize the System V va_list tag:
+            //   {u32 gp_offset; u32 fp_offset; void* overflow; void* reg_save;}
+            if let Some(va) = va_info {
                 let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-                builder.ins().store(MemFlags::new(), base, lp, 0);
+                let gp = builder.ins().iconst(ct::I32, va.gp_start as i64);
+                builder.ins().store(MemFlags::new(), gp, lp, 0);
+                let fp = builder.ins().iconst(ct::I32, va.fp_start as i64);
+                builder.ins().store(MemFlags::new(), fp, lp, 4);
+                builder.ins().store(MemFlags::new(), va.overflow, lp, 8);
+                builder.ins().store(MemFlags::new(), va.reg_save, lp, 16);
             }
         }
 
         Instr::VaEnd { .. } => {}
 
         Instr::VaArg { dest, list_ptr, ty } => {
-            // Load the cursor, read the argument, then advance the cursor by one
-            // 8-byte slot (integer/pointer varargs are stored one per slot).
+            // Walk the System V va_list: integer/pointer args come from the GP
+            // region (gp_offset < 48) or the overflow area; floating-point args
+            // from the FP region (fp_offset < 176) or overflow. Update whichever
+            // cursor advanced. No branches: addresses/offsets are chosen with
+            // `select`.
             let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let cursor = builder.ins().load(ptr_ty, MemFlags::new(), lp, 0);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let v = builder.ins().load(cl_ty, MemFlags::new(), cursor, 0);
-            let next = builder.ins().iadd_imm(cursor, 8);
-            builder.ins().store(MemFlags::new(), next, lp, 0);
+            let is_fp = cl_ty.is_float();
+            let (off_field, threshold, step): (i32, i64, i64) =
+                if is_fp { (4, 176, 16) } else { (0, 48, 8) };
+
+            let offset = builder.ins().load(ct::I32, MemFlags::new(), lp, off_field);
+            let offset64 = builder.ins().uextend(ct::I64, offset);
+            let reg_save = builder.ins().load(ptr_ty, MemFlags::new(), lp, 16);
+            let overflow = builder.ins().load(ptr_ty, MemFlags::new(), lp, 8);
+
+            let thr = builder.ins().iconst(ct::I32, threshold);
+            let in_reg = builder.ins().icmp(IntCC::UnsignedLessThan, offset, thr);
+
+            let reg_addr = builder.ins().iadd(reg_save, offset64);
+            let new_off = builder.ins().iadd_imm(offset, step);
+            let new_ovf = builder.ins().iadd_imm(overflow, 8);
+
+            let addr = builder.ins().select(in_reg, reg_addr, overflow);
+            // Advance gp/fp_offset only when the value came from a register.
+            let stored_off = builder.ins().select(in_reg, new_off, offset);
+            builder.ins().store(MemFlags::new(), stored_off, lp, off_field);
+            // Advance overflow only when the value came from the stack.
+            let stored_ovf = builder.ins().select(in_reg, overflow, new_ovf);
+            builder.ins().store(MemFlags::new(), stored_ovf, lp, 8);
+
+            let v = builder.ins().load(cl_ty, MemFlags::new(), addr, 0);
             val_map.insert(dest.0, v);
         }
 
@@ -426,6 +511,17 @@ fn emit_instr(
                 });
             }
         }
+    }
+}
+
+/// Apply C default argument promotions to a variadic argument: `float` widens
+/// to `double` (so it occupies an XMM register per the ABI). Integer/pointer
+/// values keep their class.
+fn va_promote(v: cir::Value, builder: &mut FunctionBuilder<'_>) -> cir::Value {
+    if builder.func.dfg.value_type(v) == ct::F32 {
+        builder.ins().fpromote(ct::F64, v)
+    } else {
+        v
     }
 }
 
@@ -553,6 +649,7 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
         // Only appears in global initializers (handled in the data section);
         // never emitted into a function body.
         Constant::GlobalAddr(_) => builder.ins().iconst(ptr_ty, 0),
+        Constant::Aggregate { .. } => builder.ins().iconst(ptr_ty, 0),
     }
 }
 

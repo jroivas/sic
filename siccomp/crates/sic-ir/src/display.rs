@@ -63,6 +63,9 @@ impl fmt::Display for Constant {
             Constant::Bytes(b) => write!(f, "\"{}\"", String::from_utf8_lossy(b).escape_default()),
             Constant::Zeroinit => write!(f, "zeroinit"),
             Constant::GlobalAddr(g) => write!(f, "&global{}", g.0),
+            Constant::Aggregate { bytes, relocs } => {
+                write!(f, "aggregate[{} bytes, {} relocs]", bytes.len(), relocs.len())
+            }
         }
     }
 }

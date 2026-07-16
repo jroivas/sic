@@ -133,6 +133,10 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         }
         let did = global_ids[&(i as u32)];
         let mut desc = DataDescription::new();
+        // Align the global to its type's natural alignment. Without this the
+        // linker packs data byte-aligned, so a struct/array of pointers can land
+        // on an odd address and pointer loads read straddled, garbage bytes.
+        desc.set_align(g.ty.align_of(ptr_size).max(1));
         let size = g.ty.size_of(ptr_size) as usize;
         match &g.init {
             Some(sic_ir::Constant::Bytes(b)) => {
@@ -168,6 +172,28 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
                     v.to_le_bytes().to_vec()
                 };
                 desc.define(bytes.into_boxed_slice());
+            }
+            Some(sic_ir::Constant::Aggregate { bytes, relocs }) => {
+                // Aggregate (struct/array) initializer: raw bytes carrying
+                // load-time pointer relocations for embedded function/global
+                // addresses (e.g. sqlite's function/mutex method tables).
+                let mut data = bytes.clone();
+                if data.len() < size { data.resize(size, 0); }
+                desc.define(data.into_boxed_slice());
+                for (off, target) in relocs {
+                    match target {
+                        sic_ir::RelocTarget::Global(gref, addend) => {
+                            let target_did = global_ids[&gref.0];
+                            let gv = obj_module.declare_data_in_data(target_did, &mut desc);
+                            desc.write_data_addr(*off as u32, gv, *addend);
+                        }
+                        sic_ir::RelocTarget::Func(fref) => {
+                            let fid = func_ids[&fref.0];
+                            let fv = obj_module.declare_func_in_data(fid, &mut desc);
+                            desc.write_function_addr(*off as u32, fv);
+                        }
+                    }
+                }
             }
             _ => {
                 // zero-initialize
@@ -293,18 +319,35 @@ pub fn build_cl_sig(
     cl_sig
 }
 
-/// Number of integer-register/stack slots we materialize for the variadic tail
-/// of a variadic function *definition*. Cranelift has no native variadic
-/// support, so we over-declare trailing integer params to capture the varargs
-/// (in registers first, then the stack overflow area) and spill them into a
-/// contiguous save area that `va_arg` walks. See `func::compile_function`.
-pub const VARARG_SLOTS: usize = 16;
+/// x86-64 System V register-save-area geometry: 6 general-purpose argument
+/// registers (rdi,rsi,rdx,rcx,r8,r9) and 8 vector registers (xmm0–xmm7).
+pub const VA_GP_REGS: usize = 6;
+pub const VA_FP_REGS: usize = 8;
+/// Extra trailing stack slots captured for varargs that overflow the registers.
+pub const VA_OVERFLOW_SLOTS: usize = 8;
 
-/// Build the signature used to *compile* a function body. Identical to
-/// [`build_cl_sig`] except that variadic functions gain `VARARG_SLOTS` extra
-/// trailing `i64` params so the callee can read the passed variadic arguments.
-/// The module-level declaration keeps the plain (unpadded) signature so calls
-/// still append the actual argument types per the platform ABI.
+/// Count how many named parameters occupy general-purpose vs vector argument
+/// registers (each capped at the number of such registers).
+pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize, usize) {
+    let mut n_gp = 0usize;
+    let mut n_fp = 0usize;
+    for p in &sig.params {
+        match types::cl_type(p, ptr_size) {
+            Some(t) if t.is_float() => n_fp += 1,
+            Some(_) => n_gp += 1,
+            None => {}
+        }
+    }
+    (n_gp.min(VA_GP_REGS), n_fp.min(VA_FP_REGS))
+}
+
+/// Build the signature used to *compile* a variadic function body. Cranelift has
+/// no native variadic support, so we over-declare trailing params to capture the
+/// incoming argument registers: `i64` params grab the remaining GP registers,
+/// `f64` params grab the remaining XMM registers, and extra `i64` params grab
+/// the start of the stack overflow area. The prologue spills these into a
+/// System-V-layout register save area (see `func::compile_function`) so a
+/// `va_list` built here is ABI-compatible with libc's `vfprintf` et al.
 pub fn build_cl_sig_def(
     sig: &sic_ir::FunctionType,
     ptr_size: u32,
@@ -312,7 +355,14 @@ pub fn build_cl_sig_def(
 ) -> cir::Signature {
     let mut cl_sig = build_cl_sig(sig, ptr_size, call_conv);
     if sig.variadic {
-        for _ in 0..VARARG_SLOTS {
+        let (n_gp, n_fp) = va_named_reg_counts(sig, ptr_size);
+        for _ in 0..(VA_GP_REGS - n_gp) {
+            cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
+        }
+        for _ in 0..(VA_FP_REGS - n_fp) {
+            cl_sig.params.push(cir::AbiParam::new(cir::types::F64));
+        }
+        for _ in 0..VA_OVERFLOW_SLOTS {
             cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
         }
     }

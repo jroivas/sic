@@ -4,6 +4,24 @@ use crate::Result;
 use crate::CompileError;
 use sic_ir::{Type, StructType, UnionType, FunctionType};
 
+/// The x86-64 System V `__builtin_va_list`: `__va_list_tag[1]`, where the tag is
+/// `{u32 gp_offset; u32 fp_offset; void* overflow_arg_area; void* reg_save_area;}`
+/// (24 bytes). Modeling it as a one-element array gives the correct C decay:
+/// passing `ap` yields `&ap[0]`, matching what glibc's `vfprintf` expects.
+pub fn va_list_type() -> Type {
+    let tag = Type::Struct(StructType::plain(
+        Some("__va_list_tag".to_string()),
+        vec![
+            ("gp_offset".to_string(), Type::Int { bits: 32, signed: false }),
+            ("fp_offset".to_string(), Type::Int { bits: 32, signed: false }),
+            ("overflow_arg_area".to_string(), Type::Pointer(Box::new(Type::Void))),
+            ("reg_save_area".to_string(), Type::Pointer(Box::new(Type::Void))),
+        ],
+        false,
+    ));
+    Type::Array { elem: Box::new(tag), len: 1 }
+}
+
 /// Convert an AST type to an IR type.
 pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     lower_ast_type(&qt.ty, named, ptr_size)
@@ -76,7 +94,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
-                return Ok(Type::Pointer(Box::new(Type::Void)));
+                return Ok(va_list_type());
             }
             // sic/Rust-style primitive type aliases
             match n.as_str() {
@@ -107,7 +125,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
 pub fn opaque_aggregate(t: Type) -> Type {
     match t {
         Type::Struct(st) if st.name.is_some() =>
-            Type::Struct(StructType { name: st.name, fields: vec![], packed: st.packed }),
+            Type::Struct(StructType::plain(st.name, vec![], st.packed)),
         Type::Union(u) if u.name.is_some() =>
             Type::Union(UnionType { name: u.name, fields: vec![] }),
         other => other,
@@ -134,18 +152,36 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
             }
         }
         // Forward declaration — use an opaque struct
-        return Ok(Type::Struct(StructType {
-            name: s.name.clone(), fields: vec![], packed: false,
-        }));
+        return Ok(Type::Struct(StructType::plain(s.name.clone(), vec![], false)));
     }
     let fields = s.fields.as_ref().unwrap();
     let mut ir_fields = Vec::new();
+    let mut bitfields = Vec::new();
+    let mut any_bitfield = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
         let fty = lower_type(&f.ty, named, ptr_size)?;
+        let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
+        if bw.is_some() { any_bitfield = true; }
         ir_fields.push((fname, fty));
+        bitfields.push(bw);
     }
-    Ok(Type::Struct(StructType { name: s.name.clone(), fields: ir_fields, packed: false }))
+    Ok(Type::Struct(StructType {
+        name: s.name.clone(),
+        fields: ir_fields,
+        packed: false,
+        bitfields: if any_bitfield { bitfields } else { Vec::new() },
+    }))
+}
+
+/// Evaluate a bit-field width (a constant integer expression).
+fn eval_bit_width(e: &crate::ast::Expr) -> u32 {
+    use crate::ast::ExprKind;
+    match &e.kind {
+        ExprKind::IntLit(v, _) => *v as u32,
+        ExprKind::UIntLit(v, _) => *v as u32,
+        _ => super::eval_const_expr(e, &HashMap::new()).unwrap_or(0) as u32,
+    }
 }
 
 fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {

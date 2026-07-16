@@ -11,6 +11,10 @@ pub struct FuncCtx<'m> {
     pub func: *mut Function, // raw pointer to avoid lifetime issues during construction
     /// Local variable map: name → (type, alloca ValId)
     pub locals: Vec<HashMap<String, (Type, ValId)>>,
+    /// Function-scope `static` locals: name → (type, internal global). These
+    /// have static storage duration, so they resolve to a module global rather
+    /// than a stack slot.
+    pub static_locals: HashMap<String, (Type, GlobalRef)>,
     /// Type of each value produced by instructions: ValId → Type
     pub val_types: HashMap<u32, Type>,
     /// Current basic block id being built
@@ -50,6 +54,7 @@ impl<'m> FuncCtx<'m> {
             lowerer,
             func: func as *mut Function,
             locals: vec![HashMap::new()],
+            static_locals: HashMap::new(),
             val_types: HashMap::new(),
             current_bb: entry_id,
             ret_ty,
@@ -131,6 +136,9 @@ impl<'m> FuncCtx<'m> {
             if let Some((ty, vid)) = scope.get(name) {
                 return Some(LookupResult::Local(ty, *vid));
             }
+        }
+        if let Some((ty, gref)) = self.static_locals.get(name) {
+            return Some(LookupResult::Global(ty, *gref));
         }
         if let Some((ty, gref)) = self.lowerer.globals_map.get(name) {
             return Some(LookupResult::Global(ty, *gref));
@@ -444,7 +452,20 @@ impl<'m> FuncCtx<'m> {
                     }
                     _ => {}
                 }
+                let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
                 for d in declarators {
+                    // A function-scope `static` local has static storage duration:
+                    // back it with an internal global (unique-named to avoid
+                    // clashes) and bind the local name to it, rather than a stack
+                    // slot re-initialized on every call.
+                    if is_static {
+                        let fname = self.func_ref().name.clone();
+                        let uniq = self.lowerer.module.globals.len();
+                        let gname = format!("{}.{}.{}", fname, d.name, uniq);
+                        let (gty, gref) = self.lowerer.add_static_local_global(gname, d, base_ty)?;
+                        self.static_locals.insert(d.name.clone(), (gty, gref));
+                        continue;
+                    }
                     let mut ty = self.lower_type(&d.ty)?;
                     // Handle VLA (variable-length array): size was 0 because expr isn't constant
                     // Try to evaluate the size expr at compile time or use a conservative fallback
@@ -476,6 +497,12 @@ impl<'m> FuncCtx<'m> {
                     let vid = self.alloc_val();
                     self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: explicit_align });
 
+                    // Bind the name in scope *before* lowering the initializer:
+                    // C makes a declarator visible within its own initializer, so
+                    // `T *p = malloc(sizeof(*p))` must see `p` as a `T*` (not
+                    // default to `int`, which would size the allocation wrong).
+                    self.define_local(d.name.clone(), ty.clone(), vid);
+
                     if let Some(init) = &d.init {
                         self.lower_initializer(init, Val::Local(vid), &ty)?;
                     } else {
@@ -496,7 +523,6 @@ impl<'m> FuncCtx<'m> {
                             name: d.name.clone(), ty: ty.clone(), slot: vid, is_param: false,
                         });
                     }
-                    self.define_local(d.name.clone(), ty, vid);
                 }
             }
             Decl::TypeDef { names, .. } => {

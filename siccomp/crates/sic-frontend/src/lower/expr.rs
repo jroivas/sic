@@ -8,6 +8,21 @@ use super::lower_type;
 struct LValue {
     ptr: Val,
     ty: Type,    // type of the pointee
+    /// Set when the location is a bit-field: (bit offset within the storage unit
+    /// pointed to by `ptr`, width in bits, whether the field is signed). Reads
+    /// and writes go through masked load/store.
+    bitfield: Option<BitField>,
+}
+
+#[derive(Clone, Copy)]
+struct BitField {
+    bit_offset: u32,
+    width: u32,
+    signed: bool,
+}
+
+impl LValue {
+    fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None } }
 }
 
 impl<'m> FuncCtx<'m> {
@@ -141,10 +156,7 @@ impl<'m> FuncCtx<'m> {
                 if matches!(lv.ty, Type::Array { .. }) {
                     return Ok(lv.ptr);
                 }
-                let dest = self.alloc_val();
-                let ty = lv.ty.clone();
-                self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
-                Ok(Val::Local(dest))
+                self.load_lvalue(&lv)
             }
 
             ExprKind::Arrow { base, name } => {
@@ -152,10 +164,7 @@ impl<'m> FuncCtx<'m> {
                 if matches!(lv.ty, Type::Array { .. }) {
                     return Ok(lv.ptr);
                 }
-                let dest = self.alloc_val();
-                let ty = lv.ty.clone();
-                self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
-                Ok(Val::Local(dest))
+                self.load_lvalue(&lv)
             }
 
             ExprKind::Cast { ty, expr: inner } => {
@@ -249,13 +258,14 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::VaStart { list, last } => {
-                let list_ptr = self.lower_expr_as_ptr(list)?;
+                let _ = last;
+                let list_ptr = self.lower_va_list_ptr(list)?;
                 self.push_instr(Instr::VaStart { list_ptr });
                 Ok(Constant::zero())
             }
 
             ExprKind::VaArg { list, ty } => {
-                let list_ptr = self.lower_expr_as_ptr(list)?;
+                let list_ptr = self.lower_va_list_ptr(list)?;
                 let ir_ty = self.lower_type(ty)?;
                 let dest = self.alloc_val();
                 self.push_instr(Instr::VaArg { dest, list_ptr, ty: ir_ty });
@@ -263,7 +273,7 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::VaEnd { list } => {
-                let list_ptr = self.lower_expr_as_ptr(list)?;
+                let list_ptr = self.lower_va_list_ptr(list)?;
                 self.push_instr(Instr::VaEnd { list_ptr });
                 Ok(Constant::zero())
             }
@@ -328,6 +338,9 @@ impl<'m> FuncCtx<'m> {
             match (&lt, &rt) {
                 (Type::Pointer(elem), _) if !matches!(rt, Type::Pointer(_)) => {
                     let inner = match elem.as_ref() { Type::Array { elem: e, .. } => *e.clone(), t => t.clone() };
+                    // Resolve an opaque pointee aggregate so the element stride is
+                    // its real size, not 0/1 (pointer pointees are stored opaque).
+                    let inner = super::types::resolve_aggregate(&inner, &self.lowerer.struct_types);
                     let elem_size = inner.size_of(self.ptr_size()) as i64;
                     let idx = self.coerce(r, &Type::i64())?;
                     let idx = if op == BinOpKind::Sub {
@@ -342,6 +355,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 (_, Type::Pointer(elem)) if op == BinOpKind::Add => {
                     let inner = match elem.as_ref() { Type::Array { elem: e, .. } => *e.clone(), t => t.clone() };
+                    let inner = super::types::resolve_aggregate(&inner, &self.lowerer.struct_types);
                     let elem_size = inner.size_of(self.ptr_size());
                     let idx = self.coerce(l, &Type::i64())?;
                     let dest = self.alloc_val();
@@ -351,7 +365,8 @@ impl<'m> FuncCtx<'m> {
                 }
                 (Type::Pointer(elem), Type::Pointer(_)) if op == BinOpKind::Sub => {
                     // ptr - ptr → (ptr - ptr) / elem_size
-                    let inner = match elem.as_ref() { Type::Array { elem: e, .. } => e.as_ref(), t => t };
+                    let inner = match elem.as_ref() { Type::Array { elem: e, .. } => (**e).clone(), t => t.clone() };
+                    let inner = super::types::resolve_aggregate(&inner, &self.lowerer.struct_types);
                     let elem_size = inner.size_of(self.ptr_size()) as i64;
                     let lp = self.coerce(l, &Type::i64())?;
                     let rp = self.coerce(r, &Type::i64())?;
@@ -496,18 +511,14 @@ impl<'m> FuncCtx<'m> {
         let rhs_val = self.lower_expr(rhs)?;
 
         let store_val = if let Some(bin_op) = op {
-            // Load current value, apply op, store result
-            let cur = self.alloc_val();
-            let ty = lv.ty.clone();
-            self.push_instr(Instr::Load { dest: cur, ptr: lv.ptr.clone(), ty });
-            self.emit_binop(bin_op, Val::Local(cur), rhs_val)?
+            // Load current value (bit-field aware), apply op, store result.
+            let cur = self.load_lvalue(&lv)?;
+            self.emit_binop(bin_op, cur, rhs_val)?
         } else {
             rhs_val
         };
 
-        let coerced = self.coerce(store_val, &lv.ty)?;
-        self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr });
-        Ok(coerced)
+        self.store_lvalue(&lv, store_val)
     }
 
     fn lower_unary(&mut self, op: UnOpKind, inner: &Expr) -> Result<Val> {
@@ -525,10 +536,17 @@ impl<'m> FuncCtx<'m> {
             }
             UnOpKind::Deref => {
                 let ptr = self.lower_expr(inner)?;
-                let dest = self.alloc_val();
                 // Determine pointee type
                 let ptr_ty = self.val_type(&ptr);
                 let inner_ty = self.pointee_of(&ptr_ty);
+                // Dereferencing a function pointer yields a function designator
+                // that immediately decays back to the pointer — emit no load
+                // (so `(*fp)(args)` calls `fp` directly rather than a garbage
+                // value loaded from the function's code).
+                if matches!(inner_ty, Type::Function(_)) {
+                    return Ok(ptr);
+                }
+                let dest = self.alloc_val();
                 self.push_instr(Instr::Load { dest, ptr, ty: inner_ty });
                 Ok(Val::Local(dest))
             }
@@ -561,26 +579,76 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Read an lvalue's value, extracting a bit-field with shifts/masking.
+    fn load_lvalue(&mut self, lv: &LValue) -> Result<Val> {
+        if let Some(bf) = lv.bitfield {
+            let ty = lv.ty.clone();
+            let bits = ty.int_bits().unwrap_or(32);
+            let raw = self.alloc_val();
+            self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
+            // Shift the field to the top, then back down: masks and (for signed
+            // fields) sign-extends in one pair of shifts.
+            let left = bits.saturating_sub(bf.bit_offset + bf.width);
+            let right = bits.saturating_sub(bf.width);
+            let hi = if left > 0 {
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Shl, lhs: Val::Local(raw), rhs: Constant::int(left as i64), ty: ty.clone() });
+                Val::Local(d)
+            } else { Val::Local(raw) };
+            let op = if bf.signed { BinOp::AShr } else { BinOp::LShr };
+            let res = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: res, op, lhs: hi, rhs: Constant::int(right as i64), ty });
+            return Ok(Val::Local(res));
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+        Ok(Val::Local(dest))
+    }
+
+    /// Store `val` into an lvalue, performing a read-modify-write for bit-fields.
+    /// Returns the value actually stored (for use as the assignment's value).
+    fn store_lvalue(&mut self, lv: &LValue, val: Val) -> Result<Val> {
+        if let Some(bf) = lv.bitfield {
+            let ty = lv.ty.clone();
+            let val = self.coerce(val, &ty)?;
+            let mask: i64 = if bf.width >= 64 { -1 } else { ((1u64 << bf.width) - 1) as i64 };
+            let vm = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: vm, op: BinOp::And, lhs: val.clone(), rhs: Constant::int(mask), ty: ty.clone() });
+            let vs = if bf.bit_offset > 0 {
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Shl, lhs: Val::Local(vm), rhs: Constant::int(bf.bit_offset as i64), ty: ty.clone() });
+                Val::Local(d)
+            } else { Val::Local(vm) };
+            let raw = self.alloc_val();
+            self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
+            let clear_mask = !(mask as u64).wrapping_shl(bf.bit_offset) as i64;
+            let cleared = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: cleared, op: BinOp::And, lhs: Val::Local(raw), rhs: Constant::int(clear_mask), ty: ty.clone() });
+            let newv = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: newv, op: BinOp::Or, lhs: Val::Local(cleared), rhs: vs, ty: ty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(newv), ptr: lv.ptr.clone() });
+            return Ok(val);
+        }
+        let coerced = self.coerce(val, &lv.ty)?;
+        self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr.clone() });
+        Ok(coerced)
+    }
+
     fn lower_pre_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(inner)?;
-        let cur = self.alloc_val();
-        let ty = lv.ty.clone();
-        self.push_instr(Instr::Load { dest: cur, ptr: lv.ptr.clone(), ty: ty.clone() });
+        let cur = self.load_lvalue(&lv)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
-        let result = self.emit_binop(op, Val::Local(cur), Constant::int(1))?;
-        self.push_instr(Instr::Store { val: result.clone(), ptr: lv.ptr });
-        Ok(result)
+        let result = self.emit_binop(op, cur, Constant::int(1))?;
+        self.store_lvalue(&lv, result)
     }
 
     fn lower_post_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(inner)?;
-        let old = self.alloc_val();
-        let ty = lv.ty.clone();
-        self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: ty.clone() });
+        let old = self.load_lvalue(&lv)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
-        let result = self.emit_binop(op, Val::Local(old), Constant::int(1))?;
-        self.push_instr(Instr::Store { val: result, ptr: lv.ptr });
-        Ok(Val::Local(old))
+        let result = self.emit_binop(op, old.clone(), Constant::int(1))?;
+        self.store_lvalue(&lv, result)?;
+        Ok(old)
     }
 
     fn lower_ternary(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
@@ -626,6 +694,22 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
         Ok(Val::Local(dest))
+    }
+
+    /// Lower a call argument. Struct/union arguments are passed by value using
+    /// the pointer ABI: the callee receives a pointer to the value and copies it
+    /// into its own local, so passing the argument's address is sufficient.
+    fn lower_arg(&mut self, a: &Expr) -> Result<Val> {
+        let aty = self.infer_expr_type(a).unwrap_or_else(|_| Type::i32());
+        if matches!(aty, Type::Struct(_) | Type::Union(_)) {
+            if let Ok(lv) = self.lower_lvalue(a) {
+                return Ok(lv.ptr);
+            }
+            // Non-lvalue aggregate (e.g. a struct returned by value): its rvalue
+            // lowering already yields a pointer to the temporary.
+            return self.lower_expr(a);
+        }
+        self.lower_expr(a)
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
@@ -701,7 +785,7 @@ impl<'m> FuncCtx<'m> {
         // Evaluate arguments
         let mut arg_vals = Vec::new();
         for a in args {
-            arg_vals.push(self.lower_expr(a)?);
+            arg_vals.push(self.lower_arg(a)?);
         }
 
         // Resolve function reference
@@ -772,6 +856,9 @@ impl<'m> FuncCtx<'m> {
         let param_tys: Vec<Type> = self.lowerer.module.func_sig(fref).params.clone();
         for (i, pval) in arg_vals.iter_mut().enumerate() {
             if let Some(pty) = param_tys.get(i) {
+                // Struct/union args are already lowered to a pointer to the value
+                // (by-value ABI); leave them as-is.
+                if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
                 let coerced = self.coerce(pval.clone(), pty)?;
                 *pval = coerced;
             }
@@ -876,11 +963,11 @@ impl<'m> FuncCtx<'m> {
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {
                         let ty = ty.clone();
-                        Ok(LValue { ptr: Val::Local(vid), ty })
+                        Ok(LValue::plain(Val::Local(vid), ty))
                     }
                     Some(LookupResult::Global(ty, gref)) => {
                         let ty = ty.clone();
-                        Ok(LValue { ptr: Val::Global(gref), ty })
+                        Ok(LValue::plain(Val::Global(gref), ty))
                     }
                     _ => Err(CompileError::at(
                         format!("'{}' is not an lvalue", name),
@@ -892,7 +979,7 @@ impl<'m> FuncCtx<'m> {
                 let ptr = self.lower_expr(inner)?;
                 let ptr_ty = self.val_type(&ptr);
                 let inner_ty = self.pointee_of(&ptr_ty);
-                Ok(LValue { ptr, ty: inner_ty })
+                Ok(LValue::plain(ptr, inner_ty))
             }
             ExprKind::Index { base, index } => self.lower_lvalue_index(base, index),
             ExprKind::Field { base, name } => self.lower_lvalue_field(base, name),
@@ -927,7 +1014,7 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         let result_ty = Type::Pointer(Box::new(elem_ty.clone()));
         self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size, result_ty });
-        Ok(LValue { ptr: Val::Local(dest), ty: elem_ty })
+        Ok(LValue::plain(Val::Local(dest), elem_ty))
     }
 
     fn lower_lvalue_field(&mut self, base: &Expr, name: &str) -> Result<LValue> {
@@ -951,7 +1038,7 @@ impl<'m> FuncCtx<'m> {
                 format!("-> applied to non-pointer (field '{}')", name),
                 base.span.file.clone(), base.span.line, base.span.col)),
         };
-        let lv = LValue { ptr, ty: struct_ty };
+        let lv = LValue::plain(ptr, struct_ty);
         self.field_ptr_from(lv, name, true, &base.span)
     }
 
@@ -982,9 +1069,18 @@ impl<'m> FuncCtx<'m> {
         // Resolve an opaque pointee aggregate to its full definition so field
         // offsets are computed from the real layout.
         let resolved_ty = super::types::resolve_aggregate(&struct_ty, &self.lowerer.struct_types);
-        let byte_offset = match &resolved_ty {
-            Type::Struct(st) => st.field_offset(field_idx, self.ptr_size()),
-            _ => 0,
+        let (byte_offset, bitfield) = match &resolved_ty {
+            Type::Struct(st) => {
+                let (offs, bit_offs, _) = st.layout_full(self.ptr_size());
+                let bo = offs.get(field_idx).copied().unwrap_or(0);
+                let bf = st.bitfields.get(field_idx).copied().flatten().map(|w| BitField {
+                    bit_offset: *bit_offs.get(field_idx).unwrap_or(&0),
+                    width: w,
+                    signed: field_ty.is_signed(),
+                });
+                (bo, bf)
+            }
+            _ => (0, None),
         };
 
         let dest = self.alloc_val();
@@ -992,7 +1088,7 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetFieldPtr {
             dest, base: base_ptr, field_idx, struct_name, byte_offset, result_ty,
         });
-        Ok(LValue { ptr: Val::Local(dest), ty: field_ty })
+        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield })
     }
 
     // ─── Type inference ───────────────────────────────────────────────────────
@@ -1130,11 +1226,59 @@ impl<'m> FuncCtx<'m> {
                     _ => Type::i32(),
                 })
             }
+            ExprKind::Call { func, .. } => {
+                // Return type of the callee. A direct call resolves via the
+                // module signature; an indirect call takes the pointee function
+                // type's return. Without this a call defaults to i32 and a
+                // pointer-returning call in a ternary gets truncated to 32 bits.
+                if let ExprKind::Ident(name) = &func.kind {
+                    if let Some(LookupResult::Func(fref)) = self.lookup(name) {
+                        return Ok(self.lowerer.module.func_sig(fref).ret.clone());
+                    }
+                }
+                let fty = self.infer_expr_type(func)?;
+                Ok(match fty {
+                    Type::Pointer(inner) => match *inner {
+                        Type::Function(ft) => ft.ret.clone(),
+                        _ => Type::i32(),
+                    },
+                    Type::Function(ft) => ft.ret.clone(),
+                    _ => Type::i32(),
+                })
+            }
+            ExprKind::Ternary { then, else_, .. } => {
+                // Mirror lower_ternary's result-type selection.
+                let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
+                let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+                Ok(match (&tty, &ety) {
+                    (Type::Pointer(_), _) | (Type::Void, _) => tty,
+                    (_, Type::Pointer(_)) => ety,
+                    _ if tty.is_float() => tty,
+                    _ if ety.is_float() => ety,
+                    _ if ety.size_of(self.ptr_size()) > tty.size_of(self.ptr_size()) => ety,
+                    _ => tty,
+                })
+            }
             _ => Ok(Type::i32()),
         }
     }
 
+    /// Lower a `va_list` operand to the address of its `__va_list_tag`. A local
+    /// `va_list` (the builtin array, or a user-defined struct aliased to
+    /// `va_list`) needs its own address; a `va_list` *parameter* has already
+    /// decayed to a `__va_list_tag*`, so its value is that address.
+    fn lower_va_list_ptr(&mut self, list: &Expr) -> Result<Val> {
+        let ty = self.infer_expr_type(list).unwrap_or_else(|_| Type::void_ptr());
+        if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {
+            if let Ok(lv) = self.lower_lvalue(list) {
+                return Ok(lv.ptr);
+            }
+        }
+        self.lower_expr(list)
+    }
+
     /// Lower an expression expecting it to produce a pointer (for va_list etc).
+    #[allow(dead_code)]
     fn lower_expr_as_ptr(&mut self, expr: &Expr) -> Result<Val> {
         match self.lower_lvalue(expr) {
             Ok(lv) => Ok(lv.ptr),
