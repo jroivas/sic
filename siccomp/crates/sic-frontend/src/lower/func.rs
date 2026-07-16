@@ -25,6 +25,10 @@ pub struct FuncCtx<'m> {
     pub labels: HashMap<String, BlockId>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
+    /// Stack of `break` targets for *both* loops and switches, in nesting order.
+    /// `break` jumps to the innermost of these (a switch inside a loop breaks the
+    /// switch, not the loop); `continue` uses `loop_stack` instead.
+    pub break_stack: Vec<BlockId>,
     /// Stack of active switches: (default block, end block, case-value → block).
     /// `case:`/`default:` labels resolve to these pre-created blocks so the
     /// `Switch` terminator's arms and the emitted case bodies share the same
@@ -60,6 +64,7 @@ impl<'m> FuncCtx<'m> {
             ret_ty,
             labels: HashMap::new(),
             loop_stack: Vec::new(),
+            break_stack: Vec::new(),
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
             last_init_local: None,
@@ -343,9 +348,10 @@ impl<'m> FuncCtx<'m> {
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
             Stmt::Break(_) => {
-                if let Some(&(end, _)) = self.loop_stack.last() {
-                    self.set_terminator(Terminator::Jump(end));
-                } else if let Some(end) = self.switch_stack.last().map(|s| s.1) {
+                // `break` targets the innermost enclosing loop *or* switch,
+                // whichever is nested deeper — a switch inside a loop breaks the
+                // switch, not the loop.
+                if let Some(&end) = self.break_stack.last() {
                     self.set_terminator(Terminator::Jump(end));
                 } else {
                     return Err(CompileError::new("break outside loop/switch"));
@@ -650,9 +656,11 @@ impl<'m> FuncCtx<'m> {
         self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
 
         self.loop_stack.push((end_bb, cond_bb));
+        self.break_stack.push(end_bb);
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
+        self.break_stack.pop();
         self.loop_stack.pop();
 
         self.switch_to_block(end_bb);
@@ -666,9 +674,11 @@ impl<'m> FuncCtx<'m> {
 
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(body_bb)); }
         self.loop_stack.push((end_bb, cond_bb));
+        self.break_stack.push(end_bb);
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
+        self.break_stack.pop();
         self.loop_stack.pop();
 
         self.switch_to_block(cond_bb);
@@ -709,9 +719,11 @@ impl<'m> FuncCtx<'m> {
         }
 
         self.loop_stack.push((end_bb, post_bb));
+        self.break_stack.push(end_bb);
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(post_bb)); }
+        self.break_stack.pop();
         self.loop_stack.pop();
 
         self.switch_to_block(post_bb);
@@ -745,6 +757,7 @@ impl<'m> FuncCtx<'m> {
 
         self.set_terminator(Terminator::Switch { val: v_i32, default: default_bb, arms });
         self.switch_stack.push((default_bb, end_bb, case_blocks));
+        self.break_stack.push(end_bb);
 
         // Statements before the first label are unreachable but may declare
         // locals — lower them into a throwaway block.
@@ -752,6 +765,7 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(pre);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+        self.break_stack.pop();
         self.switch_stack.pop();
 
         // A switch with no `default:` leaves the default block empty — route it
