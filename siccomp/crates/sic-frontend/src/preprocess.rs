@@ -103,6 +103,70 @@ fn target_predefines() -> Vec<&'static str> {
         defs.push("_LP64");
     }
 
+    // Operating-system predefines. `-undef` strips these too, but programs very
+    // commonly branch on them (`#ifdef __linux__`, `_WIN32`, `__unix__`, ...).
+    // Define the set matching the OS this compiler runs on, mirroring GCC/Clang.
+    #[cfg(target_os = "linux")]
+    {
+        defs.push("__linux__");
+        defs.push("__linux");
+        defs.push("__gnu_linux__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        defs.push("__APPLE__");
+        defs.push("__MACH__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        defs.push("_WIN32");
+        #[cfg(target_pointer_width = "64")]
+        {
+            defs.push("_WIN64");
+        }
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        defs.push("__FreeBSD__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "openbsd")]
+    {
+        defs.push("__OpenBSD__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "netbsd")]
+    {
+        defs.push("__NetBSD__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "dragonfly")]
+    {
+        defs.push("__DragonFly__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(any(target_os = "solaris", target_os = "illumos"))]
+    {
+        defs.push("__sun__");
+        defs.push("__sun");
+        defs.push("__svr4__");
+        defs.push("__unix__");
+        defs.push("__unix");
+    }
+    #[cfg(target_os = "emscripten")]
+    {
+        defs.push("__EMSCRIPTEN__");
+        defs.push("EMSCRIPTEN");
+    }
+
     defs
 }
 
