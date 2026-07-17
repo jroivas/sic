@@ -563,9 +563,19 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::MemCopy { dst: ptr, src, size: copy, align: 1 });
             }
             Initializer::Expr(e) => {
-                let val = self.lower_expr(e)?;
-                let coerced = self.coerce(val, ty)?;
-                self.push_instr(Instr::Store { val: coerced, ptr });
+                // `T v = <aggregate expr>` (e.g. a compound literal or a struct
+                // returned by value) copies the whole object rather than storing
+                // a pointer/register-sized scalar.
+                if matches!(ty, Type::Struct(_) | Type::Union(_)) {
+                    let src = self.lower_aggregate_ptr(e)?;
+                    let size = ty.size_of(self.ptr_size());
+                    let align = ty.align_of(self.ptr_size());
+                    self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
+                } else {
+                    let val = self.lower_expr(e)?;
+                    let coerced = self.coerce(val, ty)?;
+                    self.push_instr(Instr::Store { val: coerced, ptr });
+                }
             }
             Initializer::List(items) => {
                 match ty {

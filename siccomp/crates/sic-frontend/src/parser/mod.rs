@@ -1034,14 +1034,14 @@ impl Parser {
             let (_, ty) = self.parse_declarator(ty)?;
             self.expect(TokenKind::RParen)?;
             if self.at(TokenKind::LBrace) {
-                // Compound literal: (type){ initializer-list }
-                self.advance(); // {
-                let mut inits = Vec::new();
-                while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                    inits.push(self.parse_initializer()?);
-                    if !self.eat(TokenKind::Comma) { break; }
-                }
-                self.expect(TokenKind::RBrace)?;
+                // Compound literal: (type){ initializer-list }. Reuse the normal
+                // brace-initializer parser so designated initializers (`.field =`
+                // / `[i] =`) are accepted the same way they are in declarations.
+                let init = self.parse_initializer()?;
+                let inits = match init {
+                    Initializer::List(v) => v,
+                    other => vec![other],
+                };
                 let mut e = Expr::new(ExprKind::CompoundLiteral { ty, init: inits }, sp.clone());
                 e = self.parse_postfix_ops(e)?;
                 return Ok(e);

@@ -176,7 +176,7 @@ pub fn compile_function(
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
                 ptr_ty, target_config, ptr_size, va_info,
-                &mut slot_map, var_dbg,
+                &mut slot_map, var_dbg, module_ir,
             );
         }
         emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty);
@@ -201,6 +201,7 @@ fn emit_instr(
     va_info: Option<VaInfo>,
     slot_map: &mut HashMap<u32, cir::StackSlot>,
     var_dbg: &mut Vec<VarDbg>,
+    module_ir: &sic_ir::Module,
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
@@ -310,8 +311,20 @@ fn emit_instr(
                 (tys, n)
             };
 
+            // A variadic callee's declared signature is padded with trailing
+            // GP/FP filler params (see `build_cl_sig_def`) that only exist so the
+            // *callee* can spill argument registers. At a call site those fillers
+            // must be ignored: arguments past the real named parameters are
+            // variadic and must be passed in their natural register class (so a
+            // `double` lands in XMM, not a GP filler slot). Use the real named
+            // parameter count from the IR as the boundary.
+            let ir_sig = module_ir.func_sig(*func);
+            let named_count = ir_sig.params.len();
+            let is_variadic = ir_sig.variadic;
+            let boundary = if is_variadic { named_count } else { declared_count };
+
             let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                if i < declared_count {
+                if i < boundary && i < declared_count {
                     let hint = param_tys[i];
                     let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
                     coerce(v, hint, builder, ptr_ty)
@@ -323,8 +336,26 @@ fn emit_instr(
                 }
             }).collect();
 
-            let inst = if arg_vals.len() > declared_count {
-                // Variadic call with extra args: build extended sig and use call_indirect
+            let inst = if is_variadic {
+                // Build a call signature = real named params + the actual (promoted)
+                // argument types. Cranelift's SysV lowering places each param in its
+                // natural register class and sets AL to the number of XMM registers
+                // used, which is what a variadic callee (e.g. printf) expects.
+                let base = &builder.func.stencil.dfg.signatures[sig_ref];
+                let mut new_sig = cir::Signature::new(base.call_conv);
+                new_sig.returns = base.returns.clone();
+                for &t in param_tys.iter().take(named_count.min(param_tys.len())) {
+                    new_sig.params.push(cir::AbiParam::new(t));
+                }
+                for v in arg_vals.iter().skip(named_count) {
+                    let ty = builder.func.dfg.value_type(*v);
+                    new_sig.params.push(cir::AbiParam::new(ty));
+                }
+                let new_sig_ref = builder.func.import_signature(new_sig);
+                let faddr = builder.ins().func_addr(ptr_ty, cl_fref);
+                builder.ins().call_indirect(new_sig_ref, faddr, &arg_vals)
+            } else if arg_vals.len() > declared_count {
+                // Non-variadic over-provided (shouldn't normally happen): fall back.
                 let mut new_sig = builder.func.stencil.dfg.signatures[sig_ref].clone();
                 for v in &arg_vals[declared_count..] {
                     let ty = builder.func.dfg.value_type(*v);
@@ -760,13 +791,33 @@ fn emit_cast(
             else { coerce(val, dst, builder, ptr_ty) }
         }
         CastOp::BitCast | CastOp::IntToPtr | CastOp::PtrToInt => coerce(val, dst, builder, ptr_ty),
-        CastOp::SIToFP  => builder.ins().fcvt_from_sint(dst, val),
-        CastOp::UIToFP  => builder.ins().fcvt_from_uint(dst, val),
-        CastOp::FPToSI  => builder.ins().fcvt_to_sint_sat(dst, val),
+        // x64 float<->int conversions require the GPR side to be 32 or 64 bits.
+        // For narrower ints (i8/i16) widen to i32 first / reduce afterwards.
+        CastOp::SIToFP  => {
+            let v = if src.bits() < 32 { builder.ins().sextend(ct::I32, val) } else { val };
+            builder.ins().fcvt_from_sint(dst, v)
+        }
+        CastOp::UIToFP  => {
+            let v = if src.bits() < 32 { builder.ins().uextend(ct::I32, val) } else { val };
+            builder.ins().fcvt_from_uint(dst, v)
+        }
+        CastOp::FPToSI  => {
+            if dst.bits() < 32 {
+                let w = builder.ins().fcvt_to_sint_sat(ct::I32, val);
+                builder.ins().ireduce(dst, w)
+            } else {
+                builder.ins().fcvt_to_sint_sat(dst, val)
+            }
+        }
         CastOp::FPToUI  => {
             // C (unsigned T)x where x is negative is UB; most platforms treat it
             // as sign-conversion: cast to signed then reinterpret as unsigned.
-            builder.ins().fcvt_to_sint_sat(dst, val)
+            if dst.bits() < 32 {
+                let w = builder.ins().fcvt_to_sint_sat(ct::I32, val);
+                builder.ins().ireduce(dst, w)
+            } else {
+                builder.ins().fcvt_to_sint_sat(dst, val)
+            }
         }
         CastOp::FPExt   => builder.ins().fpromote(dst, val),
         CastOp::FPTrunc => builder.ins().fdemote(dst, val),

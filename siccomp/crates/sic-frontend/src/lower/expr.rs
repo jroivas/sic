@@ -289,6 +289,16 @@ impl<'m> FuncCtx<'m> {
     fn lower_init_item(&mut self, item: &crate::ast::Initializer, ptr: Val, ty: &Type) -> Result<()> {
         match item {
             crate::ast::Initializer::Expr(e) => {
+                // A struct/union field initialized from an aggregate expression
+                // (e.g. a nested compound literal) is copied whole, not stored as
+                // a scalar (which would truncate to a register).
+                if matches!(ty, Type::Struct(_) | Type::Union(_)) {
+                    let src = self.lower_aggregate_ptr(e)?;
+                    let size = ty.size_of(self.ptr_size());
+                    let align = ty.align_of(self.ptr_size());
+                    self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
+                    return Ok(());
+                }
                 let v = self.lower_expr(e)?;
                 let cv = self.coerce(v, ty)?;
                 self.push_instr(Instr::Store { val: cv, ptr });
@@ -509,12 +519,13 @@ impl<'m> FuncCtx<'m> {
         // Aggregate (struct/union) assignment is a byte copy, not a scalar
         // load/store — the latter would truncate anything wider than a register.
         if op.is_none() && matches!(lv.ty, Type::Struct(_) | Type::Union(_)) {
-            if let Ok(src) = self.lower_lvalue(rhs) {
-                let size = lv.ty.size_of(self.ptr_size());
-                let align = lv.ty.align_of(self.ptr_size());
-                self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src: src.ptr, size, align });
-                return Ok(lv.ptr);
-            }
+            // Copy the whole object, whether the RHS is an lvalue or an aggregate
+            // rvalue (e.g. a compound literal `(T){...}` or a struct return).
+            let src = self.lower_aggregate_ptr(rhs)?;
+            let size = lv.ty.size_of(self.ptr_size());
+            let align = lv.ty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
+            return Ok(lv.ptr);
         }
 
         let rhs_val = self.lower_expr(rhs)?;
@@ -719,6 +730,17 @@ impl<'m> FuncCtx<'m> {
             return self.lower_expr(a);
         }
         self.lower_expr(a)
+    }
+
+    /// Pointer to the storage of a struct/union-typed expression. Lvalues yield
+    /// their address; aggregate rvalues (compound literals, struct-returning
+    /// calls) already lower to a pointer to their temporary.
+    pub(crate) fn lower_aggregate_ptr(&mut self, e: &Expr) -> Result<Val> {
+        if let Ok(lv) = self.lower_lvalue(e) {
+            Ok(lv.ptr)
+        } else {
+            self.lower_expr(e)
+        }
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
@@ -993,8 +1015,15 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Index { base, index } => self.lower_lvalue_index(base, index),
             ExprKind::Field { base, name } => self.lower_lvalue_field(base, name),
             ExprKind::Arrow { base, name }  => self.lower_lvalue_arrow(base, name),
+            ExprKind::CompoundLiteral { ty, .. } => {
+                // A compound literal is an lvalue: materialize the temporary and
+                // use its address (its rvalue lowering already yields that pointer).
+                let ir_ty = self.lower_type(ty)?;
+                let ptr = self.lower_expr(expr)?;
+                Ok(LValue::plain(ptr, ir_ty))
+            }
             _ => {
-                // Not a simple lvalue — could be compound literal etc.
+                // Not a simple lvalue.
                 Err(CompileError::at(
                     "expression is not an lvalue",
                     expr.span.file.clone(), expr.span.line, expr.span.col,
