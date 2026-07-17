@@ -1,0 +1,17 @@
+// Regression: sic must accept GCC-style `-m` machine flags. `-m64` is the
+// default target (no-op); `-msse2`/`-mavx`/`-march=`/`-mtune=` are CPU
+// feature/tuning hints that are accepted and ignored. Previously clap split
+// `-m64` into `-m` + `64` and errored "unexpected argument '-m'". This test is
+// built with those flags (see test_0115.sic.flags).
+
+int main(void)
+{
+    // A little floating-point work so the SSE-related flags are plausible.
+    double a = 1.5, b = 2.5;
+    if (a + b != 4.0) return 1;
+    int xs[4] = { 1, 2, 3, 4 };
+    int sum = 0;
+    for (int i = 0; i < 4; i++) sum += xs[i];
+    if (sum != 10) return 2;
+    return 0;
+}
