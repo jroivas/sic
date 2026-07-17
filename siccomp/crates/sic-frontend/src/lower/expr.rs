@@ -1223,14 +1223,18 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Index { base, .. } => {
                 let bt = self.infer_expr_type(base)?;
-                Ok(match bt {
+                let elem = match bt {
                     Type::Pointer(t) => match *t {
                         Type::Array { elem, .. } => *elem,
                         other => other,
                     },
                     Type::Array { elem, .. } => *elem,
                     _ => Type::i32(),
-                })
+                };
+                // The element of a pointer-to-opaque-aggregate (e.g. `p->aCol[0]`
+                // where `aCol` is `Column*`) must be resolved to its full
+                // definition, or `sizeof` sees an empty struct and returns 0.
+                Ok(super::types::resolve_aggregate(&elem, &self.lowerer.struct_types))
             }
             ExprKind::Call { func, .. } => {
                 // Return type of the callee. A direct call resolves via the
