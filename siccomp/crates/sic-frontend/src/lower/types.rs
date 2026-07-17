@@ -68,11 +68,11 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             let elem = lower_type(base, named, ptr_size)?;
             let len = if let Some(sz) = size {
                 // Fold the (constant) length expression — handles arithmetic like
-                // `3 << 27` or `800 * 512 * 4`, not just bare literals. Genuine
-                // VLAs / non-constant sizes evaluate to 0, as before. (Enum
-                // constants aren't in scope here, so those still fall back to 0.)
-                super::eval_const_expr(sz, &HashMap::new())
-                    .ok()
+                // `3 << 27` or `800 * 512 * 4`, and `sizeof(T)` / `offsetof(...)`
+                // (needed for e.g. `u8 space[offsetof(SrcList,a)+sizeof(SrcItem)]`).
+                // Genuine VLAs / non-constant sizes evaluate to 0, as before.
+                // (Enum constants aren't in scope here, so those still fall back to 0.)
+                eval_const_size(sz, named, ptr_size, &HashMap::new())
                     .filter(|&v| v >= 0)
                     .map(|v| v as usize)
                     .unwrap_or(0)
@@ -172,6 +172,90 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         packed: false,
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
     }))
+}
+
+/// Type-aware constant folder for array dimensions. Extends the plain integer
+/// arithmetic of [`super::eval_const_expr`] with `sizeof(T)` and
+/// `__builtin_offsetof(T, ...)`, which need the type table and pointer width.
+/// Returns `None` for non-constant (e.g. VLA) expressions.
+pub fn eval_const_size(
+    e: &Expr,
+    named: &HashMap<String, Type>,
+    ptr_size: u32,
+    enum_consts: &HashMap<String, i64>,
+) -> Option<i64> {
+    use crate::ast::{ExprKind, UnOpKind, BinOpKind, OffsetDesignator};
+    match &e.kind {
+        ExprKind::IntLit(v, _) => Some(*v),
+        ExprKind::UIntLit(v, _) => Some(*v as i64),
+        ExprKind::CharLit(v) => Some(*v as i64),
+        ExprKind::Ident(name) => enum_consts.get(name.as_str()).copied(),
+        ExprKind::SizeofType(qt) => {
+            let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
+            Some(t.size_of(ptr_size) as i64)
+        }
+        ExprKind::OffsetOf { ty, designators } => {
+            let mut cur = lower_ast_type(&ty.ty, named, ptr_size).ok()?;
+            let mut offset: i64 = 0;
+            for d in designators {
+                match d {
+                    OffsetDesignator::Field(name) => {
+                        let resolved = resolve_aggregate(&cur, named);
+                        let (idx, fty, _) = super::expr::find_field(&resolved, name, named)?;
+                        if let Type::Struct(st) = &resolved {
+                            offset += st.field_offset(idx, ptr_size) as i64;
+                        }
+                        // union members are all at offset 0
+                        cur = fty;
+                    }
+                    OffsetDesignator::Index(ie) => {
+                        let i = eval_const_size(ie, named, ptr_size, enum_consts)?;
+                        let elem = match &cur {
+                            Type::Array { elem, .. } => *elem.clone(),
+                            Type::Pointer(t) => *t.clone(),
+                            other => other.clone(),
+                        };
+                        offset += i.wrapping_mul(elem.size_of(ptr_size) as i64);
+                        cur = elem;
+                    }
+                }
+            }
+            Some(offset)
+        }
+        ExprKind::Unary { op: UnOpKind::Neg, expr } =>
+            Some(eval_const_size(expr, named, ptr_size, enum_consts)?.wrapping_neg()),
+        ExprKind::Unary { op: UnOpKind::BitNot, expr } =>
+            Some(!eval_const_size(expr, named, ptr_size, enum_consts)?),
+        ExprKind::Unary { op: UnOpKind::Not, expr } =>
+            Some(if eval_const_size(expr, named, ptr_size, enum_consts)? == 0 { 1 } else { 0 }),
+        ExprKind::BinOp { op, lhs, rhs } => {
+            let l = eval_const_size(lhs, named, ptr_size, enum_consts)?;
+            let r = eval_const_size(rhs, named, ptr_size, enum_consts)?;
+            Some(match op {
+                BinOpKind::Add => l.wrapping_add(r),
+                BinOpKind::Sub => l.wrapping_sub(r),
+                BinOpKind::Mul => l.wrapping_mul(r),
+                BinOpKind::Div if r != 0 => l / r,
+                BinOpKind::Rem if r != 0 => l % r,
+                BinOpKind::BitAnd => l & r,
+                BinOpKind::BitOr  => l | r,
+                BinOpKind::BitXor => l ^ r,
+                BinOpKind::Shl    => l << (r & 63),
+                BinOpKind::Shr    => l >> (r & 63),
+                _ => return None,
+            })
+        }
+        ExprKind::Ternary { cond, then, else_ } => {
+            if eval_const_size(cond, named, ptr_size, enum_consts)? != 0 {
+                eval_const_size(then, named, ptr_size, enum_consts)
+            } else {
+                eval_const_size(else_, named, ptr_size, enum_consts)
+            }
+        }
+        ExprKind::Cast { expr, .. } => eval_const_size(expr, named, ptr_size, enum_consts),
+        // Fall back to the plain integer evaluator for anything else.
+        _ => super::eval_const_expr(e, enum_consts).ok(),
+    }
 }
 
 /// Evaluate a bit-field width (a constant integer expression).

@@ -144,6 +144,12 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Index { base, index } => {
                 let lv = self.lower_lvalue_index(base, index)?;
+                // An array element that is itself an array decays to a pointer to
+                // its first element (`a[i]` in `a[i][j]` yields the row address,
+                // not a load of the whole row).
+                if matches!(lv.ty, Type::Array { .. }) {
+                    return Ok(lv.ptr);
+                }
                 let dest = self.alloc_val();
                 let ty = lv.ty.clone();
                 self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
@@ -1295,7 +1301,7 @@ fn inc_op(ty: &Type, inc: bool) -> BinOp {
     }
 }
 
-fn find_field(ty: &Type, name: &str, named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {
+pub(super) fn find_field(ty: &Type, name: &str, named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {
     // A pointee aggregate is stored opaque (no fields); recover its definition.
     let resolved = super::types::resolve_aggregate(ty, named);
     match &resolved {

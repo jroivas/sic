@@ -505,6 +505,12 @@ impl Parser {
     }
 
     fn parse_declarator_suffix(&mut self, mut ty: QualType) -> Result<QualType> {
+        // Postfix declarator operators bind left-to-right: the *leftmost* suffix
+        // is the *outermost* type constructor. E.g. `int a[2][3]` is "array-2 of
+        // array-3 of int", so `[2]` must wrap `[3]`. Collect the whole suffix run
+        // in source order, then apply it inside-out (last suffix innermost).
+        enum Suffix { Array(Option<Box<Expr>>), Func(Vec<Param>, bool) }
+        let mut suffixes = Vec::new();
         loop {
             match self.peek_kind() {
                 TokenKind::LBracket => {
@@ -512,16 +518,22 @@ impl Parser {
                     let size = if self.at(TokenKind::RBracket) { None }
                                else { Some(Box::new(self.parse_assign_expr()?)) };
                     self.expect(TokenKind::RBracket)?;
-                    ty = QualType::new(AstType::Array { base: Box::new(ty), size });
+                    suffixes.push(Suffix::Array(size));
                 }
                 TokenKind::LParen => {
                     let (params, variadic) = self.parse_params()?;
-                    ty = QualType::new(AstType::Function {
-                        ret: Box::new(ty), params, variadic,
-                    });
+                    suffixes.push(Suffix::Func(params, variadic));
                 }
                 _ => break,
             }
+        }
+        for suf in suffixes.into_iter().rev() {
+            ty = match suf {
+                Suffix::Array(size) => QualType::new(AstType::Array { base: Box::new(ty), size }),
+                Suffix::Func(params, variadic) => QualType::new(AstType::Function {
+                    ret: Box::new(ty), params, variadic,
+                }),
+            };
         }
         Ok(ty)
     }
