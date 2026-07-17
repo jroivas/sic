@@ -430,11 +430,15 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "isize" | "usize" => TokenKind::TypeName,
         "__attribute__"  => TokenKind::Attribute,
         "__extension__"  => TokenKind::Extension,
-        "__asm__" | "asm" => TokenKind::Asm,
+        // GNU/Clang double-underscore keyword aliases (both `__kw` and `__kw__`
+        // spellings). glibc headers use these once the compiler advertises
+        // `__GNUC__`/`__clang__`.
+        "__asm__" | "__asm" | "asm" => TokenKind::Asm,
         "__inline__" | "__inline" => TokenKind::Inline,
-        "__const__"      => TokenKind::Const,
-        "__volatile__"   => TokenKind::Volatile,
-        "__restrict__"   => TokenKind::Restrict,
+        "__const__" | "__const" => TokenKind::Const,
+        "__volatile__" | "__volatile" => TokenKind::Volatile,
+        "__restrict__" | "__restrict" => TokenKind::Restrict,
+        "__signed__" | "__signed" => TokenKind::Signed,
         "__builtin_va_start" | "__builtin_c23_va_start"
         | "__builtin_va_end" | "__builtin_va_arg" => TokenKind::Ident,
         _ if typedefs.contains(s) => TokenKind::TypeName,

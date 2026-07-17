@@ -46,6 +46,13 @@ pub fn preprocess_ex(
         cmd.arg(format!("-D{}={}", name, value));
     }
 
+    // Identify as Clang so programs that gate on a minimum compiler version
+    // accept sic (e.g. QEMU's `__clang_major__ >= 10` check). We claim Clang 15
+    // with the GCC 4.2.1 compatibility that real Clang advertises.
+    for (name, value) in compiler_identity_predefines() {
+        cmd.arg(format!("-D{}={}", name, value));
+    }
+
     for d in defines {
         cmd.arg(format!("-D{}", d));
     }
@@ -168,6 +175,27 @@ fn target_predefines() -> Vec<&'static str> {
     }
 
     defs
+}
+
+/// Compiler-identity predefines. sic is neither GCC nor Clang, but many programs
+/// refuse to build unless they recognize a compiler of a sufficient version
+/// (e.g. QEMU errors out unless `__clang_major__ >= 10`). We advertise Clang
+/// 15.0.0.
+///
+/// We deliberately DO NOT also define `__GNUC__`, even though a real Clang does.
+/// `__GNUC__` gates glibc/library headers into GNU code paths that emit builtins
+/// sic doesn't implement yet (`__builtin_clz`, the `__extension__ ({...})`
+/// statement-expression form of `assert`, etc.). Advertising just the Clang
+/// version satisfies the common minimum-compiler checks without turning those on.
+fn compiler_identity_predefines() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("__clang__", "1"),
+        ("__clang_major__", "15"),
+        ("__clang_minor__", "0"),
+        ("__clang_patchlevel__", "0"),
+        ("__clang_version__", "\"15.0.0\""),
+        ("__VERSION__", "\"Clang 15.0.0\""),
+    ]
 }
 
 /// Query the host C compiler for its predefined macros and return the safe,

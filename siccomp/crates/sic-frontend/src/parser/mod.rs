@@ -219,6 +219,10 @@ impl Parser {
         loop {
             self.skip_attributes();
             match self.peek_kind() {
+                // GCC `__extension__` is a transparent prefix on a declaration
+                // (used e.g. on `long long` struct members in glibc headers).
+                // Skip it; not consuming it here made struct-member parsing spin.
+                TokenKind::Extension => { self.advance(); }
                 // Storage classes
                 TokenKind::Auto     => { storage = Some(StorageClass::Auto);     self.advance(); }
                 TokenKind::Register => { storage = Some(StorageClass::Register); self.advance(); }
@@ -366,8 +370,17 @@ impl Parser {
             self.advance();
             let mut fields = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                let before = self.pos;
                 fields.extend(self.parse_struct_field()?);
                 self.eat(TokenKind::Semi);
+                // Safety: never spin (and allocate unboundedly) if some construct
+                // failed to consume any tokens.
+                if self.pos == before {
+                    return Err(CompileError::at(
+                        "unexpected token in struct/union member",
+                        self.span().file.clone(), self.span().line, self.span().col,
+                    ));
+                }
             }
             self.expect(TokenKind::RBrace)?;
             Some(fields)

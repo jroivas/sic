@@ -1,0 +1,13 @@
+/* Test that we fake being at lest clang 10/15 */
+
+#ifdef __apple_build_version__
+# if __clang_major__ < 15 || (__clang_major__ == 15 && __clang_minor__ < 0)
+#  error You need at least XCode Clang v15.0
+# endif
+#else
+# if __clang_major__ < 10 || (__clang_major__ == 10 && __clang_minor__ < 0)
+#  error You need at least Clang v10.0
+# endif
+#endif
+
+int main(void) { return 0; }
