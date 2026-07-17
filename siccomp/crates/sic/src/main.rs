@@ -251,6 +251,17 @@ fn main() {
             if let Some((name, value)) = parse_f_option(&a) {
                 f_options.insert(name, value);
             }
+        } else if a == "-m64" {
+            // sic targets x86-64; `-m64` is the default. Accept as a no-op.
+        } else if a == "-m32" || a == "-mx32" {
+            // sic can only produce 64-bit code — fail loudly rather than
+            // silently emitting a 64-bit object for a 32-bit request.
+            eprintln!("sic: error: '{}' is not supported (sic only targets 64-bit x86-64)", a);
+            std::process::exit(1);
+        } else if a.starts_with("-m") && a.len() > 2 {
+            // Other machine-dependent flags (`-msse2`, `-mavx`, `-march=...`,
+            // `-mtune=...`, `-mfpmath=...`, ...) are CPU feature/tuning hints.
+            // Accept and ignore them: they affect optimization, not correctness.
         } else if a == "-M" || a == "-MM" {
             // Dependency-only: emit make rules and don't compile.
             deps_only = true;
