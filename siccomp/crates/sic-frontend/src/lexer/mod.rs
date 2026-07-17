@@ -226,7 +226,12 @@ impl Lexer {
 
     fn scan_string_literal(&mut self, sp: Span) -> Result<Token> {
         self.advance(); // opening "
-        let mut s = String::new();
+        // A C string literal is a sequence of *bytes*, not Unicode scalars. An
+        // octal/hex escape like `\342` or `\xe2` denotes the single raw byte
+        // 0xE2 — it must NOT be re-encoded as the UTF-8 of code point U+00E2
+        // (which would emit 0xC3 0xA2 and corrupt e.g. box-drawing characters).
+        // Ordinary source characters keep their own UTF-8 byte encoding.
+        let mut bytes: Vec<u8> = Vec::new();
         loop {
             if self.pos >= self.src.len() {
                 return Err(CompileError::at("unterminated string literal", sp.file.clone(), sp.line, sp.col));
@@ -238,12 +243,17 @@ impl Lexer {
                     return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
                 }
                 let val = self.read_escape_value();
-                s.push(char::from_u32(val).unwrap_or('\u{FFFD}'));
+                bytes.push(val as u8);
             } else {
-                s.push(c);
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             }
         }
+        // The token text carries the raw C-string bytes; it may not be valid
+        // UTF-8 (e.g. `"\xe2"`). Downstream only ever reads it as bytes
+        // (`as_bytes`/`into_bytes`/`len`), so preserve the bytes verbatim.
         // Adjacent string literal concatenation is handled by the parser.
+        let s = unsafe { String::from_utf8_unchecked(bytes) };
         Ok(Token::new(TokenKind::StringLit, s, sp))
     }
 

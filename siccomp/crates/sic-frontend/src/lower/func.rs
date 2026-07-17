@@ -784,13 +784,30 @@ impl<'m> FuncCtx<'m> {
         let src_ty = self.val_type(&val);
         if src_ty == *target { return Ok(val); }
 
-        match (src_ty, target) {
+        match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
             _ => {}
         }
 
+        // Integer → pointer: widen the integer to pointer size *first*, with the
+        // integer's own signedness. Casting a narrow signed int like `(void*)-1`
+        // must sign-extend (0xffff…ffff), not zero-extend (0x0000…ffff); the
+        // low-level `IntToPtr` reinterpret can't know the source signedness.
+        if let (Type::Int { bits, signed }, Type::Pointer(_)) = (&src_ty, target) {
+            let ptr_bits = self.ptr_size() * 8;
+            if *bits < ptr_bits {
+                let wide = Type::Int { bits: ptr_bits, signed: *signed };
+                let ext = self.alloc_val();
+                let op = cast_op_for(&src_ty, &wide);
+                self.push_instr(Instr::Cast { dest: ext, op, val, to_ty: wide });
+                let dest = self.alloc_val();
+                self.push_instr(Instr::Cast { dest, op: CastOp::IntToPtr, val: Val::Local(ext), to_ty: target.clone() });
+                return Ok(Val::Local(dest));
+            }
+        }
+
         let dest = self.alloc_val();
-        let op = cast_op_for(&self.val_type(&val), target);
+        let op = cast_op_for(&src_ty, target);
         self.push_instr(Instr::Cast { dest, op, val, to_ty: target.clone() });
         Ok(Val::Local(dest))
     }

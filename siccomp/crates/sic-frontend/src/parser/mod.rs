@@ -1245,9 +1245,12 @@ impl Parser {
             }
             TokenKind::StringLit => {
                 let mut s = self.advance().text.clone();
-                // Concatenate adjacent string literals
+                // Concatenate adjacent string literals. The token text holds raw
+                // C-string bytes and may be invalid UTF-8, so append at the byte
+                // level rather than via `&str`.
                 while self.at(TokenKind::StringLit) {
-                    s.push_str(&self.advance().text);
+                    let next = self.advance().text.as_bytes().to_vec();
+                    unsafe { s.as_mut_vec().extend_from_slice(&next); }
                 }
                 Ok(Expr::new(ExprKind::StringLit(s), sp))
             }

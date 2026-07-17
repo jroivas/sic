@@ -425,7 +425,7 @@ impl<'m> FuncCtx<'m> {
                         BinOpKind::Gt => CmpOp::FOGt, BinOpKind::Ge => CmpOp::FOGe,
                         _ => unreachable!()
                     }
-                } else if is_signed || matches!(common, Type::Pointer(_)) {
+                } else if is_signed {
                     match op {
                         BinOpKind::Eq => CmpOp::IEq,  BinOpKind::Ne => CmpOp::INe,
                         BinOpKind::Lt => CmpOp::ISLt, BinOpKind::Le => CmpOp::ISLe,
@@ -433,6 +433,9 @@ impl<'m> FuncCtx<'m> {
                         _ => unreachable!()
                     }
                 } else {
+                    // Unsigned ints AND pointers: pointer relational comparisons
+                    // are unsigned (addresses like 0xffff... must compare above
+                    // real heap/stack addresses, not as a negative number).
                     match op {
                         BinOpKind::Eq => CmpOp::IEq,  BinOpKind::Ne => CmpOp::INe,
                         BinOpKind::Lt => CmpOp::IULt, BinOpKind::Le => CmpOp::IULe,
