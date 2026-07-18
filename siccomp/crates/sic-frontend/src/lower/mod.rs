@@ -102,7 +102,8 @@ impl Lowerer {
                 Decl::UnionDecl(u) | Decl::Var { base_ty: QualType { ty: AstType::Union(u), .. }, .. } => {
                     self.register_union_type_from_def(u)?;
                 }
-                Decl::EnumDecl(e) => {
+                Decl::EnumDecl(e)
+                | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => {
                     self.register_enum(e)?;
                 }
                 _ => {}
@@ -417,8 +418,9 @@ impl Lowerer {
                     return false;
                 }
                 let Initializer::List(items) = init else { return false };
+                let items = expand_init_ranges(items, &self.enum_consts);
                 let mut cursor = 0usize;
-                for item in items {
+                for item in &items {
                     let (target, next) =
                         self.designated_const_target(&ty, &item.designators, cursor, base);
                     if let Some((off, leaf)) = target {
@@ -479,6 +481,7 @@ impl Lowerer {
                 let i = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
                 (member_at(self, agg, i, base), i)
             }
+            Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
             None => (member_at(self, agg, cursor, base), cursor),
         };
         let Some((mut off, mut cur_ty)) = first else { return (None, top_index + 1); };
@@ -496,6 +499,7 @@ impl Lowerer {
                     let Some((o, t)) = member_at(self, &cur_ty, i, off) else { return (None, top_index + 1); };
                     off = o; cur_ty = t;
                 }
+                Designator::IndexRange(..) => return (None, top_index + 1),
             }
         }
         (Some((off, cur_ty)), top_index + 1)
@@ -736,6 +740,36 @@ fn field_offset_by_name(st: &Type, name: &str, ptr_size: u32) -> Option<(u64, Ty
 }
 
 /// Evaluate a constant expression (only literals and simple arithmetic).
+/// Expand any leading GNU range designator `[lo ... hi]` in a brace-list into one
+/// `Index` item per index. Ranges are (nearly) always the sole/first designator,
+/// so only the first designator is expanded; the rest of the chain is preserved.
+/// Non-range items are returned unchanged.
+pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<String, i64>) -> Vec<InitItem> {
+    if !items.iter().any(|it| matches!(it.designators.first(), Some(Designator::IndexRange(..)))) {
+        return items.to_vec();
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(Designator::IndexRange(lo, hi)) = item.designators.first() {
+            let lo = eval_const_expr(lo, enum_consts).unwrap_or(0).max(0);
+            let hi = eval_const_expr(hi, enum_consts).unwrap_or(lo);
+            let rest = &item.designators[1..];
+            let mut i = lo;
+            while i <= hi {
+                let mut ds = Vec::with_capacity(rest.len() + 1);
+                ds.push(Designator::Index(Box::new(Expr::new(
+                    ExprKind::IntLit(i, false), crate::lexer::Span::default()))));
+                ds.extend(rest.iter().cloned());
+                out.push(InitItem { designators: ds, init: item.init.clone() });
+                i += 1;
+            }
+        } else {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
     match &e.kind {
         ExprKind::IntLit(v, _) => Ok(*v),

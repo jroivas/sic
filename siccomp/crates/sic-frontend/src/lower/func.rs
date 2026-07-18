@@ -641,8 +641,9 @@ impl<'m> FuncCtx<'m> {
                         align: ty.align_of(self.ptr_size()),
                     });
                 }
+                let items = super::expand_init_ranges(items, &self.lowerer.enum_consts);
                 let mut cursor = 0usize;
-                for item in items {
+                for item in &items {
                     let (target, next) =
                         self.resolve_init_target(&ptr, ty, &item.designators, cursor)?;
                     if let Some((tptr, tty)) = target {
@@ -684,6 +685,7 @@ impl<'m> FuncCtx<'m> {
                 let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
                 (self.member_at(base, agg, i), i)
             }
+            Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
             None => (self.member_at(base, agg, cursor), cursor),
         };
         let Some((mut ptr, mut cur_ty)) = first else {
@@ -708,6 +710,9 @@ impl<'m> FuncCtx<'m> {
                     };
                     ptr = p; cur_ty = ety;
                 }
+                // A range in a chained (non-leading) position is unsupported;
+                // skip the element rather than crash.
+                Designator::IndexRange(..) => return Ok((None, top_index + 1)),
             }
         }
         Ok((Some((ptr, cur_ty)), top_index + 1))

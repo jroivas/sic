@@ -671,8 +671,15 @@ impl Parser {
                     if self.at(TokenKind::LBracket) {
                         self.advance();
                         let idx = self.parse_assign_expr()?;
-                        self.expect(TokenKind::RBracket)?;
-                        designators.push(Designator::Index(Box::new(idx)));
+                        if self.eat(TokenKind::Ellipsis) {
+                            // GNU range designator `[lo ... hi]`.
+                            let hi = self.parse_assign_expr()?;
+                            self.expect(TokenKind::RBracket)?;
+                            designators.push(Designator::IndexRange(Box::new(idx), Box::new(hi)));
+                        } else {
+                            self.expect(TokenKind::RBracket)?;
+                            designators.push(Designator::Index(Box::new(idx)));
+                        }
                     } else if self.at(TokenKind::Dot) {
                         self.advance();
                         let name = self.expect_name()?;

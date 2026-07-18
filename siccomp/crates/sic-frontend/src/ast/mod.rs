@@ -128,6 +128,8 @@ pub struct InitItem {
 pub enum Designator {
     Field(String),
     Index(Box<Expr>),
+    /// GNU range designator `[lo ... hi] = ...`: fills every index lo..=hi.
+    IndexRange(Box<Expr>, Box<Expr>),
 }
 
 /// A top-level declaration.
