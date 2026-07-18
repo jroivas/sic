@@ -51,6 +51,22 @@ impl Parser {
     }
 
     fn at(&self, kind: TokenKind) -> bool { self.peek_kind() == kind }
+
+    /// Expect a name in an ordinary-identifier position (member/enum/label/goto
+    /// name). Besides a plain identifier, this also accepts a built-in type-alias
+    /// token (`u64`, `i32`, `usize`, ...): those aliases collide with common C
+    /// identifiers, so a program is free to use them as names.
+    fn expect_name(&mut self) -> Result<String> {
+        if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
+            Ok(self.advance().text.clone())
+        } else {
+            let t = self.peek().clone();
+            Err(CompileError::at(
+                format!("expected identifier but got {:?} ('{}')", t.kind, t.text),
+                t.span.file.clone(), t.span.line, t.span.col,
+            ))
+        }
+    }
     fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) { self.advance(); true } else { false }
     }
@@ -432,7 +448,7 @@ impl Parser {
             let mut vs = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 let vsp = self.span();
-                let vname = self.expect(TokenKind::Ident)?.text;
+                let vname = self.expect_name()?;
                 let value = if self.eat(TokenKind::Eq) { Some(Box::new(self.parse_assign_expr()?)) } else { None };
                 vs.push(EnumVariant { name: vname, value, span: vsp });
                 if !self.eat(TokenKind::Comma) { break; }
@@ -782,7 +798,7 @@ impl Parser {
     fn parse_goto(&mut self) -> Result<Stmt> {
         let sp = self.span();
         self.advance();
-        let name = self.expect(TokenKind::Ident)?.text;
+        let name = self.expect_name()?;
         self.eat(TokenKind::Semi);
         Ok(Stmt::Goto(name, sp))
     }
@@ -1166,6 +1182,13 @@ impl Parser {
                 let e = Expr::new(ExprKind::Generic { controlling, assocs }, sp);
                 self.parse_postfix_ops(e)
             }
+            // GCC `__extension__` is a transparent prefix in expression context
+            // too (e.g. `__extension__ ({ ... })` statement expressions in glib
+            // macros). Skip it and parse the operand.
+            TokenKind::Extension => {
+                self.advance();
+                self.parse_unary()
+            }
             _ => self.parse_postfix()
         }
     }
@@ -1333,10 +1356,10 @@ impl Parser {
         self.expect(TokenKind::Comma)?;
         let mut designators = Vec::new();
         // First member is a bare identifier.
-        designators.push(OffsetDesignator::Field(self.expect(TokenKind::Ident)?.text));
+        designators.push(OffsetDesignator::Field(self.expect_name()?));
         loop {
             if self.eat(TokenKind::Dot) {
-                designators.push(OffsetDesignator::Field(self.expect(TokenKind::Ident)?.text));
+                designators.push(OffsetDesignator::Field(self.expect_name()?));
             } else if self.eat(TokenKind::LBracket) {
                 let idx = self.parse_assign_expr()?;
                 self.expect(TokenKind::RBracket)?;

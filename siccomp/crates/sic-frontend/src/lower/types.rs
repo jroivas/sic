@@ -110,6 +110,15 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "uint128"| "u128" => return Ok(Type::Int { bits: 128, signed: false }),
                 "isize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: true  }),
                 "usize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: false }),
+                // Extended float types. sic has no true 128/80-bit float codegen,
+                // so these share `Float80` (16 bytes, computed as f64) — enough to
+                // compile code that merely passes them around. `_Float16` is 2
+                // bytes, `_Float32`/`_Float64` map to float/double.
+                "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
+                | "_Float64x"     => return Ok(Type::Float80),
+                "_Float64"        => return Ok(Type::Float64),
+                "_Float32" | "_Float32x" => return Ok(Type::Float32),
+                "_Float16"        => return Ok(Type::Int { bits: 16, signed: false }),
                 _ => {}
             }
             named.get(n).cloned().ok_or_else(|| {
