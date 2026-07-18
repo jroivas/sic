@@ -289,10 +289,11 @@ pub enum ExprKind {
     /// Compound literal: (Type){ ... }
     CompoundLiteral { ty: QualType, init: Vec<InitItem> },
 
-    /// __builtin_va_start / va_arg / va_end
+    /// __builtin_va_start / va_arg / va_end / va_copy
     VaStart { list: BoxExpr, last: BoxExpr },
     VaArg { list: BoxExpr, ty: QualType },
     VaEnd { list: BoxExpr },
+    VaCopy { dst: BoxExpr, src: BoxExpr },
 }
 
 /// A member designator step inside `__builtin_offsetof(type, member)`.

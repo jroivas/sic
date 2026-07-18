@@ -1,0 +1,49 @@
+// QEMU-driven batch: __builtin_parity, sizeof/division inside enum constants,
+// __builtin_va_copy, the `__attribute` (no trailing __) spelling, and C99 hex
+// float literals (0x1p64 / 0x1.8p3).
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdint.h>
+
+// sizeof / division in enum constant values (QEMU register-index & _IOR style).
+enum { REG4 = 0x40 / sizeof(uint32_t), LSZ = sizeof(long), REG5 = REG4 + 1 };
+
+// `__attribute` (GCC alias for __attribute__) on a struct.
+struct Packed { uint32_t a; uint16_t b; } __attribute((__aligned__(8)));
+
+static int vsum(int n, va_list ap){ int s=0; for(int i=0;i<n;i++) s+=va_arg(ap,int); return s; }
+static int twice(int n, ...){
+    va_list ap, cp; va_start(ap, n);
+    va_copy(cp, ap);
+    int a = vsum(n, ap), b = vsum(n, cp);
+    va_end(cp); va_end(ap);
+    return a + b;
+}
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    // parity = popcount & 1.
+    if (__builtin_parity(0) != 0) ok=0;
+    if (__builtin_parity(1) != 1) ok=0;
+    if (__builtin_parity(3) != 0) ok=0;
+    if (__builtin_parityll(7) != 1) ok=0;
+
+    // enum with sizeof/division.
+    if (REG4 != 16 || LSZ != 8 || REG5 != 17) ok=0;
+
+    // va_copy: same args summed twice.
+    if (twice(3, 10, 20, 30) != 120) ok=0;
+
+    // hex floats (compared, not printed — printf floats are unreliable on sic).
+    if (!(0x1p64 == 18446744073709551616.0)) ok=0;
+    if (!(0x1.8p3 == 12.0)) ok=0;
+    if (!(0x1.0p-1 == 0.5)) ok=0;
+    if (!(-0x1p4 == -16.0)) ok=0;
+
+    if (sizeof(struct Packed) == 0) ok=0;
+
+    printf("qemu-batch2: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

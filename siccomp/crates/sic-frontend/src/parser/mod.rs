@@ -1330,8 +1330,8 @@ impl Parser {
             }
             TokenKind::FloatLit => {
                 let text = self.advance().text.clone();
-                let v: f64 = text.trim_end_matches(|c| matches!(c, 'f'|'F'|'l'|'L'))
-                                 .parse().unwrap_or(0.0);
+                let body = text.trim_end_matches(|c| matches!(c, 'f'|'F'|'l'|'L'));
+                let v = parse_c_float(body);
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))
             }
             TokenKind::StringLit => {
@@ -1358,6 +1358,7 @@ impl Parser {
                     "__builtin_c23_va_start" => return self.parse_va_builtin_c23_start(sp),
                     "__builtin_va_arg"       => return self.parse_va_builtin_arg(sp),
                     "__builtin_va_end"       => return self.parse_va_builtin_end(sp),
+                    "__builtin_va_copy"      => return self.parse_va_builtin_copy(sp),
                     "__builtin_offsetof"     => return self.parse_offsetof(sp),
                     "__alignof__" | "__alignof" | "_Alignof"
                                              => return self.parse_alignof(sp),
@@ -1485,6 +1486,15 @@ impl Parser {
         Ok(Expr::new(ExprKind::VaStart { list: Box::new(list), last: Box::new(last) }, sp))
     }
 
+    fn parse_va_builtin_copy(&mut self, sp: Span) -> Result<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let dst = self.parse_assign_expr()?;
+        self.expect(TokenKind::Comma)?;
+        let src = self.parse_assign_expr()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Expr::new(ExprKind::VaCopy { dst: Box::new(dst), src: Box::new(src) }, sp))
+    }
+
     fn parse_va_builtin_arg(&mut self, sp: Span) -> Result<Expr> {
         self.expect(TokenKind::LParen)?;
         let list = self.parse_assign_expr()?;
@@ -1598,4 +1608,33 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
 
     let is_64 = suffix_l || raw > u32::MAX as u64;
     (raw as i64, is_u, is_64)
+}
+
+/// Parse a C floating-point literal body (suffix already stripped) into an
+/// `f64`. Handles decimal floats via the standard parser and C99 hex floats
+/// (`0x1p64`, `0x1.8p-3`) which Rust's `str::parse` rejects.
+fn parse_c_float(body: &str) -> f64 {
+    let lower = body.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("0x") {
+        // rest = <hexint>[.<hexfrac>]p[+-]<decexp>
+        let (mantissa, exp) = match rest.split_once('p') {
+            Some((m, e)) => (m, e.parse::<i32>().unwrap_or(0)),
+            None => (rest, 0),
+        };
+        let (int_part, frac_part) = match mantissa.split_once('.') {
+            Some((i, f)) => (i, f),
+            None => (mantissa, ""),
+        };
+        let mut value = 0.0f64;
+        for c in int_part.chars() {
+            if let Some(d) = c.to_digit(16) { value = value * 16.0 + d as f64; }
+        }
+        let mut scale = 1.0f64 / 16.0;
+        for c in frac_part.chars() {
+            if let Some(d) = c.to_digit(16) { value += d as f64 * scale; scale /= 16.0; }
+        }
+        value * 2f64.powi(exp)
+    } else {
+        body.parse().unwrap_or(0.0)
+    }
 }

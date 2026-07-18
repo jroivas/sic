@@ -281,6 +281,17 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::VaEnd { list_ptr });
                 Ok(Constant::zero())
             }
+
+            ExprKind::VaCopy { dst, src } => {
+                // va_copy(d, s): duplicate the whole va_list state.
+                let dptr = self.lower_va_list_ptr(dst)?;
+                let sptr = self.lower_va_list_ptr(src)?;
+                let vl = super::types::va_list_type();
+                let size = vl.size_of(self.ptr_size());
+                let align = vl.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: dptr, src: sptr, size, align });
+                Ok(Constant::zero())
+            }
         }
     }
 
@@ -842,6 +853,14 @@ impl<'m> FuncCtx<'m> {
                 let d = self.alloc_val();
                 self.push_instr(Instr::UnaryOp { dest: d, op, val: v, ty: ty.clone() });
                 Val::Local(d)
+            }
+            BitOp::Parity => {
+                // parity(x) = popcount(x) & 1
+                let pc = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: pc, op: UnOp::Popcnt, val: v, ty: ty.clone() });
+                let res = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: res, op: BinOp::And, lhs: Val::Local(pc), rhs: Constant::int(1), ty: ty.clone() });
+                Val::Local(res)
             }
             BitOp::Clrsb => {
                 // clrsb(x) = clz(x ^ (x >>arith (bits-1))) - 1: leading redundant
@@ -1612,7 +1631,7 @@ pub(super) fn resolve_field_access(
 }
 
 #[derive(Clone, Copy)]
-enum BitOp { Clz, Ctz, Popcnt, Ffs, Clrsb }
+enum BitOp { Clz, Ctz, Popcnt, Ffs, Clrsb, Parity }
 
 /// Classify `__builtin_{clz,ctz,popcount,ffs}[l|ll]` into (kind, operand bits).
 fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
@@ -1625,6 +1644,7 @@ fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
         "__builtin_popcount" => BitOp::Popcnt,
         "__builtin_ffs"      => BitOp::Ffs,
         "__builtin_clrsb"    => BitOp::Clrsb,
+        "__builtin_parity"   => BitOp::Parity,
         _ => return None,
     };
     Some((kind, bits))

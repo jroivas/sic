@@ -203,7 +203,11 @@ impl Lowerer {
             let mut counter = 0i64;
             for v in variants {
                 let val = if let Some(init) = &v.value {
-                    eval_const_expr(init, &self.enum_consts)?
+                    // Use the richer size-aware evaluator so enum values built from
+                    // `sizeof(T)`, `offsetof(...)` and division (e.g. QEMU's `_IOR`
+                    // / register-index enums) fold instead of erroring.
+                    crate::lower::types::eval_const_size(init, &self.struct_types, self.ptr_size, &self.enum_consts)
+                        .ok_or_else(|| CompileError::new(format!("enum value for '{}' is not a constant", v.name)))?
                 } else {
                     counter
                 };

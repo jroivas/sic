@@ -184,6 +184,25 @@ impl Lexer {
             while self.pos < self.src.len() && self.src[self.pos].is_ascii_hexdigit() {
                 text.push(self.advance());
             }
+            // Hex float: optional `.hexdigits` and a mandatory binary exponent
+            // `p[+-]digits` (e.g. `0x1p64`, `0x1.8p-3`).
+            if self.pos < self.src.len() && self.src[self.pos] == '.' {
+                is_float = true;
+                text.push(self.advance());
+                while self.pos < self.src.len() && self.src[self.pos].is_ascii_hexdigit() {
+                    text.push(self.advance());
+                }
+            }
+            if self.pos < self.src.len() && (self.src[self.pos] == 'p' || self.src[self.pos] == 'P') {
+                is_float = true;
+                text.push(self.advance());
+                if self.pos < self.src.len() && (self.src[self.pos] == '+' || self.src[self.pos] == '-') {
+                    text.push(self.advance());
+                }
+                while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                    text.push(self.advance());
+                }
+            }
         // binary (C23 / GNU extension: 0b1010)
         } else if self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B') {
             text.push(self.advance()); // 0
@@ -432,7 +451,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         // Resolved to an IR float type in `lower_ast_type`.
         "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
         | "_Float16" | "_Float32" | "_Float32x" | "_Float64" | "_Float64x" => TokenKind::TypeName,
-        "__attribute__"  => TokenKind::Attribute,
+        "__attribute__" | "__attribute" => TokenKind::Attribute,
         "__extension__"  => TokenKind::Extension,
         // GNU/Clang double-underscore keyword aliases (both `__kw` and `__kw__`
         // spellings). glibc headers use these once the compiler advertises
@@ -444,7 +463,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "__restrict__" | "__restrict" => TokenKind::Restrict,
         "__signed__" | "__signed" => TokenKind::Signed,
         "__builtin_va_start" | "__builtin_c23_va_start"
-        | "__builtin_va_end" | "__builtin_va_arg" => TokenKind::Ident,
+        | "__builtin_va_end" | "__builtin_va_arg" | "__builtin_va_copy" => TokenKind::Ident,
         _ if typedefs.contains(s) => TokenKind::TypeName,
         _ => TokenKind::Ident,
     }
