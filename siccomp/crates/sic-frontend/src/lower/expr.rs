@@ -15,7 +15,7 @@ struct LValue {
 }
 
 #[derive(Clone, Copy)]
-struct BitField {
+pub(super) struct BitField {
     bit_offset: u32,
     width: u32,
     signed: bool,
@@ -1090,41 +1090,20 @@ impl<'m> FuncCtx<'m> {
             lv.ty.clone()
         };
 
-        // Look up field index and type
-        let (field_idx, field_ty, struct_name) = find_field(&struct_ty, field_name, &self.lowerer.struct_types)
-            .ok_or_else(|| CompileError::at(
-                format!("no field '{}' in type", field_name),
-                sp.file.clone(), sp.line, sp.col,
-            ))?;
+        // Resolve the member — including through anonymous struct/union members —
+        // to a cumulative byte offset, type, and (if any) bit-field descriptor.
+        let (byte_offset, field_ty, bitfield) =
+            resolve_field_access(&struct_ty, field_name, self.ptr_size(), &self.lowerer.struct_types)
+                .ok_or_else(|| CompileError::at(
+                    format!("no field '{}' in type", field_name),
+                    sp.file.clone(), sp.line, sp.col,
+                ))?;
 
-        let base_ptr = if via_ptr {
-            // base is already a pointer to struct
-            lv.ptr
-        } else {
-            lv.ptr
-        };
-
-        // Resolve an opaque pointee aggregate to its full definition so field
-        // offsets are computed from the real layout.
-        let resolved_ty = super::types::resolve_aggregate(&struct_ty, &self.lowerer.struct_types);
-        let (byte_offset, bitfield) = match &resolved_ty {
-            Type::Struct(st) => {
-                let (offs, bit_offs, _) = st.layout_full(self.ptr_size());
-                let bo = offs.get(field_idx).copied().unwrap_or(0);
-                let bf = st.bitfields.get(field_idx).copied().flatten().map(|w| BitField {
-                    bit_offset: *bit_offs.get(field_idx).unwrap_or(&0),
-                    width: w,
-                    signed: field_ty.is_signed(),
-                });
-                (bo, bf)
-            }
-            _ => (0, None),
-        };
-
+        let base_ptr = lv.ptr;
         let dest = self.alloc_val();
         let result_ty = Type::Pointer(Box::new(field_ty.clone()));
         self.push_instr(Instr::GetFieldPtr {
-            dest, base: base_ptr, field_idx, struct_name, byte_offset, result_ty,
+            dest, base: base_ptr, field_idx: 0, struct_name: None, byte_offset, result_ty,
         });
         Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield })
     }
@@ -1235,7 +1214,7 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Field { base, name } => {
                 let base_ty = self.infer_expr_type(base)?;
-                if let Some((_, fty, _)) = find_field(&base_ty, name, &self.lowerer.struct_types) {
+                if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
                 } else {
                     Ok(Type::i32())
@@ -1247,7 +1226,7 @@ impl<'m> FuncCtx<'m> {
                     Type::Pointer(t) => *t,
                     other => other,
                 };
-                if let Some((_, fty, _)) = find_field(&struct_ty, name, &self.lowerer.struct_types) {
+                if let Some((_, fty, _)) = resolve_field_access(&struct_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
                 } else {
                     Ok(Type::i32())
@@ -1334,6 +1313,61 @@ fn inc_op(ty: &Type, inc: bool) -> BinOp {
         if inc { BinOp::FAdd } else { BinOp::FSub }
     } else {
         if inc { BinOp::Add } else { BinOp::Sub }
+    }
+}
+
+/// A resolved member access: cumulative byte offset from the start of the
+/// aggregate, the member's type, and bit-field info if it is one. Drills through
+/// anonymous (unnamed) struct/union members, whose fields are accessed as if they
+/// were members of the enclosing aggregate (C11 anonymous struct/union).
+pub(super) fn resolve_field_access(
+    ty: &Type,
+    name: &str,
+    ptr_size: u32,
+    named: &std::collections::HashMap<String, Type>,
+) -> Option<(u64, Type, Option<BitField>)> {
+    let resolved = super::types::resolve_aggregate(ty, named);
+    match &resolved {
+        Type::Struct(st) => {
+            let (offs, bit_offs, _) = st.layout_full(ptr_size);
+            // Direct member.
+            for (i, (fname, fty)) in st.fields.iter().enumerate() {
+                if fname == name {
+                    let bf = st.bitfields.get(i).copied().flatten().map(|w| BitField {
+                        bit_offset: *bit_offs.get(i).unwrap_or(&0),
+                        width: w,
+                        signed: fty.is_signed(),
+                    });
+                    return Some((*offs.get(i).unwrap_or(&0), fty.clone(), bf));
+                }
+            }
+            // Anonymous member: recurse, adding that member's byte offset.
+            for (i, (fname, fty)) in st.fields.iter().enumerate() {
+                if fname.is_empty() && matches!(fty, Type::Struct(_) | Type::Union(_)) {
+                    if let Some((sub_off, sub_ty, sub_bf)) = resolve_field_access(fty, name, ptr_size, named) {
+                        return Some((offs.get(i).copied().unwrap_or(0) + sub_off, sub_ty, sub_bf));
+                    }
+                }
+            }
+            None
+        }
+        Type::Union(u) => {
+            // All union members live at offset 0.
+            for (fname, fty) in &u.fields {
+                if fname == name {
+                    return Some((0, fty.clone(), None));
+                }
+            }
+            for (fname, fty) in &u.fields {
+                if fname.is_empty() && matches!(fty, Type::Struct(_) | Type::Union(_)) {
+                    if let Some(r) = resolve_field_access(fty, name, ptr_size, named) {
+                        return Some(r);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
