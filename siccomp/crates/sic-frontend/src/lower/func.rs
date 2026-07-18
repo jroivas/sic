@@ -406,6 +406,22 @@ impl<'m> FuncCtx<'m> {
                 self.func_mut().block_mut(case_bb).label = Some(format!("case_{}", const_val));
                 self.lower_stmt(body)?;
             }
+            Stmt::CaseRange(lo, _hi, body, _) => {
+                // `case LOW ... HIGH:` — every value in the range was pre-created
+                // as an arm pointing to a single shared block (see `lower_switch`
+                // / `collect_cases_in`). Look it up by the low value and lower the
+                // body into it once.
+                let low_val = eval_const_expr(lo, &self.lowerer.enum_consts).unwrap_or(0);
+                let case_bb = self.switch_stack.last()
+                    .and_then(|(_, _, cases)| cases.get(&low_val).copied())
+                    .unwrap_or_else(|| self.new_block_after_current());
+                if !self.is_terminated() {
+                    self.set_terminator(Terminator::Jump(case_bb));
+                }
+                self.switch_to_block(case_bb);
+                self.func_mut().block_mut(case_bb).label = Some(format!("case_{}_range", low_val));
+                self.lower_stmt(body)?;
+            }
             Stmt::Default(body, _) => {
                 // Use the enclosing switch's pre-created default block.
                 let default_bb = self.switch_stack.last()
@@ -757,10 +773,20 @@ impl<'m> FuncCtx<'m> {
         let cases = collect_switch_cases(body, &self.lowerer.enum_consts);
         let mut arms: Vec<(i64, BlockId)> = Vec::new();
         let mut case_blocks: std::collections::HashMap<i64, BlockId> = std::collections::HashMap::new();
-        for (case_val, _) in &cases {
+        // One block per group, so all values of a `case LOW ... HIGH:` range
+        // share a single body block.
+        let mut group_blocks: std::collections::HashMap<usize, BlockId> = std::collections::HashMap::new();
+        for (case_val, group) in &cases {
             // Duplicate case values shouldn't happen in valid C; keep the first.
             if case_blocks.contains_key(case_val) { continue; }
-            let case_bb = self.new_block_after_current();
+            let case_bb = match group_blocks.get(group) {
+                Some(&bb) => bb,
+                None => {
+                    let bb = self.new_block_after_current();
+                    group_blocks.insert(*group, bb);
+                    bb
+                }
+            };
             arms.push((*case_val, case_bb));
             case_blocks.insert(*case_val, case_bb);
         }
@@ -922,7 +948,7 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
 /// `default:`, or `label:`), so it must be lowered even when the preceding code
 /// already terminated the current block.
 fn stmt_is_jump_target(s: &Stmt) -> bool {
-    matches!(s, Stmt::Case(..) | Stmt::Default(..) | Stmt::Label(..))
+    matches!(s, Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) | Stmt::Label(..))
 }
 
 /// Source line a statement begins on (for DWARF line markers). 0 = unknown.
@@ -932,6 +958,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
         | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
+        | Stmt::CaseRange(_, _, _, s)
         | Stmt::Default(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,
@@ -946,25 +973,48 @@ fn decl_line(d: &Decl) -> u32 {
     }
 }
 
+/// Returns `(case value, group id)` pairs. Values with the same group id share
+/// one target block — this is how a `case LOW ... HIGH:` range maps all of its
+/// values to a single body. Each plain `case:` gets its own group.
 fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> Vec<(i64, usize)> {
     let mut cases = Vec::new();
-    collect_cases_in(stmt, enum_consts, &mut cases);
+    let mut group = 0usize;
+    collect_cases_in(stmt, enum_consts, &mut cases, &mut group);
     cases
 }
 
-fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut Vec<(i64, usize)>) {
+fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut Vec<(i64, usize)>, group: &mut usize) {
     match stmt {
         Stmt::Case(val, body, _) => {
             if let Ok(v) = eval_const_expr(val, enum_consts) {
-                out.push((v, out.len()));
+                out.push((v, *group));
             }
-            collect_cases_in(body, enum_consts, out);
+            *group += 1;
+            collect_cases_in(body, enum_consts, out, group);
+        }
+        Stmt::CaseRange(lo, hi, body, _) => {
+            // Expand the range into one arm per value, all sharing this group so
+            // they route to a single body block. Capped to avoid pathological
+            // blowups (`case 0 ... INT_MAX:`); real ranges are tiny.
+            if let (Ok(l), Ok(h)) = (eval_const_expr(lo, enum_consts), eval_const_expr(hi, enum_consts)) {
+                const MAX_RANGE: i64 = 100_000;
+                let mut v = l;
+                let mut count = 0i64;
+                while v <= h && count < MAX_RANGE {
+                    out.push((v, *group));
+                    if v == i64::MAX { break; }
+                    v += 1;
+                    count += 1;
+                }
+            }
+            *group += 1;
+            collect_cases_in(body, enum_consts, out, group);
         }
         Stmt::Block(stmts, _) => {
-            for s in stmts { collect_cases_in(s, enum_consts, out); }
+            for s in stmts { collect_cases_in(s, enum_consts, out, group); }
         }
-        Stmt::Label(_, inner, _) => collect_cases_in(inner, enum_consts, out),
-        Stmt::Default(inner, _)  => collect_cases_in(inner, enum_consts, out),
+        Stmt::Label(_, inner, _) => collect_cases_in(inner, enum_consts, out, group),
+        Stmt::Default(inner, _)  => collect_cases_in(inner, enum_consts, out, group),
         _ => {}
     }
 }

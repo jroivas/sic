@@ -809,6 +809,13 @@ impl Parser {
         let sp = self.span();
         self.advance();
         let val = self.parse_assign_expr()?;
+        // GCC case-range extension: `case LOW ... HIGH:`.
+        if self.eat(TokenKind::Ellipsis) {
+            let high = self.parse_assign_expr()?;
+            self.expect(TokenKind::Colon)?;
+            let body = Box::new(self.parse_stmt()?);
+            return Ok(Stmt::CaseRange(val, high, body, sp));
+        }
         self.expect(TokenKind::Colon)?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::Case(val, body, sp))
@@ -1153,7 +1160,11 @@ impl Parser {
                     assocs.push((ty, e));
                 }
                 self.expect(TokenKind::RParen)?;
-                Ok(Expr::new(ExprKind::Generic { controlling, assocs }, sp))
+                // A `_Generic(...)` selection is a primary expression and can be
+                // followed by postfix operators — most importantly a call, as in
+                // `_Generic(x, int: f, long: g)(x)` (QEMU's bswap macros).
+                let e = Expr::new(ExprKind::Generic { controlling, assocs }, sp);
+                self.parse_postfix_ops(e)
             }
             _ => self.parse_postfix()
         }

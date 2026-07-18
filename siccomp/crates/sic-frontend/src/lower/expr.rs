@@ -744,6 +744,14 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // A `_Generic(...)` selection used as the callee resolves to the chosen
+        // association's expression, which may itself be a builtin name (e.g.
+        // QEMU's `bswaps` macro: `_Generic(x, uint16_t: __builtin_bswap16, ...)(x)`).
+        if let ExprKind::Generic { controlling, assocs } = &func_expr.kind {
+            let idx = self.select_generic(controlling, assocs)?;
+            return self.lower_call(&assocs[idx].1, args, sp);
+        }
+
         // Handle __builtin_bswap* before evaluating args
         if let ExprKind::Ident(name) = &func_expr.kind {
             let bits: Option<u32> = match name.as_str() {

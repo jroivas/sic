@@ -166,6 +166,8 @@ pub enum Stmt {
     Goto(String, Span),
     Label(String, BoxStmt, Span),
     Case(Expr, BoxStmt, Span),
+    /// GCC case-range extension: `case LOW ... HIGH:`.
+    CaseRange(Expr, Expr, BoxStmt, Span),
     Default(BoxStmt, Span),
     Switch { val: Expr, body: BoxStmt, span: Span },
     Null(Span),
