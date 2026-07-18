@@ -36,6 +36,11 @@ int main(void){
     // va_copy: same args summed twice.
     if (twice(3, 10, 20, 30) != 120) ok=0;
 
+    // __builtin_sub_overflow (signed/unsigned, no-overflow and overflow).
+    long r; unsigned long ur;
+    if (__builtin_sub_overflow(5L, 3L, &r) || r != 2) ok=0;
+    if (!__builtin_sub_overflow(3UL, 5UL, &ur) || ur != (unsigned long)-2) ok=0;
+
     // hex floats (compared, not printed — printf floats are unreliable on sic).
     if (!(0x1p64 == 18446744073709551616.0)) ok=0;
     if (!(0x1.8p3 == 12.0)) ok=0;

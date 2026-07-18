@@ -953,6 +953,7 @@ impl<'m> FuncCtx<'m> {
             // return whether the mathematical result overflowed the result type.
             let ovf_op = match name.as_str() {
                 "__builtin_add_overflow" => Some(BinOp::Add),
+                "__builtin_sub_overflow" => Some(BinOp::Sub),
                 "__builtin_mul_overflow" => Some(BinOp::Mul),
                 _ => None,
             };
@@ -1205,6 +1206,21 @@ impl<'m> FuncCtx<'m> {
             BinOp::Add => {
                 // Unsigned add overflows iff the sum wrapped below an operand.
                 self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::IULt, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
+            }
+            BinOp::Sub if signed => {
+                // Signed sub overflows iff the operands differ in sign and the
+                // result's sign differs from the minuend: ((a^b) & (a^diff)) < 0.
+                let t1 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t1, op: BinOp::Xor, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
+                let t2 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t2, op: BinOp::Xor, lhs: a.clone(), rhs: result.clone(), ty: ty.clone() });
+                let t3 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: t3, op: BinOp::And, lhs: Val::Local(t1), rhs: Val::Local(t2), ty: ty.clone() });
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::ISLt, lhs: Val::Local(t3), rhs: zero, ty: ty.clone() });
+            }
+            BinOp::Sub => {
+                // Unsigned sub overflows (borrows) iff a < b.
+                self.push_instr(Instr::Cmp { dest: ovf, op: CmpOp::IULt, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
             }
             _ => {
                 // Multiply: overflow iff a != 0 and result / a != b.

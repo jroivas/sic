@@ -251,7 +251,16 @@ pub fn eval_const_size(
                 BinOpKind::BitXor => l ^ r,
                 BinOpKind::Shl    => l << (r & 63),
                 BinOpKind::Shr    => l >> (r & 63),
-                _ => return None,
+                BinOpKind::Eq     => (l == r) as i64,
+                BinOpKind::Ne     => (l != r) as i64,
+                BinOpKind::Lt     => (l < r) as i64,
+                BinOpKind::Le     => (l <= r) as i64,
+                BinOpKind::Gt     => (l > r) as i64,
+                BinOpKind::Ge     => (l >= r) as i64,
+                BinOpKind::LogAnd => (l != 0 && r != 0) as i64,
+                BinOpKind::LogOr  => (l != 0 || r != 0) as i64,
+                // Div/Rem by zero fall through here.
+                BinOpKind::Div | BinOpKind::Rem => return None,
             })
         }
         ExprKind::Ternary { cond, then, else_ } => {
