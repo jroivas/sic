@@ -1,0 +1,39 @@
+// QEMU-driven: _Generic matching pointer-to-struct associations (QEMU's
+// QEMU_MAKE_LOCKABLE), generic __atomic_load/__atomic_store, __builtin_addcll
+// carry chain, and __builtin_<libc> passthrough.
+#include <stdio.h>
+#include <string.h>
+
+typedef struct QemuMutex { int lock; } QemuMutex;
+typedef struct QemuSpin  { int v; } QemuSpin;
+static int from_mutex(QemuMutex *m){ (void)m; return 1; }
+static int from_spin(QemuSpin *s){ (void)s; return 2; }
+#define PICK(x) _Generic((x), \
+    QemuMutex *: from_mutex(x), \
+    QemuSpin  *: from_spin(x), \
+    default: 0)
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    // _Generic selects by pointer-to-struct type.
+    QemuMutex mtx = {0}; QemuSpin sp = {0};
+    if (PICK(&mtx) != 1) ok=0;
+    if (PICK(&sp)  != 2) ok=0;
+
+    // generic __atomic_load / __atomic_store (3-arg pointer form).
+    int n = 5, got = 0, put = 42;
+    __atomic_load(&n, &got, 0);
+    if (got != 5) ok=0;
+    __atomic_store(&n, &put, 0);
+    if (n != 42) ok=0;
+
+    // __builtin_<libc> passthrough.
+    char buf[8];
+    __builtin_memcpy(buf, "hey", 4);
+    if (__builtin_strlen(buf) != 3 || buf[0] != 'h') ok=0;
+
+    printf("qemu-batch3: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

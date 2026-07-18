@@ -961,6 +961,19 @@ impl<'m> FuncCtx<'m> {
                 return self.lower_overflow_builtin(op, a_expr, b_expr, res_expr);
             }
 
+            // Multiprecision add/subtract with carry:
+            //   T __builtin_{add,sub}c[l|ll](T a, T b, T carryin, T *carryout)
+            // Returns `a ± b ± carryin` (wrapped) and stores the outgoing
+            // carry/borrow (0 or 1) through `*carryout`.
+            let carry_sub = match name.as_str() {
+                "__builtin_addc" | "__builtin_addcl" | "__builtin_addcll" => Some(false),
+                "__builtin_subc" | "__builtin_subcl" | "__builtin_subcll" => Some(true),
+                _ => None,
+            };
+            if let (Some(is_sub), [a_expr, b_expr, cin_expr, cout_expr]) = (carry_sub, args) {
+                return self.lower_carry_builtin(is_sub, a_expr, b_expr, cin_expr, cout_expr);
+            }
+
             // Atomic builtins. We lower these to plain (non-atomic) load/store
             // and treat fences as no-ops. This is functionally correct for
             // single-threaded execution and the relaxed-ordering uses sqlite
@@ -977,6 +990,36 @@ impl<'m> FuncCtx<'m> {
                         let dest = self.alloc_val();
                         self.push_instr(Instr::Load { dest, ptr, ty });
                         return Ok(Val::Local(dest));
+                    }
+                }
+                // void __atomic_load(const T *ptr, T *ret, int memorder): *ret = *ptr.
+                "__atomic_load" => {
+                    if let [ptr_expr, ret_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let ret = self.lower_expr(ret_expr)?;
+                        let ty = match self.val_type(&ptr) {
+                            Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+                            _ => Type::i32(),
+                        };
+                        let size = ty.size_of(self.ptr_size());
+                        let align = ty.align_of(self.ptr_size());
+                        self.push_instr(Instr::MemCopy { dst: ret, src: ptr, size, align });
+                        return Ok(Constant::zero());
+                    }
+                }
+                // void __atomic_store(T *ptr, T *val, int memorder): *ptr = *val.
+                "__atomic_store" => {
+                    if let [ptr_expr, val_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let val = self.lower_expr(val_expr)?;
+                        let ty = match self.val_type(&ptr) {
+                            Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+                            _ => Type::i32(),
+                        };
+                        let size = ty.size_of(self.ptr_size());
+                        let align = ty.align_of(self.ptr_size());
+                        self.push_instr(Instr::MemCopy { dst: ptr, src: val, size, align });
+                        return Ok(Constant::zero());
                     }
                 }
                 // void __atomic_store_n(T *ptr, T val, int memorder)
@@ -1101,10 +1144,24 @@ impl<'m> FuncCtx<'m> {
                         return Ok(if let Some(d) = dest { Val::Local(d) } else { Constant::zero() });
                     }
                     _ => {
-                        return Err(CompileError::at(
-                            format!("unknown function '{}'", name),
-                            sp.file.clone(), sp.line, sp.col,
-                        ));
+                        // Many `__builtin_<fn>` calls (memcpy, memmove, strlen, …)
+                        // are just the libc function; retry resolution with the
+                        // prefix stripped.
+                        if let Some(libc) = name.strip_prefix("__builtin_") {
+                            if let Some(LookupResult::Func(fr)) = self.lookup(libc) {
+                                fr
+                            } else {
+                                return Err(CompileError::at(
+                                    format!("unknown function '{}'", name),
+                                    sp.file.clone(), sp.line, sp.col,
+                                ));
+                            }
+                        } else {
+                            return Err(CompileError::at(
+                                format!("unknown function '{}'", name),
+                                sp.file.clone(), sp.line, sp.col,
+                            ));
+                        }
                     }
                 }
             }
@@ -1242,6 +1299,58 @@ impl<'m> FuncCtx<'m> {
             }
         }
         Ok(Val::Local(ovf))
+    }
+
+    /// Lower `__builtin_{add,sub}c[l|ll](a, b, carryin, *carryout)`: wide
+    /// add/subtract with carry. Returns the wrapped result and stores the
+    /// outgoing carry (0/1) through `*carryout`.
+    fn lower_carry_builtin(
+        &mut self, is_sub: bool,
+        a_expr: &Expr, b_expr: &Expr, cin_expr: &Expr, cout_expr: &Expr,
+    ) -> Result<Val> {
+        let a = self.lower_expr(a_expr)?;
+        let b = self.lower_expr(b_expr)?;
+        let cin = self.lower_expr(cin_expr)?;
+        let cout_ptr = self.lower_expr(cout_expr)?;
+
+        let ty = match self.val_type(&cout_ptr) {
+            Type::Pointer(inner) => *inner,
+            _ => self.val_type(&a),
+        };
+        let a = self.coerce(a, &ty)?;
+        let b = self.coerce(b, &ty)?;
+        let cin = self.coerce(cin, &ty)?;
+
+        let op = if is_sub { BinOp::Sub } else { BinOp::Add };
+        // First combine a and b, tracking carry/borrow, then fold in carryin.
+        let s1 = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: s1, op, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
+        let s1 = Val::Local(s1);
+        // carry1: add → s1 < a; sub (borrow) → a < b.
+        let c1 = self.alloc_val();
+        if is_sub {
+            self.push_instr(Instr::Cmp { dest: c1, op: CmpOp::IULt, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
+        } else {
+            self.push_instr(Instr::Cmp { dest: c1, op: CmpOp::IULt, lhs: s1.clone(), rhs: a.clone(), ty: ty.clone() });
+        }
+        let s2 = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: s2, op, lhs: s1.clone(), rhs: cin.clone(), ty: ty.clone() });
+        let s2 = Val::Local(s2);
+        // carry2: add → s2 < s1; sub (borrow) → s1 < cin.
+        let c2 = self.alloc_val();
+        if is_sub {
+            self.push_instr(Instr::Cmp { dest: c2, op: CmpOp::IULt, lhs: s1.clone(), rhs: cin.clone(), ty: ty.clone() });
+        } else {
+            self.push_instr(Instr::Cmp { dest: c2, op: CmpOp::IULt, lhs: s2.clone(), rhs: s1.clone(), ty: ty.clone() });
+        }
+        // carryout = (c1 | c2), extended to the result type.
+        let c1i = self.coerce(Val::Local(c1), &ty)?;
+        let c2i = self.coerce(Val::Local(c2), &ty)?;
+        let cout = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: cout, op: BinOp::Or, lhs: c1i, rhs: c2i, ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(cout), ptr: cout_ptr });
+
+        Ok(s2)
     }
 
     // ─── LValue lowering ─────────────────────────────────────────────────────
@@ -1398,7 +1507,7 @@ impl<'m> FuncCtx<'m> {
             match aty {
                 None => default_idx = Some(i),
                 Some(qt) => {
-                    if decay(self.lower_type(qt)?) == ctrl_ty {
+                    if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty) {
                         return Ok(i);
                     }
                 }
@@ -1643,6 +1752,25 @@ pub(super) fn resolve_field_access(
             None
         }
         _ => None,
+    }
+}
+
+/// Type equality for `_Generic` association matching. Aggregate pointees are
+/// stored opaque in some contexts and fully resolved in others, so two
+/// otherwise-identical `struct Foo *` can differ by field population; compare
+/// named aggregates by name instead.
+fn generic_type_eq(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Pointer(x), Type::Pointer(y)) => generic_type_eq(x, y),
+        (Type::Struct(s1), Type::Struct(s2)) => match (&s1.name, &s2.name) {
+            (Some(n1), Some(n2)) => n1 == n2,
+            _ => a == b,
+        },
+        (Type::Union(u1), Type::Union(u2)) => match (&u1.name, &u2.name) {
+            (Some(n1), Some(n2)) => n1 == n2,
+            _ => a == b,
+        },
+        _ => a == b,
     }
 }
 

@@ -41,6 +41,13 @@ int main(void){
     if (__builtin_sub_overflow(5L, 3L, &r) || r != 2) ok=0;
     if (!__builtin_sub_overflow(3UL, 5UL, &ur) || ur != (unsigned long)-2) ok=0;
 
+    // __builtin_{add,sub}cll: multiprecision add/subtract with carry.
+    unsigned long long co;
+    if (__builtin_addcll(0xFFFFFFFFFFFFFFFFULL, 1ULL, 0, &co) != 0 || co != 1) ok=0;
+    if (__builtin_addcll(1, 2, 1, &co) != 4 || co != 0) ok=0;
+    if (__builtin_subcll(0, 1, 0, &co) != 0xFFFFFFFFFFFFFFFFULL || co != 1) ok=0;
+    if (__builtin_subcll(5, 3, 1, &co) != 1 || co != 0) ok=0;
+
     // hex floats (compared, not printed — printf floats are unreliable on sic).
     if (!(0x1p64 == 18446744073709551616.0)) ok=0;
     if (!(0x1.8p3 == 12.0)) ok=0;
