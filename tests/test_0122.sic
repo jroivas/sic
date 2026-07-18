@@ -1,0 +1,46 @@
+// __builtin_choose_expr / __builtin_types_compatible_p and scope-aware typeof.
+// QEMU/glib use these in the `typeof_strip_qual` macro; sic must (1) parse them,
+// (2) select only the chosen branch at compile time, (3) compare types ignoring
+// qualifiers, and (4) resolve typeof of a local through the choose_expr.
+#include <stdio.h>
+
+// Mirrors QEMU's include/qemu/compiler.h typeof_strip_qual (bool arm shown).
+#define strip_qual(expr)                                                   \
+  typeof(                                                                  \
+    __builtin_choose_expr(                                                 \
+      __builtin_types_compatible_p(typeof(expr), _Bool) ||                 \
+        __builtin_types_compatible_p(typeof(expr), const _Bool) ||         \
+        __builtin_types_compatible_p(typeof(expr), volatile _Bool),        \
+        (_Bool)1,                                                          \
+      (expr)))
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    // types_compatible_p: equal ignoring qualifiers, distinct otherwise.
+    if (!__builtin_types_compatible_p(int, int)) ok=0;
+    if (!__builtin_types_compatible_p(int, const int)) ok=0;   // quals ignored
+    if ( __builtin_types_compatible_p(int, long)) ok=0;
+    if ( __builtin_types_compatible_p(int, unsigned int)) ok=0;
+    if (!__builtin_types_compatible_p(char *, char *)) ok=0;
+
+    // choose_expr picks a branch at compile time; the other is not evaluated.
+    int c = __builtin_choose_expr(1, 42, "not an int");
+    if (c != 42) ok=0;
+    long d = __builtin_choose_expr(0, (void)0, 7L);
+    if (d != 7) ok=0;
+
+    // scope-aware typeof: strip_qual(const int) -> int, keeps the value.
+    const int x = 7;
+    strip_qual(x) y = x;
+    if (y != 7) ok=0;
+
+    // typeof of a plain local through choose_expr keeps the wide type.
+    long l = 0x100000000L;
+    strip_qual(l) m = l;
+    if (m != 0x100000000L) ok=0;
+
+    printf("choose_expr: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

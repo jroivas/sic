@@ -1,8 +1,7 @@
-use crate::ast::{self, Expr, ExprKind, BinOpKind, UnOpKind, Initializer, QualType, AstType};
+use crate::ast::{self, Expr, ExprKind, BinOpKind, UnOpKind};
 use crate::{Result, CompileError};
 use sic_ir::*;
 use super::func::{FuncCtx, LookupResult};
-use super::lower_type;
 
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
 struct LValue {
@@ -139,6 +138,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::PostInc { inc, expr: inner } => self.lower_post_inc(*inc, inner),
 
             ExprKind::Ternary { cond, then, else_ } => self.lower_ternary(cond, then, else_),
+            ExprKind::Elvis { cond, else_ } => self.lower_elvis(cond, else_),
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
@@ -191,6 +191,19 @@ impl<'m> FuncCtx<'m> {
                 let ty = self.infer_expr_type(inner)?;
                 let size = ty.size_of(self.ptr_size());
                 Ok(Constant::uint(size))
+            }
+
+            ExprKind::ChooseExpr { cond, then, else_ } => {
+                // Compile-time selection: only the chosen branch is lowered.
+                if self.eval_choose_cond(cond) != 0 { self.lower_expr(then) }
+                else { self.lower_expr(else_) }
+            }
+            ExprKind::TypesCompatible(t1, t2) => {
+                let compat = match (self.lower_type(t1), self.lower_type(t2)) {
+                    (Ok(a), Ok(b)) => self.types_equal(&a, &b),
+                    _ => false,
+                };
+                Ok(Constant::int(if compat { 1 } else { 0 }))
             }
 
             ExprKind::AlignofType(ty) => {
@@ -653,6 +666,48 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// Lower GNU `a ?: b`. `a` is evaluated exactly once (its SSA value is reused
+    /// both as the condition and as the "then" result).
+    fn lower_elvis(&mut self, cond: &Expr, else_: &Expr) -> Result<Val> {
+        let cond_val = self.lower_expr(cond)?;
+        let cty = self.infer_expr_type(cond).unwrap_or_else(|_| Type::i32());
+        let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+        let ty = match (&cty, &ety) {
+            (Type::Pointer(_), _) | (Type::Void, _) => cty.clone(),
+            (_, Type::Pointer(_)) => ety.clone(),
+            _ if cty.is_float() => cty.clone(),
+            _ if ety.is_float() => ety.clone(),
+            _ if ety.size_of(self.ptr_size()) > cty.size_of(self.ptr_size()) => ety.clone(),
+            _ => cty.clone(),
+        };
+        let cond_bool = self.to_bool(cond_val.clone())?;
+
+        let result_ptr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: ty.clone(), align: None });
+
+        let then_bb  = self.new_block_after_current();
+        let else_bb  = self.new_block_after_current();
+        let merge_bb = self.new_block_after_current();
+
+        self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
+
+        self.switch_to_block(then_bb);
+        let tv = self.coerce(cond_val, &ty)?;
+        self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        self.switch_to_block(else_bb);
+        let ev = self.lower_expr(else_)?;
+        let ev = self.coerce(ev, &ty)?;
+        self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        self.switch_to_block(merge_bb);
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
+        Ok(Val::Local(dest))
+    }
+
     /// Lower a call argument. Struct/union arguments are passed by value using
     /// the pointer ABI: the callee receives a pointer to the value and copies it
     /// into its own local, so passing the argument's address is sufficient.
@@ -739,6 +794,38 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(ext))
     }
 
+    /// Whether two IR types are the same for `__builtin_types_compatible_p`
+    /// (sic already drops qualifiers; opaque aggregates compare by name).
+    fn types_equal(&self, a: &Type, b: &Type) -> bool {
+        super::types::resolve_aggregate(a, &self.lowerer.struct_types)
+            == super::types::resolve_aggregate(b, &self.lowerer.struct_types)
+    }
+
+    /// Evaluate the (constant) controlling condition of a `__builtin_choose_expr`,
+    /// understanding `__builtin_types_compatible_p` and the `||`/`&&`/`!` that
+    /// glib/QEMU macros build them from. Unknown → 0 (pick the else branch).
+    fn eval_choose_cond(&self, e: &Expr) -> i64 {
+        match &e.kind {
+            ExprKind::TypesCompatible(t1, t2) => {
+                match (self.lower_type(t1), self.lower_type(t2)) {
+                    (Ok(a), Ok(b)) => if self.types_equal(&a, &b) { 1 } else { 0 },
+                    _ => 0,
+                }
+            }
+            ExprKind::ChooseExpr { cond, then, else_ } => {
+                if self.eval_choose_cond(cond) != 0 { self.eval_choose_cond(then) }
+                else { self.eval_choose_cond(else_) }
+            }
+            ExprKind::BinOp { op: BinOpKind::LogOr, lhs, rhs } =>
+                (self.eval_choose_cond(lhs) != 0 || self.eval_choose_cond(rhs) != 0) as i64,
+            ExprKind::BinOp { op: BinOpKind::LogAnd, lhs, rhs } =>
+                (self.eval_choose_cond(lhs) != 0 && self.eval_choose_cond(rhs) != 0) as i64,
+            ExprKind::Unary { op: UnOpKind::Not, expr } =>
+                (self.eval_choose_cond(expr) == 0) as i64,
+            _ => crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0),
+        }
+    }
+
     /// Lower `__builtin_{clz,ctz,popcount,ffs}[l|ll]` on a `bits`-wide operand.
     /// The result is an `int`.
     fn lower_bit_count(&mut self, arg: &Expr, bits: u32, kind: BitOp) -> Result<Val> {
@@ -755,6 +842,19 @@ impl<'m> FuncCtx<'m> {
                 let d = self.alloc_val();
                 self.push_instr(Instr::UnaryOp { dest: d, op, val: v, ty: ty.clone() });
                 Val::Local(d)
+            }
+            BitOp::Clrsb => {
+                // clrsb(x) = clz(x ^ (x >>arith (bits-1))) - 1: leading redundant
+                // sign bits. The `x ^ sign` maps the leading sign run to zeros.
+                let sign = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: sign, op: BinOp::AShr, lhs: v.clone(), rhs: Constant::int((bits - 1) as i64), ty: ty.clone() });
+                let y = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: y, op: BinOp::Xor, lhs: v, rhs: Val::Local(sign), ty: ty.clone() });
+                let clz = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: clz, op: UnOp::Clz, val: Val::Local(y), ty: ty.clone() });
+                let res = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: res, op: BinOp::Sub, lhs: Val::Local(clz), rhs: Constant::int(1), ty: ty.clone() });
+                Val::Local(res)
             }
             BitOp::Ffs => {
                 // ffs(x) = x == 0 ? 0 : ctz(x) + 1
@@ -1333,6 +1433,11 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             ExprKind::Cast { ty, .. } => self.lower_type(ty),
+            ExprKind::ChooseExpr { cond, then, else_ } => {
+                if self.eval_choose_cond(cond) != 0 { self.infer_expr_type(then) }
+                else { self.infer_expr_type(else_) }
+            }
+            ExprKind::TypesCompatible(..) => Ok(Type::i32()),
             ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
             | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Ok(Type::u64()),
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
@@ -1401,8 +1506,9 @@ impl<'m> FuncCtx<'m> {
                     _ => Type::i32(),
                 })
             }
-            ExprKind::Ternary { then, else_, .. } => {
-                // Mirror lower_ternary's result-type selection.
+            ExprKind::Ternary { then, else_, .. }
+            | ExprKind::Elvis { cond: then, else_ } => {
+                // Mirror lower_ternary/lower_elvis's result-type selection.
                 let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
                 let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
                 Ok(match (&tty, &ety) {
@@ -1506,7 +1612,7 @@ pub(super) fn resolve_field_access(
 }
 
 #[derive(Clone, Copy)]
-enum BitOp { Clz, Ctz, Popcnt, Ffs }
+enum BitOp { Clz, Ctz, Popcnt, Ffs, Clrsb }
 
 /// Classify `__builtin_{clz,ctz,popcount,ffs}[l|ll]` into (kind, operand bits).
 fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
@@ -1518,6 +1624,7 @@ fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
         "__builtin_ctz"      => BitOp::Ctz,
         "__builtin_popcount" => BitOp::Popcnt,
         "__builtin_ffs"      => BitOp::Ffs,
+        "__builtin_clrsb"    => BitOp::Clrsb,
         _ => return None,
     };
     Some((kind, bits))

@@ -236,6 +236,10 @@ pub enum ExprKind {
     /// Ternary: cond ? a : b
     Ternary { cond: BoxExpr, then: BoxExpr, else_: BoxExpr },
 
+    /// GNU `a ?: b`: value is `a` when `a` is truthy, else `b`. `a` is evaluated
+    /// exactly once.
+    Elvis { cond: BoxExpr, else_: BoxExpr },
+
     /// Function call: f(args)
     Call { func: BoxExpr, args: Vec<Expr> },
 
@@ -253,6 +257,13 @@ pub enum ExprKind {
     SizeofType(QualType),
     AlignofType(QualType),
     AlignofExpr(BoxExpr),
+
+    /// `__builtin_choose_expr(const_cond, then, else)`: a compile-time selection.
+    /// Only the selected branch is lowered/type-checked.
+    ChooseExpr { cond: BoxExpr, then: BoxExpr, else_: BoxExpr },
+    /// `__builtin_types_compatible_p(type1, type2)`: 1 if the types are the same
+    /// (ignoring qualifiers), else 0.
+    TypesCompatible(QualType, QualType),
 
     /// Cast: (type)expr
     Cast { ty: QualType, expr: BoxExpr },

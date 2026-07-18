@@ -943,6 +943,13 @@ impl Parser {
         let sp = self.span();
         let cond = self.parse_logor()?;
         if self.eat(TokenKind::Question) {
+            // GNU `a ?: b`: omitted middle operand — the value is the condition.
+            if self.eat(TokenKind::Colon) {
+                let else_ = self.parse_assign_expr()?;
+                return Ok(Expr::new(ExprKind::Elvis {
+                    cond: Box::new(cond), else_: Box::new(else_),
+                }, sp));
+            }
             let then = self.parse_expr()?;
             self.expect(TokenKind::Colon)?;
             let else_ = self.parse_assign_expr()?;
@@ -1347,6 +1354,9 @@ impl Parser {
                     "__builtin_offsetof"     => return self.parse_offsetof(sp),
                     "__alignof__" | "__alignof" | "_Alignof"
                                              => return self.parse_alignof(sp),
+                    "__builtin_choose_expr"  => return self.parse_choose_expr(sp),
+                    "__builtin_types_compatible_p"
+                                             => return self.parse_types_compatible(sp),
                     _ => {}
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
@@ -1380,6 +1390,30 @@ impl Parser {
 
     /// `__builtin_offsetof(type-name, member-designator)` where the designator
     /// is `identifier ( .identifier | [ expr ] )*`.
+    /// `__builtin_choose_expr(const_cond, then_expr, else_expr)`.
+    fn parse_choose_expr(&mut self, sp: Span) -> Result<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let cond = Box::new(self.parse_assign_expr()?);
+        self.expect(TokenKind::Comma)?;
+        let then = Box::new(self.parse_assign_expr()?);
+        self.expect(TokenKind::Comma)?;
+        let else_ = Box::new(self.parse_assign_expr()?);
+        self.expect(TokenKind::RParen)?;
+        Ok(Expr::new(ExprKind::ChooseExpr { cond, then, else_ }, sp))
+    }
+
+    /// `__builtin_types_compatible_p(type1, type2)`.
+    fn parse_types_compatible(&mut self, sp: Span) -> Result<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let (b1, _) = self.parse_decl_specifiers()?;
+        let (_, t1) = self.parse_declarator(b1)?;
+        self.expect(TokenKind::Comma)?;
+        let (b2, _) = self.parse_decl_specifiers()?;
+        let (_, t2) = self.parse_declarator(b2)?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Expr::new(ExprKind::TypesCompatible(t1, t2), sp))
+    }
+
     /// `__alignof__(type)` / `_Alignof(type)` / `__alignof__ expr`. The keyword
     /// has already been consumed.
     fn parse_alignof(&mut self, sp: Span) -> Result<Expr> {

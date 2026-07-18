@@ -160,7 +160,38 @@ impl<'m> FuncCtx<'m> {
     pub fn ptr_size(&self) -> u32 { self.lowerer.ptr_size }
 
     pub fn lower_type(&self, qt: &QualType) -> Result<Type> {
-        lower_type(qt, &self.lowerer.struct_types, self.lowerer.ptr_size)
+        self.lower_ast_type_scoped(&qt.ty)
+    }
+
+    /// Like the standalone `lower_type`, but resolves `typeof(expr)` against the
+    /// current function scope (via `infer_expr_type`) so `typeof(local)` yields
+    /// the real type instead of the scope-less fallback. Non-typeof types (and
+    /// anything not wrapping a typeof) delegate to the standalone lowerer.
+    fn lower_ast_type_scoped(&self, ty: &AstType) -> Result<Type> {
+        use crate::ast::AstType as A;
+        // Only intercept when a `typeof` actually appears; otherwise defer wholly
+        // to the standalone lowerer (its array-size evaluator understands
+        // sizeof/offsetof, which the scope-aware path here does not).
+        if !contains_typeof(ty) {
+            return lower_type(&QualType::new(ty.clone()), &self.lowerer.struct_types, self.lowerer.ptr_size);
+        }
+        match ty {
+            A::Typeof(e) => self.infer_expr_type(e),
+            A::Pointer { base, .. } => {
+                let inner = self.lower_ast_type_scoped(&base.ty)?;
+                Ok(Type::Pointer(Box::new(super::types::opaque_aggregate(inner))))
+            }
+            A::Array { base, size } => {
+                let elem = self.lower_ast_type_scoped(&base.ty)?;
+                let len = match size {
+                    Some(sz) => crate::lower::eval_const_expr(sz, &self.lowerer.enum_consts)
+                        .ok().filter(|&v| v >= 0).map(|v| v as usize).unwrap_or(0),
+                    None => 0,
+                };
+                Ok(Type::Array { elem: Box::new(elem), len })
+            }
+            _ => lower_type(&QualType::new(ty.clone()), &self.lowerer.struct_types, self.lowerer.ptr_size),
+        }
     }
 
     // ─── Top-level expression lowering (for fake_main) ─────────────────────
@@ -1051,6 +1082,19 @@ fn decl_line(d: &Decl) -> u32 {
 /// (used to advance the positional cursor). A direct member returns its own
 /// index; a member reached through an anonymous struct/union returns the
 /// anonymous member's index.
+/// Whether an AST type mentions `typeof(...)` anywhere reachable through the
+/// pointer/array/function spine (so it needs scope-aware resolution).
+fn contains_typeof(ty: &AstType) -> bool {
+    use crate::ast::AstType as A;
+    match ty {
+        A::Typeof(_) => true,
+        A::Pointer { base, .. } | A::Array { base, .. } => contains_typeof(&base.ty),
+        A::Function { ret, params, .. } =>
+            contains_typeof(&ret.ty) || params.iter().any(|p| contains_typeof(&p.ty.ty)),
+        _ => false,
+    }
+}
+
 pub(super) fn top_field_index(agg: &Type, name: &str, named: &HashMap<String, Type>) -> usize {
     let resolved = super::types::resolve_aggregate(agg, named);
     if let Type::Struct(st) = &resolved {
