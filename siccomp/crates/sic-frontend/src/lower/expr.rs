@@ -193,6 +193,15 @@ impl<'m> FuncCtx<'m> {
                 Ok(Constant::uint(size))
             }
 
+            ExprKind::AlignofType(ty) => {
+                let a = self.lower_type(ty)?.align_of(self.ptr_size());
+                Ok(Constant::uint(a))
+            }
+            ExprKind::AlignofExpr(inner) => {
+                let a = self.infer_expr_type(inner)?.align_of(self.ptr_size());
+                Ok(Constant::uint(a))
+            }
+
             ExprKind::Comma(lhs, rhs) => {
                 self.lower_expr(lhs)?;
                 self.lower_expr(rhs)
@@ -231,35 +240,11 @@ impl<'m> FuncCtx<'m> {
                     });
                 }
                 let ptr = Val::Local(vid);
-                use crate::lower::func::FuncCtx;
-                // lower each initializer
-                for (i, item) in init.iter().enumerate() {
-                    match &ir_ty.clone() {
-                        Type::Struct(st) if i < st.fields.len() => {
-                            let fty = st.fields[i].1.clone();
-                            let byte_offset = st.field_offset(i, self.ptr_size());
-                            let fptr = self.alloc_val();
-                            self.push_instr(Instr::GetFieldPtr {
-                                dest: fptr, base: ptr.clone(), field_idx: i,
-                                struct_name: st.name.clone(), byte_offset,
-                                result_ty: Type::Pointer(Box::new(fty.clone())),
-                            });
-                            self.lower_init_item(item, Val::Local(fptr), &fty)?;
-                        }
-                        Type::Array { elem, len } if i < *len || *len == 0 => {
-                            let eptr = self.alloc_val();
-                            let elem = *elem.clone();
-                            let elem_size = elem.size_of(self.ptr_size());
-                            self.push_instr(Instr::GetElemPtr {
-                                dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
-                                result_ty: Type::Pointer(Box::new(elem.clone())),
-                            });
-                            self.lower_init_item(item, Val::Local(eptr), &elem)?;
-                        }
-                        _ => {}
-                    }
-                }
-                // Return as pointer (compound literals decay to pointer)
+                // Reuse the full brace-initializer lowering (handles designators,
+                // nested aggregates, and cursor positioning).
+                let list = crate::ast::Initializer::List(init.clone());
+                self.lower_initializer(&list, ptr.clone(), &ir_ty)?;
+                // A compound literal decays to a pointer to its temporary.
                 Ok(ptr)
             }
 
@@ -284,54 +269,6 @@ impl<'m> FuncCtx<'m> {
                 Ok(Constant::zero())
             }
         }
-    }
-
-    fn lower_init_item(&mut self, item: &crate::ast::Initializer, ptr: Val, ty: &Type) -> Result<()> {
-        match item {
-            crate::ast::Initializer::Expr(e) => {
-                // A struct/union field initialized from an aggregate expression
-                // (e.g. a nested compound literal) is copied whole, not stored as
-                // a scalar (which would truncate to a register).
-                if matches!(ty, Type::Struct(_) | Type::Union(_)) {
-                    let src = self.lower_aggregate_ptr(e)?;
-                    let size = ty.size_of(self.ptr_size());
-                    let align = ty.align_of(self.ptr_size());
-                    self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
-                    return Ok(());
-                }
-                let v = self.lower_expr(e)?;
-                let cv = self.coerce(v, ty)?;
-                self.push_instr(Instr::Store { val: cv, ptr });
-            }
-            crate::ast::Initializer::List(items) => {
-                for (i, it) in items.iter().enumerate() {
-                    match ty {
-                        Type::Struct(st) if i < st.fields.len() => {
-                            let fty = st.fields[i].1.clone();
-                            let byte_offset = st.field_offset(i, self.ptr_size());
-                            let fptr = self.alloc_val();
-                            self.push_instr(Instr::GetFieldPtr {
-                                dest: fptr, base: ptr.clone(), field_idx: i,
-                                struct_name: st.name.clone(), byte_offset,
-                                result_ty: Type::Pointer(Box::new(fty.clone())),
-                            });
-                            self.lower_init_item(it, Val::Local(fptr), &fty)?;
-                        }
-                        Type::Array { elem, .. } => {
-                            let elem_size = elem.size_of(self.ptr_size());
-                            let eptr = self.alloc_val();
-                            self.push_instr(Instr::GetElemPtr {
-                                dest: eptr, base: ptr.clone(), index: Constant::int(i as i64), elem_size,
-                                result_ty: Type::Pointer(elem.clone()),
-                            });
-                            self.lower_init_item(it, Val::Local(eptr), elem)?;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        Ok(())
     }
 
     fn lower_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -732,6 +669,127 @@ impl<'m> FuncCtx<'m> {
         self.lower_expr(a)
     }
 
+    /// Pointee type of a pointer value (resolving opaque aggregates).
+    fn pointee_ty(&self, ptr: &Val) -> Type {
+        match self.val_type(ptr) {
+            Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+            other => other,
+        }
+    }
+
+    /// `T __atomic_exchange_n(ptr, val)`: old = *ptr; *ptr = val; return old.
+    fn lower_atomic_exchange(&mut self, ptr_expr: &Expr, val_expr: &Expr) -> Result<Val> {
+        let ptr = self.lower_expr(ptr_expr)?;
+        let ty = self.pointee_ty(&ptr);
+        let old = self.alloc_val();
+        self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
+        let val = self.lower_expr(val_expr)?;
+        let val = self.coerce(val, &ty)?;
+        self.push_instr(Instr::Store { val, ptr });
+        Ok(Val::Local(old))
+    }
+
+    /// `__sync_{val,bool}_compare_and_swap(ptr, oldv, newv)`: if `*ptr == oldv`
+    /// set `*ptr = newv`. Returns the prior value (`ret_bool == false`) or whether
+    /// the swap happened. Non-atomic (single-thread) emulation.
+    fn lower_atomic_cas(&mut self, ptr_expr: &Expr, old_expr: &Expr, new_expr: &Expr, ret_bool: bool) -> Result<Val> {
+        let ptr = self.lower_expr(ptr_expr)?;
+        let ty = self.pointee_ty(&ptr);
+        let cur = self.alloc_val();
+        self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
+        let oldv = self.lower_expr(old_expr)?; let oldv = self.coerce(oldv, &ty)?;
+        let newv = self.lower_expr(new_expr)?; let newv = self.coerce(newv, &ty)?;
+        let matched = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: oldv, ty: ty.clone() });
+        let sel = self.alloc_val();
+        self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: newv, on_false: Val::Local(cur), ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
+        if ret_bool {
+            let ext = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: Val::Local(matched), to_ty: Type::i32() });
+            Ok(Val::Local(ext))
+        } else {
+            Ok(Val::Local(cur))
+        }
+    }
+
+    /// `bool __atomic_compare_exchange_n(ptr, expected_ptr, desired, ...)`: like
+    /// CAS, but on failure writes the current value back through `expected_ptr`.
+    fn lower_atomic_compare_exchange(&mut self, ptr_expr: &Expr, exp_ptr_expr: &Expr, des_expr: &Expr) -> Result<Val> {
+        let ptr = self.lower_expr(ptr_expr)?;
+        let ty = self.pointee_ty(&ptr);
+        let eptr = self.lower_expr(exp_ptr_expr)?;
+        let cur = self.alloc_val();
+        self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
+        let expected = self.alloc_val();
+        self.push_instr(Instr::Load { dest: expected, ptr: eptr.clone(), ty: ty.clone() });
+        let desired = self.lower_expr(des_expr)?; let desired = self.coerce(desired, &ty)?;
+        let matched = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: Val::Local(expected), ty: ty.clone() });
+        // *ptr = matched ? desired : cur
+        let sel = self.alloc_val();
+        self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: desired, on_false: Val::Local(cur), ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
+        // *expected_ptr = matched ? expected : cur  (write current back on failure)
+        let esel = self.alloc_val();
+        self.push_instr(Instr::Select { dest: esel, cond: Val::Local(matched), on_true: Val::Local(expected), on_false: Val::Local(cur), ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(esel), ptr: eptr });
+        let ext = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: Val::Local(matched), to_ty: Type::i32() });
+        Ok(Val::Local(ext))
+    }
+
+    /// Lower `__builtin_{clz,ctz,popcount,ffs}[l|ll]` on a `bits`-wide operand.
+    /// The result is an `int`.
+    fn lower_bit_count(&mut self, arg: &Expr, bits: u32, kind: BitOp) -> Result<Val> {
+        let ty = Type::Int { bits, signed: false };
+        let v = self.lower_expr(arg)?;
+        let v = self.coerce(v, &ty)?;
+        let result = match kind {
+            BitOp::Clz | BitOp::Ctz | BitOp::Popcnt => {
+                let op = match kind {
+                    BitOp::Clz => UnOp::Clz,
+                    BitOp::Ctz => UnOp::Ctz,
+                    _ => UnOp::Popcnt,
+                };
+                let d = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: d, op, val: v, ty: ty.clone() });
+                Val::Local(d)
+            }
+            BitOp::Ffs => {
+                // ffs(x) = x == 0 ? 0 : ctz(x) + 1
+                let ctz = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: ctz, op: UnOp::Ctz, val: v.clone(), ty: ty.clone() });
+                let ctzp1 = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: ctzp1, op: BinOp::Add, lhs: Val::Local(ctz), rhs: Constant::int(1), ty: ty.clone() });
+                let iszero = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: iszero, op: CmpOp::IEq, lhs: v, rhs: Constant::int(0), ty: ty.clone() });
+                let sel = self.alloc_val();
+                self.push_instr(Instr::Select { dest: sel, cond: Val::Local(iszero), on_true: Constant::int(0), on_false: Val::Local(ctzp1), ty: ty.clone() });
+                Val::Local(sel)
+            }
+        };
+        self.coerce(result, &Type::i32())
+    }
+
+    /// Lower an atomic read-modify-write as a non-atomic load/op/store, returning
+    /// either the old value (`ret_new == false`) or the new value.
+    fn lower_atomic_rmw(&mut self, ptr_expr: &Expr, val_expr: &Expr, op: BinOp, ret_new: bool) -> Result<Val> {
+        let ptr = self.lower_expr(ptr_expr)?;
+        let ty = match self.val_type(&ptr) {
+            Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+            other => other,
+        };
+        let old = self.alloc_val();
+        self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
+        let rhs = self.lower_expr(val_expr)?;
+        let rhs = self.coerce(rhs, &ty)?;
+        let newv = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newv, op, lhs: Val::Local(old), rhs, ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(newv), ptr });
+        Ok(Val::Local(if ret_new { newv } else { old }))
+    }
+
     /// Pointer to the storage of a struct/union-typed expression. Lvalues yield
     /// their address; aggregate rvalues (compound literals, struct-returning
     /// calls) already lower to a pointer to their temporary.
@@ -817,6 +875,73 @@ impl<'m> FuncCtx<'m> {
                 }
                 // void __sync_synchronize(void) — full memory barrier; no-op here.
                 "__sync_synchronize" => return Ok(Constant::zero()),
+                // Atomic read-modify-write builtins. sic has no real atomics, so
+                // these lower to a plain load / op / store (correct for a single
+                // thread, which is enough to compile and run the code).
+                //   __atomic_fetch_OP(ptr, val, order)  -> returns OLD value
+                //   __atomic_OP_fetch(ptr, val, order)  -> returns NEW value
+                //   __sync_fetch_and_OP(ptr, val)       -> returns OLD value
+                //   __sync_OP_and_fetch(ptr, val)       -> returns NEW value
+                n if atomic_rmw_op(n).is_some() => {
+                    let (op, ret_new) = atomic_rmw_op(n).unwrap();
+                    if let [ptr_expr, val_expr, ..] = args {
+                        return self.lower_atomic_rmw(ptr_expr, val_expr, op, ret_new);
+                    }
+                }
+                // Fences / barriers: no-ops for a single thread.
+                "__atomic_thread_fence" | "__atomic_signal_fence" => return Ok(Constant::zero()),
+                // T __atomic_exchange_n(ptr, val, order) / __sync_lock_test_and_set(ptr, val)
+                "__atomic_exchange_n" | "__sync_lock_test_and_set" => {
+                    if let [ptr_expr, val_expr, ..] = args {
+                        return self.lower_atomic_exchange(ptr_expr, val_expr);
+                    }
+                }
+                // void __sync_lock_release(ptr): *ptr = 0
+                "__sync_lock_release" => {
+                    if let [ptr_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let ty = self.pointee_ty(&ptr);
+                        let z = self.coerce(Constant::zero(), &ty)?;
+                        self.push_instr(Instr::Store { val: z, ptr });
+                        return Ok(Constant::zero());
+                    }
+                }
+                // Compare-and-swap.
+                "__sync_val_compare_and_swap" => {
+                    if let [p, o, d, ..] = args { return self.lower_atomic_cas(p, o, d, false); }
+                }
+                "__sync_bool_compare_and_swap" => {
+                    if let [p, o, d, ..] = args { return self.lower_atomic_cas(p, o, d, true); }
+                }
+                "__atomic_compare_exchange_n" | "__atomic_compare_exchange" => {
+                    if let [p, eptr, d, ..] = args { return self.lower_atomic_compare_exchange(p, eptr, d); }
+                }
+                // Branch-prediction hints: the value is just the first argument.
+                "__builtin_expect" | "__builtin_expect_with_probability" => {
+                    if let Some(e) = args.first() { return self.lower_expr(e); }
+                }
+                // Optimizer hints with no runtime effect for us.
+                "__builtin_prefetch" | "__builtin_unreachable"
+                | "__builtin_assume_aligned" => {
+                    // `assume_aligned(p, ...)` returns its pointer; the rest are void.
+                    if name.as_str() == "__builtin_assume_aligned" {
+                        if let Some(e) = args.first() { return self.lower_expr(e); }
+                    }
+                    return Ok(Constant::zero());
+                }
+                "__builtin_constant_p" => return Ok(Constant::int(0)),
+                // Bit-count builtins: clz/ctz/popcount/ffs (32- and 64-bit).
+                n if builtin_bit_op(n).is_some() => {
+                    let (kind, bits) = builtin_bit_op(n).unwrap();
+                    if let Some(arg) = args.first() {
+                        return self.lower_bit_count(arg, bits, kind);
+                    }
+                }
+                // Static assertions: accepted, not evaluated (compile-time only).
+                "_Static_assert" | "static_assert" => return Ok(Constant::zero()),
+                // Type-compat query: conservatively false (only affects _Generic-
+                // style dispatch we don't otherwise need).
+                "__builtin_types_compatible_p" => return Ok(Constant::int(0)),
                 _ => {}
             }
         }
@@ -1208,7 +1333,8 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             ExprKind::Cast { ty, .. } => self.lower_type(ty),
-            ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_) => Ok(Type::u64()),
+            ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
+            | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Ok(Type::u64()),
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(Type::Pointer(Box::new(inner_ty)))
@@ -1377,6 +1503,50 @@ pub(super) fn resolve_field_access(
         }
         _ => None,
     }
+}
+
+#[derive(Clone, Copy)]
+enum BitOp { Clz, Ctz, Popcnt, Ffs }
+
+/// Classify `__builtin_{clz,ctz,popcount,ffs}[l|ll]` into (kind, operand bits).
+fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
+    let (base, bits) = if let Some(b) = name.strip_suffix("ll") { (b, 64) }
+        else if let Some(b) = name.strip_suffix('l') { (b, 64) }
+        else { (name, 32) };
+    let kind = match base {
+        "__builtin_clz"      => BitOp::Clz,
+        "__builtin_ctz"      => BitOp::Ctz,
+        "__builtin_popcount" => BitOp::Popcnt,
+        "__builtin_ffs"      => BitOp::Ffs,
+        _ => return None,
+    };
+    Some((kind, bits))
+}
+
+/// Classify an atomic/sync read-modify-write builtin into its arithmetic op and
+/// whether it returns the new value (vs the old). Returns `None` for names that
+/// aren't of this family (or use an op we don't special-case, e.g. `nand`).
+fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
+    let (op_name, ret_new) = if let Some(rest) = name.strip_prefix("__atomic_fetch_") {
+        (rest, false)
+    } else if let Some(rest) = name.strip_prefix("__atomic_").and_then(|r| r.strip_suffix("_fetch")) {
+        (rest, true)
+    } else if let Some(rest) = name.strip_prefix("__sync_fetch_and_") {
+        (rest, false)
+    } else if let Some(rest) = name.strip_prefix("__sync_").and_then(|r| r.strip_suffix("_and_fetch")) {
+        (rest, true)
+    } else {
+        return None;
+    };
+    let op = match op_name {
+        "add" => BinOp::Add,
+        "sub" => BinOp::Sub,
+        "or"  => BinOp::Or,
+        "and" => BinOp::And,
+        "xor" => BinOp::Xor,
+        _ => return None,
+    };
+    Some((op, ret_new))
 }
 
 pub(super) fn find_field(ty: &Type, name: &str, named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {

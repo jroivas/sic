@@ -265,6 +265,9 @@ fn emit_instr(
                     let zero = builder.ins().iconst(vty, 0);
                     builder.ins().icmp(cir::condcodes::IntCC::Equal, v, zero)
                 }
+                UnOp::Clz    => builder.ins().clz(v),
+                UnOp::Ctz    => builder.ins().ctz(v),
+                UnOp::Popcnt => builder.ins().popcnt(v),
             };
             val_map.insert(dest.0, result);
         }

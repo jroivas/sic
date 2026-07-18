@@ -112,7 +112,22 @@ pub struct Declarator {
 #[derive(Debug, Clone)]
 pub enum Initializer {
     Expr(Expr),
-    List(Vec<Initializer>),
+    List(Vec<InitItem>),
+}
+
+/// One element of a brace initializer list, with any leading designators
+/// (`.field` / `[index]`, possibly chained: `.a.b[2] = ...`). Empty designators
+/// means the element is positional.
+#[derive(Debug, Clone)]
+pub struct InitItem {
+    pub designators: Vec<Designator>,
+    pub init: Initializer,
+}
+
+#[derive(Debug, Clone)]
+pub enum Designator {
+    Field(String),
+    Index(Box<Expr>),
 }
 
 /// A top-level declaration.
@@ -236,6 +251,8 @@ pub enum ExprKind {
     /// sizeof(expr) or sizeof(type)
     SizeofExpr(BoxExpr),
     SizeofType(QualType),
+    AlignofType(QualType),
+    AlignofExpr(BoxExpr),
 
     /// Cast: (type)expr
     Cast { ty: QualType, expr: BoxExpr },
@@ -257,7 +274,7 @@ pub enum ExprKind {
     StmtExpr(Vec<Stmt>),
 
     /// Compound literal: (Type){ ... }
-    CompoundLiteral { ty: QualType, init: Vec<Initializer> },
+    CompoundLiteral { ty: QualType, init: Vec<InitItem> },
 
     /// __builtin_va_start / va_arg / va_end
     VaStart { list: BoxExpr, last: BoxExpr },

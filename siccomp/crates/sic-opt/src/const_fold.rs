@@ -58,7 +58,7 @@ impl ConstFold {
     fn fold_init(init: &mut Initializer) {
         match init {
             Initializer::Expr(e) => { Self::fold_expr(e); }
-            Initializer::List(items) => { for i in items { Self::fold_init(i); } }
+            Initializer::List(items) => { for i in items { Self::fold_init(&mut i.init); } }
         }
     }
 

@@ -245,6 +245,23 @@ fn main() {
             let _lang = iter.next();
         } else if a.starts_with("-x") && a.len() > 2 {
             // Attached form `-xc` — likewise ignored.
+        } else if a == "-isystem" || a == "-iquote" || a == "-idirafter" {
+            // GCC include-path variants: treat like `-I<dir>` (the following arg
+            // is the directory). sic has a single include search list.
+            if let Some(dir) = iter.next() {
+                argv.push(format!("-I{}", dir));
+            }
+        } else if let Some(dir) = a.strip_prefix("-isystem")
+            .or_else(|| a.strip_prefix("-iquote"))
+            .or_else(|| a.strip_prefix("-idirafter"))
+            .filter(|d| !d.is_empty())
+        {
+            // Attached form, e.g. `-isystem../linux-headers`.
+            argv.push(format!("-I{}", dir));
+        } else if a == "-include" || a == "-imacros" {
+            // Force-include a file / its macros: forward to cpp verbatim.
+            dep_flags.push(a);
+            if let Some(v) = iter.next() { dep_flags.push(v); }
         } else if a.starts_with("-f") && a.len() > 2 {
             // GCC/Clang `-f<name>[=<value>]` options: parse and store. Accepted
             // for compatibility; acted upon only where sic implements them.

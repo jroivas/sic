@@ -310,7 +310,8 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> T
         ExprKind::FloatLit(_) => Type::Float64,
         ExprKind::StringLit(_) => Type::char_ptr(),
         ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).unwrap_or_else(|_| Type::i32()),
-        ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_) => Type::u64(),
+        ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
+        | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Type::u64(),
         ExprKind::Unary { op: UnOpKind::Addr, expr } => {
             Type::Pointer(Box::new(typeof_expr_type(expr, named, ptr_size)))
         }

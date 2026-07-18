@@ -544,8 +544,26 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::LBracket => {
                     self.advance();
-                    let size = if self.at(TokenKind::RBracket) { None }
-                               else { Some(Box::new(self.parse_assign_expr()?)) };
+                    // C99 array-parameter qualifiers inside the brackets:
+                    // `arr[static N]`, `arr[const]`, `arr[restrict]` (glibc's
+                    // `__restrict_arr`), `arr[*]` (unspecified VLA).
+                    loop {
+                        match self.peek_kind() {
+                            TokenKind::Static | TokenKind::Const
+                            | TokenKind::Volatile | TokenKind::Restrict => { self.advance(); }
+                            _ => break,
+                        }
+                    }
+                    let size = if self.at(TokenKind::RBracket) {
+                        None
+                    } else if self.at(TokenKind::Star)
+                        && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::RBracket)
+                    {
+                        self.advance(); // `[*]`
+                        None
+                    } else {
+                        Some(Box::new(self.parse_assign_expr()?))
+                    };
                     self.expect(TokenKind::RBracket)?;
                     suffixes.push(Suffix::Array(size));
                 }
@@ -646,15 +664,28 @@ impl Parser {
             self.advance();
             let mut list = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                // designators: [i] = or .field = (skip for now)
-                if self.at(TokenKind::LBracket) {
-                    self.advance(); self.parse_assign_expr()?; self.expect(TokenKind::RBracket)?;
-                    self.eat(TokenKind::Eq);
-                } else if self.at(TokenKind::Dot) {
-                    self.advance(); self.advance(); // .field
-                    self.eat(TokenKind::Eq);
+                // Designator chain: any run of `.field` / `[index]`, then `=`.
+                // e.g. `.payload.area = ...`, `[3].x = ...`.
+                let mut designators = Vec::new();
+                loop {
+                    if self.at(TokenKind::LBracket) {
+                        self.advance();
+                        let idx = self.parse_assign_expr()?;
+                        self.expect(TokenKind::RBracket)?;
+                        designators.push(Designator::Index(Box::new(idx)));
+                    } else if self.at(TokenKind::Dot) {
+                        self.advance();
+                        let name = self.expect_name()?;
+                        designators.push(Designator::Field(name));
+                    } else {
+                        break;
+                    }
                 }
-                list.push(self.parse_initializer()?);
+                if !designators.is_empty() {
+                    self.expect(TokenKind::Eq)?;
+                }
+                let init = self.parse_initializer()?;
+                list.push(InitItem { designators, init });
                 if !self.eat(TokenKind::Comma) { break; }
             }
             self.expect(TokenKind::RBrace)?;
@@ -1076,7 +1107,7 @@ impl Parser {
                 let init = self.parse_initializer()?;
                 let inits = match init {
                     Initializer::List(v) => v,
-                    other => vec![other],
+                    other => vec![InitItem { designators: vec![], init: other }],
                 };
                 let mut e = Expr::new(ExprKind::CompoundLiteral { ty, init: inits }, sp.clone());
                 e = self.parse_postfix_ops(e)?;
@@ -1204,14 +1235,13 @@ impl Parser {
             if let Ok((ty, _)) = self.parse_decl_specifiers() {
                 if let Ok((_, ty)) = self.parse_declarator(ty) {
                     if self.eat(TokenKind::RParen) && self.at(TokenKind::LBrace) {
-                        // Compound literal
-                        self.advance(); // {
-                        let mut inits = Vec::new();
-                        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-                            inits.push(self.parse_initializer()?);
-                            if !self.eat(TokenKind::Comma) { break; }
-                        }
-                        self.expect(TokenKind::RBrace)?;
+                        // Compound literal — parse the brace body as an
+                        // initializer (handles designators).
+                        let init = self.parse_initializer()?;
+                        let inits = match init {
+                            Initializer::List(v) => v,
+                            other => vec![InitItem { designators: vec![], init: other }],
+                        };
                         let mut e = Expr::new(ExprKind::CompoundLiteral { ty, init: inits }, sp.clone());
                         e = self.parse_postfix_ops(e)?;
                         return Ok(e);
@@ -1315,6 +1345,8 @@ impl Parser {
                     "__builtin_va_arg"       => return self.parse_va_builtin_arg(sp),
                     "__builtin_va_end"       => return self.parse_va_builtin_end(sp),
                     "__builtin_offsetof"     => return self.parse_offsetof(sp),
+                    "__alignof__" | "__alignof" | "_Alignof"
+                                             => return self.parse_alignof(sp),
                     _ => {}
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
@@ -1348,6 +1380,21 @@ impl Parser {
 
     /// `__builtin_offsetof(type-name, member-designator)` where the designator
     /// is `identifier ( .identifier | [ expr ] )*`.
+    /// `__alignof__(type)` / `_Alignof(type)` / `__alignof__ expr`. The keyword
+    /// has already been consumed.
+    fn parse_alignof(&mut self, sp: Span) -> Result<Expr> {
+        if self.at(TokenKind::LParen) && self.is_cast() {
+            self.advance(); // (
+            let (ty, _) = self.parse_decl_specifiers()?;
+            let (_, ty) = self.parse_declarator(ty)?;
+            self.expect(TokenKind::RParen)?;
+            Ok(Expr::new(ExprKind::AlignofType(ty), sp))
+        } else {
+            let e = self.parse_unary()?;
+            Ok(Expr::new(ExprKind::AlignofExpr(Box::new(e)), sp))
+        }
+    }
+
     fn parse_offsetof(&mut self, sp: Span) -> Result<Expr> {
         use crate::ast::OffsetDesignator;
         self.expect(TokenKind::LParen)?;

@@ -18,6 +18,9 @@ pub enum UnOp {
     FNeg,  // float negation
     Not,   // bitwise NOT
     BoolNot, // logical NOT (result is i1)
+    Clz,   // count leading zeros
+    Ctz,   // count trailing zeros
+    Popcnt, // population count (set bits)
 }
 
 /// Integer / float comparison predicates.

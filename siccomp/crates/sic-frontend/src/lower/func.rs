@@ -559,7 +559,7 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
+    pub(crate) fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
         match init {
             // `char buf[] = "..."` / `char buf[N] = "..."`: copy the string bytes
             // into the array (not the pointer). Zero-fill any remaining space.
@@ -594,44 +594,115 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             Initializer::List(items) => {
-                match ty {
-                    Type::Array { elem, len } => {
-                        let elem_size = elem.size_of(self.ptr_size());
-                        for (i, item) in items.iter().enumerate() {
-                            if i >= *len && *len > 0 { break; }
-                            let idx_val = Constant::int(i as i64);
-                            let elem_ptr = self.alloc_val();
-                            self.push_instr(Instr::GetElemPtr {
-                                dest: elem_ptr, base: ptr.clone(), index: idx_val, elem_size,
-                                result_ty: Type::Pointer(elem.clone()),
-                            });
-                            self.lower_initializer(item, Val::Local(elem_ptr), elem)?;
-                        }
+                // Scalar wrapped in braces: `int x = { 5 };`.
+                if !matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+                    if let Some(first) = items.first() {
+                        self.lower_initializer(&first.init, ptr, ty)?;
                     }
-                    Type::Struct(st) => {
-                        let st = st.clone();
-                        for (i, item) in items.iter().enumerate() {
-                            if i >= st.fields.len() { break; }
-                            let field_ty = st.fields[i].1.clone();
-                            let byte_offset = st.field_offset(i, self.ptr_size());
-                            let field_ptr = self.alloc_val();
-                            self.push_instr(Instr::GetFieldPtr {
-                                dest: field_ptr, base: ptr.clone(), field_idx: i,
-                                struct_name: st.name.clone(), byte_offset,
-                                result_ty: Type::Pointer(Box::new(field_ty.clone())),
-                            });
-                            self.lower_initializer(item, Val::Local(field_ptr), &field_ty)?;
-                        }
+                    return Ok(());
+                }
+                // Any member not named by the initializer is zero-initialized
+                // (C11 6.7.9p19/21). Zero the whole aggregate first, then fill.
+                let size = ty.size_of(self.ptr_size());
+                if size > 0 {
+                    self.push_instr(Instr::MemSet {
+                        dst: ptr.clone(), val: Constant::zero(), size,
+                        align: ty.align_of(self.ptr_size()),
+                    });
+                }
+                let mut cursor = 0usize;
+                for item in items {
+                    let (target, next) =
+                        self.resolve_init_target(&ptr, ty, &item.designators, cursor)?;
+                    if let Some((tptr, tty)) = target {
+                        self.lower_initializer(&item.init, tptr, &tty)?;
                     }
-                    _ => {
-                        if let Some(first) = items.first() {
-                            self.lower_initializer(first, ptr, ty)?;
-                        }
-                    }
+                    cursor = next;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Emit a pointer to `base + byte_offset`, typed as `*pointee`.
+    fn gep_offset(&mut self, base: &Val, byte_offset: u64, pointee: &Type) -> Val {
+        let dest = self.alloc_val();
+        self.push_instr(Instr::GetFieldPtr {
+            dest, base: base.clone(), field_idx: 0, struct_name: None,
+            byte_offset, result_ty: Type::Pointer(Box::new(pointee.clone())),
+        });
+        Val::Local(dest)
+    }
+
+    /// Resolve where a brace-list element is written: the position named by its
+    /// designators, or `cursor` when it has none. Returns the target pointer, its
+    /// type, and the next cursor value (top-level index + 1).
+    #[allow(clippy::type_complexity)]
+    fn resolve_init_target(&mut self, base: &Val, agg: &Type, designators: &[crate::ast::Designator], cursor: usize)
+        -> Result<(Option<(Val, Type)>, usize)>
+    {
+        use crate::ast::Designator;
+        // First step: designator[0] if present, else the implicit cursor.
+        let (first, top_index) = match designators.first() {
+            Some(Designator::Field(name)) => {
+                let Some((off, fty, _)) = super::expr::resolve_field_access(agg, name, self.ptr_size(), &self.lowerer.struct_types)
+                else { return Ok((None, cursor + 1)); };
+                (Some((self.gep_offset(base, off, &fty), fty)), top_field_index(agg, name, &self.lowerer.struct_types))
+            }
+            Some(Designator::Index(e)) => {
+                let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
+                (self.member_at(base, agg, i), i)
+            }
+            None => (self.member_at(base, agg, cursor), cursor),
+        };
+        let Some((mut ptr, mut cur_ty)) = first else {
+            // Out-of-range positional/index element (excess initializer): skip it
+            // but still advance the cursor past this position.
+            return Ok((None, top_index + 1));
+        };
+        // Navigate any remaining (chained) designators into `cur_ty`.
+        let rest = if designators.is_empty() { &designators[..] } else { &designators[1..] };
+        for d in rest {
+            match d {
+                Designator::Field(name) => {
+                    let Some((off, fty, _)) = super::expr::resolve_field_access(&cur_ty, name, self.ptr_size(), &self.lowerer.struct_types)
+                    else { return Ok((None, top_index + 1)); };
+                    ptr = self.gep_offset(&ptr, off, &fty);
+                    cur_ty = fty;
+                }
+                Designator::Index(e) => {
+                    let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
+                    let Some((p, ety)) = self.member_at(&ptr, &cur_ty, i) else {
+                        return Ok((None, top_index + 1));
+                    };
+                    ptr = p; cur_ty = ety;
+                }
+            }
+        }
+        Ok((Some((ptr, cur_ty)), top_index + 1))
+    }
+
+    /// Pointer + type of the `idx`-th member of an aggregate (struct field or
+    /// array element), by positional index. `None` when `idx` is out of range.
+    fn member_at(&mut self, base: &Val, agg: &Type, idx: usize) -> Option<(Val, Type)> {
+        let resolved = super::types::resolve_aggregate(agg, &self.lowerer.struct_types);
+        match &resolved {
+            Type::Struct(st) => {
+                let fty = st.fields.get(idx)?.1.clone();
+                let off = st.field_offset(idx, self.ptr_size());
+                Some((self.gep_offset(base, off, &fty), fty))
+            }
+            Type::Union(u) => {
+                let fty = u.fields.get(idx)?.1.clone();
+                Some((self.gep_offset(base, 0, &fty), fty))
+            }
+            Type::Array { elem, len } => {
+                if *len > 0 && idx >= *len { return None; }
+                let esz = elem.size_of(self.ptr_size());
+                Some((self.gep_offset(base, idx as u64 * esz, elem), (**elem).clone()))
+            }
+            _ => None,
+        }
     }
 
     // ─── Control flow ────────────────────────────────────────────────────────
@@ -976,6 +1047,28 @@ fn decl_line(d: &Decl) -> u32 {
 /// Returns `(case value, group id)` pairs. Values with the same group id share
 /// one target block — this is how a `case LOW ... HIGH:` range maps all of its
 /// values to a single body. Each plain `case:` gets its own group.
+/// Index of the top-level member of `agg` that a designated field name selects
+/// (used to advance the positional cursor). A direct member returns its own
+/// index; a member reached through an anonymous struct/union returns the
+/// anonymous member's index.
+pub(super) fn top_field_index(agg: &Type, name: &str, named: &HashMap<String, Type>) -> usize {
+    let resolved = super::types::resolve_aggregate(agg, named);
+    if let Type::Struct(st) = &resolved {
+        for (i, (fname, _)) in st.fields.iter().enumerate() {
+            if fname == name { return i; }
+        }
+        for (i, (fname, fty)) in st.fields.iter().enumerate() {
+            if fname.is_empty()
+                && matches!(fty, Type::Struct(_) | Type::Union(_))
+                && super::expr::resolve_field_access(fty, name, 8, named).is_some()
+            {
+                return i;
+            }
+        }
+    }
+    0
+}
+
 fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> Vec<(i64, usize)> {
     let mut cases = Vec::new();
     let mut group = 0usize;
