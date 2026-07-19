@@ -58,7 +58,7 @@ impl Lowerer {
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
-                    let sig = FunctionType { ret: ir_ret, params: ir_params?, variadic: *variadic };
+                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
                     if self.module.func_ref_by_name(name).is_none() {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
@@ -69,7 +69,7 @@ impl Lowerer {
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
-                    let sig = FunctionType { ret: ir_ret, params: ir_params?, variadic: *variadic };
+                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
                     if self.module.func_ref_by_name(name).is_none() {
                         let linkage = match storage {
                             Some(StorageClass::Static) => Linkage::Internal,
@@ -772,6 +772,26 @@ pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<Strin
         }
     }
     out
+}
+
+/// Build an IR function signature applying the aggregate-return sret ABI: a
+/// Struct/Union return prepends a hidden `Pointer(ret)` first parameter (the
+/// caller-provided result slot). `ret` is preserved unchanged so call sites can
+/// detect the ABI from the signature.
+pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> FunctionType {
+    if matches!(ret, Type::Struct(_) | Type::Union(_)) {
+        let mut ps = Vec::with_capacity(params.len() + 1);
+        ps.push(Type::Pointer(Box::new(ret.clone())));
+        ps.extend(params);
+        FunctionType { ret, params: ps, variadic }
+    } else {
+        FunctionType { ret, params, variadic }
+    }
+}
+
+/// Whether a return type uses the sret ABI (aggregate returned by value).
+pub(crate) fn ret_is_sret(ret: &Type) -> bool {
+    matches!(ret, Type::Struct(_) | Type::Union(_))
 }
 
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {

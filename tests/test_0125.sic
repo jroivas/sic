@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
+// `return <value>;` in a void function (GCC-ism; QEMU's void qatomic_* wrappers).
+static unsigned long g_and;
+static unsigned long do_and(unsigned long *p, unsigned long m){ unsigned long o=*p; *p &= m; return o; }
+static void clear_atomic(unsigned long *p, unsigned long m){ return do_and(p, ~m); }
+
 typedef struct QemuMutex { int lock; } QemuMutex;
 typedef struct QemuSpin  { int v; } QemuSpin;
 static int from_mutex(QemuMutex *m){ (void)m; return 1; }
@@ -28,6 +33,10 @@ int main(void){
     if (got != 5) ok=0;
     __atomic_store(&n, &put, 0);
     if (n != 42) ok=0;
+
+    // return-value-in-void-function preserves side effects.
+    g_and = 0xFF; clear_atomic(&g_and, 0x0F);
+    if (g_and != 0xF0) ok=0;
 
     // __builtin_<libc> passthrough.
     char buf[8];

@@ -42,6 +42,10 @@ pub struct FuncCtx<'m> {
     pub pretty_func: String,
     /// Last source line emitted as a debug marker (avoids redundant markers).
     pub last_line: u32,
+    /// When this function returns an aggregate by value (sret ABI), the pointer
+    /// to the caller-provided result slot (the hidden first parameter) and the
+    /// aggregate type. `return expr` copies into this slot and `ret`s void.
+    pub sret: Option<(Val, Type)>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -70,6 +74,7 @@ impl<'m> FuncCtx<'m> {
             last_init_local: None,
             pretty_func: String::new(),
             last_line: 0,
+            sret: None,
         }
     }
 
@@ -239,19 +244,28 @@ impl<'m> Lowerer {
         }).collect();
         let ir_params = ir_params?;
 
-        let sig = FunctionType { ret: ir_ret.clone(), params: ir_params.clone(), variadic };
+        let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic);
+        let is_sret = super::ret_is_sret(&ir_ret);
 
         let linkage = match storage {
             Some(StorageClass::Static) => Linkage::Internal,
             _ => Linkage::External,
         };
 
-        let ir_param_decls: Vec<sic_ir::Param> = params.iter().zip(&ir_params).map(|(p, ty)| {
+        let mut ir_param_decls: Vec<sic_ir::Param> = params.iter().zip(&ir_params).map(|(p, ty)| {
             sic_ir::Param {
                 name: p.name.clone().unwrap_or_default(),
                 ty: ty.clone(),
             }
         }).collect();
+        // sret ABI: prepend the hidden result-pointer parameter so the backend
+        // allocates a block param for it (matching the signature).
+        if is_sret {
+            ir_param_decls.insert(0, sic_ir::Param {
+                name: String::new(),
+                ty: Type::Pointer(Box::new(ir_ret.clone())),
+            });
+        }
 
         let mut func = Function::new(name.to_string(), sig, ir_param_decls, linkage);
 
@@ -281,10 +295,17 @@ impl<'m> Lowerer {
 
         // Alloca for each parameter and store the param sentinel value.
         // The backend maps ValId(0x10000 + i) → the i-th function parameter.
+        // With the sret ABI the hidden result pointer occupies sentinel 0, so
+        // user parameters are shifted by one.
         fc.enter_scope();
+        let param_base = if is_sret { 1 } else { 0 };
+        if is_sret {
+            fc.sret = Some((Val::Local(ValId(0x10000)), ir_ret.clone()));
+        }
         for (i, p) in params.iter().enumerate() {
             if let Some(pname) = &p.name {
                 let pty = ir_params[i].clone();
+                let sentinel = ValId((i + param_base) as u32 + 0x10000);
                 let ptr_vid = fc.alloc_val();
                 fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone(), align: None });
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {
@@ -294,13 +315,13 @@ impl<'m> Lowerer {
                     let align = pty.align_of(ps) as u64;
                     fc.push_instr(Instr::MemCopy {
                         dst: Val::Local(ptr_vid),
-                        src: Val::Local(ValId(i as u32 + 0x10000)),
+                        src: Val::Local(sentinel),
                         size,
                         align,
                     });
                 } else {
                     fc.push_instr(Instr::Store {
-                        val: Val::Local(ValId(i as u32 + 0x10000)),
+                        val: Val::Local(sentinel),
                         ptr: Val::Local(ptr_vid),
                     });
                 }
@@ -320,7 +341,7 @@ impl<'m> Lowerer {
 
         // If function didn't return, add implicit return
         if !fc.is_terminated() {
-            let ret_val = if ir_ret == Type::Void {
+            let ret_val = if ir_ret == Type::Void || is_sret {
                 None
             } else if let Some((last_vid, last_ty)) = fc.last_init_local.clone() {
                 // sic implicit return: last initialized local variable
@@ -364,14 +385,34 @@ impl<'m> FuncCtx<'m> {
             }
             Stmt::Decl(d) => self.lower_local_decl(d)?,
             Stmt::Return(val, _) => {
-                let ret = if let Some(e) = val {
-                    let v = self.lower_expr(e)?;
-                    let expected = self.ret_ty.clone();
-                    Some(self.coerce(v, &expected)?)
+                if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
+                    // Aggregate return: copy the value into the caller's slot.
+                    if let Some(e) = val {
+                        let src = self.lower_aggregate_ptr(e)?;
+                        let ps = self.ptr_size();
+                        let size = agg_ty.size_of(ps);
+                        let align = agg_ty.align_of(ps) as u64;
+                        self.push_instr(Instr::MemCopy { dst: sret_ptr, src, size, align });
+                    }
+                    self.set_terminator(Terminator::Ret(None));
+                } else if self.ret_ty == Type::Void {
+                    // `return expr;` in a void function (GCC-ism, common in QEMU's
+                    // `return qatomic_*()` void wrappers): evaluate the operand for
+                    // its side effects but discard the value.
+                    if let Some(e) = val {
+                        let _ = self.lower_expr(e)?;
+                    }
+                    self.set_terminator(Terminator::Ret(None));
                 } else {
-                    None
-                };
-                self.set_terminator(Terminator::Ret(ret));
+                    let ret = if let Some(e) = val {
+                        let v = self.lower_expr(e)?;
+                        let expected = self.ret_ty.clone();
+                        Some(self.coerce(v, &expected)?)
+                    } else {
+                        None
+                    };
+                    self.set_terminator(Terminator::Ret(ret));
+                }
             }
             Stmt::If { cond, then, else_, .. } => self.lower_if(cond, then, else_.as_deref())?,
             Stmt::While { cond, body, .. } => self.lower_while(cond, body)?,

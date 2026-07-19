@@ -1129,9 +1129,15 @@ impl<'m> FuncCtx<'m> {
                                 Type::Function(ft) => *ft.clone(),
                                 _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                             },
+                            // A function-typed parameter does not decay to a
+                            // pointer type in sic's IR; accept it directly.
+                            Type::Function(ft) => *ft.clone(),
                             _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                         };
                         let ret_ty = func_ty.ret.clone();
+                        if super::ret_is_sret(&ret_ty) {
+                            return self.lower_indirect_sret(fptr, func_ty, arg_vals);
+                        }
                         let is_void = ret_ty == Type::Void;
                         let dest = if !is_void { Some(self.alloc_val()) } else { None };
                         self.push_instr(Instr::CallIndirect {
@@ -1174,9 +1180,13 @@ impl<'m> FuncCtx<'m> {
                         Type::Function(ft) => *ft.clone(),
                         _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                     },
+                    Type::Function(ft) => *ft.clone(),
                     _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                 };
                 let ret_ty = func_ty.ret.clone();
+                if super::ret_is_sret(&ret_ty) {
+                    return self.lower_indirect_sret(fptr, func_ty, arg_vals);
+                }
                 let is_void = ret_ty == Type::Void;
                 let dest = if !is_void { Some(self.alloc_val()) } else { None };
                 self.push_instr(Instr::CallIndirect {
@@ -1192,6 +1202,28 @@ impl<'m> FuncCtx<'m> {
 
         let ret_ty = self.lowerer.module.func_sig(fref).ret.clone();
         let is_void = ret_ty == Type::Void;
+
+        // Aggregate return (sret ABI): allocate the result slot, pass its pointer
+        // as the hidden first argument, and yield that pointer as the call value.
+        if super::ret_is_sret(&ret_ty) {
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
+            let slot = Val::Local(slot);
+            let param_tys: Vec<Type> = self.lowerer.module.func_sig(fref).params.clone();
+            // Coerce user args against params[1..] (params[0] is the sret ptr).
+            for (i, pval) in arg_vals.iter_mut().enumerate() {
+                if let Some(pty) = param_tys.get(i + 1) {
+                    if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
+                    let coerced = self.coerce(pval.clone(), pty)?;
+                    *pval = coerced;
+                }
+            }
+            let mut args = Vec::with_capacity(arg_vals.len() + 1);
+            args.push(slot.clone());
+            args.extend(arg_vals);
+            self.push_instr(Instr::Call { dest: None, func: fref, args, ret_ty });
+            return Ok(slot);
+        }
 
         // Coerce arguments to expected param types
         let param_tys: Vec<Type> = self.lowerer.module.func_sig(fref).params.clone();
@@ -1213,6 +1245,35 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty });
             Ok(Val::Local(dest))
         }
+    }
+
+    /// Lower an indirect call to an aggregate-returning function (sret ABI):
+    /// allocate the result slot, pass its pointer as the hidden first argument,
+    /// and yield that pointer. `func_ty.params[0]` is the sret pointer parameter.
+    fn lower_indirect_sret(&mut self, fptr: Val, func_ty: sic_ir::FunctionType, arg_vals: Vec<Val>) -> Result<Val> {
+        let ret_ty = func_ty.ret.clone();
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
+        let slot = Val::Local(slot);
+        // Coerce user args against params[1..] (params[0] is the sret pointer).
+        let mut coerced = Vec::with_capacity(arg_vals.len() + 1);
+        coerced.push(slot.clone());
+        for (i, a) in arg_vals.into_iter().enumerate() {
+            match func_ty.params.get(i + 1) {
+                Some(pty) if !matches!(pty, Type::Struct(_) | Type::Union(_)) => {
+                    coerced.push(self.coerce(a, pty)?);
+                }
+                _ => coerced.push(a),
+            }
+        }
+        self.push_instr(Instr::CallIndirect {
+            dest: None,
+            fptr,
+            args: coerced,
+            ret_ty,
+            func_ty: Box::new(func_ty),
+        });
+        Ok(slot)
     }
 
     /// Lower `__builtin_{add,mul}_overflow(a, b, *res)`: compute `a op b` in the
@@ -1433,8 +1494,17 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_field(&mut self, base: &Expr, name: &str) -> Result<LValue> {
-        // base must be a struct lvalue
-        let lv = self.lower_lvalue(base)?;
+        // base is normally a struct lvalue; but it can also be a struct *rvalue*
+        // (e.g. `f().field` where `f` returns a struct by value), whose address is
+        // the materialized temporary.
+        let lv = match self.lower_lvalue(base) {
+            Ok(lv) => lv,
+            Err(_) => {
+                let ptr = self.lower_aggregate_ptr(base)?;
+                let ty = self.infer_expr_type(base)?;
+                LValue::plain(ptr, ty)
+            }
+        };
         self.field_ptr_from(lv, name, false, &base.span)
     }
 
