@@ -4,6 +4,16 @@ pub use token::{Token, TokenKind, Span};
 use std::collections::HashSet;
 use crate::{Result, CompileError};
 
+/// Source language being compiled. Chosen from the input file's extension.
+/// It only affects whether sic's Rust-style primitive aliases (`i32`, `u64`,
+/// `isize`, …) are reserved type keywords: in `Sic` they are types; in `C` they
+/// are ordinary identifiers (so C code may use `isize`/`usize` as variables).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    C,
+    Sic,
+}
+
 pub struct Lexer {
     src: Vec<char>,
     pos: usize,
@@ -13,10 +23,18 @@ pub struct Lexer {
     file: Option<String>,
     /// Typedef names to distinguish from plain identifiers.
     pub typedefs: HashSet<String>,
+    /// Source language (affects Rust-style type-alias keywords).
+    lang: Lang,
 }
 
 impl Lexer {
+    /// Construct a lexer for C source (the default for the C front end).
     pub fn new(source: &str, typedefs: HashSet<String>) -> Self {
+        Self::new_lang(source, typedefs, Lang::C)
+    }
+
+    /// Construct a lexer for a specific source language.
+    pub fn new_lang(source: &str, typedefs: HashSet<String>, lang: Lang) -> Self {
         Lexer {
             src: source.chars().collect(),
             pos: 0,
@@ -24,6 +42,7 @@ impl Lexer {
             col: 1,
             file: None,
             typedefs,
+            lang,
         }
     }
 
@@ -169,7 +188,7 @@ impl Lexer {
             "false" => return Token::new(TokenKind::IntLit, "0".to_string(), sp),
             _ => {}
         }
-        let kind = keyword_or_ident(&text, &self.typedefs);
+        let kind = keyword_or_ident(&text, &self.typedefs, self.lang);
         Token::new(kind, text, sp)
     }
 
@@ -396,7 +415,19 @@ fn unescape_char(c: char) -> char {
     }
 }
 
-fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
+fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKind {
+    // sic's Rust-style primitive aliases are reserved type names only in sic
+    // source; in C they are ordinary identifiers (e.g. a local named `isize`).
+    if lang == Lang::Sic {
+        match s {
+            "int8" | "int16" | "int32" | "int64" | "int128" |
+            "uint8" | "uint16" | "uint32" | "uint64" | "uint128" |
+            "i8" | "i16" | "i32" | "i64" | "i128" |
+            "u8" | "u16" | "u32" | "u64" | "u128" |
+            "isize" | "usize" => return TokenKind::TypeName,
+            _ => {}
+        }
+    }
     match s {
         "auto"           => TokenKind::Auto,
         "break"          => TokenKind::Break,
@@ -441,12 +472,6 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>) -> TokenKind {
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
         "__builtin_va_list" => TokenKind::TypeName,
-        // sic primitive type aliases
-        "int8" | "int16" | "int32" | "int64" | "int128" |
-        "uint8" | "uint16" | "uint32" | "uint64" | "uint128" |
-        "i8" | "i16" | "i32" | "i64" | "i128" |
-        "u8" | "u16" | "u32" | "u64" | "u128" |
-        "isize" | "usize" => TokenKind::TypeName,
         // Extended floating types (GCC `__float128`/`__float80`, C23 `_FloatN`).
         // Resolved to an IR float type in `lower_ast_type`.
         "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"

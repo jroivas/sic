@@ -392,7 +392,15 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     let preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
-    let mut lexer = Lexer::new(&preprocessed, HashSet::new());
+    // Pick the source language from the file extension: `.sic` is sic-lang (its
+    // Rust-style primitive aliases `i32`/`u64`/`isize`/… are reserved types);
+    // everything else is C, where those names are ordinary identifiers.
+    let lang = if path.to_ascii_lowercase().ends_with(".sic") {
+        sic_frontend::Lang::Sic
+    } else {
+        sic_frontend::Lang::C
+    };
+    let mut lexer = Lexer::new_lang(&preprocessed, HashSet::new(), lang);
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
     let mut parser = Parser::new(tokens, path.to_string());

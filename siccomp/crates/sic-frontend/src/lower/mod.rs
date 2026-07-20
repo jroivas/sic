@@ -80,6 +80,10 @@ impl Lowerer {
                 }
                 Decl::TypeDef { names, .. } => {
                     for (name, ty) in names {
+                        // Register any enums/tagged structs nested in the type body
+                        // (e.g. `typedef struct { enum { A, B } k; } T;`) so their
+                        // constants and tags resolve.
+                        self.register_nested_struct_defs(&ty.ty)?;
                         if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
                             // Also register named struct/union by their own name
                             match &ty.ty {
@@ -137,6 +141,11 @@ impl Lowerer {
             }
             AstType::Pointer { base, .. } | AstType::Array { base, .. } => {
                 self.register_nested_struct_defs(&base.ty)?;
+            }
+            // An enum defined inline (e.g. `enum { LOC_NONE, ... } kind;` as a
+            // struct field) contributes its constants to the enclosing scope.
+            AstType::Enum(e) if e.variants.is_some() => {
+                self.register_enum(e)?;
             }
             _ => {}
         }
