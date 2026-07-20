@@ -289,6 +289,14 @@ impl Lowerer {
                     _ => Linkage::External,
                 };
                 let constant = type_is_const(&d.ty);
+                // If the prior declaration carried a larger explicit array size
+                // (e.g. `extern T a[N];` then a sparse `T a[] = { [i]=... }`), keep
+                // the larger so every valid index stays in bounds.
+                if let (Type::Array { len: nl, .. }, Type::Array { len: el, .. }) =
+                    (&mut ir_ty, &existing.ty)
+                {
+                    if *el > *nl { *nl = *el; }
+                }
                 let g = &mut self.module.globals[gref.0 as usize];
                 g.ty = ir_ty.clone();
                 g.init = init;
@@ -324,6 +332,31 @@ impl Lowerer {
         let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty) };
         let gref = self.module.add_global(g);
         Ok((ty_for_map, gref))
+    }
+
+    /// Infer the length of an incomplete-size array from its brace initializer,
+    /// honoring designated indices (`[i] = ...`, `[lo ... hi] = ...`) which can
+    /// reach past the positional element count. Mirrors the C cursor semantics:
+    /// an index designator sets the cursor, each element then advances it.
+    fn infer_array_len(&self, items: &[InitItem]) -> usize {
+        let mut cursor: usize = 0;
+        let mut max_len: usize = 0;
+        for item in items {
+            match item.designators.first() {
+                Some(Designator::Index(e)) => {
+                    cursor = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                }
+                Some(Designator::IndexRange(_, hi)) => {
+                    cursor = eval_const_expr(hi, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                }
+                // A field designator at array top level isn't valid C; treat the
+                // element as positional.
+                _ => {}
+            }
+            cursor += 1;
+            max_len = max_len.max(cursor);
+        }
+        max_len
     }
 
     /// Serialize a variable's constant initializer to an IR `Constant`, adjusting
@@ -387,8 +420,11 @@ impl Lowerer {
             }
             Some(Initializer::List(items)) => {
                 // Infer an unspecified top-level array length from the brace list.
+                // Designated initializers (`[i] = ...`) can place elements past the
+                // positional count, so the length is the highest index reached, not
+                // just `items.len()`.
                 if let Type::Array { len, .. } = &mut *ir_ty {
-                    if *len == 0 { *len = items.len(); }
+                    if *len == 0 { *len = self.infer_array_len(items); }
                 }
                 let total = ir_ty.size_of(self.ptr_size) as usize;
                 let ty_snapshot = ir_ty.clone();
