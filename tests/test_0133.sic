@@ -1,0 +1,33 @@
+// GCC intrinsic-header prerequisites (util/bufferiszero.c pulls in <immintrin.h>):
+//  - C23 _FloatN literal suffixes: 0.0f16 / 1.0f128
+//  - __bf16 / __fp16 recognized as (16-bit) types, incl. vector_size typedefs
+//  - x86 scalar bit-scan intrinsics __builtin_ia32_bsr/bsf
+#include <stdio.h>
+
+// __bf16 base type in a GCC vector typedef (as in avx512bf16vlintrin.h).
+typedef __bf16 v16bf __attribute__((__vector_size__(32)));
+static int nonnull(const v16bf *p){ return p != 0; }
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    // _FloatN suffixed literals fold to their value.
+    if (0.0f16 != 0.0 || 1.5f32 != 1.5 || 2.25f64 != 2.25 || 3.5f128 != 3.5) ok=0;
+    if (4.0f != 4.0) ok=0;   // plain f suffix still works
+
+    // __bf16 / __fp16 as scalar types (2 bytes).
+    __bf16 h = 0; __fp16 g = 0; (void)h; (void)g;
+    if (sizeof(__bf16) != 2 || sizeof(__fp16) != 2) ok=0;
+    v16bf vv; if (!nonnull(&vv)) ok=0;
+
+    // bsr = index of MSB, bsf = index of LSB.
+    if (__builtin_ia32_bsrsi(1) != 0) ok=0;
+    if (__builtin_ia32_bsrsi(0x100) != 8) ok=0;
+    if (__builtin_ia32_bsrsi(0x80000000u) != 31) ok=0;
+    if (__builtin_ia32_bsfsi(0x100) != 8) ok=0;
+    if (__builtin_ia32_bsrdi(0x1000000000ull) != 36) ok=0;
+
+    printf("intrin-prereqs: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

@@ -1120,6 +1120,23 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Constant::zero());
                     }
                 }
+                // x86 scalar bit-scan intrinsics (from <ia32intrin.h>):
+                //   bsr = index of the most-significant set bit = (bits-1) - clz
+                //   bsf = index of the least-significant set bit = ctz
+                "__builtin_ia32_bsrsi" | "__builtin_ia32_bsrdi"
+                | "__builtin_ia32_bsfsi" | "__builtin_ia32_bsfdi" => {
+                    if let Some(arg) = args.first() {
+                        let bits = if name.ends_with("di") { 64 } else { 32 };
+                        if name.contains("bsf") {
+                            return self.lower_bit_count(arg, bits, BitOp::Ctz);
+                        }
+                        // bsr: (bits-1) - clz
+                        let clz = self.lower_bit_count(arg, bits, BitOp::Clz)?;
+                        let res = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: res, op: BinOp::Sub, lhs: Constant::int((bits - 1) as i64), rhs: clz, ty: Type::i32() });
+                        return Ok(Val::Local(res));
+                    }
+                }
                 // void __sync_synchronize(void) — full memory barrier; no-op here.
                 "__sync_synchronize" => return Ok(Constant::zero()),
                 // Atomic read-modify-write builtins. sic has no real atomics, so

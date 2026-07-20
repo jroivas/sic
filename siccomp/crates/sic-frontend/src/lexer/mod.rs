@@ -484,7 +484,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         // Extended floating types (GCC `__float128`/`__float80`, C23 `_FloatN`).
         // Resolved to an IR float type in `lower_ast_type`.
         "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
-        | "_Float16" | "_Float32" | "_Float32x" | "_Float64" | "_Float64x" => TokenKind::TypeName,
+        | "_Float16" | "_Float32" | "_Float32x" | "_Float64" | "_Float64x"
+        | "__bf16" | "__fp16" => TokenKind::TypeName,
         "__attribute__" | "__attribute" => TokenKind::Attribute,
         "__extension__"  => TokenKind::Extension,
         // GNU/Clang double-underscore keyword aliases (both `__kw` and `__kw__`

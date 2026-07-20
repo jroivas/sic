@@ -120,7 +120,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 | "_Float64x"     => return Ok(Type::Float80),
                 "_Float64"        => return Ok(Type::Float64),
                 "_Float32" | "_Float32x" => return Ok(Type::Float32),
-                "_Float16"        => return Ok(Type::Int { bits: 16, signed: false }),
+                // 16-bit floats: sic has no half/bfloat16 codegen, so carry them
+                // as a 2-byte scalar (enough to parse & pass around intrinsics).
+                "_Float16" | "__bf16" | "__fp16" => return Ok(Type::Int { bits: 16, signed: false }),
                 _ => {}
             }
             named.get(n).cloned().ok_or_else(|| {
