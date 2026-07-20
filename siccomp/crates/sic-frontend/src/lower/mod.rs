@@ -613,6 +613,14 @@ impl Lowerer {
                 lower_type(qt, &self.struct_types, self.ptr_size).ok()
                     .map(|t| t.size_of(self.ptr_size) as i64)
             }
+            // `sizeof(expr)` — notably `ARRAY_SIZE(global_array)` in static
+            // initializers, which needs the operand's (global) type.
+            ExprKind::SizeofExpr(inner) => {
+                self.const_expr_type(inner).map(|t| t.size_of(self.ptr_size) as i64)
+            }
+            ExprKind::AlignofExpr(inner) => {
+                self.const_expr_type(inner).map(|t| t.align_of(self.ptr_size) as i64)
+            }
             ExprKind::Cast { expr, .. } => self.eval_const_int(expr),
             ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_int(expr).map(|v| v.wrapping_neg()),
             ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_int(expr).map(|v| !v),
@@ -637,6 +645,41 @@ impl Lowerer {
             ExprKind::Ternary { cond, then, else_ } => {
                 if self.eval_const_int(cond)? != 0 { self.eval_const_int(then) } else { self.eval_const_int(else_) }
             }
+            _ => None,
+        }
+    }
+
+    /// Best-effort type of a constant expression at file scope, using the global
+    /// symbol table. Covers what `sizeof(expr)` / `_Alignof(expr)` in static
+    /// initializers need — notably `sizeof(global_array)` for `ARRAY_SIZE`.
+    fn const_expr_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Ident(name) => self.globals_map.get(name).map(|(t, _)| t.clone()),
+            ExprKind::Index { base, .. } => {
+                match types::resolve_aggregate(&self.const_expr_type(base)?, &self.struct_types) {
+                    Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
+                    _ => None,
+                }
+            }
+            ExprKind::Unary { op: UnOpKind::Deref, expr } => {
+                match types::resolve_aggregate(&self.const_expr_type(expr)?, &self.struct_types) {
+                    Type::Pointer(t) => Some(*t),
+                    _ => None,
+                }
+            }
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                let bt = types::resolve_aggregate(&self.const_expr_type(base)?, &self.struct_types);
+                let bt = if let ExprKind::Arrow { .. } = &e.kind {
+                    match bt { Type::Pointer(t) => types::resolve_aggregate(&t, &self.struct_types), other => other }
+                } else { bt };
+                crate::lower::expr::resolve_field_access(&bt, name, self.ptr_size, &self.struct_types)
+                    .map(|(_, fty, _)| fty)
+            }
+            ExprKind::Cast { ty, .. } => lower_type(ty, &self.struct_types, self.ptr_size).ok(),
+            ExprKind::StringLit(s) => Some(Type::Array {
+                elem: Box::new(Type::Int { bits: 8, signed: true }),
+                len: s.len() + 1,
+            }),
             _ => None,
         }
     }
