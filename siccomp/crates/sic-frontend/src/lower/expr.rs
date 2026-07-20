@@ -1194,6 +1194,16 @@ impl<'m> FuncCtx<'m> {
                     return Ok(Constant::zero());
                 }
                 "__builtin_constant_p" => return Ok(Constant::int(0)),
+                // Return/frame-address introspection: sic can't walk the call
+                // stack, so return a null pointer (callers use these for
+                // diagnostics/backtraces, which degrade gracefully).
+                "__builtin_return_address" | "__builtin_frame_address"
+                | "__builtin_dwarf_cfa" => return Ok(Constant::zero()),
+                // These identity/no-op address adjusters return their argument.
+                "__builtin_extract_return_addr" | "__builtin_frob_return_addr" => {
+                    if let Some(e) = args.first() { return self.lower_expr(e); }
+                    return Ok(Constant::zero());
+                }
                 // Floating-point classification / comparison builtins.
                 "__builtin_isnan" | "__builtin_isinf" | "__builtin_isinf_sign"
                 | "__builtin_isfinite" | "__builtin_isnormal" => {
@@ -1207,6 +1217,44 @@ impl<'m> FuncCtx<'m> {
                         return self.lower_fp_compare(name, a, b);
                     }
                 }
+                // __builtin_fpclassify(NAN, INF, NORMAL, SUBNORMAL, ZERO, x):
+                // pick the category constant matching x. Subnormals are treated
+                // as normal (sic doesn't distinguish the boundary).
+                "__builtin_fpclassify" => {
+                    if let [nan_v, inf_v, normal_v, _subnormal_v, zero_v, x] = args {
+                        let is_nan = self.lower_fp_classify("__builtin_isnan", x)?;
+                        let is_inf = self.lower_fp_classify("__builtin_isinf", x)?;
+                        let xv = self.lower_expr(x)?;
+                        let fty = match self.val_type(&xv) { t if t.is_float() => t, _ => Type::Float64 };
+                        let xv = self.coerce(xv, &fty)?;
+                        let is_zero = self.alloc_val();
+                        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::FOEq, lhs: xv, rhs: Val::Const(Constant::Float(0.0)), ty: fty });
+                        // result = isnan ? NAN : isinf ? INF : iszero ? ZERO : NORMAL
+                        let nan_v = self.lower_expr(nan_v)?;
+                        let inf_v = self.lower_expr(inf_v)?;
+                        let normal_v = self.lower_expr(normal_v)?;
+                        let zero_v = self.lower_expr(zero_v)?;
+                        let ity = Type::i32();
+                        let (nan_v, inf_v, normal_v, zero_v) = (
+                            self.coerce(nan_v, &ity)?, self.coerce(inf_v, &ity)?,
+                            self.coerce(normal_v, &ity)?, self.coerce(zero_v, &ity)?);
+                        let is_nan = self.coerce(is_nan, &Type::Bool)?;
+                        let is_inf = self.coerce(is_inf, &Type::Bool)?;
+                        let sel_zn = self.alloc_val();
+                        self.push_instr(Instr::Select { dest: sel_zn, cond: Val::Local(is_zero), on_true: zero_v, on_false: normal_v, ty: ity.clone() });
+                        let sel_inf = self.alloc_val();
+                        self.push_instr(Instr::Select { dest: sel_inf, cond: is_inf, on_true: inf_v, on_false: Val::Local(sel_zn), ty: ity.clone() });
+                        let sel = self.alloc_val();
+                        self.push_instr(Instr::Select { dest: sel, cond: is_nan, on_true: nan_v, on_false: Val::Local(sel_inf), ty: ity });
+                        return Ok(Val::Local(sel));
+                    }
+                }
+                // Infinity / huge-value constants.
+                "__builtin_inf" | "__builtin_inff" | "__builtin_infl"
+                | "__builtin_huge_val" | "__builtin_huge_valf" | "__builtin_huge_vall" =>
+                    return Ok(Val::Const(Constant::Float(f64::INFINITY))),
+                "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl" =>
+                    return Ok(Val::Const(Constant::Float(f64::NAN))),
                 // signbit(x): nonzero iff the sign bit is set. Type-pun the float
                 // through a stack slot and test the top bit (correct for -0.0).
                 "__builtin_signbit" | "__builtin_signbitf" | "__builtin_signbitl" => {
