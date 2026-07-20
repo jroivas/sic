@@ -1734,6 +1734,38 @@ impl<'m> FuncCtx<'m> {
                     _ => tty,
                 })
             }
+            ExprKind::Assign { lhs, .. } => self.infer_expr_type(lhs),
+            ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
+            ExprKind::BinOp { op, lhs, rhs } => {
+                use BinOpKind::*;
+                match op {
+                    // Relational/logical operators yield int.
+                    Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),
+                    // Arithmetic: pointer/array ± integer keeps the pointer type
+                    // (pointer arithmetic; arrays decay to pointer-to-element).
+                    // `ptr - ptr` is ptrdiff_t. Otherwise pick the "richer" operand
+                    // type so float/wider integer results survive.
+                    _ => {
+                        let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
+                        let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+                        let decay = |t: Type| match t {
+                            Type::Array { elem, .. } => Type::Pointer(elem),
+                            other => other,
+                        };
+                        let lt = decay(lt);
+                        let rt = decay(rt);
+                        Ok(match (&lt, &rt) {
+                            (Type::Pointer(_), Type::Pointer(_)) if *op == Sub => Type::i64(),
+                            (Type::Pointer(_), _) => lt,
+                            (_, Type::Pointer(_)) => rt,
+                            _ if lt.is_float() => lt,
+                            _ if rt.is_float() => rt,
+                            _ if rt.size_of(self.ptr_size()) > lt.size_of(self.ptr_size()) => rt,
+                            _ => lt,
+                        })
+                    }
+                }
+            }
             _ => Ok(Type::i32()),
         }
     }

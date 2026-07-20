@@ -12,11 +12,26 @@
         __builtin_types_compatible_p(typeof(expr), const _Bool) ||         \
         __builtin_types_compatible_p(typeof(expr), volatile _Bool),        \
         (_Bool)1,                                                          \
-      (expr)))
+      (expr)+0))
+
+// A list type to exercise the pointer fallback `(expr)+0`, as QEMU's real
+// QAPI_LIST_LENGTH does: typeof_strip_qual of a `const T *` must stay a pointer
+// (pointer arithmetic type), so `_tail->next` type-checks.
+typedef struct Node { struct Node *next; int v; } Node;
+static int list_len(const Node *list){
+    int n = 0;
+    strip_qual(list) _tail;               // must be Node * (a pointer)
+    for (_tail = list; _tail != NULL; _tail = _tail->next) n++;
+    return n;
+}
 
 int main(void){
     setvbuf(stdout,0,_IONBF,0);
     int ok = 1;
+
+    // typeof_strip_qual of a pointer stays a pointer (the `(expr)+0` fallback).
+    Node c = {0, 3}, b = {&c, 2}, a = {&b, 1};
+    if (list_len(&a) != 3) ok=0;
 
     // types_compatible_p: equal ignoring qualifiers, distinct otherwise.
     if (!__builtin_types_compatible_p(int, int)) ok=0;
