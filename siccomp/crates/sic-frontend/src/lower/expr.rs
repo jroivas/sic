@@ -805,6 +805,90 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(ext))
     }
 
+    /// Lower a floating-point classification builtin (`isnan`/`isinf`/`isfinite`/
+    /// `isnormal`) to an `int` (0/1) using ordered comparisons: `x == x` is false
+    /// only for NaN, and `x - x == 0` is true only for finite values.
+    fn lower_fp_classify(&mut self, name: &str, arg: &Expr) -> Result<Val> {
+        let x = self.lower_expr(arg)?;
+        let fty = match self.val_type(&x) {
+            t if t.is_float() => t,
+            _ => Type::Float64,
+        };
+        let x = self.coerce(x, &fty)?;
+        let zero = Val::Const(Constant::Float(0.0));
+        // self_eq = (x == x): 1 unless NaN.
+        let self_eq = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: self_eq, op: CmpOp::FOEq, lhs: x.clone(), rhs: x.clone(), ty: fty.clone() });
+        // diff = x - x; finite = (diff == 0): 1 only for finite x.
+        let diff = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: diff, op: BinOp::FSub, lhs: x.clone(), rhs: x.clone(), ty: fty.clone() });
+        let finite = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: finite, op: CmpOp::FOEq, lhs: Val::Local(diff), rhs: zero.clone(), ty: fty.clone() });
+
+        let res = match name {
+            "__builtin_isnan" => {
+                // !self_eq
+                let r = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: r, op: UnOp::BoolNot, val: Val::Local(self_eq), ty: Type::Bool });
+                Val::Local(r)
+            }
+            "__builtin_isfinite" => Val::Local(finite),
+            "__builtin_isinf" | "__builtin_isinf_sign" => {
+                // self_eq && !finite  (not NaN, not finite → infinite)
+                let nfin = self.alloc_val();
+                self.push_instr(Instr::UnaryOp { dest: nfin, op: UnOp::BoolNot, val: Val::Local(finite), ty: Type::Bool });
+                let r = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: r, op: BinOp::And, lhs: Val::Local(self_eq), rhs: Val::Local(nfin), ty: Type::Bool });
+                Val::Local(r)
+            }
+            // isnormal ≈ finite && x != 0 (ignores the subnormal boundary).
+            _ => {
+                let nz = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: nz, op: CmpOp::FONe, lhs: x, rhs: zero, ty: fty });
+                let r = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: r, op: BinOp::And, lhs: Val::Local(finite), rhs: Val::Local(nz), ty: Type::Bool });
+                Val::Local(r)
+            }
+        };
+        self.coerce(res, &Type::i32())
+    }
+
+    /// Lower a floating-point comparison builtin (`isgreater` etc.) — like the
+    /// bare operator but without raising an invalid exception on NaN (which sic
+    /// does not model anyway), yielding `int` 0/1.
+    fn lower_fp_compare(&mut self, name: &str, a: &Expr, b: &Expr) -> Result<Val> {
+        let av = self.lower_expr(a)?;
+        let bv = self.lower_expr(b)?;
+        let fty = match self.val_type(&av) {
+            t if t.is_float() => t,
+            _ => Type::Float64,
+        };
+        let av = self.coerce(av, &fty)?;
+        let bv = self.coerce(bv, &fty)?;
+        if name == "__builtin_isunordered" {
+            // NaN in either operand: !(a == a) || !(b == b).
+            let ae = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: ae, op: CmpOp::FOEq, lhs: av.clone(), rhs: av, ty: fty.clone() });
+            let be = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: be, op: CmpOp::FOEq, lhs: bv.clone(), rhs: bv, ty: fty });
+            let both = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: both, op: BinOp::And, lhs: Val::Local(ae), rhs: Val::Local(be), ty: Type::Bool });
+            let r = self.alloc_val();
+            self.push_instr(Instr::UnaryOp { dest: r, op: UnOp::BoolNot, val: Val::Local(both), ty: Type::Bool });
+            return self.coerce(Val::Local(r), &Type::i32());
+        }
+        let op = match name {
+            "__builtin_isgreater" => CmpOp::FOGt,
+            "__builtin_isgreaterequal" => CmpOp::FOGe,
+            "__builtin_isless" => CmpOp::FOLt,
+            "__builtin_islessequal" => CmpOp::FOLe,
+            _ /* islessgreater */ => CmpOp::FONe,
+        };
+        let r = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: r, op, lhs: av, rhs: bv, ty: fty });
+        self.coerce(Val::Local(r), &Type::i32())
+    }
+
     /// Whether two IR types are the same for `__builtin_types_compatible_p`
     /// (sic already drops qualifiers; opaque aggregates compare by name).
     fn types_equal(&self, a: &Type, b: &Type) -> bool {
@@ -1093,6 +1177,42 @@ impl<'m> FuncCtx<'m> {
                     return Ok(Constant::zero());
                 }
                 "__builtin_constant_p" => return Ok(Constant::int(0)),
+                // Floating-point classification / comparison builtins.
+                "__builtin_isnan" | "__builtin_isinf" | "__builtin_isinf_sign"
+                | "__builtin_isfinite" | "__builtin_isnormal" => {
+                    if let Some(arg) = args.first() {
+                        return self.lower_fp_classify(name, arg);
+                    }
+                }
+                "__builtin_isgreater" | "__builtin_isgreaterequal" | "__builtin_isless"
+                | "__builtin_islessequal" | "__builtin_islessgreater" | "__builtin_isunordered" => {
+                    if let [a, b, ..] = args {
+                        return self.lower_fp_compare(name, a, b);
+                    }
+                }
+                // signbit(x): nonzero iff the sign bit is set. Type-pun the float
+                // through a stack slot and test the top bit (correct for -0.0).
+                "__builtin_signbit" | "__builtin_signbitf" | "__builtin_signbitl" => {
+                    if let Some(arg) = args.first() {
+                        let v = self.lower_expr(arg)?;
+                        let fty = self.val_type(&v);
+                        let (fty, ity, shift) = match fty {
+                            Type::Float32 => (Type::Float32, Type::Int { bits: 32, signed: false }, 31),
+                            _ => (Type::Float64, Type::Int { bits: 64, signed: false }, 63),
+                        };
+                        let v = self.coerce(v, &fty)?;
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: ity.clone(), align: None });
+                        self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+                        let iv = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: iv, ptr: Val::Local(slot), ty: ity.clone() });
+                        let sh = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: sh, op: BinOp::LShr, lhs: Val::Local(iv), rhs: Constant::int(shift), ty: ity.clone() });
+                        let masked = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: masked, op: BinOp::And, lhs: Val::Local(sh), rhs: Constant::int(1), ty: ity });
+                        return self.coerce(Val::Local(masked), &Type::i32());
+                    }
+                }
                 // Bit-count builtins: clz/ctz/popcount/ffs (32- and 64-bit).
                 n if builtin_bit_op(n).is_some() => {
                     let (kind, bits) = builtin_bit_op(n).unwrap();
