@@ -274,12 +274,30 @@ impl Lowerer {
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType) -> Result<()> {
-        // Skip duplicate declarations (e.g. `int a;` declared twice)
-        if self.globals_map.contains_key(&d.name) {
-            return Ok(());
-        }
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         let init = self.build_global_init(d, &mut ir_ty);
+        // If already declared, a real definition (with an initializer) must upgrade
+        // a prior `extern`/tentative declaration — otherwise the definition would
+        // be dropped and the symbol left undefined at link time (e.g. a header's
+        // `extern const T arr[];` followed by `const T arr[] = {...}`).
+        if let Some((_, gref)) = self.globals_map.get(&d.name).cloned() {
+            let existing = &self.module.globals[gref.0 as usize];
+            let existing_is_decl = existing.init.is_none() || existing.linkage == Linkage::Import;
+            if init.is_some() && existing_is_decl {
+                let new_linkage = match base_ty.storage {
+                    Some(StorageClass::Static) => Linkage::Internal,
+                    _ => Linkage::External,
+                };
+                let constant = type_is_const(&d.ty);
+                let g = &mut self.module.globals[gref.0 as usize];
+                g.ty = ir_ty.clone();
+                g.init = init;
+                g.linkage = new_linkage;
+                g.constant = constant;
+                self.globals_map.insert(d.name.clone(), (ir_ty, gref));
+            }
+            return Ok(());
+        }
         let linkage = match base_ty.storage {
             Some(StorageClass::Static) => Linkage::Internal,
             // `extern T x;` with no initializer is a pure declaration: the

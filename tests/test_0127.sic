@@ -1,0 +1,28 @@
+// A definition must upgrade a prior `extern`/tentative declaration of the same
+// global. QEMU's hexagon opcodes.h declares `extern const T opcode_encodings[];`
+// then the .c file defines it; sic's duplicate-declaration guard used to drop
+// the definition, leaving the symbol undefined at link time.
+#include <stdio.h>
+
+// extern declarations first (as a header would provide)
+extern const char * const g_names[];
+extern const int g_vals[];
+extern int g_tentative;          // tentative (no initializer)
+
+// real definitions afterwards
+const char * const g_names[] = { "a", "b", "c" };
+const int g_vals[] = { 10, 20, 30 };
+int g_tentative = 7;
+
+static const char *name_of(int i){ return g_names[i]; }
+static int val_of(int i){ return g_vals[i]; }
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+    if (name_of(1)[0] != 'b') ok=0;
+    if (val_of(2) != 30) ok=0;
+    if (g_tentative != 7) ok=0;
+    printf("extern-then-define: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}
