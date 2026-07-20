@@ -22,6 +22,9 @@ pub enum TypeQual {
     Const, Volatile, Restrict, Atomic,
     /// `_Alignas(N)` / `alignas(N)` — the requested alignment in bytes.
     Align(u32),
+    /// `inline` function specifier (carried on the decl-specifier `QualType` so
+    /// function definitions can record it; see `Decl::Func::inline`).
+    Inline,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +150,11 @@ pub enum Decl {
         variadic: bool,
         body: Option<Vec<Stmt>>,   // None = prototype only
         storage: Option<StorageClass>,
+        /// `inline` keyword present. An inline definition may be omitted when
+        /// unreferenced (GNU/C99 inline semantics) — this lets sic skip the
+        /// thousands of unused `extern __inline` SIMD intrinsics in system
+        /// headers instead of trying to lower their unimplemented builtins.
+        inline: bool,
         span: Span,
     },
     TypeDef {

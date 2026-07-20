@@ -114,6 +114,7 @@ impl Parser {
 
         // Parse declaration specifiers
         let (base_ty, storage) = self.parse_decl_specifiers()?;
+        let is_inline = base_ty.qualifiers.contains(&TypeQual::Inline);
 
         // Check for ';' — bare type declaration (struct/enum definition, typedef)
         if self.at(TokenKind::Semi) {
@@ -150,7 +151,7 @@ impl Parser {
                 let body = self.parse_compound_stmt_as_stmts()?;
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: Some(body), storage, span: sp,
+                    body: Some(body), storage, inline: is_inline, span: sp,
                 });
             }
 
@@ -159,14 +160,14 @@ impl Parser {
                 let body = self.parse_compound_stmt_as_stmts()?;
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: Some(body), storage, span: sp,
+                    body: Some(body), storage, inline: is_inline, span: sp,
                 });
             } else {
                 // Prototype
                 self.eat(TokenKind::Semi);
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: None, storage, span: sp,
+                    body: None, storage, inline: is_inline, span: sp,
                 });
             }
         }
@@ -269,8 +270,9 @@ impl Parser {
                     self.expect(TokenKind::RParen)?;
                     if align > 0 { quals.push(TypeQual::Align(align)); }
                 }
-                // inline (ignored)
-                TokenKind::Inline   => { self.advance(); }
+                // `inline` function specifier: recorded so definitions can be
+                // omitted when unreferenced (GNU inline semantics).
+                TokenKind::Inline   => { quals.push(TypeQual::Inline); self.advance(); }
                 // signedness
                 TokenKind::Signed   => { signed = Some(true);  self.advance(); }
                 TokenKind::Unsigned => { signed = Some(false); self.advance(); }

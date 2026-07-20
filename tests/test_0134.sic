@@ -1,0 +1,25 @@
+// Unreferenced `inline` function definitions are not lowered (GNU/C99 inline
+// semantics). This is what lets sic ignore the thousands of unused
+// `extern __inline` SIMD intrinsics in <immintrin.h> whose bodies call
+// unimplemented `__builtin_ia32_*`. Here the unused inline calls a function
+// that is never defined/declared: if it were lowered it would be an "unknown
+// function" error, so a clean compile proves it was skipped.
+#include <stdio.h>
+
+/* Never called → must be skipped (its body references an undefined symbol). */
+static inline int dead_inline(int x){ return this_symbol_does_not_exist(x); }
+
+/* Called → must be emitted and work. */
+static inline int live_inline(int x){ return x * 3 + 1; }
+
+/* A used inline calling another used inline (transitive reachability). */
+static inline int wrap(int x){ return live_inline(x) - 1; }
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+    if (live_inline(3) != 10) ok=0;   /* 3*3+1 */
+    if (wrap(3) != 9) ok=0;           /* 10-1 */
+    printf("inline-skip: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

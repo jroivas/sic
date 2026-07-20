@@ -2,7 +2,7 @@ mod types;
 mod expr;
 mod func;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::{Result, CompileError};
 use sic_ir::*;
@@ -20,6 +20,10 @@ pub struct Lowerer {
     pub struct_types: HashMap<String, Type>,
     /// Target pointer size in bytes
     pub ptr_size: u32,
+    /// Names of `inline` functions that are reachable and must be emitted.
+    /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
+    /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
+    emit_inline: HashSet<String>,
 }
 
 impl Lowerer {
@@ -30,10 +34,14 @@ impl Lowerer {
             enum_consts: HashMap::new(),
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
+            emit_inline: HashSet::new(),
         }
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
+        // Decide which `inline` functions are reachable (and thus emitted).
+        self.emit_inline = compute_emitted_inlines(tu);
+
         // First pass: collect all function prototypes and global variable names
         // so that forward references work.
         self.collect_declarations(tu)?;
@@ -63,7 +71,9 @@ impl Lowerer {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
                 }
-                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, .. } => {
+                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, .. } => {
+                    // Skip unreferenced inline definitions (see `emit_inline`).
+                    if *inline && !self.emit_inline.contains(name) { continue; }
                     // Function definition — pre-register with empty body for stable FuncRef
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
@@ -236,7 +246,8 @@ impl Lowerer {
 
     fn lower_global_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
-            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, .. } => {
+            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, .. } => {
+                if *inline && !self.emit_inline.contains(name) { return Ok(()); }
                 self.lower_function(name, ret_ty, params, *variadic, body, storage)?;
             }
             Decl::Func { body: None, .. } => {
@@ -952,5 +963,162 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
             let sp = &e.span;
             Err(CompileError::at("non-constant expression", sp.file.clone(), sp.line, sp.col))
         }
+    }
+}
+
+/// Determine which `inline` functions are reachable — and therefore must be
+/// emitted — starting from the always-emitted roots (non-inline function bodies
+/// and global-variable initializers) and following references transitively
+/// through inline function bodies. Unreachable inline definitions are dropped,
+/// which is what lets sic ignore the thousands of unused `extern __inline`
+/// SIMD intrinsics pulled in by `<immintrin.h>` and friends.
+fn compute_emitted_inlines(tu: &TranslationUnit) -> HashSet<String> {
+    let mut inline_bodies: HashMap<&str, &Vec<Stmt>> = HashMap::new();
+    for d in &tu.decls {
+        if let Decl::Func { name, body: Some(b), inline: true, .. } = d {
+            inline_bodies.insert(name.as_str(), b);
+        }
+    }
+    if inline_bodies.is_empty() {
+        return HashSet::new();
+    }
+
+    // Seed with everything referenced from always-emitted code.
+    let mut worklist: Vec<String> = Vec::new();
+    for d in &tu.decls {
+        match d {
+            Decl::Func { body: Some(b), inline: false, .. } => {
+                for s in b { collect_stmt_names(s, &mut worklist); }
+            }
+            Decl::Var { declarators, .. } => {
+                for decl in declarators {
+                    if let Some(init) = &decl.init { collect_init_names(init, &mut worklist); }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Transitively pull in referenced inline functions.
+    let mut emitted: HashSet<String> = HashSet::new();
+    while let Some(name) = worklist.pop() {
+        if let Some(body) = inline_bodies.get(name.as_str()) {
+            if emitted.insert(name) {
+                for s in *body { collect_stmt_names(s, &mut worklist); }
+            }
+        }
+    }
+    emitted
+}
+
+fn collect_init_names(init: &Initializer, out: &mut Vec<String>) {
+    match init {
+        Initializer::Expr(e) => collect_expr_names(e, out),
+        Initializer::List(items) => {
+            for it in items {
+                for d in &it.designators {
+                    if let Designator::Index(e) | Designator::IndexRange(e, _) = d {
+                        collect_expr_names(e, out);
+                    }
+                }
+                collect_init_names(&it.init, out);
+            }
+        }
+    }
+}
+
+fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
+    match s {
+        Stmt::Decl(d) => collect_decl_names(d, out),
+        Stmt::Expr(e, _) => collect_expr_names(e, out),
+        Stmt::Block(ss, _) => { for s in ss { collect_stmt_names(s, out); } }
+        Stmt::If { cond, then, else_, .. } => {
+            collect_expr_names(cond, out);
+            collect_stmt_names(then, out);
+            if let Some(e) = else_ { collect_stmt_names(e, out); }
+        }
+        Stmt::While { cond, body, .. } => { collect_expr_names(cond, out); collect_stmt_names(body, out); }
+        Stmt::DoWhile { body, cond, .. } => { collect_stmt_names(body, out); collect_expr_names(cond, out); }
+        Stmt::For { init, cond, post, body, .. } => {
+            match init {
+                Some(ForInit::Decl(d)) => collect_decl_names(d, out),
+                Some(ForInit::Expr(e)) => collect_expr_names(e, out),
+                None => {}
+            }
+            if let Some(e) = cond { collect_expr_names(e, out); }
+            if let Some(e) = post { collect_expr_names(e, out); }
+            collect_stmt_names(body, out);
+        }
+        Stmt::Return(Some(e), _) => collect_expr_names(e, out),
+        Stmt::Label(_, body, _) => collect_stmt_names(body, out),
+        Stmt::Case(e, body, _) => { collect_expr_names(e, out); collect_stmt_names(body, out); }
+        Stmt::CaseRange(lo, hi, body, _) => {
+            collect_expr_names(lo, out); collect_expr_names(hi, out); collect_stmt_names(body, out);
+        }
+        Stmt::Default(body, _) => collect_stmt_names(body, out),
+        Stmt::Switch { val, body, .. } => { collect_expr_names(val, out); collect_stmt_names(body, out); }
+        Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
+        | Stmt::Goto(_, _) | Stmt::Null(_) => {}
+    }
+}
+
+fn collect_decl_names(d: &Decl, out: &mut Vec<String>) {
+    if let Decl::Var { declarators, .. } = d {
+        for decl in declarators {
+            if let Some(init) = &decl.init { collect_init_names(init, out); }
+        }
+    }
+}
+
+fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
+    use ExprKind::*;
+    match &e.kind {
+        Ident(name) => out.push(name.clone()),
+        BinOp { lhs, rhs, .. } | Comma(lhs, rhs) => {
+            collect_expr_names(lhs, out); collect_expr_names(rhs, out);
+        }
+        Assign { lhs, rhs, .. } => { collect_expr_names(lhs, out); collect_expr_names(rhs, out); }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
+        | SizeofExpr(expr) | AlignofExpr(expr) => collect_expr_names(expr, out),
+        Ternary { cond, then, else_ } => {
+            collect_expr_names(cond, out); collect_expr_names(then, out); collect_expr_names(else_, out);
+        }
+        Elvis { cond, else_ } => { collect_expr_names(cond, out); collect_expr_names(else_, out); }
+        ChooseExpr { cond, then, else_ } => {
+            collect_expr_names(cond, out); collect_expr_names(then, out); collect_expr_names(else_, out);
+        }
+        Call { func, args } => {
+            collect_expr_names(func, out);
+            for a in args { collect_expr_names(a, out); }
+        }
+        Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
+        Field { base, .. } | Arrow { base, .. } => collect_expr_names(base, out),
+        Cast { expr, .. } => collect_expr_names(expr, out),
+        Generic { controlling, assocs } => {
+            collect_expr_names(controlling, out);
+            for (_, e) in assocs { collect_expr_names(e, out); }
+        }
+        StmtExpr(stmts) => { for s in stmts { collect_stmt_names(s, out); } }
+        CompoundLiteral { init, .. } => {
+            for it in init {
+                for d in &it.designators {
+                    if let Designator::Index(e) | Designator::IndexRange(e, _) = d {
+                        collect_expr_names(e, out);
+                    }
+                }
+                collect_init_names(&it.init, out);
+            }
+        }
+        VaStart { list, last } => { collect_expr_names(list, out); collect_expr_names(last, out); }
+        VaArg { list, .. } => collect_expr_names(list, out),
+        VaEnd { list } => collect_expr_names(list, out),
+        VaCopy { dst, src } => { collect_expr_names(dst, out); collect_expr_names(src, out); }
+        OffsetOf { designators, .. } => {
+            for d in designators {
+                if let OffsetDesignator::Index(e) = d { collect_expr_names(e, out); }
+            }
+        }
+        IntLit(..) | UIntLit(..) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
+        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) => {}
     }
 }
