@@ -253,9 +253,18 @@ impl Lexer {
             }
         }
 
-        // suffixes: u, l, ll, f, ul, ull, etc. (consume but store in text)
+        // suffixes: u, l, ll, f, ul, ull, etc. (consume but store in text). A
+        // float `f`/`F` may carry a C23 `_FloatN` width — `0.0f16`, `1.0f128` —
+        // so consume any digits that follow it.
         while self.pos < self.src.len() && matches!(self.src[self.pos], 'u'|'U'|'l'|'L'|'f'|'F') {
-            text.push(self.advance());
+            let c = self.advance();
+            text.push(c);
+            if matches!(c, 'f' | 'F') {
+                is_float = true;
+                while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() {
+                    text.push(self.advance());
+                }
+            }
         }
 
         let kind = if is_float { TokenKind::FloatLit } else { TokenKind::IntLit };

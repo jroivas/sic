@@ -1330,7 +1330,7 @@ impl Parser {
             }
             TokenKind::FloatLit => {
                 let text = self.advance().text.clone();
-                let body = text.trim_end_matches(|c| matches!(c, 'f'|'F'|'l'|'L'));
+                let body = strip_float_suffix(&text);
                 let v = parse_c_float(body);
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))
             }
@@ -1613,6 +1613,18 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
 /// Parse a C floating-point literal body (suffix already stripped) into an
 /// `f64`. Handles decimal floats via the standard parser and C99 hex floats
 /// (`0x1p64`, `0x1.8p-3`) which Rust's `str::parse` rejects.
+/// Strip a floating-point literal's suffix, including C23 `_FloatN` widths
+/// (`f16`/`f32`/`f64`/`f128`, `bf16`) and the plain `f`/`F`/`l`/`L`.
+fn strip_float_suffix(text: &str) -> &str {
+    for suf in ["bf16", "BF16", "f128", "F128", "f64", "F64", "f32", "F32",
+                "f16", "F16", "f", "F", "l", "L"] {
+        if let Some(b) = text.strip_suffix(suf) {
+            return b;
+        }
+    }
+    text
+}
+
 fn parse_c_float(body: &str) -> f64 {
     let lower = body.to_ascii_lowercase();
     if let Some(rest) = lower.strip_prefix("0x") {
