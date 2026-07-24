@@ -3,6 +3,7 @@
 // globals are lowered, so sic pre-records global variable types (with array
 // lengths inferred from initializers) to fold sizeof(global) at that point.
 #include <stdio.h>
+#include <stddef.h>
 
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 
