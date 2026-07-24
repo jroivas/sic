@@ -1,0 +1,28 @@
+// Wide / Unicode string & char literal prefixes (QEMU hw/usb uses L"..."):
+// L"..", u"..", U"..", u8"..", and L'x'. sic treats them as narrow literals —
+// enough to parse and compile.
+#include <stdio.h>
+#include <string.h>
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    const char *a = L"Label";      // wide string prefix
+    const char *b = u"hi";
+    const char *c = U"yo";
+    const char *d = u8"utf8";
+    if (!a || !b || !c || !d) ok=0;
+    if (strcmp(a, "Label") != 0) ok=0;     // content preserved (narrow)
+    if (strcmp(d, "utf8") != 0) ok=0;
+
+    int wc = L'A';                 // wide char prefix
+    if (wc != 'A') ok=0;
+
+    // adjacent concatenation still works
+    const char *e = "x" "y";
+    if (strcmp(e, "xy") != 0) ok=0;
+
+    printf("wide-strings: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

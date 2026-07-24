@@ -152,6 +152,19 @@ impl Lexer {
         let sp = self.span();
         let c = self.peek();
 
+        // Wide / Unicode string & char literal prefixes: `L"..."`, `u"..."`,
+        // `U"..."`, `u8"..."`, and the `L'x'` char forms. sic treats them as
+        // ordinary (narrow) literals — enough to parse and compile.
+        if matches!(c, 'L' | 'u' | 'U') {
+            let n1 = self.peek2();
+            if n1 == '"' { self.advance(); return self.scan_string_literal(sp); }
+            if n1 == '\'' { self.advance(); return self.scan_char_literal(sp); }
+            if c == 'u' && n1 == '8' && self.src.get(self.pos + 2) == Some(&'"') {
+                self.advance(); self.advance();
+                return self.scan_string_literal(sp);
+            }
+        }
+
         // Identifier or keyword
         if c.is_alphabetic() || c == '_' {
             return Ok(self.scan_ident_or_keyword(sp));
