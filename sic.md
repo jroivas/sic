@@ -870,6 +870,8 @@ When compiling a module in C compatiblae mode, it produces these outputs
 - module\_[module\_name].def
 - module\_[module\_name].sicmod
 
+TODO FIXME: See C++20 modules and import, compatibility?
+
 ## Match
 
 New alternative to traditional `switch` and `case`.
