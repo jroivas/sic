@@ -674,6 +674,12 @@ impl Lowerer {
             ExprKind::AlignofExpr(inner) => {
                 self.const_expr_type(inner).map(|t| t.align_of(self.ptr_size) as i64)
             }
+            // `offsetof(...)` — so `offsetofend` (= offsetof + sizeof(member)) and
+            // other offsetof-based enum values fold. Delegates to the size-aware
+            // evaluator which knows the member layout.
+            ExprKind::OffsetOf { .. } => {
+                types::eval_const_size(e, &self.struct_types, self.ptr_size, &self.enum_consts)
+            }
             ExprKind::Cast { expr, .. } => self.eval_const_int(expr),
             ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_int(expr).map(|v| v.wrapping_neg()),
             ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_int(expr).map(|v| !v),
