@@ -9,6 +9,9 @@ pub struct Parser {
     typedefs: HashSet<String>,
     source_file: String,
     lang: Lang,
+    /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
+    /// SIMD vector typedefs). Applied to the declared type as an N-byte array.
+    pending_vector_size: Option<u32>,
 }
 
 impl Parser {
@@ -17,7 +20,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -144,7 +147,7 @@ impl Parser {
             let variadic = variadic;
             let ret_ty = *ret.clone();
 
-            self.skip_attributes();
+            self.skip_decl_tail();
 
             // K&R (old-style) definition: the parameter list held only names,
             // and their declarations follow before the `{` body, e.g.
@@ -179,6 +182,11 @@ impl Parser {
 
         // Variable declaration(s)
         let mut declarators = Vec::new();
+        // Trailing `__asm__("name")` rename and/or `__attribute__((...))`
+        // (including `vector_size`) before the initializer.
+        let mut ty = ty;
+        self.skip_decl_tail();
+        if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
         let init = if self.eat(TokenKind::Eq) {
             Some(self.parse_initializer()?)
         } else {
@@ -188,7 +196,10 @@ impl Parser {
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
-            let (n, t) = self.parse_declarator(base_ty.clone())?;
+            self.pending_vector_size = None;
+            let (n, mut t) = self.parse_declarator(base_ty.clone())?;
+            self.skip_decl_tail();
+            if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             declarators.push(Declarator { name: n, ty: t, init, span: self.span() });
         }
@@ -220,7 +231,16 @@ impl Parser {
     fn parse_typedef(&mut self, base_ty: QualType, sp: Span) -> Result<Decl> {
         let mut names = Vec::new();
         loop {
-            let (name, ty) = self.parse_declarator(base_ty.clone())?;
+            // A trailing `__attribute__((vector_size(N)))` turns the typedef into
+            // an N-byte SIMD vector (represented as an array — see apply_vector_size).
+            // The attribute may be consumed inside `parse_declarator`, so clear the
+            // capture slot first and read it afterward.
+            self.pending_vector_size = None;
+            let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
+            self.skip_attributes();
+            if let Some(n) = self.pending_vector_size.take() {
+                ty = self.apply_vector_size(ty, n);
+            }
             self.typedefs.insert(name.clone());
             names.push((name, ty));
             if !self.eat(TokenKind::Comma) { break; }
@@ -307,6 +327,17 @@ impl Parser {
                 TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
+                // `__int128` is a base integer type that combines with
+                // signed/unsigned (`unsigned __int128`, `__signed__ __int128`),
+                // unlike ordinary typedef names.
+                TokenKind::TypeName if base.is_none()
+                    && matches!(self.peek().text.as_str(), "__int128" | "__int128_t" | "__uint128_t") =>
+                {
+                    let name = self.advance().text.clone();
+                    base = Some(AstType::Named(
+                        if name == "__uint128_t" || signed == Some(false) { "__uint128_t" } else { "__int128" }
+                            .to_string()));
+                }
                 // A type-name (typedef or sic alias like `u32`) is only a type
                 // specifier when no other type info has been seen yet. Otherwise
                 // it is the declarator name — e.g. `uint32_t u32;` where the
@@ -445,17 +476,23 @@ impl Parser {
     fn parse_enum(&mut self) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // 'enum'
+        // `enum __attribute__((packed)) { ... }` — skip attributes before the tag.
+        self.skip_attributes();
         let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             Some(self.advance().text.clone())
         } else {
             None
         };
+        self.skip_attributes();
         let variants = if self.at(TokenKind::LBrace) {
             self.advance();
             let mut vs = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 let vsp = self.span();
                 let vname = self.expect_name()?;
+                // Enumerator attributes (`NAME __attribute__((...)) = val`), e.g.
+                // glib's `GLIB_AVAILABLE_ENUMERATOR_IN_*` deprecation markers.
+                self.skip_attributes();
                 let value = if self.eat(TokenKind::Eq) { Some(Box::new(self.parse_assign_expr()?)) } else { None };
                 vs.push(EnumVariant { name: vname, value, span: vsp });
                 if !self.eat(TokenKind::Comma) { break; }
@@ -1289,7 +1326,9 @@ impl Parser {
             // macros). Skip it and parse the operand.
             TokenKind::Extension => {
                 self.advance();
-                self.parse_unary()
+                // Parse at the cast level so `__extension__ (T)(V){...}` (glibc
+                // SIMD intrinsic bodies) handles the leading cast / compound literal.
+                self.parse_cast()
             }
             _ => self.parse_postfix()
         }
@@ -1575,9 +1614,75 @@ impl Parser {
         while self.at(TokenKind::Attribute) {
             self.advance();
             if self.at(TokenKind::LParen) {
+                self.capture_vector_size();
                 self.skip_balanced_parens();
             }
         }
+    }
+
+    /// Skip the tail that can follow a declarator before `;`/`=`/`{`/`,`: an
+    /// `__asm__("label")` rename (glibc's `__REDIRECT`) and/or trailing
+    /// `__attribute__((...))`, in any order. Needed now that `__attribute__` is
+    /// no longer stripped by the preprocessor.
+    fn skip_decl_tail(&mut self) {
+        loop {
+            if self.at(TokenKind::Attribute) {
+                self.advance();
+                if self.at(TokenKind::LParen) {
+                    self.capture_vector_size();
+                    self.skip_balanced_parens();
+                }
+            } else if self.at(TokenKind::Asm) {
+                self.advance();
+                if self.at(TokenKind::LParen) { self.skip_balanced_parens(); }
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Peek inside an attribute list (positioned at its opening `(`) for a
+    /// `vector_size(N)` / `__vector_size__(N)` attribute and record `N` in
+    /// `pending_vector_size`. Non-consuming.
+    fn capture_vector_size(&mut self) {
+        let mut i = self.pos;
+        let mut depth = 0i32;
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => { depth -= 1; if depth <= 0 { break; } }
+                TokenKind::Ident => {
+                    let name = self.tokens[i].text.as_str();
+                    if name == "vector_size" || name == "__vector_size__" {
+                        if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen))
+                            && matches!(self.tokens.get(i + 2).map(|t| t.kind), Some(TokenKind::IntLit))
+                        {
+                            if let Ok(n) = self.tokens[i + 2].text
+                                .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                                .parse::<u32>()
+                            {
+                                self.pending_vector_size = Some(n);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    /// Wrap `ty` as a `vector_size(n)` vector: an array of `n / sizeof(elem)`
+    /// elements (a sized aggregate, so `sizeof`/lane-indexing/`|`/`&` work).
+    fn apply_vector_size(&self, ty: QualType, n: u32) -> QualType {
+        let elem_sz = ast_type_byte_size(&ty.ty).max(1);
+        let lanes = (n / elem_sz).max(1);
+        let span = Span::default();
+        let base = Box::new(ty);
+        QualType::new(AstType::Array {
+            base,
+            size: Some(Box::new(Expr::new(ExprKind::IntLit(lanes as i64, false), span))),
+        })
     }
 
     fn skip_balanced_parens(&mut self) {
@@ -1672,6 +1777,28 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
 /// (`0x1p64`, `0x1.8p-3`) which Rust's `str::parse` rejects.
 /// Strip a floating-point literal's suffix, including C23 `_FloatN` widths
 /// (`f16`/`f32`/`f64`/`f128`, `bf16`) and the plain `f`/`F`/`l`/`L`.
+/// Byte size of a primitive `AstType` (64-bit target), used to size a
+/// `vector_size(N)` vector as an array of `N / size` elements. Non-primitive
+/// bases default to 1 (byte granularity), which still gives the right total size.
+fn ast_type_byte_size(ty: &AstType) -> u32 {
+    match ty {
+        AstType::Char { .. } | AstType::Bool => 1,
+        AstType::Short { .. } => 2,
+        AstType::Int { .. } | AstType::Float => 4,
+        AstType::Long { .. } | AstType::LongLong { .. } | AstType::Double => 8,
+        AstType::Pointer { .. } => 8,
+        AstType::Named(n) => match n.as_str() {
+            "int8" | "i8" | "uint8" | "u8" => 1,
+            "int16" | "i16" | "uint16" | "u16" | "_Float16" | "__bf16" | "__fp16" => 2,
+            "int32" | "i32" | "uint32" | "u32" | "_Float32" => 4,
+            "int64" | "i64" | "uint64" | "u64" | "isize" | "usize" | "_Float64" => 8,
+            "int128" | "i128" | "uint128" | "u128" => 16,
+            _ => 1,
+        },
+        _ => 1,
+    }
+}
+
 fn strip_float_suffix(text: &str) -> &str {
     for suf in ["bf16", "BF16", "f128", "F128", "f64", "F64", "f32", "F32",
                 "f16", "F16", "f", "F", "l", "L"] {
