@@ -1,0 +1,26 @@
+// enum values built from sizeof of a *global* array — `enum { N = ARRAY_SIZE(g) }`
+// (QEMU e1000e/igb `NREADOPS`, smbios `..._LEN`). Enums are registered before
+// globals are lowered, so sic pre-records global variable types (with array
+// lengths inferred from initializers) to fold sizeof(global) at that point.
+#include <stdio.h>
+
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+
+typedef void (*op_t)(int);
+static void o0(int x){(void)x;} static void o1(int x){(void)x;}
+static void o2(int x){(void)x;} static void o3(int x){(void)x;}
+
+static op_t const readops[] = { o0, o1, o2, o3 };     // sized by initializer
+static const int table[] = { 10, 20, 30 };
+
+enum { NREADOPS = ARRAY_SIZE(readops) };              // = 4
+enum { NTABLE = ARRAY_SIZE(table), NHALF = NTABLE / 2 + 1 };
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+    if (NREADOPS != 4) ok=0;
+    if (NTABLE != 3 || NHALF != 2) ok=0;
+    printf("enum-arraysize: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

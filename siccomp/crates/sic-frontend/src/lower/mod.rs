@@ -24,6 +24,10 @@ pub struct Lowerer {
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
     emit_inline: HashSet<String>,
+    /// File-scope variable types (with inferred array lengths), registered in
+    /// `collect_declarations` so `sizeof(global_array)` folds even before the
+    /// global is lowered — needed for `enum { N = ARRAY_SIZE(global) }`.
+    global_types: HashMap<String, Type>,
 }
 
 impl Lowerer {
@@ -35,6 +39,7 @@ impl Lowerer {
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
             emit_inline: HashSet::new(),
+            global_types: HashMap::new(),
         }
     }
 
@@ -66,6 +71,23 @@ impl Lowerer {
 
     fn collect_declarations(&mut self, tu: &TranslationUnit) -> Result<()> {
         for decl in &tu.decls {
+            // Record file-scope variable types (with array lengths inferred from
+            // their initializers) so `sizeof(global_array)` in a later enum value
+            // resolves. Processed in source order, matching C's scope rules.
+            if let Decl::Var { base_ty: _, declarators, .. } = decl {
+                for d in declarators {
+                    if let Ok(mut ty) = lower_type(&d.ty, &self.struct_types, self.ptr_size) {
+                        if let Type::Array { len, .. } = &mut ty {
+                            if *len == 0 {
+                                if let Some(Initializer::List(items)) = &d.init {
+                                    *len = self.infer_array_len(items);
+                                }
+                            }
+                        }
+                        self.global_types.entry(d.name.clone()).or_insert(ty);
+                    }
+                }
+            }
             match decl {
                 Decl::Func { name, ret_ty, params, variadic, body: None, .. } => {
                     // Forward declaration / extern
@@ -685,7 +707,8 @@ impl Lowerer {
     /// initializers need — notably `sizeof(global_array)` for `ARRAY_SIZE`.
     fn const_expr_type(&self, e: &Expr) -> Option<Type> {
         match &e.kind {
-            ExprKind::Ident(name) => self.globals_map.get(name).map(|(t, _)| t.clone()),
+            ExprKind::Ident(name) => self.globals_map.get(name).map(|(t, _)| t.clone())
+                .or_else(|| self.global_types.get(name).cloned()),
             ExprKind::Index { base, .. } => {
                 match types::resolve_aggregate(&self.const_expr_type(base)?, &self.struct_types) {
                     Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
