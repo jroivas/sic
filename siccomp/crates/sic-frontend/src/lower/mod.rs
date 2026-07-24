@@ -328,6 +328,15 @@ impl Lowerer {
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        // A declaration whose type is a function (e.g. `static Handler foo;` where
+        // `Handler` is a function typedef) is a function prototype, not a variable.
+        // Register it as an extern function so the real definition can supply it.
+        if let Type::Function(ft) = &ir_ty {
+            if self.module.func_ref_by_name(&d.name).is_none() {
+                self.module.add_extern(ExternFunc { name: d.name.clone(), sig: (**ft).clone() });
+            }
+            return Ok(());
+        }
         let init = self.build_global_init(d, &mut ir_ty);
         // If already declared, a real definition (with an initializer) must upgrade
         // a prior `extern`/tentative declaration — otherwise the definition would
