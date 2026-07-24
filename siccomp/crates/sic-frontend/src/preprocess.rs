@@ -28,13 +28,9 @@ pub fn preprocess_ex(
     cmd.arg(format!("-std={}", std));
     // Define common macros that tests rely on
     cmd.arg("-DNULL=((void*)0)");
-    // Strip `__attribute__` at preprocessing. Fully preserving it (to capture
-    // `vector_size` for SIMD types) requires the parser to handle attributes in
-    // every position — including type position inside casts/compound literals,
-    // e.g. `(__attribute__((vector_size(16))) int){...}` in <xmmintrin.h>. That
-    // is a large, separate effort; until it (and real vector-op codegen) lands,
-    // stripping keeps the many system headers parseable.
-    cmd.arg("-D__attribute__(x)=");
+    // NB: `__attribute__` is NOT stripped — the parser skips attributes in every
+    // position itself (`skip_attributes`) and captures `vector_size(N)` to size
+    // SIMD vector types. Most attributes are parsed then discarded.
 
     // `-undef` strips the compiler's predefined target macros, but system
     // headers (e.g. <gnu/stubs.h>) branch on them to pick the right ABI

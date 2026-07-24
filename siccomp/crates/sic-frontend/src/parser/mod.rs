@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use crate::ast::*;
-use crate::lexer::{Lexer, Lang, Token, TokenKind, Span};
+use crate::lexer::{Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
 
 pub struct Parser {
@@ -467,6 +467,8 @@ impl Parser {
             } else {
                 None
             };
+            // Trailing field attribute, e.g. `int x __attribute__((aligned(8)));`.
+            self.skip_attributes();
             fields.push(FieldDecl { name: Some(name), ty, bit_width, span: sp.clone() });
             if !self.eat(TokenKind::Comma) { break; }
         }
@@ -536,6 +538,8 @@ impl Parser {
                     TokenKind::Const    => { pq.push(TypeQual::Const);    self.advance(); }
                     TokenKind::Volatile => { pq.push(TypeQual::Volatile); self.advance(); }
                     TokenKind::Restrict => { pq.push(TypeQual::Restrict); self.advance(); }
+                    // `int * __attribute__((...)) p` — pointer attribute.
+                    TokenKind::Attribute => { self.skip_attributes(); }
                     _ => break,
                 }
             }
@@ -655,6 +659,8 @@ impl Parser {
             let (base_ty, _) = self.parse_decl_specifiers()?;
             // Check for abstract declarator (no name)
             let (name, ty) = self.parse_declarator(base_ty)?;
+            // Parameter attribute, e.g. `f(const T *cfg __attribute__((unused)))`.
+            self.skip_attributes();
             params.push(Param { name: if name.is_empty() { None } else { Some(name) }, ty, span: psp });
             if !self.eat(TokenKind::Comma) { break; }
             if self.at(TokenKind::Ellipsis) { self.advance(); variadic = true; break; }
@@ -772,6 +778,11 @@ impl Parser {
             TokenKind::Asm => { self.parse_asm_skip()?; Ok(Stmt::Null(sp)) }
             // __extension__ — skip
             TokenKind::Extension => { self.advance(); self.parse_stmt() }
+            // Statement attribute, e.g. `__attribute__((fallthrough));`.
+            TokenKind::Attribute => {
+                self.skip_attributes();
+                if self.eat(TokenKind::Semi) { Ok(Stmt::Null(sp)) } else { self.parse_stmt() }
+            }
             _ if self.is_decl_start() => {
                 let d = self.parse_local_decl()?;
                 Ok(Stmt::Decl(d))
@@ -797,7 +808,10 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::Typeof | TokenKind::Alignas)
+            | TokenKind::Typeof | TokenKind::Alignas
+            // A declaration may lead with attributes, e.g. glib's g_autoptr /
+            // QEMU's RCU_READ_LOCK_GUARD: `__attribute__((cleanup(f))) T v = ...`.
+            | TokenKind::Attribute)
         {
             return true;
         }
@@ -970,7 +984,12 @@ impl Parser {
         let mut declarators = Vec::new();
         loop {
             let dsp = self.span();
-            let (name, ty) = self.parse_declarator(base_ty.clone())?;
+            self.pending_vector_size = None;
+            let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
+            // Trailing `__asm__`/`__attribute__` before the initializer, e.g.
+            // glib g_autoptr / QEMU RCU_READ_LOCK_GUARD cleanup locals.
+            self.skip_decl_tail();
+            if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !name.is_empty() {
                 declarators.push(Declarator { name, ty, init, span: dsp });
@@ -1182,8 +1201,11 @@ impl Parser {
         if self.at(TokenKind::LParen) && self.is_cast() {
             let sp = self.span();
             self.advance(); // (
+            self.pending_vector_size = None;
             let (ty, _) = self.parse_decl_specifiers()?;
-            let (_, ty) = self.parse_declarator(ty)?;
+            let (_, mut ty) = self.parse_declarator(ty)?;
+            // `(__attribute__((vector_size(N))) T){...}` — apply a captured vector size.
+            if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
             self.expect(TokenKind::RParen)?;
             if self.at(TokenKind::LBrace) {
                 // Compound literal: (type){ initializer-list }. Reuse the normal
@@ -1208,13 +1230,15 @@ impl Parser {
         // Look ahead: `( type-specifier ...`
         if self.pos + 1 >= self.tokens.len() { return false; }
         let tok = &self.tokens[self.pos + 1];
-        // Keyword type-specifiers unambiguously begin a type.
+        // Keyword type-specifiers (and a leading `__attribute__`, e.g. the
+        // `(__attribute__((vector_size(16))) int){...}` compound literals in
+        // <xmmintrin.h>) unambiguously begin a type.
         if matches!(tok.kind,
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
             | TokenKind::Enum | TokenKind::Const | TokenKind::Volatile
-            | TokenKind::Typeof | TokenKind::Alignas)
+            | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Attribute)
         {
             return true;
         }
