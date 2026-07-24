@@ -403,7 +403,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     let mut lexer = Lexer::new_lang(&preprocessed, HashSet::new(), lang);
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
-    let mut parser = Parser::new(tokens, path.to_string());
+    let mut parser = Parser::new_lang(tokens, path.to_string(), lang);
     let mut tu = parser.parse().map_err(|e| format!("{}", e))?;
 
     if args.ast {

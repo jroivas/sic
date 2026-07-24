@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use crate::ast::*;
-use crate::lexer::{Lexer, Token, TokenKind, Span};
+use crate::lexer::{Lexer, Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
 
 pub struct Parser {
@@ -8,11 +8,16 @@ pub struct Parser {
     pos: usize,
     typedefs: HashSet<String>,
     source_file: String,
+    lang: Lang,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, source_file: String) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file }
+        Self::new_lang(tokens, source_file, Lang::C)
+    }
+
+    pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -625,16 +630,18 @@ impl Parser {
     /// keyword/name, qualifier, or storage class). Used to detect K&R-style
     /// parameter declarations following an old-style function header.
     fn starts_decl_specifier(&self) -> bool {
-        matches!(self.peek_kind(),
+        if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas
-        ) || (self.peek_kind() == TokenKind::Ident
-              && self.typedefs.contains(self.peek().text.as_str()))
+            | TokenKind::Typeof | TokenKind::Alignas)
+        {
+            return true;
+        }
+        self.typename_starts_decl()
     }
 
     /// Parse the K&R parameter declaration list that sits between an old-style
@@ -746,15 +753,40 @@ impl Parser {
     }
 
     fn is_decl_start(&self) -> bool {
-        matches!(self.peek_kind(),
+        if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas
-        ) || (self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()))
+            | TokenKind::Typeof | TokenKind::Alignas)
+        {
+            return true;
+        }
+        self.typename_starts_decl()
+    }
+
+    /// Whether the current `TypeName`/typedef token begins a declaration rather
+    /// than being a variable that shadows the type (see `starts_decl_specifier`).
+    fn typename_starts_decl(&self) -> bool {
+        let is_typename = self.peek_kind() == TokenKind::TypeName
+            || (self.peek_kind() == TokenKind::Ident
+                && self.typedefs.contains(self.peek().text.as_str()));
+        if !is_typename {
+            return false;
+        }
+        if self.lang == Lang::Sic {
+            return true;
+        }
+        // A following assignment/member operator means the name is being used as
+        // a value (`vaddr &= x`, `entry->f`), so it's an expression, not a decl.
+        !matches!(self.tokens.get(self.pos + 1).map(|t| t.kind),
+            Some(TokenKind::Eq) | Some(TokenKind::PlusAssign) | Some(TokenKind::MinusAssign)
+            | Some(TokenKind::StarAssign) | Some(TokenKind::SlashAssign) | Some(TokenKind::PercentAssign)
+            | Some(TokenKind::AndAssign) | Some(TokenKind::OrAssign) | Some(TokenKind::XorAssign)
+            | Some(TokenKind::ShlAssign) | Some(TokenKind::ShrAssign)
+            | Some(TokenKind::Dot) | Some(TokenKind::Arrow))
     }
 
     fn parse_compound_stmt_as_stmts(&mut self) -> Result<Vec<Stmt>> {
@@ -1139,13 +1171,36 @@ impl Parser {
         // Look ahead: `( type-specifier ...`
         if self.pos + 1 >= self.tokens.len() { return false; }
         let tok = &self.tokens[self.pos + 1];
-        matches!(tok.kind,
+        // Keyword type-specifiers unambiguously begin a type.
+        if matches!(tok.kind,
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
-            | TokenKind::Enum | TokenKind::TypeName | TokenKind::Const | TokenKind::Volatile
-            | TokenKind::Typeof | TokenKind::Alignas
-        ) || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()))
+            | TokenKind::Enum | TokenKind::Const | TokenKind::Volatile
+            | TokenKind::Typeof | TokenKind::Alignas)
+        {
+            return true;
+        }
+        let is_typename = tok.kind == TokenKind::TypeName
+            || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()));
+        if !is_typename {
+            return false;
+        }
+        // A `TypeName` is ambiguous with a variable of the same name. In C this
+        // is common — code often shadows a typedef (`vaddr`, `entry`, …) with a
+        // local — so treat `(T …)` as a cast only when the type is followed by a
+        // token that continues/closes a type-name (`)`, `*`, `[`, `(`, or a
+        // qualifier), not a binary operator (`(vaddr | x)` is OR, not a cast).
+        // In sic-lang the aliases are reserved types, so stay strict there.
+        if self.lang == Lang::Sic {
+            return true;
+        }
+        match self.tokens.get(self.pos + 2) {
+            Some(t2) => matches!(t2.kind,
+                TokenKind::RParen | TokenKind::Star | TokenKind::LBracket | TokenKind::LParen
+                | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict),
+            None => true,
+        }
     }
 
     fn parse_unary(&mut self) -> Result<Expr> {

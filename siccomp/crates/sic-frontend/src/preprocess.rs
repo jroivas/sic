@@ -249,4 +249,11 @@ fn is_safe_predefine(name: &str) -> bool {
         || name.ends_with("_MIN__")
         || name.ends_with("_WIDTH__")
         || name.ends_with("_TYPE__")
+        // Floating-point property macros used by <float.h>: __FLT_RADIX__,
+        // __FLT_MANT_DIG__, __DBL_EPSILON__, __LDBL_MIN_EXP__, … — all numeric.
+        || name.starts_with("__FLT")
+        || name.starts_with("__DBL_")
+        || name.starts_with("__LDBL_")
+        || name.starts_with("__DEC")
+        || name == "__FLT_RADIX__"
 }

@@ -209,18 +209,30 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     let mut func_line_info: Vec<(FuncId, String, u64, Vec<(u64, u32, bool)>, Vec<dwarf::VarInfo>)> =
         Vec::new();
     let mut ctx = cranelift_codegen::Context::new();
+    let dbg_timing = std::env::var("SIC_TIMING").is_ok();
     for (i, f) in ir_module.functions.iter().enumerate() {
         let fid = func_ids[&(i as u32)];
         ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
+        let ft = std::time::Instant::now();
         let mut var_dbg: Vec<func::VarDbg> = Vec::new();
         func::compile_function(
             f, ir_module, &mut obj_module, &func_ids, &global_ids, &mut ctx.func, ptr_size,
             &mut var_dbg,
         )?;
+        if dbg_timing {
+            let e = ft.elapsed();
+            if e.as_millis() > 100 { eprintln!("[timing] compile_function '{}': {:?}", f.name, e); }
+        }
 
-        if let Err(e) = obj_module.define_function(fid, &mut ctx) {
+        let dt = std::time::Instant::now();
+        let define_res = obj_module.define_function(fid, &mut ctx);
+        if dbg_timing {
+            let e = dt.elapsed();
+            if e.as_millis() > 100 { eprintln!("[timing] define_function '{}': {:?}", f.name, e); }
+        }
+        if let Err(e) = define_res {
             // Print the Cranelift IR to stderr for debugging
             eprintln!("Cranelift error in function '{}': {:?}", f.name, e);
             eprintln!("{}", cranelift_codegen::ir::Function::display(&ctx.func));

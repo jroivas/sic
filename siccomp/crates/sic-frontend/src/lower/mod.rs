@@ -39,15 +39,22 @@ impl Lowerer {
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
+        let dbg = std::env::var("SIC_TIMING").is_ok();
+        let t0 = std::time::Instant::now();
         // Decide which `inline` functions are reachable (and thus emitted).
         self.emit_inline = compute_emitted_inlines(tu);
+        if dbg { eprintln!("[timing] compute_emitted_inlines: {:?} ({} inlines)", t0.elapsed(), self.emit_inline.len()); }
 
         // First pass: collect all function prototypes and global variable names
         // so that forward references work.
+        let t1 = std::time::Instant::now();
         self.collect_declarations(tu)?;
+        if dbg { eprintln!("[timing] collect_declarations: {:?}", t1.elapsed()); }
 
         // Second pass: lower function bodies and global initializers
+        let t2 = std::time::Instant::now();
         self.lower_translation_unit(tu)?;
+        if dbg { eprintln!("[timing] lower_translation_unit: {:?}", t2.elapsed()); }
 
         // If no main was defined, wrap top-level expression statements in a fake main.
         if self.module.func_ref_by_name("main").is_none() {
@@ -226,6 +233,10 @@ impl Lowerer {
                     // `sizeof(T)`, `offsetof(...)` and division (e.g. QEMU's `_IOR`
                     // / register-index enums) fold instead of erroring.
                     crate::lower::types::eval_const_size(init, &self.struct_types, self.ptr_size, &self.enum_consts)
+                        // Fall back to the globals-aware evaluator so enum values
+                        // built from `ARRAY_SIZE(global_array)` (= sizeof of a
+                        // file-scope array) also fold — e.g. e1000e's NREADOPS.
+                        .or_else(|| self.eval_const_int(init))
                         .ok_or_else(|| CompileError::new(format!("enum value for '{}' is not a constant", v.name)))?
                 } else {
                     counter

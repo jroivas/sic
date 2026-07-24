@@ -924,7 +924,7 @@ impl<'m> FuncCtx<'m> {
         // One block per group, so all values of a `case LOW ... HIGH:` range
         // share a single body block.
         let mut group_blocks: std::collections::HashMap<usize, BlockId> = std::collections::HashMap::new();
-        for (case_val, group) in &cases {
+        for (case_val, group) in &cases.singles {
             // Duplicate case values shouldn't happen in valid C; keep the first.
             if case_blocks.contains_key(case_val) { continue; }
             let case_bb = match group_blocks.get(group) {
@@ -938,8 +938,39 @@ impl<'m> FuncCtx<'m> {
             arms.push((*case_val, case_bb));
             case_blocks.insert(*case_val, case_bb);
         }
+        // Ranges: bounds checks emitted before the switch dispatch. Each range's
+        // low value keys `case_blocks` so the body lowering (`Stmt::CaseRange`)
+        // finds its shared block.
+        let mut range_arms: Vec<(i64, i64, BlockId)> = Vec::new();
+        for (lo, hi, group) in &cases.ranges {
+            let bb = match group_blocks.get(group) {
+                Some(&b) => b,
+                None => { let b = self.new_block_after_current(); group_blocks.insert(*group, b); b }
+            };
+            case_blocks.entry(*lo).or_insert(bb);
+            range_arms.push((*lo, *hi, bb));
+        }
 
-        self.set_terminator(Terminator::Switch { val: v_i32, default: default_bb, arms });
+        // Dispatch: test each range (`lo <= v <= hi`) in a chain, then fall into
+        // the integer `Switch` for the individual case values.
+        if range_arms.is_empty() {
+            self.set_terminator(Terminator::Switch { val: v_i32.clone(), default: default_bb, arms });
+        } else {
+            let switch_bb = self.new_block_after_current();
+            let n = range_arms.len();
+            for (idx, (lo, hi, bb)) in range_arms.iter().enumerate() {
+                let next_bb = if idx + 1 < n { self.new_block_after_current() } else { switch_bb };
+                let ge = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: ge, op: CmpOp::ISGe, lhs: v_i32.clone(), rhs: Constant::int(*lo), ty: Type::i32() });
+                let le = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: le, op: CmpOp::ISLe, lhs: v_i32.clone(), rhs: Constant::int(*hi), ty: Type::i32() });
+                let both = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: both, op: BinOp::And, lhs: Val::Local(ge), rhs: Val::Local(le), ty: Type::Bool });
+                self.set_terminator(Terminator::CondJump { cond: Val::Local(both), then_bb: *bb, else_bb: next_bb });
+                self.switch_to_block(next_bb);
+            }
+            self.set_terminator(Terminator::Switch { val: v_i32.clone(), default: default_bb, arms });
+        }
         self.switch_stack.push((default_bb, end_bb, case_blocks));
         self.break_stack.push(end_bb);
 
@@ -1159,36 +1190,37 @@ pub(super) fn top_field_index(agg: &Type, name: &str, named: &HashMap<String, Ty
     0
 }
 
-fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> Vec<(i64, usize)> {
-    let mut cases = Vec::new();
+/// Collected switch labels: individual `case V:` values and `case LO ... HI:`
+/// ranges, each tagged with a *group* id so all labels sharing one body block
+/// map to the same block.
+#[derive(Default)]
+pub(super) struct SwitchCases {
+    pub singles: Vec<(i64, usize)>,        // (value, group)
+    pub ranges: Vec<(i64, i64, usize)>,    // (lo, hi, group)
+}
+
+fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> SwitchCases {
+    let mut cases = SwitchCases::default();
     let mut group = 0usize;
     collect_cases_in(stmt, enum_consts, &mut cases, &mut group);
     cases
 }
 
-fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut Vec<(i64, usize)>, group: &mut usize) {
+fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut SwitchCases, group: &mut usize) {
     match stmt {
         Stmt::Case(val, body, _) => {
             if let Ok(v) = eval_const_expr(val, enum_consts) {
-                out.push((v, *group));
+                out.singles.push((v, *group));
             }
             *group += 1;
             collect_cases_in(body, enum_consts, out, group);
         }
         Stmt::CaseRange(lo, hi, body, _) => {
-            // Expand the range into one arm per value, all sharing this group so
-            // they route to a single body block. Capped to avoid pathological
-            // blowups (`case 0 ... INT_MAX:`); real ranges are tiny.
+            // Record the range as a bounds check — NOT enumerated. QEMU uses huge
+            // ranges (`case 0xF0000000 ... 0xFFFFFFFF:`), so enumerating them
+            // produces hundreds of millions of switch arms (and hangs codegen).
             if let (Ok(l), Ok(h)) = (eval_const_expr(lo, enum_consts), eval_const_expr(hi, enum_consts)) {
-                const MAX_RANGE: i64 = 100_000;
-                let mut v = l;
-                let mut count = 0i64;
-                while v <= h && count < MAX_RANGE {
-                    out.push((v, *group));
-                    if v == i64::MAX { break; }
-                    v += 1;
-                    count += 1;
-                }
+                if l <= h { out.ranges.push((l, h, *group)); }
             }
             *group += 1;
             collect_cases_in(body, enum_consts, out, group);

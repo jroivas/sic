@@ -1785,13 +1785,14 @@ impl<'m> FuncCtx<'m> {
         for d in designators {
             match d {
                 OffsetDesignator::Field(name) => {
+                    // `resolve_field_access` drills through anonymous struct/union
+                    // members and returns the accumulated byte offset — needed for
+                    // `offsetof(env, sctlr_el)` where the field lives in an
+                    // anonymous union inside the struct.
                     let resolved = super::types::resolve_aggregate(&cur, &self.lowerer.struct_types);
-                    let (idx, fty, _) = find_field(&resolved, name, &self.lowerer.struct_types)
+                    let (off, fty, _) = resolve_field_access(&resolved, name, self.ptr_size(), &self.lowerer.struct_types)
                         .ok_or_else(|| CompileError::new(format!("no field '{}' in offsetof", name)))?;
-                    if let Type::Struct(st) = &resolved {
-                        offset += st.field_offset(idx, self.ptr_size());
-                    }
-                    // union members are all at offset 0
+                    offset += off;
                     cur = fty;
                 }
                 OffsetDesignator::Index(e) => {
