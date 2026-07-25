@@ -12,6 +12,11 @@ pub struct Parser {
     /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
     /// SIMD vector typedefs). Applied to the declared type as an N-byte array.
     pending_vector_size: Option<u32>,
+    /// Names declared as variables (params + locals) in the function currently
+    /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
+    /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
+    /// shadow the `typedef uintptr_t vaddr;` etc.
+    func_vars: HashSet<String>,
 }
 
 impl Parser {
@@ -20,7 +25,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -156,7 +161,9 @@ impl Parser {
                 && !self.at(TokenKind::Eof) && self.starts_decl_specifier()
             {
                 self.parse_kr_param_decls(&mut params)?;
+                self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
                 let body = self.parse_compound_stmt_as_stmts()?;
+                self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
                     body: Some(body), storage, inline: is_inline, span: sp,
@@ -164,8 +171,10 @@ impl Parser {
             }
 
             if self.at(TokenKind::LBrace) {
-                // Function definition
+                // Function definition. Seed the shadow set with the parameter names.
+                self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
                 let body = self.parse_compound_stmt_as_stmts()?;
+                self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
                     body: Some(body), storage, inline: is_inline, span: sp,
@@ -990,6 +999,7 @@ impl Parser {
             // glib g_autoptr / QEMU RCU_READ_LOCK_GUARD cleanup locals.
             self.skip_decl_tail();
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
+            if !name.is_empty() { self.func_vars.insert(name.clone()); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !name.is_empty() {
                 declarators.push(Declarator { name, ty, init, span: dsp });
@@ -1245,6 +1255,12 @@ impl Parser {
         let is_typename = tok.kind == TokenKind::TypeName
             || (tok.kind == TokenKind::Ident && self.typedefs.contains(tok.text.as_str()));
         if !is_typename {
+            return false;
+        }
+        // A parameter or local of the same name shadows the typedef, so `(name)`
+        // is a parenthesized variable, not a cast (`(vaddr) & MASK` is an AND).
+        // Only in C mode: in sic-lang the aliases are reserved and cannot shadow.
+        if self.lang == Lang::C && self.func_vars.contains(tok.text.as_str()) {
             return false;
         }
         // A `TypeName` is ambiguous with a variable of the same name. In C this
