@@ -143,7 +143,7 @@ impl Lowerer {
                                 AstType::Enum(e) => { self.register_enum(e)?; }
                                 _ => {}
                             }
-                            self.struct_types.insert(name.clone(), ir_ty);
+                            self.register_type_name(name.clone(), ir_ty);
                         }
                     }
                 }
@@ -161,6 +161,25 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// Register a typedef name → type binding without clobbering a completed
+    /// struct/union of the same name with an incomplete alias. C tags and typedef
+    /// names live in one map here, so `typedef Fwd Tag;` (where `struct Tag {..}`
+    /// is already complete) must not overwrite the real definition with `Fwd`'s
+    /// stale empty snapshot (QEMU's `typedef HexagonCPU ArchCPU;` after
+    /// `struct ArchCPU {..}`).
+    fn register_type_name(&mut self, name: String, ty: Type) {
+        let incoming_empty = matches!(&ty, Type::Struct(s) if s.fields.is_empty())
+            || matches!(&ty, Type::Union(u) if u.fields.is_empty());
+        if incoming_empty {
+            if let Some(existing) = self.struct_types.get(&name) {
+                let existing_complete = matches!(existing, Type::Struct(s) if !s.fields.is_empty())
+                    || matches!(existing, Type::Union(u) if !u.fields.is_empty());
+                if existing_complete { return; }
+            }
+        }
+        self.struct_types.insert(name, ty);
     }
 
     /// Register any tagged struct/union definitions nested inside a type so they
@@ -219,7 +238,7 @@ impl Lowerer {
                 packed: false,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
             });
-            self.struct_types.insert(name.clone(), ir_ty);
+            self.register_type_name(name.clone(), ir_ty);
         }
         Ok(())
     }
@@ -234,7 +253,7 @@ impl Lowerer {
                 ir_fields.push((fname, fty));
             }
             let ir_ty = Type::Union(UnionType { name: Some(name.clone()), fields: ir_fields });
-            self.struct_types.insert(name.clone(), ir_ty);
+            self.register_type_name(name.clone(), ir_ty);
         }
         Ok(())
     }
@@ -320,7 +339,7 @@ impl Lowerer {
                             AstType::Enum(e) => { self.register_enum(e)?; }
                             _ => {}
                         }
-                        self.struct_types.insert(name.clone(), ir_ty);
+                        self.register_type_name(name.clone(), ir_ty);
                     }
                 }
             }
