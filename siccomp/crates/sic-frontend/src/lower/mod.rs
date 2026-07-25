@@ -365,14 +365,20 @@ impl Lowerer {
             return Ok(());
         }
         let init = self.build_global_init(d, &mut ir_ty);
-        // If already declared, a real definition (with an initializer) must upgrade
-        // a prior `extern`/tentative declaration — otherwise the definition would
-        // be dropped and the symbol left undefined at link time (e.g. a header's
-        // `extern const T arr[];` followed by `const T arr[] = {...}`).
+        // If already declared, a definition must upgrade a prior `extern`
+        // declaration — otherwise the definition is dropped and the symbol left
+        // undefined at link time. This covers both a real initializer (`extern
+        // const T arr[];` then `const T arr[] = {...}`) and a *tentative*
+        // definition — a non-`extern` file-scope declaration with no initializer
+        // (`extern int g;` from a header, then `int g;` in the .c), which C makes
+        // a zero-initialized (bss) definition. QEMU's `error_abort`,
+        // `trace_events_enabled_count`, etc. are declared exactly this way.
+        let new_is_definition =
+            init.is_some() || !matches!(base_ty.storage, Some(StorageClass::Extern));
         if let Some((_, gref)) = self.globals_map.get(&d.name).cloned() {
             let existing = &self.module.globals[gref.0 as usize];
             let existing_is_decl = existing.init.is_none() || existing.linkage == Linkage::Import;
-            if init.is_some() && existing_is_decl {
+            if new_is_definition && existing_is_decl {
                 let new_linkage = match base_ty.storage {
                     Some(StorageClass::Static) => Linkage::Internal,
                     _ => Linkage::External,
