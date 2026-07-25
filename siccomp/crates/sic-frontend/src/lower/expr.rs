@@ -2354,6 +2354,29 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Assign { lhs, .. } => self.infer_expr_type(lhs),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
+            // GCC statement expression `({ ...; expr; })` has the type of its last
+            // statement when that is an expression statement, else void. Needed so
+            // `typeof(({...; p;}))` (QEMU's nested qobject_ref) keeps `p`'s type.
+            // A trailing bare identifier is usually a temporary declared inside the
+            // block (`typeof(x) _o = x; _o;`), invisible to the outer scope, so
+            // resolve such declarators here.
+            ExprKind::StmtExpr(stmts) => {
+                match stmts.last() {
+                    Some(ast::Stmt::Expr(e, _)) => {
+                        if let ExprKind::Ident(name) = &e.kind {
+                            for stmt in stmts {
+                                if let ast::Stmt::Decl(ast::Decl::Var { declarators, .. }) = stmt {
+                                    if let Some(d) = declarators.iter().find(|d| &d.name == name) {
+                                        return self.lower_type(&d.ty);
+                                    }
+                                }
+                            }
+                        }
+                        self.infer_expr_type(e)
+                    }
+                    _ => Ok(Type::Void),
+                }
+            }
             ExprKind::BinOp { op, lhs, rhs } => {
                 use BinOpKind::*;
                 match op {
