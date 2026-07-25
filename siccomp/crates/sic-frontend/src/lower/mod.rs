@@ -90,7 +90,11 @@ impl Lowerer {
             }
             match decl {
                 Decl::Func { name, ret_ty, params, variadic, body: None, .. } => {
-                    // Forward declaration / extern
+                    // Forward declaration / extern. A struct/union/enum *defined*
+                    // in the return type or a parameter (`struct S {..} *f(void)`)
+                    // must be registered so its fields resolve later.
+                    self.register_nested_struct_defs(&ret_ty.ty)?;
+                    for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
@@ -103,6 +107,10 @@ impl Lowerer {
                 Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, .. } => {
                     // Skip unreferenced inline definitions (see `emit_inline`).
                     if *inline && !self.emit_inline.contains(name) { continue; }
+                    // Register any struct/union/enum defined in the return type or
+                    // parameters before lowering them.
+                    self.register_nested_struct_defs(&ret_ty.ty)?;
+                    for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
                     // Function definition — pre-register with empty body for stable FuncRef
                     let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
