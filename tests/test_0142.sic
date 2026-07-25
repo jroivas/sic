@@ -1,0 +1,36 @@
+// x86 AES-NI round intrinsics (aesenc/aesenclast/aesdec/aesdeclast/aesimc)
+// emulated with the AES S-box tables + GF(2^8) MixColumns. Expected outputs are
+// the exact hardware AES-NI results (verified against `gcc -maes`). Used by
+// QEMU's host/crypto/aes-round.h.
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <wmmintrin.h>
+#include <emmintrin.h>
+
+static int check(const char *name, __m128i v, const char *hex){
+    unsigned char b[16]; _mm_storeu_si128((__m128i*)b, v);
+    char got[33];
+    for (int i=0;i<16;i++) sprintf(got+i*2, "%02x", b[i]);
+    int ok = strcmp(got, hex) == 0;
+    if (!ok) printf("%s: got %s want %s\n", name, got, hex);
+    return ok;
+}
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    unsigned char sb[16]={0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff};
+    unsigned char kb[16]={0x0f,0x0e,0x0d,0x0c,0x0b,0x0a,0x09,0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,0x00};
+    __m128i s=_mm_loadu_si128((__m128i*)sb);
+    __m128i k=_mm_loadu_si128((__m128i*)kb);
+
+    int ok = 1;
+    ok &= check("enc",     _mm_aesenc_si128(s,k),     "6c77ebd5ff6df27eaa0039f0d1e98ba3");
+    ok &= check("enclast", _mm_aesenclast_si128(s,k), "6cf2a11a10e421cbc3c796f1488032ea");
+    ok &= check("dec",     _mm_aesdec_si128(s,k),     "d2e90dcd297b30600f0833a760fb40b0");
+    ok &= check("declast", _mm_aesdeclast_si128(s,k), "5dc76f0e8de990f690eb917924fbd266");
+    ok &= check("imc",     _mm_aesimc_si128(s),       "aaff88ddeebbcc992277005566334411");
+
+    printf("aes-ni: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}
