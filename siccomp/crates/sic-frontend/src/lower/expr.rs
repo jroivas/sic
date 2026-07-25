@@ -2093,9 +2093,18 @@ impl<'m> FuncCtx<'m> {
         let idx_i64 = self.coerce(idx_val, &Type::i64())?;
 
         let base_ty = self.val_type(&base_val);
-        // Unwrap the pointer target; if it's an array (alloca of array), take the element type
+        // `Pointer(Array[T;N])` is ambiguous in the IR: it is both the address of
+        // an array *variable* `T v[N]` (where `v[i]` is a `T`) and the value of a
+        // pointer-to-array `T (*e)[N]` (where `e[i]` is the whole `T[N]`). The C
+        // type of `base` disambiguates: an array-typed base indexes to its element,
+        // a pointer-typed base dereferences one level.
+        let logical = self.infer_expr_type(base).ok();
         let elem_ty = match &base_ty {
             Type::Pointer(t) => match t.as_ref() {
+                Type::Array { .. } if matches!(logical, Some(Type::Pointer(_))) => {
+                    // pointer-to-array: one index yields the whole array element
+                    super::types::resolve_aggregate(t, &self.lowerer.struct_types)
+                }
                 Type::Array { elem, .. } => *elem.clone(),
                 other => super::types::resolve_aggregate(other, &self.lowerer.struct_types),
             },
