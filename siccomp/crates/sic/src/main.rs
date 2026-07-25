@@ -379,6 +379,28 @@ fn is_link_input(path: &str) -> bool {
         || lower.contains(".so.") // versioned shared libs, e.g. libfoo.so.1
 }
 
+/// An assembly source (`.s` = plain, `.S` = needs the C preprocessor). sic has
+/// no assembler; these are handed to the system compiler driver as-is.
+fn is_assembly(path: &str) -> bool {
+    path.ends_with(".s") || path.ends_with(".S")
+}
+
+/// Assemble a `.s`/`.S` source to an object file via the system compiler driver
+/// (which preprocesses `.S` and runs the assembler), forwarding the include and
+/// define flags an `.S` file may rely on.
+fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let cc = resolve_linker();
+    let mut cmd = Command::new(&cc);
+    cmd.arg("-c").arg(src).arg("-o").arg(obj);
+    for d in &args.defines { cmd.arg(format!("-D{}", d)); }
+    for i in &args.includes { cmd.arg(format!("-I{}", i)); }
+    if args.pthread { cmd.arg("-pthread"); }
+    for f in effective_dep_flags(args) { cmd.arg(f); }
+    let status = cmd.status()?;
+    if status.success() { Ok(()) }
+    else { Err(format!("assembler failed with exit code {:?}", status.code()).into()) }
+}
+
 /// Compile one C source through the front end to an IR module.
 fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
     // Forward dependency-generation flags (`-MD`/`-MF`/...) so cpp writes the
@@ -488,12 +510,16 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             return Err("cannot specify -o with -c and multiple source files".into());
         }
         for src in &sources {
-            let obj_bytes = compile_source(src, args)?;
             let obj_path = match &args.output {
                 Some(out) => out.clone(),
                 // default: foo.c → foo.o
                 None => PathBuf::from(src).with_extension("o").to_string_lossy().into_owned(),
             };
+            if is_assembly(src) {
+                assemble_source(src, &obj_path, args)?;
+                continue;
+            }
+            let obj_bytes = compile_source(src, args)?;
             fs::write(&obj_path, &obj_bytes)?;
         }
         return Ok(());
@@ -541,9 +567,13 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Compile each source to a temp object; keep the handles alive until linking.
     let mut tmp_objs: Vec<tempfile::NamedTempFile> = Vec::new();
     for src in &sources {
-        let obj_bytes = compile_source(src, args)?;
         let mut tmp = tempfile::Builder::new().suffix(".o").tempfile()?;
-        tmp.write_all(&obj_bytes)?;
+        if is_assembly(src) {
+            assemble_source(src, &tmp.path().to_string_lossy(), args)?;
+        } else {
+            let obj_bytes = compile_source(src, args)?;
+            tmp.write_all(&obj_bytes)?;
+        }
         tmp_objs.push(tmp);
     }
 
