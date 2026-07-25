@@ -30,8 +30,12 @@ pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -
 /// Like lower_type, but array parameters decay to pointer-to-element (C semantics).
 pub fn lower_param_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     let ty = lower_type(qt, named, ptr_size)?;
+    // Only a *syntactic* array parameter (`T a[N]`) decays to a pointer. A vector
+    // (`vector_size`) type is written as a typedef name that merely *resolves* to
+    // an array; it is passed by value like a struct and must not decay.
+    let syntactic_array = matches!(qt.ty, AstType::Array { .. });
     Ok(match ty {
-        Type::Array { elem, .. } => Type::Pointer(elem),
+        Type::Array { elem, .. } if syntactic_array => Type::Pointer(elem),
         other => other,
     })
 }

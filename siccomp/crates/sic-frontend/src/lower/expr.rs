@@ -301,6 +301,18 @@ impl<'m> FuncCtx<'m> {
             return self.lower_logical(op == BinOpKind::LogAnd, lhs, rhs);
         }
 
+        // GCC vector extension: when both operands are vector (array) types an
+        // arithmetic/bitwise/comparison operator is element-wise, not scalar.
+        // Regular arrays decay to pointers before this point, so two array
+        // operands here means a `vector_size` type.
+        if !matches!(op, BinOpKind::LogAnd | BinOpKind::LogOr) {
+            if let (Ok(lt @ Type::Array { .. }), Ok(Type::Array { .. })) =
+                (self.infer_expr_type(lhs), self.infer_expr_type(rhs))
+            {
+                return self.lower_vector_binop(op, lhs, rhs, lt);
+            }
+        }
+
         let l = self.lower_expr(lhs)?;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
@@ -479,9 +491,10 @@ impl<'m> FuncCtx<'m> {
 
         // Aggregate (struct/union) assignment is a byte copy, not a scalar
         // load/store — the latter would truncate anything wider than a register.
-        if op.is_none() && matches!(lv.ty, Type::Struct(_) | Type::Union(_)) {
+        if op.is_none() && matches!(lv.ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
             // Copy the whole object, whether the RHS is an lvalue or an aggregate
-            // rvalue (e.g. a compound literal `(T){...}` or a struct return).
+            // rvalue (e.g. a compound literal `(T){...}`, a struct return, or a
+            // vector produced by an element-wise operator/intrinsic).
             let src = self.lower_aggregate_ptr(rhs)?;
             let size = lv.ty.size_of(self.ptr_size());
             let align = lv.ty.align_of(self.ptr_size());
@@ -993,6 +1006,195 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(if ret_new { newv } else { old }))
     }
 
+    // ---- SIMD vector intrinsics (scalar-emulated over the byte aggregate) ----
+
+    /// Address of `base + off` bytes (off is a compile-time constant).
+    fn vec_at(&mut self, base: &Val, off: i64) -> Val {
+        if off == 0 { return base.clone(); }
+        let d = self.alloc_val();
+        self.push_instr(Instr::PtrOffset { dest: d, base: base.clone(), offset: Constant::int(off) });
+        Val::Local(d)
+    }
+
+    /// Load a scalar of `ty` at `base + off`.
+    fn vec_load(&mut self, base: &Val, off: i64, ty: Type) -> Val {
+        let addr = self.vec_at(base, off);
+        let d = self.alloc_val();
+        self.push_instr(Instr::Load { dest: d, ptr: addr, ty });
+        Val::Local(d)
+    }
+
+    /// Store `val` at `base + off`.
+    fn vec_store(&mut self, base: &Val, off: i64, val: Val) {
+        let addr = self.vec_at(base, off);
+        self.push_instr(Instr::Store { val, ptr: addr });
+    }
+
+    fn vec_bin(&mut self, op: BinOp, lhs: Val, rhs: Val, ty: Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: d, op, lhs, rhs, ty });
+        Val::Local(d)
+    }
+
+    /// Fresh stack slot holding a vector of type `vty`; returns a pointer to it.
+    fn vec_alloca(&mut self, vty: Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: d, ty: vty, align: None });
+        Val::Local(d)
+    }
+
+    /// Element-wise binary op on two vector (`vector_size`) operands. Operates
+    /// lane-by-lane over the vector's element type into a fresh result vector.
+    /// Comparisons yield an all-ones (`-1`) / all-zeros lane per GCC semantics.
+    fn lower_vector_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr, vty: Type) -> Result<Val> {
+        let (elem, lanes) = match &vty {
+            Type::Array { elem, len } => ((**elem).clone(), *len),
+            _ => return Err(CompileError::new("vector binop on non-array type")),
+        };
+        let signed = matches!(&elem, Type::Int { signed: true, .. });
+        // Either an arithmetic/bitwise op, or a comparison predicate.
+        let arith = match op {
+            BinOpKind::BitOr => Some(BinOp::Or),
+            BinOpKind::BitAnd => Some(BinOp::And),
+            BinOpKind::BitXor => Some(BinOp::Xor),
+            BinOpKind::Add => Some(BinOp::Add),
+            BinOpKind::Sub => Some(BinOp::Sub),
+            BinOpKind::Mul => Some(BinOp::Mul),
+            BinOpKind::Div => Some(if signed { BinOp::SDiv } else { BinOp::UDiv }),
+            BinOpKind::Rem => Some(if signed { BinOp::SRem } else { BinOp::URem }),
+            BinOpKind::Shl => Some(BinOp::Shl),
+            BinOpKind::Shr => Some(if signed { BinOp::AShr } else { BinOp::LShr }),
+            _ => None,
+        };
+        let cmp = match op {
+            BinOpKind::Eq => Some(CmpOp::IEq),
+            BinOpKind::Ne => Some(CmpOp::INe),
+            BinOpKind::Lt => Some(if signed { CmpOp::ISLt } else { CmpOp::IULt }),
+            BinOpKind::Le => Some(if signed { CmpOp::ISLe } else { CmpOp::IULe }),
+            BinOpKind::Gt => Some(if signed { CmpOp::ISGt } else { CmpOp::IUGt }),
+            BinOpKind::Ge => Some(if signed { CmpOp::ISGe } else { CmpOp::IUGe }),
+            _ => None,
+        };
+        if arith.is_none() && cmp.is_none() {
+            return Err(CompileError::new(format!("unsupported vector operator {:?}", op)));
+        }
+        let lp = self.lower_aggregate_ptr(lhs)?;
+        let rp = self.lower_aggregate_ptr(rhs)?;
+        let rp_out = self.vec_alloca(vty.clone());
+        let esz = elem.size_of(self.ptr_size()) as i64;
+        for i in 0..lanes {
+            let off = i as i64 * esz;
+            let x = self.vec_load(&lp, off, elem.clone());
+            let y = self.vec_load(&rp, off, elem.clone());
+            let v = if let Some(irop) = arith {
+                self.vec_bin(irop, x, y, elem.clone())
+            } else {
+                let c = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: c, op: cmp.unwrap(), lhs: x, rhs: y, ty: elem.clone() });
+                let s = self.alloc_val();
+                self.push_instr(Instr::Select { dest: s, cond: Val::Local(c), on_true: Constant::int(-1), on_false: Constant::int(0), ty: elem.clone() });
+                Val::Local(s)
+            };
+            self.vec_store(&rp_out, off, v);
+        }
+        Ok(rp_out)
+    }
+
+    /// `__builtin_ia32_pmovmskb128/256`: pack the high bit of each byte into an int.
+    fn lower_vec_pmovmskb(&mut self, arg: &Expr, n: usize) -> Result<Val> {
+        let vp = self.lower_aggregate_ptr(arg)?;
+        let u8t = Type::u8();
+        let i32t = Type::i32();
+        let mut mask = Constant::int(0);
+        for i in 0..n {
+            let b = self.vec_load(&vp, i as i64, u8t.clone());
+            let b32 = self.coerce(b, &i32t)?;
+            let sh = self.vec_bin(BinOp::LShr, b32, Constant::int(7), i32t.clone());
+            let bit = self.vec_bin(BinOp::And, sh, Constant::int(1), i32t.clone());
+            let shifted = self.vec_bin(BinOp::Shl, bit, Constant::int(i as i64), i32t.clone());
+            mask = self.vec_bin(BinOp::Or, mask, shifted, i32t.clone());
+        }
+        Ok(mask)
+    }
+
+    /// `__builtin_ia32_pcmpeqb128/256`: per-byte equality → 0xFF/0x00 lanes.
+    fn lower_vec_pcmpeqb(&mut self, a: &Expr, b: &Expr, n: usize) -> Result<Val> {
+        let ap = self.lower_aggregate_ptr(a)?;
+        let bp = self.lower_aggregate_ptr(b)?;
+        let vty = self.infer_expr_type(a)?;
+        let rp = self.vec_alloca(vty);
+        let u8t = Type::u8();
+        for i in 0..n {
+            let x = self.vec_load(&ap, i as i64, u8t.clone());
+            let y = self.vec_load(&bp, i as i64, u8t.clone());
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: x, rhs: y, ty: u8t.clone() });
+            let val = self.alloc_val();
+            self.push_instr(Instr::Select { dest: val, cond: Val::Local(eq), on_true: Constant::int(0xFF), on_false: Constant::int(0), ty: u8t.clone() });
+            self.vec_store(&rp, i as i64, Val::Local(val));
+        }
+        Ok(rp)
+    }
+
+    /// `__builtin_ia32_pshufb128`: byte shuffle `r[i] = (b[i]&0x80) ? 0 : a[b[i]&0x0F]`.
+    fn lower_vec_pshufb(&mut self, a: &Expr, b: &Expr, n: usize) -> Result<Val> {
+        let ap = self.lower_aggregate_ptr(a)?;
+        let bp = self.lower_aggregate_ptr(b)?;
+        let vty = self.infer_expr_type(a)?;
+        let rp = self.vec_alloca(vty);
+        let u8t = Type::u8();
+        let i64t = Type::i64();
+        for i in 0..n {
+            let idx = self.vec_load(&bp, i as i64, u8t.clone());
+            let idx64 = self.coerce(idx, &i64t)?;
+            // lo = idx & 0x0F  → offset into `a`
+            let lo = self.vec_bin(BinOp::And, idx64.clone(), Constant::int(0x0F), i64t.clone());
+            let srcaddr = self.alloc_val();
+            self.push_instr(Instr::PtrOffset { dest: srcaddr, base: ap.clone(), offset: lo });
+            let src = self.alloc_val();
+            self.push_instr(Instr::Load { dest: src, ptr: Val::Local(srcaddr), ty: u8t.clone() });
+            // high bit set → zero the lane
+            let hib = self.vec_bin(BinOp::And, idx64, Constant::int(0x80), i64t.clone());
+            let clr = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: clr, op: CmpOp::INe, lhs: hib, rhs: Constant::int(0), ty: i64t.clone() });
+            let val = self.alloc_val();
+            self.push_instr(Instr::Select { dest: val, cond: Val::Local(clr), on_true: Constant::int(0), on_false: Val::Local(src), ty: u8t.clone() });
+            self.vec_store(&rp, i as i64, Val::Local(val));
+        }
+        Ok(rp)
+    }
+
+    /// `__builtin_ia32_pclmulqdq128`: carry-less multiply of two selected 64-bit
+    /// halves → a 128-bit result. `imm` selects which halves (bit0 of a, bit4 of b).
+    fn lower_vec_pclmulqdq(&mut self, a: &Expr, b: &Expr, imm: &Expr) -> Result<Val> {
+        let ap = self.lower_aggregate_ptr(a)?;
+        let bp = self.lower_aggregate_ptr(b)?;
+        let immv = crate::lower::eval_const_expr(imm, &self.lowerer.enum_consts).unwrap_or(0);
+        let u64t = Type::u64();
+        let i128t = Type::Int { bits: 128, signed: false };
+        let a_off = if immv & 0x01 != 0 { 8 } else { 0 };
+        let b_off = if immv & 0x10 != 0 { 8 } else { 0 };
+        let x = self.vec_load(&ap, a_off, u64t.clone());
+        let y = self.vec_load(&bp, b_off, u64t.clone());
+        let xext = self.coerce(x, &i128t)?;
+        let mut res = Constant::int(0);
+        for j in 0..64 {
+            // bit j of y set?  term = bit ? (xext << j) : 0 ; res ^= term
+            let yj = self.vec_bin(BinOp::LShr, y.clone(), Constant::int(j), u64t.clone());
+            let ybit = self.vec_bin(BinOp::And, yj, Constant::int(1), u64t.clone());
+            let set = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: set, op: CmpOp::INe, lhs: ybit, rhs: Constant::int(0), ty: u64t.clone() });
+            let shifted = self.vec_bin(BinOp::Shl, xext.clone(), Constant::int(j), i128t.clone());
+            let term = self.alloc_val();
+            self.push_instr(Instr::Select { dest: term, cond: Val::Local(set), on_true: shifted, on_false: Constant::int(0), ty: i128t.clone() });
+            res = self.vec_bin(BinOp::Xor, res, Val::Local(term), i128t.clone());
+        }
+        let vty = self.infer_expr_type(a).unwrap_or(Type::Array { elem: Box::new(Type::i64()), len: 2 });
+        let rp = self.vec_alloca(vty);
+        self.vec_store(&rp, 0, res);
+        Ok(rp)
+    }
+
     /// Pointer to the storage of a struct/union-typed expression. Lvalues yield
     /// their address; aggregate rvalues (compound literals, struct-returning
     /// calls) already lower to a pointer to their temporary.
@@ -1136,6 +1338,26 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::BinOp { dest: res, op: BinOp::Sub, lhs: Constant::int((bits - 1) as i64), rhs: clz, ty: Type::i32() });
                         return Ok(Val::Local(res));
                     }
+                }
+                // x86 SIMD vector intrinsics — scalar-emulated over the byte/lane
+                // aggregate that a `vector_size` type lowers to.
+                "__builtin_ia32_pmovmskb128" | "__builtin_ia32_pmovmskb256" => {
+                    if let [v] = args {
+                        let n = if name.ends_with("256") { 32 } else { 16 };
+                        return self.lower_vec_pmovmskb(v, n);
+                    }
+                }
+                "__builtin_ia32_pcmpeqb128" | "__builtin_ia32_pcmpeqb256" => {
+                    if let [a, b] = args {
+                        let n = if name.ends_with("256") { 32 } else { 16 };
+                        return self.lower_vec_pcmpeqb(a, b, n);
+                    }
+                }
+                "__builtin_ia32_pshufb128" => {
+                    if let [a, b] = args { return self.lower_vec_pshufb(a, b, 16); }
+                }
+                "__builtin_ia32_pclmulqdq128" => {
+                    if let [a, b, imm] = args { return self.lower_vec_pclmulqdq(a, b, imm); }
                 }
                 // void __sync_synchronize(void) — full memory barrier; no-op here.
                 "__sync_synchronize" => return Ok(Constant::zero()),

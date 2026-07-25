@@ -327,7 +327,7 @@ pub fn build_cl_sig(
     // Aggregate returns use the sret ABI: the frontend prepends a hidden pointer
     // parameter (already present in `sig.params`) and the callee copies the
     // result through it, so there is no register return value.
-    if !matches!(sig.ret, sic_ir::Type::Struct(_) | sic_ir::Type::Union(_)) {
+    if !matches!(sig.ret, sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) | sic_ir::Type::Array { .. }) {
         if let Some(t) = types::cl_type(&sig.ret, ptr_size) {
             cl_sig.returns.push(cir::AbiParam::new(t));
         }

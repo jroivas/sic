@@ -1,0 +1,63 @@
+// x86 SIMD via scalar emulation over the `vector_size` byte aggregate: GCC
+// vector operators (|, ^, ==) and the intrinsics QEMU uses — pcmpeqb128,
+// pmovmskb128, pshufb128, pclmulqdq128. Also exercises the vector ABI
+// (by-value vector params/returns through the sret path).
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <emmintrin.h>   // SSE2: _mm_cmpeq_epi8, _mm_movemask_epi8, _mm_or_si128
+#include <tmmintrin.h>   // SSSE3: _mm_shuffle_epi8 (pshufb)
+#include <wmmintrin.h>   // AES-NI/CLMUL: _mm_clmulepi64_si128
+
+int main(void){
+    setvbuf(stdout,0,_IONBF,0);
+    int ok = 1;
+
+    // --- vector OR / AND / XOR operators via intrinsics ---
+    uint8_t a[16], b[16], out[16];
+    for (int i=0;i<16;i++){ a[i]=i; b[i]=0xF0|i; }
+    __m128i va = _mm_loadu_si128((__m128i*)a);
+    __m128i vb = _mm_loadu_si128((__m128i*)b);
+    __m128i vo = _mm_or_si128(va, vb);
+    _mm_storeu_si128((__m128i*)out, vo);
+    for (int i=0;i<16;i++) if (out[i] != (a[i]|b[i])) ok=0;
+    if (!ok) printf("OR fail\n");
+
+    __m128i vx = _mm_xor_si128(va, vb);
+    _mm_storeu_si128((__m128i*)out, vx);
+    for (int i=0;i<16;i++) if (out[i] != (a[i]^b[i])) ok=0;
+    if (!ok) printf("XOR fail\n");
+
+    // --- pcmpeqb + pmovmskb ---
+    uint8_t c[16]; for(int i=0;i<16;i++) c[i] = (i%2)? a[i] : 0xAA;
+    __m128i vc = _mm_loadu_si128((__m128i*)c);
+    __m128i eq = _mm_cmpeq_epi8(va, vc);
+    int mask = _mm_movemask_epi8(eq);
+    int expect = 0;
+    for (int i=0;i<16;i++) if (a[i]==c[i]) expect |= (1<<i);
+    if (mask != expect) { ok=0; printf("cmpeq/movemask fail: %x vs %x\n", mask, expect); }
+
+    // --- pshufb ---
+    uint8_t ctrl[16] = {15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0}; // reverse
+    __m128i vctrl = _mm_loadu_si128((__m128i*)ctrl);
+    __m128i sh = _mm_shuffle_epi8(va, vctrl);
+    _mm_storeu_si128((__m128i*)out, sh);
+    for (int i=0;i<16;i++) if (out[i] != a[15-i]) { ok=0; printf("pshufb fail @%d\n", i); }
+    // high-bit control zeros the lane
+    uint8_t ctrl2[16]; memset(ctrl2, 0x80, 16);
+    __m128i vctrl2 = _mm_loadu_si128((__m128i*)ctrl2);
+    __m128i sh2 = _mm_shuffle_epi8(va, vctrl2);
+    _mm_storeu_si128((__m128i*)out, sh2);
+    for (int i=0;i<16;i++) if (out[i] != 0) { ok=0; printf("pshufb zero fail\n"); }
+
+    // --- pclmulqdq (carry-less multiply) ---
+    // 0x3 * 0x5 carry-less = 0b0011 clmul 0b0101 = 0b001111 = 0xF
+    __m128i pa = _mm_set_epi64x(0, 0x3);
+    __m128i pb = _mm_set_epi64x(0, 0x5);
+    __m128i pr = _mm_clmulepi64_si128(pa, pb, 0x00);
+    uint64_t lo; memcpy(&lo, &pr, 8);
+    if (lo != 0xF) { ok=0; printf("clmul fail: %llx\n", (unsigned long long)lo); }
+
+    printf("simd: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

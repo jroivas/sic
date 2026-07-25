@@ -945,7 +945,7 @@ pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<Strin
 /// caller-provided result slot). `ret` is preserved unchanged so call sites can
 /// detect the ABI from the signature.
 pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> FunctionType {
-    if matches!(ret, Type::Struct(_) | Type::Union(_)) {
+    if ret_is_sret(&ret) {
         let mut ps = Vec::with_capacity(params.len() + 1);
         ps.push(Type::Pointer(Box::new(ret.clone())));
         ps.extend(params);
@@ -957,7 +957,9 @@ pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> Func
 
 /// Whether a return type uses the sret ABI (aggregate returned by value).
 pub(crate) fn ret_is_sret(ret: &Type) -> bool {
-    matches!(ret, Type::Struct(_) | Type::Union(_))
+    // Structs, unions and `vector_size` arrays are returned through a hidden
+    // result pointer. (Only vectors ever return an array by value in C.)
+    matches!(ret, Type::Struct(_) | Type::Union(_) | Type::Array { .. })
 }
 
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {

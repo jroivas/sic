@@ -308,8 +308,9 @@ impl<'m> Lowerer {
                 let sentinel = ValId((i + param_base) as u32 + 0x10000);
                 let ptr_vid = fc.alloc_val();
                 fc.push_instr(Instr::Alloca { dest: ptr_vid, ty: pty.clone(), align: None });
-                if matches!(pty, Type::Struct(_) | Type::Union(_)) {
-                    // Struct/union params are passed as pointer; copy into local alloca
+                if matches!(pty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+                    // Aggregate params (struct/union/vector) are passed as a
+                    // pointer; copy into the local alloca so the callee owns a copy.
                     let ps = fc.ptr_size();
                     let size = pty.size_of(ps);
                     let align = pty.align_of(ps) as u64;
@@ -651,10 +652,11 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::MemCopy { dst: ptr, src, size: copy, align: 1 });
             }
             Initializer::Expr(e) => {
-                // `T v = <aggregate expr>` (e.g. a compound literal or a struct
-                // returned by value) copies the whole object rather than storing
+                // `T v = <aggregate expr>` (e.g. a compound literal, a struct
+                // returned by value, or a `vector_size` array from an element-wise
+                // operator/intrinsic) copies the whole object rather than storing
                 // a pointer/register-sized scalar.
-                if matches!(ty, Type::Struct(_) | Type::Union(_)) {
+                if matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
                     let src = self.lower_aggregate_ptr(e)?;
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());
