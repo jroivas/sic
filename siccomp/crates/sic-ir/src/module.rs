@@ -49,6 +49,9 @@ pub struct Function {
     pub params: Vec<Param>,
     pub blocks: Vec<BasicBlock>,
     pub linkage: Linkage,
+    /// `Some(priority)` if this is an `__attribute__((constructor))` — its address
+    /// is placed in `.init_array` so the C runtime calls it before `main`.
+    pub constructor: Option<i32>,
     /// Name of the next-id counter for values inside this function.
     next_val_id: u32,
     next_block_id: u32,
@@ -58,6 +61,7 @@ impl Function {
     pub fn new(name: String, sig: FunctionType, params: Vec<Param>, linkage: Linkage) -> Self {
         Function {
             name, sig, params, blocks: Vec::new(), linkage,
+            constructor: None,
             next_val_id: 0, next_block_id: 0,
         }
     }

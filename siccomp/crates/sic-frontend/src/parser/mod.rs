@@ -12,6 +12,9 @@ pub struct Parser {
     /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
     /// SIMD vector typedefs). Applied to the declared type as an N-byte array.
     pending_vector_size: Option<u32>,
+    /// `__attribute__((constructor[(prio)]))` seen while parsing the current
+    /// declaration's specifiers; the function runs before `main` via `.init_array`.
+    pending_constructor: Option<i32>,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -25,7 +28,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -107,7 +110,9 @@ impl Parser {
     fn parse_external_decl(&mut self) -> Result<Decl> {
         let sp = self.span();
 
-        // __attribute__ at top level: skip
+        // Reset per-declaration attribute state, then parse a leading
+        // `__attribute__((constructor))` (captured by `skip_attributes`).
+        self.pending_constructor = None;
         self.skip_attributes();
 
         // __asm__ at top level: skip
@@ -153,6 +158,9 @@ impl Parser {
             let ret_ty = *ret.clone();
 
             self.skip_decl_tail();
+            // `__attribute__((constructor))` may appear before the specifiers or
+            // after the declarator; take whichever was captured for this function.
+            let ctor = self.pending_constructor.take();
 
             // K&R (old-style) definition: the parameter list held only names,
             // and their declarations follow before the `{` body, e.g.
@@ -166,7 +174,7 @@ impl Parser {
                 self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: Some(body), storage, inline: is_inline, span: sp,
+                    body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
 
@@ -177,14 +185,14 @@ impl Parser {
                 self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: Some(body), storage, inline: is_inline, span: sp,
+                    body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             } else {
                 // Prototype
                 self.eat(TokenKind::Semi);
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    body: None, storage, inline: is_inline, span: sp,
+                    body: None, storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
         }
@@ -1704,6 +1712,15 @@ impl Parser {
                                 self.pending_vector_size = Some(n);
                             }
                         }
+                    } else if name == "constructor" || name == "__constructor__" {
+                        // Optional priority: `constructor(101)`. Default 65535
+                        // (GCC's default, run after all prioritized constructors).
+                        let prio = if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            self.tokens.get(i + 2)
+                                .and_then(|t| t.text.parse::<i32>().ok())
+                                .unwrap_or(65535)
+                        } else { 65535 };
+                        self.pending_constructor = Some(prio);
                     }
                 }
                 _ => {}

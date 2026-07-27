@@ -155,6 +155,9 @@ pub enum Decl {
         /// thousands of unused `extern __inline` SIMD intrinsics in system
         /// headers instead of trying to lower their unimplemented builtins.
         inline: bool,
+        /// `__attribute__((constructor[(prio)]))`: run before `main` via
+        /// `.init_array`. `Some(priority)` (lower priority runs earlier).
+        constructor: Option<i32>,
         span: Span,
     },
     TypeDef {

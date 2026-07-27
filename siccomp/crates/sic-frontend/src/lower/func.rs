@@ -238,6 +238,7 @@ impl<'m> Lowerer {
         body: &[Stmt],
         storage: &Option<StorageClass>,
         inline: bool,
+        constructor: Option<i32>,
     ) -> Result<()> {
         let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
         let ir_params: Result<Vec<_>> = params.iter().map(|p| {
@@ -266,6 +267,7 @@ impl<'m> Lowerer {
         }
 
         let mut func = Function::new(name.to_string(), sig, ir_param_decls, linkage);
+        func.constructor = constructor;
 
         // Create entry block
         let entry_id = func.alloc_block();

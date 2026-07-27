@@ -313,9 +313,9 @@ impl Lowerer {
 
     fn lower_global_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
-            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, .. } => {
+            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, .. } => {
                 if *inline && !self.emit_inline.contains(name) { return Ok(()); }
-                self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline)?;
+                self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline, *constructor)?;
             }
             Decl::Func { body: None, .. } => {
                 // Already handled in collect_declarations
