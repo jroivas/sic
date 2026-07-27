@@ -442,7 +442,10 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .unwrap_or("module")
         .to_string();
 
-    let lowerer = Lowerer::new(module_name);
+    let mut lowerer = Lowerer::new(module_name);
+    // `.sic` REPL inputs may synthesize a `main` from top-level statements; a C
+    // translation unit must define `main` itself.
+    lowerer.set_repl_main(lang == sic_frontend::Lang::Sic);
     let mut ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
     ir_module.source_file = Some(path.to_string());
 

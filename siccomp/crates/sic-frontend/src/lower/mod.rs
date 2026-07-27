@@ -28,6 +28,9 @@ pub struct Lowerer {
     /// `collect_declarations` so `sizeof(global_array)` folds even before the
     /// global is lowered — needed for `enum { N = ARRAY_SIZE(global) }`.
     global_types: HashMap<String, Type>,
+    /// Whether to synthesize a `main` from bare top-level statements (a sic-lang
+    /// REPL convenience). Off for C, where a unit without `main` is a library.
+    repl_main: bool,
 }
 
 impl Lowerer {
@@ -40,7 +43,14 @@ impl Lowerer {
             ptr_size: 8, // assume 64-bit
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),
+            repl_main: true,
         }
+    }
+
+    /// Enable or disable REPL-style `main` synthesis (default on). C sources set
+    /// this off — they must define `main` explicitly.
+    pub fn set_repl_main(&mut self, on: bool) {
+        self.repl_main = on;
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
@@ -870,6 +880,11 @@ impl Lowerer {
         // *defines* functions but happens to lack `main` is a library unit —
         // fabricating a `main` there causes "multiple definition of main" when
         // several such objects are linked together.
+        // Fabricating a `main` is a sic-lang REPL convenience. A C translation
+        // unit must have an explicit `main`; inventing one for a `.c` library unit
+        // that merely lacks it (e.g. testfloat's data-only functionInfos.c) causes
+        // "multiple definition of main" when several such objects are linked.
+        if !self.repl_main { return Ok(()); }
         let defines_functions = tu.decls.iter()
             .any(|d| matches!(d, Decl::Func { body: Some(_), .. }));
         let has_content = tu.decls.iter().any(|d| !matches!(d, Decl::Func { .. }));
