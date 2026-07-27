@@ -237,6 +237,7 @@ impl<'m> Lowerer {
         variadic: bool,
         body: &[Stmt],
         storage: &Option<StorageClass>,
+        inline: bool,
     ) -> Result<()> {
         let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
         let ir_params: Result<Vec<_>> = params.iter().map(|p| {
@@ -247,10 +248,7 @@ impl<'m> Lowerer {
         let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic);
         let is_sret = super::ret_is_sret(&ir_ret);
 
-        let linkage = match storage {
-            Some(StorageClass::Static) => Linkage::Internal,
-            _ => Linkage::External,
-        };
+        let linkage = super::fn_linkage(storage, inline);
 
         let mut ir_param_decls: Vec<sic_ir::Param> = params.iter().zip(&ir_params).map(|(p, ty)| {
             sic_ir::Param {

@@ -1,0 +1,14 @@
+// An emitted `inline` function (sic doesn't truly inline) must have INTERNAL
+// linkage, else multiple TUs that include the same header inline (QEMU's SSE/AES
+// intrinsics: _mm_shuffle_epi8, _mm_aesimc_si128, ...) collide with "multiple
+// definition" at link. Single-TU sanity check here; cross-TU is covered by the
+// build. gnu_inline/static-inline both stay local.
+#include <stdio.h>
+static inline int si(int x){ return x + 1; }
+extern __inline __attribute__((__gnu_inline__)) int gi(int x){ return x * 2; }
+int main(void){
+    setvbuf(stdout,0,2,0);
+    int ok = (si(41)==42 && gi(21)==42);
+    printf("inline-internal-linkage: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

@@ -128,10 +128,7 @@ impl Lowerer {
                     }).collect();
                     let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
                     if self.module.func_ref_by_name(name).is_none() {
-                        let linkage = match storage {
-                            Some(StorageClass::Static) => Linkage::Internal,
-                            _ => Linkage::External,
-                        };
+                        let linkage = fn_linkage(storage, *inline);
                         self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
                     }
                 }
@@ -318,7 +315,7 @@ impl Lowerer {
         match decl {
             Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, .. } => {
                 if *inline && !self.emit_inline.contains(name) { return Ok(()); }
-                self.lower_function(name, ret_ty, params, *variadic, body, storage)?;
+                self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline)?;
             }
             Decl::Func { body: None, .. } => {
                 // Already handled in collect_declarations
@@ -1004,6 +1001,19 @@ pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> Func
 }
 
 /// Whether a return type uses the sret ABI (aggregate returned by value).
+/// Linkage for a function definition. `static` is internal; an `inline`
+/// definition is emitted internal too — sic does not truly inline, so each
+/// translation unit keeps its own copy, and giving them external linkage makes
+/// multiple TUs that use the same header inline (e.g. `_mm_shuffle_epi8`,
+/// `_mm_aesimc_si128`) collide with "multiple definition" at link.
+pub(crate) fn fn_linkage(storage: &Option<StorageClass>, inline: bool) -> Linkage {
+    match storage {
+        Some(StorageClass::Static) => Linkage::Internal,
+        _ if inline => Linkage::Internal,
+        _ => Linkage::External,
+    }
+}
+
 pub(crate) fn ret_is_sret(ret: &Type) -> bool {
     // Structs, unions and `vector_size` arrays are returned through a hidden
     // result pointer. (Only vectors ever return an array by value in C.)
