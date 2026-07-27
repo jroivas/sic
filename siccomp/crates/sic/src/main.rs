@@ -109,6 +109,13 @@ struct Args {
     #[arg(skip)]
     dep_flags: Vec<String>,
 
+    /// `-iquote`/`-isystem`/`-idirafter` include-search flags, forwarded to cpp
+    /// verbatim so their quote-vs-angle search semantics are preserved (unlike
+    /// `-I`, an `-iquote` dir is NOT searched for `#include <...>`). Set from the
+    /// argv pre-pass.
+    #[arg(skip)]
+    cpp_include_flags: Vec<String>,
+
     /// Dependency-only mode (`-M` / `-MM`): emit make rules and don't compile.
     #[arg(skip)]
     deps_only: bool,
@@ -210,6 +217,7 @@ fn main() {
     let mut dump_flag: Option<String> = None;
     let mut f_options: std::collections::HashMap<String, FOption> = std::collections::HashMap::new();
     let mut dep_flags: Vec<String> = Vec::new();
+    let mut cpp_include_flags: Vec<String> = Vec::new();
     let mut deps_only = false;
     let mut pthread = false;
     let mut shared = false;
@@ -252,18 +260,21 @@ fn main() {
         } else if a.starts_with("-x") && a.len() > 2 {
             // Attached form `-xc` — likewise ignored.
         } else if a == "-isystem" || a == "-iquote" || a == "-idirafter" {
-            // GCC include-path variants: treat like `-I<dir>` (the following arg
-            // is the directory). sic has a single include search list.
+            // GCC include-path variants — forward to cpp VERBATIM (as flag + dir).
+            // They must NOT collapse to `-I`: an `-iquote` dir is only searched for
+            // `#include "..."`, so flattening it lets a local header shadow a
+            // system `#include <...>` (QEMU's include/elf.h shadowed the system
+            // <elf.h> that gelf.h needs, breaking tcg/debuginfo.c).
+            cpp_include_flags.push(a.clone());
             if let Some(dir) = iter.next() {
-                argv.push(format!("-I{}", dir));
+                cpp_include_flags.push(dir);
             }
-        } else if let Some(dir) = a.strip_prefix("-isystem")
-            .or_else(|| a.strip_prefix("-iquote"))
-            .or_else(|| a.strip_prefix("-idirafter"))
-            .filter(|d| !d.is_empty())
+        } else if a.starts_with("-isystem")
+            || a.starts_with("-iquote")
+            || a.starts_with("-idirafter")
         {
-            // Attached form, e.g. `-isystem../linux-headers`.
-            argv.push(format!("-I{}", dir));
+            // Attached form, e.g. `-isystem../linux-headers`: forward verbatim.
+            cpp_include_flags.push(a);
         } else if a == "-include" || a == "-imacros" {
             // Force-include a file / its macros: forward to cpp verbatim.
             dep_flags.push(a);
@@ -318,6 +329,7 @@ fn main() {
     args.dump_flag = dump_flag;
     args.f_options = f_options;
     args.dep_flags = dep_flags;
+    args.cpp_include_flags = cpp_include_flags;
     args.pthread = pthread;
     args.shared = shared;
     args.deps_only = deps_only;
@@ -413,6 +425,9 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // `.d` file as a side effect of preprocessing.
     let dep_owned = effective_dep_flags(args);
     let mut extra: Vec<&str> = dep_owned.iter().map(|s| s.as_str()).collect();
+    // Preserve `-iquote`/`-isystem`/`-idirafter` search semantics (forwarded to
+    // cpp verbatim rather than flattened to `-I`).
+    extra.extend(args.cpp_include_flags.iter().map(|s| s.as_str()));
     // `-pthread` compiles with `_REENTRANT` defined.
     if args.pthread {
         extra.push("-D_REENTRANT");
