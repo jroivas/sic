@@ -1,0 +1,20 @@
+// GCC's width-suffixed atomic builtins: `__sync_{val,bool}_compare_and_swap_N`
+// (N = 1/2/4/8/16). QEMU's 128-bit host-atomics path uses the `_16` form once
+// CMPXCHG16B is detected. sic shares one width-agnostic handler (single-thread
+// load/compare/store; correct for the emulator's use).
+#include <stdio.h>
+int main(void){
+    setvbuf(stdout,0,2,0);
+    int ok = 1;
+    // 4-byte sized form
+    int a = 10;
+    if (__sync_val_compare_and_swap_4(&a, 10, 20) != 10 || a != 20) ok = 0;
+    if (__sync_bool_compare_and_swap_4(&a, 99, 30) != 0 || a != 20) ok = 0;
+    // 16-byte form on __int128
+    __int128 v = ((__int128)0x1122334455667788ULL << 64) | 0x99aabbccddeeff00ULL;
+    __int128 old = v;
+    if (__sync_val_compare_and_swap_16(&v, old, 42) != old || v != 42) ok = 0;
+    if (__sync_bool_compare_and_swap_16(&v, 42, 100) != 1 || v != 100) ok = 0;
+    printf("sized-atomic-cas: %s\n", ok?"OK":"FAIL");
+    return ok?0:1;
+}

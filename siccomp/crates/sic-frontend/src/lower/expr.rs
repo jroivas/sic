@@ -1614,11 +1614,14 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Constant::zero());
                     }
                 }
-                // Compare-and-swap.
-                "__sync_val_compare_and_swap" => {
+                // Compare-and-swap. GCC exposes both the type-generic form and the
+                // width-suffixed `_1/_2/_4/_8/_16` forms (QEMU's atomic128 host
+                // path uses `_16` for 128-bit CAS). `lower_atomic_cas` is width-
+                // agnostic (it works off the pointee type, incl. i128).
+                n if sync_builtin_base(n) == "__sync_val_compare_and_swap" => {
                     if let [p, o, d, ..] = args { return self.lower_atomic_cas(p, o, d, false); }
                 }
-                "__sync_bool_compare_and_swap" => {
+                n if sync_builtin_base(n) == "__sync_bool_compare_and_swap" => {
                     if let [p, o, d, ..] = args { return self.lower_atomic_cas(p, o, d, true); }
                 }
                 "__atomic_compare_exchange_n" | "__atomic_compare_exchange" => {
@@ -2573,6 +2576,22 @@ fn builtin_bit_op(name: &str) -> Option<(BitOp, u32)> {
 /// Classify an atomic/sync read-modify-write builtin into its arithmetic op and
 /// whether it returns the new value (vs the old). Returns `None` for names that
 /// aren't of this family (or use an op we don't special-case, e.g. `nand`).
+/// Map a `__sync_*`/`__atomic_*` builtin name to its width-generic base by
+/// stripping a trailing `_1/_2/_4/_8/_16` size suffix. GCC exposes both the
+/// type-generic form and these sized forms (QEMU's 128-bit host atomics use the
+/// `_16` variant); both share one handler. Names without such a suffix (or that
+/// aren't atomics) are returned unchanged.
+fn sync_builtin_base(name: &str) -> &str {
+    for w in ["_16", "_8", "_4", "_2", "_1"] {
+        if let Some(base) = name.strip_suffix(w) {
+            if base.starts_with("__sync_") || base.starts_with("__atomic_") {
+                return base;
+            }
+        }
+    }
+    name
+}
+
 fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
     let (op_name, ret_new) = if let Some(rest) = name.strip_prefix("__atomic_fetch_") {
         (rest, false)
