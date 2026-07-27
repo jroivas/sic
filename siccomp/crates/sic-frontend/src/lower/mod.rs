@@ -1013,6 +1013,16 @@ pub(crate) fn ret_is_sret(ret: &Type) -> bool {
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
     match &e.kind {
         ExprKind::IntLit(v, _) => Ok(*v),
+        // `__builtin_constant_p(x)` folds to 0 here (sic can't prove constness),
+        // matching how `lower_call` lowers it. This lets a
+        // `__builtin_constant_p(x) ? <fold> : <runtime>` ternary fold to its
+        // runtime arm and drop the dead `<fold>` arm (QEMU's dup_const/tcg
+        // macros whose dead arm ends in `qemu_build_not_reached_always()`).
+        ExprKind::Call { func, .. }
+            if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
+        {
+            Ok(0)
+        }
         ExprKind::UIntLit(v, _) => Ok(*v as i64),
         ExprKind::CharLit(v) => Ok(*v as i64),
         ExprKind::Ident(name) => {

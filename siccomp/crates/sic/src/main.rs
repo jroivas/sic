@@ -571,6 +571,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         let dep_owned = effective_dep_flags(args);
         let mut extra: Vec<&str> = args.dump_flag.as_deref().into_iter().collect();
         extra.extend(dep_owned.iter().map(|s| s.as_str()));
+        // Preserve `-iquote`/`-isystem` search semantics for `-E` too (meson's
+        // configure probes preprocess with these).
+        extra.extend(args.cpp_include_flags.iter().map(|s| s.as_str()));
         let mut out_text = String::new();
         for src in &sources {
             out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &extra)

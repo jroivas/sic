@@ -702,6 +702,15 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_ternary(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
+        // Constant-fold a compile-time-constant condition to just the taken arm,
+        // like gcc/clang. QEMU's `dup_const`/tcg macros nest
+        // `__builtin_constant_p(x) ? <fold> : <runtime>`; sic returns 0 for
+        // `__builtin_constant_p`, so the dead `<fold>` arm (which ends in an
+        // exhaustiveness `qemu_build_not_reached_always()`) must not be lowered —
+        // else it emits a call to that deliberately-undefined symbol.
+        if let Ok(v) = crate::lower::eval_const_expr(cond, &self.lowerer.enum_consts) {
+            return if v != 0 { self.lower_expr(then) } else { self.lower_expr(else_) };
+        }
         let cond_val = self.lower_expr(cond)?;
         let cond_bool = self.to_bool(cond_val)?;
 
