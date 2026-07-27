@@ -1070,6 +1070,19 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
             Ok(if eval_const_expr(expr, enum_consts)? == 0 { 1 } else { 0 })
         }
         ExprKind::BinOp { op, lhs, rhs } => {
+            // Short-circuit `&&`/`||`: a constant-false `&&` (or constant-true `||`)
+            // folds even when the other operand is not constant. This is what makes
+            // `if (kvm_enabled() && x)` — where `kvm_enabled()` is `(0)` in a
+            // user-mode build — a dead branch, so its call to the (unstubbed)
+            // `kvm_arch_get_supported_cpuid` is never emitted.
+            if matches!(op, BinOpKind::LogAnd) {
+                if eval_const_expr(lhs, enum_consts)? == 0 { return Ok(0); }
+                return Ok(if eval_const_expr(rhs, enum_consts)? != 0 { 1 } else { 0 });
+            }
+            if matches!(op, BinOpKind::LogOr) {
+                if eval_const_expr(lhs, enum_consts)? != 0 { return Ok(1); }
+                return Ok(if eval_const_expr(rhs, enum_consts)? != 0 { 1 } else { 0 });
+            }
             let l = eval_const_expr(lhs, enum_consts)?;
             let r = eval_const_expr(rhs, enum_consts)?;
             Ok(match op {
