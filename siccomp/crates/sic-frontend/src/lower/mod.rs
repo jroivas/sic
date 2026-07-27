@@ -377,6 +377,24 @@ impl Lowerer {
             }
             return Ok(());
         }
+        // Reserve the global's ref and register it BEFORE building the
+        // initializer, so a self-referential static initializer resolves — e.g.
+        // QEMU's `QTAILQ_HEAD_INITIALIZER(list)` sets `list.tqh_circ.tql_prev =
+        // &list.tqh_circ`. Without this the self-pointer serializes to NULL and
+        // the first list insert dereferences it (SIGSEGV).
+        if !self.globals_map.contains_key(&d.name) {
+            let placeholder_linkage = match base_ty.storage {
+                Some(StorageClass::Static) => Linkage::Internal,
+                Some(StorageClass::Extern) => Linkage::Import,
+                _ => Linkage::External,
+            };
+            let g = Global {
+                name: d.name.clone(), ty: ir_ty.clone(), init: None,
+                linkage: placeholder_linkage, constant: type_is_const(&d.ty),
+            };
+            let gref = self.module.add_global(g);
+            self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
+        }
         let init = self.build_global_init(d, &mut ir_ty);
         // If already declared, a definition must upgrade a prior `extern`
         // declaration — otherwise the definition is dropped and the symbol left
