@@ -797,6 +797,20 @@ impl<'m> FuncCtx<'m> {
     // ─── Control flow ────────────────────────────────────────────────────────
 
     fn lower_if(&mut self, cond: &Expr, then: &Stmt, else_: Option<&Stmt>) -> Result<()> {
+        // Fold a compile-time-constant condition to just its taken branch, like
+        // gcc/clang. QEMU's feature gates expand to a literal (`whpx_enabled()` →
+        // `0` on Linux); lowering the dead branch would emit calls to functions
+        // that are never compiled/linked (`whpx_*`/`hvf_*`) → undefined symbols.
+        // `eval_const_expr` only succeeds for genuine constant expressions (no
+        // calls/side effects), so dropping the other branch is safe.
+        if let Ok(v) = crate::lower::eval_const_expr(cond, &self.lowerer.enum_consts) {
+            if v != 0 {
+                return self.lower_stmt(then);
+            } else if let Some(e) = else_ {
+                return self.lower_stmt(e);
+            }
+            return Ok(());
+        }
         let cond_val = self.lower_expr(cond)?;
         let cond_bool = self.to_bool(cond_val)?;
 
