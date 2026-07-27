@@ -239,6 +239,12 @@ fn main() {
         } else if a == "-E" {
             // Preprocess only.
             preprocess_only = true;
+        } else if a == "-P" {
+            // Inhibit linemarkers in preprocessed output (`cpp -P`). meson passes
+            // `-E -P` for its header-detection probes; forward it to cpp. Without
+            // accepting it, clap rejected the whole invocation → every such probe
+            // failed at configure time (HAVE_PTY_H etc. wrongly came out unset).
+            dep_flags.push("-P".to_string());
         } else if a == "-x" {
             // `-x <lang>` selects the input language. sic only handles C, so
             // accept and ignore the language argument (consume it).
