@@ -685,6 +685,16 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
     link.arg("-o").arg(out_path);
 
+    // Garbage-collect unreferenced sections. sic emits one section per function
+    // (`-ffunction-sections`), so this drops functions that were pulled in from an
+    // archive member for a sibling symbol but are themselves unused — matching
+    // GCC's behavior and avoiding dangling references to symbols not linked in
+    // this configuration (e.g. QEMU user-mode's pci-stub → monitor_printf).
+    // `.init_array` and `--dynamic-list` symbols are roots the GC preserves.
+    if !args.shared {
+        link.arg("-Wl,--gc-sections");
+    }
+
     // Produce a shared object rather than an executable.
     if args.shared {
         link.arg("-shared");

@@ -85,11 +85,19 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         .finish(flags)
         .map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
 
-    let obj_builder = ObjectBuilder::new(
+    let mut obj_builder = ObjectBuilder::new(
         isa,
         ir_module.name.as_bytes().to_vec(),
         cranelift_module::default_libcall_names(),
     )?;
+    // Emit each function into its own ELF section (`.text.<name>`), like GCC's
+    // `-ffunction-sections`. Combined with the driver's `--gc-sections`, this
+    // lets the linker drop functions that are pulled in from an archive member
+    // for one symbol but are themselves unreferenced — e.g. QEMU's pci-stub.c
+    // bundles `msi_enabled` (needed) with `hmp_pcie_aer_inject_error` (calls the
+    // unavailable `monitor_printf`); without per-function GC the whole object,
+    // and thus the dangling reference, is retained and the link fails.
+    obj_builder.per_function_section(true);
 
     let mut obj_module = ObjectModule::new(obj_builder);
 
