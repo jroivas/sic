@@ -222,7 +222,11 @@ fn main() {
     let mut pthread = false;
     let mut shared = false;
     let mut argv: Vec<String> = Vec::new();
-    let mut iter = std::env::args().peekable();
+    // Expand `@file` response files (GCC/Clang convention): meson passes the huge
+    // link command line as `@qemu-system-*.rsp`. Read and tokenize them into the
+    // argument stream before processing.
+    let expanded = expand_response_files(std::env::args());
+    let mut iter = expanded.into_iter().peekable();
     while let Some(a) = iter.next() {
         if a == "-pthread" || a == "-pthreads" {
             // Compile with `_REENTRANT` and link the pthread library.
@@ -275,6 +279,17 @@ fn main() {
         {
             // Attached form, e.g. `-isystem../linux-headers`: forward verbatim.
             cpp_include_flags.push(a);
+        } else if a == "-Xlinker" {
+            // `-Xlinker <arg>` passes one token straight to the linker; forward it
+            // as `-Wl,<arg>` (the link driver understands both).
+            if let Some(v) = iter.next() {
+                argv.push(format!("-Wl,{}", v));
+            }
+        } else if let Some(rest) = a.strip_prefix("-Xlinker=") {
+            argv.push(format!("-Wl,{}", rest));
+        } else if a == "-Xassembler" || a == "-Xpreprocessor" {
+            // Pass-through for the assembler/preprocessor stages; consume the arg.
+            let _ = iter.next();
         } else if a == "-include" || a == "-imacros" {
             // Force-include a file / its macros: forward to cpp verbatim.
             dep_flags.push(a);
@@ -387,6 +402,60 @@ fn opt_cranelift_level(opt: &str) -> &'static str {
             Err(_) => "none", // unrecognized level: stay safe
         },
     }
+}
+
+/// Expand GCC/Clang `@file` response-file arguments into a flat argument list.
+/// The file holds whitespace-separated arguments (with `'`/`"` quoting and `\`
+/// escapes); expansion is recursive. meson uses these for the huge link lines.
+fn expand_response_files(args: impl Iterator<Item = String>) -> Vec<String> {
+    fn push_expanded(arg: String, out: &mut Vec<String>, depth: u32) {
+        if depth < 32 {
+            if let Some(path) = arg.strip_prefix('@') {
+                if let Ok(contents) = std::fs::read_to_string(path) {
+                    for tok in tokenize_response(&contents) {
+                        push_expanded(tok, out, depth + 1);
+                    }
+                    return;
+                }
+            }
+        }
+        out.push(arg);
+    }
+    let mut out = Vec::new();
+    for a in args {
+        push_expanded(a, &mut out, 0);
+    }
+    out
+}
+
+/// Split a response-file's contents into arguments: whitespace-separated, with
+/// `'`/`"` quoting and `\`-escapes (GCC's `@file` lexing).
+fn tokenize_response(s: &str) -> Vec<String> {
+    let mut toks = Vec::new();
+    let mut cur = String::new();
+    let mut in_tok = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q { quote = None; }
+                else if c == '\\' && q == '"' {
+                    if let Some(&n) = chars.peek() { cur.push(n); chars.next(); }
+                } else { cur.push(c); }
+            }
+            None => {
+                if c == '\'' || c == '"' { quote = Some(c); in_tok = true; }
+                else if c == '\\' {
+                    if let Some(&n) = chars.peek() { cur.push(n); chars.next(); in_tok = true; }
+                } else if c.is_whitespace() {
+                    if in_tok { toks.push(std::mem::take(&mut cur)); in_tok = false; }
+                } else { cur.push(c); in_tok = true; }
+            }
+        }
+    }
+    if in_tok { toks.push(cur); }
+    toks
 }
 
 /// An input file is a linker input (object/archive/shared lib) rather than a
