@@ -655,8 +655,18 @@ impl<'m> FuncCtx<'m> {
                 // `T v = <aggregate expr>` (e.g. a compound literal, a struct
                 // returned by value, or a `vector_size` array from an element-wise
                 // operator/intrinsic) copies the whole object rather than storing
-                // a pointer/register-sized scalar.
-                if matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+                // a pointer/register-sized scalar. An array-typed target only takes
+                // this path for a genuine aggregate RHS (a vector); a scalar RHS is
+                // a plain store (the array being an array-decayed element lvalue).
+                let aggregate_init = match ty {
+                    Type::Struct(_) | Type::Union(_) => true,
+                    Type::Array { .. } => matches!(
+                        self.infer_expr_type(e),
+                        Ok(Type::Array { .. } | Type::Struct(_) | Type::Union(_))
+                    ),
+                    _ => false,
+                };
+                if aggregate_init {
                     let src = self.lower_aggregate_ptr(e)?;
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());

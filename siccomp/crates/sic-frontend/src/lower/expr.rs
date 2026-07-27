@@ -535,7 +535,19 @@ impl<'m> FuncCtx<'m> {
 
         // Aggregate (struct/union) assignment is a byte copy, not a scalar
         // load/store — the latter would truncate anything wider than a register.
-        if op.is_none() && matches!(lv.ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+        // For an array-typed lvalue this only applies to a genuine aggregate RHS
+        // (a vector produced by an operator/intrinsic); a scalar RHS to an
+        // array-typed lvalue is a deref like `*arr = 1` (an array decayed to a
+        // pointer whose element type sic surfaces as the array), a scalar store.
+        let aggregate_assign = op.is_none() && match &lv.ty {
+            Type::Struct(_) | Type::Union(_) => true,
+            Type::Array { .. } => matches!(
+                self.infer_expr_type(rhs),
+                Ok(Type::Array { .. } | Type::Struct(_) | Type::Union(_))
+            ),
+            _ => false,
+        };
+        if aggregate_assign {
             // Copy the whole object, whether the RHS is an lvalue or an aggregate
             // rvalue (e.g. a compound literal `(T){...}`, a struct return, or a
             // vector produced by an element-wise operator/intrinsic).
@@ -2064,7 +2076,19 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => {
                 let ptr = self.lower_expr(inner)?;
                 let ptr_ty = self.val_type(&ptr);
-                let inner_ty = self.pointee_of(&ptr_ty);
+                // `*x`: if `x` is an array it decays to a pointer to its element, so
+                // the deref yields the element (`*arr` == `arr[0]`); if `x` is a
+                // pointer-to-array it yields the whole array. The C type of `x`
+                // disambiguates (both are `Pointer(Array)` in the IR).
+                let inner_ty = match self.infer_expr_type(inner) {
+                    Ok(Type::Array { elem, .. }) => {
+                        super::types::resolve_aggregate(&elem, &self.lowerer.struct_types)
+                    }
+                    Ok(Type::Pointer(t)) => {
+                        super::types::resolve_aggregate(&t, &self.lowerer.struct_types)
+                    }
+                    _ => self.pointee_of(&ptr_ty),
+                };
                 Ok(LValue::plain(ptr, inner_ty))
             }
             ExprKind::Index { base, index } => self.lower_lvalue_index(base, index),
