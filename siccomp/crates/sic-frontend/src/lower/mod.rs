@@ -300,11 +300,17 @@ impl Lowerer {
                 self.enum_consts.insert(v.name.clone(), val);
                 counter = val + 1;
             }
+            // Publish the updated enum constants so subsequent array dimensions
+            // (`T arr[SOME_ENUM_MAX]`) fold via the scope-less `lower_type` path.
+            types::set_enum_consts(&self.enum_consts);
         }
         Ok(())
     }
 
     fn lower_translation_unit(&mut self, tu: &TranslationUnit) -> Result<()> {
+        // All enums are registered by now; make them available to array-size
+        // folding in the global-lowering pass.
+        types::set_enum_consts(&self.enum_consts);
         for decl in &tu.decls {
             self.lower_global_decl(decl)?;
         }

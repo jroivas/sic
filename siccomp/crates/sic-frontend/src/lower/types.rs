@@ -1,8 +1,23 @@
 use std::collections::HashMap;
+use std::cell::RefCell;
 use crate::ast::*;
 use crate::Result;
 use crate::CompileError;
 use sic_ir::{Type, StructType, UnionType, FunctionType};
+
+thread_local! {
+    /// File-scope enum constants, published by the Lowerer so that array
+    /// dimensions like `T arr[MODULE_INIT_MAX]` (an enum constant) resolve during
+    /// the scope-less `lower_type` path. Without this a global array sized by an
+    /// enum comes out length 0 — QEMU's `init_type_list[MODULE_INIT_MAX]` then
+    /// overlaps the next global and crashes at startup.
+    static ENUM_CONSTS: RefCell<HashMap<String, i64>> = RefCell::new(HashMap::new());
+}
+
+/// Publish the current file-scope enum constants for array-dimension folding.
+pub fn set_enum_consts(m: &HashMap<String, i64>) {
+    ENUM_CONSTS.with(|c| *c.borrow_mut() = m.clone());
+}
 
 /// The x86-64 System V `__builtin_va_list`: `__va_list_tag[1]`, where the tag is
 /// `{u32 gp_offset; u32 fp_offset; void* overflow_arg_area; void* reg_save_area;}`
@@ -75,11 +90,13 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 // `3 << 27` or `800 * 512 * 4`, and `sizeof(T)` / `offsetof(...)`
                 // (needed for e.g. `u8 space[offsetof(SrcList,a)+sizeof(SrcItem)]`).
                 // Genuine VLAs / non-constant sizes evaluate to 0, as before.
-                // (Enum constants aren't in scope here, so those still fall back to 0.)
-                eval_const_size(sz, named, ptr_size, &HashMap::new())
-                    .filter(|&v| v >= 0)
-                    .map(|v| v as usize)
-                    .unwrap_or(0)
+                // Enum constants resolve via the published `ENUM_CONSTS`.
+                ENUM_CONSTS.with(|ec| {
+                    eval_const_size(sz, named, ptr_size, &ec.borrow())
+                        .filter(|&v| v >= 0)
+                        .map(|v| v as usize)
+                })
+                .unwrap_or(0)
             } else {
                 0 // incomplete array type
             };
