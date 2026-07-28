@@ -109,7 +109,15 @@ impl Lowerer {
                                 }
                             }
                         }
-                        self.global_types.entry(d.name.clone()).or_insert(ty);
+                        // Prefer a complete array type over an incomplete one: a
+                        // header's `extern T a[];` (len 0) may precede the sized
+                        // definition `T a[N] = {...}`, and `sizeof(a)` must fold to
+                        // the real length (QEMU's keymap
+                        // `qemu_input_map_*_len = sizeof(map)/sizeof(map[0])`).
+                        let new_complete = matches!(&ty, Type::Array { len, .. } if *len > 0);
+                        if new_complete || !self.global_types.contains_key(&d.name) {
+                            self.global_types.insert(d.name.clone(), ty);
+                        }
                     }
                 }
             }
@@ -526,7 +534,11 @@ impl Lowerer {
                 }
             }
             Some(Initializer::Expr(e)) => {
-                match eval_const_expr(e, &self.enum_consts) {
+                // Use the fuller integer evaluator (it also folds `sizeof(expr)` /
+                // `offsetof` / `alignof` against global types), so a scalar global
+                // like `const unsigned n = sizeof(arr)/sizeof(arr[0]);` gets a real
+                // value instead of being left undefined.
+                match self.eval_const_int(e).ok_or(()) {
                     Ok(v) => Some(Constant::Int(v)),
                     Err(_) => {
                         // A pointer global initialized with a symbolic address:
