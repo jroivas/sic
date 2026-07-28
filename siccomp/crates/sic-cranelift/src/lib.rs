@@ -104,8 +104,18 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // ── Declare all functions first ──────────────────────────────────────────
     let mut func_ids: HashMap<u32, FuncId> = HashMap::new();
 
+    // An `internal` (static) function unreachable from any external entry,
+    // constructor, or global function-pointer is dead — don't emit it. sic can
+    // over-emit `static inline`s from headers (e.g. an un-selected `_Generic`
+    // branch), whose stray symbol references would otherwise pull archive members
+    // into conflict with unit-test stubs. Non-internal functions are always kept.
+    let reachable_fns = ir_module.reachable_functions();
+
     // Defined functions
     for (i, f) in ir_module.functions.iter().enumerate() {
+        if f.linkage == Linkage::Internal && !reachable_fns.contains(&(i as u32)) {
+            continue;
+        }
         let sig = build_cl_sig(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         let linkage = ir_linkage(f.linkage);
         let fid = obj_module.declare_function(&f.name, linkage, &sig)?;
@@ -252,7 +262,8 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     let mut ctx = cranelift_codegen::Context::new();
     let dbg_timing = std::env::var("SIC_TIMING").is_ok();
     for (i, f) in ir_module.functions.iter().enumerate() {
-        let fid = func_ids[&(i as u32)];
+        // Skip functions that were not declared (dead internal functions).
+        let Some(&fid) = func_ids.get(&(i as u32)) else { continue };
         ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 

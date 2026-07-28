@@ -194,13 +194,20 @@ impl Module {
     /// symbol for each pollutes the object and can leave unresolvable references
     /// (e.g. glibc's internal `__asinhf`), so only referenced externs matter.
     pub fn used_externs(&self) -> std::collections::HashSet<usize> {
+        // Only scan functions that will actually be emitted; an extern referenced
+        // solely by a dead (unemitted) internal function must not be declared, or
+        // it becomes an undefined symbol that pulls archive members.
+        let reachable = self.reachable_functions();
         let mut used = std::collections::HashSet::new();
         let note_val = |v: &Val, used: &mut std::collections::HashSet<usize>| {
             if let Val::Func(fr) = v {
                 if fr.is_extern() { used.insert(fr.index()); }
             }
         };
-        for f in &self.functions {
+        for (i, f) in self.functions.iter().enumerate() {
+            if f.linkage == Linkage::Internal && !reachable.contains(&(i as u32)) {
+                continue;
+            }
             for bb in &f.blocks {
                 for instr in &bb.instrs {
                     if let Instr::Call { func, .. } = instr {
@@ -256,6 +263,65 @@ impl Module {
             }
         }
         used
+    }
+
+    /// Indices (into `functions`) of *defined* functions reachable from a root —
+    /// an externally-visible function, a constructor, or a function whose address
+    /// a global initializer stores — following calls and address-of. An `internal`
+    /// (`static`) function unreachable from any root is dead: sic may have emitted
+    /// it from a header (e.g. an un-selected `_Generic` branch of QEMU's
+    /// `qemu_lockable_*`), and its stray references would otherwise pull archive
+    /// members into conflict with unit-test stubs. Not removing them keeps the
+    /// object correct but bloated; removing them matches what a real compiler +
+    /// `--gc-sections` achieve, without the archive-pull side effect.
+    pub fn reachable_functions(&self) -> std::collections::HashSet<u32> {
+        use std::collections::HashSet;
+        let mut reachable: HashSet<u32> = HashSet::new();
+        let mut work: Vec<u32> = Vec::new();
+        // Roots: anything not purely-internal, plus constructors.
+        for (i, f) in self.functions.iter().enumerate() {
+            if f.linkage != Linkage::Internal || f.constructor.is_some() {
+                if reachable.insert(i as u32) { work.push(i as u32); }
+            }
+        }
+        // Roots: functions whose address a global initializer stores.
+        for g in &self.globals {
+            if let Some(Constant::Aggregate { relocs, .. }) = &g.init {
+                for (_, target) in relocs {
+                    if let RelocTarget::Func(fr) = target {
+                        if !fr.is_extern() && reachable.insert(fr.index() as u32) {
+                            work.push(fr.index() as u32);
+                        }
+                    }
+                }
+            }
+        }
+        // Transitive closure over calls and address-of within reachable functions.
+        while let Some(fi) = work.pop() {
+            let Some(f) = self.functions.get(fi as usize) else { continue };
+            let mut refs: Vec<u32> = Vec::new();
+            for bb in &f.blocks {
+                for instr in &bb.instrs {
+                    if let Instr::Call { func, .. } = instr {
+                        if !func.is_extern() { refs.push(func.index() as u32); }
+                    }
+                    instr.for_each_val(|v| {
+                        if let Val::Func(fr) = v {
+                            if !fr.is_extern() { refs.push(fr.index() as u32); }
+                        }
+                    });
+                }
+                bb.terminator.for_each_val(|v| {
+                    if let Val::Func(fr) = v {
+                        if !fr.is_extern() { refs.push(fr.index() as u32); }
+                    }
+                });
+            }
+            for r in refs {
+                if reachable.insert(r) { work.push(r); }
+            }
+        }
+        reachable
     }
 }
 
