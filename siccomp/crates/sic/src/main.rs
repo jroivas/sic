@@ -116,6 +116,11 @@ struct Args {
     #[arg(skip)]
     cpp_include_flags: Vec<String>,
 
+    /// Link-line tokens (objects/archives/sources, `-l`/`-L`/`-Wl,`/`-pthread`) in
+    /// original order, so the linker sees archives inside their `--start-group`.
+    #[arg(skip)]
+    link_order: Vec<String>,
+
     /// Dependency-only mode (`-M` / `-MM`): emit make rules and don't compile.
     #[arg(skip)]
     deps_only: bool,
@@ -218,6 +223,11 @@ fn main() {
     let mut f_options: std::collections::HashMap<String, FOption> = std::collections::HashMap::new();
     let mut dep_flags: Vec<String> = Vec::new();
     let mut cpp_include_flags: Vec<String> = Vec::new();
+    // Link-line tokens (objects, archives, sources, `-l`/`-L`/`-Wl,`/`-Xlinker`,
+    // `-pthread`) in their ORIGINAL order. The linker is order-sensitive —
+    // `-Wl,--start-group <archives> -Wl,--end-group` must keep the archives
+    // between the group markers, or circular inter-archive deps don't resolve.
+    let mut link_order: Vec<String> = Vec::new();
     let mut deps_only = false;
     let mut pthread = false;
     let mut shared = false;
@@ -227,10 +237,28 @@ fn main() {
     // argument stream before processing.
     let expanded = expand_response_files(std::env::args());
     let mut iter = expanded.into_iter().peekable();
+    // argv[0] is the program name; clap needs it but it is not a link input.
+    if let Some(arg0) = iter.next() {
+        argv.push(arg0);
+    }
     while let Some(a) = iter.next() {
         if a == "-pthread" || a == "-pthreads" {
             // Compile with `_REENTRANT` and link the pthread library.
             pthread = true;
+            link_order.push("-pthread".to_string());
+        } else if a == "-o" {
+            // Output file: forward to clap (`-o <path>`); the path is NOT a link
+            // input, so it must not enter `link_order`.
+            argv.push(a);
+            if let Some(v) = iter.next() { argv.push(v); }
+        } else if a.starts_with("-Wl,") {
+            // Linker pass-through: keep it in link order (group markers etc.).
+            link_order.push(a);
+        } else if a.starts_with("-l") && a.len() > 2 {
+            // `-l<lib>`: a link input whose position matters (archive ordering).
+            link_order.push(a);
+        } else if a.starts_with("-L") && a.len() > 2 {
+            link_order.push(a);
         } else if a == "-shared" {
             // Produce a shared object; pass through to the linker.
             shared = true;
@@ -281,12 +309,13 @@ fn main() {
             cpp_include_flags.push(a);
         } else if a == "-Xlinker" {
             // `-Xlinker <arg>` passes one token straight to the linker; forward it
-            // as `-Wl,<arg>` (the link driver understands both).
+            // as `-Wl,<arg>` (the link driver understands both), keeping its place
+            // in the link order.
             if let Some(v) = iter.next() {
-                argv.push(format!("-Wl,{}", v));
+                link_order.push(format!("-Wl,{}", v));
             }
         } else if let Some(rest) = a.strip_prefix("-Xlinker=") {
-            argv.push(format!("-Wl,{}", rest));
+            link_order.push(format!("-Wl,{}", rest));
         } else if a == "-Xassembler" || a == "-Xpreprocessor" {
             // Pass-through for the assembler/preprocessor stages; consume the arg.
             let _ = iter.next();
@@ -335,6 +364,13 @@ fn main() {
             dump_flag = Some(a.clone());
             preprocess_only = true;
         } else {
+            // A positional argument: a source to compile or a link input
+            // (object/archive). Record its place in the link order (sources are
+            // substituted with their compiled temp object at link time). Flags
+            // beginning with `-` are not link inputs.
+            if !a.starts_with('-') {
+                link_order.push(a.clone());
+            }
             argv.push(a);
         }
     }
@@ -345,6 +381,7 @@ fn main() {
     args.f_options = f_options;
     args.dep_flags = dep_flags;
     args.cpp_include_flags = cpp_include_flags;
+    args.link_order = link_order;
     args.pthread = pthread;
     args.shared = shared;
     args.deps_only = deps_only;
@@ -624,35 +661,14 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // ── Link ───────────────────────────────────────────────────────────────────
     let cc = resolve_linker();
 
-    // Collect linker pass-through flags: search paths, libraries, and `-Wl,`.
-    let mut link_flags: Vec<String> = Vec::new();
-    // `-pthread` links the pthread library (the driver handles the specifics).
-    if args.pthread {
-        link_flags.push("-pthread".to_string());
-    }
-    for dir in &args.lib_dirs {
-        link_flags.push(format!("-L{}", dir));
-    }
-    for lib in &args.libs {
-        link_flags.push(format!("-l{}", lib));
-    }
-    // `-Wl,a,b,c` passes a, b, c straight through to the linker.
-    for w in &args.warnings {
-        if let Some(rest) = w.strip_prefix("l,") {
-            for opt in rest.split(',') {
-                link_flags.push(format!("-Wl,{}", opt));
-            }
-        }
-    }
-
     // No input files: this is a linker query/utility invocation such as
     // `-Wl,--version` (which asks the linker to print its version and exit).
     // Forward the linker flags to the driver and let it respond, like gcc/clang.
     if sources.is_empty() && objects.is_empty() {
-        if link_flags.is_empty() {
+        if args.link_order.is_empty() {
             return Err("no input files".into());
         }
-        let status = Command::new(&cc).args(&link_flags).status()?;
+        let status = Command::new(&cc).args(&args.link_order).status()?;
         return if status.success() {
             Ok(())
         } else {
@@ -676,13 +692,13 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let out_path = args.output.as_deref().unwrap_or("a.out");
     let mut link = Command::new(&cc);
 
-    // Compiled sources (temp objects) and user-provided object files.
-    for tmp in &tmp_objs {
-        link.arg(tmp.path());
-    }
-    for obj in &objects {
-        link.arg(obj);
-    }
+    // Map each source path to the temp object it compiled to, so we can splice
+    // compiled sources back into the link line at their original position.
+    let src_obj: std::collections::HashMap<&str, std::path::PathBuf> = sources.iter()
+        .zip(&tmp_objs)
+        .map(|(s, t)| (s.as_str(), t.path().to_path_buf()))
+        .collect();
+
     link.arg("-o").arg(out_path);
 
     // Garbage-collect unreferenced sections. sic emits one section per function
@@ -695,6 +711,17 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         link.arg("-Wl,--gc-sections");
     }
 
+    // Emit all link inputs (objects, archives, `-l`/`-L`/`-Wl,`/`-pthread`) in
+    // their ORIGINAL order — the linker is order-sensitive, and archives must
+    // stay inside their `-Wl,--start-group ... -Wl,--end-group`. Compiled sources
+    // are substituted with their temp object at the same position.
+    for tok in &args.link_order {
+        match src_obj.get(tok.as_str()) {
+            Some(obj) => { link.arg(obj); }
+            None => { link.arg(tok); }
+        }
+    }
+
     // Produce a shared object rather than an executable.
     if args.shared {
         link.arg("-shared");
@@ -704,8 +731,6 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.debug_info {
         link.arg("-g");
     }
-
-    link.args(&link_flags);
 
     let status = link.status()?;
     if !status.success() {
