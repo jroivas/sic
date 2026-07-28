@@ -125,8 +125,16 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     }
 
     // ── Declare globals ──────────────────────────────────────────────────────
+    // An `extern` (Import) global that nothing references is not emitted as an
+    // undefined symbol — otherwise the linker pulls archive members to satisfy a
+    // symbol the code never uses (see `used_globals`). Defined globals are always
+    // declared (they are this module's definitions).
+    let used_globals = ir_module.used_globals();
     let mut global_ids: HashMap<u32, cranelift_module::DataId> = HashMap::new();
     for (i, g) in ir_module.globals.iter().enumerate() {
+        if g.linkage == Linkage::Import && !used_globals.contains(&(i as u32)) {
+            continue;
+        }
         let linkage = ir_linkage(g.linkage);
         let writable = !g.constant;
         let did = obj_module.declare_data(&g.name, linkage, writable, false)?;

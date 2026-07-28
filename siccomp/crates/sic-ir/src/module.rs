@@ -224,6 +224,39 @@ impl Module {
         }
         used
     }
+
+    /// Indices of globals actually referenced somewhere (an instruction operand,
+    /// a terminator, or another global's initializer relocation). An `extern`
+    /// (Import) global that a header declared but nothing uses must NOT be emitted
+    /// as an undefined symbol, or the linker pulls archive members to satisfy it
+    /// — dragging real definitions into conflict with a unit test's stubs
+    /// (QEMU's error-report.c declares `global_aio_wait` without using it).
+    pub fn used_globals(&self) -> std::collections::HashSet<u32> {
+        let mut used = std::collections::HashSet::new();
+        let note_val = |v: &Val, used: &mut std::collections::HashSet<u32>| {
+            if let Val::Global(gr) = v { used.insert(gr.0); }
+        };
+        for f in &self.functions {
+            for bb in &f.blocks {
+                for instr in &bb.instrs {
+                    instr.for_each_val(|v| note_val(v, &mut used));
+                }
+                bb.terminator.for_each_val(|v| note_val(v, &mut used));
+            }
+        }
+        for g in &self.globals {
+            match &g.init {
+                Some(Constant::Aggregate { relocs, .. }) => {
+                    for (_, target) in relocs {
+                        if let RelocTarget::Global(gr, _) = target { used.insert(gr.0); }
+                    }
+                }
+                Some(Constant::GlobalAddr(gr)) => { used.insert(gr.0); }
+                _ => {}
+            }
+        }
+        used
+    }
 }
 
 pub enum FuncDecl<'a> {
