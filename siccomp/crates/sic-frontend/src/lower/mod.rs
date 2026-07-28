@@ -865,6 +865,14 @@ impl Lowerer {
                 Some(RelocTarget::Global(g, 0))
             }
             ExprKind::Unary { op: UnOpKind::Addr, expr } => self.addr_of_reloc(expr),
+            // A compound literal in a static initializer (e.g. QEnumLookup's
+            // `.array = (const char *const[]){ [i] = "..." }`): materialize it as a
+            // private global and point at it. An array literal decays to its first
+            // element's address.
+            ExprKind::CompoundLiteral { ty, init } => {
+                let gref = self.emit_compound_literal_global(ty, init)?;
+                Some(RelocTarget::Global(gref, 0))
+            }
             // A bare function or array name decays to its own address.
             ExprKind::Ident(name) => {
                 if let Some(fref) = self.module.func_ref_by_name(name) {
@@ -879,6 +887,32 @@ impl Lowerer {
             }
             _ => None,
         }
+    }
+
+    /// Materialize a static compound literal `(T){...}` as a private, constant
+    /// global and return its ref. Used when a compound literal appears in another
+    /// global's initializer (it needs a real address to point at).
+    fn emit_compound_literal_global(&mut self, ty: &QualType, items: &[InitItem]) -> Option<GlobalRef> {
+        let mut ir_ty = lower_type(ty, &self.struct_types, self.ptr_size).ok()?;
+        if let Type::Array { len, .. } = &mut ir_ty {
+            if *len == 0 { *len = self.infer_array_len(items); }
+        }
+        let total = ir_ty.size_of(self.ptr_size) as usize;
+        let init = Initializer::List(items.to_vec());
+        let mut buf = vec![0u8; total.max(1)];
+        let mut relocs = Vec::new();
+        if !self.serialize_const(&init, &ir_ty, &mut buf, 0, &mut relocs) {
+            return None;
+        }
+        buf.truncate(total);
+        let constant = if relocs.is_empty() {
+            Constant::Bytes(buf)
+        } else {
+            Constant::Aggregate { bytes: buf, relocs }
+        };
+        let name = format!(".compound.{}", self.module.globals.len());
+        let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true };
+        Some(self.module.add_global(g))
     }
 
     /// Resolve `&expr` to a relocation target.
