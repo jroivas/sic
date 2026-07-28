@@ -150,7 +150,14 @@ impl Lowerer {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
                     let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
-                    if self.module.func_ref_by_name(name).is_none() {
+                    // Register the DEFINED function even when a prior forward
+                    // declaration only produced an extern (e.g. `static void f();`
+                    // then `static void f() {...}` in QEMU's qht.c). Otherwise a
+                    // caller lowered before the definition resolves to the extern,
+                    // and the real (uncalled) definition is dropped as dead → the
+                    // extern reference is left undefined.
+                    let already_defined = self.module.functions.iter().any(|f| f.name == *name);
+                    if !already_defined {
                         let linkage = fn_linkage(storage, *inline, self.static_funcs.contains(name));
                         self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
                     }
