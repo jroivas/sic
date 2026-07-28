@@ -31,6 +31,12 @@ pub struct Lowerer {
     /// Whether to synthesize a `main` from bare top-level statements (a sic-lang
     /// REPL convenience). Off for C, where a unit without `main` is a library.
     repl_main: bool,
+    /// Functions declared `static` anywhere in the unit. C gives a function
+    /// internal linkage if ANY declaration is `static`, even when its definition
+    /// omits the keyword — the decodetree pattern `static bool decode_insn(...);`
+    /// then `#include` defining `bool decode_insn(...)` (no `static`). Without
+    /// this the two TUs including the same .inc collide ("multiple definition").
+    static_funcs: HashSet<String>,
 }
 
 impl Lowerer {
@@ -44,6 +50,7 @@ impl Lowerer {
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),
             repl_main: true,
+            static_funcs: HashSet::new(),
         }
     }
 
@@ -80,6 +87,14 @@ impl Lowerer {
     }
 
     fn collect_declarations(&mut self, tu: &TranslationUnit) -> Result<()> {
+        // A function has internal linkage if ANY of its declarations is `static`,
+        // even one whose definition omits the keyword. Collect all such names up
+        // front so the definition (processed later) gets the right linkage.
+        for decl in &tu.decls {
+            if let Decl::Func { name, storage: Some(StorageClass::Static), .. } = decl {
+                self.static_funcs.insert(name.clone());
+            }
+        }
         for decl in &tu.decls {
             // Record file-scope variable types (with array lengths inferred from
             // their initializers) so `sizeof(global_array)` in a later enum value
@@ -128,7 +143,7 @@ impl Lowerer {
                     }).collect();
                     let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
                     if self.module.func_ref_by_name(name).is_none() {
-                        let linkage = fn_linkage(storage, *inline);
+                        let linkage = fn_linkage(storage, *inline, self.static_funcs.contains(name));
                         self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
                     }
                 }
@@ -1030,9 +1045,12 @@ pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> Func
 /// translation unit keeps its own copy, and giving them external linkage makes
 /// multiple TUs that use the same header inline (e.g. `_mm_shuffle_epi8`,
 /// `_mm_aesimc_si128`) collide with "multiple definition" at link.
-pub(crate) fn fn_linkage(storage: &Option<StorageClass>, inline: bool) -> Linkage {
+pub(crate) fn fn_linkage(storage: &Option<StorageClass>, inline: bool, declared_static: bool) -> Linkage {
     match storage {
         Some(StorageClass::Static) => Linkage::Internal,
+        // A prior `static` declaration gives internal linkage even if this
+        // definition omits the keyword (C11 6.2.2p5).
+        _ if declared_static => Linkage::Internal,
         _ if inline => Linkage::Internal,
         _ => Linkage::External,
     }

@@ -249,7 +249,7 @@ impl<'m> Lowerer {
         let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic);
         let is_sret = super::ret_is_sret(&ir_ret);
 
-        let linkage = super::fn_linkage(storage, inline);
+        let linkage = super::fn_linkage(storage, inline, self.static_funcs.contains(name));
 
         let mut ir_param_decls: Vec<sic_ir::Param> = params.iter().zip(&ir_params).map(|(p, ty)| {
             sic_ir::Param {
