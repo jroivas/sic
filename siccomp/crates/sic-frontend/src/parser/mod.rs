@@ -15,6 +15,9 @@ pub struct Parser {
     /// `__attribute__((constructor[(prio)]))` seen while parsing the current
     /// declaration's specifiers; the function runs before `main` via `.init_array`.
     pending_constructor: Option<i32>,
+    /// `__attribute__((weak))` seen while parsing the current declaration; the
+    /// declared symbols get weak linkage so duplicate definitions merge.
+    pending_weak: bool,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -28,7 +31,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -113,6 +116,7 @@ impl Parser {
         // Reset per-declaration attribute state, then parse a leading
         // `__attribute__((constructor))` (captured by `skip_attributes`).
         self.pending_constructor = None;
+        self.pending_weak = false;
         self.skip_attributes();
 
         // __asm__ at top level: skip
@@ -140,7 +144,7 @@ impl Parser {
             if let Some(StorageClass::Typedef) = storage {
                 return Ok(Decl::TypeDef { names: vec![], span: sp });
             }
-            return Ok(Decl::Var { base_ty, declarators: vec![], span: sp });
+            return Ok(Decl::Var { base_ty, declarators: vec![], weak: self.pending_weak, span: sp });
         }
 
         // typedef with declarators
@@ -222,7 +226,7 @@ impl Parser {
         }
         self.eat(TokenKind::Semi);
 
-        Ok(Decl::Var { base_ty, declarators, span: sp })
+        Ok(Decl::Var { base_ty, declarators, weak: self.pending_weak, span: sp })
     }
 
     fn is_expr_start_not_decl(&self) -> bool {
@@ -995,7 +999,7 @@ impl Parser {
 
         if self.at(TokenKind::Semi) {
             self.advance();
-            return Ok(Decl::Var { base_ty, declarators: vec![], span: sp });
+            return Ok(Decl::Var { base_ty, declarators: vec![], weak: false, span: sp });
         }
 
         let mut declarators = Vec::new();
@@ -1015,7 +1019,7 @@ impl Parser {
             if !self.eat(TokenKind::Comma) { break; }
         }
         self.eat(TokenKind::Semi);
-        Ok(Decl::Var { base_ty, declarators, span: sp })
+        Ok(Decl::Var { base_ty, declarators, weak: false, span: sp })
     }
 
     // ─── Expressions ──────────────────────────────────────────────────────────
@@ -1712,6 +1716,8 @@ impl Parser {
                                 self.pending_vector_size = Some(n);
                             }
                         }
+                    } else if name == "weak" || name == "__weak__" {
+                        self.pending_weak = true;
                     } else if name == "constructor" || name == "__constructor__" {
                         // Optional priority: `constructor(101)`. Default 65535
                         // (GCC's default, run after all prioritized constructors).

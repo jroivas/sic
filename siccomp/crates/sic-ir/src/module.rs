@@ -7,6 +7,7 @@ pub enum Linkage {
     Internal,    // static, not exported
     Private,     // not even named in object
     Import,      // declared here but defined elsewhere (e.g. libc `stdout`)
+    Weak,        // `__attribute__((weak))`: definition that merges with others
 }
 
 /// A global variable.

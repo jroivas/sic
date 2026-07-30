@@ -356,7 +356,7 @@ impl Lowerer {
             Decl::Func { body: None, .. } => {
                 // Already handled in collect_declarations
             }
-            Decl::Var { base_ty, declarators, .. } => {
+            Decl::Var { base_ty, declarators, weak, .. } => {
                 // Check for struct/union/enum definitions within the base type
                 match &base_ty.ty {
                     AstType::Struct(s) => { self.register_struct_type_from_def(s)?; }
@@ -365,7 +365,7 @@ impl Lowerer {
                     _ => {}
                 }
                 for d in declarators {
-                    self.lower_global_var(d, base_ty)?;
+                    self.lower_global_var(d, base_ty, *weak)?;
                 }
             }
             Decl::TypeDef { names, .. } => {
@@ -396,7 +396,7 @@ impl Lowerer {
         Ok(())
     }
 
-    fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType) -> Result<()> {
+    fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         // A declaration whose type is a function (e.g. `static Handler foo;` where
         // `Handler` is a function typedef) is a function prototype, not a variable.
@@ -416,6 +416,7 @@ impl Lowerer {
             let placeholder_linkage = match base_ty.storage {
                 Some(StorageClass::Static) => Linkage::Internal,
                 Some(StorageClass::Extern) => Linkage::Import,
+                _ if weak => Linkage::Weak,
                 _ => Linkage::External,
             };
             let g = Global {
@@ -442,6 +443,7 @@ impl Lowerer {
             if new_is_definition && existing_is_decl {
                 let new_linkage = match base_ty.storage {
                     Some(StorageClass::Static) => Linkage::Internal,
+                    _ if weak => Linkage::Weak,
                     _ => Linkage::External,
                 };
                 let constant = type_is_const(&d.ty);
@@ -468,6 +470,10 @@ impl Lowerer {
             // object lives in another translation unit (e.g. libc's `stdout`).
             // Emit it as an import so we don't shadow it with a zero definition.
             Some(StorageClass::Extern) if init.is_none() => Linkage::Import,
+            // A `__attribute__((weak))` definition merges with duplicates across
+            // objects (e.g. QEMU's `global_qtest` in libqtest-single.h, included
+            // by every qtest binary's translation units).
+            _ if weak => Linkage::Weak,
             Some(StorageClass::Extern) => Linkage::External,
             _ => Linkage::External,
         };

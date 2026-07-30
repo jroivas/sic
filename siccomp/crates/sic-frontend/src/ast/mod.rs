@@ -141,6 +141,9 @@ pub enum Decl {
     Var {
         base_ty: QualType,
         declarators: Vec<Declarator>,
+        /// `__attribute__((weak))` on the declaration: emit each declared symbol
+        /// with weak linkage so duplicate definitions across objects merge.
+        weak: bool,
         span: Span,
     },
     Func {

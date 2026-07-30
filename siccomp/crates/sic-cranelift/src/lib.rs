@@ -63,6 +63,9 @@ fn ir_linkage(l: Linkage) -> CLinkage {
         Linkage::Internal => CLinkage::Local,
         Linkage::Private  => CLinkage::Local,
         Linkage::Import   => CLinkage::Import,
+        // Preemptible emits a weak symbol binding, so multiple definitions of a
+        // `__attribute__((weak))` symbol merge instead of colliding at link time.
+        Linkage::Weak     => CLinkage::Preemptible,
     }
 }
 
