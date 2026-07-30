@@ -229,6 +229,10 @@ pub fn eval_const_size(
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
             Some(t.size_of(ptr_size) as i64)
         }
+        ExprKind::AlignofType(qt) => {
+            let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
+            Some(t.align_of(ptr_size) as i64)
+        }
         ExprKind::OffsetOf { ty, designators } => {
             let mut cur = lower_ast_type(&ty.ty, named, ptr_size).ok()?;
             let mut offset: i64 = 0;

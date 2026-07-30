@@ -779,6 +779,14 @@ impl Lowerer {
                 lower_type(qt, &self.struct_types, self.ptr_size).ok()
                     .map(|t| t.size_of(self.ptr_size) as i64)
             }
+            // `__alignof__(T)` / `_Alignof(T)` in a static initializer — e.g.
+            // QEMU's OBJECT_DEFINE_TYPE `.instance_align = __alignof__(T)`. Without
+            // this the field failed to fold and the WHOLE TypeInfo aggregate was
+            // zero-filled, so `type_register_static` saw a NULL `.parent`.
+            ExprKind::AlignofType(qt) => {
+                lower_type(qt, &self.struct_types, self.ptr_size).ok()
+                    .map(|t| t.align_of(self.ptr_size) as i64)
+            }
             // `sizeof(expr)` — notably `ARRAY_SIZE(global_array)` in static
             // initializers, which needs the operand's (global) type.
             ExprKind::SizeofExpr(inner) => {
