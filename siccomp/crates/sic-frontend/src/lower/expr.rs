@@ -285,7 +285,16 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::CompoundLiteral { ty, init } => {
-                let ir_ty = self.lower_type(ty)?;
+                let mut ir_ty = self.lower_type(ty)?;
+                // An implicit-length array literal `(T[]){ a, b, c }` lowers to
+                // `[T; 0]`; size it from the initializer element count so the
+                // alloca reserves the full array. Otherwise the element stores
+                // overflow a 1-byte slot into neighboring stack storage (QEMU's
+                // virtio_pci_types_register `.interfaces = (const InterfaceInfo[])
+                // { {..}, {..}, {} }` got clobbered by a later g_strdup_printf).
+                if let Type::Array { len, .. } = &mut ir_ty {
+                    if *len == 0 { *len = self.lowerer.infer_array_len(init); }
+                }
                 let vid = self.alloc_val();
                 self.push_instr(Instr::Alloca { dest: vid, ty: ir_ty.clone(), align: None });
                 // Zero first
