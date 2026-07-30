@@ -2348,6 +2348,12 @@ impl<'m> FuncCtx<'m> {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(match inner_ty {
                     Type::Pointer(t) => self.pointee_of(&Type::Pointer(t)),
+                    // An array decays to a pointer to its element, so `*arr` is
+                    // the element type — `sizeof(*arr)` must be the element size,
+                    // not the default i32 (QEMU's `qsort(cmds, .., sizeof(*cmds), ..)`
+                    // over a `static HMPCommand cmds[]` gave size 4 → memory
+                    // corruption during the sort).
+                    Type::Array { elem, .. } => super::types::resolve_aggregate(&elem, &self.lowerer.struct_types),
                     _ => Type::i32(),
                 })
             }

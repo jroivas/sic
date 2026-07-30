@@ -835,8 +835,10 @@ impl Lowerer {
                 }
             }
             ExprKind::Unary { op: UnOpKind::Deref, expr } => {
+                // An array decays to a pointer, so `*arr` is its element type (like
+                // `arr[0]`) — needed for `sizeof(*global_array)`.
                 match types::resolve_aggregate(&self.const_expr_type(expr)?, &self.struct_types) {
-                    Type::Pointer(t) => Some(*t),
+                    Type::Pointer(t) | Type::Array { elem: t, .. } => Some(*t),
                     _ => None,
                 }
             }
