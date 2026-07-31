@@ -500,6 +500,38 @@ impl Lowerer {
     /// honoring designated indices (`[i] = ...`, `[lo ... hi] = ...`) which can
     /// reach past the positional element count. Mirrors the C cursor semantics:
     /// an index designator sets the cursor, each element then advances it.
+    /// If `ir_ty` is a struct whose last member is a flexible array (`T arr[]`,
+    /// length 0) and the brace initializer supplies elements for it, replace
+    /// `ir_ty` with an extended struct type whose final member is sized to the
+    /// initializer's element count. Without this the object's size excludes the
+    /// trailing elements and serialization writes out of bounds → the whole
+    /// aggregate is zero-filled (QEMU's `QemuOptsList { ...; QemuOptDesc desc[]; }`).
+    fn size_flexible_array_member(&self, ir_ty: &mut Type, items: &[InitItem]) {
+        use crate::ast::Designator;
+        let resolved = types::resolve_aggregate(ir_ty, &self.struct_types);
+        let Type::Struct(st) = &resolved else { return };
+        let Some(last_idx) = st.fields.len().checked_sub(1) else { return };
+        let last_name = st.fields[last_idx].0.clone();
+        if !matches!(&st.fields[last_idx].1, Type::Array { len: 0, .. }) { return; }
+        // Find the initializer for the flexible member: a `.name = { ... }`
+        // designator, or the positional element at the last field index.
+        let flex = items.iter().enumerate().find_map(|(pos, it)| {
+            match it.designators.first() {
+                Some(Designator::Field(n)) if *n == last_name => Some(&it.init),
+                None if pos == last_idx => Some(&it.init),
+                _ => None,
+            }
+        });
+        let Some(Initializer::List(sub)) = flex else { return };
+        let n = self.infer_array_len(sub);
+        if n == 0 { return; }
+        let mut new_st = st.clone();
+        if let Type::Array { len, .. } = &mut new_st.fields[last_idx].1 {
+            *len = n;
+        }
+        *ir_ty = Type::Struct(new_st);
+    }
+
     fn infer_array_len(&self, items: &[InitItem]) -> usize {
         let mut cursor: usize = 0;
         let mut max_len: usize = 0;
@@ -592,6 +624,11 @@ impl Lowerer {
                 if let Type::Array { len, .. } = &mut *ir_ty {
                     if *len == 0 { *len = self.infer_array_len(items); }
                 }
+                // A struct ending in a flexible array member (`T arr[];`) whose
+                // initializer supplies elements grows past its declared size;
+                // size the member so the buffer and emitted symbol cover them
+                // (QEMU's `QemuOptsList` ends in `QemuOptDesc desc[]`).
+                self.size_flexible_array_member(ir_ty, items);
                 let total = ir_ty.size_of(self.ptr_size) as usize;
                 let ty_snapshot = ir_ty.clone();
                 let init = d.init.as_ref().unwrap();
