@@ -1387,6 +1387,10 @@ fn collect_decl_names(d: &Decl, out: &mut Vec<String>) {
     if let Decl::Var { declarators, .. } = d {
         for decl in declarators {
             if let Some(init) = &decl.init { collect_init_names(init, out); }
+            // A `__attribute__((cleanup(fn)))` function is referenced only by the
+            // cleanup emission, not by an Ident — record it so a `static inline`
+            // cleanup (glib's `g_autoptr`) is still emitted.
+            if let Some(f) = &decl.cleanup { out.push(f.clone()); }
         }
     }
 }

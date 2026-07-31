@@ -18,6 +18,9 @@ pub struct Parser {
     /// `__attribute__((weak))` seen while parsing the current declaration; the
     /// declared symbols get weak linkage so duplicate definitions merge.
     pending_weak: bool,
+    /// `__attribute__((cleanup(fn)))` function name seen in the most recent
+    /// `skip_attributes`/`skip_decl_tail` run, applied to the next declarator.
+    pending_cleanup: Option<String>,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -31,7 +34,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -213,7 +216,7 @@ impl Parser {
         } else {
             None
         };
-        declarators.push(Declarator { name, ty, init, span: sp.clone() });
+        declarators.push(Declarator { name, ty, init, cleanup: None, span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
@@ -222,7 +225,7 @@ impl Parser {
             self.skip_decl_tail();
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
-            declarators.push(Declarator { name: n, ty: t, init, span: self.span() });
+            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, span: self.span() });
         }
         self.eat(TokenKind::Semi);
 
@@ -1002,19 +1005,28 @@ impl Parser {
             return Ok(Decl::Var { base_ty, declarators: vec![], weak: false, span: sp });
         }
 
+        // `g_autoptr(T)`/`QEMU_LOCK_GUARD` put `__attribute__((cleanup(fn)))` in
+        // the leading specifiers; it was captured by `parse_decl_specifiers` and
+        // applies to the first declarator.
+        let spec_cleanup = self.pending_cleanup.take();
         let mut declarators = Vec::new();
+        let mut first = true;
         loop {
             let dsp = self.span();
             self.pending_vector_size = None;
+            self.pending_cleanup = None;
             let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
             // Trailing `__asm__`/`__attribute__` before the initializer, e.g.
             // glib g_autoptr / QEMU RCU_READ_LOCK_GUARD cleanup locals.
             self.skip_decl_tail();
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
+            let cleanup = self.pending_cleanup.take()
+                .or_else(|| if first { spec_cleanup.clone() } else { None });
+            first = false;
             if !name.is_empty() { self.func_vars.insert(name.clone()); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !name.is_empty() {
-                declarators.push(Declarator { name, ty, init, span: dsp });
+                declarators.push(Declarator { name, ty, init, cleanup, span: dsp });
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
@@ -1714,6 +1726,16 @@ impl Parser {
                                 .parse::<u32>()
                             {
                                 self.pending_vector_size = Some(n);
+                            }
+                        }
+                    } else if name == "cleanup" || name == "__cleanup__" {
+                        // `cleanup(fn)`: the following token inside the parens is
+                        // the cleanup function's name (possibly parenthesized).
+                        let mut j = i + 1;
+                        while matches!(self.tokens.get(j).map(|t| t.kind), Some(TokenKind::LParen)) { j += 1; }
+                        if let Some(t) = self.tokens.get(j) {
+                            if t.kind == TokenKind::Ident {
+                                self.pending_cleanup = Some(t.text.clone());
                             }
                         }
                     } else if name == "weak" || name == "__weak__" {

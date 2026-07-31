@@ -46,6 +46,16 @@ pub struct FuncCtx<'m> {
     /// to the caller-provided result slot (the hidden first parameter) and the
     /// aggregate type. `return expr` copies into this slot and `ret`s void.
     pub sret: Option<(Val, Type)>,
+    /// Parallel to the `locals` scope stack: per-scope `(var_address, cleanup_fn)`
+    /// pairs from `__attribute__((cleanup(fn)))`. On scope exit / return / break /
+    /// continue the cleanup functions are called (`fn(&var)`) in reverse order.
+    pub cleanups: Vec<Vec<(Val, String)>>,
+    /// Scope depth (`cleanups.len()`) recorded per `break_stack` entry (loops and
+    /// switches), so `break` runs the cleanups for the scopes it exits.
+    pub break_scope_depth: Vec<usize>,
+    /// Scope depth recorded per `loop_stack` entry, so `continue` runs cleanups
+    /// for the scopes it exits.
+    pub continue_scope_depth: Vec<usize>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -75,6 +85,9 @@ impl<'m> FuncCtx<'m> {
             pretty_func: String::new(),
             last_line: 0,
             sret: None,
+            cleanups: vec![Vec::new()],
+            break_scope_depth: Vec::new(),
+            continue_scope_depth: Vec::new(),
         }
     }
 
@@ -134,8 +147,61 @@ impl<'m> FuncCtx<'m> {
         !matches!(self.current_block().terminator, Terminator::Unreachable)
     }
 
-    pub fn enter_scope(&mut self) { self.locals.push(HashMap::new()); }
-    pub fn exit_scope(&mut self)  { self.locals.pop(); }
+    pub fn enter_scope(&mut self) {
+        self.locals.push(HashMap::new());
+        self.cleanups.push(Vec::new());
+    }
+    pub fn exit_scope(&mut self) {
+        // Run this scope's cleanups on normal fall-through. A terminated block
+        // (ended in return/break/continue/goto) already ran them along that
+        // path, so skip to avoid a double call.
+        if !self.is_terminated() {
+            if let Some(scope) = self.cleanups.last() {
+                let calls: Vec<(Val, String)> = scope.iter().rev().cloned().collect();
+                for (addr, f) in calls { self.emit_cleanup_call(addr, &f); }
+            }
+        }
+        self.cleanups.pop();
+        self.locals.pop();
+    }
+
+    /// Register a `__attribute__((cleanup(fn)))` action for a variable in the
+    /// current scope. `var_addr` is the variable's storage address (its alloca).
+    pub fn register_cleanup(&mut self, var_addr: Val, fn_name: String) {
+        if let Some(scope) = self.cleanups.last_mut() {
+            scope.push((var_addr, fn_name));
+        }
+    }
+
+    /// Emit cleanup calls for every scope down to (and including) `from`,
+    /// innermost first — used by `return` (`from` = 0) and `break`/`continue`
+    /// (`from` = the loop's recorded scope depth). Does not modify the stack.
+    fn emit_cleanups_to(&mut self, from: usize) {
+        let n = self.cleanups.len();
+        for i in (from..n).rev() {
+            let calls: Vec<(Val, String)> = self.cleanups[i].iter().rev().cloned().collect();
+            for (addr, f) in calls { self.emit_cleanup_call(addr, &f); }
+        }
+    }
+
+    /// Emit `fn(&var)` for a cleanup function. The function takes a pointer to
+    /// the variable; declare it as an extern `void(void*)` if not yet known.
+    fn emit_cleanup_call(&mut self, var_addr: Val, fn_name: &str) {
+        let fref = match self.lowerer.module.func_ref_by_name(fn_name) {
+            Some(f) => f,
+            None => {
+                let sig = sic_ir::FunctionType {
+                    params: vec![Type::void_ptr()],
+                    ret: Type::Void,
+                    variadic: false,
+                };
+                self.lowerer.module.add_extern(sic_ir::ExternFunc {
+                    name: fn_name.to_string(), sig,
+                })
+            }
+        };
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![var_addr], ret_ty: Type::Void });
+    }
 
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
@@ -353,6 +419,10 @@ impl<'m> Lowerer {
             } else {
                 Some(Constant::zero())
             };
+            // Falling off the end of the function still runs cleanups for any
+            // `__attribute__((cleanup))` locals in scope (a function that ends
+            // without an explicit `return`).
+            fc.emit_cleanups_to(0);
             fc.set_terminator(Terminator::Ret(ret_val));
         }
 
@@ -386,6 +456,9 @@ impl<'m> FuncCtx<'m> {
             }
             Stmt::Decl(d) => self.lower_local_decl(d)?,
             Stmt::Return(val, _) => {
+                // Evaluate the return value BEFORE running cleanups (the value
+                // must be computed while the about-to-be-destroyed locals are
+                // still valid), then run every enclosing scope's cleanups.
                 if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
                     // Aggregate return: copy the value into the caller's slot.
                     if let Some(e) = val {
@@ -395,6 +468,7 @@ impl<'m> FuncCtx<'m> {
                         let align = agg_ty.align_of(ps) as u64;
                         self.push_instr(Instr::MemCopy { dst: sret_ptr, src, size, align });
                     }
+                    self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(None));
                 } else if self.ret_ty == Type::Void {
                     // `return expr;` in a void function (GCC-ism, common in QEMU's
@@ -403,6 +477,7 @@ impl<'m> FuncCtx<'m> {
                     if let Some(e) = val {
                         let _ = self.lower_expr(e)?;
                     }
+                    self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(None));
                 } else {
                     let ret = if let Some(e) = val {
@@ -412,6 +487,7 @@ impl<'m> FuncCtx<'m> {
                     } else {
                         None
                     };
+                    self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(ret));
                 }
             }
@@ -425,6 +501,9 @@ impl<'m> FuncCtx<'m> {
                 // whichever is nested deeper — a switch inside a loop breaks the
                 // switch, not the loop.
                 if let Some(&end) = self.break_stack.last() {
+                    if let Some(&depth) = self.break_scope_depth.last() {
+                        self.emit_cleanups_to(depth);
+                    }
                     self.set_terminator(Terminator::Jump(end));
                 } else {
                     return Err(CompileError::new("break outside loop/switch"));
@@ -432,6 +511,9 @@ impl<'m> FuncCtx<'m> {
             }
             Stmt::Continue(_) => {
                 if let Some(&(_, cont)) = self.loop_stack.last() {
+                    if let Some(&depth) = self.continue_scope_depth.last() {
+                        self.emit_cleanups_to(depth);
+                    }
                     self.set_terminator(Terminator::Jump(cont));
                 } else {
                     return Err(CompileError::new("continue outside loop"));
@@ -617,6 +699,11 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::DbgVar {
                             name: d.name.clone(), ty: ty.clone(), slot: vid, is_param: false,
                         });
+                    }
+                    // `__attribute__((cleanup(fn)))`: call `fn(&var)` when this
+                    // scope exits (glib `g_autoptr`, QEMU `QEMU_LOCK_GUARD`).
+                    if let Some(fname) = &d.cleanup {
+                        self.register_cleanup(Val::Local(vid), fname.clone());
                     }
                 }
             }
@@ -857,9 +944,14 @@ impl<'m> FuncCtx<'m> {
 
         self.loop_stack.push((end_bb, cond_bb));
         self.break_stack.push(end_bb);
+        let d = self.cleanups.len();
+        self.break_scope_depth.push(d);
+        self.continue_scope_depth.push(d);
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
+        self.continue_scope_depth.pop();
+        self.break_scope_depth.pop();
         self.break_stack.pop();
         self.loop_stack.pop();
 
@@ -875,9 +967,14 @@ impl<'m> FuncCtx<'m> {
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(body_bb)); }
         self.loop_stack.push((end_bb, cond_bb));
         self.break_stack.push(end_bb);
+        let d = self.cleanups.len();
+        self.break_scope_depth.push(d);
+        self.continue_scope_depth.push(d);
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
+        self.continue_scope_depth.pop();
+        self.break_scope_depth.pop();
         self.break_stack.pop();
         self.loop_stack.pop();
 
@@ -920,9 +1017,16 @@ impl<'m> FuncCtx<'m> {
 
         self.loop_stack.push((end_bb, post_bb));
         self.break_stack.push(end_bb);
+        // `break` exits the whole loop, so it also runs the for-init scope's
+        // cleanups (WITH_QEMU_LOCK_GUARD declares its guard there); `continue`
+        // jumps to the post-expression with that scope still live.
+        self.break_scope_depth.push(self.cleanups.len() - 1);
+        self.continue_scope_depth.push(self.cleanups.len());
         self.switch_to_block(body_bb);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(post_bb)); }
+        self.continue_scope_depth.pop();
+        self.break_scope_depth.pop();
         self.break_stack.pop();
         self.loop_stack.pop();
 
@@ -999,6 +1103,7 @@ impl<'m> FuncCtx<'m> {
         }
         self.switch_stack.push((default_bb, end_bb, case_blocks));
         self.break_stack.push(end_bb);
+        self.break_scope_depth.push(self.cleanups.len());
 
         // Statements before the first label are unreachable but may declare
         // locals — lower them into a throwaway block.
@@ -1006,6 +1111,7 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(pre);
         self.lower_stmt(body)?;
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+        self.break_scope_depth.pop();
         self.break_stack.pop();
         self.switch_stack.pop();
 
