@@ -239,12 +239,17 @@ pub fn eval_const_size(
             for d in designators {
                 match d {
                     OffsetDesignator::Field(name) => {
+                        // Use the offset-aware resolver so a member reached
+                        // through an anonymous struct/union counts its enclosing
+                        // member's offset too. QEMU's VirtIODevice wraps
+                        // `host_features` in an anonymous union, and
+                        // `offsetof(VirtIODevice, host_features)` in the static
+                        // `virtio_properties[]` initializer failed to fold with the
+                        // plain direct-field lookup — zeroing the whole array.
                         let resolved = resolve_aggregate(&cur, named);
-                        let (idx, fty, _) = super::expr::find_field(&resolved, name, named)?;
-                        if let Type::Struct(st) = &resolved {
-                            offset += st.field_offset(idx, ptr_size) as i64;
-                        }
-                        // union members are all at offset 0
+                        let (foff, fty, _bf) =
+                            super::expr::resolve_field_access(&resolved, name, ptr_size, named)?;
+                        offset += foff as i64;
                         cur = fty;
                     }
                     OffsetDesignator::Index(ie) => {

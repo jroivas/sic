@@ -2668,26 +2668,3 @@ fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
     Some((op, ret_new))
 }
 
-pub(super) fn find_field(ty: &Type, name: &str, named: &std::collections::HashMap<String, Type>) -> Option<(usize, Type, Option<String>)> {
-    // A pointee aggregate is stored opaque (no fields); recover its definition.
-    let resolved = super::types::resolve_aggregate(ty, named);
-    match &resolved {
-        Type::Struct(st) => {
-            for (i, (fname, fty)) in st.fields.iter().enumerate() {
-                if fname == name {
-                    return Some((i, fty.clone(), st.name.clone()));
-                }
-            }
-            None
-        }
-        Type::Union(u) => {
-            for (i, (fname, fty)) in u.fields.iter().enumerate() {
-                if fname == name {
-                    return Some((i, fty.clone(), u.name.clone()));
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
