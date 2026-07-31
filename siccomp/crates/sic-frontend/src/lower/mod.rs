@@ -866,6 +866,18 @@ impl Lowerer {
     /// type-dependent operators (`sizeof`) that need the type table. Recurses so
     /// `sizeof(T)` nested in arithmetic still folds.
     fn eval_const_int(&self, e: &Expr) -> Option<i64> {
+        // A cast to a narrower integer type truncates to that width and re-signs.
+        // Handle it before the type-blind `eval_const_expr`, so `(uint32_t)-1`
+        // folds to 0xFFFFFFFF instead of a 64-bit -1 — QEMU's DEFINE_PROP_UNSIGNED
+        // stores `.defval.u = (uint32_t)_defval`, and a 0xFFFFFFFFFFFFFFFF default
+        // (guest-phys-bits = -1) then failed QAPI's uint32 range check at boot.
+        if let ExprKind::Cast { ty, expr } = &e.kind {
+            let inner = self.eval_const_int(expr)?;
+            return Some(match lower_type(ty, &self.struct_types, self.ptr_size) {
+                Ok(t) => apply_int_cast(inner, &t),
+                Err(_) => inner,
+            });
+        }
         if let Ok(v) = eval_const_expr(e, &self.enum_consts) {
             return Some(v);
         }
@@ -1224,6 +1236,24 @@ pub(crate) fn ret_is_sret(ret: &Type) -> bool {
     // Structs, unions and `vector_size` arrays are returned through a hidden
     // result pointer. (Only vectors ever return an array by value in C.)
     matches!(ret, Type::Struct(_) | Type::Union(_) | Type::Array { .. })
+}
+
+/// Apply an integer cast's truncation/re-signing to a folded constant: mask to
+/// the target type's width, then sign- or zero-extend back to i64.
+fn apply_int_cast(v: i64, ty: &Type) -> i64 {
+    match ty {
+        Type::Bool => (v != 0) as i64,
+        Type::Int { bits, signed } if *bits < 64 => {
+            let masked = (v as u64) & ((1u64 << *bits) - 1);
+            if *signed {
+                let sh = 64 - *bits;
+                ((masked << sh) as i64) >> sh
+            } else {
+                masked as i64
+            }
+        }
+        _ => v,
+    }
 }
 
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
