@@ -398,6 +398,13 @@ impl Lowerer {
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        // An array dimension that `lower_type` couldn't fold (it has no global
+        // symbol table) is re-evaluated with the global-aware evaluator, so
+        // `T a[ARRAY_SIZE(g)]` — `sizeof(g)/sizeof(g[0])` over another global —
+        // gets its real length instead of 0. QEMU's tcg.c sizes
+        // `all_cts[ARRAY_SIZE(constraint_sets)][...]` this way; a 0 made the
+        // array 1 byte and process_constraint_sets scribbled over neighbours.
+        self.resolve_global_array_dims(&mut ir_ty, &d.ty.ty);
         // A declaration whose type is a function (e.g. `static Handler foo;` where
         // `Handler` is a function typedef) is a function prototype, not a variable.
         // Register it as an extern function so the real definition can supply it.
@@ -530,6 +537,23 @@ impl Lowerer {
             *len = n;
         }
         *ir_ty = Type::Struct(new_st);
+    }
+
+    /// Walk an array type in parallel with its AST form and fill in any
+    /// still-zero dimension by folding its size expression with the global-aware
+    /// evaluator (`eval_const_int` resolves `sizeof(global)` via `const_expr_type`,
+    /// which `lower_type`'s dimension pass — lacking the symbol table — cannot).
+    fn resolve_global_array_dims(&self, ir_ty: &mut Type, ast_ty: &AstType) {
+        if let (Type::Array { elem, len }, AstType::Array { base, size }) = (&mut *ir_ty, ast_ty) {
+            if *len == 0 {
+                if let Some(sz) = size {
+                    if let Some(n) = self.eval_const_int(sz) {
+                        if n > 0 { *len = n as usize; }
+                    }
+                }
+            }
+            self.resolve_global_array_dims(elem, &base.ty);
+        }
     }
 
     fn infer_array_len(&self, items: &[InitItem]) -> usize {
