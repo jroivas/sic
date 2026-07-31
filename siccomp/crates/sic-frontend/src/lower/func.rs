@@ -786,8 +786,22 @@ impl<'m> FuncCtx<'m> {
                 for item in &items {
                     let (target, next) =
                         self.resolve_init_target(&ptr, ty, &item.designators, cursor)?;
-                    if let Some((tptr, tty)) = target {
-                        self.lower_initializer(&item.init, tptr, &tty)?;
+                    if let Some((tptr, tty, bf)) = target {
+                        if let Some(bf) = bf {
+                            // Bit-field member: read-modify-write so it doesn't
+                            // clobber neighbours sharing the storage unit.
+                            let e = match &item.init {
+                                Initializer::Expr(e) => e.clone(),
+                                Initializer::List(items) => match items.first() {
+                                    Some(crate::ast::InitItem { init: Initializer::Expr(e), .. }) => e.clone(),
+                                    _ => continue,
+                                },
+                            };
+                            let v = self.lower_expr(&e)?;
+                            self.store_bitfield(&tptr, &tty, bf, v)?;
+                        } else {
+                            self.lower_initializer(&item.init, tptr, &tty)?;
+                        }
                     }
                     cursor = next;
                 }
@@ -811,15 +825,15 @@ impl<'m> FuncCtx<'m> {
     /// type, and the next cursor value (top-level index + 1).
     #[allow(clippy::type_complexity)]
     fn resolve_init_target(&mut self, base: &Val, agg: &Type, designators: &[crate::ast::Designator], cursor: usize)
-        -> Result<(Option<(Val, Type)>, usize)>
+        -> Result<(Option<(Val, Type, Option<super::expr::BitField>)>, usize)>
     {
         use crate::ast::Designator;
         // First step: designator[0] if present, else the implicit cursor.
         let (first, top_index) = match designators.first() {
             Some(Designator::Field(name)) => {
-                let Some((off, fty, _)) = super::expr::resolve_field_access(agg, name, self.ptr_size(), &self.lowerer.struct_types)
+                let Some((off, fty, bf)) = super::expr::resolve_field_access(agg, name, self.ptr_size(), &self.lowerer.struct_types)
                 else { return Ok((None, cursor + 1)); };
-                (Some((self.gep_offset(base, off, &fty), fty)), top_field_index(agg, name, &self.lowerer.struct_types))
+                (Some((self.gep_offset(base, off, &fty), fty, bf)), top_field_index(agg, name, &self.lowerer.struct_types))
             }
             Some(Designator::Index(e)) => {
                 let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
@@ -828,7 +842,7 @@ impl<'m> FuncCtx<'m> {
             Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
             None => (self.member_at(base, agg, cursor), cursor),
         };
-        let Some((mut ptr, mut cur_ty)) = first else {
+        let Some((mut ptr, mut cur_ty, mut bf)) = first else {
             // Out-of-range positional/index element (excess initializer): skip it
             // but still advance the cursor past this position.
             return Ok((None, top_index + 1));
@@ -838,44 +852,53 @@ impl<'m> FuncCtx<'m> {
         for d in rest {
             match d {
                 Designator::Field(name) => {
-                    let Some((off, fty, _)) = super::expr::resolve_field_access(&cur_ty, name, self.ptr_size(), &self.lowerer.struct_types)
+                    let Some((off, fty, sub_bf)) = super::expr::resolve_field_access(&cur_ty, name, self.ptr_size(), &self.lowerer.struct_types)
                     else { return Ok((None, top_index + 1)); };
                     ptr = self.gep_offset(&ptr, off, &fty);
                     cur_ty = fty;
+                    bf = sub_bf;
                 }
                 Designator::Index(e) => {
                     let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
-                    let Some((p, ety)) = self.member_at(&ptr, &cur_ty, i) else {
+                    let Some((p, ety, sub_bf)) = self.member_at(&ptr, &cur_ty, i) else {
                         return Ok((None, top_index + 1));
                     };
-                    ptr = p; cur_ty = ety;
+                    ptr = p; cur_ty = ety; bf = sub_bf;
                 }
                 // A range in a chained (non-leading) position is unsupported;
                 // skip the element rather than crash.
                 Designator::IndexRange(..) => return Ok((None, top_index + 1)),
             }
         }
-        Ok((Some((ptr, cur_ty)), top_index + 1))
+        Ok((Some((ptr, cur_ty, bf)), top_index + 1))
     }
 
     /// Pointer + type of the `idx`-th member of an aggregate (struct field or
     /// array element), by positional index. `None` when `idx` is out of range.
-    fn member_at(&mut self, base: &Val, agg: &Type, idx: usize) -> Option<(Val, Type)> {
+    fn member_at(&mut self, base: &Val, agg: &Type, idx: usize) -> Option<(Val, Type, Option<super::expr::BitField>)> {
         let resolved = super::types::resolve_aggregate(agg, &self.lowerer.struct_types);
         match &resolved {
             Type::Struct(st) => {
                 let fty = st.fields.get(idx)?.1.clone();
+                // A bit-field member shares its storage unit with neighbours, so
+                // the pointer is the unit's byte offset and writes must mask.
+                if let Some(Some(width)) = st.bitfields.get(idx).copied() {
+                    let (offs, bit_offs, _) = st.layout_full(self.ptr_size());
+                    let byte_off = *offs.get(idx).unwrap_or(&0);
+                    let bf = super::expr::BitField::new(*bit_offs.get(idx).unwrap_or(&0), width, fty.is_signed());
+                    return Some((self.gep_offset(base, byte_off, &fty), fty, Some(bf)));
+                }
                 let off = st.field_offset(idx, self.ptr_size());
-                Some((self.gep_offset(base, off, &fty), fty))
+                Some((self.gep_offset(base, off, &fty), fty, None))
             }
             Type::Union(u) => {
                 let fty = u.fields.get(idx)?.1.clone();
-                Some((self.gep_offset(base, 0, &fty), fty))
+                Some((self.gep_offset(base, 0, &fty), fty, None))
             }
             Type::Array { elem, len } => {
                 if *len > 0 && idx >= *len { return None; }
                 let esz = elem.size_of(self.ptr_size());
-                Some((self.gep_offset(base, idx as u64 * esz, elem), (**elem).clone()))
+                Some((self.gep_offset(base, idx as u64 * esz, elem), (**elem).clone(), None))
             }
             _ => None,
         }

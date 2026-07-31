@@ -684,8 +684,21 @@ impl Lowerer {
                 for item in &items {
                     let (target, next) =
                         self.designated_const_target(&ty, &item.designators, cursor, base);
-                    if let Some((off, leaf)) = target {
-                        if !self.serialize_const(&item.init, &leaf, buf, off, relocs) {
+                    if let Some((off, leaf, bf)) = target {
+                        if let Some(bf) = bf {
+                            // Bit-field member: pack (RMW) so neighbours sharing
+                            // the storage unit survive.
+                            let e = match &item.init {
+                                Initializer::Expr(e) => e,
+                                Initializer::List(its) => match its.first() {
+                                    Some(InitItem { init: Initializer::Expr(e), .. }) => e,
+                                    _ => return false,
+                                },
+                            };
+                            if !self.serialize_bitfield(e, &leaf, bf, buf, off) {
+                                return false;
+                            }
+                        } else if !self.serialize_const(&item.init, &leaf, buf, off, relocs) {
                             return false;
                         }
                     }
@@ -712,20 +725,26 @@ impl Lowerer {
     /// `resolve_init_target`. Handles designators (including chained ones) and
     /// anonymous members.
     fn designated_const_target(&self, agg: &Type, designators: &[crate::ast::Designator], cursor: usize, base: usize)
-        -> (Option<(usize, Type)>, usize)
+        -> (Option<(usize, Type, Option<crate::lower::expr::BitField>)>, usize)
     {
         use crate::ast::Designator;
-        let member_at = |me: &Self, agg: &Type, idx: usize, base: usize| -> Option<(usize, Type)> {
+        type Tgt = (usize, Type, Option<crate::lower::expr::BitField>);
+        let member_at = |me: &Self, agg: &Type, idx: usize, base: usize| -> Option<Tgt> {
             let r = types::resolve_aggregate(agg, &me.struct_types);
             match &r {
                 Type::Struct(st) => {
                     let fty = st.fields.get(idx)?.1.clone();
-                    Some((base + st.field_offset(idx, me.ptr_size) as usize, fty))
+                    if let Some(Some(width)) = st.bitfields.get(idx).copied() {
+                        let (offs, bit_offs, _) = st.layout_full(me.ptr_size);
+                        let bf = crate::lower::expr::BitField::new(*bit_offs.get(idx).unwrap_or(&0), width, fty.is_signed());
+                        return Some((base + *offs.get(idx).unwrap_or(&0) as usize, fty, Some(bf)));
+                    }
+                    Some((base + st.field_offset(idx, me.ptr_size) as usize, fty, None))
                 }
-                Type::Union(u) => Some((base, u.fields.get(idx)?.1.clone())),
+                Type::Union(u) => Some((base, u.fields.get(idx)?.1.clone(), None)),
                 Type::Array { elem, len } => {
                     if *len > 0 && idx >= *len { return None; }
-                    Some((base + idx * elem.size_of(me.ptr_size) as usize, (**elem).clone()))
+                    Some((base + idx * elem.size_of(me.ptr_size) as usize, (**elem).clone(), None))
                 }
                 _ => None,
             }
@@ -733,7 +752,7 @@ impl Lowerer {
         let (first, top_index) = match designators.first() {
             Some(Designator::Field(name)) => {
                 match crate::lower::expr::resolve_field_access(agg, name, self.ptr_size, &self.struct_types) {
-                    Some((foff, fty, _)) => (Some((base + foff as usize, fty)),
+                    Some((foff, fty, bf)) => (Some((base + foff as usize, fty, bf)),
                                              crate::lower::func::top_field_index(agg, name, &self.struct_types)),
                     None => return (None, cursor + 1),
                 }
@@ -745,25 +764,40 @@ impl Lowerer {
             Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
             None => (member_at(self, agg, cursor, base), cursor),
         };
-        let Some((mut off, mut cur_ty)) = first else { return (None, top_index + 1); };
+        let Some((mut off, mut cur_ty, mut bf)) = first else { return (None, top_index + 1); };
         let rest = if designators.is_empty() { &designators[..] } else { &designators[1..] };
         for d in rest {
             match d {
                 Designator::Field(name) => {
                     match crate::lower::expr::resolve_field_access(&cur_ty, name, self.ptr_size, &self.struct_types) {
-                        Some((foff, fty, _)) => { off += foff as usize; cur_ty = fty; }
+                        Some((foff, fty, sub_bf)) => { off += foff as usize; cur_ty = fty; bf = sub_bf; }
                         None => return (None, top_index + 1),
                     }
                 }
                 Designator::Index(e) => {
                     let i = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
-                    let Some((o, t)) = member_at(self, &cur_ty, i, off) else { return (None, top_index + 1); };
-                    off = o; cur_ty = t;
+                    let Some((o, t, sub_bf)) = member_at(self, &cur_ty, i, off) else { return (None, top_index + 1); };
+                    off = o; cur_ty = t; bf = sub_bf;
                 }
                 Designator::IndexRange(..) => return (None, top_index + 1),
             }
         }
-        (Some((off, cur_ty)), top_index + 1)
+        (Some((off, cur_ty, bf)), top_index + 1)
+    }
+
+    /// Pack a bit-field's constant value into `buf` at byte offset `base` (the
+    /// storage unit), read-modify-write so neighbouring bit-fields are preserved.
+    fn serialize_bitfield(&self, e: &Expr, ty: &Type, bf: crate::lower::expr::BitField, buf: &mut [u8], base: usize) -> bool {
+        let size = ty.size_of(self.ptr_size) as usize;
+        if size == 0 || base + size > buf.len() { return false; }
+        let v = match self.eval_const_int(e) { Some(v) => v as u64, None => return false };
+        let field_mask: u64 = if bf.width >= 64 { !0 } else { (1u64 << bf.width) - 1 };
+        let mut cur: u64 = 0;
+        for i in 0..size { cur |= (buf[base + i] as u64) << (8 * i); }
+        cur &= !(field_mask << bf.bit_offset);
+        cur |= (v & field_mask) << bf.bit_offset;
+        for i in 0..size { buf[base + i] = (cur >> (8 * i)) as u8; }
+        true
     }
 
     /// Serialize a scalar constant expression into `buf[base..base+size]`.

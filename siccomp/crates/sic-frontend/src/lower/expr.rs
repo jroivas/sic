@@ -15,9 +15,15 @@ struct LValue {
 
 #[derive(Clone, Copy)]
 pub(super) struct BitField {
-    bit_offset: u32,
-    width: u32,
-    signed: bool,
+    pub(super) bit_offset: u32,
+    pub(super) width: u32,
+    pub(super) signed: bool,
+}
+
+impl BitField {
+    pub(super) fn new(bit_offset: u32, width: u32, signed: bool) -> Self {
+        BitField { bit_offset, width, signed }
+    }
 }
 
 /// Which AES-NI round intrinsic to emulate.
@@ -674,29 +680,38 @@ impl<'m> FuncCtx<'m> {
     /// Returns the value actually stored (for use as the assignment's value).
     fn store_lvalue(&mut self, lv: &LValue, val: Val) -> Result<Val> {
         if let Some(bf) = lv.bitfield {
-            let ty = lv.ty.clone();
-            let val = self.coerce(val, &ty)?;
-            let mask: i64 = if bf.width >= 64 { -1 } else { ((1u64 << bf.width) - 1) as i64 };
-            let vm = self.alloc_val();
-            self.push_instr(Instr::BinOp { dest: vm, op: BinOp::And, lhs: val.clone(), rhs: Constant::int(mask), ty: ty.clone() });
-            let vs = if bf.bit_offset > 0 {
-                let d = self.alloc_val();
-                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Shl, lhs: Val::Local(vm), rhs: Constant::int(bf.bit_offset as i64), ty: ty.clone() });
-                Val::Local(d)
-            } else { Val::Local(vm) };
-            let raw = self.alloc_val();
-            self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
-            let clear_mask = !(mask as u64).wrapping_shl(bf.bit_offset) as i64;
-            let cleared = self.alloc_val();
-            self.push_instr(Instr::BinOp { dest: cleared, op: BinOp::And, lhs: Val::Local(raw), rhs: Constant::int(clear_mask), ty: ty.clone() });
-            let newv = self.alloc_val();
-            self.push_instr(Instr::BinOp { dest: newv, op: BinOp::Or, lhs: Val::Local(cleared), rhs: vs, ty: ty.clone() });
-            self.push_instr(Instr::Store { val: Val::Local(newv), ptr: lv.ptr.clone() });
-            return Ok(val);
+            return self.store_bitfield(&lv.ptr, &lv.ty, bf, val);
         }
         let coerced = self.coerce(val, &lv.ty)?;
         self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr.clone() });
         Ok(coerced)
+    }
+
+    /// Store `val` into a bit-field via read-modify-write: `*ptr = (*ptr & ~mask)
+    /// | ((val & field_mask) << bit_offset)`. Needed both for `s.bf = v` and for
+    /// a designated initializer of a bit-field, so adjacent bit-fields sharing
+    /// the storage unit are preserved (QEMU's `PhysPageEntry{ .ptr=NIL, .skip=1 }`
+    /// where `ptr:26`/`skip:6` share one word).
+    pub(super) fn store_bitfield(&mut self, ptr: &Val, ty: &Type, bf: BitField, val: Val) -> Result<Val> {
+        let ty = ty.clone();
+        let val = self.coerce(val, &ty)?;
+        let mask: i64 = if bf.width >= 64 { -1 } else { ((1u64 << bf.width) - 1) as i64 };
+        let vm = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: vm, op: BinOp::And, lhs: val.clone(), rhs: Constant::int(mask), ty: ty.clone() });
+        let vs = if bf.bit_offset > 0 {
+            let d = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: d, op: BinOp::Shl, lhs: Val::Local(vm), rhs: Constant::int(bf.bit_offset as i64), ty: ty.clone() });
+            Val::Local(d)
+        } else { Val::Local(vm) };
+        let raw = self.alloc_val();
+        self.push_instr(Instr::Load { dest: raw, ptr: ptr.clone(), ty: ty.clone() });
+        let clear_mask = !(mask as u64).wrapping_shl(bf.bit_offset) as i64;
+        let cleared = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: cleared, op: BinOp::And, lhs: Val::Local(raw), rhs: Constant::int(clear_mask), ty: ty.clone() });
+        let newv = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newv, op: BinOp::Or, lhs: Val::Local(cleared), rhs: vs, ty: ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(newv), ptr: ptr.clone() });
+        Ok(val)
     }
 
     fn lower_pre_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
