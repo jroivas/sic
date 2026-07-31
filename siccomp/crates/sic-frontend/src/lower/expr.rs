@@ -601,8 +601,14 @@ impl<'m> FuncCtx<'m> {
                 // Dereferencing a function pointer yields a function designator
                 // that immediately decays back to the pointer — emit no load
                 // (so `(*fp)(args)` calls `fp` directly rather than a garbage
-                // value loaded from the function's code).
-                if matches!(inner_ty, Type::Function(_)) {
+                // value loaded from the function's code). The same holds for an
+                // array: `*(T(*)[N])p` is an array lvalue that decays to its own
+                // address (== `p`), so emit no load — else a scalar is read from
+                // the first element. QEMU's coroutine trampoline relies on this:
+                // `siglongjmp(*(sigjmp_buf *)co->entry_arg, 1)` where sigjmp_buf is
+                // `struct __jmp_buf_tag[1]` — a stray load passed the saved rbx as
+                // the jmp_buf and crashed __longjmp.
+                if matches!(inner_ty, Type::Function(_) | Type::Array { .. }) {
                     return Ok(ptr);
                 }
                 let dest = self.alloc_val();
