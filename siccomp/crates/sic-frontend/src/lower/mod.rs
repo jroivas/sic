@@ -1201,11 +1201,52 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
                 eval_const_expr(else_, enum_consts)
             }
         }
+        // `__builtin_choose_expr(cond, a, b)` selects an arm at compile time from
+        // the constant condition; the unchosen arm is discarded and never
+        // evaluated. The condition here uses an *accurate* `__builtin_constant_p`
+        // (see `choose_cond_const`), unlike the conservative always-0 above:
+        // QEMU's MIN_CONST/MAX_CONST (BDRV_REQUEST_MAX_SECTORS default in
+        // virtio_blk_properties) is `__builtin_choose_expr(__builtin_constant_p(a)
+        // && ..., min, (void)0)` — a wrong 0 selects the un-foldable `(void)0`.
+        ExprKind::ChooseExpr { cond, then, else_ } => {
+            if choose_cond_const(cond, enum_consts) != 0 {
+                eval_const_expr(then, enum_consts)
+            } else {
+                eval_const_expr(else_, enum_consts)
+            }
+        }
         ExprKind::Cast { expr, .. } => eval_const_expr(expr, enum_consts),
         _ => {
             let sp = &e.span;
             Err(CompileError::at("non-constant expression", sp.file.clone(), sp.line, sp.col))
         }
+    }
+}
+
+/// Evaluate a `__builtin_choose_expr` condition at compile time, where
+/// `__builtin_constant_p(E)` is accurate (1 iff E folds to a constant). This
+/// differs from the top-level `eval_const_expr`, which conservatively folds
+/// `__builtin_constant_p` to 0 so runtime-value `?:` selects its runtime arm.
+fn choose_cond_const(e: &Expr, enum_consts: &HashMap<String, i64>) -> i64 {
+    match &e.kind {
+        ExprKind::Call { func, args }
+            if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
+        {
+            match args.first() {
+                Some(a) if eval_const_expr(a, enum_consts).is_ok() => 1,
+                _ => 0,
+            }
+        }
+        ExprKind::BinOp { op: BinOpKind::LogAnd, lhs, rhs } =>
+            (choose_cond_const(lhs, enum_consts) != 0 && choose_cond_const(rhs, enum_consts) != 0) as i64,
+        ExprKind::BinOp { op: BinOpKind::LogOr, lhs, rhs } =>
+            (choose_cond_const(lhs, enum_consts) != 0 || choose_cond_const(rhs, enum_consts) != 0) as i64,
+        ExprKind::Unary { op: UnOpKind::Not, expr } =>
+            (choose_cond_const(expr, enum_consts) == 0) as i64,
+        ExprKind::ChooseExpr { cond, then, else_ } =>
+            if choose_cond_const(cond, enum_consts) != 0 { choose_cond_const(then, enum_consts) }
+            else { choose_cond_const(else_, enum_consts) },
+        _ => eval_const_expr(e, enum_consts).unwrap_or(0),
     }
 }
 

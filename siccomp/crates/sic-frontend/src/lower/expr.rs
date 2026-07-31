@@ -1010,6 +1010,22 @@ impl<'m> FuncCtx<'m> {
                 (self.eval_choose_cond(lhs) != 0 && self.eval_choose_cond(rhs) != 0) as i64,
             ExprKind::Unary { op: UnOpKind::Not, expr } =>
                 (self.eval_choose_cond(expr) == 0) as i64,
+            // `__builtin_constant_p(E)` is 1 when E folds to a compile-time
+            // constant. `__builtin_choose_expr` needs this accurate (unlike the
+            // runtime `?:` fold, which conservatively treats it as 0): QEMU's
+            // MIN_CONST/MAX_CONST (e.g. `BDRV_REQUEST_MAX_SECTORS` defaults in
+            // virtio_blk_properties) do
+            //   __builtin_choose_expr(__builtin_constant_p(a) && ..., min, (void)0)
+            // — a 0 here selects the `(void)0` arm, which can't be lowered and
+            // zeroed the whole property table.
+            ExprKind::Call { func, args }
+                if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
+            {
+                match args.first() {
+                    Some(a) if self.lowerer.eval_const_int(a).is_some() => 1,
+                    _ => 0,
+                }
+            }
             _ => crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0),
         }
     }
