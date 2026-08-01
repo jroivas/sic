@@ -1897,6 +1897,18 @@ impl<'m> FuncCtx<'m> {
                 if super::ret_is_sret(&ret_ty) {
                     return self.lower_indirect_sret(fptr, func_ty, arg_vals);
                 }
+                // Coerce fixed args to their param types and apply the default
+                // argument promotions to any `...` args (same as the direct path).
+                for (i, pval) in arg_vals.iter_mut().enumerate() {
+                    if let Some(pty) = func_ty.params.get(i) {
+                        if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
+                        let c = self.coerce(pval.clone(), pty)?;
+                        *pval = c;
+                    } else if func_ty.variadic {
+                        let p = self.promote_vararg(pval.clone())?;
+                        *pval = p;
+                    }
+                }
                 let is_void = ret_ty == Type::Void;
                 let dest = if !is_void { Some(self.alloc_val()) } else { None };
                 self.push_instr(Instr::CallIndirect {
@@ -1937,6 +1949,7 @@ impl<'m> FuncCtx<'m> {
 
         // Coerce arguments to expected param types
         let param_tys: Vec<Type> = self.lowerer.module.func_sig(fref).params.clone();
+        let is_variadic = self.lowerer.module.func_sig(fref).variadic;
         for (i, pval) in arg_vals.iter_mut().enumerate() {
             if let Some(pty) = param_tys.get(i) {
                 // Struct/union args are already lowered to a pointer to the value
@@ -1944,6 +1957,14 @@ impl<'m> FuncCtx<'m> {
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
                 let coerced = self.coerce(pval.clone(), pty)?;
                 *pval = coerced;
+            } else if is_variadic {
+                // Arguments in the `...` part undergo the default argument
+                // promotions (char/short→int, float→double). Without this a
+                // small integer passed on the stack leaves its slot's high bits
+                // uninitialized — libc printf's `%02x` of a `uint8_t` MAC byte
+                // then read garbage (QEMU's default NIC MAC came out malformed).
+                let p = self.promote_vararg(pval.clone())?;
+                *pval = p;
             }
         }
 
@@ -2129,6 +2150,19 @@ impl<'m> FuncCtx<'m> {
     /// Extract a pointer's pointee type, resolving an opaque pointee aggregate
     /// to its full definition. Pointees are stored opaque (see `lower_ast_type`);
     /// dereferencing needs the real layout for loads/stores/copies.
+    /// Apply the C default argument promotions to a value passed in the `...`
+    /// part of a variadic call: integer types narrower than `int` widen to `int`
+    /// (preserving value per the source's signedness), and `float` widens to
+    /// `double`. Anything already `int`-width or wider is unchanged.
+    fn promote_vararg(&mut self, v: Val) -> Result<Val> {
+        match self.val_type(&v) {
+            Type::Bool => self.coerce(v, &Type::i32()),
+            Type::Int { bits, .. } if bits < 32 => self.coerce(v, &Type::i32()),
+            Type::Float32 => self.coerce(v, &Type::Float64),
+            _ => Ok(v),
+        }
+    }
+
     fn pointee_of(&self, ptr_ty: &Type) -> Type {
         match ptr_ty {
             Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
