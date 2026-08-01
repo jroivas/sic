@@ -495,36 +495,40 @@ impl<'m> FuncCtx<'m> {
             BinOpKind::LogAnd | BinOpKind::LogOr => unreachable!(),
         };
 
-        // Cranelift's x64 backend can't lower a 128-bit integer divide/remainder;
-        // call the compiler-rt/libgcc helper instead (QEMU's int128_divu/divs).
-        if matches!(result_ty, Type::Int { bits: 128, .. }) {
-            let libcall = match ir_op {
-                BinOp::SDiv => Some("__divti3"),
-                BinOp::UDiv => Some("__udivti3"),
-                BinOp::SRem => Some("__modti3"),
-                BinOp::URem => Some("__umodti3"),
-                _ => None,
-            };
-            if let Some(name) = libcall {
-                let fref = self.lowerer.module.func_ref_by_name(name).unwrap_or_else(|| {
-                    self.lowerer.module.add_extern(sic_ir::ExternFunc {
-                        name: name.to_string(),
-                        sig: sic_ir::FunctionType {
-                            ret: result_ty.clone(),
-                            params: vec![result_ty.clone(), result_ty.clone()],
-                            variadic: false,
-                        },
-                    })
-                });
-                let dest = self.alloc_val();
-                self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![lc, rc], ret_ty: result_ty });
-                return Ok(Val::Local(dest));
-            }
+        if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), rc.clone(), &result_ty) {
+            return Ok(v);
         }
-
         let dest = self.alloc_val();
         self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: rc, ty: result_ty });
         Ok(Val::Local(dest))
+    }
+
+    /// If `op` is an integer divide/remainder on a 128-bit type, emit a call to
+    /// the compiler-rt helper (`__divti3`/`__udivti3`/`__modti3`/`__umodti3`) and
+    /// return its result — Cranelift's x64 backend can't lower `udiv.i128` etc.
+    /// natively. Otherwise return None so the caller emits a plain `BinOp`.
+    fn emit_div_rem_libcall(&mut self, op: BinOp, lhs: Val, rhs: Val, ty: &Type) -> Option<Val> {
+        if !matches!(ty, Type::Int { bits: 128, .. }) { return None; }
+        let name = match op {
+            BinOp::SDiv => "__divti3",
+            BinOp::UDiv => "__udivti3",
+            BinOp::SRem => "__modti3",
+            BinOp::URem => "__umodti3",
+            _ => return None,
+        };
+        let fref = self.lowerer.module.func_ref_by_name(name).unwrap_or_else(|| {
+            self.lowerer.module.add_extern(sic_ir::ExternFunc {
+                name: name.to_string(),
+                sig: sic_ir::FunctionType {
+                    ret: ty.clone(),
+                    params: vec![ty.clone(), ty.clone()],
+                    variadic: false,
+                },
+            })
+        });
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![lhs, rhs], ret_ty: ty.clone() });
+        Some(Val::Local(dest))
     }
 
     fn lower_logical(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -2102,11 +2106,17 @@ impl<'m> FuncCtx<'m> {
                 // Multiply: overflow iff a != 0 and result / a != b.
                 let a_nz = self.alloc_val();
                 self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero, ty: ty.clone() });
-                let quot = self.alloc_val();
                 let div = if signed { BinOp::SDiv } else { BinOp::UDiv };
-                self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
+                // 128-bit divide needs a libcall (see emit_div_rem_libcall).
+                let quot_val = if let Some(v) = self.emit_div_rem_libcall(div, result.clone(), a.clone(), &ty) {
+                    v
+                } else {
+                    let quot = self.alloc_val();
+                    self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
+                    Val::Local(quot)
+                };
                 let mism = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: mism, op: CmpOp::INe, lhs: Val::Local(quot), rhs: b.clone(), ty: ty.clone() });
+                self.push_instr(Instr::Cmp { dest: mism, op: CmpOp::INe, lhs: quot_val, rhs: b.clone(), ty: ty.clone() });
                 // ovf = a_nz ? mism : false
                 self.push_instr(Instr::Select {
                     dest: ovf,
