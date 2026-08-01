@@ -75,6 +75,9 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     flag_builder.set("use_colocated_libcalls", "false").unwrap();
     flag_builder.set("is_pic", "true").unwrap();
     flag_builder.set("opt_level", opt_level).unwrap();
+    // Allow `i128` in function signatures (args/returns) — the SysV ABI passes a
+    // 128-bit integer in a register pair. Needed for C `__int128` (QEMU's Int128).
+    flag_builder.set("enable_llvm_abi_extensions", "true").unwrap();
     if debug_info {
         // Keep a real frame pointer (RBP) so DWARF can describe variable
         // locations as fixed frame-relative offsets.

@@ -13,6 +13,7 @@ pub fn cl_type(ty: &Type, ptr_size: u32) -> Option<ClType> {
             9..=16  => ct::I16,
             17..=32 => ct::I32,
             33..=64 => ct::I64,
+            65..=128 => ct::I128,
             _       => ct::I64,
         }),
         Type::Float32 => Some(ct::F32),

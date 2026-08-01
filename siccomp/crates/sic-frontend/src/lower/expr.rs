@@ -495,6 +495,33 @@ impl<'m> FuncCtx<'m> {
             BinOpKind::LogAnd | BinOpKind::LogOr => unreachable!(),
         };
 
+        // Cranelift's x64 backend can't lower a 128-bit integer divide/remainder;
+        // call the compiler-rt/libgcc helper instead (QEMU's int128_divu/divs).
+        if matches!(result_ty, Type::Int { bits: 128, .. }) {
+            let libcall = match ir_op {
+                BinOp::SDiv => Some("__divti3"),
+                BinOp::UDiv => Some("__udivti3"),
+                BinOp::SRem => Some("__modti3"),
+                BinOp::URem => Some("__umodti3"),
+                _ => None,
+            };
+            if let Some(name) = libcall {
+                let fref = self.lowerer.module.func_ref_by_name(name).unwrap_or_else(|| {
+                    self.lowerer.module.add_extern(sic_ir::ExternFunc {
+                        name: name.to_string(),
+                        sig: sic_ir::FunctionType {
+                            ret: result_ty.clone(),
+                            params: vec![result_ty.clone(), result_ty.clone()],
+                            variadic: false,
+                        },
+                    })
+                });
+                let dest = self.alloc_val();
+                self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![lc, rc], ret_ty: result_ty });
+                return Ok(Val::Local(dest));
+            }
+        }
+
         let dest = self.alloc_val();
         self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: rc, ty: result_ty });
         Ok(Val::Local(dest))

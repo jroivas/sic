@@ -651,6 +651,12 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
     match c {
         Constant::Int(v) => {
             if hint.is_float() { builder.ins().f64const(*v as f64) }
+            // Cranelift's `iconst` maxes out at I64; build an I128 by extending
+            // a 64-bit const (sign-extend a signed constant).
+            else if hint == ct::I128 {
+                let lo = builder.ins().iconst(ct::I64, *v);
+                builder.ins().sextend(ct::I128, lo)
+            }
             else {
                 let fits = match hint.bits() {
                     8  => *v >= i8::MIN as i64 && *v <= u8::MAX as i64,
@@ -663,6 +669,10 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
         }
         Constant::UInt(v) => {
             if hint.is_float() { builder.ins().f64const(*v as f64) }
+            else if hint == ct::I128 {
+                let lo = builder.ins().iconst(ct::I64, *v as i64);
+                builder.ins().uextend(ct::I128, lo)
+            }
             else {
                 let fits = match hint.bits() {
                     8  => *v <= u8::MAX as u64,
@@ -678,6 +688,10 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
             else { builder.ins().f64const(*v) }
         }
         Constant::Bool(b) => builder.ins().iconst(ct::I8, if *b { 1 } else { 0 }),
+        Constant::Null | Constant::Undef | Constant::Zeroinit if hint == ct::I128 => {
+            let lo = builder.ins().iconst(ct::I64, 0);
+            builder.ins().uextend(ct::I128, lo)
+        }
         Constant::Null | Constant::Undef | Constant::Zeroinit => builder.ins().iconst(hint, 0),
         Constant::Bytes(_) => builder.ins().iconst(ptr_ty, 0),
         // Only appears in global initializers (handled in the data section);
