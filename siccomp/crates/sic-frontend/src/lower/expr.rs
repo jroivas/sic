@@ -88,6 +88,7 @@ impl<'m> FuncCtx<'m> {
             init: Some(Constant::Bytes(bytes)),
             linkage: Linkage::Private,
             constant: true,
+            thread_local: false,
         };
         let gref = self.lowerer.module.add_global(g);
         let ptr_id = self.alloc_val();
@@ -1351,6 +1352,7 @@ impl<'m> FuncCtx<'m> {
                 init: Some(Constant::Bytes(bytes)),
                 linkage: Linkage::Private,
                 constant: true,
+                thread_local: false,
             })
         };
         let ptr = self.alloc_val();

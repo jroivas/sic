@@ -624,7 +624,17 @@ fn rval(
         Val::Const(c)  => emit_const(c, safe_hint, builder, ptr_ty),
         Val::Global(gref) => {
             if let Some(&gv) = data_refs.get(&gref.0) {
-                builder.ins().global_value(ptr_ty, gv)
+                // A TLS symbol is accessed through the TLS ABI (%fs-relative /
+                // __tls_get_addr), not a plain GOT/PC-relative address.
+                let is_tls = matches!(
+                    builder.func.global_values[gv],
+                    cir::GlobalValueData::Symbol { tls: true, .. }
+                );
+                if is_tls {
+                    builder.ins().tls_value(ptr_ty, gv)
+                } else {
+                    builder.ins().global_value(ptr_ty, gv)
+                }
             } else {
                 builder.ins().iconst(ptr_ty, 0)
             }

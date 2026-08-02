@@ -78,6 +78,9 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // Allow `i128` in function signatures (args/returns) — the SysV ABI passes a
     // 128-bit integer in a register pair. Needed for C `__int128` (QEMU's Int128).
     flag_builder.set("enable_llvm_abi_extensions", "true").unwrap();
+    // ELF general-dynamic TLS model, so `tls_value` lowers to a real TLS access
+    // (__tls_get_addr) for `__thread` variables (QEMU's bql_locked/rcu_reader).
+    flag_builder.set("tls_model", "elf_gd").unwrap();
     if debug_info {
         // Keep a real frame pointer (RBP) so DWARF can describe variable
         // locations as fixed frame-relative offsets.
@@ -152,8 +155,11 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
             continue;
         }
         let linkage = ir_linkage(g.linkage);
-        let writable = !g.constant;
-        let did = obj_module.declare_data(&g.name, linkage, writable, false)?;
+        // A `__thread` global is TLS: writable and declared with the tls flag so
+        // the backend emits it into .tdata/.tbss and accesses go through the TLS
+        // ABI (see `tls_value` in func.rs).
+        let writable = !g.constant || g.thread_local;
+        let did = obj_module.declare_data(&g.name, linkage, writable, g.thread_local)?;
         global_ids.insert(i as u32, did);
     }
 

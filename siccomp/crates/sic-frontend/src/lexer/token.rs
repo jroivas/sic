@@ -48,7 +48,7 @@ pub enum TokenKind {
     Generic,  // _Generic (C11)
 
     // --- GCC extensions ---
-    Attribute, Extension, Asm,
+    Attribute, Extension, Asm, ThreadLocal,
 
     // --- Operators ---
     Plus, Minus, Star, Slash, Percent,

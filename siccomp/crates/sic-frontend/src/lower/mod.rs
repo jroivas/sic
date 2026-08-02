@@ -306,6 +306,7 @@ impl Lowerer {
             init: Some(Constant::Bytes(bytes)),
             linkage: Linkage::Private,
             constant: true,
+            thread_local: false,
         };
         self.module.add_global(g)
     }
@@ -356,7 +357,7 @@ impl Lowerer {
             Decl::Func { body: None, .. } => {
                 // Already handled in collect_declarations
             }
-            Decl::Var { base_ty, declarators, weak, .. } => {
+            Decl::Var { base_ty, declarators, weak, thread_local, .. } => {
                 // Check for struct/union/enum definitions within the base type
                 match &base_ty.ty {
                     AstType::Struct(s) => { self.register_struct_type_from_def(s)?; }
@@ -365,7 +366,7 @@ impl Lowerer {
                     _ => {}
                 }
                 for d in declarators {
-                    self.lower_global_var(d, base_ty, *weak)?;
+                    self.lower_global_var(d, base_ty, *weak, *thread_local)?;
                 }
             }
             Decl::TypeDef { names, .. } => {
@@ -396,7 +397,7 @@ impl Lowerer {
         Ok(())
     }
 
-    fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool) -> Result<()> {
+    fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         // An array dimension that `lower_type` couldn't fold (it has no global
         // symbol table) is re-evaluated with the global-aware evaluator, so
@@ -429,6 +430,7 @@ impl Lowerer {
             let g = Global {
                 name: d.name.clone(), ty: ir_ty.clone(), init: None,
                 linkage: placeholder_linkage, constant: type_is_const(&d.ty),
+                thread_local,
             };
             let gref = self.module.add_global(g);
             self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
@@ -485,7 +487,7 @@ impl Lowerer {
             _ => Linkage::External,
         };
         let ty_for_map = ir_ty.clone();
-        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty) };
+        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty), thread_local };
         let gref = self.module.add_global(g);
         self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
         Ok(())
@@ -498,7 +500,7 @@ impl Lowerer {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         let init = self.build_global_init(d, &mut ir_ty);
         let ty_for_map = ir_ty.clone();
-        let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty) };
+        let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false };
         let gref = self.module.add_global(g);
         Ok((ty_for_map, gref))
     }
@@ -1041,7 +1043,7 @@ impl Lowerer {
             Constant::Aggregate { bytes: buf, relocs }
         };
         let name = format!(".compound.{}", self.module.globals.len());
-        let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true };
+        let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true, thread_local: false };
         Some(self.module.add_global(g))
     }
 

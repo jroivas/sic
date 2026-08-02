@@ -512,11 +512,11 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         "__volatile__" | "__volatile" => TokenKind::Volatile,
         "__restrict__" | "__restrict" => TokenKind::Restrict,
         "__signed__" | "__signed" => TokenKind::Signed,
-        // Thread-local storage specifier. sic has no TLS, so it is ignored (a
-        // consumed no-op like `__extension__`), but it must NOT mask the real
-        // storage class — `extern __thread T x;` stays a declaration, not a
-        // definition (QEMU's `current_cpu`).
-        "__thread" | "_Thread_local" | "thread_local" => TokenKind::Extension,
+        // Thread-local storage specifier: real per-thread storage (emitted into
+        // TLS sections and accessed via the TLS ABI). Orthogonal to the storage
+        // class, so `extern __thread T x;` stays a declaration (QEMU's
+        // `current_cpu`, `bql_locked`, `rcu_reader`).
+        "__thread" | "_Thread_local" | "thread_local" => TokenKind::ThreadLocal,
         "__builtin_va_start" | "__builtin_c23_va_start"
         | "__builtin_va_end" | "__builtin_va_arg" | "__builtin_va_copy" => TokenKind::Ident,
         _ if typedefs.contains(s) => TokenKind::TypeName,

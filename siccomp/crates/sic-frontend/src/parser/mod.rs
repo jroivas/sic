@@ -21,6 +21,8 @@ pub struct Parser {
     /// `__attribute__((cleanup(fn)))` function name seen in the most recent
     /// `skip_attributes`/`skip_decl_tail` run, applied to the next declarator.
     pending_cleanup: Option<String>,
+    /// `__thread`/`_Thread_local` seen in the current declaration's specifiers.
+    pending_thread_local: bool,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -34,7 +36,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -120,6 +122,7 @@ impl Parser {
         // `__attribute__((constructor))` (captured by `skip_attributes`).
         self.pending_constructor = None;
         self.pending_weak = false;
+        self.pending_thread_local = false;
         self.skip_attributes();
 
         // __asm__ at top level: skip
@@ -147,7 +150,7 @@ impl Parser {
             if let Some(StorageClass::Typedef) = storage {
                 return Ok(Decl::TypeDef { names: vec![], span: sp });
             }
-            return Ok(Decl::Var { base_ty, declarators: vec![], weak: self.pending_weak, span: sp });
+            return Ok(Decl::Var { base_ty, declarators: vec![], weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp });
         }
 
         // typedef with declarators
@@ -229,7 +232,7 @@ impl Parser {
         }
         self.eat(TokenKind::Semi);
 
-        Ok(Decl::Var { base_ty, declarators, weak: self.pending_weak, span: sp })
+        Ok(Decl::Var { base_ty, declarators, weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp })
     }
 
     fn is_expr_start_not_decl(&self) -> bool {
@@ -241,7 +244,8 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Eof | TokenKind::LBrace
+            | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
+            | TokenKind::Eof | TokenKind::LBrace
         ) { return false; }
         // Ident that's a typedef name also starts a declaration
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
@@ -289,6 +293,9 @@ impl Parser {
                 // (used e.g. on `long long` struct members in glibc headers).
                 // Skip it; not consuming it here made struct-member parsing spin.
                 TokenKind::Extension => { self.advance(); }
+                // `__thread`/`_Thread_local`: per-thread storage. Orthogonal to
+                // the storage class, so it doesn't set `storage`.
+                TokenKind::ThreadLocal => { self.pending_thread_local = true; self.advance(); }
                 // Storage classes
                 TokenKind::Auto     => { storage = Some(StorageClass::Auto);     self.advance(); }
                 TokenKind::Register => { storage = Some(StorageClass::Register); self.advance(); }
@@ -704,7 +711,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::Typeof | TokenKind::Alignas)
+            | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal)
         {
             return true;
         }
@@ -832,7 +839,7 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
-            | TokenKind::Typeof | TokenKind::Alignas
+            | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
             // A declaration may lead with attributes, e.g. glib's g_autoptr /
             // QEMU's RCU_READ_LOCK_GUARD: `__attribute__((cleanup(f))) T v = ...`.
             | TokenKind::Attribute)
@@ -1002,7 +1009,7 @@ impl Parser {
 
         if self.at(TokenKind::Semi) {
             self.advance();
-            return Ok(Decl::Var { base_ty, declarators: vec![], weak: false, span: sp });
+            return Ok(Decl::Var { base_ty, declarators: vec![], weak: false, thread_local: false, span: sp });
         }
 
         // `g_autoptr(T)`/`QEMU_LOCK_GUARD` put `__attribute__((cleanup(fn)))` in
@@ -1031,7 +1038,7 @@ impl Parser {
             if !self.eat(TokenKind::Comma) { break; }
         }
         self.eat(TokenKind::Semi);
-        Ok(Decl::Var { base_ty, declarators, weak: false, span: sp })
+        Ok(Decl::Var { base_ty, declarators, weak: false, thread_local: false, span: sp })
     }
 
     // ─── Expressions ──────────────────────────────────────────────────────────

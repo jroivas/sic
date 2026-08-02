@@ -18,6 +18,7 @@ pub struct Global {
     pub init: Option<Constant>,
     pub linkage: Linkage,
     pub constant: bool,   // true for const globals
+    pub thread_local: bool, // `__thread` / `_Thread_local`: per-thread storage
 }
 
 /// A function parameter.

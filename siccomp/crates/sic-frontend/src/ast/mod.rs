@@ -147,6 +147,9 @@ pub enum Decl {
         /// `__attribute__((weak))` on the declaration: emit each declared symbol
         /// with weak linkage so duplicate definitions across objects merge.
         weak: bool,
+        /// `__thread`/`_Thread_local`: file-scope declarators get per-thread
+        /// storage (emitted into TLS, accessed via the TLS ABI).
+        thread_local: bool,
         span: Span,
     },
     Func {
