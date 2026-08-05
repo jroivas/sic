@@ -38,6 +38,29 @@ pub fn va_list_type() -> Type {
 }
 
 /// Convert an AST type to an IR type.
+/// An enum's underlying integer type is signed only if some enumerator is
+/// negative; otherwise it is unsigned (matching GCC/Clang). Enumerator values
+/// are auto-incremented from 0, so a negative value can only come from an
+/// explicit negative initializer — evaluate those; unresolvable ones are assumed
+/// non-negative (the common case).
+fn enum_is_signed(e: &EnumDef) -> bool {
+    let Some(variants) = &e.variants else { return false };
+    let empty = HashMap::new();
+    let mut next: i64 = 0;
+    for v in variants {
+        let val = match &v.value {
+            Some(expr) => match super::eval_const_expr(expr, &empty) {
+                Ok(n) => n,
+                Err(_) => { next = next.saturating_add(1); continue; }
+            },
+            None => next,
+        };
+        if val < 0 { return true; }
+        next = val.saturating_add(1);
+    }
+    false
+}
+
 pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     lower_ast_type(&qt.ty, named, ptr_size)
 }
@@ -113,7 +136,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         }
         AstType::Struct(s) => lower_struct(s, named, ptr_size)?,
         AstType::Union(u)  => lower_union(u, named, ptr_size)?,
-        AstType::Enum(_)   => Type::Int { bits: 32, signed: true }, // enum → i32
+        // An enum's underlying type is unsigned when every enumerator is
+        // non-negative (GCC/Clang behaviour), signed otherwise. This matters for
+        // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a
+        // value like `TEMP_CONST` (4 = 0b100) must read back as 4, not sign-extend
+        // to -4 (which made TCG liveness analysis hit g_assert_not_reached).
+        AstType::Enum(e)   => Type::Int { bits: 32, signed: enum_is_signed(e) },
         AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
