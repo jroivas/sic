@@ -1009,6 +1009,15 @@ impl Lowerer {
                 Some(RelocTarget::Global(g, 0))
             }
             ExprKind::Unary { op: UnOpKind::Addr, expr } => self.addr_of_reloc(expr),
+            // `_Generic(...)` in a static initializer: select the matching
+            // association at compile time and evaluate it. QEMU's TCG `all_outop[]`
+            // table is `[OP] = _Generic(outop_X, T: &outop_X.base)` — without this
+            // every entry was NULL, so ld/st/etc. had no constraint set and TCG
+            // register allocation read `all_cts[-1]` garbage on the first TB.
+            ExprKind::Generic { controlling, assocs } => {
+                let idx = self.select_generic_const(controlling, assocs)?;
+                self.eval_ptr_reloc(&assocs[idx].1.clone())
+            }
             // A compound literal in a static initializer (e.g. QEnumLookup's
             // `.array = (const char *const[]){ [i] = "..." }`): materialize it as a
             // private global and point at it. An array literal decays to its first
@@ -1057,6 +1066,35 @@ impl Lowerer {
         let name = format!(".compound.{}", self.module.globals.len());
         let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true, thread_local: false };
         Some(self.module.add_global(g))
+    }
+
+    /// Select the matching `_Generic` association at file scope (for static
+    /// initializers): compare the controlling expression's type against each
+    /// association type, falling back to the `default` association. Returns the
+    /// chosen association index.
+    fn select_generic_const(&self, controlling: &Expr, assocs: &[(Option<QualType>, Box<Expr>)]) -> Option<usize> {
+        fn decay(t: Type) -> Type {
+            match t {
+                Type::Array { elem, .. } => Type::Pointer(elem),
+                Type::Function(_) => Type::void_ptr(),
+                other => other,
+            }
+        }
+        let ctrl = decay(self.const_expr_type(controlling)?);
+        let mut default_idx = None;
+        for (i, (aty, _)) in assocs.iter().enumerate() {
+            match aty {
+                None => default_idx = Some(i),
+                Some(qt) => {
+                    if let Ok(at) = lower_type(qt, &self.struct_types, self.ptr_size) {
+                        if types::type_matches_generic(&decay(at), &ctrl) {
+                            return Some(i);
+                        }
+                    }
+                }
+            }
+        }
+        default_idx
     }
 
     /// Resolve `&expr` to a relocation target.

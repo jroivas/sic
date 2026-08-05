@@ -38,6 +38,24 @@ pub fn va_list_type() -> Type {
 }
 
 /// Convert an AST type to an IR type.
+/// Type equality for `_Generic` association matching (file-scope variant of the
+/// FuncCtx `generic_type_eq`): named aggregates compare by name, since a pointee
+/// may be stored opaque in one place and fully populated in another.
+pub fn type_matches_generic(a: &Type, b: &Type) -> bool {
+    match (a, b) {
+        (Type::Pointer(x), Type::Pointer(y)) => type_matches_generic(x, y),
+        (Type::Struct(s1), Type::Struct(s2)) => match (&s1.name, &s2.name) {
+            (Some(n1), Some(n2)) => n1 == n2,
+            _ => a == b,
+        },
+        (Type::Union(u1), Type::Union(u2)) => match (&u1.name, &u2.name) {
+            (Some(n1), Some(n2)) => n1 == n2,
+            _ => a == b,
+        },
+        _ => a == b,
+    }
+}
+
 /// An enum's underlying integer type is signed only if some enumerator is
 /// negative; otherwise it is unsigned (matching GCC/Clang). Enumerator values
 /// are auto-incremented from 0, so a negative value can only come from an
