@@ -656,7 +656,14 @@ impl<'m> FuncCtx<'m> {
                     // or `char s[] = "..."`. Without this the array would have
                     // length 0, and the element stores would overflow the stack.
                     let inferred = if let Type::Array { elem, len: 0 } = &ty {
+                        let is_char = matches!(elem.as_ref(), Type::Int { bits: 8, .. });
                         let n = match &d.init {
+                            // `char a[] = { "str" }` acts as `char a[] = "str"`.
+                            Some(Initializer::List(items))
+                                if is_char && super::string_brace_len(items).is_some() =>
+                            {
+                                super::string_brace_len(items).unwrap()
+                            }
                             Some(Initializer::List(items)) => items.len(),
                             Some(Initializer::Expr(e)) => match &e.kind {
                                 ExprKind::StringLit(s) => s.len() + 1, // + NUL terminator
@@ -720,6 +727,17 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
+        // `char a[] = { "str" }` fills the char array from the string, exactly like
+        // `char a[] = "str"` — re-dispatch on the unwrapped string literal.
+        if let Type::Array { elem, .. } = ty {
+            if matches!(elem.as_ref(), Type::Int { bits: 8, .. }) {
+                if let Initializer::List(items) = init {
+                    if let Some(e) = super::string_brace_items(items) {
+                        return self.lower_initializer(&Initializer::Expr(e.clone()), ptr, ty);
+                    }
+                }
+            }
+        }
         match init {
             // `char buf[] = "..."` / `char buf[N] = "..."`: copy the string bytes
             // into the array (not the pointer). Zero-fill any remaining space.

@@ -583,6 +583,18 @@ impl Lowerer {
     /// `ir_ty` for inferred array lengths. Shared by file-scope globals and
     /// function-scope `static` locals.
     fn build_global_init(&mut self, d: &Declarator, ir_ty: &mut Type) -> Option<Constant> {
+        // `char a[] = { "str" }` — a brace list wrapping a single string literal —
+        // is equivalent to `char a[] = "str"` (C11 6.7.9p14). Rewrite to the bare
+        // string initializer so it sizes/fills the array (QEMU's
+        // `static const char eip_name[] = { "rip" };` otherwise came out empty).
+        let target_is_char_array = matches!(&*ir_ty,
+            Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }));
+        if target_is_char_array {
+            if let Some(inner) = unwrap_string_brace(d.init.as_ref()) {
+                let d2 = Declarator { init: Some(Initializer::Expr(inner.clone())), ..d.clone() };
+                return self.build_global_init(&d2, ir_ty);
+            }
+        }
         match &d.init {
             // `char arr[] = "..."` / `char *p = "..."`.
             Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::StringLit(_)) => {
@@ -1256,6 +1268,37 @@ fn apply_int_cast(v: i64, ty: &Type) -> i64 {
         }
         _ => v,
     }
+}
+
+/// If `init` is a brace list wrapping exactly one (undesignated) string literal
+/// — `{ "str" }` — return that string-literal expression. C treats this as the
+/// bare string initializer for a char array.
+fn unwrap_string_brace(init: Option<&Initializer>) -> Option<&Expr> {
+    if let Some(Initializer::List(items)) = init {
+        return string_brace_items(items);
+    }
+    None
+}
+
+/// If `items` is `{ "str" }` (one undesignated string-literal element), return
+/// its string-literal expression.
+pub(super) fn string_brace_items(items: &[InitItem]) -> Option<&Expr> {
+    if items.len() == 1 && items[0].designators.is_empty() {
+        if let Initializer::Expr(e) = &items[0].init {
+            if matches!(&e.kind, ExprKind::StringLit(_)) {
+                return Some(e);
+            }
+        }
+    }
+    None
+}
+
+/// The array length (chars + NUL) for a `{ "str" }` char-array initializer.
+pub(super) fn string_brace_len(items: &[InitItem]) -> Option<usize> {
+    string_brace_items(items).and_then(|e| match &e.kind {
+        ExprKind::StringLit(s) => Some(s.len() + 1),
+        _ => None,
+    })
 }
 
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
