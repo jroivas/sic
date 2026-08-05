@@ -233,7 +233,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::SizeofType(ty) => {
                 let ir_ty = self.lower_type(ty)?;
                 let size = ir_ty.size_of(self.ptr_size());
-                Ok(Constant::uint(size))
+                Ok(self.size_t_val(size))
             }
 
             ExprKind::SizeofExpr(inner) => {
@@ -241,7 +241,7 @@ impl<'m> FuncCtx<'m> {
                 // Simplified: just return a placeholder for now.
                 let ty = self.infer_expr_type(inner)?;
                 let size = ty.size_of(self.ptr_size());
-                Ok(Constant::uint(size))
+                Ok(self.size_t_val(size))
             }
 
             ExprKind::ChooseExpr { cond, then, else_ } => {
@@ -259,11 +259,11 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::AlignofType(ty) => {
                 let a = self.lower_type(ty)?.align_of(self.ptr_size());
-                Ok(Constant::uint(a))
+                Ok(self.size_t_val(a))
             }
             ExprKind::AlignofExpr(inner) => {
                 let a = self.infer_expr_type(inner)?.align_of(self.ptr_size());
-                Ok(Constant::uint(a))
+                Ok(self.size_t_val(a))
             }
 
             ExprKind::Comma(lhs, rhs) => {
@@ -2200,6 +2200,19 @@ impl<'m> FuncCtx<'m> {
             Type::Float32 => self.coerce(v, &Type::Float64),
             _ => Ok(v),
         }
+    }
+
+    /// Materialize a `size_t`-typed constant (the result type of `sizeof`,
+    /// `_Alignof`, `offsetof`). A bare integer constant defaults to i32 when its
+    /// value fits, so `sizeof(long) * n` would compute at 32 bits; forcing the
+    /// pointer-width unsigned type keeps such products 64-bit (QEMU's ROUND_UP
+    /// masks a 64-bit pointer with `-(sizeof(...)*n)` — a 32-bit result truncated
+    /// the TB code buffer address and faulted during code generation).
+    fn size_t_val(&mut self, v: u64) -> Val {
+        let dest = self.alloc_val();
+        let ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        self.push_instr(Instr::Cast { dest, op: CastOp::ZExt, val: Constant::uint(v), to_ty: ty });
+        Val::Local(dest)
     }
 
     fn pointee_of(&self, ptr_ty: &Type) -> Type {
