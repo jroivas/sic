@@ -1159,6 +1159,13 @@ impl<'m> FuncCtx<'m> {
             _ => {}
         }
 
+        // Conversion TO `_Bool` is `x != 0`, not a bit-truncation. A wide value
+        // whose low bits are zero (e.g. `0x100` from `apic_base & (1<<8)`, the
+        // `bool cpu_is_bsp()` return in QEMU) must become `true`, not `false`.
+        if *target == Type::Bool && matches!(src_ty, Type::Int { .. } | Type::Pointer(_) | Type::Float32 | Type::Float64 | Type::Float80) {
+            return self.to_bool(val);
+        }
+
         // Integer → pointer: widen the integer to pointer size *first*, with the
         // integer's own signedness. Casting a narrow signed int like `(void*)-1`
         // must sign-extend (0xffff…ffff), not zero-extend (0x0000…ffff); the
