@@ -1002,6 +1002,15 @@ impl Lowerer {
     fn eval_ptr_reloc(&mut self, e: &Expr) -> Option<RelocTarget> {
         match &e.kind {
             ExprKind::Cast { expr, .. } => self.eval_ptr_reloc(expr),
+            // A constant-condition ternary selecting a pointer, e.g. QEMU's
+            // `.out_rr = TCG_TARGET_HAS_x ? tgen_x : NULL` in the TCG outop tables.
+            // Fold the condition and evaluate the taken branch (a NULL branch has
+            // no reloc → the field stays 0). Without this the pointer field failed
+            // to resolve and the whole static struct was zero-filled.
+            ExprKind::Ternary { cond, then, else_ } => {
+                let c = self.eval_const_int(cond)?;
+                if c != 0 { self.eval_ptr_reloc(then) } else { self.eval_ptr_reloc(else_) }
+            }
             ExprKind::StringLit(s) => {
                 let mut bytes = s.clone().into_bytes();
                 bytes.push(0);
