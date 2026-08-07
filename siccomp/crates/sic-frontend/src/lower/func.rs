@@ -630,7 +630,20 @@ impl<'m> FuncCtx<'m> {
                     _ => {}
                 }
                 let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
+                let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
+                    // A block-scope `extern T x;` refers to the file-scope/other-TU
+                    // global, NOT a new local: register it as a global (import if
+                    // needed) and bind the name to that global, rather than a stack
+                    // slot. QEMU accesses `extern const TCGOpDef tcg_op_defs[];` this
+                    // way inside functions; a stack slot read pure garbage.
+                    if is_extern {
+                        self.lowerer.lower_global_var(d, base_ty, false, false)?;
+                        if let Some((gty, gref)) = self.lowerer.globals_map.get(&d.name).cloned() {
+                            self.static_locals.insert(d.name.clone(), (gty, gref));
+                        }
+                        continue;
+                    }
                     // A function-scope `static` local has static storage duration:
                     // back it with an internal global (unique-named to avoid
                     // clashes) and bind the local name to it, rather than a stack
