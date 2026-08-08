@@ -686,7 +686,14 @@ impl<'m> FuncCtx<'m> {
     fn load_lvalue(&mut self, lv: &LValue) -> Result<Val> {
         if let Some(bf) = lv.bitfield {
             let ty = lv.ty.clone();
-            let bits = ty.int_bits().unwrap_or(32);
+            // The extraction shifts operate on the loaded STORAGE unit's width,
+            // not the field type's semantic value width. These differ for a
+            // `_Bool` bitfield: `int_bits(_Bool)` is 1, but the field is loaded
+            // as a byte (8 bits). Using 1 made the shift/mask a no-op, so a
+            // `_Bool:1` read its neighbour's bit too (QEMU's decode_insn loops on
+            // `while (e->is_decode)` where is_decode is a `_Bool:1` — an infinite
+            // loop that stalled guest translation).
+            let bits = ty.size_of(self.ptr_size()).max(1) as u32 * 8;
             let raw = self.alloc_val();
             self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
             // Shift the field to the top, then back down: masks and (for signed
