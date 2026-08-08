@@ -110,8 +110,7 @@ impl<'m> FuncCtx<'m> {
                 self.lower_expr(&assocs[idx].1)
             }
             ExprKind::OffsetOf { ty, designators } => {
-                let off = self.compute_offsetof(ty, designators)?;
-                self.coerce(Constant::int(off as i64), &Type::u64())
+                self.lower_offsetof(ty, designators)
             }
             // Widen a 64-bit literal to its declared width so its runtime type
             // isn't the default 32-bit (needed for e.g. `1LL << 40`). For a
@@ -2417,36 +2416,64 @@ impl<'m> FuncCtx<'m> {
     /// Compute the byte offset of a member designator within a type, for
     /// `__builtin_offsetof`. Walks `.field` (struct/union) and `[index]` (array)
     /// steps, summing struct field offsets and array element strides.
-    fn compute_offsetof(&self, ty: &crate::ast::QualType, designators: &[crate::ast::OffsetDesignator]) -> Result<u64> {
+    /// Lower `offsetof(T, ...designators...)` to a `size_t` value. A constant
+    /// index folds into the constant offset; a NON-constant array index (a GCC
+    /// extension, e.g. `offsetof(CPU, segs[i].base)`) makes offsetof a runtime
+    /// value `const_offset + index * elem_size`. QEMU registers its per-segment
+    /// TCG globals in a loop with exactly this form; treating the index as 0
+    /// pointed every segment base at segs[0], breaking CS-relative addressing.
+    fn lower_offsetof(&mut self, ty: &crate::ast::QualType, designators: &[crate::ast::OffsetDesignator]) -> Result<Val> {
         use crate::ast::OffsetDesignator;
         let mut cur = self.lower_type(ty)?;
-        let mut offset: u64 = 0;
+        let mut const_off: u64 = 0;
+        let mut runtime: Option<Val> = None; // accumulated runtime byte offset
         for d in designators {
             match d {
                 OffsetDesignator::Field(name) => {
-                    // `resolve_field_access` drills through anonymous struct/union
-                    // members and returns the accumulated byte offset — needed for
-                    // `offsetof(env, sctlr_el)` where the field lives in an
-                    // anonymous union inside the struct.
                     let resolved = super::types::resolve_aggregate(&cur, &self.lowerer.struct_types);
                     let (off, fty, _) = resolve_field_access(&resolved, name, self.ptr_size(), &self.lowerer.struct_types)
                         .ok_or_else(|| CompileError::new(format!("no field '{}' in offsetof", name)))?;
-                    offset += off;
+                    const_off += off;
                     cur = fty;
                 }
                 OffsetDesignator::Index(e) => {
-                    let i = super::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0);
                     let elem = match &cur {
                         Type::Array { elem, .. } => *elem.clone(),
                         Type::Pointer(t) => *t.clone(),
                         other => other.clone(),
                     };
-                    offset += (i as u64).wrapping_mul(elem.size_of(self.ptr_size()));
+                    let esz = elem.size_of(self.ptr_size());
+                    if let Ok(i) = super::eval_const_expr(e, &self.lowerer.enum_consts) {
+                        const_off += (i as u64).wrapping_mul(esz);
+                    } else {
+                        // Runtime index: emit `index * elem_size` and add it.
+                        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                        let iv = self.lower_expr(e)?;
+                        let iv = self.coerce(iv, &usize_ty)?;
+                        let term = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: term, op: BinOp::Mul, lhs: iv, rhs: Constant::uint(esz), ty: usize_ty.clone() });
+                        runtime = Some(match runtime {
+                            None => Val::Local(term),
+                            Some(acc) => {
+                                let s = self.alloc_val();
+                                self.push_instr(Instr::BinOp { dest: s, op: BinOp::Add, lhs: acc, rhs: Val::Local(term), ty: usize_ty.clone() });
+                                Val::Local(s)
+                            }
+                        });
+                    }
                     cur = elem;
                 }
             }
         }
-        Ok(offset)
+        match runtime {
+            None => self.coerce(Constant::uint(const_off), &Type::u64()),
+            Some(rt) => {
+                let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                let dest = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest, op: BinOp::Add, lhs: rt, rhs: Constant::uint(const_off), ty: usize_ty });
+                Ok(Val::Local(dest))
+            }
+        }
     }
 
     pub fn infer_expr_type(&self, expr: &Expr) -> Result<Type> {
