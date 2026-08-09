@@ -405,7 +405,14 @@ pub fn build_cl_sig(
 pub const VA_GP_REGS: usize = 6;
 pub const VA_FP_REGS: usize = 8;
 /// Extra trailing stack slots captured for varargs that overflow the registers.
-pub const VA_OVERFLOW_SLOTS: usize = 8;
+/// Cranelift can't expose the real System V overflow_arg_area pointer, so a
+/// variadic callee copies this many incoming stack slots into a synthetic
+/// overflow area; a `va_list` that consumes more stack args than this reads
+/// garbage. It must therefore exceed the widest real variadic call — e.g.
+/// QEMU's `x86_cpu_dump_state` forwards ~15 stack args through `qemu_fprintf`
+/// to glibc's `vfprintf`. Extra slots are harmless (they read unused caller
+/// frame and are never consumed past the format string).
+pub const VA_OVERFLOW_SLOTS: usize = 64;
 
 /// Count how many named parameters occupy general-purpose vs vector argument
 /// registers (each capped at the number of such registers).
