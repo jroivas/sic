@@ -84,6 +84,9 @@ pub struct FieldDecl {
 pub struct EnumDef {
     pub name: Option<String>,
     pub variants: Option<Vec<EnumVariant>>,
+    /// `__attribute__((packed))`: underlying type is the smallest integer that
+    /// holds all enumerators (1 byte for small values), affecting struct layout.
+    pub packed: bool,
     pub span: Span,
 }
 

@@ -23,6 +23,9 @@ pub struct Parser {
     pending_cleanup: Option<String>,
     /// `__thread`/`_Thread_local` seen in the current declaration's specifiers.
     pending_thread_local: bool,
+    /// `__attribute__((packed))` seen in the most recent attribute scan — used to
+    /// size a `packed` enum's underlying type to the smallest that fits.
+    pending_packed: bool,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -36,7 +39,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -509,7 +512,11 @@ impl Parser {
     fn parse_enum(&mut self) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // 'enum'
-        // `enum __attribute__((packed)) { ... }` — skip attributes before the tag.
+        // `enum __attribute__((packed)) { ... }` — a packed enum uses the smallest
+        // integer type that fits its enumerators (1 byte for small values), which
+        // affects the size/layout of any struct containing it (QEMU's FloatClass /
+        // FloatParts128 in softfloat).
+        self.pending_packed = false;
         self.skip_attributes();
         let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             Some(self.advance().text.clone())
@@ -535,7 +542,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(AstType::Enum(EnumDef { name, variants, span: sp }))
+        Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, span: sp }))
     }
 
     // ─── Declarators ──────────────────────────────────────────────────────────
@@ -1745,6 +1752,8 @@ impl Parser {
                                 self.pending_cleanup = Some(t.text.clone());
                             }
                         }
+                    } else if name == "packed" || name == "__packed__" {
+                        self.pending_packed = true;
                     } else if name == "weak" || name == "__weak__" {
                         self.pending_weak = true;
                     } else if name == "constructor" || name == "__constructor__" {

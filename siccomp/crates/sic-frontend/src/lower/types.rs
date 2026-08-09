@@ -79,6 +79,45 @@ fn enum_is_signed(e: &EnumDef) -> bool {
     false
 }
 
+/// The underlying integer type of an enum. Normally `int` (32-bit); a
+/// `__attribute__((packed))` enum uses the smallest standard integer that holds
+/// every enumerator (1/2/4/8 bytes), which shrinks any struct containing it
+/// (QEMU's `FloatClass` is packed → 1 byte → `FloatParts128` is 24 not 32).
+fn enum_int_type(e: &EnumDef) -> Type {
+    let signed = enum_is_signed(e);
+    if !e.packed {
+        return Type::Int { bits: 32, signed };
+    }
+    // Compute the value range to pick the smallest fitting width.
+    let empty = HashMap::new();
+    let (mut lo, mut hi): (i64, i64) = (0, 0);
+    let mut next: i64 = 0;
+    if let Some(variants) = &e.variants {
+        for v in variants {
+            let val = match &v.value {
+                Some(expr) => match super::eval_const_expr(expr, &empty) {
+                    Ok(n) => n,
+                    Err(_) => { next = next.saturating_add(1); continue; }
+                },
+                None => next,
+            };
+            lo = lo.min(val);
+            hi = hi.max(val);
+            next = val.saturating_add(1);
+        }
+    }
+    let bits = if signed {
+        if lo >= i8::MIN as i64 && hi <= i8::MAX as i64 { 8 }
+        else if lo >= i16::MIN as i64 && hi <= i16::MAX as i64 { 16 }
+        else if lo >= i32::MIN as i64 && hi <= i32::MAX as i64 { 32 }
+        else { 64 }
+    } else if hi <= u8::MAX as i64 { 8 }
+    else if hi <= u16::MAX as i64 { 16 }
+    else if hi <= u32::MAX as i64 { 32 }
+    else { 64 };
+    Type::Int { bits, signed }
+}
+
 pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     lower_ast_type(&qt.ty, named, ptr_size)
 }
@@ -159,7 +198,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a
         // value like `TEMP_CONST` (4 = 0b100) must read back as 4, not sign-extend
         // to -4 (which made TCG liveness analysis hit g_assert_not_reached).
-        AstType::Enum(e)   => Type::Int { bits: 32, signed: enum_is_signed(e) },
+        AstType::Enum(e)   => enum_int_type(e),
         AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
