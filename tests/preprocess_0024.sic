@@ -1,0 +1,2 @@
+#define MACROA(a, b) a ## b
+MACROA(SUC, CESS)
