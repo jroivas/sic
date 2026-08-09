@@ -777,7 +777,14 @@ impl<'m> FuncCtx<'m> {
         // exhaustiveness `qemu_build_not_reached_always()`) must not be lowered —
         // else it emits a call to that deliberately-undefined symbol.
         if let Ok(v) = crate::lower::eval_const_expr(cond, &self.lowerer.enum_consts) {
-            return if v != 0 { self.lower_expr(then) } else { self.lower_expr(else_) };
+            let taken = if v != 0 { then } else { else_ };
+            // An aggregate-valued arm flows as a pointer, so return its aggregate
+            // pointer rather than a (truncated) scalar load. Matches the runtime
+            // path below and the non-folded aggregate case.
+            if matches!(self.infer_expr_type(taken), Ok(Type::Struct(_) | Type::Union(_) | Type::Array { .. })) {
+                return self.lower_aggregate_ptr(taken);
+            }
+            return self.lower_expr(taken);
         }
         let cond_val = self.lower_expr(cond)?;
         let cond_bool = self.to_bool(cond_val)?;
@@ -787,6 +794,40 @@ impl<'m> FuncCtx<'m> {
         // survives. Both branches are coerced to it.
         let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
         let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+
+        // Aggregate result (`cond ? struct_a : struct_b`): each arm yields a
+        // pointer to a struct/union/array; copy the selected one into a result
+        // slot and yield that slot's pointer (how aggregate values flow in the
+        // IR). A scalar Store/Load would truncate the aggregate to a register.
+        // QEMU's decoder does `*entry = repz ? pause : nop;` (X86OpEntry copy).
+        let agg_ty = match (&tty, &ety) {
+            (Type::Struct(_) | Type::Union(_) | Type::Array { .. }, _) => Some(tty.clone()),
+            (_, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) => Some(ety.clone()),
+            _ => None,
+        };
+        if let Some(aty) = agg_ty {
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: aty.clone(), align: None });
+            let size = aty.size_of(self.ptr_size());
+            let align = aty.align_of(self.ptr_size());
+            let then_bb  = self.new_block_after_current();
+            let else_bb  = self.new_block_after_current();
+            let merge_bb = self.new_block_after_current();
+            self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
+
+            self.switch_to_block(then_bb);
+            let tp = self.lower_aggregate_ptr(then)?;
+            self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+            self.set_terminator(Terminator::Jump(merge_bb));
+
+            self.switch_to_block(else_bb);
+            let ep = self.lower_aggregate_ptr(else_)?;
+            self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+            self.set_terminator(Terminator::Jump(merge_bb));
+
+            self.switch_to_block(merge_bb);
+            return Ok(Val::Local(slot));
+        }
         let ty = match (&tty, &ety) {
             (Type::Pointer(_), _) | (Type::Void, _) => tty.clone(),
             (_, Type::Pointer(_)) => ety.clone(),
