@@ -410,8 +410,10 @@ pub fn build_cl_sig(
         }
         sic_ir::Type::Array { .. } | sic_ir::Type::Void => {}
         other => {
-            if let Some(t) = types::cl_type(other, ptr_size) {
-                cl_sig.returns.push(cir::AbiParam::new(t));
+            if types::cl_type(other, ptr_size).is_some() {
+                // Narrow integers are zero/sign-extended to 32 bits on return
+                // (SysV/gcc convention) so callers see clean upper bits.
+                cl_sig.returns.push(abi::scalar_abi_param(other, ptr_size));
             }
         }
     }

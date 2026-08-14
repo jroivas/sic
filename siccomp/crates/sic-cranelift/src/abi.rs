@@ -44,10 +44,27 @@ pub fn chunk_cl_type(c: &Chunk) -> ClType {
     }
 }
 
+/// AbiParam for a scalar, annotated so Cranelift zero/sign-extends a narrow
+/// integer (<32 bits) to 32 bits at the ABI boundary. System V (and gcc/clang)
+/// require this: the upper bits of a narrow return/argument register are only
+/// well-defined after extension, so a caller that widens the value — e.g.
+/// `uint32_t off = cpu_ldw_mmu()` in QEMU's `helper_check_io` — sees clean bits.
+/// Without it, the garbage upper bits corrupt later use (address arithmetic).
+pub fn scalar_abi_param(ty: &Type, ptr_size: u32) -> AbiParam {
+    let t = cl_type(ty, ptr_size).unwrap_or(ct::I64);
+    match ty {
+        Type::Bool => AbiParam::new(t).uext(),
+        Type::Int { bits, signed } if *bits < 32 => {
+            if *signed { AbiParam::new(t).sext() } else { AbiParam::new(t).uext() }
+        }
+        _ => AbiParam::new(t),
+    }
+}
+
 /// Append the `AbiParam`s for one IR parameter.
 pub fn push_param_abi(ty: &Type, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<AbiParam>) {
     match classify_param(ty, ptr_size) {
-        ParamPass::Scalar(t) => out.push(AbiParam::new(t)),
+        ParamPass::Scalar(_) => out.push(scalar_abi_param(ty, ptr_size)),
         ParamPass::Direct(chunks) => {
             for c in &chunks {
                 out.push(AbiParam::new(chunk_cl_type(c)));
