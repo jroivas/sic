@@ -394,12 +394,25 @@ pub fn build_cl_sig(
         abi::push_param_abi(p, ptr_size, ptr_ty, &mut cl_sig.params);
     }
 
-    // Aggregate returns use the sret ABI: the frontend prepends a hidden pointer
-    // parameter (already present in `sig.params`) and the callee copies the
-    // result through it, so there is no register return value.
-    if !matches!(sig.ret, sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) | sic_ir::Type::Array { .. }) {
-        if let Some(t) = types::cl_type(&sig.ret, ptr_size) {
-            cl_sig.returns.push(cir::AbiParam::new(t));
+    // Returns: a small struct/union comes back in registers (one return value per
+    // eightbyte); a MEMORY-class aggregate (and, for now, `Array`/vectors) uses the
+    // sret ABI — the frontend prepends a hidden pointer param (already in
+    // `sig.params`) so there is no register return value.
+    match &sig.ret {
+        sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) => {
+            if let sic_ir::abi::AggClass::Regs(chunks) =
+                sic_ir::abi::classify_struct_union(&sig.ret, ptr_size)
+            {
+                for c in &chunks {
+                    cl_sig.returns.push(cir::AbiParam::new(abi::chunk_cl_type(c)));
+                }
+            }
+        }
+        sic_ir::Type::Array { .. } | sic_ir::Type::Void => {}
+        other => {
+            if let Some(t) = types::cl_type(other, ptr_size) {
+                cl_sig.returns.push(cir::AbiParam::new(t));
+            }
         }
     }
 

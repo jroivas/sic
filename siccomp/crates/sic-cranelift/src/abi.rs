@@ -54,6 +54,9 @@ pub fn push_param_abi(ty: &Type, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<Ab
             }
         }
         ParamPass::ByValStack(size) => {
+            // Cranelift requires the StructArgument size to be a multiple of 8;
+            // System V also passes MEMORY-class aggregates in 8-byte stack slots.
+            let size = (size + 7) & !7;
             out.push(AbiParam::special(ptr_ty, ArgumentPurpose::StructArgument(size)));
         }
     }

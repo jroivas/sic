@@ -1925,7 +1925,7 @@ impl<'m> FuncCtx<'m> {
                             _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                         };
                         let ret_ty = func_ty.ret.clone();
-                        if super::ret_is_sret(&ret_ty) {
+                        if super::ret_is_sret(&ret_ty, self.ptr_size()) {
                             return self.lower_indirect_sret(fptr, func_ty, arg_vals);
                         }
                         let is_void = ret_ty == Type::Void;
@@ -1974,7 +1974,7 @@ impl<'m> FuncCtx<'m> {
                     _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
                 };
                 let ret_ty = func_ty.ret.clone();
-                if super::ret_is_sret(&ret_ty) {
+                if super::ret_is_sret(&ret_ty, self.ptr_size()) {
                     return self.lower_indirect_sret(fptr, func_ty, arg_vals);
                 }
                 // Coerce fixed args to their param types and apply the default
@@ -2007,7 +2007,7 @@ impl<'m> FuncCtx<'m> {
 
         // Aggregate return (sret ABI): allocate the result slot, pass its pointer
         // as the hidden first argument, and yield that pointer as the call value.
-        if super::ret_is_sret(&ret_ty) {
+        if super::ret_is_sret(&ret_ty, self.ptr_size()) {
             let slot = self.alloc_val();
             self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
             let slot = Val::Local(slot);

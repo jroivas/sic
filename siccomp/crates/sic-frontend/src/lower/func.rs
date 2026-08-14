@@ -312,8 +312,8 @@ impl<'m> Lowerer {
         }).collect();
         let ir_params = ir_params?;
 
-        let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic);
-        let is_sret = super::ret_is_sret(&ir_ret);
+        let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic, self.ptr_size);
+        let is_sret = super::ret_is_sret(&ir_ret, self.ptr_size);
 
         let linkage = super::fn_linkage(storage, inline, self.static_funcs.contains(name));
 
@@ -479,6 +479,17 @@ impl<'m> FuncCtx<'m> {
                     }
                     self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(None));
+                } else if matches!(self.ret_ty, Type::Struct(_) | Type::Union(_)) {
+                    // Small (register-class) aggregate return: `self.sret` is None,
+                    // so hand the backend a pointer to the value; it loads the
+                    // eightbytes into the return registers.
+                    let ret = if let Some(e) = val {
+                        Some(self.lower_aggregate_ptr(e)?)
+                    } else {
+                        None
+                    };
+                    self.emit_cleanups_to(0);
+                    self.set_terminator(Terminator::Ret(ret));
                 } else {
                     let ret = if let Some(e) = val {
                         let v = self.lower_expr(e)?;

@@ -49,6 +49,19 @@ pub fn compile_function(
     let ptr_ty = ptr_cl(ptr_size);
     let target_config = obj_module.target_config();
 
+    // If this function returns a small aggregate in registers, the return
+    // terminator gets a pointer to the value and must load these eightbytes into
+    // the return registers.
+    let ret_chunks: Option<Vec<sic_ir::abi::Chunk>> = match &f.sig.ret {
+        sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) => {
+            match sic_ir::abi::classify_struct_union(&f.sig.ret, ptr_size) {
+                sic_ir::abi::AggClass::Regs(chunks) => Some(chunks),
+                sic_ir::abi::AggClass::Memory(_) => None,
+            }
+        }
+        _ => None,
+    };
+
     // Pre-declare all callees and globals inside this function's IR.
     // Sort by key for deterministic ordering (avoids HashMap non-determinism).
     let mut callee_refs: HashMap<u32, cir::FuncRef> = HashMap::new();
@@ -208,7 +221,7 @@ pub fn compile_function(
                 &mut slot_map, var_dbg, module_ir,
             );
         }
-        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty);
+        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref());
     }
 
     builder.seal_all_blocks();
@@ -389,16 +402,11 @@ fn emit_instr(
             } else {
                 builder.ins().call(cl_fref, &arg_vals)
             };
-            if let Some(d) = dest {
-                let results = builder.inst_results(inst).to_vec();
-                if !results.is_empty() {
-                    val_map.insert(d.0, results[0]);
-                }
-            }
+            let results = builder.inst_results(inst).to_vec();
+            bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
         Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
-            let _ = ret_ty;
             let base_sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let (arg_vals, _named_cl) = marshal_args(
@@ -415,12 +423,8 @@ fn emit_instr(
             }
             let sig_ref = builder.func.import_signature(sig);
             let inst = builder.ins().call_indirect(sig_ref, fp, &arg_vals);
-            if let Some(d) = dest {
-                let results = builder.inst_results(inst).to_vec();
-                if !results.is_empty() {
-                    val_map.insert(d.0, results[0]);
-                }
-            }
+            let results = builder.inst_results(inst).to_vec();
+            bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
         Instr::GetElemPtr { dest, base, index, elem_size, .. } => {
@@ -570,6 +574,42 @@ fn va_promote(v: cir::Value, builder: &mut FunctionBuilder<'_>) -> cir::Value {
     }
 }
 
+/// Bind a call's result(s) to its `dest`. A small aggregate returns in registers
+/// (one value per eightbyte); reconstruct it into a fresh slot and bind `dest` to
+/// that pointer (aggregates flow as pointers). Scalars bind directly.
+fn bind_call_result(
+    dest: &Option<ValId>,
+    results: &[cir::Value],
+    ret_ty: &sic_ir::Type,
+    ptr_size: u32,
+    builder: &mut FunctionBuilder<'_>,
+    ptr_ty: cir::Type,
+    val_map: &mut HashMap<u32, cir::Value>,
+) {
+    let Some(d) = dest else { return };
+    if results.is_empty() {
+        return;
+    }
+    if matches!(ret_ty, sic_ir::Type::Struct(_) | sic_ir::Type::Union(_)) {
+        if let sic_ir::abi::AggClass::Regs(chunks) =
+            sic_ir::abi::classify_struct_union(ret_ty, ptr_size)
+        {
+            let size = ret_ty.size_of(ptr_size) as u32;
+            let align = ret_ty.align_of(ptr_size).max(1);
+            let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                cir::StackSlotKind::ExplicitSlot, size, align.trailing_zeros() as u8,
+            ));
+            let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+            for (c, r) in chunks.iter().zip(results) {
+                crate::abi::store_chunk(builder, *r, addr, c);
+            }
+            val_map.insert(d.0, addr);
+            return;
+        }
+    }
+    val_map.insert(d.0, results[0]);
+}
+
 /// Marshal IR call arguments into Cranelift values per the System V ABI:
 /// a small aggregate (Direct) is loaded from its pointer into one value per
 /// eightbyte; a MEMORY aggregate (ByValStack) is passed as a pointer (Cranelift
@@ -629,15 +669,25 @@ fn emit_terminator(
     data_refs: &HashMap<u32, cir::GlobalValue>,
     bb_map: &HashMap<u32, cir::Block>,
     ptr_ty: cir::Type,
+    ret_chunks: Option<&[sic_ir::abi::Chunk]>,
 ) {
     match term {
         Terminator::Ret(None) => { builder.ins().return_(&[]); }
         Terminator::Ret(Some(v)) => {
-            let hint = builder.func.signature.returns
-                .first().map(|p| p.value_type).unwrap_or(ct::I32);
-            let rv = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-            let rv = coerce(rv, hint, builder, ptr_ty);
-            builder.ins().return_(&[rv]);
+            if let Some(chunks) = ret_chunks {
+                // Small aggregate return: `v` is a pointer to the value; load each
+                // eightbyte into its return register.
+                let base = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                let rets: Vec<cir::Value> =
+                    chunks.iter().map(|c| crate::abi::load_chunk(builder, base, c)).collect();
+                builder.ins().return_(&rets);
+            } else {
+                let hint = builder.func.signature.returns
+                    .first().map(|p| p.value_type).unwrap_or(ct::I32);
+                let rv = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
+                let rv = coerce(rv, hint, builder, ptr_ty);
+                builder.ins().return_(&[rv]);
+            }
         }
         Terminator::Jump(bb) => {
             let cl_bb = bb_map[&bb.0];

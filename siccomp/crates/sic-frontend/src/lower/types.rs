@@ -189,7 +189,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             }).collect();
             // Apply the aggregate-return sret ABI so function-pointer types match
             // the (sret-lowered) functions assigned to them and called indirectly.
-            Type::Function(Box::new(super::build_fn_sig(ret_ty, param_tys?, *variadic)))
+            Type::Function(Box::new(super::build_fn_sig(ret_ty, param_tys?, *variadic, ptr_size)))
         }
         AstType::Struct(s) => lower_struct(s, named, ptr_size)?,
         AstType::Union(u)  => lower_union(u, named, ptr_size)?,

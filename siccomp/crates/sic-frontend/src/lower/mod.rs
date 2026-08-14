@@ -132,7 +132,7 @@ impl Lowerer {
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
-                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
+                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
                     if self.module.func_ref_by_name(name).is_none() {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
@@ -149,7 +149,7 @@ impl Lowerer {
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
-                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic);
+                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
                     // Register the DEFINED function even when a prior forward
                     // declaration only produced an extern (e.g. `static void f();`
                     // then `static void f() {...}` in QEMU's qht.c). Otherwise a
@@ -1280,8 +1280,8 @@ pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<Strin
 /// Struct/Union return prepends a hidden `Pointer(ret)` first parameter (the
 /// caller-provided result slot). `ret` is preserved unchanged so call sites can
 /// detect the ABI from the signature.
-pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool) -> FunctionType {
-    if ret_is_sret(&ret) {
+pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool, ptr_size: u32) -> FunctionType {
+    if ret_is_sret(&ret, ptr_size) {
         let mut ps = Vec::with_capacity(params.len() + 1);
         ps.push(Type::Pointer(Box::new(ret.clone())));
         ps.extend(params);
@@ -1308,10 +1308,12 @@ pub(crate) fn fn_linkage(storage: &Option<StorageClass>, inline: bool, declared_
     }
 }
 
-pub(crate) fn ret_is_sret(ret: &Type) -> bool {
-    // Structs, unions and `vector_size` arrays are returned through a hidden
-    // result pointer. (Only vectors ever return an array by value in C.)
-    matches!(ret, Type::Struct(_) | Type::Union(_) | Type::Array { .. })
+pub(crate) fn ret_is_sret(ret: &Type, ptr_size: u32) -> bool {
+    // Under System V, only a MEMORY-class aggregate (>16 bytes / x87 / unaligned)
+    // is returned through the hidden result pointer; a small struct/union is
+    // returned in registers (see sic_ir::abi). `vector_size` arrays keep the sret
+    // path for now (ABI.md follow-up).
+    sic_ir::abi::ret_in_memory(ret, ptr_size)
 }
 
 /// Apply an integer cast's truncation/re-signing to a folded constant: mask to
