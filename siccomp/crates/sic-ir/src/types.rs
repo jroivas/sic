@@ -94,7 +94,12 @@ impl Type {
         match self {
             Type::Void | Type::Function(_) => 1,
             Type::Bool => 1,
-            Type::Int { bits, .. } => ((*bits as u64 + 7) / 8).min(ptr_size as u64),
+            // Natural alignment is the byte size, capped at 16 (the max scalar
+            // alignment on x86-64 SysV). NB: `__int128` is 16-byte aligned — a
+            // `.min(ptr_size)` here would wrongly cap it to 8, mis-laying out
+            // every struct with an `Int128` (QEMU's MemoryRegion et al.) and
+            // breaking 128-bit atomics.
+            Type::Int { bits, .. } => ((*bits as u64 + 7) / 8).min(16),
             Type::Float32 => 4,
             Type::Float64 => 8,
             Type::Float80 => 16,
