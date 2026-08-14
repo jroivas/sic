@@ -26,16 +26,32 @@ pub struct StructType {
     /// (in bits); its `fields` entry holds the declared storage integer type.
     /// Empty means no bit-fields (default). A zero width forces alignment.
     pub bitfields: Vec<Option<u32>>,
+    /// Parallel to `fields`: `Some(n)` is an `__attribute__((aligned(n)))`
+    /// override on the member, raising its (and the struct's) alignment. Empty
+    /// means no overrides (default).
+    pub field_aligns: Vec<Option<u32>>,
+    /// Type-level `__attribute__((aligned(n)))` on the struct itself, raising the
+    /// whole type's alignment (QEMU's `QEMU_ALIGNED` on `CPUTLBDescFast`).
+    pub min_align: Option<u32>,
 }
 
 impl StructType {
     /// Construct a plain (bit-field-free) struct.
     pub fn plain(name: Option<String>, fields: Vec<(String, Type)>, packed: bool) -> Self {
-        StructType { name, fields, packed, bitfields: Vec::new() }
+        StructType { name, fields, packed, bitfields: Vec::new(), field_aligns: Vec::new(), min_align: None }
     }
 
     fn bitfield_width(&self, idx: usize) -> Option<u32> {
         self.bitfields.get(idx).copied().flatten()
+    }
+
+    /// Effective alignment (bytes) of field `idx`: the max of its type's natural
+    /// alignment and any `aligned(n)` override. An override wins even under
+    /// `#pragma pack`/`packed` (which otherwise forces alignment 1).
+    fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {
+        let natural = if self.packed { 1 } else { ty.align_of(ptr_size) };
+        let override_ = self.field_aligns.get(idx).copied().flatten().unwrap_or(0) as u64;
+        natural.max(override_).max(1)
     }
 }
 
@@ -43,6 +59,10 @@ impl StructType {
 pub struct UnionType {
     pub name: Option<String>,
     pub fields: Vec<(String, Type)>,
+    /// Parallel to `fields`: `aligned(n)` overrides on members (see `StructType`).
+    pub field_aligns: Vec<Option<u32>>,
+    /// Type-level `__attribute__((aligned(n)))` on the union itself.
+    pub min_align: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,7 +179,7 @@ impl StructType {
         let mut max_align = 1u64;
 
         for (i, (_, ty)) in self.fields.iter().enumerate() {
-            let align = if self.packed { 1 } else { ty.align_of(ptr_size).max(1) };
+            let align = self.field_align(i, ty, ptr_size);
             let size = ty.size_of(ptr_size);
             match self.bitfield_width(i) {
                 Some(width) => {
@@ -192,8 +212,12 @@ impl StructType {
         }
 
         let mut total = bit_pos;
-        if max_align > 0 && !self.packed {
-            total = round_up_bits(total, max_align * 8);
+        // A type-level `aligned(n)` raises the struct's alignment (and thus its
+        // trailing padding) even under `packed`.
+        let min_align = self.min_align.unwrap_or(0) as u64;
+        let eff_align = max_align.max(min_align);
+        if eff_align > 0 && (!self.packed || min_align > 0) {
+            total = round_up_bits(total, eff_align * 8);
         }
         (byte_offsets, bit_offsets, (total + 7) / 8)
     }
@@ -203,14 +227,16 @@ impl StructType {
     }
 
     pub fn align_of(&self, ptr_size: u32) -> u64 {
-        if self.packed {
-            return 1;
-        }
+        // Even a `packed` struct is aligned to any explicit member `aligned(n)`
+        // override, so compute from `field_align` (which folds packed in). A
+        // type-level `aligned(n)` raises it further.
         self.fields
             .iter()
-            .map(|(_, t)| t.align_of(ptr_size))
+            .enumerate()
+            .map(|(i, (_, t))| self.field_align(i, t, ptr_size))
             .max()
             .unwrap_or(1)
+            .max(self.min_align.unwrap_or(0) as u64)
     }
 
     pub fn field_offset(&self, idx: usize, ptr_size: u32) -> u64 {
@@ -229,20 +255,33 @@ fn round_up_bits(pos: u64, align: u64) -> u64 {
 }
 
 impl UnionType {
+    /// Effective alignment of member `idx`: natural align raised by any
+    /// `aligned(n)` override.
+    fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {
+        let override_ = self.field_aligns.get(idx).copied().flatten().unwrap_or(0) as u64;
+        ty.align_of(ptr_size).max(override_).max(1)
+    }
+
     pub fn size_of(&self, ptr_size: u32) -> u64 {
-        self.fields
+        let max = self.fields
             .iter()
             .map(|(_, t)| t.size_of(ptr_size))
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // A union's size is rounded up to its alignment (which an `aligned(n)`
+        // member override or a type-level `aligned(n)` can raise above the
+        // largest member's size).
+        round_up_bits(max * 8, self.align_of(ptr_size) * 8) / 8
     }
 
     pub fn align_of(&self, ptr_size: u32) -> u64 {
         self.fields
             .iter()
-            .map(|(_, t)| t.align_of(ptr_size))
+            .enumerate()
+            .map(|(i, (_, t))| self.field_align(i, t, ptr_size))
             .max()
             .unwrap_or(1)
+            .max(self.min_align.unwrap_or(0) as u64)
     }
 }
 

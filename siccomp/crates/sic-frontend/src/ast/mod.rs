@@ -62,6 +62,10 @@ pub enum AstType {
 pub struct StructDef {
     pub name: Option<String>,
     pub fields: Option<Vec<FieldDecl>>,
+    /// Type-level `__attribute__((aligned(N)))` — on the tag (`struct
+    /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
+    /// struct {...} T QEMU_ALIGNED(N)`). Raises the whole type's alignment.
+    pub align: Option<u32>,
     pub span: Span,
 }
 
@@ -69,6 +73,8 @@ pub struct StructDef {
 pub struct UnionDef {
     pub name: Option<String>,
     pub fields: Option<Vec<FieldDecl>>,
+    /// Type-level `__attribute__((aligned(N)))` (see `StructDef::align`).
+    pub align: Option<u32>,
     pub span: Span,
 }
 
@@ -77,6 +83,11 @@ pub struct FieldDecl {
     pub name: Option<String>,
     pub ty: QualType,
     pub bit_width: Option<BoxExpr>,
+    /// `__attribute__((aligned(N)))` on the member: forces the member's (and
+    /// hence the aggregate's) alignment to at least N bytes. QEMU's `FPReg`
+    /// union uses this on its `floatx80 d` member to make the whole union
+    /// 16-aligned, which shifts every following field in `CPUX86State`.
+    pub align: Option<u32>,
     pub span: Span,
 }
 

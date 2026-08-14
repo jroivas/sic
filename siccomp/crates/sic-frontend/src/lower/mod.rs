@@ -259,21 +259,27 @@ impl Lowerer {
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
             let mut ir_fields = Vec::new();
             let mut bitfields = Vec::new();
+            let mut field_aligns = Vec::new();
             let mut any_bitfield = false;
+            let mut any_align = false;
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
                 let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
                 if bw.is_some() { any_bitfield = true; }
+                if f.align.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 bitfields.push(bw);
+                field_aligns.push(f.align);
             }
             let ir_ty = Type::Struct(StructType {
                 name: Some(name.clone()),
                 fields: ir_fields,
                 packed: false,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
+                field_aligns: if any_align { field_aligns } else { Vec::new() },
+                min_align: s.align,
             });
             self.register_type_name(name.clone(), ir_ty);
         }
@@ -283,13 +289,22 @@ impl Lowerer {
     fn register_union_type_from_def(&mut self, u: &UnionDef) -> Result<()> {
         if let (Some(name), Some(fields)) = (&u.name, &u.fields) {
             let mut ir_fields = Vec::new();
+            let mut field_aligns = Vec::new();
+            let mut any_align = false;
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
+                if f.align.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
+                field_aligns.push(f.align);
             }
-            let ir_ty = Type::Union(UnionType { name: Some(name.clone()), fields: ir_fields });
+            let ir_ty = Type::Union(UnionType {
+                name: Some(name.clone()),
+                fields: ir_fields,
+                field_aligns: if any_align { field_aligns } else { Vec::new() },
+                min_align: u.align,
+            });
             self.register_type_name(name.clone(), ir_ty);
         }
         Ok(())

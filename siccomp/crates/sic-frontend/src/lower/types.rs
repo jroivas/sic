@@ -247,7 +247,7 @@ pub fn opaque_aggregate(t: Type) -> Type {
         Type::Struct(st) if st.name.is_some() =>
             Type::Struct(StructType::plain(st.name, vec![], st.packed)),
         Type::Union(u) if u.name.is_some() =>
-            Type::Union(UnionType { name: u.name, fields: vec![] }),
+            Type::Union(UnionType { name: u.name, fields: vec![], field_aligns: vec![], min_align: u.min_align }),
         other => other,
     }
 }
@@ -277,20 +277,26 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
     let fields = s.fields.as_ref().unwrap();
     let mut ir_fields = Vec::new();
     let mut bitfields = Vec::new();
+    let mut field_aligns = Vec::new();
     let mut any_bitfield = false;
+    let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
         let fty = lower_type(&f.ty, named, ptr_size)?;
         let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
         if bw.is_some() { any_bitfield = true; }
+        if f.align.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
         bitfields.push(bw);
+        field_aligns.push(f.align);
     }
     Ok(Type::Struct(StructType {
         name: s.name.clone(),
         fields: ir_fields,
         packed: false,
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
+        field_aligns: if any_align { field_aligns } else { Vec::new() },
+        min_align: s.align,
     }))
 }
 
@@ -413,16 +419,25 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
                 return Ok(ty.clone());
             }
         }
-        return Ok(Type::Union(UnionType { name: u.name.clone(), fields: vec![] }));
+        return Ok(Type::Union(UnionType { name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
     }
     let fields = u.fields.as_ref().unwrap();
     let mut ir_fields = Vec::new();
+    let mut field_aligns = Vec::new();
+    let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
         let fty = lower_type(&f.ty, named, ptr_size)?;
+        if f.align.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
+        field_aligns.push(f.align);
     }
-    Ok(Type::Union(UnionType { name: u.name.clone(), fields: ir_fields }))
+    Ok(Type::Union(UnionType {
+        name: u.name.clone(),
+        fields: ir_fields,
+        field_aligns: if any_align { field_aligns } else { Vec::new() },
+        min_align: u.align,
+    }))
 }
 
 /// Best-effort standalone type of a `typeof(expr)` operand, used when resolving

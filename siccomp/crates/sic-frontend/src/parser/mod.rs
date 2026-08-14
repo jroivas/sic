@@ -26,6 +26,10 @@ pub struct Parser {
     /// `__attribute__((packed))` seen in the most recent attribute scan — used to
     /// size a `packed` enum's underlying type to the smallest that fits.
     pending_packed: bool,
+    /// `__attribute__((aligned(N)))` seen in the most recent attribute scan — the
+    /// largest N. Applied to the next struct/union member to raise its (and the
+    /// aggregate's) alignment (QEMU's `FPReg` union → 16-aligned `CPUX86State`).
+    pending_aligned: Option<u32>,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -39,7 +43,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_aligned: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -267,10 +271,20 @@ impl Parser {
             // The attribute may be consumed inside `parse_declarator`, so clear the
             // capture slot first and read it afterward.
             self.pending_vector_size = None;
+            self.pending_aligned = None;
             let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
             self.skip_attributes();
             if let Some(n) = self.pending_vector_size.take() {
                 ty = self.apply_vector_size(ty, n);
+            }
+            // `typedef struct {...} Name QEMU_ALIGNED(N)`: the alignment attaches
+            // to the aliased struct/union type (QEMU's CPUTLBDescFast etc.).
+            if let Some(n) = self.pending_aligned.take() {
+                match &mut ty.ty {
+                    AstType::Struct(sd) => sd.align = Some(sd.align.unwrap_or(0).max(n)),
+                    AstType::Union(ud)  => ud.align = Some(ud.align.unwrap_or(0).max(n)),
+                    _ => {}
+                }
             }
             self.typedefs.insert(name.clone());
             names.push((name, ty));
@@ -446,13 +460,22 @@ impl Parser {
     fn parse_struct_or_union(&mut self, is_union: bool) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // consume 'struct'/'union'
+        // A leading `struct __attribute__((aligned(N))) Tag {...}` raises the whole
+        // type's alignment. Capture N here, before member parsing clears the slot.
+        self.pending_aligned = None;
         self.skip_attributes();
+        let mut type_align = self.pending_aligned.take();
 
         let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             Some(self.advance().text.clone())
         } else {
             None
         };
+        // Attributes may also sit between the tag and the body:
+        // `struct Tag __attribute__((aligned(N))) {...}`.
+        self.pending_aligned = None;
+        self.skip_attributes();
+        type_align = type_align.or(self.pending_aligned.take());
 
         let fields = if self.at(TokenKind::LBrace) {
             self.advance();
@@ -477,24 +500,33 @@ impl Parser {
         };
 
         if is_union {
-            Ok(AstType::Union(UnionDef { name, fields, span: sp }))
+            Ok(AstType::Union(UnionDef { name, fields, align: type_align, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, span: sp }))
         }
     }
 
     fn parse_struct_field(&mut self) -> Result<Vec<FieldDecl>> {
         let sp = self.span();
+        // Clear any `aligned(N)` left over from a preceding declaration (a file-
+        // scope `int g __attribute__((aligned(64)))`, a typedef, etc.) so it can't
+        // leak onto this member and corrupt an unrelated struct's layout.
+        self.pending_aligned = None;
         let (base_ty, _) = self.parse_decl_specifiers()?;
         let mut fields = Vec::new();
 
         if self.at(TokenKind::Semi) {
             // Anonymous struct/union member
-            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, span: sp });
+            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, align: None, span: sp });
             return Ok(fields);
         }
 
         loop {
+            // Alignment may be attached to the base type (before the declarator,
+            // applying to every declarator in the group) or trail an individual
+            // member; capture both. `parse_declarator` runs `skip_attributes`
+            // for the trailing form.
+            let group_align = self.pending_aligned.take();
             let (name, ty) = self.parse_declarator(base_ty.clone())?;
             let bit_width = if self.eat(TokenKind::Colon) {
                 Some(Box::new(self.parse_assign_expr()?))
@@ -503,7 +535,8 @@ impl Parser {
             };
             // Trailing field attribute, e.g. `int x __attribute__((aligned(8)));`.
             self.skip_attributes();
-            fields.push(FieldDecl { name: Some(name), ty, bit_width, span: sp.clone() });
+            let align = self.pending_aligned.take().or(group_align);
+            fields.push(FieldDecl { name: Some(name), ty, bit_width, align, span: sp.clone() });
             if !self.eat(TokenKind::Comma) { break; }
         }
         Ok(fields)
@@ -1754,6 +1787,19 @@ impl Parser {
                         }
                     } else if name == "packed" || name == "__packed__" {
                         self.pending_packed = true;
+                    } else if name == "aligned" || name == "__aligned__" {
+                        // `aligned(EXPR)`: force alignment to the constant EXPR
+                        // (e.g. `16`, `sizeof(void*)`, `2 * sizeof(void *)` as in
+                        // QEMU_ALIGNED). Bare `aligned` (no argument) requests the
+                        // target's max useful alignment; ignore that rare form.
+                        if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            if let Some(rp) = self.matching_rparen(i + 1) {
+                                if let Some(n) = self.eval_align_tokens(i + 2, rp) {
+                                    self.pending_aligned =
+                                        Some(self.pending_aligned.unwrap_or(0).max(n));
+                                }
+                            }
+                        }
                     } else if name == "weak" || name == "__weak__" {
                         self.pending_weak = true;
                     } else if name == "constructor" || name == "__constructor__" {
@@ -1771,6 +1817,72 @@ impl Parser {
             }
             i += 1;
         }
+    }
+
+    /// Index of the `)` matching the `(` at `lparen_idx`, or None.
+    fn matching_rparen(&self, lparen_idx: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        let mut i = lparen_idx;
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => { depth -= 1; if depth == 0 { return Some(i); } }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Evaluate the constant expression in an `aligned(...)` argument over the
+    /// token range `[lo, hi)`. Handles the forms that appear in alignment
+    /// attributes: integer literals, `sizeof(...)` (taken as the 8-byte machine
+    /// word — sic targets 64-bit), parentheses, and `<<`, `+`, `*`. Returns None
+    /// for anything it doesn't understand (the attribute is then ignored, as
+    /// before). Operators are handled at the outermost (depth-0) level, splitting
+    /// at the last occurrence for left-associativity; precedence low→high is
+    /// `<<`, `+`, `*`.
+    fn eval_align_tokens(&self, lo: usize, hi: usize) -> Option<u32> {
+        if lo >= hi { return None; }
+        // Strip a fully-enclosing paren pair.
+        if self.tokens[lo].kind == TokenKind::LParen
+            && self.matching_rparen(lo) == Some(hi - 1)
+        {
+            return self.eval_align_tokens(lo + 1, hi - 1);
+        }
+        // Scan for a top-level (depth 0) split operator, lowest precedence first.
+        for op in [TokenKind::Shl, TokenKind::Plus, TokenKind::Star] {
+            let mut depth = 0i32;
+            let mut split = None;
+            for i in lo..hi {
+                match self.tokens[i].kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    k if depth == 0 && k == op => split = Some(i), // last occurrence
+                    _ => {}
+                }
+            }
+            if let Some(s) = split {
+                let l = self.eval_align_tokens(lo, s)?;
+                let r = self.eval_align_tokens(s + 1, hi)?;
+                return Some(match op {
+                    TokenKind::Shl => l.wrapping_shl(r),
+                    TokenKind::Plus => l.wrapping_add(r),
+                    _ => l.wrapping_mul(r),
+                });
+            }
+        }
+        // Atom: a bare integer literal, or sizeof(...) as the machine word.
+        if self.tokens[lo].kind == TokenKind::Sizeof {
+            return Some(8);
+        }
+        if hi - lo == 1 && self.tokens[lo].kind == TokenKind::IntLit {
+            return self.tokens[lo].text
+                .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                .parse::<u32>()
+                .ok();
+        }
+        None
     }
 
     /// Wrap `ty` as a `vector_size(n)` vector: an array of `n / sizeof(elem)`
