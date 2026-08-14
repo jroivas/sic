@@ -116,6 +116,11 @@ pub enum Instr {
     VaArg   { dest: ValId, list_ptr: Val, ty: Type },
     VaEnd   { list_ptr: Val },
 
+    /// `__builtin_return_address(0)`: the current function's return address (a
+    /// pointer). Backed by Cranelift's `get_return_address`. QEMU's `GETPC()`
+    /// depends on it to restart a faulting TB at the right guest PC.
+    ReturnAddress { dest: ValId },
+
     /// Debug marker: the source line number that the following instructions
     /// correspond to. Emits no machine code; drives the DWARF line table.
     SrcLine(u32),
@@ -131,7 +136,8 @@ impl Instr {
     /// Invoke `f` on every `Val` operand of this instruction.
     pub fn for_each_val<F: FnMut(&Val)>(&self, mut f: F) {
         match self {
-            Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. } => {}
+            Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
+            | Instr::ReturnAddress { .. } => {}
             Instr::Load { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }

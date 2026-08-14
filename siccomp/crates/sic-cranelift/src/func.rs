@@ -506,6 +506,12 @@ fn emit_instr(
 
         Instr::VaEnd { .. } => {}
 
+        Instr::ReturnAddress { dest } => {
+            // `__builtin_return_address(0)` — QEMU's GETPC() restart pointer.
+            let v = builder.ins().get_return_address(ptr_ty);
+            val_map.insert(dest.0, v);
+        }
+
         Instr::VaArg { dest, list_ptr, ty } => {
             // Walk the System V va_list: integer/pointer args come from the GP
             // region (gp_offset < 48) or the overflow area; floating-point args

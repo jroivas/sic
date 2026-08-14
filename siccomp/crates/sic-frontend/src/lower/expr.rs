@@ -1799,11 +1799,26 @@ impl<'m> FuncCtx<'m> {
                     return Ok(Constant::zero());
                 }
                 "__builtin_constant_p" => return Ok(Constant::int(0)),
-                // Return/frame-address introspection: sic can't walk the call
-                // stack, so return a null pointer (callers use these for
-                // diagnostics/backtraces, which degrade gracefully).
-                "__builtin_return_address" | "__builtin_frame_address"
-                | "__builtin_dwarf_cfa" => return Ok(Constant::zero()),
+                // `__builtin_return_address(0)` = the current function's return
+                // address. Critical for QEMU's GETPC(): a faulting helper uses it
+                // to restart the TB at the right guest PC. Level 0 maps to
+                // Cranelift's get_return_address; deeper levels (stack walking) and
+                // frame/CFA queries fall back to null (diagnostics degrade).
+                "__builtin_return_address" => {
+                    let level0 = args.first()
+                        .and_then(|e| crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).ok())
+                        .map(|v| v == 0)
+                        .unwrap_or(true);
+                    if level0 {
+                        let d = self.alloc_val();
+                        self.push_instr(Instr::ReturnAddress { dest: d });
+                        self.val_types.insert(d.0, Type::void_ptr());
+                        return Ok(Val::Local(d));
+                    }
+                    return Ok(Constant::zero());
+                }
+                "__builtin_frame_address" | "__builtin_dwarf_cfa"
+                    => return Ok(Constant::zero()),
                 // These identity/no-op address adjusters return their argument.
                 "__builtin_extract_return_addr" | "__builtin_frob_return_addr" => {
                     if let Some(e) = args.first() { return self.lower_expr(e); }

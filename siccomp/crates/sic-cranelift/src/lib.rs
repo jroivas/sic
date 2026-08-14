@@ -82,11 +82,11 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // ELF general-dynamic TLS model, so `tls_value` lowers to a real TLS access
     // (__tls_get_addr) for `__thread` variables (QEMU's bql_locked/rcu_reader).
     flag_builder.set("tls_model", "elf_gd").unwrap();
-    if debug_info {
-        // Keep a real frame pointer (RBP) so DWARF can describe variable
-        // locations as fixed frame-relative offsets.
-        flag_builder.set("preserve_frame_pointers", "true").unwrap();
-    }
+    // Keep a real frame pointer (RBP): DWARF describes variable locations as
+    // fixed frame-relative offsets, and Cranelift's `get_return_address`
+    // (`__builtin_return_address(0)` / QEMU's GETPC()) requires it.
+    let _ = debug_info;
+    flag_builder.set("preserve_frame_pointers", "true").unwrap();
     let flags = settings::Flags::new(flag_builder);
 
     // Native ISA
