@@ -1,6 +1,7 @@
 mod types;
 mod func;
 mod dwarf;
+pub mod abi;
 
 use std::collections::HashMap;
 use cranelift_codegen::ir as cir;
@@ -381,11 +382,16 @@ pub fn build_cl_sig(
     call_conv: CallConv,
 ) -> cir::Signature {
     let mut cl_sig = cir::Signature::new(call_conv);
+    let ptr_ty = types::ptr_cl(ptr_size);
 
     for p in &sig.params {
-        if let Some(t) = types::cl_type(p, ptr_size) {
-            cl_sig.params.push(cir::AbiParam::new(t));
+        // System V: a small struct/union is passed in registers (one param per
+        // eightbyte), a large one by value on the stack (StructArgument); scalars
+        // and vectors keep their single-value mapping. See abi.rs / ABI.md.
+        if matches!(p, sic_ir::Type::Void) {
+            continue;
         }
+        abi::push_param_abi(p, ptr_size, ptr_ty, &mut cl_sig.params);
     }
 
     // Aggregate returns use the sret ABI: the frontend prepends a hidden pointer
@@ -420,10 +426,18 @@ pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize,
     let mut n_gp = 0usize;
     let mut n_fp = 0usize;
     for p in &sig.params {
-        match types::cl_type(p, ptr_size) {
-            Some(t) if t.is_float() => n_fp += 1,
-            Some(_) => n_gp += 1,
-            None => {}
+        // A Direct aggregate consumes one register per eightbyte (by class); a
+        // ByValStack aggregate is on the stack and consumes none.
+        match abi::classify_param(p, ptr_size) {
+            abi::ParamPass::Scalar(t) => {
+                if t.is_float() { n_fp += 1 } else { n_gp += 1 }
+            }
+            abi::ParamPass::Direct(chunks) => {
+                for c in &chunks {
+                    if c.class == sic_ir::abi::RegClass::Sse { n_fp += 1 } else { n_gp += 1 }
+                }
+            }
+            abi::ParamPass::ByValStack(_) => {}
         }
     }
     (n_gp.min(VA_GP_REGS), n_fp.min(VA_FP_REGS))

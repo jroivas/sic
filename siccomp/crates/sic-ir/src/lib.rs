@@ -4,6 +4,7 @@ pub mod instr;
 pub mod module;
 pub mod backend;
 pub mod display;
+pub mod abi;
 
 pub use types::*;
 pub use value::*;

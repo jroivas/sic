@@ -87,10 +87,37 @@ pub fn compile_function(
     let mut va_info: Option<VaInfo> = None;
     {
         let params = builder.block_params(entry_cl).to_vec();
-        let fixed = f.params.len();
-        for i in 0..fixed {
-            if i < params.len() {
-                val_map.insert(0x10000 + i as u32, params[i]);
+        let named = f.params.len();
+        // Bind each named IR param to its entry-block value(s). A small struct/union
+        // (Direct) arrives spread across several block params (one per eightbyte);
+        // reconstruct it into a fresh slot and bind the sentinel to that pointer, so
+        // the body — which treats every aggregate as a pointer — sees what it expects.
+        // A ByValStack aggregate already arrives as a pointer (Cranelift's copy).
+        let mut bp = 0usize; // entry-block param cursor
+        for i in 0..named {
+            let pty = &f.params[i].ty;
+            match crate::abi::classify_param(pty, ptr_size) {
+                crate::abi::ParamPass::Scalar(_) | crate::abi::ParamPass::ByValStack(_) => {
+                    if bp < params.len() {
+                        val_map.insert(0x10000 + i as u32, params[bp]);
+                    }
+                    bp += 1;
+                }
+                crate::abi::ParamPass::Direct(chunks) => {
+                    let size = pty.size_of(ptr_size) as u32;
+                    let align = pty.align_of(ptr_size).max(1);
+                    let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                        cir::StackSlotKind::ExplicitSlot, size, align.trailing_zeros() as u8,
+                    ));
+                    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+                    for c in &chunks {
+                        if bp < params.len() {
+                            crate::abi::store_chunk(&mut builder, params[bp], addr, c);
+                        }
+                        bp += 1;
+                    }
+                    val_map.insert(0x10000 + i as u32, addr);
+                }
             }
         }
         if f.sig.variadic {
@@ -111,7 +138,9 @@ pub fn compile_function(
 
             let n_gp_fill = VA_GP_REGS - n_gp;
             let n_fp_fill = VA_FP_REGS - n_fp;
-            let mut idx = fixed;
+            // The over-declared va filler params follow the (possibly expanded)
+            // named params, so start at the block-param cursor, not the IR count.
+            let mut idx = bp;
             for k in 0..n_gp_fill {
                 if idx < params.len() {
                     builder.ins().store(MemFlags::new(), params[idx], reg_save, ((n_gp + k) * 8) as i32);
@@ -324,43 +353,33 @@ fn emit_instr(
             let ir_sig = module_ir.func_sig(*func);
             let named_count = ir_sig.params.len();
             let is_variadic = ir_sig.variadic;
-            let boundary = if is_variadic { named_count } else { declared_count };
-
-            let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                if i < boundary && i < declared_count {
-                    let hint = param_tys[i];
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-                    coerce(v, hint, builder, ptr_ty)
-                } else {
-                    // Variadic argument: apply C default promotions (float→double)
-                    // but keep the natural class so floats land in XMM registers.
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
-                    va_promote(v, builder)
-                }
-            }).collect();
+            let _ = &param_tys;
+            let (arg_vals, _named_cl) = marshal_args(
+                args, &ir_sig.params, named_count, is_variadic, ptr_size,
+                val_map, callee_refs, data_refs, builder, ptr_ty,
+            );
 
             let inst = if is_variadic {
-                // Build a call signature = real named params + the actual (promoted)
-                // argument types. Cranelift's SysV lowering places each param in its
-                // natural register class and sets AL to the number of XMM registers
-                // used, which is what a variadic callee (e.g. printf) expects.
+                // Named (already ABI-expanded) params + the actual variadic arg
+                // types. Cranelift's SysV lowering places each in its natural class.
                 let base = &builder.func.stencil.dfg.signatures[sig_ref];
                 let mut new_sig = cir::Signature::new(base.call_conv);
                 new_sig.returns = base.returns.clone();
-                for &t in param_tys.iter().take(named_count.min(param_tys.len())) {
-                    new_sig.params.push(cir::AbiParam::new(t));
-                }
-                for v in arg_vals.iter().skip(named_count) {
+                for v in &arg_vals {
                     let ty = builder.func.dfg.value_type(*v);
                     new_sig.params.push(cir::AbiParam::new(ty));
                 }
                 let new_sig_ref = builder.func.import_signature(new_sig);
                 let faddr = builder.ins().func_addr(ptr_ty, cl_fref);
                 builder.ins().call_indirect(new_sig_ref, faddr, &arg_vals)
-            } else if arg_vals.len() > declared_count {
-                // Non-variadic over-provided (shouldn't normally happen): fall back.
-                let mut new_sig = builder.func.stencil.dfg.signatures[sig_ref].clone();
-                for v in &arg_vals[declared_count..] {
+            } else if arg_vals.len() != declared_count {
+                // Argument count doesn't match the declared (expanded) signature —
+                // e.g. a no-prototype/K&R call. Build a signature from the actual
+                // marshalled values.
+                let base = &builder.func.stencil.dfg.signatures[sig_ref];
+                let mut new_sig = cir::Signature::new(base.call_conv);
+                new_sig.returns = base.returns.clone();
+                for v in &arg_vals {
                     let ty = builder.func.dfg.value_type(*v);
                     new_sig.params.push(cir::AbiParam::new(ty));
                 }
@@ -381,24 +400,16 @@ fn emit_instr(
         Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
             let _ = ret_ty;
             let base_sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
-            let declared_count = base_sig.params.len();
-            let param_tys: Vec<cir::Type> = base_sig.params.iter().map(|p| p.value_type).collect();
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let arg_vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
-                if i < declared_count {
-                    let hint = param_tys[i];
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-                    coerce(v, hint, builder, ptr_ty)
-                } else {
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
-                    va_promote(v, builder)
-                }
-            }).collect();
-            // A variadic function pointer (e.g. `int(*)(int,int,...)`) declares
-            // only its fixed params; extend the call signature with the actual
-            // trailing argument types so the call verifies.
-            let mut sig = base_sig;
-            for v in &arg_vals[declared_count.min(arg_vals.len())..] {
+            let (arg_vals, _named_cl) = marshal_args(
+                args, &func_ty.params, func_ty.params.len(), func_ty.variadic, ptr_size,
+                val_map, callee_refs, data_refs, builder, ptr_ty,
+            );
+            // Build the call signature from the marshalled values: base returns
+            // plus the actual (ABI-expanded / variadic) argument types.
+            let mut sig = cir::Signature::new(base_sig.call_conv);
+            sig.returns = base_sig.returns.clone();
+            for v in &arg_vals {
                 let ty = builder.func.dfg.value_type(*v);
                 sig.params.push(cir::AbiParam::new(ty));
             }
@@ -557,6 +568,57 @@ fn va_promote(v: cir::Value, builder: &mut FunctionBuilder<'_>) -> cir::Value {
     } else {
         v
     }
+}
+
+/// Marshal IR call arguments into Cranelift values per the System V ABI:
+/// a small aggregate (Direct) is loaded from its pointer into one value per
+/// eightbyte; a MEMORY aggregate (ByValStack) is passed as a pointer (Cranelift
+/// copies it to the stack); scalars pass through with coercion. Arguments past
+/// `named` are variadic and get the C default promotions in their natural class.
+/// Returns the flat value list and how many values the *named* portion produced.
+#[allow(clippy::too_many_arguments)]
+fn marshal_args(
+    args: &[Val],
+    ir_params: &[sic_ir::Type],
+    named: usize,
+    is_variadic: bool,
+    ptr_size: u32,
+    val_map: &HashMap<u32, cir::Value>,
+    callee_refs: &HashMap<u32, cir::FuncRef>,
+    data_refs: &HashMap<u32, cir::GlobalValue>,
+    builder: &mut FunctionBuilder<'_>,
+    ptr_ty: cir::Type,
+) -> (Vec<cir::Value>, usize) {
+    let mut out: Vec<cir::Value> = Vec::with_capacity(args.len());
+    let mut named_cl = 0usize;
+    for (i, a) in args.iter().enumerate() {
+        let is_named = !is_variadic || i < named;
+        if is_named && i < ir_params.len() {
+            match crate::abi::classify_param(&ir_params[i], ptr_size) {
+                crate::abi::ParamPass::Scalar(t) => {
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, t);
+                    out.push(coerce(v, t, builder, ptr_ty));
+                }
+                crate::abi::ParamPass::ByValStack(_) => {
+                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                    out.push(coerce(v, ptr_ty, builder, ptr_ty));
+                }
+                crate::abi::ParamPass::Direct(chunks) => {
+                    let base = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                    for c in &chunks {
+                        let v = crate::abi::load_chunk(builder, base, c);
+                        out.push(v);
+                    }
+                }
+            }
+            named_cl = out.len();
+        } else {
+            // Variadic (or over-provided) argument.
+            let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
+            out.push(va_promote(v, builder));
+        }
+    }
+    (out, named_cl)
 }
 
 fn emit_terminator(
