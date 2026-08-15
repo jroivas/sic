@@ -1799,6 +1799,16 @@ impl<'m> FuncCtx<'m> {
                     return Ok(Constant::zero());
                 }
                 "__builtin_constant_p" => return Ok(Constant::int(0)),
+                // sic does no object-size analysis; return the "size unknown"
+                // sentinel so any _FORTIFY / size check falls through to the plain
+                // path: type 0/1 -> (size_t)-1, type 2/3 -> 0.
+                "__builtin_object_size" | "__builtin_dynamic_object_size" => {
+                    let ty = args.get(1)
+                        .and_then(|e| crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).ok())
+                        .unwrap_or(0);
+                    let v: u64 = if ty & 2 != 0 { 0 } else { u64::MAX };
+                    return self.coerce(Constant::uint(v), &Type::Int { bits: 64, signed: false });
+                }
                 // `__builtin_return_address(0)` = the current function's return
                 // address. Critical for QEMU's GETPC(): a faulting helper uses it
                 // to restart the TB at the right guest PC. Level 0 maps to

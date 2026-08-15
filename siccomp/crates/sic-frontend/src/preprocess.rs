@@ -58,6 +58,12 @@ pub fn preprocess_ex(
     for d in defines {
         cmd.arg(format!("-D{}", d));
     }
+    // Now that we advertise `__GNUC__`, glibc would turn on `_FORTIFY_SOURCE`,
+    // rewriting libc calls into `__*_chk` builtins (`__builtin_object_size`,
+    // `__builtin___memcpy_chk`, …) that sic doesn't implement. Force fortify off
+    // (after user `-D` so it wins). The unfortified calls are equivalent.
+    cmd.arg("-U_FORTIFY_SOURCE");
+    cmd.arg("-D_FORTIFY_SOURCE=0");
     for i in include_dirs {
         cmd.arg(format!("-I{}", i));
     }
@@ -197,6 +203,15 @@ fn compiler_identity_predefines() -> Vec<(&'static str, &'static str)> {
         ("__clang_patchlevel__", "0"),
         ("__clang_version__", "\"15.0.0\""),
         ("__VERSION__", "\"Clang 15.0.0\""),
+        // A real Clang also defines __GNUC__ (as GCC 4.2.1) for compatibility, and
+        // much library code gates GNU extensions (e.g. libslirp's
+        // `SLIRP_PACKED_BEGIN/END`, which are ONLY defined under `#ifdef __GNUC__`)
+        // on it. Advertise the same low version: `#ifdef __GNUC__` checks pass,
+        // while `__GNUC__ >= 7`-style checks for newer-GCC-only header paths stay
+        // off. sic implements enough GNU builtins/extensions to handle the rest.
+        ("__GNUC__", "4"),
+        ("__GNUC_MINOR__", "2"),
+        ("__GNUC_PATCHLEVEL__", "1"),
     ]
 }
 
