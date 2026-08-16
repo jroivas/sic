@@ -1640,6 +1640,11 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             for a in args { collect_expr_names(a, out); }
         }
         Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
+        Slice { base, lo, hi } => {
+            collect_expr_names(base, out);
+            if let Some(e) = lo { collect_expr_names(e, out); }
+            if let Some(e) = hi { collect_expr_names(e, out); }
+        }
         Field { base, .. } | Arrow { base, .. } => collect_expr_names(base, out),
         Cast { expr, .. } => collect_expr_names(expr, out),
         Generic { controlling, assocs } => {

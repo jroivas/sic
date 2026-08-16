@@ -1,0 +1,33 @@
+// SIC string slicing, phase 2 (sic.md §"Built-in string"): `s[lo:hi]` is a
+// half-open, byte-offset VIEW into the string — no copy. Omitted bounds default
+// to 0 / size. `.ptr` copies only when the slice isn't already NUL-terminated.
+#include <string.h>
+
+int main()
+{
+    string a = "Hello World";
+    string b = a[0:5];   // "Hello" — a[5] is ' ', so .ptr must copy
+    string c = a[6:];    // "World" — ends on a's NUL, .ptr needs no copy
+    string d = a[:5];    // "Hello"
+    string e = a[:];     // whole string
+
+    if (b.size != 5 || c.size != 5 || d.size != 5 || e.size != 11) return 1;
+    if (strcmp(b.ptr, "Hello") != 0) return 2;
+    if (strcmp(c.ptr, "World") != 0) return 3;
+    if (strcmp(d.ptr, "Hello") != 0) return 4;
+    if (strcmp(e.ptr, "Hello World") != 0) return 5;
+
+    // Slice of a slice (still a view into the original data).
+    string cc = c[1:3];  // "or"
+    if (cc.size != 2 || strcmp(cc.ptr, "or") != 0) return 6;
+
+    // Empty slice.
+    string z = a[3:3];
+    if (z.size != 0 || strcmp(z.ptr, "") != 0) return 7;
+
+    // Normal integer array indexing still works in sic mode.
+    int arr[3] = { 10, 20, 30 };
+    if (arr[1] != 20) return 8;
+
+    return 0;
+}

@@ -1612,9 +1612,21 @@ impl Parser {
             match self.peek_kind() {
                 TokenKind::LBracket => {
                     self.advance();
-                    let idx = self.parse_expr()?;
-                    self.expect(TokenKind::RBracket)?;
-                    e = Expr::new(ExprKind::Index { base: Box::new(e), index: Box::new(idx) }, sp.clone());
+                    // sic substring slice `base[lo:hi]` with optional bounds
+                    // (sic.md §"Built-in string"). A leading `:` means no `lo`.
+                    let lo = if self.lang == Lang::Sic && self.at(TokenKind::Colon) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr()?))
+                    };
+                    if self.lang == Lang::Sic && self.eat(TokenKind::Colon) {
+                        let hi = if self.at(TokenKind::RBracket) { None } else { Some(Box::new(self.parse_expr()?)) };
+                        self.expect(TokenKind::RBracket)?;
+                        e = Expr::new(ExprKind::Slice { base: Box::new(e), lo, hi }, sp.clone());
+                    } else {
+                        self.expect(TokenKind::RBracket)?;
+                        e = Expr::new(ExprKind::Index { base: Box::new(e), index: lo.unwrap() }, sp.clone());
+                    }
                 }
                 TokenKind::LParen => {
                     self.advance();

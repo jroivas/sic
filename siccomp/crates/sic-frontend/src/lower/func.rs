@@ -931,7 +931,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Pointer + type of the `idx`-th member of an aggregate (struct field or
     /// array element), by positional index. `None` when `idx` is out of range.
-    fn member_at(&mut self, base: &Val, agg: &Type, idx: usize) -> Option<(Val, Type, Option<super::expr::BitField>)> {
+    pub(crate) fn member_at(&mut self, base: &Val, agg: &Type, idx: usize) -> Option<(Val, Type, Option<super::expr::BitField>)> {
         let resolved = super::types::resolve_aggregate(agg, &self.lowerer.struct_types);
         match &resolved {
             Type::Struct(st) => {

@@ -266,6 +266,11 @@ pub enum ExprKind {
     /// SIC swap operator `a <> b`: exchange two same-typed lvalues (sic.md §"Swap").
     Swap { lhs: BoxExpr, rhs: BoxExpr },
 
+    /// SIC substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
+    /// byte-offset view into a `string`. Either bound may be omitted (`s[lo:]`,
+    /// `s[:hi]`, `s[:]`), defaulting `lo` to 0 and `hi` to the string's size.
+    Slice { base: BoxExpr, lo: Option<BoxExpr>, hi: Option<BoxExpr> },
+
     /// Unary prefix
     Unary { op: UnOpKind, expr: BoxExpr },
 

@@ -184,6 +184,8 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Swap { lhs, rhs } => self.lower_swap(lhs, rhs),
 
+            ExprKind::Slice { base, lo, hi } => self.lower_slice(base, lo.as_deref(), hi.as_deref()),
+
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
 
             ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
@@ -668,6 +670,60 @@ impl<'m> FuncCtx<'m> {
         let n = self.coerce(n, &Type::u64())?;
         self.push_instr(Instr::Call { dest: None, func: fref, args: vec![dstp, srcp, n], ret_ty: voidp });
         Ok(())
+    }
+
+    /// Materialize a `string` slice descriptor `{ data, size }` in a fresh temp
+    /// and return the pointer to it (the aggregate-by-pointer convention used for
+    /// struct rvalues, e.g. compound literals).
+    pub(crate) fn make_string_val(&mut self, data: Val, size: Val) -> Result<Val> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: sty.clone(), align: None });
+        let base = Val::Local(slot);
+        if let Some((dptr, dty, _)) = self.member_at(&base, &sty, 0) {
+            let v = self.coerce(data, &dty)?;
+            self.push_instr(Instr::Store { val: v, ptr: dptr });
+        }
+        if let Some((sptr, sfty, _)) = self.member_at(&base, &sty, 1) {
+            let v = self.coerce(size, &sfty)?;
+            self.push_instr(Instr::Store { val: v, ptr: sptr });
+        }
+        Ok(base)
+    }
+
+    /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
+    /// byte-offset **view** into `s` — no copy. `{ s.data + lo, hi - lo }`.
+    /// Omitted bounds default to `lo=0`, `hi=s.size`.
+    fn lower_slice(&mut self, base: &Expr, lo: Option<&Expr>, hi: Option<&Expr>) -> Result<Val> {
+        let bt = self.infer_expr_type(base)?;
+        if !super::types::is_sic_string(&bt) {
+            return Err(CompileError::at(
+                "slice `[a:b]` applies only to a `string`".to_string(),
+                base.span.file.clone(), base.span.line, base.span.col,
+            ));
+        }
+        let data_lv = self.lower_lvalue_field(base, "data")?;
+        let data = self.load_lvalue(&data_lv)?;                 // char*
+        let size_lv = self.lower_lvalue_field(base, "size")?;
+        let size = self.load_lvalue(&size_lv)?;
+        let size = self.coerce(size, &Type::i64())?;
+
+        let lo_v = match lo {
+            Some(e) => { let v = self.lower_expr(e)?; self.coerce(v, &Type::i64())? }
+            None => Constant::int(0),
+        };
+        let hi_v = match hi {
+            Some(e) => { let v = self.lower_expr(e)?; self.coerce(v, &Type::i64())? }
+            None => size.clone(),
+        };
+
+        // new data = base data + lo
+        let new_data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: new_data, base: data, index: lo_v.clone(), elem_size: 1, result_ty: Type::char_ptr() });
+        // new size = hi - lo
+        let new_size = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_v, rhs: lo_v, ty: Type::i64() });
+        self.make_string_val(Val::Local(new_data), Val::Local(new_size))
     }
 
     /// sic `s.ptr`: yield a `const char*` usable as a C string, copying only when
@@ -2893,6 +2949,8 @@ impl<'m> FuncCtx<'m> {
                 })
             }
             ExprKind::Assign { lhs, .. } => self.infer_expr_type(lhs),
+            // A substring slice is itself a `string` (sic.md §"Built-in string").
+            ExprKind::Slice { .. } => Ok(super::types::sic_string_type(self.ptr_size())),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
             // GCC statement expression `({ ...; expr; })` has the type of its last
             // statement when that is an expression statement, else void. Needed so
