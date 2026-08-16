@@ -1,0 +1,30 @@
+// SIC native string, phase 1 (sic.md §"Built-in string"): the `string` type is
+// a non-owning slice { data, size }. Literal init, `.size` (bytes), `.ptr`
+// (NUL-terminated C string, no copy when already terminated), and by-value copy.
+#include <string.h>
+
+string g = "global string";
+
+int main()
+{
+    string s = "Hello";
+    if (s.size != 5) return 1;
+    // A string literal is already NUL-terminated, so `.ptr` needs no copy.
+    if (strcmp(s.ptr, "Hello") != 0) return 2;
+
+    // Assigning a string copies the { data, size } descriptor by value.
+    string t = s;
+    if (t.size != 5) return 3;
+    if (strcmp(t.ptr, "Hello") != 0) return 4;
+
+    // File-scope string.
+    if (g.size != 13) return 5;
+    if (strcmp(g.ptr, "global string") != 0) return 6;
+
+    // Empty string.
+    string e = "";
+    if (e.size != 0) return 7;
+    if (strcmp(e.ptr, "") != 0) return 8;
+
+    return 0;
+}

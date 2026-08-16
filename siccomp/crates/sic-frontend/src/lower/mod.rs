@@ -621,6 +621,22 @@ impl Lowerer {
             }
         }
         match &d.init {
+            // sic `string g = "..."` at file scope: a `{ data, size }` slice
+            // descriptor — pointer reloc to the cstring + the byte length.
+            Some(Initializer::Expr(e))
+                if types::is_sic_string(ir_ty) && matches!(&e.kind, ExprKind::StringLit(_)) =>
+            {
+                let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
+                let len = s.len();
+                let mut bytes = s.clone().into_bytes();
+                bytes.push(0); // NUL terminator
+                let gref = self.add_cstring_global(bytes);
+                let ps = self.ptr_size as usize;
+                let mut b = vec![0u8; ps * 2];
+                let size_le = (len as u64).to_le_bytes();
+                b[ps..ps * 2].copy_from_slice(&size_le[..ps]);
+                Some(Constant::Aggregate { bytes: b, relocs: vec![(0, RelocTarget::Global(gref, 0))] })
+            }
             // `char arr[] = "..."` / `char *p = "..."`.
             Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::StringLit(_)) => {
                 let ExprKind::StringLit(s) = &e.kind else { unreachable!() };

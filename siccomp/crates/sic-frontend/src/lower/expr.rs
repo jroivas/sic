@@ -209,6 +209,15 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Field { base, name } => {
+                // sic native-string computed accessors (sic.md §"Built-in string").
+                // `.size` / `.data` are ordinary struct fields and fall through.
+                if self.is_sic() && name == "ptr" {
+                    if let Ok(bt) = self.infer_expr_type(base) {
+                        if super::types::is_sic_string(&bt) {
+                            return self.emit_string_cptr(base);
+                        }
+                    }
+                }
                 let lv = self.lower_lvalue_field(base, name)?;
                 // An array member decays to a pointer to its first element.
                 if matches!(lv.ty, Type::Array { .. }) {
@@ -625,6 +634,91 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![lhs, rhs], ret_ty: ty.clone() });
         Some(Val::Local(dest))
+    }
+
+    /// Emit `malloc(n)` and return the result typed as `char*`. Used by the
+    /// native-string ops (`.ptr` copy, concat); the block is not freed yet —
+    /// reclamation waits on the ownership/refcount milestone.
+    fn emit_malloc(&mut self, n: Val) -> Result<Val> {
+        let voidp = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("malloc").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "malloc".to_string(),
+                sig: FunctionType { ret: voidp.clone(), params: vec![Type::u64()], variadic: false },
+            })
+        });
+        let sz = self.coerce(n, &Type::u64())?;
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![sz], ret_ty: voidp });
+        self.val_types.insert(dest.0, Type::char_ptr());
+        Ok(Val::Local(dest))
+    }
+
+    /// Emit `memcpy(dst, src, n)`.
+    fn emit_memcpy(&mut self, dst: Val, src: Val, n: Val) -> Result<()> {
+        let voidp = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("memcpy").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "memcpy".to_string(),
+                sig: FunctionType { ret: voidp.clone(), params: vec![voidp.clone(), voidp.clone(), Type::u64()], variadic: false },
+            })
+        });
+        let dstp = self.coerce(dst, &voidp)?;
+        let srcp = self.coerce(src, &voidp)?;
+        let n = self.coerce(n, &Type::u64())?;
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![dstp, srcp, n], ret_ty: voidp });
+        Ok(())
+    }
+
+    /// sic `s.ptr`: yield a `const char*` usable as a C string, copying only when
+    /// necessary (sic.md §"Built-in string"). If the byte just past the slice
+    /// (`data[size]`) is already NUL, the slice is a valid C string and `data` is
+    /// returned as-is; otherwise a NUL-terminated `malloc` copy is made.
+    fn emit_string_cptr(&mut self, base: &Expr) -> Result<Val> {
+        let data_lv = self.lower_lvalue_field(base, "data")?;
+        let data = self.load_lvalue(&data_lv)?;                 // char*
+        let size_lv = self.lower_lvalue_field(base, "size")?;
+        let size = self.load_lvalue(&size_lv)?;
+        let size = self.coerce(size, &Type::i64())?;
+
+        // Probe data[size]; in-bounds because backing buffers are NUL-terminated.
+        let last = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: last, base: data.clone(), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
+        let byte = self.alloc_val();
+        self.push_instr(Instr::Load { dest: byte, ptr: Val::Local(last), ty: Type::i8() });
+        let is_term = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_term, op: CmpOp::IEq, lhs: Val::Local(byte), rhs: Constant::zero(), ty: Type::i8() });
+
+        let result_ptr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::char_ptr(), align: None });
+
+        let copy_bb = self.new_block_after_current();
+        let term_bb = self.new_block_after_current();
+        let end_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_term), then_bb: term_bb, else_bb: copy_bb });
+
+        // Already NUL-terminated: use data directly.
+        self.switch_to_block(term_bb);
+        self.push_instr(Instr::Store { val: data.clone(), ptr: Val::Local(result_ptr) });
+        self.set_terminator(Terminator::Jump(end_bb));
+
+        // Not terminated: malloc(size+1), copy, append NUL.
+        self.switch_to_block(copy_bb);
+        let n = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: n, op: BinOp::Add, lhs: size.clone(), rhs: Constant::int(1), ty: Type::i64() });
+        let buf = self.emit_malloc(Val::Local(n))?;
+        self.emit_memcpy(buf.clone(), data.clone(), size.clone())?;
+        let bend = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: bend, base: buf.clone(), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::MemSet { dst: Val::Local(bend), val: Constant::zero(), size: 1, align: 1 });
+        self.push_instr(Instr::Store { val: buf, ptr: Val::Local(result_ptr) });
+        self.set_terminator(Terminator::Jump(end_bb));
+
+        self.switch_to_block(end_bb);
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: Type::char_ptr() });
+        self.val_types.insert(dest.0, Type::char_ptr());
+        Ok(Val::Local(dest))
     }
 
     fn lower_logical(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -2725,6 +2819,12 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Field { base, name } => {
                 let base_ty = self.infer_expr_type(base)?;
+                // sic native-string computed accessors: `.ptr` is a `char*`,
+                // `.length` is a `usize` (sic.md §"Built-in string").
+                if self.is_sic() && super::types::is_sic_string(&base_ty) {
+                    if name == "ptr" { return Ok(Type::char_ptr()); }
+                    if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
+                }
                 if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
                 } else {

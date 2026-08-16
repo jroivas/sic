@@ -219,6 +219,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "uint128"| "u128" => return Ok(Type::Int { bits: 128, signed: false }),
                 "isize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: true  }),
                 "usize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: false }),
+                // sic native string: a non-owning slice `{ char* data; usize size }`
+                // (sic.md §"Built-in string").
+                "string"          => return Ok(sic_string_type(ptr_size)),
                 // Extended float types. sic has no true 128/80-bit float codegen,
                 // so these share `Float80` (16 bytes, computed as f64) — enough to
                 // compile code that merely passes them around. `_Float16` is 2
@@ -469,4 +472,26 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> T
         }
         _ => Type::i32(),
     }
+}
+
+/// The IR type of sic's native `string`: a non-owning slice
+/// `struct __sic_string { char* data; usize size }` (sic.md §"Built-in string").
+/// `size` is the byte length; the slice is not assumed NUL-terminated.
+pub fn sic_string_type(ptr_size: u32) -> Type {
+    Type::Struct(StructType::plain(
+        Some(SIC_STRING_NAME.to_string()),
+        vec![
+            ("data".to_string(), Type::char_ptr()),
+            ("size".to_string(), Type::Int { bits: ptr_size * 8, signed: false }),
+        ],
+        false,
+    ))
+}
+
+/// Reserved tag for the native `string` slice struct.
+pub const SIC_STRING_NAME: &str = "__sic_string";
+
+/// Whether `ty` is sic's native `string` slice type.
+pub fn is_sic_string(ty: &Type) -> bool {
+    matches!(ty, Type::Struct(st) if st.name.as_deref() == Some(SIC_STRING_NAME))
 }

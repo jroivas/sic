@@ -786,6 +786,14 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::MemSet { dst: ptr.clone(), val: Constant::zero(), size: total, align: 1 });
                 self.push_instr(Instr::MemCopy { dst: ptr, src, size: copy, align: 1 });
             }
+            // sic `string s = "..."`: fill the slice descriptor { data, size }
+            // rather than treating the literal as an aggregate to byte-copy.
+            Initializer::Expr(e)
+                if super::types::is_sic_string(ty) && matches!(&e.kind, ExprKind::StringLit(_)) =>
+            {
+                let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
+                self.store_string_literal(&ptr, ty, s)?;
+            }
             Initializer::Expr(e) => {
                 // `T v = <aggregate expr>` (e.g. a compound literal, a struct
                 // returned by value, or a `vector_size` array from an element-wise
@@ -950,6 +958,23 @@ impl<'m> FuncCtx<'m> {
             }
             _ => None,
         }
+    }
+
+    /// Fill a sic `string` slice descriptor at `base` from a string literal:
+    /// `data` points at a private NUL-terminated global, `size` is the byte
+    /// length (sic.md §"Built-in string").
+    pub(crate) fn store_string_literal(&mut self, base: &Val, ty: &Type, s: &str) -> Result<()> {
+        let data_src = self.emit_cstring(s);            // char* to "...\0"
+        let size_val = Constant::uint(s.len() as u64);  // byte length (excl. NUL)
+        if let Some((dptr, dty, _)) = self.member_at(base, ty, 0) {
+            let v = self.coerce(data_src, &dty)?;
+            self.push_instr(Instr::Store { val: v, ptr: dptr });
+        }
+        if let Some((sptr, sty, _)) = self.member_at(base, ty, 1) {
+            let v = self.coerce(size_val, &sty)?;
+            self.push_instr(Instr::Store { val: v, ptr: sptr });
+        }
+        Ok(())
     }
 
     // ─── Control flow ────────────────────────────────────────────────────────
