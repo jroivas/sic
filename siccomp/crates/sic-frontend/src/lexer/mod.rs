@@ -165,6 +165,18 @@ impl Lexer {
             }
         }
 
+        // sic raw multiline string: `r"""..."""` (sic.md §"Multine strings").
+        // Checked before identifier scanning so the `r` prefix isn't lexed as a
+        // name. Only in sic mode.
+        if self.lang == Lang::Sic && c == 'r'
+            && self.src.get(self.pos + 1) == Some(&'"')
+            && self.src.get(self.pos + 2) == Some(&'"')
+            && self.src.get(self.pos + 3) == Some(&'"')
+        {
+            self.advance(); // consume the `r`
+            return self.scan_triple_string(sp, true);
+        }
+
         // Identifier or keyword
         if c.is_alphabetic() || c == '_' {
             return Ok(self.scan_ident_or_keyword(sp));
@@ -173,6 +185,14 @@ impl Lexer {
         // Numbers
         if c.is_ascii_digit() || (c == '.' && self.peek2().is_ascii_digit()) {
             return self.scan_number(sp);
+        }
+
+        // sic non-raw multiline string: `"""..."""` (sic.md §"Multine strings").
+        if self.lang == Lang::Sic && c == '"'
+            && self.src.get(self.pos + 1) == Some(&'"')
+            && self.src.get(self.pos + 2) == Some(&'"')
+        {
+            return self.scan_triple_string(sp, false);
         }
 
         // String literal
@@ -317,6 +337,59 @@ impl Lexer {
         Ok(Token::new(TokenKind::StringLit, s, sp))
     }
 
+    /// Scan a sic triple-quoted string (sic.md §"Multine strings"). The optional
+    /// `r` prefix is already consumed; here we consume the opening `"""`, the
+    /// body, and the closing `"""`. A non-raw string decodes escapes and does not
+    /// preserve source newlines/indentation — each source line is trimmed of its
+    /// indentation and the lines are joined with a single space. A raw string
+    /// preserves its bytes verbatim (no escapes, newlines and indent kept).
+    fn scan_triple_string(&mut self, sp: Span, raw: bool) -> Result<Token> {
+        self.advance(); self.advance(); self.advance(); // opening """
+        let mut bytes: Vec<u8> = Vec::new();
+        // For a non-raw string, `pending_newline` collapses a source newline and
+        // the indentation that follows it into a single separating space.
+        let mut pending_newline = false;
+        loop {
+            if self.pos >= self.src.len() {
+                return Err(CompileError::at("unterminated multiline string", sp.file.clone(), sp.line, sp.col));
+            }
+            // Closing `"""` (an escaped quote is handled in the `\\` arm below and
+            // never reaches here, so it cannot close the string).
+            if self.src[self.pos] == '"'
+                && self.src.get(self.pos + 1) == Some(&'"')
+                && self.src.get(self.pos + 2) == Some(&'"')
+            {
+                self.advance(); self.advance(); self.advance();
+                break;
+            }
+            let c = self.advance();
+            if raw {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                continue;
+            }
+            // Non-raw newline/indent collapsing.
+            if c == '\n' { pending_newline = true; continue; }
+            if pending_newline {
+                if c == ' ' || c == '\t' || c == '\r' { continue; } // strip indentation
+                if !bytes.is_empty() { bytes.push(b' '); }
+                pending_newline = false;
+            }
+            if c == '\\' {
+                if self.pos >= self.src.len() {
+                    return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
+                }
+                let val = self.read_escape_value();
+                bytes.push(val as u8);
+            } else {
+                let mut buf = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+        let s = unsafe { String::from_utf8_unchecked(bytes) };
+        Ok(Token::new(TokenKind::StringLit, s, sp))
+    }
+
     fn scan_char_literal(&mut self, sp: Span) -> Result<Token> {
         self.advance(); // opening '
         if self.pos >= self.src.len() {
@@ -376,6 +449,9 @@ impl Lexer {
         let p3 = if self.pos + 1 < self.src.len() { self.src[self.pos + 1] } else { '\0' };
 
         let (kind, extra) = match (c, p2, p3) {
+            ('<', '<', '<') if self.lang == Lang::Sic => { self.advance(); self.advance(); (TokenKind::RotL, "<<<") }
+            ('>', '>', '>') if self.lang == Lang::Sic => { self.advance(); self.advance(); (TokenKind::RotR, ">>>") }
+            ('<', '>', _)   if self.lang == Lang::Sic => { self.advance();                 (TokenKind::Swap, "<>") }
             ('<', '<', '=') => { self.advance(); self.advance(); (TokenKind::ShlAssign, "<<="  ) }
             ('>', '>', '=') => { self.advance(); self.advance(); (TokenKind::ShrAssign, ">>="  ) }
             ('<', '<', _)   => { self.advance();                 (TokenKind::Shl,       "<<"   ) }
@@ -447,6 +523,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             "i8" | "i16" | "i32" | "i64" | "i128" |
             "u8" | "u16" | "u32" | "u64" | "u128" |
             "isize" | "usize" => return TokenKind::TypeName,
+            // `fallthrough` is an explicit switch-case terminator in sic
+            // (sic.md §"Switch - case"); it is an ordinary identifier in C.
+            "fallthrough" => return TokenKind::Fallthrough,
             _ => {}
         }
     }

@@ -1,0 +1,13 @@
+int main()
+{
+    int a = 10, z = 0;
+    unsigned int u = 20, uz = 0;
+    if ((a / z) != 0) return 1;
+    if ((a % z) != 0) return 2;
+    if ((u / uz) != 0) return 3;
+    if ((u % uz) != 0) return 4;
+    if ((a / 2) != 5) return 5;      // normal division still works
+    if ((a % 3) != 1) return 6;
+    if ((17 / 5) != 3) return 7;
+    return 0;
+}

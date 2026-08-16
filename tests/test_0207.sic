@@ -1,0 +1,7 @@
+// SIC rejects an empty-bracket array declaration (sic.md §"Empty brackets
+// pointer"): `char test[];` has no size and no initializer. Pinned via `.xfail`.
+int main()
+{
+    char test[];
+    return 0;
+}

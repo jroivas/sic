@@ -229,6 +229,9 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub fn ptr_size(&self) -> u32 { self.lowerer.ptr_size }
+    /// True for SIC-language (`.sic`) sources — gates SIC's defined-behavior
+    /// semantics (zero-init, `÷0 → 0`, defined shifts, …).
+    pub fn is_sic(&self) -> bool { self.lowerer.sic }
 
     pub fn lower_type(&self, qt: &QualType) -> Result<Type> {
         self.lower_ast_type_scoped(&qt.ty)
@@ -445,6 +448,9 @@ impl<'m> FuncCtx<'m> {
         self.mark_line(stmt_line(stmt));
         match stmt {
             Stmt::Null(_) => {}
+            // sic's explicit `fallthrough;` is a no-op: control simply continues
+            // into the statements of the next case (sic.md §"Switch - case").
+            Stmt::Fallthrough(_) => {}
             Stmt::Expr(e, _) => { self.lower_expr(e)?; }
             Stmt::Block(stmts, _) => {
                 self.enter_scope();
@@ -1341,7 +1347,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
         | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
-        | Stmt::CaseRange(_, _, _, s)
+        | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,

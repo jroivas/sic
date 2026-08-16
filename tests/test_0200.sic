@@ -1,0 +1,22 @@
+// SIC rotate operators `<<<` / `>>>` (sic.md §"Rotate and shift").
+// Unlike shifts, bits rotated out the top/bottom re-enter the other end.
+int main()
+{
+    unsigned int x = 0x12345678u;
+
+    // Rotate left by 8: top byte 0x12 wraps around to the bottom.
+    if ((x <<< 8) != 0x34567812u) return 1;
+    // Rotate right by 8: bottom byte 0x78 wraps around to the top.
+    if ((x >>> 8) != 0x78123456u) return 2;
+    // Rotate by 0 is the identity.
+    if ((x <<< 0) != 0x12345678u) return 3;
+    // Rotating by the full width (32) comes back to the original value.
+    if ((x <<< 32) != 0x12345678u) return 4;
+
+    // 64-bit rotate.
+    unsigned long y = 0x0123456789abcdefUL;
+    if ((y <<< 8) != 0x23456789abcdef01UL) return 5;
+    if ((y >>> 8) != 0xef0123456789abcdUL) return 6;
+
+    return 0;
+}

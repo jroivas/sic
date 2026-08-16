@@ -80,6 +80,7 @@ impl fmt::Display for BinOp {
             BinOp::FMul => "fmul", BinOp::FDiv => "fdiv", BinOp::FRem => "frem",
             BinOp::And => "and", BinOp::Or => "or", BinOp::Xor => "xor",
             BinOp::Shl => "shl", BinOp::AShr => "ashr", BinOp::LShr => "lshr",
+            BinOp::Rotl => "rotl", BinOp::Rotr => "rotr",
         };
         write!(f, "{}", s)
     }

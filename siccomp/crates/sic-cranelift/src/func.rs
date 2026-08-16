@@ -883,6 +883,8 @@ fn emit_binop(op: &BinOp, l: cir::Value, r: cir::Value, builder: &mut FunctionBu
         BinOp::Shl  => builder.ins().ishl(l, r),
         BinOp::AShr => builder.ins().sshr(l, r),
         BinOp::LShr => builder.ins().ushr(l, r),
+        BinOp::Rotl => builder.ins().rotl(l, r),
+        BinOp::Rotr => builder.ins().rotr(l, r),
     }
 }
 

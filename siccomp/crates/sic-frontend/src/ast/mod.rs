@@ -214,6 +214,9 @@ pub enum Stmt {
     Return(Option<Expr>, Span),
     Break(Span),
     Continue(Span),
+    /// sic-only: explicit `fallthrough;` inside a switch (sic.md §"Switch - case").
+    /// Semantically a no-op — control simply falls into the next case.
+    Fallthrough(Span),
     Goto(String, Span),
     Label(String, BoxStmt, Span),
     Case(Expr, BoxStmt, Span),
@@ -259,6 +262,9 @@ pub enum ExprKind {
 
     /// Compound assignment: a += b, a -= b, etc.
     Assign { op: Option<BinOpKind>, lhs: BoxExpr, rhs: BoxExpr },
+
+    /// SIC swap operator `a <> b`: exchange two same-typed lvalues (sic.md §"Swap").
+    Swap { lhs: BoxExpr, rhs: BoxExpr },
 
     /// Unary prefix
     Unary { op: UnOpKind, expr: BoxExpr },
@@ -342,6 +348,7 @@ pub enum BinOpKind {
     Add, Sub, Mul, Div, Rem,
     BitAnd, BitOr, BitXor,
     Shl, Shr,
+    RotL, RotR,
     Eq, Ne, Lt, Le, Gt, Ge,
     LogAnd, LogOr,
 }

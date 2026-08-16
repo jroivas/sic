@@ -387,6 +387,8 @@ pub fn eval_const_size(
                 BinOpKind::LogOr  => (l != 0 || r != 0) as i64,
                 // Div/Rem by zero fall through here.
                 BinOpKind::Div | BinOpKind::Rem => return None,
+                // Rotate width depends on the operand type; not constant-folded.
+                BinOpKind::RotL | BinOpKind::RotR => return None,
             })
         }
         ExprKind::Ternary { cond, then, else_ } => {

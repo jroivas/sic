@@ -37,6 +37,10 @@ pub struct Lowerer {
     /// then `#include` defining `bool decode_insn(...)` (no `static`). Without
     /// this the two TUs including the same .inc collide ("multiple definition").
     static_funcs: HashSet<String>,
+    /// Whether this unit is SIC-language source (`.sic`), which turns on SIC's
+    /// defined-behavior semantics (guaranteed zero-init, `÷0 → 0`, defined
+    /// shifts, …). Off for C, whose semantics must stay unchanged.
+    pub sic: bool,
 }
 
 impl Lowerer {
@@ -51,6 +55,7 @@ impl Lowerer {
             global_types: HashMap::new(),
             repl_main: true,
             static_funcs: HashSet::new(),
+            sic: false,
         }
     }
 
@@ -58,6 +63,11 @@ impl Lowerer {
     /// this off — they must define `main` explicitly.
     pub fn set_repl_main(&mut self, on: bool) {
         self.repl_main = on;
+    }
+
+    /// Enable SIC-language semantics (`.sic` sources). See [`Lowerer::sic`].
+    pub fn set_sic(&mut self, on: bool) {
+        self.sic = on;
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
@@ -1576,7 +1586,7 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
         Stmt::Default(body, _) => collect_stmt_names(body, out),
         Stmt::Switch { val, body, .. } => { collect_expr_names(val, out); collect_stmt_names(body, out); }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Goto(_, _) | Stmt::Null(_) => {}
+        | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}
     }
 }
 
@@ -1599,7 +1609,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         BinOp { lhs, rhs, .. } | Comma(lhs, rhs) => {
             collect_expr_names(lhs, out); collect_expr_names(rhs, out);
         }
-        Assign { lhs, rhs, .. } => { collect_expr_names(lhs, out); collect_expr_names(rhs, out); }
+        Assign { lhs, rhs, .. } | Swap { lhs, rhs } => { collect_expr_names(lhs, out); collect_expr_names(rhs, out); }
         Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
         | SizeofExpr(expr) | AlignofExpr(expr) => collect_expr_names(expr, out),
         Ternary { cond, then, else_ } => {

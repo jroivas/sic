@@ -9,6 +9,7 @@ pub enum BinOp {
     FAdd, FSub, FMul, FDiv, FRem,
     And, Or, Xor,
     Shl, AShr, LShr, // arithmetic / logical shift right
+    Rotl, Rotr,      // bitwise rotate left / right (SIC `<<<` / `>>>`)
 }
 
 /// Unary operations.

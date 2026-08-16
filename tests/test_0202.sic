@@ -1,0 +1,37 @@
+// SIC mandatory switch terminators (sic.md §"Switch - case"): every case must
+// end with `break` or `fallthrough`. This mirrors the spec's worked example.
+int test(int x)
+{
+    int r = 0;
+    int a = 0;
+    switch (x) {
+        case 1: r = 111; a = 1;
+            break;
+        case 2:
+            r = 222;
+            a = 3;
+            break;
+        case 3: r = 333;
+            break;
+        // Stacked cases via explicit fallthrough.
+        case 6: fallthrough;
+        case 7: fallthrough;
+        case 8: r = 678;
+            break;
+        default: r = 0;
+            break;
+    }
+    return r + a;
+}
+
+int main()
+{
+    if (test(1) != 112) return 1;
+    if (test(2) != 225) return 2;
+    if (test(3) != 333) return 3;
+    if (test(6) != 678) return 4;  // 6 -> 7 -> 8
+    if (test(7) != 678) return 5;  // 7 -> 8
+    if (test(8) != 678) return 6;
+    if (test(99) != 0) return 7;   // default
+    return 0;
+}

@@ -182,6 +182,8 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Assign { op, lhs, rhs } => self.lower_assign(*op, lhs, rhs),
 
+            ExprKind::Swap { lhs, rhs } => self.lower_swap(lhs, rhs),
+
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
 
             ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
@@ -457,6 +459,8 @@ impl<'m> FuncCtx<'m> {
             BinOpKind::BitXor => (BinOp::Xor, common.clone()),
             BinOpKind::Shl    => (BinOp::Shl,  common.clone()),
             BinOpKind::Shr    => (if is_signed { BinOp::AShr } else { BinOp::LShr }, common.clone()),
+            BinOpKind::RotL   => (BinOp::Rotl, common.clone()),
+            BinOpKind::RotR   => (BinOp::Rotr, common.clone()),
             // Comparisons return i32 (C convention: 0 or 1)
             BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le |
             BinOpKind::Gt | BinOpKind::Ge => {
@@ -495,12 +499,104 @@ impl<'m> FuncCtx<'m> {
             BinOpKind::LogAnd | BinOpKind::LogOr => unreachable!(),
         };
 
+        // SIC defines integer `÷0` and `%0` as 0 (sic.md §"Integer overflow"),
+        // rather than C's undefined behavior / hardware trap.
+        if self.is_sic()
+            && matches!(ir_op, BinOp::SDiv | BinOp::UDiv | BinOp::SRem | BinOp::URem)
+        {
+            return Ok(self.guarded_div_rem(ir_op, lc, rc, result_ty));
+        }
+        // SIC defines out-of-range shifts (sic.md §"Rotate and shift"): count ≥
+        // width → 0 (signed `>>` → sign-fill); count ≤ 0 → value unchanged.
+        if self.is_sic() && matches!(ir_op, BinOp::Shl | BinOp::AShr | BinOp::LShr) {
+            return Ok(self.guarded_shift(ir_op, lc, rc, result_ty));
+        }
         if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), rc.clone(), &result_ty) {
             return Ok(v);
         }
         let dest = self.alloc_val();
         self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: rc, ty: result_ty });
         Ok(Val::Local(dest))
+    }
+
+    /// SIC integer `÷0`/`%0` → 0. Force the divisor to a nonzero value so the
+    /// trapping div/rem never sees 0, then select 0 when the real divisor was 0.
+    fn guarded_div_rem(&mut self, op: BinOp, lc: Val, rc: Val, ty: Type) -> Val {
+        let is_zero = self.alloc_val();
+        self.push_instr(Instr::Cmp {
+            dest: is_zero, op: CmpOp::IEq, lhs: rc.clone(), rhs: Constant::int(0), ty: ty.clone(),
+        });
+        let safe_rhs = self.alloc_val();
+        self.push_instr(Instr::Select {
+            dest: safe_rhs, cond: Val::Local(is_zero),
+            on_true: Constant::int(1), on_false: rc, ty: ty.clone(),
+        });
+        let q = if let Some(v) =
+            self.emit_div_rem_libcall(op, lc.clone(), Val::Local(safe_rhs), &ty)
+        {
+            v
+        } else {
+            let d = self.alloc_val();
+            self.push_instr(Instr::BinOp {
+                dest: d, op, lhs: lc, rhs: Val::Local(safe_rhs), ty: ty.clone(),
+            });
+            Val::Local(d)
+        };
+        let result = self.alloc_val();
+        self.push_instr(Instr::Select {
+            dest: result, cond: Val::Local(is_zero),
+            on_true: Constant::int(0), on_false: q, ty,
+        });
+        Val::Local(result)
+    }
+
+    /// SIC out-of-range shift semantics (sic.md §"Rotate and shift"). Cranelift
+    /// masks the shift count to the operand width; SIC instead defines count ≥
+    /// width → 0 (arithmetic `>>` → sign fill) and count ≤ 0 → value unchanged.
+    /// The in-range shift is only *used* for 0<count<width (where masking is a
+    /// no-op); the out-of-range cases are picked with `select`.
+    fn guarded_shift(&mut self, op: BinOp, lc: Val, rc: Val, ty: Type) -> Val {
+        let bits = ty.int_bits().unwrap_or(32) as i64;
+
+        let normal = self.alloc_val();
+        self.push_instr(Instr::BinOp {
+            dest: normal, op, lhs: lc.clone(), rhs: rc.clone(), ty: ty.clone(),
+        });
+        // Value when count ≥ width: 0, except signed `>>` fills the sign bit
+        // (= arithmetic-shift the value by width-1).
+        let overflow_val = if matches!(op, BinOp::AShr) {
+            let d = self.alloc_val();
+            self.push_instr(Instr::BinOp {
+                dest: d, op: BinOp::AShr, lhs: lc.clone(),
+                rhs: Constant::int(bits - 1), ty: ty.clone(),
+            });
+            Val::Local(d)
+        } else {
+            Constant::int(0)
+        };
+        // The count is compared as signed: a shift amount is conceptually signed
+        // ("zero or negative → unchanged"), and realistic counts are tiny, so a
+        // high-bit-set count means "negative", not "> 2 billion".
+        let ge_w = self.alloc_val();
+        self.push_instr(Instr::Cmp {
+            dest: ge_w, op: CmpOp::ISGe, lhs: rc.clone(), rhs: Constant::int(bits), ty: ty.clone(),
+        });
+        let inner = self.alloc_val();
+        self.push_instr(Instr::Select {
+            dest: inner, cond: Val::Local(ge_w),
+            on_true: overflow_val, on_false: Val::Local(normal), ty: ty.clone(),
+        });
+        // count ≤ 0 → value unchanged.
+        let le0 = self.alloc_val();
+        self.push_instr(Instr::Cmp {
+            dest: le0, op: CmpOp::ISLe, lhs: rc, rhs: Constant::int(0), ty: ty.clone(),
+        });
+        let result = self.alloc_val();
+        self.push_instr(Instr::Select {
+            dest: result, cond: Val::Local(le0),
+            on_true: lc, on_false: Val::Local(inner), ty,
+        });
+        Val::Local(result)
     }
 
     /// If `op` is an integer divide/remainder on a 128-bit type, emit a call to
@@ -615,6 +711,44 @@ impl<'m> FuncCtx<'m> {
         };
 
         self.store_lvalue(&lv, store_val)
+    }
+
+    /// SIC swap `a <> b` (sic.md §"Swap"): exchange the contents of two lvalues.
+    /// Both operands must denote storage of the same size — swap exchanges bytes,
+    /// it never converts. Scalars go through a crossed load/store; aggregates are
+    /// exchanged byte-wise via a temporary.
+    fn lower_swap(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let lv_a = self.lower_lvalue(lhs)?;
+        let lv_b = self.lower_lvalue(rhs)?;
+
+        let size = lv_a.ty.size_of(self.ptr_size());
+        if size != lv_b.ty.size_of(self.ptr_size()) {
+            return Err(CompileError::at(
+                "`<>` swap requires both operands to have the same type".to_string(),
+                lhs.span.file.clone(), lhs.span.line, lhs.span.col,
+            ));
+        }
+
+        match &lv_a.ty {
+            Type::Struct(_) | Type::Union(_) | Type::Array { .. } => {
+                // Aggregate swap: exchange the bytes through a temporary buffer.
+                let align = lv_a.ty.align_of(self.ptr_size());
+                let tmp_slot = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: tmp_slot, ty: lv_a.ty.clone(), align: None });
+                let tmp = Val::Local(tmp_slot);
+                self.push_instr(Instr::MemCopy { dst: tmp.clone(), src: lv_a.ptr.clone(), size, align });
+                self.push_instr(Instr::MemCopy { dst: lv_a.ptr.clone(), src: lv_b.ptr.clone(), size, align });
+                self.push_instr(Instr::MemCopy { dst: lv_b.ptr.clone(), src: tmp, size, align });
+            }
+            _ => {
+                // Scalar (including bit-field) swap: load both, store crossed.
+                let va = self.load_lvalue(&lv_a)?;
+                let vb = self.load_lvalue(&lv_b)?;
+                self.store_lvalue(&lv_a, vb)?;
+                self.store_lvalue(&lv_b, va)?;
+            }
+        }
+        Ok(Constant::zero())
     }
 
     fn lower_unary(&mut self, op: UnOpKind, inner: &Expr) -> Result<Val> {

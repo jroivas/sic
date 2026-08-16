@@ -839,6 +839,7 @@ impl Parser {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Break(sp)) }
             TokenKind::Continue => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Continue(sp)) }
+            TokenKind::Fallthrough => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Fallthrough(sp)) }
             TokenKind::Goto => self.parse_goto(),
             TokenKind::Switch => self.parse_switch(),
             // label: `ident :`
@@ -922,13 +923,45 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// sic forbids a bare assignment as a controlling expression, because
+    /// `if (x = y)` is a common typo for `if (x == y)`. An extra pair of
+    /// parentheses (`if ((x = y))`) documents the intent and is accepted
+    /// (sic.md §"Assignment and equals"). `wrapped` says whether the condition
+    /// text began with `(`, i.e. the assignment is parenthesised.
+    fn reject_bare_assign_cond(&self, cond: &Expr, wrapped: bool) -> Result<()> {
+        if self.lang == Lang::Sic && !wrapped
+            && matches!(cond.kind, ExprKind::Assign { .. })
+        {
+            return Err(CompileError::at(
+                "assignment used directly as a condition is ambiguous with `==`; \
+                 wrap it in an extra pair of parentheses, e.g. `if ((x = y))`"
+                    .to_string(),
+                cond.span.file.clone(), cond.span.line, cond.span.col,
+            ));
+        }
+        Ok(())
+    }
+
     fn parse_if(&mut self) -> Result<Stmt> {
         let sp = self.span();
         self.advance(); // 'if'
         self.expect(TokenKind::LParen)?;
+        let wrapped = self.at(TokenKind::LParen);
         let cond = self.parse_expr()?;
+        self.reject_bare_assign_cond(&cond, wrapped)?;
         self.expect(TokenKind::RParen)?;
         let then = Box::new(self.parse_stmt()?);
+        // Dangling else: an unbraced inner `if` that carries its own `else` is
+        // ambiguous to read; require braces (sic.md §"Dangling else").
+        if self.lang == Lang::Sic {
+            if let Stmt::If { else_: Some(_), .. } = then.as_ref() {
+                return Err(CompileError::at(
+                    "ambiguous dangling `else`: put braces around the inner `if`"
+                        .to_string(),
+                    sp.file.clone(), sp.line, sp.col,
+                ));
+            }
+        }
         let else_ = if self.eat(TokenKind::Else) { Some(Box::new(self.parse_stmt()?)) } else { None };
         Ok(Stmt::If { cond, then, else_, span: sp })
     }
@@ -937,7 +970,9 @@ impl Parser {
         let sp = self.span();
         self.advance();
         self.expect(TokenKind::LParen)?;
+        let wrapped = self.at(TokenKind::LParen);
         let cond = self.parse_expr()?;
+        self.reject_bare_assign_cond(&cond, wrapped)?;
         self.expect(TokenKind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
         Ok(Stmt::While { cond, body, span: sp })
@@ -949,7 +984,9 @@ impl Parser {
         let body = Box::new(self.parse_stmt()?);
         self.expect(TokenKind::While)?;
         self.expect(TokenKind::LParen)?;
+        let wrapped = self.at(TokenKind::LParen);
         let cond = self.parse_expr()?;
+        self.reject_bare_assign_cond(&cond, wrapped)?;
         self.expect(TokenKind::RParen)?;
         self.eat(TokenKind::Semi);
         Ok(Stmt::DoWhile { body, cond, span: sp })
@@ -971,7 +1008,14 @@ impl Parser {
             Some(ForInit::Expr(e))
         };
 
-        let cond = if self.at(TokenKind::Semi) { None } else { Some(self.parse_expr()?) };
+        let cond = if self.at(TokenKind::Semi) {
+            None
+        } else {
+            let wrapped = self.at(TokenKind::LParen);
+            let c = self.parse_expr()?;
+            self.reject_bare_assign_cond(&c, wrapped)?;
+            Some(c)
+        };
         self.eat(TokenKind::Semi);
 
         let post = if self.at(TokenKind::RParen) { None } else { Some(self.parse_expr()?) };
@@ -1004,7 +1048,68 @@ impl Parser {
         let val = self.parse_expr()?;
         self.expect(TokenKind::RParen)?;
         let body = Box::new(self.parse_stmt()?);
+        // sic makes every case terminator mandatory (sic.md §"Switch - case").
+        if self.lang == Lang::Sic {
+            self.check_switch_terminators(&body)?;
+        }
         Ok(Stmt::Switch { val, body, span: sp })
+    }
+
+    /// sic requires every switch case to end explicitly with `break` or
+    /// `fallthrough`; implicit fallthrough (or code after a terminator) is a
+    /// compile error (sic.md §"Switch - case").
+    fn check_switch_terminators(&self, body: &Stmt) -> Result<()> {
+        // Flatten the switch body into a stream of case-label boundaries and the
+        // plain statements that follow them, expanding nested labels
+        // (`case 1: case 2:`) and goto-label bodies so each case's region is
+        // a contiguous run of statements.
+        enum Item<'a> { Label(&'a Span), Plain(&'a Stmt) }
+        fn flatten<'a>(s: &'a Stmt, out: &mut Vec<Item<'a>>) {
+            match s {
+                Stmt::Case(_, b, sp) | Stmt::CaseRange(_, _, b, sp) | Stmt::Default(b, sp) => {
+                    out.push(Item::Label(sp));
+                    flatten(b, out);
+                }
+                Stmt::Label(_, b, _) => flatten(b, out),
+                other => out.push(Item::Plain(other)),
+            }
+        }
+
+        let mut stream = Vec::new();
+        match body {
+            Stmt::Block(ss, _) => for s in ss { flatten(s, &mut stream); },
+            other => flatten(other, &mut stream),
+        }
+
+        // Split the stream into per-case regions and validate each one.
+        let mut i = 0;
+        while i < stream.len() && !matches!(stream[i], Item::Label(_)) { i += 1; }
+        while i < stream.len() {
+            let label_span = match &stream[i] { Item::Label(sp) => *sp, _ => unreachable!() };
+            i += 1;
+            let start = i;
+            while i < stream.len() && !matches!(stream[i], Item::Label(_)) { i += 1; }
+            let region: Vec<&Stmt> = stream[start..i].iter()
+                .filter_map(|it| if let Item::Plain(s) = it { Some(*s) } else { None })
+                .collect();
+
+            let err = |msg: &str| CompileError::at(
+                msg.to_string(), label_span.file.clone(), label_span.line, label_span.col,
+            );
+            let last = match region.last() {
+                None => return Err(err("empty case: end it with `break` or `fallthrough`")),
+                Some(s) => *s,
+            };
+            if !stmt_terminates_case(last) {
+                return Err(err("case must end with `break` or `fallthrough`"));
+            }
+            for s in &region[..region.len() - 1] {
+                if matches!(s, Stmt::Break(_) | Stmt::Fallthrough(_)) {
+                    return Err(err("no code is allowed after `break` or `fallthrough`"));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn parse_label(&mut self) -> Result<Stmt> {
@@ -1072,6 +1177,19 @@ impl Parser {
             first = false;
             if !name.is_empty() { self.func_vars.insert(name.clone()); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
+            // sic rejects an empty-bracket array declaration like `char test[];`
+            // — the size must come from a bound or an initializer (sic.md
+            // §"Empty brackets pointer"). `extern` decls (unknown-bound arrays)
+            // and function parameters (parsed elsewhere) are unaffected.
+            if self.lang == Lang::Sic && init.is_none()
+                && !matches!(storage, Some(StorageClass::Extern))
+                && matches!(ty.ty, AstType::Array { size: None, .. })
+            {
+                return Err(CompileError::at(
+                    format!("array `{}` has no size; give it a bound or an initializer", name),
+                    dsp.file.clone(), dsp.line, dsp.col,
+                ));
+            }
             if !name.is_empty() {
                 declarators.push(Declarator { name, ty, init, cleanup, span: dsp });
             }
@@ -1097,6 +1215,14 @@ impl Parser {
     fn parse_assign_expr(&mut self) -> Result<Expr> {
         let sp = self.span();
         let lhs = self.parse_ternary()?;
+
+        // SIC swap operator `a <> b` (sic.md §"Swap"): exchange two lvalues.
+        // Right-associative like assignment, and only recognised in sic mode.
+        if self.peek_kind() == TokenKind::Swap {
+            self.advance();
+            let rhs = self.parse_assign_expr()?;
+            return Ok(Expr::new(ExprKind::Swap { lhs: Box::new(lhs), rhs: Box::new(rhs) }, sp));
+        }
 
         let op = match self.peek_kind() {
             TokenKind::Eq           => { self.advance(); None }
@@ -1235,6 +1361,8 @@ impl Parser {
             let op = match self.peek_kind() {
                 TokenKind::Shl => BinOpKind::Shl,
                 TokenKind::Shr => BinOpKind::Shr,
+                TokenKind::RotL => BinOpKind::RotL,
+                TokenKind::RotR => BinOpKind::RotR,
                 _ => break,
             };
             self.advance();
@@ -2009,6 +2137,23 @@ fn ast_type_byte_size(ty: &AstType) -> u32 {
             _ => 1,
         },
         _ => 1,
+    }
+}
+
+/// Whether a statement transfers control out of its switch case, so that the
+/// case does not fall through implicitly. `break`/`fallthrough` are the explicit
+/// sic terminators; `return`/`goto`/`continue` also leave the case. A braced
+/// block terminates iff its last statement does, and an `if/else` terminates iff
+/// both arms do.
+fn stmt_terminates_case(s: &Stmt) -> bool {
+    match s {
+        Stmt::Break(_) | Stmt::Fallthrough(_) | Stmt::Return(..)
+        | Stmt::Goto(..) | Stmt::Continue(_) => true,
+        Stmt::Block(ss, _) => ss.last().map_or(false, stmt_terminates_case),
+        Stmt::If { then, else_: Some(e), .. } => {
+            stmt_terminates_case(then) && stmt_terminates_case(e)
+        }
+        _ => false,
     }
 }
 

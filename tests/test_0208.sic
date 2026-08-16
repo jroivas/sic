@@ -1,0 +1,29 @@
+// SIC multiline strings (sic.md §"Multine strings").
+// Non-raw `"""..."""` collapses source newlines/indentation into single spaces
+// and decodes escapes; raw `r"""..."""` preserves the bytes verbatim.
+#include <string.h>
+
+int main()
+{
+    const char *s = """This is line one.
+        And line two.
+        Ends here.""";
+    if (strcmp(s, "This is line one. And line two. Ends here.") != 0) return 1;
+
+    // Raw string: newlines and (lack of) indentation preserved exactly. The
+    // continuation lines start at column 0 so no indentation leaks in.
+    const char *r = r"""line1
+line2
+line3""";
+    if (strcmp(r, "line1\nline2\nline3") != 0) return 2;
+
+    // Escaped quotes inside a non-raw triple string.
+    const char *q = """a\"\"\"b""";
+    if (strcmp(q, "a\"\"\"b") != 0) return 3;
+
+    // A quote or two (not three) inside a non-raw string is literal.
+    const char *d = """say "hi" now""";
+    if (strcmp(d, "say \"hi\" now") != 0) return 4;
+
+    return 0;
+}

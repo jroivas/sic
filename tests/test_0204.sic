@@ -1,0 +1,34 @@
+// SIC safety diagnostics — the *accepted* forms (sic.md §"Assignment and
+// equals", §"Dangling else", §"Empty brackets pointer").
+int main()
+{
+    int x = 0, y = 5;
+
+    // Double-parenthesised assignment as a condition is allowed.
+    if ((x = y)) {
+        if (x != 5) return 1;
+    } else {
+        return 2;
+    }
+
+    // The classic getc idiom: the assignment is parenthesised and the top-level
+    // condition is a comparison, so it is unambiguous and accepted.
+    int i = 0, sum = 0, n = 3;
+    while ((i = i + 1) <= n)
+        sum += i;
+    if (sum != 6) return 3;
+
+    // Dangling else made explicit with braces.
+    int a = 1, b = 1, r = 0;
+    if (a) {
+        if (b) r = 10;
+    } else
+        r = 20;
+    if (r != 10) return 4;
+
+    // Empty brackets are fine when an initializer supplies the size.
+    char msg[] = "hi";
+    if (msg[0] != 'h') return 5;
+
+    return 0;
+}

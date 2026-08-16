@@ -1,0 +1,30 @@
+// SIC swap operator `a <> b` (sic.md §"Swap"): exchange two same-typed lvalues.
+struct point { int x; int y; };
+
+int main()
+{
+    // Scalar ints.
+    int a = 3, b = 7;
+    a <> b;
+    if (a != 7 || b != 3) return 1;
+
+    // Pointers.
+    int *p = &a, *q = &b;
+    p <> q;
+    if (p != &b || q != &a) return 2;
+    if (*p != 3 || *q != 7) return 3;
+
+    // Array elements (lvalues via indexing).
+    int arr[3] = { 10, 20, 30 };
+    arr[0] <> arr[2];
+    if (arr[0] != 30 || arr[2] != 10 || arr[1] != 20) return 4;
+
+    // Whole structs.
+    struct point m = { 1, 2 };
+    struct point n = { 8, 9 };
+    m <> n;
+    if (m.x != 8 || m.y != 9) return 5;
+    if (n.x != 1 || n.y != 2) return 6;
+
+    return 0;
+}

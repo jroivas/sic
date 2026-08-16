@@ -573,6 +573,8 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // `.sic` REPL inputs may synthesize a `main` from top-level statements; a C
     // translation unit must define `main` itself.
     lowerer.set_repl_main(lang == sic_frontend::Lang::Sic);
+    // Enable SIC-language defined-behavior semantics for `.sic` sources.
+    lowerer.set_sic(lang == sic_frontend::Lang::Sic);
     let mut ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
     ir_module.source_file = Some(path.to_string());
 

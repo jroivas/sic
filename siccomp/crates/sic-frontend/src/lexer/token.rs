@@ -42,6 +42,7 @@ pub enum TokenKind {
     Register, Restrict, Return, Short, Signed, Sizeof, Static,
     Struct, Switch, Typedef, Union, Unsigned, Void, Volatile, While,
     Bool, Complex, Atomic,
+    Fallthrough,  // sic-only: explicit switch-case fallthrough (sic.md §"Switch - case")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)
@@ -58,6 +59,8 @@ pub enum TokenKind {
     AmpAmp, PipePipe,
     AndAssign, OrAssign, XorAssign,
     Shl, Shr, ShlAssign, ShrAssign,
+    RotL, RotR,
+    Swap,
     Eq, EqEq, BangEq,
     Lt, Gt, LtEq, GtEq,
     Question, Colon, Semi, Comma, Dot, Arrow, Ellipsis,

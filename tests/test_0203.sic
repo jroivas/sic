@@ -1,0 +1,16 @@
+// SIC rejects implicit switch fallthrough (sic.md §"Switch - case"): `case 1`
+// falls into `case 2` with no `break`/`fallthrough`, which must be a compile
+// error. Pinned via the accompanying `.xfail` marker.
+int main()
+{
+    int x = 1;
+    int r = 0;
+    switch (x) {
+        case 1:
+            r = 1;
+        case 2:
+            r = 2;
+            break;
+    }
+    return r;
+}

@@ -1,0 +1,9 @@
+// SIC rejects a bare assignment as a condition (sic.md §"Assignment and
+// equals"): `if (x = y)` is a likely typo for `if (x == y)`. Pinned via `.xfail`.
+int main()
+{
+    int x = 0, y = 1;
+    if (x = y)
+        return 1;
+    return 0;
+}

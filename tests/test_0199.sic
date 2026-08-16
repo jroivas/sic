@@ -1,0 +1,15 @@
+// sic.md §"Rotate and shift" examples: results 0, 0x12345678, 0xfab3a9c8, 0xfffffab3, 0xffffffff
+int main()
+{
+    unsigned int a = 0x12345678;
+    int b = -88888888;
+    if ((a << 100) != 0u) return 1;               // count >= width -> 0
+    if ((a << -1) != a) return 2;                 // negative count -> unchanged
+    if ((unsigned)(b >> 0) != 0xfab3a9c8u) return 3;
+    if ((unsigned)(b >> 16) != 0xfffffab3u) return 4;
+    if ((unsigned)(b >> 32) != 0xffffffffu) return 5;   // signed >> overflow -> sign fill
+    if ((a >> 40) != 0u) return 6;                // unsigned >> overflow -> 0
+    if ((a << 4) != 0x23456780u) return 7;        // in-range still correct
+    if ((a >> 4) != 0x01234567u) return 8;
+    return 0;
+}

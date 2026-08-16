@@ -1,0 +1,17 @@
+// SIC guarantees every variable is initialized to 0 (sic.md §"Initialized variables").
+// Uninitialized locals: ints->0, float->0.0, pointers->NULL, arrays/structs->all 0.
+int main()
+{
+    int a;
+    double b;
+    char *p;
+    int arr[4];
+    struct { int x; char *s; } st;
+
+    if (a != 0) return 1;
+    if (b != 0.0) return 2;
+    if (p != 0) return 3;
+    if (arr[0] != 0 || arr[3] != 0) return 4;
+    if (st.x != 0 || st.s != 0) return 5;
+    return 0;
+}
