@@ -213,10 +213,14 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Field { base, name } => {
                 // sic native-string computed accessors (sic.md §"Built-in string").
                 // `.size` / `.data` are ordinary struct fields and fall through.
-                if self.is_sic() && name == "ptr" {
+                if self.is_sic() && (name == "ptr" || name == "length") {
                     if let Ok(bt) = self.infer_expr_type(base) {
                         if super::types::is_sic_string(&bt) {
-                            return self.emit_string_cptr(base);
+                            return if name == "ptr" {
+                                self.emit_string_cptr(base)
+                            } else {
+                                self.emit_string_length(base)
+                            };
                         }
                     }
                 }
@@ -724,6 +728,24 @@ impl<'m> FuncCtx<'m> {
         let new_size = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_v, rhs: lo_v, ty: Type::i64() });
         self.make_string_val(Val::Local(new_data), Val::Local(new_size))
+    }
+
+    /// sic `s.length`: number of UTF-8 code points in the slice (sic.md
+    /// §"Built-in string"). Delegates to a synthesized once-per-module helper
+    /// `__sic_str_length(data, size)` — keeping the counting loop in its own
+    /// function avoids emitting multiple expression-level loops into one caller
+    /// (which the -O0 backend miscompiles) and keeps call sites small.
+    fn emit_string_length(&mut self, base: &Expr) -> Result<Val> {
+        let data_lv = self.lower_lvalue_field(base, "data")?;
+        let data = self.load_lvalue(&data_lv)?;
+        let size_lv = self.lower_lvalue_field(base, "size")?;
+        let size = self.load_lvalue(&size_lv)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let size = self.coerce(size, &usize_ty)?;
+        let fref = self.lowerer.ensure_str_length_fn();
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![data, size], ret_ty: usize_ty });
+        Ok(Val::Local(dest))
     }
 
     /// sic `s.ptr`: yield a `const char*` usable as a C string, copying only when

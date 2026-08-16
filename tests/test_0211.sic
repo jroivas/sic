@@ -1,0 +1,33 @@
+// SIC string `.length`, phase 3 (sic.md §"Built-in string"): number of UTF-8
+// code points (`.size` is the byte count). For ASCII, length == size.
+#include <stdio.h>
+
+int main()
+{
+    string a = "Hello";
+    if (a.length != 5 || a.size != 5) return 1;
+
+    // "héllo": é is 2 UTF-8 bytes (0xC3 0xA9) → 6 bytes, 5 code points.
+    string b = "h\xc3\xa9llo";
+    if (b.size != 6) return 2;
+    if (b.length != 5) return 3;
+
+    // Euro sign € is 3 bytes (0xE2 0x82 0xAC) → 3 bytes, 1 code point.
+    string e = "\xe2\x82\xac";
+    if (e.size != 3 || e.length != 1) return 4;
+
+    // Length of a substring view.
+    string w = "Hello World";
+    if (w[6:].length != 5) return 5;
+    if (w[0:5].length != 5) return 6;
+
+    // Empty string.
+    string z = "";
+    if (z.length != 0) return 7;
+
+    // Multiple `.length` uses in one function must all be correct.
+    if (a.length != 5) return 8;
+    if (b.length != 5) return 9;
+
+    return 0;
+}

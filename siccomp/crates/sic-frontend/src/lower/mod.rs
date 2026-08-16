@@ -83,6 +83,13 @@ impl Lowerer {
         self.collect_declarations(tu)?;
         if dbg { eprintln!("[timing] collect_declarations: {:?}", t1.elapsed()); }
 
+        // Build sic's native-string helpers up front (outside any function's
+        // lowering) so their FuncRefs are stable and callers never construct
+        // them mid-body.
+        if self.sic {
+            self.ensure_str_length_fn();
+        }
+
         // Second pass: lower function bodies and global initializers
         let t2 = std::time::Instant::now();
         self.lower_translation_unit(tu)?;
@@ -334,6 +341,112 @@ impl Lowerer {
             thread_local: false,
         };
         self.module.add_global(g)
+    }
+
+    /// Synthesize (once per module) the native-string length helper
+    /// `usize __sic_str_length(char* data, usize size)` — counts UTF-8 code
+    /// points in `data[0..size]` (bytes where `(b & 0xC0) != 0x80`), sic.md
+    /// §"Built-in string". Kept as its own function so a caller with several
+    /// `.length` uses doesn't get multiple loops inlined (miscompiled at -O0).
+    pub(crate) fn ensure_str_length_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_str_length") {
+            return f;
+        }
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let i8p = Type::char_ptr();
+        let sig = FunctionType { ret: usize_ty.clone(), params: vec![i8p.clone(), usize_ty.clone()], variadic: false };
+        let params = vec![
+            sic_ir::Param { name: "data".to_string(), ty: i8p.clone() },
+            sic_ir::Param { name: "size".to_string(), ty: usize_ty.clone() },
+        ];
+        let mut func = Function::new("__sic_str_length".to_string(), sig, params, Linkage::Internal);
+        let entry_id = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry_id));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            // Spill the incoming params into stack slots and read them from memory
+            // inside the loop — mirroring normal function lowering. Using the raw
+            // entry-block param values across the loop back-edge miscompiles.
+            let data_slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: data_slot, ty: i8p.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(data_slot) });
+            let size_slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: size_slot, ty: usize_ty.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10001)), ptr: Val::Local(size_slot) });
+            // Zero-init i64 slots with a properly-widened zero: a bare
+            // `Constant::int(0)` stores only 32 bits (leaving the high half of an
+            // i64 slot as stack garbage), so coerce it to i64 first.
+            let zero64 = fc.coerce(Constant::int(0), &Type::i64()).unwrap();
+            let count = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: count, ty: Type::i64(), align: None });
+            fc.push_instr(Instr::Store { val: zero64.clone(), ptr: Val::Local(count) });
+            let i = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: i, ty: Type::i64(), align: None });
+            fc.push_instr(Instr::Store { val: zero64, ptr: Val::Local(i) });
+
+            let cond_bb = fc.new_block_after_current();
+            let body_bb = fc.new_block_after_current();
+            let end_bb = fc.new_block_after_current();
+            fc.set_terminator(Terminator::Jump(cond_bb));
+
+            // cond: i < size
+            fc.switch_to_block(cond_bb);
+            let iv = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv, ptr: Val::Local(i), ty: Type::i64() });
+            let sz = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: sz, ptr: Val::Local(size_slot), ty: usize_ty.clone() });
+            let sz = fc.coerce(Val::Local(sz), &Type::i64()).unwrap();
+            let lt = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: Val::Local(iv), rhs: sz, ty: Type::i64() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: body_bb, else_bb: end_bb });
+
+            let incr_bb = fc.new_block_after_current();
+            let next_bb = fc.new_block_after_current();
+
+            // body: if (data[i] & 0xC0) != 0x80 → count++ ; then i++
+            fc.switch_to_block(body_bb);
+            let iv2 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv2, ptr: Val::Local(i), ty: Type::i64() });
+            let dp = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: dp, ptr: Val::Local(data_slot), ty: i8p.clone() });
+            let bptr = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: bptr, base: Val::Local(dp), index: Val::Local(iv2), elem_size: 1, result_ty: i8p.clone() });
+            let byte = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: byte, ptr: Val::Local(bptr), ty: Type::u8() });
+            let byte_w = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: byte_w, op: CastOp::ZExt, val: Val::Local(byte), to_ty: Type::i32() });
+            let masked = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: masked, op: BinOp::And, lhs: Val::Local(byte_w), rhs: Constant::int(0xC0), ty: Type::i32() });
+            let is_cp = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_cp, op: CmpOp::INe, lhs: Val::Local(masked), rhs: Constant::int(0x80), ty: Type::i32() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_cp), then_bb: incr_bb, else_bb: next_bb });
+
+            // incr: count += 1
+            fc.switch_to_block(incr_bb);
+            let cv = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: cv, ptr: Val::Local(count), ty: Type::i64() });
+            let nc = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: nc, op: BinOp::Add, lhs: Val::Local(cv), rhs: Constant::int(1), ty: Type::i64() });
+            fc.push_instr(Instr::Store { val: Val::Local(nc), ptr: Val::Local(count) });
+            fc.set_terminator(Terminator::Jump(next_bb));
+
+            // next: i += 1; loop
+            fc.switch_to_block(next_bb);
+            let iv3 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv3, ptr: Val::Local(i), ty: Type::i64() });
+            let ni = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: ni, op: BinOp::Add, lhs: Val::Local(iv3), rhs: Constant::int(1), ty: Type::i64() });
+            fc.push_instr(Instr::Store { val: Val::Local(ni), ptr: Val::Local(i) });
+            fc.set_terminator(Terminator::Jump(cond_bb));
+
+            // end: return count as usize
+            fc.switch_to_block(end_bb);
+            let r = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(count), ty: Type::i64() });
+            let r = fc.coerce(Val::Local(r), &usize_ty).unwrap();
+            fc.set_terminator(Terminator::Ret(Some(r)));
+        }
+        self.module.add_function(func)
     }
 
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
