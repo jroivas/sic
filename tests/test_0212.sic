@@ -1,0 +1,37 @@
+// SIC string concatenation, phase 4 (sic.md §"Built-in string"): `a + b` builds
+// a fresh joined string (heap, NUL-terminated). Operands may be strings or
+// string literals.
+#include <string.h>
+
+int main()
+{
+    string a = "Hello";
+    string b = a + " world";
+    if (b.size != 11) return 1;
+    if (strcmp(b.ptr, "Hello world") != 0) return 2;
+    if (b.length != 11) return 3;
+
+    // Chained concatenation.
+    string c = a + " " + a;
+    if (c.size != 11 || strcmp(c.ptr, "Hello Hello") != 0) return 4;
+
+    // string + string.
+    string sp = " ";
+    string d = a + sp + a;
+    if (strcmp(d.ptr, "Hello Hello") != 0) return 5;
+
+    // Concatenating an empty piece.
+    string e = a + "";
+    if (strcmp(e.ptr, "Hello") != 0 || e.size != 5) return 6;
+
+    // Concatenate a substring view.
+    string w = "Hello World";
+    string f = w[0:5] + "!";     // "Hello!"
+    if (strcmp(f.ptr, "Hello!") != 0 || f.size != 6) return 7;
+
+    // UTF-8 length is preserved across concatenation.
+    string g = "h\xc3\xa9" + a;  // "hé" + "Hello" → 8 bytes, 7 code points
+    if (g.size != 8 || g.length != 7) return 8;
+
+    return 0;
+}

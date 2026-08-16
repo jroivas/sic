@@ -389,9 +389,76 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic string concatenation `a + b` (sic.md §"Built-in string"): if either
+        // side is a `string`, build a fresh joined string.
+        if self.is_sic() && op == BinOpKind::Add
+            && (self.is_string_operand(lhs) || self.is_string_operand(rhs))
+        {
+            return self.lower_string_concat(lhs, rhs);
+        }
+
         let l = self.lower_expr(lhs)?;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
+    }
+
+    /// Whether `e` is an actual `string`-typed expression. Used to decide that a
+    /// `+` is string concatenation. A bare string literal does NOT count here (so
+    /// `"abc" + 1` stays pointer arithmetic); the literal is still accepted as the
+    /// *other* operand once concatenation is triggered by a real string.
+    fn is_string_operand(&self, e: &Expr) -> bool {
+        matches!(self.infer_expr_type(e), Ok(t) if super::types::is_sic_string(&t))
+    }
+
+    /// Load a `string`/literal operand of `+` as a `(data, size)` pair (size as
+    /// i64). A `string` reads its slice fields; a literal uses a fresh cstring
+    /// global and its compile-time byte length.
+    fn string_operand_parts(&mut self, e: &Expr) -> Result<(Val, Val)> {
+        if let ExprKind::StringLit(s) = &e.kind {
+            let data = self.emit_cstring(s);
+            return Ok((data, Constant::int(s.len() as i64)));
+        }
+        let ty = self.infer_expr_type(e)?;
+        if !super::types::is_sic_string(&ty) {
+            return Err(CompileError::at(
+                "operand of string `+` is neither a string nor a string literal".to_string(),
+                e.span.file.clone(), e.span.line, e.span.col,
+            ));
+        }
+        let data_lv = self.lower_lvalue_field(e, "data")?;
+        let data = self.load_lvalue(&data_lv)?;
+        let size_lv = self.lower_lvalue_field(e, "size")?;
+        let size = self.load_lvalue(&size_lv)?;
+        let size = self.coerce(size, &Type::i64())?;
+        Ok((data, size))
+    }
+
+    /// sic `a + b` on strings: `malloc(a.size + b.size + 1)`, copy both halves,
+    /// NUL-terminate, and return the joined `string`. The buffer is not freed
+    /// yet (reclaimed later by the ownership/refcount milestone).
+    fn lower_string_concat(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let (d1, s1) = self.string_operand_parts(lhs)?;
+        let (d2, s2) = self.string_operand_parts(rhs)?;
+
+        // total = s1 + s2 ; buf = malloc(total + 1)
+        let total = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: s1.clone(), rhs: s2.clone(), ty: Type::i64() });
+        let bufsize = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: bufsize, op: BinOp::Add, lhs: Val::Local(total), rhs: Constant::int(1), ty: Type::i64() });
+        let buf = self.emit_malloc(Val::Local(bufsize))?;
+
+        // memcpy(buf, d1, s1); memcpy(buf + s1, d2, s2)
+        self.emit_memcpy(buf.clone(), d1, s1.clone())?;
+        let mid = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: mid, base: buf.clone(), index: s1, elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_memcpy(Val::Local(mid), d2, s2)?;
+
+        // buf[total] = 0
+        let endp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: endp, base: buf.clone(), index: Val::Local(total), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
+
+        self.make_string_val(buf, Val::Local(total))
     }
 
     pub fn emit_binop(&mut self, op: BinOpKind, l: Val, r: Val) -> Result<Val> {
@@ -3002,6 +3069,10 @@ impl<'m> FuncCtx<'m> {
                 match op {
                     // Relational/logical operators yield int.
                     Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),
+                    // sic string concatenation yields a `string`.
+                    Add if self.is_sic()
+                        && (self.is_string_operand(lhs) || self.is_string_operand(rhs)) =>
+                        Ok(super::types::sic_string_type(self.ptr_size())),
                     // Arithmetic: pointer/array ± integer keeps the pointer type
                     // (pointer arithmetic; arrays decay to pointer-to-element).
                     // `ptr - ptr` is ptrdiff_t. Otherwise pick the "richer" operand
