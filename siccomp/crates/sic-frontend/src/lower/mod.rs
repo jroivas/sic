@@ -1713,6 +1713,7 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             collect_expr_names(lo, out); collect_expr_names(hi, out); collect_stmt_names(body, out);
         }
         Stmt::Default(body, _) => collect_stmt_names(body, out),
+        Stmt::Defer(body, _) => collect_stmt_names(body, out),
         Stmt::Switch { val, body, .. } => { collect_expr_names(val, out); collect_stmt_names(body, out); }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
         | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}

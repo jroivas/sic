@@ -840,6 +840,11 @@ impl Parser {
             TokenKind::Break => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Break(sp)) }
             TokenKind::Continue => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Continue(sp)) }
             TokenKind::Fallthrough => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Fallthrough(sp)) }
+            TokenKind::Defer => {
+                self.advance();
+                let inner = Box::new(self.parse_stmt()?);
+                Ok(Stmt::Defer(inner, sp))
+            }
             TokenKind::Goto => self.parse_goto(),
             TokenKind::Switch => self.parse_switch(),
             // label: `ident :`

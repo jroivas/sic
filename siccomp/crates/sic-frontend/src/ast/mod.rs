@@ -217,6 +217,9 @@ pub enum Stmt {
     /// sic-only: explicit `fallthrough;` inside a switch (sic.md §"Switch - case").
     /// Semantically a no-op — control simply falls into the next case.
     Fallthrough(Span),
+    /// sic-only: `defer <stmt>;` — run the statement at scope exit / return
+    /// (sic.md §"Defer keyword").
+    Defer(BoxStmt, Span),
     Goto(String, Span),
     Label(String, BoxStmt, Span),
     Case(Expr, BoxStmt, Span),

@@ -1,0 +1,43 @@
+// SIC `defer <stmt>;` (sic.md §"Defer keyword"): the statement runs at scope exit,
+// on every path (fall-through, return, break, continue), in LIFO order.
+
+int order[16];
+int n = 0;
+void mark(int v) { order[n++] = v; }
+
+void fallthrough_case() {
+    defer mark(1);
+    defer mark(2);   // LIFO → runs before mark(1)
+    mark(10);
+}
+
+void early_return(int early) {
+    defer mark(3);
+    if (early) return;   // defer still runs
+    mark(20);
+}
+
+int main() {
+    fallthrough_case();
+    // expect: 10, 2, 1
+    if (order[0] != 10 || order[1] != 2 || order[2] != 1) return 1;
+
+    n = 0;
+    early_return(1);
+    // expect: 3 (mark(20) skipped)
+    if (n != 1 || order[0] != 3) return 2;
+
+    // defer inside a loop body runs each iteration, including on `continue`.
+    n = 0;
+    for (int i = 0; i < 3; i++) {
+        defer mark(100 + i);
+        if (i == 1) continue;
+        mark(i);
+    }
+    // expect: 0,100, 101, 2,102
+    int expect[5] = { 0, 100, 101, 2, 102 };
+    if (n != 5) return 3;
+    for (int i = 0; i < 5; i++) if (order[i] != expect[i]) return 4;
+
+    return 0;
+}

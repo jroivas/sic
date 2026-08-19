@@ -5,6 +5,18 @@ use crate::{Result, CompileError};
 use sic_ir::*;
 use super::{Lowerer, lower_type, lower_param_type, eval_const_expr};
 
+/// A scope-exit action, run in LIFO order on every exit path (fall-through,
+/// `return`, `break`, `continue`).
+#[derive(Clone)]
+pub enum Cleanup {
+    /// `__attribute__((cleanup(fn)))`: call `fn(&var)`.
+    AttrFn { addr: Val, fn_name: String },
+    /// sic `defer <stmt>;`: lower the statement at each exit site.
+    Defer(Box<Stmt>),
+    /// sic refcounted `string` local: release its `rc` on scope exit.
+    StringRelease { addr: Val },
+}
+
 /// Per-function lowering context.
 pub struct FuncCtx<'m> {
     pub lowerer: &'m mut Lowerer,
@@ -49,7 +61,7 @@ pub struct FuncCtx<'m> {
     /// Parallel to the `locals` scope stack: per-scope `(var_address, cleanup_fn)`
     /// pairs from `__attribute__((cleanup(fn)))`. On scope exit / return / break /
     /// continue the cleanup functions are called (`fn(&var)`) in reverse order.
-    pub cleanups: Vec<Vec<(Val, String)>>,
+    pub cleanups: Vec<Vec<Cleanup>>,
     /// Scope depth (`cleanups.len()`) recorded per `break_stack` entry (loops and
     /// switches), so `break` runs the cleanups for the scopes it exits.
     pub break_scope_depth: Vec<usize>,
@@ -157,8 +169,8 @@ impl<'m> FuncCtx<'m> {
         // path, so skip to avoid a double call.
         if !self.is_terminated() {
             if let Some(scope) = self.cleanups.last() {
-                let calls: Vec<(Val, String)> = scope.iter().rev().cloned().collect();
-                for (addr, f) in calls { self.emit_cleanup_call(addr, &f); }
+                let calls: Vec<Cleanup> = scope.iter().rev().cloned().collect();
+                for c in calls { self.emit_cleanup(c); }
             }
         }
         self.cleanups.pop();
@@ -169,7 +181,14 @@ impl<'m> FuncCtx<'m> {
     /// current scope. `var_addr` is the variable's storage address (its alloca).
     pub fn register_cleanup(&mut self, var_addr: Val, fn_name: String) {
         if let Some(scope) = self.cleanups.last_mut() {
-            scope.push((var_addr, fn_name));
+            scope.push(Cleanup::AttrFn { addr: var_addr, fn_name });
+        }
+    }
+
+    /// Register an arbitrary scope-exit action in the current scope.
+    pub fn register_scope_exit(&mut self, action: Cleanup) {
+        if let Some(scope) = self.cleanups.last_mut() {
+            scope.push(action);
         }
     }
 
@@ -179,10 +198,23 @@ impl<'m> FuncCtx<'m> {
     fn emit_cleanups_to(&mut self, from: usize) {
         let n = self.cleanups.len();
         for i in (from..n).rev() {
-            let calls: Vec<(Val, String)> = self.cleanups[i].iter().rev().cloned().collect();
-            for (addr, f) in calls { self.emit_cleanup_call(addr, &f); }
+            let calls: Vec<Cleanup> = self.cleanups[i].iter().rev().cloned().collect();
+            for c in calls { self.emit_cleanup(c); }
         }
     }
+
+    /// Dispatch one scope-exit action.
+    fn emit_cleanup(&mut self, c: Cleanup) {
+        match c {
+            Cleanup::AttrFn { addr, fn_name } => self.emit_cleanup_call(addr, &fn_name),
+            Cleanup::Defer(stmt) => { let _ = self.lower_stmt(&stmt); }
+            Cleanup::StringRelease { addr } => self.emit_string_release_at(addr),
+        }
+    }
+
+    /// Release a refcounted `string` local at scope exit (implemented in the
+    /// refcounted-strings phase). Placeholder until then.
+    fn emit_string_release_at(&mut self, _addr: Val) {}
 
     /// Emit `fn(&var)` for a cleanup function. The function takes a pointer to
     /// the variable; declare it as an extern `void(void*)` if not yet known.
@@ -451,6 +483,11 @@ impl<'m> FuncCtx<'m> {
             // sic's explicit `fallthrough;` is a no-op: control simply continues
             // into the statements of the next case (sic.md §"Switch - case").
             Stmt::Fallthrough(_) => {}
+            // sic `defer <stmt>;` (sic.md §"Defer keyword"): register the statement
+            // to be lowered (LIFO) at every exit of the enclosing scope.
+            Stmt::Defer(inner, _) => {
+                self.register_scope_exit(Cleanup::Defer(inner.clone()));
+            }
             Stmt::Expr(e, _) => { self.lower_expr(e)?; }
             Stmt::Block(stmts, _) => {
                 self.enter_scope();
@@ -1373,7 +1410,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
-        | Stmt::Default(_, s) => s.line,
+        | Stmt::Default(_, s) | Stmt::Defer(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,
     }

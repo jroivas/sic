@@ -529,6 +529,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `fallthrough` is an explicit switch-case terminator in sic
             // (sic.md §"Switch - case"); it is an ordinary identifier in C.
             "fallthrough" => return TokenKind::Fallthrough,
+            // `defer` runs a statement at scope exit (sic.md §"Defer keyword").
+            "defer" => return TokenKind::Defer,
             _ => {}
         }
     }

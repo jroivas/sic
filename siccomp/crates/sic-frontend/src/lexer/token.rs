@@ -43,6 +43,7 @@ pub enum TokenKind {
     Struct, Switch, Typedef, Union, Unsigned, Void, Volatile, While,
     Bool, Complex, Atomic,
     Fallthrough,  // sic-only: explicit switch-case fallthrough (sic.md §"Switch - case")
+    Defer,        // sic-only: `defer <stmt>;` scope-exit action (sic.md §"Defer keyword")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)
