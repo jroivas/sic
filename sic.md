@@ -386,6 +386,22 @@ It will free the memory in case reference_cnt is decremented to 0.
 It's also possible that reference to the allocation has been passed forward to a thread.
 On that case reference_cnt is still not 0, and memory will be freed when the reference gets out of scope.
 
+## Defer keyword
+
+Borror `defer` syntax from Go to allow automatic action on every return.
+
+For example:
+
+    void test()
+    {
+        int *tmp = new int(10);
+        defer del tmp;
+        int *tmp2 == new int(5);
+        if (!tmp2)
+            return; // Defer statemen is run after this return
+        tmp[0] = 10;
+    } // Defer statenment is run here when exiting the scope
+
 ## References
 
 First we have a reference, which is indicated by `@` at the beginning of the type declaration.
