@@ -531,6 +531,10 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             "fallthrough" => return TokenKind::Fallthrough,
             // `defer` runs a statement at scope exit (sic.md §"Defer keyword").
             "defer" => return TokenKind::Defer,
+            // `new` / `del` — typed allocation and free (sic.md §"Scopes and
+            // automatic release"); ordinary identifiers in C.
+            "new" => return TokenKind::New,
+            "del" => return TokenKind::Del,
             _ => {}
         }
     }

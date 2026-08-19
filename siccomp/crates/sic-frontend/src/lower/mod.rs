@@ -1714,6 +1714,7 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
         }
         Stmt::Default(body, _) => collect_stmt_names(body, out),
         Stmt::Defer(body, _) => collect_stmt_names(body, out),
+        Stmt::Delete(e, _) => collect_expr_names(e, out),
         Stmt::Switch { val, body, .. } => { collect_expr_names(val, out); collect_stmt_names(body, out); }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
         | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}
@@ -1759,6 +1760,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             if let Some(e) = lo { collect_expr_names(e, out); }
             if let Some(e) = hi { collect_expr_names(e, out); }
         }
+        New { count, .. } => { if let Some(e) = count { collect_expr_names(e, out); } }
         Field { base, .. } | Arrow { base, .. } => collect_expr_names(base, out),
         Cast { expr, .. } => collect_expr_names(expr, out),
         Generic { controlling, assocs } => {

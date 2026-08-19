@@ -488,6 +488,8 @@ impl<'m> FuncCtx<'m> {
             Stmt::Defer(inner, _) => {
                 self.register_scope_exit(Cleanup::Defer(inner.clone()));
             }
+            // sic `del <expr>;` (sic.md §"Scopes and automatic release").
+            Stmt::Delete(e, _) => { self.lower_delete(e)?; }
             Stmt::Expr(e, _) => { self.lower_expr(e)?; }
             Stmt::Block(stmts, _) => {
                 self.enter_scope();
@@ -1410,7 +1412,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
-        | Stmt::Default(_, s) | Stmt::Defer(_, s) => s.line,
+        | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,
     }

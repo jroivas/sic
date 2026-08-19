@@ -220,6 +220,9 @@ pub enum Stmt {
     /// sic-only: `defer <stmt>;` — run the statement at scope exit / return
     /// (sic.md §"Defer keyword").
     Defer(BoxStmt, Span),
+    /// sic-only: `del <expr>;` — free a `new`-allocated pointer (refcount--,
+    /// free at 0). sic.md §"Scopes and automatic release".
+    Delete(Expr, Span),
     Goto(String, Span),
     Label(String, BoxStmt, Span),
     Case(Expr, BoxStmt, Span),
@@ -273,6 +276,11 @@ pub enum ExprKind {
     /// byte-offset view into a `string`. Either bound may be omitted (`s[lo:]`,
     /// `s[:hi]`, `s[:]`), defaulting `lo` to 0 and `hi` to the string's size.
     Slice { base: BoxExpr, lo: Option<BoxExpr>, hi: Option<BoxExpr> },
+
+    /// SIC `new T` / `new T(count)` (sic.md §"Scopes and automatic release"):
+    /// allocate `count` (default 1) elements of `T` with a refcount header;
+    /// yields `T*`.
+    New { ty: QualType, count: Option<BoxExpr> },
 
     /// Unary prefix
     Unary { op: UnOpKind, expr: BoxExpr },

@@ -1,0 +1,41 @@
+// SIC `new` / `del` (sic.md §"Scopes and automatic release"): typed allocation
+// with a hidden {size,refcount} header; `del` frees (refcount--, free at 0).
+// Manual/owning — not auto-freed at scope exit.
+#include <stdio.h>
+
+struct pt { int x, y; };
+
+int main()
+{
+    // Array allocation: new T(n) reserves n elements.
+    int *p = new int(10);
+    for (int i = 0; i < 10; i++) p[i] = i * i;
+    int sum = 0;
+    for (int i = 0; i < 10; i++) sum += p[i];
+    if (sum != 285) return 1;
+    del p;
+
+    // Single element: new T.
+    int *one = new int;
+    *one = 42;
+    if (*one != 42) return 2;
+    del one;
+
+    // Struct allocation + member access.
+    struct pt *q = new struct pt;
+    q->x = 3; q->y = 4;
+    if (q->x + q->y != 7) return 3;
+    del q;
+
+    // `defer del` frees at scope exit even on an early path.
+    int *r = new int(4);
+    defer del r;
+    r[3] = 99;
+    if (r[3] != 99) return 4;
+
+    // del of NULL is a no-op.
+    int *z = 0;
+    del z;
+
+    return 0;
+}

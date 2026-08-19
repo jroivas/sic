@@ -186,6 +186,8 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Slice { base, lo, hi } => self.lower_slice(base, lo.as_deref(), hi.as_deref()),
 
+            ExprKind::New { ty, count } => self.lower_new(ty, count.as_deref()),
+
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
 
             ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
@@ -725,6 +727,96 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![sz], ret_ty: voidp });
         self.val_types.insert(dest.0, Type::char_ptr());
         Ok(Val::Local(dest))
+    }
+
+    /// Emit `free(p)`.
+    fn emit_free(&mut self, p: Val) -> Result<()> {
+        let voidp = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("free").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "free".to_string(),
+                sig: FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false },
+            })
+        });
+        let p = self.coerce(p, &voidp)?;
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![p], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// sic `new T` / `new T(count)` (sic.md §"Scopes and automatic release"):
+    /// allocate a block with a `{ usize size; usize refcount }` header before the
+    /// data, `refcount = 1`, and return the data pointer typed `T*`. `del` frees
+    /// via the header; the header also carries the size for future bounds checks.
+    pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, count: Option<&Expr>) -> Result<Val> {
+        let elem_ty = self.lower_type(ty)?;
+        let elem_size = elem_ty.size_of(self.ptr_size()).max(1);
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let header = (2 * self.ptr_size()) as i64;
+
+        let count_val = match count {
+            Some(e) => { let v = self.lower_expr(e)?; self.coerce(v, &usize_ty)? }
+            None => self.coerce(Constant::int(1), &usize_ty)?,
+        };
+        let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
+        let data_size = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: data_size, op: BinOp::Mul, lhs: count_val, rhs: esz, ty: usize_ty.clone() });
+        let header_c = self.coerce(Constant::int(header), &usize_ty)?;
+        let total = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: Val::Local(data_size), rhs: header_c, ty: usize_ty.clone() });
+        let block = self.emit_malloc(Val::Local(total))?; // char*
+
+        // header[0] = data_size ; header[1] (at +ptr_size) = refcount = 1
+        self.push_instr(Instr::Store { val: Val::Local(data_size), ptr: block.clone() });
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(self.ptr_size() as i64), elem_size: 1, result_ty: Type::char_ptr() });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rc_ptr) });
+
+        let ptr_ty = Type::Pointer(Box::new(elem_ty));
+        let data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
+        self.val_types.insert(data.0, ptr_ty);
+        Ok(Val::Local(data))
+    }
+
+    /// sic `del p;` — decrement the header refcount of a `new`-allocated pointer
+    /// and `free` the block when it reaches 0. A NULL pointer is a no-op.
+    pub(crate) fn lower_delete(&mut self, e: &Expr) -> Result<()> {
+        let p = self.lower_expr(e)?;
+        let pc = self.coerce(p, &Type::char_ptr())?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: pc.clone(), rhs: Constant::zero(), ty: Type::char_ptr() });
+        let body_bb = self.new_block_after_current();
+        let free_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: body_bb });
+
+        // body: refcount field is at p - ptr_size (block + ptr_size). Decrement.
+        self.switch_to_block(body_bb);
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-(self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
+        let rc = self.alloc_val();
+        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        let newrc = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
+        let zero = self.coerce(Constant::int(0), &usize_ty)?;
+        let is_zero = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
+
+        // free: block = p - 2*ptr_size
+        self.switch_to_block(free_bb);
+        let block = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_free(Val::Local(block))?;
+        self.set_terminator(Terminator::Jump(done_bb));
+
+        self.switch_to_block(done_bb);
+        Ok(())
     }
 
     /// Emit `memcpy(dst, src, n)`.
@@ -3040,6 +3132,8 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Assign { lhs, .. } => self.infer_expr_type(lhs),
             // A substring slice is itself a `string` (sic.md §"Built-in string").
             ExprKind::Slice { .. } => Ok(super::types::sic_string_type(self.ptr_size())),
+            // `new T` / `new T(n)` yields `T*`.
+            ExprKind::New { ty, .. } => Ok(Type::Pointer(Box::new(self.lower_type(ty)?))),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
             // GCC statement expression `({ ...; expr; })` has the type of its last
             // statement when that is an expression statement, else void. Needed so

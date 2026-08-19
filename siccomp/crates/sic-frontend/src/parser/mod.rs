@@ -845,6 +845,12 @@ impl Parser {
                 let inner = Box::new(self.parse_stmt()?);
                 Ok(Stmt::Defer(inner, sp))
             }
+            TokenKind::Del => {
+                self.advance();
+                let e = self.parse_expr()?;
+                self.eat(TokenKind::Semi);
+                Ok(Stmt::Delete(e, sp))
+            }
             TokenKind::Goto => self.parse_goto(),
             TokenKind::Switch => self.parse_switch(),
             // label: `ident :`
@@ -1526,6 +1532,28 @@ impl Parser {
                 self.advance();
                 let e = self.parse_cast()?;
                 Ok(Expr::new(ExprKind::Unary { op: UnOpKind::BitNot, expr: Box::new(e) }, sp))
+            }
+            // sic `new T` / `new T(count)` (sic.md §"Scopes and automatic release").
+            TokenKind::New => {
+                self.advance();
+                let (mut ty, _storage) = self.parse_decl_specifiers()?;
+                // Pointer suffixes (`new char*`); qualifiers after `*` are ignored.
+                while self.eat(TokenKind::Star) {
+                    while matches!(self.peek_kind(),
+                        TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict) {
+                        self.advance();
+                    }
+                    ty = QualType::new(AstType::Pointer { base: Box::new(ty), quals: vec![] });
+                }
+                // Optional element count `(n)`.
+                let count = if self.eat(TokenKind::LParen) {
+                    let c = self.parse_expr()?;
+                    self.expect(TokenKind::RParen)?;
+                    Some(Box::new(c))
+                } else {
+                    None
+                };
+                Ok(Expr::new(ExprKind::New { ty, count }, sp))
             }
             TokenKind::Sizeof => {
                 self.advance();
