@@ -518,8 +518,10 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
     // source; in C they are ordinary identifiers (e.g. a local named `isize`).
     if lang == Lang::Sic {
         match s {
-            "int8" | "int16" | "int32" | "int64" | "int128" |
-            "uint8" | "uint16" | "uint32" | "uint64" | "uint128" |
+            // Canonical Rust-style width aliases. The long forms (`int8`,
+            // `uint8`, …) are intentionally NOT reserved, so a program may use
+            // them as its own identifiers/typedefs; use `int8_t` (C) for a
+            // fixed-width C type.
             "i8" | "i16" | "i32" | "i64" | "i128" |
             "u8" | "u16" | "u32" | "u64" | "u128" |
             "isize" | "usize" => return TokenKind::TypeName,

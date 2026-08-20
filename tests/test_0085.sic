@@ -6,26 +6,26 @@ int main()
     if (sizeof(unsigned int) != 4)
         return 2;
 
-    if (sizeof(int8) != 1)
+    if (sizeof(i8) != 1)
         return 3;
-    if (sizeof(int16) != 2)
+    if (sizeof(i16) != 2)
         return 4;
-    if (sizeof(int32) != 4)
+    if (sizeof(i32) != 4)
         return 5;
-    if (sizeof(int64) != 8)
+    if (sizeof(i64) != 8)
         return 6;
-    if (sizeof(int128) != 16)
+    if (sizeof(i128) != 16)
         return 7;
 
-    if (sizeof(uint8) != 1)
+    if (sizeof(u8) != 1)
         return 8;
-    if (sizeof(uint16) != 2)
+    if (sizeof(u16) != 2)
         return 9;
-    if (sizeof(uint32) != 4)
+    if (sizeof(u32) != 4)
         return 10;
-    if (sizeof(uint64) != 8)
+    if (sizeof(u64) != 8)
         return 11;
-    if (sizeof(uint128) != 16)
+    if (sizeof(u128) != 16)
         return 12;
 
     /*

@@ -204,19 +204,22 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             if n == "__builtin_va_list" {
                 return Ok(va_list_type());
             }
-            // sic/Rust-style primitive type aliases
+            // sic/Rust-style primitive type aliases (canonical short forms). The
+            // long forms (`int8`, `uint8`, …) are deliberately not aliases, so a
+            // user typedef/identifier of that name wins; C's `__int128` family is
+            // kept. `int8_t`/`uint8_t` remain available via <stdint.h>.
             match n.as_str() {
-                "int8"   | "i8"   => return Ok(Type::Int { bits: 8,   signed: true  }),
-                "int16"  | "i16"  => return Ok(Type::Int { bits: 16,  signed: true  }),
-                "int32"  | "i32"  => return Ok(Type::Int { bits: 32,  signed: true  }),
-                "int64"  | "i64"  => return Ok(Type::Int { bits: 64,  signed: true  }),
-                "int128" | "i128" | "__int128" | "__int128_t" => return Ok(Type::Int { bits: 128, signed: true  }),
+                "i8"   => return Ok(Type::Int { bits: 8,   signed: true  }),
+                "i16"  => return Ok(Type::Int { bits: 16,  signed: true  }),
+                "i32"  => return Ok(Type::Int { bits: 32,  signed: true  }),
+                "i64"  => return Ok(Type::Int { bits: 64,  signed: true  }),
+                "i128" | "__int128" | "__int128_t" => return Ok(Type::Int { bits: 128, signed: true  }),
                 "__uint128_t" => return Ok(Type::Int { bits: 128, signed: false }),
-                "uint8"  | "u8"   => return Ok(Type::Int { bits: 8,   signed: false }),
-                "uint16" | "u16"  => return Ok(Type::Int { bits: 16,  signed: false }),
-                "uint32" | "u32"  => return Ok(Type::Int { bits: 32,  signed: false }),
-                "uint64" | "u64"  => return Ok(Type::Int { bits: 64,  signed: false }),
-                "uint128"| "u128" => return Ok(Type::Int { bits: 128, signed: false }),
+                "u8"   => return Ok(Type::Int { bits: 8,   signed: false }),
+                "u16"  => return Ok(Type::Int { bits: 16,  signed: false }),
+                "u32"  => return Ok(Type::Int { bits: 32,  signed: false }),
+                "u64"  => return Ok(Type::Int { bits: 64,  signed: false }),
+                "u128" => return Ok(Type::Int { bits: 128, signed: false }),
                 "isize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: true  }),
                 "usize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: false }),
                 // sic native string: a non-owning slice `{ char* data; usize size }`
