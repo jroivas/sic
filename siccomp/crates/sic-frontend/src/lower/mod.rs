@@ -1,6 +1,7 @@
 mod types;
 mod expr;
 mod func;
+mod borrowck;
 
 use std::collections::{HashMap, HashSet};
 use crate::ast::*;

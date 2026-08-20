@@ -372,6 +372,10 @@ impl<'m> Lowerer {
         inline: bool,
         constructor: Option<i32>,
     ) -> Result<()> {
+        // sic `@` reference borrow-checking (sic.md §"References").
+        if self.sic {
+            super::borrowck::check(body)?;
+        }
         let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
         let ir_params: Result<Vec<_>> = params.iter().map(|p| {
             lower_param_type(&p.ty, &self.struct_types, self.ptr_size)

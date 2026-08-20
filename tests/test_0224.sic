@@ -1,0 +1,2 @@
+// A reference to NULL is not allowed.
+int main(){ int *z = 0; @int *r = @z ; @int *bad = @0; return 0; }   // @0 ERROR

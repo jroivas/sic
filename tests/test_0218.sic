@@ -22,11 +22,15 @@ int main()
     // Passing a reference: @n retains n across the call.
     if (slen(@n) != 11) return 1;
 
-    // Reference bound to a local, used, released at scope exit.
-    @char *r = @n;
-    if (strcmp(r, "hello world") != 0) return 2;
+    // Reference bound to a local, used, released at (inner) scope exit — so the
+    // shared borrow ends before the exclusive borrow below (borrow-checker: a
+    // variable has multiple readers XOR one writer).
+    {
+        @char *r = @n;
+        if (strcmp(r, "hello world") != 0) return 2;
+    }
 
-    // @mut permits mutation of the referent.
+    // @mut permits mutation of the referent (exclusive borrow, now unaliased).
     upper0(@mut n);
     if (n[0] != 'H') return 3;
 

@@ -1,0 +1,37 @@
+// SIC `@` reference borrow-checker — valid programs (sic.md §"References"):
+// multiple shared readers, a lone exclusive writer, conflicting borrow kinds kept
+// in separate scopes, temporary references (call args) that don't outlive the
+// statement, and returning a reference PARAMETER.
+#include <string.h>
+
+int slen(@char *s) { int i = 0; while (s[i]) i++; return i; }
+void bump0(@mut char *s) { s[0] = s[0] + 1; }
+@char *passthru(@char *s) { return s; }   // returning a ref PARAM is allowed
+
+int main()
+{
+    char *n = new char(12);
+    memcpy(n, "hello world", 12);
+
+    // Temporary references (call args) are statement-scoped — several in a row,
+    // and none of them keeps `n` borrowed past its own statement.
+    if (slen(@n) != 11) return 1;
+    if (slen(@n) != 11) return 2;
+
+    // Several shared borrows coexist (multiple readers), in their own scope.
+    {
+        @char *a = @n;
+        @char *b = @n;
+        if (slen(a) != 11 || slen(b) != 11) return 3;
+    }
+
+    // An exclusive borrow — valid now that the shared borrows are gone.
+    {
+        @mut char *m = @mut n;
+        bump0(m);
+    }
+    if (n[0] != 'i') return 4;   // 'h' + 1 == 'i'
+
+    del n;
+    return 0;
+}

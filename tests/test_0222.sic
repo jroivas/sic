@@ -1,0 +1,7 @@
+// Borrow conflict: `n` is mutably borrowed, then borrowed shared — rejected.
+int main(){
+    char *n = new char(4);
+    @mut char *a = @mut n;   // exclusive borrow
+    @char *b = @n;           // ERROR: n already mutably borrowed
+    return 0;
+}

@@ -261,6 +261,23 @@ impl Parser {
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
             return false;
         }
+        // sic `@T` / `@mut T` reference type at the head of a declaration (e.g. a
+        // `@char* f()` return type) starts a declaration, not an expression.
+        if self.peek_kind() == TokenKind::At {
+            let mut j = self.pos + 1;
+            if self.tokens.get(j).map(|t| t.kind) == Some(TokenKind::Ident)
+                && self.tokens.get(j).map(|t| t.text.as_str()) == Some("mut")
+            {
+                j += 1;
+            }
+            if matches!(self.tokens.get(j).map(|t| t.kind), Some(
+                TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+                | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+                | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
+                | TokenKind::Enum | TokenKind::Const | TokenKind::TypeName)) {
+                return false;
+            }
+        }
         true
     }
 
