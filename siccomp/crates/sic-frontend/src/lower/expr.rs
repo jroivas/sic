@@ -435,32 +435,40 @@ impl<'m> FuncCtx<'m> {
         Ok((data, size))
     }
 
-    /// sic `a + b` on strings: `malloc(a.size + b.size + 1)`, copy both halves,
-    /// NUL-terminate, and return the joined `string`. The buffer is not freed
-    /// yet (reclaimed later by the ownership/refcount milestone).
+    /// sic `a + b` on strings: allocate an owned refcount block
+    /// `[ rc(usize) | data...(total) | NUL ]`, copy both halves, and return the
+    /// joined `string` with `rc` = 1. Released (freed) at scope exit.
     fn lower_string_concat(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let (d1, s1) = self.string_operand_parts(lhs)?;
         let (d2, s2) = self.string_operand_parts(rhs)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let word = self.ptr_size() as i64; // sizeof(usize) — the rc cell
 
-        // total = s1 + s2 ; buf = malloc(total + 1)
+        // total = s1 + s2 ; block = malloc(word + total + 1)
         let total = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: s1.clone(), rhs: s2.clone(), ty: Type::i64() });
         let bufsize = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: bufsize, op: BinOp::Add, lhs: Val::Local(total), rhs: Constant::int(1), ty: Type::i64() });
-        let buf = self.emit_malloc(Val::Local(bufsize))?;
+        self.push_instr(Instr::BinOp { dest: bufsize, op: BinOp::Add, lhs: Val::Local(total), rhs: Constant::int(word + 1), ty: Type::i64() });
+        let block = self.emit_malloc(Val::Local(bufsize))?; // char*
 
-        // memcpy(buf, d1, s1); memcpy(buf + s1, d2, s2)
-        self.emit_memcpy(buf.clone(), d1, s1.clone())?;
+        // rc cell at block[0] = 1
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: block.clone() });
+        // data = block + word
+        let data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: data, base: block.clone(), index: Constant::int(word), elem_size: 1, result_ty: Type::char_ptr() });
+
+        // memcpy(data, d1, s1); memcpy(data + s1, d2, s2); data[total] = 0
+        self.emit_memcpy(Val::Local(data), d1, s1.clone())?;
         let mid = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: mid, base: buf.clone(), index: s1, elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: mid, base: Val::Local(data), index: s1, elem_size: 1, result_ty: Type::char_ptr() });
         self.emit_memcpy(Val::Local(mid), d2, s2)?;
-
-        // buf[total] = 0
         let endp = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: endp, base: buf.clone(), index: Val::Local(total), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(data), index: Val::Local(total), elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
 
-        self.make_string_val(buf, Val::Local(total))
+        // rc = block (the refcount cell address)
+        self.make_string_val(Val::Local(data), Val::Local(total), block)
     }
 
     pub fn emit_binop(&mut self, op: BinOpKind, l: Val, r: Val) -> Result<Val> {
@@ -729,6 +737,31 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// Emit `strlen(s)` → `usize`.
+    fn emit_strlen(&mut self, s: Val) -> Result<Val> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let fref = self.lowerer.module.func_ref_by_name("strlen").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "strlen".to_string(),
+                sig: FunctionType { ret: usize_ty.clone(), params: vec![Type::char_ptr()], variadic: false },
+            })
+        });
+        let s = self.coerce(s, &Type::char_ptr())?;
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![s], ret_ty: usize_ty });
+        Ok(Val::Local(dest))
+    }
+
+    /// Build a non-owning `string` (rc = NULL) from a `char*` value, computing its
+    /// length with `strlen`. Used to pass a C string / literal to a `string`
+    /// parameter.
+    pub(crate) fn cstr_to_string(&mut self, data: Val) -> Result<Val> {
+        let data = self.coerce(data, &Type::char_ptr())?;
+        let len = self.emit_strlen(data.clone())?;
+        let nullrc = self.coerce(Constant::zero(), &self.rc_ptr_ty())?;
+        self.make_string_val(data, len, nullrc)
+    }
+
     /// Emit `free(p)`.
     fn emit_free(&mut self, p: Val) -> Result<()> {
         let voidp = Type::void_ptr();
@@ -835,10 +868,11 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    /// Materialize a `string` slice descriptor `{ data, size }` in a fresh temp
-    /// and return the pointer to it (the aggregate-by-pointer convention used for
-    /// struct rvalues, e.g. compound literals).
-    pub(crate) fn make_string_val(&mut self, data: Val, size: Val) -> Result<Val> {
+    /// Materialize a `string` slice descriptor `{ data, size, rc }` in a fresh
+    /// temp and return the pointer to it (the aggregate-by-pointer convention used
+    /// for struct rvalues). `rc` is the refcount cell pointer (NULL for
+    /// non-owning strings).
+    pub(crate) fn make_string_val(&mut self, data: Val, size: Val, rc: Val) -> Result<Val> {
         let sty = super::types::sic_string_type(self.ptr_size());
         let slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: slot, ty: sty.clone(), align: None });
@@ -851,7 +885,55 @@ impl<'m> FuncCtx<'m> {
             let v = self.coerce(size, &sfty)?;
             self.push_instr(Instr::Store { val: v, ptr: sptr });
         }
+        if let Some((rptr, rfty, _)) = self.member_at(&base, &sty, 2) {
+            let v = self.coerce(rc, &rfty)?;
+            self.push_instr(Instr::Store { val: v, ptr: rptr });
+        }
         Ok(base)
+    }
+
+    /// Pointer type of the `rc` refcount cell (`usize*`).
+    fn rc_ptr_ty(&self) -> Type {
+        Type::Pointer(Box::new(Type::Int { bits: self.ptr_size() * 8, signed: false }))
+    }
+
+    /// Emit `__sic_str_retain(rc)` — incref the refcount cell (NULL is a no-op).
+    fn emit_string_retain(&mut self, rc: Val) {
+        let fref = self.lowerer.ensure_str_retain_fn();
+        let rcty = self.rc_ptr_ty();
+        let rc = self.coerce(rc.clone(), &rcty).unwrap_or(rc);
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![rc], ret_ty: Type::Void });
+    }
+
+    /// Emit `__sic_str_release(rc)` — decref and free the block at 0 (NULL no-op).
+    pub(crate) fn emit_string_release(&mut self, rc: Val) {
+        let fref = self.lowerer.ensure_str_release_fn();
+        let rcty = self.rc_ptr_ty();
+        let rc = self.coerce(rc.clone(), &rcty).unwrap_or(rc);
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![rc], ret_ty: Type::Void });
+    }
+
+    /// Load and release the `rc` of the `string` stored at `base` (a pointer to
+    /// the descriptor) — used for scope-exit release and before overwriting.
+    pub(crate) fn release_string_at(&mut self, base: &Val) -> Result<()> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        if let Some((rptr, rfty, _)) = self.member_at(base, &sty, 2) {
+            let rc = self.alloc_val();
+            self.push_instr(Instr::Load { dest: rc, ptr: rptr, ty: rfty });
+            self.emit_string_release(Val::Local(rc));
+        }
+        Ok(())
+    }
+
+    /// Retain the `rc` of the `string` stored at `base`.
+    pub(crate) fn retain_string_at(&mut self, base: &Val) -> Result<()> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        if let Some((rptr, rfty, _)) = self.member_at(base, &sty, 2) {
+            let rc = self.alloc_val();
+            self.push_instr(Instr::Load { dest: rc, ptr: rptr, ty: rfty });
+            self.emit_string_retain(Val::Local(rc));
+        }
+        Ok(())
     }
 
     /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
@@ -880,13 +962,19 @@ impl<'m> FuncCtx<'m> {
             None => size.clone(),
         };
 
+        // A slice shares the parent's owned buffer: copy its `rc` and retain it,
+        // so the parent's storage outlives the view.
+        let rc_lv = self.lower_lvalue_field(base, "rc")?;
+        let rc = self.load_lvalue(&rc_lv)?;
+        self.emit_string_retain(rc.clone());
+
         // new data = base data + lo
         let new_data = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: new_data, base: data, index: lo_v.clone(), elem_size: 1, result_ty: Type::char_ptr() });
         // new size = hi - lo
         let new_size = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_v, rhs: lo_v, ty: Type::i64() });
-        self.make_string_val(Val::Local(new_data), Val::Local(new_size))
+        self.make_string_val(Val::Local(new_data), Val::Local(new_size), rc)
     }
 
     /// sic `s.length`: number of UTF-8 code points in the slice (sic.md
@@ -1027,6 +1115,15 @@ impl<'m> FuncCtx<'m> {
             let src = self.lower_aggregate_ptr(rhs)?;
             let size = lv.ty.size_of(self.ptr_size());
             let align = lv.ty.align_of(self.ptr_size());
+            // sic `string` reassignment: retain the new value (if it is an lvalue
+            // copy), release the old one, then overwrite. Done in this order so a
+            // self-assign / alias stays balanced.
+            if self.is_sic() && super::types::is_sic_string(&lv.ty) {
+                if super::func::expr_is_lvalue(rhs) {
+                    self.retain_string_at(&src)?;
+                }
+                self.release_string_at(&lv.ptr)?;
+            }
             self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
             return Ok(lv.ptr);
         }
@@ -2505,7 +2602,16 @@ impl<'m> FuncCtx<'m> {
             // Coerce user args against params[1..] (params[0] is the sret ptr).
             for (i, pval) in arg_vals.iter_mut().enumerate() {
                 if let Some(pty) = param_tys.get(i + 1) {
-                    if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
+                    if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                        if self.is_sic() && super::types::is_sic_string(pty) {
+                            let vt = self.val_type(pval);
+                            let already = matches!(&vt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+                            if !already {
+                                *pval = self.cstr_to_string(pval.clone())?;
+                            }
+                        }
+                        continue;
+                    }
                     let coerced = self.coerce(pval.clone(), pty)?;
                     *pval = coerced;
                 }
@@ -2524,7 +2630,19 @@ impl<'m> FuncCtx<'m> {
             if let Some(pty) = param_tys.get(i) {
                 // Struct/union args are already lowered to a pointer to the value
                 // (by-value ABI); leave them as-is.
-                if matches!(pty, Type::Struct(_) | Type::Union(_)) { continue; }
+                if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    // A `char*`/string-literal passed to a `string` parameter must
+                    // be wrapped in a (non-owning) descriptor; a real string arg is
+                    // already a descriptor pointer.
+                    if self.is_sic() && super::types::is_sic_string(pty) {
+                        let vt = self.val_type(pval);
+                        let already = matches!(&vt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+                        if !already {
+                            *pval = self.cstr_to_string(pval.clone())?;
+                        }
+                    }
+                    continue;
+                }
                 let coerced = self.coerce(pval.clone(), pty)?;
                 *pval = coerced;
             } else if is_variadic {

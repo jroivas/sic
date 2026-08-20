@@ -88,6 +88,8 @@ impl Lowerer {
         // them mid-body.
         if self.sic {
             self.ensure_str_length_fn();
+            self.ensure_str_retain_fn();
+            self.ensure_str_release_fn();
         }
 
         // Second pass: lower function bodies and global initializers
@@ -449,6 +451,107 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// Synthesize `void __sic_str_retain(usize* rc)` — `if (rc) (*rc)++;`
+    /// (sic.md §"Built-in string" refcounting). NULL rc is a no-op.
+    pub(crate) fn ensure_str_retain_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_str_retain") {
+            return f;
+        }
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+        let sig = FunctionType { ret: Type::Void, params: vec![rcp.clone()], variadic: false };
+        let params = vec![sic_ir::Param { name: "rc".to_string(), ty: rcp.clone() }];
+        let mut func = Function::new("__sic_str_retain".to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: slot, ty: rcp.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(slot) });
+            let r = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: rcp.clone() });
+            let is_null = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(r), rhs: Constant::zero(), ty: rcp.clone() });
+            let body = fc.new_block_after_current();
+            let done = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done, else_bb: body });
+            fc.switch_to_block(body);
+            let r2 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r2, ptr: Val::Local(slot), ty: rcp.clone() });
+            let v = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(r2), ty: usize_ty.clone() });
+            let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
+            let v2 = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: v2, op: BinOp::Add, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
+            fc.push_instr(Instr::Store { val: Val::Local(v2), ptr: Val::Local(r2) });
+            fc.set_terminator(Terminator::Jump(done));
+            fc.switch_to_block(done);
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func)
+    }
+
+    /// Synthesize `void __sic_str_release(usize* rc)` —
+    /// `if (rc && --(*rc)==0) free(rc);`. NULL rc is a no-op.
+    pub(crate) fn ensure_str_release_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_str_release") {
+            return f;
+        }
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+        let voidp = Type::void_ptr();
+        let free_fref = self.module.func_ref_by_name("free").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "free".to_string(),
+                sig: FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false },
+            })
+        });
+        let sig = FunctionType { ret: Type::Void, params: vec![rcp.clone()], variadic: false };
+        let params = vec![sic_ir::Param { name: "rc".to_string(), ty: rcp.clone() }];
+        let mut func = Function::new("__sic_str_release".to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: slot, ty: rcp.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(slot) });
+            let r = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: rcp.clone() });
+            let is_null = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(r), rhs: Constant::zero(), ty: rcp.clone() });
+            let body = fc.new_block_after_current();
+            let free_bb = fc.new_block_after_current();
+            let done = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done, else_bb: body });
+            // body: n = *rc - 1; *rc = n; if (n==0) free(rc)
+            fc.switch_to_block(body);
+            let r2 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r2, ptr: Val::Local(slot), ty: rcp.clone() });
+            let v = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(r2), ty: usize_ty.clone() });
+            let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
+            let n = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: n, op: BinOp::Sub, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
+            fc.push_instr(Instr::Store { val: Val::Local(n), ptr: Val::Local(r2) });
+            let zero = fc.coerce(Constant::int(0), &usize_ty).unwrap();
+            let is_zero = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(n), rhs: zero, ty: usize_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done });
+            // free: free(rc)
+            fc.switch_to_block(free_bb);
+            let r3 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r3, ptr: Val::Local(slot), ty: rcp.clone() });
+            let p = fc.coerce(Val::Local(r3), &voidp).unwrap();
+            fc.push_instr(Instr::Call { dest: None, func: free_fref, args: vec![p], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Jump(done));
+            fc.switch_to_block(done);
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func)
+    }
+
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
         if let Some(variants) = &e.variants {
             let mut counter = 0i64;
@@ -745,7 +848,8 @@ impl Lowerer {
                 bytes.push(0); // NUL terminator
                 let gref = self.add_cstring_global(bytes);
                 let ps = self.ptr_size as usize;
-                let mut b = vec![0u8; ps * 2];
+                // { char* data; usize size; usize* rc } — data reloc, size, rc=NULL.
+                let mut b = vec![0u8; ps * 3];
                 let size_le = (len as u64).to_le_bytes();
                 b[ps..ps * 2].copy_from_slice(&size_le[..ps]);
                 Some(Constant::Aggregate { bytes: b, relocs: vec![(0, RelocTarget::Global(gref, 0))] })

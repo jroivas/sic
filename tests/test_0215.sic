@@ -1,0 +1,43 @@
+// SIC refcounted RAII strings (sic.md §"Built-in string"): concat/substring
+// buffers are reference-counted and released at scope exit. Copies retain,
+// slices keep their parent alive. A use-after-free or double-free would crash
+// this test; correct refcounting keeps every value valid.
+#include <string.h>
+
+string build(string base) {
+    string t = base + "-built";   // owned local
+    return t;                     // returning a local transfers ownership
+}
+
+int main()
+{
+    string a = "Hello";
+    string b = a + " world";      // owned, rc = 1
+    string c = b;                 // copy → shared (rc = 2)
+    string d = b[6:];             // slice keeps b's buffer alive (rc = 3)
+
+    if (b.size != 11) return 1;
+    if (strcmp(c.ptr, "Hello world") != 0) return 2;  // c still valid
+    if (strcmp(d.ptr, "world") != 0) return 3;         // d shares b's buffer
+
+    // Reassignment releases the old value and retains the new one.
+    string e = "tmp";
+    e = c;                        // release "tmp" (rc NULL), share c's buffer
+    if (strcmp(e.ptr, "Hello world") != 0) return 4;
+
+    // Passing a string literal and a string variable to a `string` parameter,
+    // and returning an owned string across the call boundary.
+    string r1 = build("x");       // literal arg
+    if (strcmp(r1.ptr, "x-built") != 0) return 5;
+    string r2 = build(a);         // string-variable arg
+    if (strcmp(r2.ptr, "Hello-built") != 0) return 6;
+
+    // Reassign in a loop — each temporary is released before the next.
+    string acc = "";
+    for (int i = 0; i < 3; i++) {
+        acc = acc + "ab";
+    }
+    if (strcmp(acc.ptr, "ababab") != 0 || acc.size != 6) return 7;
+
+    return 0;
+}

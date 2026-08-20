@@ -474,15 +474,19 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> T
     }
 }
 
-/// The IR type of sic's native `string`: a non-owning slice
-/// `struct __sic_string { char* data; usize size }` (sic.md §"Built-in string").
-/// `size` is the byte length; the slice is not assumed NUL-terminated.
+/// The IR type of sic's native `string`: a refcounted RAII slice
+/// `struct __sic_string { char* data; usize size; usize* rc }` (sic.md
+/// §"Built-in string"). `size` is the byte length; the slice is not assumed
+/// NUL-terminated. `rc` points at the owned block's refcount cell, or is NULL for
+/// non-owning strings (literals). Copies retain, scope exit releases.
 pub fn sic_string_type(ptr_size: u32) -> Type {
+    let usize_ty = Type::Int { bits: ptr_size * 8, signed: false };
     Type::Struct(StructType::plain(
         Some(SIC_STRING_NAME.to_string()),
         vec![
             ("data".to_string(), Type::char_ptr()),
-            ("size".to_string(), Type::Int { bits: ptr_size * 8, signed: false }),
+            ("size".to_string(), usize_ty.clone()),
+            ("rc".to_string(), Type::Pointer(Box::new(usize_ty))),
         ],
         false,
     ))

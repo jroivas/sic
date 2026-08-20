@@ -212,9 +212,11 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-    /// Release a refcounted `string` local at scope exit (implemented in the
-    /// refcounted-strings phase). Placeholder until then.
-    fn emit_string_release_at(&mut self, _addr: Val) {}
+    /// Release a refcounted `string` local at scope exit: decref its `rc`,
+    /// freeing the owned block at 0 (sic.md §"Built-in string").
+    fn emit_string_release_at(&mut self, addr: Val) {
+        let _ = self.release_string_at(&addr);
+    }
 
     /// Emit `fn(&var)` for a cleanup function. The function takes a pointer to
     /// the variable; declare it as an extern `void(void*)` if not yet known.
@@ -511,7 +513,16 @@ impl<'m> FuncCtx<'m> {
                         let ps = self.ptr_size();
                         let size = agg_ty.size_of(ps);
                         let align = agg_ty.align_of(ps) as u64;
-                        self.push_instr(Instr::MemCopy { dst: sret_ptr, src, size, align });
+                        self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
+                        // sic: returning an lvalue `string` transfers ownership —
+                        // retain so the caller's copy outlives this frame's
+                        // scope-exit release of the local. An rvalue return
+                        // (concat/slice temp) already moves its reference out.
+                        if self.is_sic() && super::types::is_sic_string(&agg_ty)
+                            && expr_is_lvalue(e)
+                        {
+                            self.retain_string_at(&sret_ptr)?;
+                        }
                     }
                     self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(None));
@@ -767,6 +778,12 @@ impl<'m> FuncCtx<'m> {
                             });
                         }
                     }
+                    // sic refcounted `string` local: release its `rc` at scope
+                    // exit (RAII). Safe for the uninitialized case too — that
+                    // zero-inits `rc` to NULL, and releasing NULL is a no-op.
+                    if self.is_sic() && super::types::is_sic_string(&ty) {
+                        self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(vid) });
+                    }
                     // Track last declared scalar local for implicit return
                     if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_) | Type::Bool) {
                         self.last_init_local = Some((vid, ty.clone()));
@@ -852,7 +869,13 @@ impl<'m> FuncCtx<'m> {
                     let src = self.lower_aggregate_ptr(e)?;
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());
-                    self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
+                    self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
+                    // A `string` initialized from an lvalue is a copy that shares
+                    // the owned buffer → retain. From an rvalue (concat/slice/call)
+                    // it is a move (the temp's reference transfers) → no retain.
+                    if super::types::is_sic_string(ty) && expr_is_lvalue(e) {
+                        self.retain_string_at(&ptr)?;
+                    }
                 } else {
                     let val = self.lower_expr(e)?;
                     let coerced = self.coerce(val, ty)?;
@@ -1012,6 +1035,11 @@ impl<'m> FuncCtx<'m> {
         if let Some((sptr, sty, _)) = self.member_at(base, ty, 1) {
             let v = self.coerce(size_val, &sty)?;
             self.push_instr(Instr::Store { val: v, ptr: sptr });
+        }
+        // rc = NULL — a literal points at static data and owns nothing.
+        if let Some((rptr, rfty, _)) = self.member_at(base, ty, 2) {
+            let v = self.coerce(Constant::zero(), &rfty)?;
+            self.push_instr(Instr::Store { val: v, ptr: rptr });
         }
         Ok(())
     }
@@ -1402,6 +1430,17 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
 /// already terminated the current block.
 fn stmt_is_jump_target(s: &Stmt) -> bool {
     matches!(s, Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) | Stmt::Label(..))
+}
+
+/// Whether `e` is an lvalue (names existing storage) rather than a freshly
+/// produced rvalue. Used to decide copy (retain) vs move for `string` values.
+pub(crate) fn expr_is_lvalue(e: &Expr) -> bool {
+    matches!(&e.kind,
+        ExprKind::Ident(_)
+        | ExprKind::Field { .. }
+        | ExprKind::Arrow { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Unary { op: crate::ast::UnOpKind::Deref, .. })
 }
 
 /// Source line a statement begins on (for DWARF line markers). 0 = unknown.
