@@ -411,6 +411,18 @@ impl<'m> FuncCtx<'m> {
             return self.lower_logical(op == BinOpKind::LogAnd, lhs, rhs);
         }
 
+        // sic array concatenation `a + b` (sic.md §"Arrays and lists"): two array
+        // operands joined into a fresh array of the combined length. Checked
+        // before the GCC vector path, which in sic would otherwise read `+` as an
+        // element-wise op (the two share one IR array type). C is unaffected.
+        if self.is_sic() && op == BinOpKind::Add {
+            if let (Ok(Type::Array { .. }), Ok(Type::Array { .. })) =
+                (self.infer_expr_type(lhs), self.infer_expr_type(rhs))
+            {
+                return self.lower_array_concat(lhs, rhs);
+            }
+        }
+
         // GCC vector extension: when both operands are vector (array) types an
         // arithmetic/bitwise/comparison operator is element-wise, not scalar.
         // Regular arrays decay to pointers before this point, so two array
@@ -434,6 +446,44 @@ impl<'m> FuncCtx<'m> {
         let l = self.lower_expr(lhs)?;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
+    }
+
+    /// sic array concatenation `a + b` (sic.md §"Arrays and lists"): allocate a
+    /// fresh array of the combined length and copy `a`'s then `b`'s elements into
+    /// it. Returns a pointer to the temporary (decays like any array value). Both
+    /// operands must share an element type.
+    fn lower_array_concat(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let (le, la) = match self.infer_expr_type(lhs)? {
+            Type::Array { elem, len } => (*elem, len),
+            _ => unreachable!("caller checked array operands"),
+        };
+        let (re, lb) = match self.infer_expr_type(rhs)? {
+            Type::Array { elem, len } => (*elem, len),
+            _ => unreachable!(),
+        };
+        if le != re {
+            return Err(CompileError::at(
+                "array concatenation requires matching element types".to_string(),
+                lhs.span.file.clone(), lhs.span.line, lhs.span.col));
+        }
+        let elem_size = le.size_of(self.ptr_size());
+        let result_ty = Type::Array { elem: Box::new(le.clone()), len: la + lb };
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: result_ty.clone(), align: None });
+        self.val_types.insert(slot.0, result_ty.clone());
+
+        // Copy `a` at offset 0, then `b` right after it. Array operands decay to a
+        // pointer to their first element.
+        let a_ptr = self.lower_aggregate_ptr(lhs)?;
+        self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: a_ptr, size: la as u64 * elem_size, align: le.align_of(self.ptr_size()) });
+        if lb > 0 {
+            let b_ptr = self.lower_aggregate_ptr(rhs)?;
+            let dst_b = self.alloc_val();
+            let bc = self.coerce(Val::Local(slot), &Type::char_ptr())?;
+            self.push_instr(Instr::GetElemPtr { dest: dst_b, base: bc, index: Constant::int(la as i64 * elem_size as i64), elem_size: 1, result_ty: Type::char_ptr() });
+            self.push_instr(Instr::MemCopy { dst: Val::Local(dst_b), src: b_ptr, size: lb as u64 * elem_size, align: le.align_of(self.ptr_size()) });
+        }
+        Ok(Val::Local(slot))
     }
 
     /// Whether `e` is an actual `string`-typed expression. Used to decide that a
@@ -3737,33 +3787,47 @@ impl<'m> FuncCtx<'m> {
                     Add if self.is_sic()
                         && (self.is_string_operand(lhs) || self.is_string_operand(rhs)) =>
                         Ok(super::types::sic_string_type(self.ptr_size())),
+                    // sic array concatenation yields an array of the combined
+                    // length (sic.md §"Arrays and lists").
+                    Add if self.is_sic() => {
+                        match (self.infer_expr_type(lhs), self.infer_expr_type(rhs)) {
+                            (Ok(Type::Array { elem, len: la }), Ok(Type::Array { len: lb, .. })) =>
+                                Ok(Type::Array { elem, len: la + lb }),
+                            _ => self.infer_arith_binop(op, lhs, rhs),
+                        }
+                    }
                     // Arithmetic: pointer/array ± integer keeps the pointer type
                     // (pointer arithmetic; arrays decay to pointer-to-element).
                     // `ptr - ptr` is ptrdiff_t. Otherwise pick the "richer" operand
                     // type so float/wider integer results survive.
-                    _ => {
-                        let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
-                        let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
-                        let decay = |t: Type| match t {
-                            Type::Array { elem, .. } => Type::Pointer(elem),
-                            other => other,
-                        };
-                        let lt = decay(lt);
-                        let rt = decay(rt);
-                        Ok(match (&lt, &rt) {
-                            (Type::Pointer(_), Type::Pointer(_)) if *op == Sub => Type::i64(),
-                            (Type::Pointer(_), _) => lt,
-                            (_, Type::Pointer(_)) => rt,
-                            _ if lt.is_float() => lt,
-                            _ if rt.is_float() => rt,
-                            _ if rt.size_of(self.ptr_size()) > lt.size_of(self.ptr_size()) => rt,
-                            _ => lt,
-                        })
-                    }
+                    _ => self.infer_arith_binop(op, lhs, rhs),
                 }
             }
             _ => Ok(Type::i32()),
         }
+    }
+
+    /// Result type of an arithmetic binary operator (the C usual-arithmetic /
+    /// pointer-arithmetic rules), factored out so the sic array/string special
+    /// cases can fall back to it.
+    fn infer_arith_binop(&self, op: &BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Type> {
+        let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
+        let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+        let decay = |t: Type| match t {
+            Type::Array { elem, .. } => Type::Pointer(elem),
+            other => other,
+        };
+        let lt = decay(lt);
+        let rt = decay(rt);
+        Ok(match (&lt, &rt) {
+            (Type::Pointer(_), Type::Pointer(_)) if *op == BinOpKind::Sub => Type::i64(),
+            (Type::Pointer(_), _) => lt,
+            (_, Type::Pointer(_)) => rt,
+            _ if lt.is_float() => lt,
+            _ if rt.is_float() => rt,
+            _ if rt.size_of(self.ptr_size()) > lt.size_of(self.ptr_size()) => rt,
+            _ => lt,
+        })
     }
 
     /// Lower a `va_list` operand to the address of its `__va_list_tag`. A local

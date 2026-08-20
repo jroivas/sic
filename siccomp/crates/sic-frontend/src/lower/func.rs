@@ -933,6 +933,28 @@ impl<'m> FuncCtx<'m> {
                         return self.build_enum_from_tag(&ptr, ty, tag, &e.span);
                     }
                 }
+                // sic array init from a differently-sized array RHS (`int c[20] =
+                // a + b;`): the target must be at least as large; copy the RHS
+                // elements and zero the remainder (sic.md §"Arrays and lists").
+                if self.is_sic() {
+                    if let (Type::Array { elem: de, len: dn }, Ok(Type::Array { elem: se, len: sn })) =
+                        (ty, self.infer_expr_type(e))
+                    {
+                        if de == &se && *dn != sn {
+                            if sn > *dn {
+                                return Err(CompileError::at(
+                                    format!("array of {} elements does not fit target of {}", sn, dn),
+                                    e.span.file.clone(), e.span.line, e.span.col));
+                            }
+                            let src = self.lower_aggregate_ptr(e)?;
+                            let esz = de.size_of(self.ptr_size());
+                            let al = de.align_of(self.ptr_size());
+                            self.push_instr(Instr::MemSet { dst: ptr.clone(), val: Constant::zero(), size: *dn as u64 * esz, align: al });
+                            self.push_instr(Instr::MemCopy { dst: ptr, src, size: sn as u64 * esz, align: al });
+                            return Ok(());
+                        }
+                    }
+                }
                 let aggregate_init = match ty {
                     Type::Struct(_) | Type::Union(_) => true,
                     Type::Array { .. } => matches!(

@@ -1,0 +1,20 @@
+// sic array concatenation (sic.md §"Arrays and lists"): `a + b` joins two arrays
+// into one of the combined length; a bigger target is zero-filled, and the
+// temporary reports its true `.length`.
+int main() {
+    int a[5];
+    int b[5];
+    for (int i = 0; i < 5; i++) { a[i] = i + 1; b[i] = i + 10; }  // a=1..5 b=10..14
+
+    int c[10] = a + b;
+    if (c.length != 10) return 91;
+    int sum = 0;
+    for (int i = 0; i < c.length; i++) sum += c[i];   // 15 + 60 = 75
+
+    int d[20] = a + b;                 // larger target: tail zeroed
+    if (d.length != 20) return 92;
+    if (d[9] != 14 || d[10] != 0) return 93;
+
+    if ((a + b).length != 10) return 94;   // temporary's true length
+    return sum;                             // 75
+}
