@@ -1,0 +1,13 @@
+// Modules Part 1: a `module` unit mangles its exported top-level symbols to
+// `mathmod_*`, keeps `static` symbols local, and resolves intra-module
+// unqualified calls (double_sq -> sq). `main` is never mangled, so it links
+// and runs normally. Exit code 25 = double_sq(5)/2 = (5*5*2)/2.
+module mathmod;
+
+static int scale = 2;          // static: internal linkage, not exported
+
+int sq(int x) { return x * x; }
+
+int double_sq(int x) { return sq(x) * scale; }   // intra-module: sq + scale
+
+int main() { return double_sq(5) / scale; }      // 25

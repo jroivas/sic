@@ -538,6 +538,10 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // automatic release"); ordinary identifiers in C.
             "new" => return TokenKind::New,
             "del" => return TokenKind::Del,
+            // `module` / `import` — module system (sic.md §"Imports"); ordinary
+            // identifiers in C.
+            "module" => return TokenKind::Module,
+            "import" => return TokenKind::Import,
             _ => {}
         }
     }

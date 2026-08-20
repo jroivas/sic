@@ -45,6 +45,7 @@ pub enum TokenKind {
     Fallthrough,  // sic-only: explicit switch-case fallthrough (sic.md §"Switch - case")
     Defer,        // sic-only: `defer <stmt>;` scope-exit action (sic.md §"Defer keyword")
     New, Del,     // sic-only: typed allocation / free (sic.md §"Scopes and automatic release")
+    Module, Import, // sic-only: module system (sic.md §"Imports")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)

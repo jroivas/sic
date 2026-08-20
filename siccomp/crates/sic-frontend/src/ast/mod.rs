@@ -198,6 +198,13 @@ pub enum Decl {
     EnumDecl(EnumDef),
     /// Top-level standalone expression statement (SIC "fake main" mode)
     ExprStmt(Expr, Span),
+    /// sic-only: `module x;` — this translation unit belongs to module `x`; its
+    /// non-`static` top-level symbols are exported (mangled `x_sym`). sic.md §"Imports".
+    Module(String, Span),
+    /// sic-only: `import x;` / `import x.sym;` / `import x.sym as alias;` — make a
+    /// module's exports available (namespaced, selective, or renamed). `sym` is
+    /// `None` for a whole-module import; `alias` renames a selective import.
+    Import { module: String, sym: Option<String>, alias: Option<String>, span: Span },
 }
 
 // ─── Statements ────────────────────────────────────────────────────────────────

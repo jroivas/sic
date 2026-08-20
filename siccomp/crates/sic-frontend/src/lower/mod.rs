@@ -42,6 +42,15 @@ pub struct Lowerer {
     /// defined-behavior semantics (guaranteed zero-init, `÷0 → 0`, defined
     /// shifts, …). Off for C, whose semantics must stay unchanged.
     pub sic: bool,
+    /// sic module system (sic.md §"Imports"): `Some(name)` when this translation
+    /// unit declared `module name;`. Its non-`static` top-level symbols are
+    /// exported with the mangled linker name `name_sym`.
+    pub current_module: Option<String>,
+    /// Imported module symbols: an unqualified/namespaced name usable in this unit
+    /// → (mangled linker symbol, IR type). Filled from `import` + the manifest.
+    pub imported_syms: HashMap<String, (String, Type)>,
+    /// Names imported as whole modules (`import x;`) — so `x.sym` resolves.
+    pub imported_modules: HashSet<String>,
 }
 
 impl Lowerer {
@@ -57,6 +66,9 @@ impl Lowerer {
             repl_main: true,
             static_funcs: HashSet::new(),
             sic: false,
+            current_module: None,
+            imported_syms: HashMap::new(),
+            imported_modules: HashSet::new(),
         }
     }
 
@@ -104,7 +116,33 @@ impl Lowerer {
             self.synthesize_fake_main(tu)?;
         }
 
+        // sic module export mangling: rename this unit's exported (external,
+        // defined) top-level symbols to `<module>_<name>` (sic.md §"Imports").
+        // References are by index, so only the emitted object symbol changes.
+        if let Some(m) = self.current_module.clone() {
+            self.mangle_module_exports(&m);
+        }
+
         Ok(self.module)
+    }
+
+    /// Rename external, defined top-level functions/globals to `<module>_<name>`.
+    /// `static` (Internal/Private) symbols and imports/externs keep their names.
+    fn mangle_module_exports(&mut self, module: &str) {
+        for f in &mut self.module.functions {
+            // `main` is reserved by the C runtime and never mangled.
+            if f.linkage == Linkage::External
+                && f.name != "main"
+                && !f.name.starts_with(&format!("{}_", module))
+            {
+                f.name = format!("{}_{}", module, f.name);
+            }
+        }
+        for g in &mut self.module.globals {
+            if g.linkage == Linkage::External {
+                g.name = format!("{}_{}", module, g.name);
+            }
+        }
     }
 
     fn collect_declarations(&mut self, tu: &TranslationUnit) -> Result<()> {
@@ -215,6 +253,8 @@ impl Lowerer {
                 | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => {
                     self.register_enum(e)?;
                 }
+                // sic `module x;` — this unit's exports get mangled `x_sym`.
+                Decl::Module(name, _) => { self.current_module = Some(name.clone()); }
                 _ => {}
             }
         }
@@ -691,6 +731,8 @@ impl Lowerer {
             Decl::ExprStmt(_, _) => {
                 // Top-level expression statements — deferred to fake_main synthesis
             }
+            // `module x;` handled in collect_declarations; `import` in a later pass.
+            Decl::Module(_, _) | Decl::Import { .. } => {}
         }
         Ok(())
     }

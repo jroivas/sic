@@ -141,6 +141,30 @@ impl Parser {
             return Ok(Decl::ExprStmt(Expr::new(ExprKind::IntLit(0, false), sp.clone()), sp));
         }
 
+        // sic module system (sic.md §"Imports").
+        if self.at(TokenKind::Module) {
+            self.advance();
+            let name = self.expect_name()?;
+            self.eat(TokenKind::Semi);
+            return Ok(Decl::Module(name, sp));
+        }
+        if self.at(TokenKind::Import) {
+            self.advance();
+            let module = self.expect_name()?;
+            // Optional `.sym` (selective import) and `as alias` (rename).
+            let sym = if self.eat(TokenKind::Dot) { Some(self.expect_name()?) } else { None };
+            let alias = if sym.is_some()
+                && self.peek_kind() == TokenKind::Ident && self.peek().text == "as"
+            {
+                self.advance(); // `as`
+                Some(self.expect_name()?)
+            } else {
+                None
+            };
+            self.eat(TokenKind::Semi);
+            return Ok(Decl::Import { module, sym, alias, span: sp });
+        }
+
         // Check for a bare expression statement (SIC mode: top-level expressions).
         // Heuristic: if it starts with something that can't be a declaration specifier,
         // treat it as an expression statement.
