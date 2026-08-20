@@ -1,0 +1,28 @@
+// sic tagged enums (sic.md §"Match") — part 2: construction + unwrap.
+// Qualified (`Enum::Variant`), bare-inferred (`Ok(v)`, `None`), enum-by-value
+// params/returns, unwrap (`Enum::VARIANT(inst)`, aborts on wrong variant), and a
+// `string` payload. Exit code aggregates several unwrapped values.
+#include <stdio.h>
+enum Option { Some<int>, None };
+enum Result { Ok<int>, Err<string> };
+
+Option maybe(int v) { if (v > 0) return Some(v); return None; }   // bare ctor + return
+
+int total(Result r) {
+    if ((int)r == 0) return Result::Ok(r);   // unwrap payload
+    string m = Result::Err(r);               // unwrap string payload
+    return (int)m.length;                    // length of "bad" = 3
+}
+
+int main() {
+    Option a = Option::Some(20);   // qualified
+    Option b = maybe(0);           // None via bare
+    int acc = 0;
+    acc += Option::Some(a);        // unwrap -> 20
+    acc += (int)b;                 // None tag -> 1
+    Result ok = Ok(9);             // bare ctor
+    Result er = Err("bad");
+    acc += total(ok);              // 9
+    acc += total(er);              // 3
+    return acc;                    // 20 + 1 + 9 + 3 = 33
+}

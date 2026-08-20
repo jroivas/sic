@@ -554,7 +554,12 @@ impl<'m> FuncCtx<'m> {
                 if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
                     // Aggregate return: copy the value into the caller's slot.
                     if let Some(e) = val {
-                        let src = self.lower_aggregate_ptr(e)?;
+                        // sic: `return None;` builds the enum from its discriminant.
+                        let src = if self.is_sic() && self.is_tagged_enum_struct(&agg_ty) {
+                            self.enum_value_ptr(e, &agg_ty, &e.span)?
+                        } else {
+                            self.lower_aggregate_ptr(e)?
+                        };
                         let ps = self.ptr_size();
                         let size = agg_ty.size_of(ps);
                         let align = agg_ty.align_of(ps) as u64;
@@ -582,7 +587,12 @@ impl<'m> FuncCtx<'m> {
                     // so hand the backend a pointer to the value; it loads the
                     // eightbytes into the return registers.
                     let ret = if let Some(e) = val {
-                        Some(self.lower_aggregate_ptr(e)?)
+                        if self.is_sic() && self.is_tagged_enum_struct(&self.ret_ty.clone()) {
+                            let rty = self.ret_ty.clone();
+                            Some(self.enum_value_ptr(e, &rty, &e.span)?)
+                        } else {
+                            Some(self.lower_aggregate_ptr(e)?)
+                        }
                     } else {
                         None
                     };
@@ -911,6 +921,17 @@ impl<'m> FuncCtx<'m> {
                 // a pointer/register-sized scalar. An array-typed target only takes
                 // this path for a genuine aggregate RHS (a vector); a scalar RHS is
                 // a plain store (the array being an array-decayed element lvalue).
+                // sic: `Option b = None;` / `Test x = BLACK;` — a bare
+                // (payload-less) variant is the discriminant, so build the
+                // `{tag,union}` value from it rather than byte-copying an int as if
+                // it were an aggregate. A same-enum RHS still copies.
+                if self.is_sic() && self.is_tagged_enum_struct(ty) {
+                    let same = matches!(self.infer_expr_type(e), Ok(t) if &t == ty);
+                    if !same {
+                        let tag = self.lower_expr(e)?;
+                        return self.build_enum_from_tag(&ptr, ty, tag, &e.span);
+                    }
+                }
                 let aggregate_init = match ty {
                     Type::Struct(_) | Type::Union(_) => true,
                     Type::Array { .. } => matches!(

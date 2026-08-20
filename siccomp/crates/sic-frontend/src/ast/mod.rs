@@ -279,6 +279,11 @@ pub enum ExprKind {
     Ident(String),
     Nullptr,           // C23 null pointer constant
 
+    /// SIC tagged-enum path `Enum::Variant` (sic.md §"Match"). As a call target
+    /// it constructs (`Option::Some(5)`) or, when the argument is an instance of
+    /// the enum, unwraps (`Test::CUSTOM(inst)`); bare it names the variant value.
+    EnumVariant { enum_name: String, variant: String },
+
     /// Binary operation
     BinOp { op: BinOpKind, lhs: BoxExpr, rhs: BoxExpr },
 

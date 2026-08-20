@@ -1872,11 +1872,23 @@ impl Parser {
                                              => return self.parse_types_compatible(sp),
                     _ => {}
                 }
+                // sic enum-variant path `Enum::Variant` (sic.md §"Match").
+                if self.at(TokenKind::ColonColon) {
+                    self.advance();
+                    let variant = self.expect_name()?;
+                    return Ok(Expr::new(ExprKind::EnumVariant { enum_name: name, variant }, sp));
+                }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
             }
             TokenKind::TypeName => {
                 // typedef name used as an expression (shouldn't be common, but handle gracefully)
                 let name = self.advance().text.clone();
+                // sic enum-variant path `Enum::Variant` where `Enum` is a type name.
+                if self.at(TokenKind::ColonColon) {
+                    self.advance();
+                    let variant = self.expect_name()?;
+                    return Ok(Expr::new(ExprKind::EnumVariant { enum_name: name, variant }, sp));
+                }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
             }
             TokenKind::LParen => {

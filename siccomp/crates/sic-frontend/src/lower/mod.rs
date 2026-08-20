@@ -806,6 +806,45 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// Synthesize `void __sic_match_fail()` — write a message to stderr and
+    /// `abort()` when a tagged-enum unwrap hits the wrong variant, or a `match`
+    /// has no arm for the runtime tag (sic.md §"Match").
+    pub(crate) fn ensure_match_fail_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_match_fail") {
+            return f;
+        }
+        let voidp = Type::void_ptr();
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let write_fref = self.module.func_ref_by_name("write").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "write".to_string(),
+                sig: FunctionType { ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
+            })
+        });
+        let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "abort".to_string(),
+                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+            })
+        });
+        let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
+        let mut func = Function::new("__sic_match_fail".to_string(), sig, vec![], Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let msg = "sic: no match / wrong enum variant\n";
+            let ptr = fc.emit_cstring(msg);
+            let ptr = fc.coerce(ptr, &voidp).unwrap();
+            let len = fc.coerce(Constant::uint(msg.len() as u64), &usize_ty).unwrap();
+            let two = fc.coerce(Constant::int(2), &Type::i32()).unwrap();
+            fc.push_instr(Instr::Call { dest: None, func: write_fref, args: vec![two, ptr, len], ret_ty: Type::i64() });
+            fc.push_instr(Instr::Call { dest: None, func: abort_fref, args: vec![], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Ret(None)); // unreachable after abort
+        }
+        self.module.add_function(func)
+    }
+
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
         if let Some(variants) = &e.variants {
             let mut counter = 0i64;
@@ -2176,6 +2215,6 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             }
         }
         IntLit(..) | UIntLit(..) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
-        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) => {}
+        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } => {}
     }
 }

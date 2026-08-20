@@ -152,6 +152,10 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::Load { dest, ptr: Val::Global(gref), ty });
                         Ok(Val::Local(dest))
                     }
+                    // A bare tagged-enum variant is its integer discriminant here;
+                    // an int→enum-struct `coerce` builds the value when the target
+                    // is the enum (e.g. `Test x = BLACK;`), and enum→int reads the
+                    // tag (`(int)x`). See `coerce`.
                     Some(LookupResult::EnumConst(v)) => Ok(Constant::int(v)),
                     Some(LookupResult::Func(fref)) => Ok(Val::Func(fref)),
                     None => {
@@ -200,6 +204,12 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
+            // Bare tagged-enum variant used as a value, e.g. `Option::None`
+            // (a payload-less constructor). A payload variant needs `(...)`.
+            ExprKind::EnumVariant { enum_name, variant } => {
+                self.construct_enum(enum_name, variant, &[], &expr.span)
+            }
+
             ExprKind::Index { base, index } => {
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
@@ -245,8 +255,18 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Cast { ty, expr: inner } => {
-                let v = self.lower_expr(inner)?;
                 let target = self.lower_type(ty)?;
+                // sic: `(int)enum_value` yields the discriminant (sic.md §"Match").
+                if self.is_sic() && matches!(target, Type::Int { .. } | Type::Bool) {
+                    if let Ok(src_ty) = self.infer_expr_type(inner) {
+                        if self.is_tagged_enum_struct(&src_ty) {
+                            let ptr = self.lower_aggregate_ptr(inner)?;
+                            let tag = self.load_enum_tag(ptr, &src_ty, &expr.span)?;
+                            return self.coerce(tag, &target);
+                        }
+                    }
+                }
+                let v = self.lower_expr(inner)?;
                 self.coerce(v, &target)
             }
 
@@ -1189,6 +1209,17 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(lhs)?;
+
+        // sic: `a = None;` — assign a bare (payload-less) variant by building the
+        // `{tag,union}` value from its discriminant. A same-enum RHS copies below.
+        if self.is_sic() && op.is_none() && self.is_tagged_enum_struct(&lv.ty) {
+            let same = matches!(self.infer_expr_type(rhs), Ok(t) if t == lv.ty);
+            if !same {
+                let tag = self.lower_expr(rhs)?;
+                self.build_enum_from_tag(&lv.ptr, &lv.ty, tag, &rhs.span)?;
+                return Ok(lv.ptr);
+            }
+        }
 
         // Aggregate (struct/union) assignment is a byte copy, not a scalar
         // load/store — the latter would truncate anything wider than a register.
@@ -2201,6 +2232,164 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Construct a sic tagged-enum value (sic.md §"Match"): allocate the
+    /// `{ tag; union }` struct on the stack, store the variant's discriminant, and
+    /// store the payload (if any). Returns a pointer to the temporary, like a
+    /// compound literal, so the surrounding assignment/return copies it.
+    fn construct_enum(&mut self, enum_name: &str, variant: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let info = self.lowerer.enum_defs.get(enum_name).cloned().ok_or_else(|| CompileError::at(
+            format!("'{}' is not a tagged enum", enum_name), sp.file.clone(), sp.line, sp.col))?;
+        let v = info.variant(variant).cloned().ok_or_else(|| CompileError::at(
+            format!("enum '{}' has no variant '{}'", enum_name, variant), sp.file.clone(), sp.line, sp.col))?;
+
+        // A payload arm whose single argument is itself an instance of this enum is
+        // an *unwrap* (`Test::CUSTOM(inst)`), not a construction.
+        if v.payload.is_some() && args.len() == 1 {
+            if let Ok(t) = self.infer_expr_type(&args[0]) {
+                if self.is_enum_struct(&t, enum_name) {
+                    return self.unwrap_enum(&info, &v, &args[0], sp);
+                }
+            }
+        }
+
+        let struct_ty = info.struct_type.clone();
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: struct_ty.clone(), align: None });
+        self.val_types.insert(slot.0, struct_ty.clone());
+        // Zero the whole value so an unused payload area is deterministic.
+        let size = struct_ty.size_of(self.ptr_size());
+        self.push_instr(Instr::MemSet {
+            dst: Val::Local(slot), val: Constant::zero(), size,
+            align: struct_ty.align_of(self.ptr_size()),
+        });
+        // Store the discriminant into `tag`.
+        let tag_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), struct_ty.clone()), "tag", false, sp)?;
+        self.store_lvalue(&tag_lv, Constant::int(v.tag))?;
+
+        // Store the payload into the `data` union member (offset 0 of the union).
+        match (&v.payload, args.len()) {
+            (Some(pty), 1) => {
+                let data_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), struct_ty.clone()), "data", false, sp)?;
+                let payload_ptr = LValue::plain(data_lv.ptr, pty.clone());
+                if self.is_sic() && super::types::is_sic_string(pty) {
+                    // A `string` payload: wrap a bare `char*`/literal into a
+                    // `{data,size,rc}` slice, then copy it in and retain it.
+                    let arg = self.lower_expr(&args[0])?;
+                    let vt = self.val_type(&arg);
+                    let is_str = super::types::is_sic_string(&vt)
+                        || matches!(&vt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+                    let src = if is_str { arg } else { self.cstr_to_string(arg)? };
+                    let sz = pty.size_of(self.ptr_size());
+                    let al = pty.align_of(self.ptr_size());
+                    self.retain_string_at(&src)?;
+                    self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });
+                } else if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    // Other aggregate payload: copy it in.
+                    let src = self.lower_aggregate_ptr(&args[0])?;
+                    let sz = pty.size_of(self.ptr_size());
+                    let al = pty.align_of(self.ptr_size());
+                    self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });
+                } else {
+                    let val = self.lower_expr(&args[0])?;
+                    self.store_lvalue(&payload_ptr, val)?;
+                }
+            }
+            (Some(_), n) => return Err(CompileError::at(
+                format!("variant '{}::{}' takes 1 value, got {}", enum_name, variant, n),
+                sp.file.clone(), sp.line, sp.col)),
+            (None, 0) => {}
+            (None, n) => return Err(CompileError::at(
+                format!("variant '{}::{}' takes no value, got {}", enum_name, variant, n),
+                sp.file.clone(), sp.line, sp.col)),
+        }
+        Ok(Val::Local(slot))
+    }
+
+    /// True if `t` is the `{tag,union}` struct of the named tagged enum.
+    fn is_enum_struct(&self, t: &Type, enum_name: &str) -> bool {
+        matches!(t, Type::Struct(st) if st.name.as_deref() == Some(enum_name))
+    }
+
+    /// True if `t` is any tagged-enum representation struct.
+    pub(super) fn is_tagged_enum_struct(&self, t: &Type) -> bool {
+        matches!(t, Type::Struct(st) if st.name.as_deref()
+            .map_or(false, |n| self.lowerer.enum_defs.contains_key(n)))
+    }
+
+    /// Build a tagged-enum value in place from a bare discriminant (`Test x =
+    /// BLACK;`): zero the storage and store the tag. A payload-less variant only.
+    pub(super) fn build_enum_from_tag(&mut self, ptr: &Val, ty: &Type, tag: Val, sp: &crate::lexer::Span) -> Result<()> {
+        let size = ty.size_of(self.ptr_size());
+        self.push_instr(Instr::MemSet {
+            dst: ptr.clone(), val: Constant::zero(), size, align: ty.align_of(self.ptr_size()),
+        });
+        let tag_lv = self.field_ptr_from(LValue::plain(ptr.clone(), ty.clone()), "tag", false, sp)?;
+        self.store_lvalue(&tag_lv, tag)?;
+        Ok(())
+    }
+
+    /// Load a tagged-enum value's discriminant (`(int)x`). `ptr` addresses the
+    /// `{tag,union}` struct.
+    pub(super) fn load_enum_tag(&mut self, ptr: Val, struct_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let tag_lv = self.field_ptr_from(LValue::plain(ptr, struct_ty.clone()), "tag", false, sp)?;
+        self.load_lvalue(&tag_lv)
+    }
+
+    /// Materialize a tagged-enum value of type `enum_ty` from `e` and return a
+    /// pointer to it: a same-enum expression yields its own storage; a bare
+    /// discriminant (`None`, `BLACK`) is built into a fresh temporary. Used where
+    /// an enum value is needed by pointer (return, argument passing).
+    pub(super) fn enum_value_ptr(&mut self, e: &Expr, enum_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let same = matches!(self.infer_expr_type(e), Ok(t) if &t == enum_ty);
+        if same {
+            self.lower_aggregate_ptr(e)
+        } else {
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: enum_ty.clone(), align: None });
+            self.val_types.insert(slot.0, enum_ty.clone());
+            let tag = self.lower_expr(e)?;
+            self.build_enum_from_tag(&Val::Local(slot), enum_ty, tag, sp)?;
+            Ok(Val::Local(slot))
+        }
+    }
+
+    /// Unwrap a tagged-enum instance to a variant's payload (sic.md §"Match"):
+    /// `Enum::VARIANT(inst)`. Aborts at runtime (`__sic_match_fail`) if `inst` is
+    /// not that variant. Returns the payload value (or, for an aggregate payload,
+    /// a pointer to it).
+    fn unwrap_enum(&mut self, info: &super::TaggedEnum, v: &super::TaggedVariant, inst_expr: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let payload_ty = v.payload.clone().ok_or_else(|| CompileError::at(
+            format!("variant '{}::{}' carries no value to unwrap", info.name, v.name),
+            sp.file.clone(), sp.line, sp.col))?;
+        let inst_ptr = self.lower_aggregate_ptr(inst_expr)?;
+        let struct_ty = info.struct_type.clone();
+
+        // Runtime guard: if tag != this variant's, abort.
+        let tag_lv = self.field_ptr_from(LValue::plain(inst_ptr.clone(), struct_ty.clone()), "tag", false, sp)?;
+        let tag = self.load_lvalue(&tag_lv)?;
+        let ne = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: ne, op: CmpOp::INe, lhs: tag, rhs: Constant::int(v.tag), ty: Type::i32() });
+        let fail_bb = self.new_block_after_current();
+        let ok_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(ne), then_bb: fail_bb, else_bb: ok_bb });
+        self.switch_to_block(fail_bb);
+        let fref = self.lowerer.ensure_match_fail_fn();
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+        self.set_terminator(Terminator::Jump(ok_bb)); // abort never returns
+        self.switch_to_block(ok_bb);
+
+        // Read the payload out of the `data` union member.
+        let data_lv = self.field_ptr_from(LValue::plain(inst_ptr, struct_ty), "data", false, sp)?;
+        if matches!(payload_ty, Type::Struct(_) | Type::Union(_)) {
+            Ok(data_lv.ptr) // aggregate payload decays to a pointer
+        } else {
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: data_lv.ptr, ty: payload_ty.clone() });
+            self.val_types.insert(d.0, payload_ty);
+            Ok(Val::Local(d))
+        }
+    }
+
     /// Resolve a namespaced module call `module.sym` to a mangled extern FuncRef,
     /// creating the extern on first use. Errors if the module has no such export.
     fn resolve_module_call(&mut self, module: &str, sym: &str, sp: &crate::lexer::Span) -> Result<FuncRef> {
@@ -2237,6 +2426,23 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
+        // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
+        if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
+            return self.construct_enum(enum_name, variant, args, sp);
+        }
+        // Bare variant constructor `Variant(args)` (`Ok(5)`), resolved from the
+        // owning enum unless a real function/variable of that name shadows it.
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            if self.is_sic() && self.lowerer.variant_enum.contains_key(name)
+                && !matches!(self.lookup(name),
+                    Some(LookupResult::Func(_)) | Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
+            {
+                let en = self.lowerer.variant_enum.get(name).cloned().unwrap();
+                return self.construct_enum(&en, name, args, sp);
+            }
+        }
+
         // A `_Generic(...)` selection used as the callee resolves to the chosen
         // association's expression, which may itself be a builtin name (e.g.
         // QEMU's `bswaps` macro: `_Generic(x, uint16_t: __builtin_bswap16, ...)(x)`).
@@ -3382,7 +3588,39 @@ impl<'m> FuncCtx<'m> {
                 // definition, or `sizeof` sees an empty struct and returns 0.
                 Ok(super::types::resolve_aggregate(&elem, &self.lowerer.struct_types))
             }
-            ExprKind::Call { func, .. } => {
+            // A tagged-enum variant path is a value of that enum's struct type.
+            ExprKind::EnumVariant { enum_name, .. } => {
+                self.lowerer.enum_defs.get(enum_name).map(|i| i.struct_type.clone())
+                    .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
+            }
+            ExprKind::Call { func, args } => {
+                // sic tagged-enum constructor / unwrap.
+                if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
+                    if let Some(info) = self.lowerer.enum_defs.get(enum_name) {
+                        // `Enum::VARIANT(inst)` unwraps → payload type; otherwise
+                        // it constructs → the enum struct.
+                        if let Some(v) = info.variant(variant) {
+                            if v.payload.is_some() && args.len() == 1 {
+                                if let Ok(t) = self.infer_expr_type(&args[0]) {
+                                    if self.is_enum_struct(&t, enum_name) {
+                                        return Ok(v.payload.clone().unwrap());
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(info.struct_type.clone());
+                    }
+                }
+                // Bare variant constructor `Ok(5)`.
+                if let ExprKind::Ident(name) = &func.kind {
+                    if self.is_sic() && !matches!(self.lookup(name), Some(LookupResult::Func(_))) {
+                        if let Some(en) = self.lowerer.variant_enum.get(name) {
+                            if let Some(info) = self.lowerer.enum_defs.get(en) {
+                                return Ok(info.struct_type.clone());
+                            }
+                        }
+                    }
+                }
                 // Return type of the callee. A direct call resolves via the
                 // module signature; an indirect call takes the pointee function
                 // type's return. Without this a call defaults to i32 and a
