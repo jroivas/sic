@@ -1,0 +1,15 @@
+// sic tagged enums (sic.md §"Match") — part 1: representation. A tagged enum
+// (a variant carries a payload) becomes a { tag; union } struct; bare variant
+// names still yield C-sequential discriminants, and plain C enums are unchanged.
+enum Option { Some<int>, None };          // Some=0, None=1
+enum Test { NONE, BLACK = 1, CUSTOM(int) }; // NONE=0, BLACK=1, CUSTOM=2
+
+int main() {
+    // tags via bare variant names
+    int t = (int)None * 10 + (int)Some;        // 10
+    t += (int)CUSTOM + (int)BLACK + (int)NONE; // +2 +1 +0 = 13
+    // tagged-enum values are struct-sized; the union sizes the payload area.
+    if (sizeof(Option) != 8) return 99;
+    Option a;                                  // declares as struct (zero-init)
+    return t;                                   // 13
+}

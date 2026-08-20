@@ -111,6 +111,9 @@ pub struct EnumDef {
 pub struct EnumVariant {
     pub name: String,
     pub value: Option<BoxExpr>,
+    /// sic-only (sic.md §"Match"): a payload type turns this into a tagged-union
+    /// variant, e.g. `Some<int>` or `CUSTOM(int)`. `None` = plain C enumerator.
+    pub payload: Option<QualType>,
     pub span: Span,
 }
 

@@ -489,6 +489,7 @@ impl Lexer {
             ('~', _, _)   => (TokenKind::Tilde,    "~"),
             ('?', _, _)   => (TokenKind::Question, "?"),
             ('@', _, _)   => (TokenKind::At,       "@"),
+            (':', ':', _) if self.lang == Lang::Sic => { self.advance(); (TokenKind::ColonColon, "::") }
             (':', _, _)   => (TokenKind::Colon,    ":"),
             (';', _, _)   => (TokenKind::Semi,     ";"),
             (',', _, _)   => (TokenKind::Comma,    ","),
@@ -542,6 +543,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // identifiers in C.
             "module" => return TokenKind::Module,
             "import" => return TokenKind::Import,
+            // `match` — pattern-match on a tagged enum (sic.md §"Match"); ordinary
+            // identifier in C.
+            "match" => return TokenKind::Match,
             _ => {}
         }
     }

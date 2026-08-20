@@ -83,6 +83,45 @@ fn enum_is_signed(e: &EnumDef) -> bool {
 /// `__attribute__((packed))` enum uses the smallest standard integer that holds
 /// every enumerator (1/2/4/8 bytes), which shrinks any struct containing it
 /// (QEMU's `FloatClass` is packed → 1 byte → `FloatParts128` is 24 not 32).
+/// A sic tagged enum (sic.md §"Match") — one with at least one payload-carrying
+/// variant — is represented as a struct `{ i32 tag; union{ payloads } data }`.
+/// The union sizes/aligns the payload area to the largest variant. Returns `None`
+/// for a plain C enum (no payloads), which stays a scalar integer.
+pub fn tagged_enum_type(
+    e: &EnumDef,
+    named: &HashMap<String, Type>,
+    ptr_size: u32,
+) -> Option<Result<Type>> {
+    let variants = e.variants.as_ref()?;
+    if !variants.iter().any(|v| v.payload.is_some()) {
+        return None;
+    }
+    let mut fields: Vec<(String, Type)> = Vec::new();
+    for v in variants {
+        if let Some(p) = &v.payload {
+            match lower_type(p, named, ptr_size) {
+                Ok(t) => fields.push((v.name.clone(), t)),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+    let data = Type::Union(UnionType {
+        name: None,
+        fields,
+        field_aligns: vec![],
+        min_align: None,
+    });
+    let st = StructType::plain(
+        e.name.clone(),
+        vec![
+            ("tag".to_string(), Type::Int { bits: 32, signed: true }),
+            ("data".to_string(), data),
+        ],
+        false,
+    );
+    Some(Ok(Type::Struct(st)))
+}
+
 fn enum_int_type(e: &EnumDef) -> Type {
     let signed = enum_is_signed(e);
     if !e.packed {
@@ -198,7 +237,13 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a
         // value like `TEMP_CONST` (4 = 0b100) must read back as 4, not sign-extend
         // to -4 (which made TCG liveness analysis hit g_assert_not_reached).
-        AstType::Enum(e)   => enum_int_type(e),
+        AstType::Enum(e)   => {
+            // sic tagged enum → its `{ tag; union }` struct; plain C enum → int.
+            if let Some(res) = tagged_enum_type(e, named, ptr_size) {
+                return res;
+            }
+            enum_int_type(e)
+        }
         AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {

@@ -62,6 +62,38 @@ pub struct Lowerer {
     /// Link flags gathered from imported modules' manifests, to be folded into the
     /// final link order by the driver.
     pub imported_links: Vec<String>,
+    /// sic tagged enums (sic.md §"Match"): enum name → its variant table (tag,
+    /// payload type, and the `{tag,union}` struct representation).
+    pub enum_defs: HashMap<String, TaggedEnum>,
+    /// Reverse index: variant name → owning enum name, for resolving a bare
+    /// `Variant(..)` / `Variant` when the target enum type is not otherwise known.
+    /// Last definition wins (a later enum may reuse a variant name).
+    pub variant_enum: HashMap<String, String>,
+}
+
+/// One variant of a sic tagged enum.
+#[derive(Debug, Clone)]
+pub struct TaggedVariant {
+    pub name: String,
+    /// C-sequential discriminant (also stored in `enum_consts`).
+    pub tag: i64,
+    /// Payload IR type, or `None` for a bare (payload-less) variant.
+    pub payload: Option<Type>,
+}
+
+/// A sic tagged enum's lowered metadata.
+#[derive(Debug, Clone)]
+pub struct TaggedEnum {
+    pub name: String,
+    /// The `{ i32 tag; union{payloads} data }` struct representation.
+    pub struct_type: Type,
+    pub variants: Vec<TaggedVariant>,
+}
+
+impl TaggedEnum {
+    pub fn variant(&self, name: &str) -> Option<&TaggedVariant> {
+        self.variants.iter().find(|v| v.name == name)
+    }
 }
 
 impl Lowerer {
@@ -83,6 +115,8 @@ impl Lowerer {
             include_dirs: Vec::new(),
             target_triple: String::new(),
             imported_links: Vec::new(),
+            enum_defs: HashMap::new(),
+            variant_enum: HashMap::new(),
         }
     }
 
@@ -795,6 +829,33 @@ impl Lowerer {
             // Publish the updated enum constants so subsequent array dimensions
             // (`T arr[SOME_ENUM_MAX]`) fold via the scope-less `lower_type` path.
             types::set_enum_consts(&self.enum_consts);
+
+            // sic tagged enum (sic.md §"Match"): build its `{tag,union}` struct and
+            // record each variant's tag + payload type so construction, match and
+            // unwrap can find them. A payload-less enum is left as a plain C enum.
+            if self.sic {
+                if let Some(res) = types::tagged_enum_type(e, &self.struct_types, self.ptr_size) {
+                    let struct_type = res?;
+                    let ename = e.name.clone().ok_or_else(|| CompileError::new(
+                        "sic tagged enum with payload variants must be named".to_string()))?;
+                    let mut tvars = Vec::new();
+                    for v in variants {
+                        let tag = *self.enum_consts.get(&v.name).unwrap();
+                        let payload = match &v.payload {
+                            Some(p) => Some(types::lower_type(p, &self.struct_types, self.ptr_size)?),
+                            None => None,
+                        };
+                        tvars.push(TaggedVariant { name: v.name.clone(), tag, payload });
+                        self.variant_enum.insert(v.name.clone(), ename.clone());
+                    }
+                    // Register the struct under the enum name so `Option a` (an
+                    // `AstType::Named`) resolves to the tagged representation.
+                    self.struct_types.insert(ename.clone(), struct_type.clone());
+                    self.enum_defs.insert(ename.clone(), TaggedEnum {
+                        name: ename, struct_type, variants: tvars,
+                    });
+                }
+            }
         }
         Ok(())
     }

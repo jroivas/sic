@@ -46,6 +46,7 @@ pub enum TokenKind {
     Defer,        // sic-only: `defer <stmt>;` scope-exit action (sic.md §"Defer keyword")
     New, Del,     // sic-only: typed allocation / free (sic.md §"Scopes and automatic release")
     Module, Import, // sic-only: module system (sic.md §"Imports")
+    Match,          // sic-only: `match` on a tagged enum (sic.md §"Match")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)
@@ -67,6 +68,7 @@ pub enum TokenKind {
     Eq, EqEq, BangEq,
     Lt, Gt, LtEq, GtEq,
     Question, Colon, Semi, Comma, Dot, Arrow, Ellipsis,
+    ColonColon, // sic-only: `::` path separator for enum variants (sic.md §"Match")
     At,       // sic-only: `@` reference type / reference-taking (sic.md §"References")
 
     // --- Delimiters ---

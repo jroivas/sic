@@ -612,6 +612,14 @@ impl Parser {
         Ok(fields)
     }
 
+    /// Parse a type-name (abstract declarator), e.g. the `int`/`char*`/`string`
+    /// inside a sic enum variant payload `Name<T>` / `Name(T)`.
+    fn parse_type_name(&mut self) -> Result<QualType> {
+        let (base, _) = self.parse_decl_specifiers()?;
+        let (_, ty) = self.parse_declarator(base)?;
+        Ok(ty)
+    }
+
     fn parse_enum(&mut self) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // 'enum'
@@ -633,11 +641,26 @@ impl Parser {
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 let vsp = self.span();
                 let vname = self.expect_name()?;
+                // sic tagged-enum payload (sic.md §"Match"): `Name<T>` or `Name(T)`
+                // attaches a value type to the variant. C enumerators have neither.
+                let payload = if self.lang == Lang::Sic && self.at(TokenKind::Lt) {
+                    self.advance();
+                    let ty = self.parse_type_name()?;
+                    self.expect(TokenKind::Gt)?;
+                    Some(ty)
+                } else if self.lang == Lang::Sic && self.at(TokenKind::LParen) {
+                    self.advance();
+                    let ty = self.parse_type_name()?;
+                    self.expect(TokenKind::RParen)?;
+                    Some(ty)
+                } else {
+                    None
+                };
                 // Enumerator attributes (`NAME __attribute__((...)) = val`), e.g.
                 // glib's `GLIB_AVAILABLE_ENUMERATOR_IN_*` deprecation markers.
                 self.skip_attributes();
                 let value = if self.eat(TokenKind::Eq) { Some(Box::new(self.parse_assign_expr()?)) } else { None };
-                vs.push(EnumVariant { name: vname, value, span: vsp });
+                vs.push(EnumVariant { name: vname, value, payload, span: vsp });
                 if !self.eat(TokenKind::Comma) { break; }
             }
             self.expect(TokenKind::RBrace)?;
@@ -645,6 +668,15 @@ impl Parser {
         } else {
             None
         };
+        // sic tagged enum (sic.md §"Match"): register the name as a type so it can
+        // be used bare (`Option a;`) like Rust, not only as `enum Option a;`.
+        if self.lang == Lang::Sic {
+            if let (Some(n), Some(vs)) = (&name, &variants) {
+                if vs.iter().any(|v| v.payload.is_some()) {
+                    self.typedefs.insert(n.clone());
+                }
+            }
+        }
         Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, span: sp }))
     }
 
