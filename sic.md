@@ -58,11 +58,11 @@ Instead byte is signed in range -128 - 127 and unsigned byte has value between 0
 
 On top of that we have specific bit size ints:
 
-- 8 bits: int8, uint8
-- 16 bits: int16, uint16
-- 32 bits: int32, uint32
-- 64 bits: int64, uint64
-- 128 bits: int128, uint128
+- 8 bits: i8, u8
+- 16 bits: i16, u16
+- 32 bits: i32, u32
+- 64 bits: i64, u64
+- 128 bits: i128, u128
 
 Extending to bigger types is trivial, in case hardware support comes available.
 However compiler supports built-in bigint, which allows arbitrary big integers.
@@ -70,8 +70,8 @@ These are not any specific bit/byte size, but can grow any size when needed.
 This of course has it's performance and storage size cost.
 Otherwise bigints can be used like any other integer type:
 
-    int32 a = 12345;
-    int64 b = 567890;
+    i32 a = 12345;
+    i64 b = 567890;
     bigint c = 123456789123456789001234567890;
 
     bigint d = a + b;
@@ -205,9 +205,9 @@ on financial calculations.
 
 For float:
 
-- 32 bits: float32, float
-- 64 bits: float64, double
-- 128 bits: float128
+- 32 bits: f32, float
+- 64 bits: f64, double
+- 128 bits: f128
 
 Fixed point precision contains two parts: integral and fraction.
 It's possible to select precision for both of them separately.
@@ -299,19 +299,19 @@ Unlike C, the SIC compiler is allowed to reorder the struct to get optimal
 alignment. This means that struct like
 
     struct test {
-        uint32 val;
-        uint64 val2;
-        uint8  val3;
-        uint32 val4;
+        u32 val;
+        u64 val2;
+        u8  val3;
+        u32 val4;
     }
 
 Is internally reorganized by type size:
 
     struct test {
-        uint64 val2;
-        uint32 val;
-        uint32 val4;
-        uint8  val3;
+        u64 val2;
+        u32 val;
+        u32 val4;
+        u8  val3;
     }
 
 Types define the primary sorting, and the order is kept inside the type.
@@ -1167,12 +1167,12 @@ on target architectures supporting it.
 Types of the values swapped should be the same or trivial conversion.
 Complex casting is not supported. However one can manually cast:
 
-    int64 a = 5;
-    int32 b = 1;
+    i64 a = 5;
+    i32 b = 1;
 
-    (int32)a <> b;
+    (i32)a <> b;
 
-    // a <> (int64)b; // This would cause error since 64-bit "a" can't fit into
+    // a <> (i64)b; // This would cause error since 64-bit "a" can't fit into
                       // 32-bit "b". This would be the default as well.
 
 ## Errors and exceptions
