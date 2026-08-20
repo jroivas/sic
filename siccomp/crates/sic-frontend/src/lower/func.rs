@@ -15,6 +15,9 @@ pub enum Cleanup {
     Defer(Box<Stmt>),
     /// sic refcounted `string` local: release its `rc` on scope exit.
     StringRelease { addr: Val },
+    /// sic transient `string.ptr` C-string copy: `free` the pointer held in
+    /// `slot` (a `char*` slot, NULL when `.ptr` needed no copy) at scope exit.
+    FreePtr { slot: Val },
 }
 
 /// Per-function lowering context.
@@ -209,7 +212,16 @@ impl<'m> FuncCtx<'m> {
             Cleanup::AttrFn { addr, fn_name } => self.emit_cleanup_call(addr, &fn_name),
             Cleanup::Defer(stmt) => { let _ = self.lower_stmt(&stmt); }
             Cleanup::StringRelease { addr } => self.emit_string_release_at(addr),
+            Cleanup::FreePtr { slot } => self.emit_free_ptr_slot(slot),
         }
+    }
+
+    /// Free the `char*` held in `slot` (a transient `string.ptr` copy). `free`
+    /// tolerates NULL, so the no-copy case is a harmless no-op.
+    fn emit_free_ptr_slot(&mut self, slot: Val) {
+        let p = self.alloc_val();
+        self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });
+        let _ = self.emit_free(Val::Local(p));
     }
 
     /// Release a refcounted `string` local at scope exit: decref its `rc`,
@@ -514,13 +526,10 @@ impl<'m> FuncCtx<'m> {
                         let size = agg_ty.size_of(ps);
                         let align = agg_ty.align_of(ps) as u64;
                         self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
-                        // sic: returning an lvalue `string` transfers ownership —
-                        // retain so the caller's copy outlives this frame's
-                        // scope-exit release of the local. An rvalue return
-                        // (concat/slice temp) already moves its reference out.
-                        if self.is_sic() && super::types::is_sic_string(&agg_ty)
-                            && expr_is_lvalue(e)
-                        {
+                        // sic: the returned `string` slot acquires a reference —
+                        // retain so it outlives this frame's scope-exit releases
+                        // (of the local and any temporaries).
+                        if self.is_sic() && super::types::is_sic_string(&agg_ty) {
                             self.retain_string_at(&sret_ptr)?;
                         }
                     }
@@ -870,10 +879,10 @@ impl<'m> FuncCtx<'m> {
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
-                    // A `string` initialized from an lvalue is a copy that shares
-                    // the owned buffer → retain. From an rvalue (concat/slice/call)
-                    // it is a move (the temp's reference transfers) → no retain.
-                    if super::types::is_sic_string(ty) && expr_is_lvalue(e) {
+                    // A `string` binding acquires a reference to the shared
+                    // buffer → retain. (Concat/slice temps register their own
+                    // release, so uniform retain-on-acquire stays balanced.)
+                    if self.is_sic() && super::types::is_sic_string(ty) {
                         self.retain_string_at(&ptr)?;
                     }
                 } else {
@@ -1430,17 +1439,6 @@ fn cast_op_for(from: &Type, to: &Type) -> CastOp {
 /// already terminated the current block.
 fn stmt_is_jump_target(s: &Stmt) -> bool {
     matches!(s, Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) | Stmt::Label(..))
-}
-
-/// Whether `e` is an lvalue (names existing storage) rather than a freshly
-/// produced rvalue. Used to decide copy (retain) vs move for `string` values.
-pub(crate) fn expr_is_lvalue(e: &Expr) -> bool {
-    matches!(&e.kind,
-        ExprKind::Ident(_)
-        | ExprKind::Field { .. }
-        | ExprKind::Arrow { .. }
-        | ExprKind::Index { .. }
-        | ExprKind::Unary { op: crate::ast::UnOpKind::Deref, .. })
 }
 
 /// Source line a statement begins on (for DWARF line markers). 0 = unknown.

@@ -467,8 +467,11 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(data), index: Val::Local(total), elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
 
-        // rc = block (the refcount cell address)
-        self.make_string_val(Val::Local(data), Val::Local(total), block)
+        // rc = block (the refcount cell address). Register the temp for release
+        // so an intermediate that is never bound to a variable is still freed.
+        let sv = self.make_string_val(Val::Local(data), Val::Local(total), block)?;
+        self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
+        Ok(sv)
     }
 
     pub fn emit_binop(&mut self, op: BinOpKind, l: Val, r: Val) -> Result<Val> {
@@ -763,7 +766,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Emit `free(p)`.
-    fn emit_free(&mut self, p: Val) -> Result<()> {
+    pub(crate) fn emit_free(&mut self, p: Val) -> Result<()> {
         let voidp = Type::void_ptr();
         let fref = self.lowerer.module.func_ref_by_name("free").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
@@ -974,7 +977,11 @@ impl<'m> FuncCtx<'m> {
         // new size = hi - lo
         let new_size = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_v, rhs: lo_v, ty: Type::i64() });
-        self.make_string_val(Val::Local(new_data), Val::Local(new_size), rc)
+        // The slice temp holds a reference (it retained the parent above);
+        // register it for release so it balances even if never bound.
+        let sv = self.make_string_val(Val::Local(new_data), Val::Local(new_size), rc)?;
+        self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
+        Ok(sv)
     }
 
     /// sic `s.length`: number of UTF-8 code points in the slice (sic.md
@@ -1016,6 +1023,12 @@ impl<'m> FuncCtx<'m> {
 
         let result_ptr = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::char_ptr(), align: None });
+        // `owned` holds the malloc'd copy (or NULL when none) so it can be freed
+        // at scope exit — the transient C-string must not leak.
+        let owned = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: owned, ty: Type::char_ptr(), align: None });
+        let nullp = self.coerce(Constant::zero(), &Type::char_ptr())?;
+        self.push_instr(Instr::Store { val: nullp, ptr: Val::Local(owned) });
 
         let copy_bb = self.new_block_after_current();
         let term_bb = self.new_block_after_current();
@@ -1036,10 +1049,13 @@ impl<'m> FuncCtx<'m> {
         let bend = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: bend, base: buf.clone(), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(bend), val: Constant::zero(), size: 1, align: 1 });
-        self.push_instr(Instr::Store { val: buf, ptr: Val::Local(result_ptr) });
+        self.push_instr(Instr::Store { val: buf.clone(), ptr: Val::Local(result_ptr) });
+        self.push_instr(Instr::Store { val: buf, ptr: Val::Local(owned) });
         self.set_terminator(Terminator::Jump(end_bb));
 
         self.switch_to_block(end_bb);
+        // Free the copy (if any) when the enclosing scope exits.
+        self.register_scope_exit(super::func::Cleanup::FreePtr { slot: Val::Local(owned) });
         let dest = self.alloc_val();
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: Type::char_ptr() });
         self.val_types.insert(dest.0, Type::char_ptr());
@@ -1115,13 +1131,11 @@ impl<'m> FuncCtx<'m> {
             let src = self.lower_aggregate_ptr(rhs)?;
             let size = lv.ty.size_of(self.ptr_size());
             let align = lv.ty.align_of(self.ptr_size());
-            // sic `string` reassignment: retain the new value (if it is an lvalue
-            // copy), release the old one, then overwrite. Done in this order so a
-            // self-assign / alias stays balanced.
+            // sic `string` reassignment: retain the new value, release the old
+            // one, then overwrite. Retain-before-release keeps a self-assign /
+            // alias balanced.
             if self.is_sic() && super::types::is_sic_string(&lv.ty) {
-                if super::func::expr_is_lvalue(rhs) {
-                    self.retain_string_at(&src)?;
-                }
+                self.retain_string_at(&src)?;
                 self.release_string_at(&lv.ptr)?;
             }
             self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
@@ -2619,7 +2633,12 @@ impl<'m> FuncCtx<'m> {
             let mut args = Vec::with_capacity(arg_vals.len() + 1);
             args.push(slot.clone());
             args.extend(arg_vals);
-            self.push_instr(Instr::Call { dest: None, func: fref, args, ret_ty });
+            self.push_instr(Instr::Call { dest: None, func: fref, args, ret_ty: ret_ty.clone() });
+            // A returned `string` temp holds a reference — release it at scope
+            // exit (a binding retains it; an unused result is freed here).
+            if self.is_sic() && super::types::is_sic_string(&ret_ty) {
+                self.register_scope_exit(super::func::Cleanup::StringRelease { addr: slot.clone() });
+            }
             return Ok(slot);
         }
 

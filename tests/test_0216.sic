@@ -1,0 +1,33 @@
+// SIC string refcounting — leak/lifetime regression (sic.md §"Built-in string").
+// Exercises the cases that previously leaked: `.ptr` copies of non-NUL-terminated
+// slices, intermediate concat temporaries in chained `+`, and string-returning
+// call results. Correctness is checked here; `valgrind` confirms zero leaks and
+// no double-free. Looping many times would exhaust memory if anything leaked.
+#include <string.h>
+
+string wrap(string s) { return "[" + s + "]"; }   // two concats + returned temp
+
+int main()
+{
+    string a = "Hello";
+
+    for (int i = 0; i < 5000; i++) {
+        // Intermediate concat temp (`a + " "`) is consumed by the outer `+`.
+        string d = a + " " + a;
+        if (d.size != 11) return 1;
+
+        // `.ptr` of a non-NUL-terminated slice must copy — and be freed.
+        string sl = d[0:5];
+        if (strcmp(sl.ptr, "Hello") != 0) return 2;
+
+        // String-returning call whose result temp must be released.
+        string w = wrap(a);
+        if (strcmp(w.ptr, "[Hello]") != 0) return 3;
+
+        // Reassignment in the loop releases the previous value.
+        a = a;                       // self-assign stays balanced
+    }
+
+    if (strcmp(a.ptr, "Hello") != 0) return 4;
+    return 0;
+}
