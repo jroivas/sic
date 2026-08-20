@@ -575,6 +575,10 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     lowerer.set_repl_main(lang == sic_frontend::Lang::Sic);
     // Enable SIC-language defined-behavior semantics for `.sic` sources.
     lowerer.set_sic(lang == sic_frontend::Lang::Sic);
+    // sic modules: `import x;` searches the `-I` dirs for `module_x.smod` and the
+    // manifest's triple is checked against this target (sic.md §"Imports").
+    lowerer.set_include_dirs(args.includes.clone());
+    lowerer.set_target_triple(target_triple());
     let mut ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
     ir_module.source_file = Some(path.to_string());
 
@@ -584,14 +588,45 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     Ok(ir_module)
 }
 
-/// Compile one C source all the way to object-file bytes.
-fn compile_source(path: &str, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let ir_module = build_ir(path, args)?;
+/// Codegen a lowered IR module to object-file bytes.
+fn compile_ir(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut backend = CraneliftBackend::new()
         .with_opt_level(opt_cranelift_level(&args.opt))
         .with_debug_info(args.debug_info);
-    backend.compile_module(&ir_module)
+    backend.compile_module(ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
+}
+
+/// Write `module_<name>.smod` next to the object file. The manifest records the
+/// module's exported symbols (typed + mangled), the target triple, and the link
+/// flags a consumer needs — this unit's own `-l`/`-L`/`-pthread` plus any flags
+/// pulled in transitively from imported modules (sic.md §"Imports").
+fn emit_module_manifest(
+    ir_module: &sic_ir::Module,
+    modname: &str,
+    obj_path: &str,
+    args: &Args,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use sic_frontend::ModuleManifest;
+
+    // A module records the link inputs a consumer needs: its own `-l`/`-L`/
+    // `-pthread` flags (captured in `link_order` by the argv pre-pass) plus any
+    // flags pulled in transitively from modules it imported.
+    let mut links: Vec<String> = Vec::new();
+    for tok in &args.link_order {
+        if tok == "-pthread" || tok.starts_with("-l") || tok.starts_with("-L") {
+            if !links.contains(tok) { links.push(tok.clone()); }
+        }
+    }
+    for l in &ir_module.imported_links {
+        if !links.contains(l) { links.push(l.clone()); }
+    }
+
+    let manifest = ModuleManifest::from_ir(ir_module, modname, &target_triple(), &links);
+    let dir = PathBuf::from(obj_path).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let manifest_path = dir.join(format!("module_{}.smod", modname));
+    fs::write(&manifest_path, manifest.to_text())?;
+    Ok(())
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -654,8 +689,14 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 assemble_source(src, &obj_path, args)?;
                 continue;
             }
-            let obj_bytes = compile_source(src, args)?;
+            let ir_module = build_ir(src, args)?;
+            let obj_bytes = compile_ir(&ir_module, args)?;
             fs::write(&obj_path, &obj_bytes)?;
+            // sic module: alongside the object, emit its portable manifest so
+            // consumers can `import` it (sic.md §"Imports").
+            if let Some(modname) = &ir_module.sic_module {
+                emit_module_manifest(&ir_module, modname, &obj_path, args)?;
+            }
         }
         return Ok(());
     }
@@ -679,14 +720,21 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Compile each source to a temp object; keep the handles alive until linking.
+    // sic modules: collect link flags pulled in from any imported manifests so
+    // they can be folded into the final link line (sic.md §"Imports").
     let mut tmp_objs: Vec<tempfile::NamedTempFile> = Vec::new();
+    let mut module_link_flags: Vec<String> = Vec::new();
     for src in &sources {
         let mut tmp = tempfile::Builder::new().suffix(".o").tempfile()?;
         if is_assembly(src) {
             assemble_source(src, &tmp.path().to_string_lossy(), args)?;
         } else {
-            let obj_bytes = compile_source(src, args)?;
+            let ir_module = build_ir(src, args)?;
+            let obj_bytes = compile_ir(&ir_module, args)?;
             tmp.write_all(&obj_bytes)?;
+            for l in &ir_module.imported_links {
+                if !module_link_flags.contains(l) { module_link_flags.push(l.clone()); }
+            }
         }
         tmp_objs.push(tmp);
     }
@@ -722,6 +770,13 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(obj) => { link.arg(obj); }
             None => { link.arg(tok); }
         }
+    }
+
+    // Fold in link flags recorded by imported module manifests (e.g. a module
+    // built with `-lm` makes its consumers link `-lm`). Appended after the
+    // objects so the archive/library symbols they name resolve.
+    for flag in &module_link_flags {
+        link.arg(flag);
     }
 
     // Produce a shared object rather than an executable.

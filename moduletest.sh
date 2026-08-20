@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Module system round-trip tests (sic.md §"Imports"). The single-file
+# compiletest harness cannot build a module and then import it, so this script
+# exercises the compiled-manifest path end to end: build a `module`, emit its
+# `module_<name>.smod`, then compile a consumer that `import`s it namespaced,
+# selectively, and renamed — and run the result.
+set -u
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+SIC="${SIC:-$ROOT/siccomp/target/debug/sic}"
+CC="${CC:-cc}"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+pass=0; fail=0
+ok()   { echo "PASS $1"; pass=$((pass+1)); }
+bad()  { echo "FAIL $1: $2"; fail=$((fail+1)); }
+
+cd "$WORK" || exit 1
+
+# ── A module and a consumer ──────────────────────────────────────────────────
+cat > math.sic <<'EOF'
+module math;
+int meaning = 42;
+static int hidden = 7;          // static: not exported
+int sq(int x){ return x * x; }
+int addv(int a, int b){ return a + b; }
+EOF
+
+cat > app.sic <<'EOF'
+import math;
+import math.sq as square;
+int main(){
+    int a = math.sq(5);         // 25
+    int b = square(4);          // 16 (renamed)
+    return math.addv(a, b);     // 41
+}
+EOF
+
+# 1. Building the module emits object + manifest.
+if ! "$SIC" -c math.sic -o math.o 2>err; then
+    bad "build-module" "compile failed: $(cat err)"
+else
+    [ -f module_math.smod ] && ok "manifest-emitted" || bad "manifest-emitted" "no module_math.smod"
+fi
+
+# 2. The manifest lists exports (mangled) but not the static symbol.
+if grep -q "math_sq" module_math.smod && ! grep -q "hidden" module_math.smod; then
+    ok "manifest-exports"
+else
+    bad "manifest-exports" "unexpected manifest:\n$(cat module_math.smod)"
+fi
+
+# 3. Consumer imports (namespaced + renamed) compile, link, and run.
+if "$SIC" app.sic math.o -I. -o app 2>err; then
+    ./app; got=$?
+    [ "$got" -eq 41 ] && ok "import-run" || bad "import-run" "expected 41, got $got"
+else
+    bad "import-run" "compile/link failed: $(cat err)"
+fi
+
+# 4. A triple mismatch is a hard error (no source fallback).
+sed 's/x86_64[^ ]*/some-other-triple/' module_math.smod > wrong.smod
+mv module_math.smod good.smod && mv wrong.smod module_math.smod
+if "$SIC" app.sic math.o -I. -o app2 2>err; then
+    bad "triple-mismatch" "expected hard error, but it compiled"
+else
+    grep -q "built for target" err && ok "triple-mismatch" \
+        || bad "triple-mismatch" "wrong error: $(cat err)"
+fi
+mv good.smod module_math.smod
+
+# 5. Link flags recorded in a manifest are folded into a consumer's link.
+cat > mlib.sic <<'EOF'
+#include <math.h>
+module mlib;
+double droot(double x){ return sqrt(x); }
+EOF
+cat > useml.sic <<'EOF'
+import mlib;
+int main(){ return (int) mlib.droot(49.0); }   // 7
+EOF
+"$SIC" -c mlib.sic -o mlib.o -lm 2>err
+if grep -q "^link -lm" module_mlib.smod; then
+    # NOTE: no -lm on the consumer command line; it must come from the manifest.
+    if "$SIC" useml.sic mlib.o -I. -o useml 2>err; then
+        ./useml; got=$?
+        [ "$got" -eq 7 ] && ok "link-fold" || bad "link-fold" "expected 7, got $got"
+    else
+        bad "link-fold" "link failed: $(cat err)"
+    fi
+else
+    bad "link-fold" "manifest missing 'link -lm':\n$(cat module_mlib.smod)"
+fi
+
+echo
+echo "Passed $pass/$((pass+fail))"
+[ "$fail" -eq 0 ]

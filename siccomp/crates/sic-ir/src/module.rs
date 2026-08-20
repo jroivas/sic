@@ -122,6 +122,12 @@ pub struct Module {
     pub type_defs: Vec<(String, Type)>,
     /// Source file path this module was compiled from (for DWARF debug info).
     pub source_file: Option<String>,
+    /// sic module system (sic.md §"Imports"): `Some(name)` when this unit declared
+    /// `module name;` — the driver emits a `module_<name>.smod` manifest for it.
+    pub sic_module: Option<String>,
+    /// Link flags gathered from imported modules' manifests, to be folded into the
+    /// final link order by the driver.
+    pub imported_links: Vec<String>,
 }
 
 impl Module {
@@ -133,6 +139,8 @@ impl Module {
             externs: Vec::new(),
             type_defs: Vec::new(),
             source_file: None,
+            sic_module: None,
+            imported_links: Vec::new(),
         }
     }
 

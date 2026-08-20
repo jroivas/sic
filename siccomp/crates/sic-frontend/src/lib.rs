@@ -3,11 +3,13 @@ pub mod lexer;
 pub mod ast;
 pub mod parser;
 pub mod lower;
+pub mod module_manifest;
 
 pub use preprocess::{preprocess, preprocess_ex};
 pub use lexer::{Lexer, Lang};
 pub use parser::Parser;
 pub use lower::Lowerer;
+pub use module_manifest::{ModuleManifest, Export as ManifestExport};
 
 #[derive(Debug, Clone)]
 pub struct CompileError {

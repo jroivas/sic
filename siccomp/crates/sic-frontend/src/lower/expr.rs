@@ -2201,6 +2201,41 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Resolve a namespaced module call `module.sym` to a mangled extern FuncRef,
+    /// creating the extern on first use. Errors if the module has no such export.
+    fn resolve_module_call(&mut self, module: &str, sym: &str, sp: &crate::lexer::Span) -> Result<FuncRef> {
+        let (symbol, ty) = self.lowerer.imported_modules
+            .get(module)
+            .and_then(|m| m.get(sym))
+            .cloned()
+            .ok_or_else(|| CompileError::at(
+                format!("module '{}' has no exported symbol '{}'", module, sym),
+                sp.file.clone(), sp.line, sp.col,
+            ))?;
+        self.module_extern(&symbol, &ty, sp)
+    }
+
+    /// Resolve a selectively/renamed-imported bare name to its mangled extern.
+    fn resolve_module_call_bare(&mut self, name: &str, sp: &crate::lexer::Span) -> Result<FuncRef> {
+        let (symbol, ty) = self.lowerer.imported_syms.get(name).cloned()
+            .expect("caller checked imported_syms");
+        self.module_extern(&symbol, &ty, sp)
+    }
+
+    /// Get-or-create the extern for an imported function symbol.
+    fn module_extern(&mut self, symbol: &str, ty: &Type, sp: &crate::lexer::Span) -> Result<FuncRef> {
+        let ft = match ty {
+            Type::Function(ft) => (**ft).clone(),
+            _ => return Err(CompileError::at(
+                format!("imported symbol '{}' is not a function", symbol),
+                sp.file.clone(), sp.line, sp.col,
+            )),
+        };
+        Ok(self.lowerer.module.func_ref_by_name(symbol).unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc { name: symbol.to_string(), sig: ft })
+        }))
+    }
+
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         // A `_Generic(...)` selection used as the callee resolves to the chosen
         // association's expression, which may itself be a builtin name (e.g.
@@ -2586,8 +2621,21 @@ impl<'m> FuncCtx<'m> {
             arg_vals.push(self.lower_arg(a)?);
         }
 
+        // sic namespaced module call `x.f(...)`: resolve `x.f` to the imported
+        // module's mangled extern; feeds the shared direct-call emission below.
+        let module_fref: Option<FuncRef> = match &func_expr.kind {
+            ExprKind::Field { base, name } => match &base.kind {
+                ExprKind::Ident(module) if self.lowerer.imported_modules.contains_key(module) => {
+                    Some(self.resolve_module_call(module, name, sp)?)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
         // Resolve function reference
-        let fref = match &func_expr.kind {
+        let fref = if let Some(fr) = module_fref { fr } else {
+        match &func_expr.kind {
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
                     Some(LookupResult::Func(fr)) => fr,
@@ -2621,6 +2669,11 @@ impl<'m> FuncCtx<'m> {
                         return Ok(if let Some(d) = dest { Val::Local(d) } else { Constant::zero() });
                     }
                     _ => {
+                        // sic selective/renamed import (`import x.f;` / `... as g;`):
+                        // a bare call `f()`/`g()` resolves to the module's extern.
+                        if self.lowerer.imported_syms.contains_key(name) {
+                            self.resolve_module_call_bare(name, sp)?
+                        } else
                         // Many `__builtin_<fn>` calls (memcpy, memmove, strlen, …)
                         // are just the libc function; retry resolution with the
                         // prefix stripped.
@@ -2681,6 +2734,7 @@ impl<'m> FuncCtx<'m> {
                 });
                 return Ok(if let Some(d) = dest { Val::Local(d) } else { Constant::zero() });
             }
+        }
         };
 
         let ret_ty = self.lowerer.module.func_sig(fref).ret.clone();

@@ -46,11 +46,22 @@ pub struct Lowerer {
     /// unit declared `module name;`. Its non-`static` top-level symbols are
     /// exported with the mangled linker name `name_sym`.
     pub current_module: Option<String>,
-    /// Imported module symbols: an unqualified/namespaced name usable in this unit
-    /// → (mangled linker symbol, IR type). Filled from `import` + the manifest.
+    /// Selectively/renamed-imported symbols (`import x.f;` / `import x.f as g;`):
+    /// bare name usable here → (mangled linker symbol, IR type). A bare call `f()`
+    /// or `g()` resolves through this table.
     pub imported_syms: HashMap<String, (String, Type)>,
-    /// Names imported as whole modules (`import x;`) — so `x.sym` resolves.
-    pub imported_modules: HashSet<String>,
+    /// Whole imported modules (`import x;` or any `import x.*;`): module name →
+    /// {export name → (mangled linker symbol, IR type)}. A namespaced use `x.f`
+    /// resolves through this table.
+    pub imported_modules: HashMap<String, HashMap<String, (String, Type)>>,
+    /// Directories searched for `module_<name>.smod` manifests (from `-I`).
+    pub include_dirs: Vec<String>,
+    /// Target triple this unit is being compiled for; a manifest whose `triple`
+    /// differs is a hard error (sic.md §"Imports").
+    pub target_triple: String,
+    /// Link flags gathered from imported modules' manifests, to be folded into the
+    /// final link order by the driver.
+    pub imported_links: Vec<String>,
 }
 
 impl Lowerer {
@@ -68,7 +79,10 @@ impl Lowerer {
             sic: false,
             current_module: None,
             imported_syms: HashMap::new(),
-            imported_modules: HashSet::new(),
+            imported_modules: HashMap::new(),
+            include_dirs: Vec::new(),
+            target_triple: String::new(),
+            imported_links: Vec::new(),
         }
     }
 
@@ -81,6 +95,23 @@ impl Lowerer {
     /// Enable SIC-language semantics (`.sic` sources). See [`Lowerer::sic`].
     pub fn set_sic(&mut self, on: bool) {
         self.sic = on;
+    }
+
+    /// Directories searched for `module_<name>.smod` manifests when resolving
+    /// `import` (from the driver's `-I` include dirs).
+    pub fn set_include_dirs(&mut self, dirs: Vec<String>) {
+        self.include_dirs = dirs;
+    }
+
+    /// The target triple to enforce against imported manifests.
+    pub fn set_target_triple(&mut self, triple: String) {
+        self.target_triple = triple;
+    }
+
+    /// Link flags gathered from imported modules' manifests (for the driver to
+    /// fold into the final link order). Empty unless this unit imports modules.
+    pub fn imported_link_flags(&self) -> &[String] {
+        &self.imported_links
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
@@ -122,6 +153,11 @@ impl Lowerer {
         if let Some(m) = self.current_module.clone() {
             self.mangle_module_exports(&m);
         }
+
+        // Surface module metadata to the driver: the module name (→ manifest
+        // emission) and any link flags pulled in from imported manifests.
+        self.module.sic_module = self.current_module.clone();
+        self.module.imported_links = std::mem::take(&mut self.imported_links);
 
         Ok(self.module)
     }
@@ -255,8 +291,95 @@ impl Lowerer {
                 }
                 // sic `module x;` — this unit's exports get mangled `x_sym`.
                 Decl::Module(name, _) => { self.current_module = Some(name.clone()); }
+                // sic `import x;` / `import x.sym [as alias];` — resolve the
+                // module's manifest and register its exports.
+                Decl::Import { module, sym, alias, span } => {
+                    self.resolve_import(module, sym.as_deref(), alias.as_deref(), span)?;
+                }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Resolve one `import` declaration: load the module's `module_<name>.smod`
+    /// manifest (once per module), hard-error on a triple/version mismatch, make
+    /// every export available namespaced as `module.sym`, and — for a selective
+    /// or renamed import — bind the bare name too. Manifest link flags are folded
+    /// into `imported_links` for the driver to pass to the linker.
+    fn resolve_import(
+        &mut self,
+        module: &str,
+        sym: Option<&str>,
+        alias: Option<&str>,
+        span: &crate::lexer::Span,
+    ) -> Result<()> {
+        use crate::module_manifest::ModuleManifest;
+
+        // Load the manifest once; later imports of the same module reuse it.
+        if !self.imported_modules.contains_key(module) {
+            let file = format!("module_{}.smod", module);
+            let mut found: Option<String> = None;
+            // Search: `-I` dirs first, then the current directory.
+            let mut dirs: Vec<String> = self.include_dirs.clone();
+            dirs.push(".".to_string());
+            for dir in &dirs {
+                let path = std::path::Path::new(dir).join(&file);
+                if path.exists() {
+                    found = Some(path.to_string_lossy().into_owned());
+                    break;
+                }
+            }
+            let path = found.ok_or_else(|| CompileError::at(
+                format!("cannot find module '{}' (looked for '{}' in include dirs)", module, file),
+                span.file.clone(), span.line, span.col,
+            ))?;
+            let text = std::fs::read_to_string(&path).map_err(|e| CompileError::at(
+                format!("reading module manifest '{}': {}", path, e),
+                span.file.clone(), span.line, span.col,
+            ))?;
+            let manifest = ModuleManifest::parse(&text).map_err(|e| CompileError::at(
+                format!("malformed module manifest '{}': {}", path, e),
+                span.file.clone(), span.line, span.col,
+            ))?;
+            // Hard error on version / triple mismatch (no source fallback).
+            if manifest.version != crate::module_manifest::MANIFEST_VERSION {
+                return Err(CompileError::at(
+                    format!("module '{}' manifest version {} != supported {}",
+                        module, manifest.version, crate::module_manifest::MANIFEST_VERSION),
+                    span.file.clone(), span.line, span.col,
+                ));
+            }
+            if !self.target_triple.is_empty() && manifest.triple != self.target_triple {
+                return Err(CompileError::at(
+                    format!("module '{}' was built for target '{}', but this compilation targets '{}'",
+                        module, manifest.triple, self.target_triple),
+                    span.file.clone(), span.line, span.col,
+                ));
+            }
+            let mut exports = HashMap::new();
+            for e in &manifest.exports {
+                exports.insert(e.name.clone(), (e.symbol.clone(), e.ty.clone()));
+            }
+            self.imported_modules.insert(module.to_string(), exports);
+            for l in &manifest.links {
+                if !self.imported_links.contains(l) {
+                    self.imported_links.push(l.clone());
+                }
+            }
+        }
+
+        // Selective / renamed import: bind the bare (or aliased) name.
+        if let Some(s) = sym {
+            let export = self.imported_modules.get(module)
+                .and_then(|m| m.get(s))
+                .cloned()
+                .ok_or_else(|| CompileError::at(
+                    format!("module '{}' has no exported symbol '{}'", module, s),
+                    span.file.clone(), span.line, span.col,
+                ))?;
+            let bind = alias.unwrap_or(s);
+            self.imported_syms.insert(bind.to_string(), export);
         }
         Ok(())
     }
