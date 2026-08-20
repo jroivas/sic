@@ -615,6 +615,7 @@ impl<'m> FuncCtx<'m> {
             Stmt::DoWhile { body, cond, .. } => self.lower_do_while(body, cond)?,
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
+            Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span)?,
             Stmt::Break(_) => {
                 // `break` targets the innermost enclosing loop *or* switch,
                 // whichever is nested deeper — a switch inside a loop breaks the
@@ -1363,6 +1364,77 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// sic `match` over a tagged enum (sic.md §"Match"). Dispatch on the value's
+    /// discriminant; each arm runs in its own scope with the payload bound to the
+    /// arm's name (a borrow of the value's storage). A `_` arm is the default; if
+    /// no arm and no `_` matches at runtime, abort via `__sic_match_fail`.
+    fn lower_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<()> {
+        let sty = self.infer_expr_type(scrutinee)?;
+        if !self.is_tagged_enum_struct(&sty) {
+            return Err(CompileError::at(
+                "match requires a tagged enum value".to_string(), sp.file.clone(), sp.line, sp.col));
+        }
+        let ename = match &sty { Type::Struct(st) => st.name.clone().unwrap(), _ => unreachable!() };
+        let info = self.lowerer.enum_defs.get(&ename).cloned().unwrap();
+        let ptr = self.lower_aggregate_ptr(scrutinee)?;
+        let tag = self.load_enum_tag(ptr.clone(), &sty, sp)?;
+
+        let end_bb = self.new_block_after_current();
+        // The wildcard `_` arm (if any) is the fallback.
+        let wildcard = arms.iter().find(|a| a.variant.is_none());
+
+        for arm in arms.iter().filter(|a| a.variant.is_some()) {
+            let vname = arm.variant.as_ref().unwrap();
+            let v = info.variant(vname).cloned().ok_or_else(|| CompileError::at(
+                format!("enum '{}' has no variant '{}'", ename, vname), sp.file.clone(), sp.line, sp.col))?;
+
+            let arm_bb = self.new_block_after_current();
+            let next_bb = self.new_block_after_current();
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: tag.clone(), rhs: Constant::int(v.tag), ty: Type::i32() });
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb: arm_bb, else_bb: next_bb });
+
+            self.switch_to_block(arm_bb);
+            self.enter_scope();
+            if let Some(bind) = &arm.binding {
+                let pty = v.payload.clone().ok_or_else(|| CompileError::at(
+                    format!("variant '{}::{}' has no payload to bind", ename, vname), sp.file.clone(), sp.line, sp.col))?;
+                // Bind the payload as a borrow of the value's `data` union member.
+                let data_lv = self.enum_data_ptr(ptr.clone(), &sty, sp)?;
+                let slot = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: slot, ty: pty.clone(), align: None });
+                if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    let size = pty.size_of(self.ptr_size());
+                    let align = pty.align_of(self.ptr_size());
+                    self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: data_lv, size, align });
+                } else {
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: d, ptr: data_lv, ty: pty.clone() });
+                    self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(slot) });
+                }
+                self.define_local(bind.clone(), pty, slot);
+            }
+            self.lower_stmt(&arm.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+            self.switch_to_block(next_bb);
+        }
+
+        // Fallback: `_` arm, or a runtime abort on an unmatched variant.
+        if let Some(w) = wildcard {
+            self.enter_scope();
+            self.lower_stmt(&w.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+        } else {
+            let fref = self.lowerer.ensure_match_fail_fn();
+            self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+            self.set_terminator(Terminator::Jump(end_bb)); // abort never returns
+        }
+        self.switch_to_block(end_bb);
+        Ok(())
+    }
+
     // ─── Type coercion / helpers ─────────────────────────────────────────────
 
     pub fn coerce(&mut self, val: Val, target: &Type) -> Result<Val> {
@@ -1549,6 +1621,10 @@ fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             scan_mutated_stmt(body, out);
         }
         Stmt::Switch { val, body, .. } => { scan_mutated_expr(val, out); scan_mutated_stmt(body, out); }
+        Stmt::Match { scrutinee, arms, .. } => {
+            scan_mutated_expr(scrutinee, out);
+            for a in arms { scan_mutated_stmt(&a.body, out); }
+        }
         Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
         | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => scan_mutated_stmt(body, out),
         Stmt::Delete(e, _) => scan_mutated_expr(e, out),
@@ -1597,7 +1673,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
-        | Stmt::For { span, .. } | Stmt::Switch { span, .. } => span.line,
+        | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. } => span.line,
     }
 }
 

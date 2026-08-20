@@ -246,7 +246,20 @@ pub enum Stmt {
     CaseRange(Expr, Expr, BoxStmt, Span),
     Default(BoxStmt, Span),
     Switch { val: Expr, body: BoxStmt, span: Span },
+    /// sic-only: `match (e) { Variant(bind): stmt; _: stmt }` over a tagged enum
+    /// (sic.md §"Match").
+    Match { scrutinee: Expr, arms: Vec<MatchArm>, span: Span },
     Null(Span),
+}
+
+/// One arm of a `match` (sic.md §"Match"): `Variant(binding): body`. A `variant`
+/// of `None` is the `_` wildcard; `binding` names the unwrapped payload.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub variant: Option<String>,
+    pub binding: Option<String>,
+    pub body: BoxStmt,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

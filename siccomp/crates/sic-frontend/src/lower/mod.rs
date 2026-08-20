@@ -2142,6 +2142,10 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
         Stmt::Defer(body, _) => collect_stmt_names(body, out),
         Stmt::Delete(e, _) => collect_expr_names(e, out),
         Stmt::Switch { val, body, .. } => { collect_expr_names(val, out); collect_stmt_names(body, out); }
+        Stmt::Match { scrutinee, arms, .. } => {
+            collect_expr_names(scrutinee, out);
+            for a in arms { collect_stmt_names(&a.body, out); }
+        }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
         | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}
     }

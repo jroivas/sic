@@ -160,6 +160,10 @@ fn check_stmt(s: &Stmt, ctx: &mut Ctx) -> Result<()> {
         }
         Stmt::Default(body, _) | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => check_stmt(body, ctx)?,
         Stmt::Delete(e, _) => check_temp(ctx, |ctx| check_expr(e, ctx))?,
+        Stmt::Match { scrutinee, arms, .. } => {
+            check_temp(ctx, |ctx| check_expr(scrutinee, ctx))?;
+            for a in arms { ctx.push(); check_stmt(&a.body, ctx)?; ctx.pop(); }
+        }
         _ => {}
     }
     Ok(())

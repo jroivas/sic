@@ -955,6 +955,7 @@ impl Parser {
             }
             TokenKind::Goto => self.parse_goto(),
             TokenKind::Switch => self.parse_switch(),
+            TokenKind::Match => self.parse_match(),
             // label: `ident :`
             TokenKind::Ident | TokenKind::TypeName if self.is_label() => self.parse_label(),
             TokenKind::Case => self.parse_case(),
@@ -1182,6 +1183,38 @@ impl Parser {
             self.check_switch_terminators(&body)?;
         }
         Ok(Stmt::Switch { val, body, span: sp })
+    }
+
+    /// sic `match (e) { Variant(bind): stmt; _: stmt }` (sic.md §"Match"). An arm
+    /// is `Pattern : Statement`; the pattern is a variant name with an optional
+    /// `(binding)`, or `_` for the wildcard. Arms are not comma-separated.
+    fn parse_match(&mut self) -> Result<Stmt> {
+        let sp = self.span();
+        self.advance(); // 'match'
+        self.expect(TokenKind::LParen)?;
+        let scrutinee = self.parse_expr()?;
+        self.expect(TokenKind::RParen)?;
+        self.expect(TokenKind::LBrace)?;
+        let mut arms = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            let asp = self.span();
+            let name = self.expect_name()?;
+            // `_` is the wildcard (any remaining variant).
+            let variant = if name == "_" { None } else { Some(name) };
+            let binding = if variant.is_some() && self.eat(TokenKind::LParen) {
+                let b = self.expect_name()?;
+                self.expect(TokenKind::RParen)?;
+                Some(b)
+            } else {
+                None
+            };
+            self.expect(TokenKind::Colon)?;
+            let body = Box::new(self.parse_stmt()?);
+            self.eat(TokenKind::Semi); // optional trailing `;` after a non-block arm
+            arms.push(MatchArm { variant, binding, body, span: asp });
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(Stmt::Match { scrutinee, arms, span: sp })
     }
 
     /// sic requires every switch case to end explicitly with `break` or

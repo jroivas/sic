@@ -1,0 +1,41 @@
+// sic tagged enums (sic.md §"Match") — part 3: the `match` statement. Dispatches
+// on the discriminant, binds the payload per arm, supports a `_` wildcard, and
+// handles a `string` payload. Arms may `return`.
+#include <stdio.h>
+enum Option { Some<int>, None };
+enum Result { Ok<int>, Err<string> };
+
+int optval(Option o) {
+    match (o) {
+        Some(v): return v;      // payload binding
+        None: return 0;
+    }
+    return -1;
+}
+
+int reslen(Result r) {
+    match (r) {
+        Ok(v): return v;
+        Err(m): return (int)m.length;   // string payload binding
+    }
+    return -1;
+}
+
+int firstonly(Result r) {
+    match (r) {
+        Ok(v): return v;
+        _: return 0;            // wildcard
+    }
+    return -1;
+}
+
+int main() {
+    int acc = 0;
+    acc += optval(Some(7));      // 7
+    acc += optval(None);         // 0
+    acc += reslen(Ok(10));       // 10
+    acc += reslen(Err("hey"));   // 3
+    acc += firstonly(Err("x"));  // 0 (wildcard)
+    acc += firstonly(Ok(13));    // 13
+    return acc;                  // 7+0+10+3+0+13 = 33
+}

@@ -2310,6 +2310,25 @@ impl<'m> FuncCtx<'m> {
         matches!(t, Type::Struct(st) if st.name.as_deref() == Some(enum_name))
     }
 
+    /// If `pty` is a tagged-enum struct and the arg `pval` is a bare discriminant
+    /// (an integer tag), build the enum value into a temporary and repoint `pval`
+    /// at it. Returns whether it handled the argument.
+    pub(super) fn build_enum_arg(&mut self, pval: &mut Val, pty: &Type, sp: &crate::lexer::Span) -> Result<bool> {
+        if !(self.is_sic() && self.is_tagged_enum_struct(pty)) {
+            return Ok(false);
+        }
+        if !matches!(self.val_type(pval), Type::Int { .. }) {
+            // Already a proper enum value (pointer to storage).
+            return Ok(false);
+        }
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: pty.clone(), align: None });
+        self.val_types.insert(slot.0, pty.clone());
+        self.build_enum_from_tag(&Val::Local(slot), pty, pval.clone(), sp)?;
+        *pval = Val::Local(slot);
+        Ok(true)
+    }
+
     /// True if `t` is any tagged-enum representation struct.
     pub(super) fn is_tagged_enum_struct(&self, t: &Type) -> bool {
         matches!(t, Type::Struct(st) if st.name.as_deref()
@@ -2333,6 +2352,12 @@ impl<'m> FuncCtx<'m> {
     pub(super) fn load_enum_tag(&mut self, ptr: Val, struct_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
         let tag_lv = self.field_ptr_from(LValue::plain(ptr, struct_ty.clone()), "tag", false, sp)?;
         self.load_lvalue(&tag_lv)
+    }
+
+    /// Pointer to a tagged-enum value's payload (`data` union member).
+    pub(super) fn enum_data_ptr(&mut self, ptr: Val, struct_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let data_lv = self.field_ptr_from(LValue::plain(ptr, struct_ty.clone()), "data", false, sp)?;
+        Ok(data_lv.ptr)
     }
 
     /// Materialize a tagged-enum value of type `enum_ty` from `e` and return a
@@ -2957,6 +2982,7 @@ impl<'m> FuncCtx<'m> {
             for (i, pval) in arg_vals.iter_mut().enumerate() {
                 if let Some(pty) = param_tys.get(i + 1) {
                     if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                        if self.build_enum_arg(pval, pty, sp)? { continue; }
                         if self.is_sic() && super::types::is_sic_string(pty) {
                             let vt = self.val_type(pval);
                             let already = matches!(&vt, Type::Pointer(inner) if super::types::is_sic_string(inner));
@@ -2990,6 +3016,9 @@ impl<'m> FuncCtx<'m> {
                 // Struct/union args are already lowered to a pointer to the value
                 // (by-value ABI); leave them as-is.
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    // sic: a bare (payload-less) variant discriminant passed to an
+                    // enum parameter is materialized into the enum value here.
+                    if self.build_enum_arg(pval, pty, sp)? { continue; }
                     // A `char*`/string-literal passed to a `string` parameter must
                     // be wrapped in a (non-owning) descriptor; a real string arg is
                     // already a descriptor pointer.
