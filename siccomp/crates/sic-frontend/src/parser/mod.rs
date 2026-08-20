@@ -1076,6 +1076,11 @@ impl Parser {
         let sp = self.span();
         self.advance(); // 'if'
         self.expect(TokenKind::LParen)?;
+        // sic guarded unwrap `if (T v = Enum::VARIANT(inst)) { .. } else { .. }`
+        // (sic.md §"Match"): a non-throwing unwrap. Desugars to a `match`.
+        if self.lang == Lang::Sic && self.is_decl_start() {
+            return self.parse_if_let(sp);
+        }
         let wrapped = self.at(TokenKind::LParen);
         let cond = self.parse_expr()?;
         self.reject_bare_assign_cond(&cond, wrapped)?;
@@ -1094,6 +1099,44 @@ impl Parser {
         }
         let else_ = if self.eat(TokenKind::Else) { Some(Box::new(self.parse_stmt()?)) } else { None };
         Ok(Stmt::If { cond, then, else_, span: sp })
+    }
+
+    /// sic `if (T name = Enum::VARIANT(inst)) then [else]` — a non-throwing enum
+    /// unwrap that binds `name` to the payload in the `then` branch when `inst` is
+    /// that variant (sic.md §"Match"). Desugared to an equivalent `match`: the
+    /// declared type is syntactic (the payload type is authoritative).
+    fn parse_if_let(&mut self, sp: Span) -> Result<Stmt> {
+        let (base, _) = self.parse_decl_specifiers()?;
+        let (name, _ty) = self.parse_declarator(base)?;
+        self.expect(TokenKind::Eq)?;
+        let init = self.parse_assign_expr()?;
+        self.expect(TokenKind::RParen)?;
+
+        // The initializer must be an enum unwrap `Enum::Variant(value)`.
+        let (variant, inst) = match &init.kind {
+            ExprKind::Call { func, args }
+                if args.len() == 1 && matches!(&func.kind, ExprKind::EnumVariant { .. }) =>
+            {
+                let ExprKind::EnumVariant { variant, .. } = &func.kind else { unreachable!() };
+                (variant.clone(), args[0].clone())
+            }
+            _ => return Err(CompileError::at(
+                "sic `if (T v = ...)` requires an enum unwrap `Enum::Variant(value)`".to_string(),
+                sp.file.clone(), sp.line, sp.col)),
+        };
+
+        let then = Box::new(self.parse_stmt()?);
+        let else_body = if self.eat(TokenKind::Else) {
+            Box::new(self.parse_stmt()?)
+        } else {
+            // No `else`: a non-matching variant is simply skipped (no abort).
+            Box::new(Stmt::Null(sp.clone()))
+        };
+        let arms = vec![
+            MatchArm { variant: Some(variant), binding: Some(name), body: then, span: sp.clone() },
+            MatchArm { variant: None, binding: None, body: else_body, span: sp.clone() },
+        ];
+        Ok(Stmt::Match { scrutinee: inst, arms, span: sp })
     }
 
     fn parse_while(&mut self) -> Result<Stmt> {

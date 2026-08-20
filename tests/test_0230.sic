@@ -1,0 +1,8 @@
+// sic tagged enums (sic.md §"Match") — a bare `Enum::VARIANT(inst)` unwrap of the
+// wrong variant aborts at runtime (SIGABRT / exit 134).
+enum Test { NONE, BLACK = 1, CUSTOM(int) };
+int main() {
+    Test b = BLACK;
+    int cv = Test::CUSTOM(b);   // b is not CUSTOM -> __sic_match_fail -> abort
+    return cv;
+}

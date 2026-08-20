@@ -1,0 +1,14 @@
+// sic tagged enums (sic.md §"Match") — part 4: the `if (T v = Enum::VARIANT(x))`
+// guarded unwrap. Non-throwing: the branch (and binding) apply only when `x` is
+// that variant; a non-match takes the `else` (or is skipped).
+enum Test { NONE, BLACK = 1, CUSTOM(int) };
+int main() {
+    Test c = Test::CUSTOM(42);
+    Test b = BLACK;
+    int acc = 0;
+    if (int cv = Test::CUSTOM(c)) { acc += cv; }        // +42
+    if (int cv = Test::CUSTOM(b)) { acc += 1000; }      // b not CUSTOM: skipped
+    else { acc += 8; }                                   // +8
+    if (int cv = Test::CUSTOM(c)) acc += cv; else acc -= 1;  // +42 (unbraced)
+    return acc;   // 42 + 8 + 42 = 92
+}
