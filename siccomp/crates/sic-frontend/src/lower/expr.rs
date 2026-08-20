@@ -888,6 +888,37 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// sic fat-pointer bounds check: abort if `idx * elem_size >= header.size`,
+    /// where the header `size` sits at `base - 2*ptr_size` (sic.md §"Scopes and
+    /// automatic release"). `base` must point at the allocation start.
+    fn emit_bounds_check(&mut self, base: Val, idx: Val, elem_size: u64) -> Result<()> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let idx_u = self.coerce(idx, &usize_ty)?;
+        let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
+        let off = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: off, op: BinOp::Mul, lhs: idx_u, rhs: esz, ty: usize_ty.clone() });
+
+        // size = *(usize*)(base - 2*ptr_size)
+        let bc = self.coerce(base, &Type::char_ptr())?;
+        let szp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: szp, base: bc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
+        let size = self.alloc_val();
+        self.push_instr(Instr::Load { dest: size, ptr: Val::Local(szp), ty: usize_ty.clone() });
+
+        // if off >= size → __sic_bounds_fail()
+        let oob = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: oob, op: CmpOp::IUGe, lhs: Val::Local(off), rhs: Val::Local(size), ty: usize_ty });
+        let fail_bb = self.new_block_after_current();
+        let ok_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(oob), then_bb: fail_bb, else_bb: ok_bb });
+        self.switch_to_block(fail_bb);
+        let fref = self.lowerer.ensure_bounds_fail_fn();
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+        self.set_terminator(Terminator::Jump(ok_bb)); // abort never returns
+        self.switch_to_block(ok_bb);
+        Ok(())
+    }
+
     /// sic `@expr` / `@mut expr` (sic.md §"References"): retain the referent's
     /// allocation and register a scope-exit release, so it stays alive for the
     /// enclosing scope. The reference value is the referent pointer.
@@ -3007,6 +3038,22 @@ impl<'m> FuncCtx<'m> {
         let idx_i64 = self.coerce(idx_val, &Type::i64())?;
 
         let base_ty = self.val_type(&base_val);
+
+        // sic fat-pointer bounds check: for `name[i]` where `name` is a
+        // never-moved `new`/`@` pointer, verify `i*elem_size < header.size`.
+        if self.is_sic() {
+            if let ExprKind::Ident(name) = &base.kind {
+                if self.fat_locals.contains(name) {
+                    let elem = match &base_ty {
+                        Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
+                        _ => Type::i32(),
+                    };
+                    let esz = elem.size_of(self.ptr_size()).max(1);
+                    self.emit_bounds_check(base_val.clone(), idx_i64.clone(), esz)?;
+                }
+            }
+        }
+
         // `Pointer(Array[T;N])` is ambiguous in the IR: it is both the address of
         // an array *variable* `T v[N]` (where `v[i]` is a `T`) and the value of a
         // pointer-to-array `T (*e)[N]` (where `e[i]` is the whole `T[N]`). The C

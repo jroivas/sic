@@ -90,6 +90,7 @@ impl Lowerer {
             self.ensure_str_length_fn();
             self.ensure_str_retain_fn();
             self.ensure_str_release_fn();
+            self.ensure_bounds_fail_fn();
         }
 
         // Second pass: lower function bodies and global initializers
@@ -564,6 +565,45 @@ impl Lowerer {
             fc.set_terminator(Terminator::Jump(done));
             fc.switch_to_block(done);
             fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func)
+    }
+
+    /// Synthesize `void __sic_bounds_fail()` — write a message to stderr (fd 2)
+    /// and `abort()` on a failed fat-pointer bounds check (sic.md §"Scopes and
+    /// automatic release": "runtime exception").
+    pub(crate) fn ensure_bounds_fail_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_bounds_fail") {
+            return f;
+        }
+        let voidp = Type::void_ptr();
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let write_fref = self.module.func_ref_by_name("write").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "write".to_string(),
+                sig: FunctionType { ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
+            })
+        });
+        let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "abort".to_string(),
+                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+            })
+        });
+        let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
+        let mut func = Function::new("__sic_bounds_fail".to_string(), sig, vec![], Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let msg = "sic: fat-pointer bounds check failed\n";
+            let ptr = fc.emit_cstring(msg);
+            let ptr = fc.coerce(ptr, &voidp).unwrap();
+            let len = fc.coerce(Constant::uint(msg.len() as u64), &usize_ty).unwrap();
+            let two = fc.coerce(Constant::int(2), &Type::i32()).unwrap();
+            fc.push_instr(Instr::Call { dest: None, func: write_fref, args: vec![two, ptr, len], ret_ty: Type::i64() });
+            fc.push_instr(Instr::Call { dest: None, func: abort_fref, args: vec![], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Ret(None)); // unreachable after abort
         }
         self.module.add_function(func)
     }

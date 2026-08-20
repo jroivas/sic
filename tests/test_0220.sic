@@ -1,0 +1,11 @@
+// SIC fat-pointer bounds check failure (sic.md §"Scopes and automatic release"):
+// indexing one past a `new int(10)` allocation must fail the check
+// `10 * sizeof(int) < size_of_allocation` and raise a runtime exception (abort,
+// SIGABRT → exit 134). Expected exit code is 134 (see .res).
+int main()
+{
+    int *v = new int(10);
+    v[10] = 0;    // out of bounds → __sic_bounds_fail → abort
+    del v;
+    return 0;
+}

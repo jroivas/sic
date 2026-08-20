@@ -74,6 +74,13 @@ pub struct FuncCtx<'m> {
     /// Scope depth recorded per `loop_stack` entry, so `continue` runs cleanups
     /// for the scopes it exits.
     pub continue_scope_depth: Vec<usize>,
+    /// sic fat-pointer bounds checking (sic.md §"Scopes and automatic release"):
+    /// names of `new`-initialized / `@`-reference locals that are never mutated,
+    /// so `name[i]` can be bounds-checked against the header size at
+    /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
+    /// ARE reassigned / incremented (and so cannot be safely checked).
+    pub fat_locals: std::collections::HashSet<String>,
+    pub moved_names: std::collections::HashSet<String>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -106,6 +113,8 @@ impl<'m> FuncCtx<'m> {
             cleanups: vec![Vec::new()],
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
+            fat_locals: std::collections::HashSet::new(),
+            moved_names: std::collections::HashSet::new(),
         }
     }
 
@@ -421,12 +430,24 @@ impl<'m> Lowerer {
         // With the sret ABI the hidden result pointer occupies sentinel 0, so
         // user parameters are shifted by one.
         fc.enter_scope();
+        // sic bounds checking: pre-scan which locals are mutated, so only
+        // never-moved `new`/`@` pointers are treated as checkable fat pointers.
+        if fc.is_sic() {
+            for s in body { scan_mutated_stmt(s, &mut fc.moved_names); }
+        }
         let param_base = if is_sret { 1 } else { 0 };
         if is_sret {
             fc.sret = Some((Val::Local(ValId(0x10000)), ir_ret.clone()));
         }
         for (i, p) in params.iter().enumerate() {
             if let Some(pname) = &p.name {
+                // A never-moved `@`-reference param is a checkable fat pointer.
+                if fc.is_sic()
+                    && p.ty.qualifiers.iter().any(|q| matches!(q, crate::ast::TypeQual::Reference { .. }))
+                    && !fc.moved_names.contains(pname)
+                {
+                    fc.fat_locals.insert(pname.clone());
+                }
                 let pty = ir_params[i].clone();
                 let sentinel = ValId((i + param_base) as u32 + 0x10000);
                 let ptr_vid = fc.alloc_val();
@@ -800,6 +821,18 @@ impl<'m> FuncCtx<'m> {
                     // zero-inits `rc` to NULL, and releasing NULL is a no-op.
                     if self.is_sic() && super::types::is_sic_string(&ty) {
                         self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(vid) });
+                    }
+                    // sic bounds checking: a never-moved pointer initialized from
+                    // `new` (or declared as a `@`-reference) is a checkable fat
+                    // pointer — `name[i]` reads the header size at `name-2*ptr`.
+                    if self.is_sic() && !d.name.is_empty() && !self.moved_names.contains(&d.name) {
+                        let is_new_init = matches!(&d.init,
+                            Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::New { .. }));
+                        let is_ref = d.ty.qualifiers.iter()
+                            .any(|q| matches!(q, crate::ast::TypeQual::Reference { .. }));
+                        if is_new_init || is_ref {
+                            self.fat_locals.insert(d.name.clone());
+                        }
                     }
                     // Track last declared scalar local for implicit return
                     if matches!(ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_) | Type::Bool) {
@@ -1415,6 +1448,86 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
         Instr::Select { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::VaArg { dest, ty, .. } => Some((*dest, ty.clone())),
         _ => None,
+    }
+}
+
+/// Pre-scan: collect names of locals that are *mutated* somewhere in the body —
+/// reassigned (`x = …`, `x += …`), incremented (`x++`, `--x`), swapped (`x <> y`)
+/// or address-taken (`&x`). A `new`/`@` pointer in this set can't be safely
+/// bounds-checked via its header (it may no longer point at the allocation base),
+/// so it is excluded from `fat_locals`.
+fn scan_mutated_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    use ExprKind::*;
+    // Record the mutated name at this node.
+    match &e.kind {
+        Assign { lhs, .. } => { if let Ident(n) = &lhs.kind { out.insert(n.clone()); } }
+        PreInc { expr, .. } | PostInc { expr, .. } => { if let Ident(n) = &expr.kind { out.insert(n.clone()); } }
+        Unary { op: crate::ast::UnOpKind::Addr, expr } => { if let Ident(n) = &expr.kind { out.insert(n.clone()); } }
+        Swap { lhs, rhs } => {
+            if let Ident(n) = &lhs.kind { out.insert(n.clone()); }
+            if let Ident(n) = &rhs.kind { out.insert(n.clone()); }
+        }
+        _ => {}
+    }
+    // Recurse into children.
+    match &e.kind {
+        BinOp { lhs, rhs, .. } | Comma(lhs, rhs) | Assign { lhs, rhs, .. } | Swap { lhs, rhs } => {
+            scan_mutated_expr(lhs, out); scan_mutated_expr(rhs, out);
+        }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
+        | SizeofExpr(expr) | AlignofExpr(expr) | Cast { expr, .. } | Ref { expr, .. } => scan_mutated_expr(expr, out),
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+            scan_mutated_expr(cond, out); scan_mutated_expr(then, out); scan_mutated_expr(else_, out);
+        }
+        Elvis { cond, else_ } => { scan_mutated_expr(cond, out); scan_mutated_expr(else_, out); }
+        Call { func, args } => { scan_mutated_expr(func, out); for a in args { scan_mutated_expr(a, out); } }
+        Index { base, index } => { scan_mutated_expr(base, out); scan_mutated_expr(index, out); }
+        Slice { base, lo, hi } => {
+            scan_mutated_expr(base, out);
+            if let Some(x) = lo { scan_mutated_expr(x, out); }
+            if let Some(x) = hi { scan_mutated_expr(x, out); }
+        }
+        New { count, .. } => { if let Some(x) = count { scan_mutated_expr(x, out); } }
+        Field { base, .. } | Arrow { base, .. } => scan_mutated_expr(base, out),
+        Generic { controlling, assocs } => { scan_mutated_expr(controlling, out); for (_, x) in assocs { scan_mutated_expr(x, out); } }
+        StmtExpr(stmts) => { for s in stmts { scan_mutated_stmt(s, out); } }
+        VaStart { list, last } => { scan_mutated_expr(list, out); scan_mutated_expr(last, out); }
+        VaArg { list, .. } | VaEnd { list } => scan_mutated_expr(list, out),
+        VaCopy { dst, src } => { scan_mutated_expr(dst, out); scan_mutated_expr(src, out); }
+        _ => {}
+    }
+}
+
+fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match s {
+        Stmt::Decl(Decl::Var { declarators, .. }) => {
+            for d in declarators {
+                if let Some(Initializer::Expr(e)) = &d.init { scan_mutated_expr(e, out); }
+            }
+        }
+        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) => scan_mutated_expr(e, out),
+        Stmt::Block(ss, _) => for s in ss { scan_mutated_stmt(s, out); },
+        Stmt::If { cond, then, else_, .. } => {
+            scan_mutated_expr(cond, out); scan_mutated_stmt(then, out);
+            if let Some(e) = else_ { scan_mutated_stmt(e, out); }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            scan_mutated_expr(cond, out); scan_mutated_stmt(body, out);
+        }
+        Stmt::For { init, cond, post, body, .. } => {
+            if let Some(ForInit::Expr(e)) = init { scan_mutated_expr(e, out); }
+            if let Some(ForInit::Decl(Decl::Var { declarators, .. })) = init {
+                for d in declarators { if let Some(Initializer::Expr(e)) = &d.init { scan_mutated_expr(e, out); } }
+            }
+            if let Some(e) = cond { scan_mutated_expr(e, out); }
+            if let Some(e) = post { scan_mutated_expr(e, out); }
+            scan_mutated_stmt(body, out);
+        }
+        Stmt::Switch { val, body, .. } => { scan_mutated_expr(val, out); scan_mutated_stmt(body, out); }
+        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
+        | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => scan_mutated_stmt(body, out),
+        Stmt::Delete(e, _) => scan_mutated_expr(e, out),
+        _ => {}
     }
 }
 

@@ -1,0 +1,35 @@
+// SIC fat-pointer bounds checks, in-bounds behavior (sic.md §"Scopes and
+// automatic release" / §"References"). A never-moved `new`/`@` pointer indexed
+// as `name[i]` is checked against the header size; valid accesses pass. Moved or
+// copied pointers are not checked (documented gap) and must not false-abort.
+#include <string.h>
+
+int slen(@char *s) {        // reference param: s[i] is bounds-checked
+    int i = 0;
+    while (s[i]) i++;
+    return i;
+}
+
+int main()
+{
+    int *v = new int(10);
+    for (int i = 0; i < 10; i++) v[i] = i * i;   // all in bounds
+    int sum = 0;
+    for (int i = 0; i < 10; i++) sum += v[i];
+    if (sum != 285) return 1;
+    del v;
+
+    // Reference indexing, in bounds.
+    char *n = new char(6);
+    memcpy(n, "hello", 6);
+    if (slen(@n) != 5) return 2;
+
+    // A copied / walked pointer is not a fat pointer → not checked, no abort.
+    char *p = n;
+    int j = 0;
+    while (*p) { p++; j++; }
+    if (j != 5) return 3;
+    del n;
+
+    return 0;
+}
