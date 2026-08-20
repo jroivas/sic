@@ -1,0 +1,11 @@
+// sic arrays (sic.md §"Arrays and lists"): `.length` = element count, `.size` =
+// byte size, both computed from the array type.
+int main() {
+    int v[5];
+    long w[3];
+    for (int i = 0; i < v.length; i++) v[i] = i;   // 0..4
+    if (v.size != 20) return 91;    // 5 * 4
+    if (w.length != 3) return 92;
+    if (w.size != 24) return 93;    // 3 * 8
+    return (int)v.length + (int)w.length;   // 8
+}

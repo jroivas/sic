@@ -238,6 +238,16 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // sic array accessors (sic.md §"Arrays and lists"): `.length` is the
+                // element count, `.size` the byte size. Both fold from the array
+                // type (fixed arrays and concat temporaries alike).
+                if self.is_sic() && (name == "length" || name == "size") {
+                    if let Ok(Type::Array { elem, len }) = self.infer_expr_type(base) {
+                        let n = len as u64;
+                        let v = if name == "length" { n } else { n * elem.size_of(self.ptr_size()) };
+                        return Ok(self.size_t_val(v));
+                    }
+                }
                 let lv = self.lower_lvalue_field(base, name)?;
                 // An array member decays to a pointer to its first element.
                 if matches!(lv.ty, Type::Array { .. }) {
@@ -3583,6 +3593,10 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && super::types::is_sic_string(&base_ty) {
                     if name == "ptr" { return Ok(Type::char_ptr()); }
                     if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
+                }
+                // sic array `.length` / `.size` are `usize` (sic.md §"Arrays and lists").
+                if self.is_sic() && matches!(base_ty, Type::Array { .. }) && (name == "length" || name == "size") {
+                    return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                 }
                 if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
