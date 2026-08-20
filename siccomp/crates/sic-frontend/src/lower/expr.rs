@@ -188,6 +188,8 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::New { ty, count } => self.lower_new(ty, count.as_deref()),
 
+            ExprKind::Ref { expr, .. } => self.lower_ref(expr),
+
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
 
             ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
@@ -819,6 +821,13 @@ impl<'m> FuncCtx<'m> {
     /// and `free` the block when it reaches 0. A NULL pointer is a no-op.
     pub(crate) fn lower_delete(&mut self, e: &Expr) -> Result<()> {
         let p = self.lower_expr(e)?;
+        self.emit_rc_release(p)
+    }
+
+    /// Decrement the fat-pointer header refcount at `p - ptr_size` and `free` the
+    /// block (`p - 2*ptr_size`) at 0. NULL is a no-op. Shared by `del` and by a
+    /// `@` reference's scope-exit release.
+    pub(crate) fn emit_rc_release(&mut self, p: Val) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
 
@@ -853,6 +862,46 @@ impl<'m> FuncCtx<'m> {
 
         self.switch_to_block(done_bb);
         Ok(())
+    }
+
+    /// Increment the fat-pointer header refcount at `p - ptr_size`. NULL is a
+    /// no-op. Used when a `@` reference retains its referent.
+    fn emit_rc_retain(&mut self, p: Val) -> Result<()> {
+        let pc = self.coerce(p, &Type::char_ptr())?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: pc.clone(), rhs: Constant::zero(), ty: Type::char_ptr() });
+        let body_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: body_bb });
+        self.switch_to_block(body_bb);
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc, index: Constant::int(-(self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
+        let rc = self.alloc_val();
+        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        let newrc = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Add, lhs: Val::Local(rc), rhs: one, ty: usize_ty });
+        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
+        self.set_terminator(Terminator::Jump(done_bb));
+        self.switch_to_block(done_bb);
+        Ok(())
+    }
+
+    /// sic `@expr` / `@mut expr` (sic.md §"References"): retain the referent's
+    /// allocation and register a scope-exit release, so it stays alive for the
+    /// enclosing scope. The reference value is the referent pointer.
+    fn lower_ref(&mut self, expr: &Expr) -> Result<Val> {
+        let p = self.lower_expr(expr)?;
+        let pc = self.coerce(p.clone(), &Type::char_ptr())?;
+        self.emit_rc_retain(pc.clone())?;
+        // Stash the (char*) pointer so the scope-exit release can reach it.
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
+        self.push_instr(Instr::Store { val: pc, ptr: Val::Local(slot) });
+        self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(slot) });
+        // The reference's value is the referent pointer, with its own type.
+        Ok(p)
     }
 
     /// Emit `memcpy(dst, src, n)`.
@@ -3271,6 +3320,8 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Slice { .. } => Ok(super::types::sic_string_type(self.ptr_size())),
             // `new T` / `new T(n)` yields `T*`.
             ExprKind::New { ty, .. } => Ok(Type::Pointer(Box::new(self.lower_type(ty)?))),
+            // `@expr` has the referent's (pointer) type.
+            ExprKind::Ref { expr, .. } => self.infer_expr_type(expr),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
             // GCC statement expression `({ ...; expr; })` has the type of its last
             // statement when that is an expression statement, else void. Needed so

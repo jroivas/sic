@@ -1,0 +1,46 @@
+// SIC `@` references, first slice (sic.md §"References"): `@expr` / `@mut expr`
+// forms a scoped, reference-counted borrow — it retains the referent's
+// allocation for the enclosing scope and releases it at scope exit. `@T` / `@mut
+// T` type syntax marks a reference; codegen-wise it is the underlying pointer.
+#include <string.h>
+
+// Reference parameter, used as an ordinary (immutable) pointer.
+int slen(@char *s) {
+    int i = 0;
+    while (s[i]) i++;
+    return i;
+}
+
+// Mutable reference parameter.
+void upper0(@mut char *s) { s[0] = s[0] - 32; }
+
+int main()
+{
+    char *n = new char(12);
+    memcpy(n, "hello world", 12);
+
+    // Passing a reference: @n retains n across the call.
+    if (slen(@n) != 11) return 1;
+
+    // Reference bound to a local, used, released at scope exit.
+    @char *r = @n;
+    if (strcmp(r, "hello world") != 0) return 2;
+
+    // @mut permits mutation of the referent.
+    upper0(@mut n);
+    if (n[0] != 'H') return 3;
+
+    // The caller still owns n and frees it manually; references only borrow.
+    del n;
+
+    // References in a loop don't accumulate (retain/release balance each iter).
+    char *m = new char(4);
+    m[0] = 'x'; m[1] = 0;
+    for (int i = 0; i < 100; i++) {
+        @char *ref = @m;
+        if (ref[0] != 'x') return 4;
+    }
+    del m;
+
+    return 0;
+}

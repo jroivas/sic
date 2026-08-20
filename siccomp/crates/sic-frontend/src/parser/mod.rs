@@ -299,12 +299,32 @@ impl Parser {
 
     // ─── Declaration specifiers ───────────────────────────────────────────────
 
+    /// Consume a contextual `mut` (only right after `@`), returning whether it
+    /// was present. `mut` is not a reserved keyword, so ordinary code may still
+    /// use it as an identifier.
+    fn eat_contextual_mut(&mut self) -> bool {
+        if self.peek_kind() == TokenKind::Ident && self.peek().text == "mut" {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     fn parse_decl_specifiers(&mut self) -> Result<(QualType, Option<StorageClass>)> {
         let mut storage: Option<StorageClass> = None;
         let mut quals: Vec<TypeQual> = Vec::new();
         let mut signed: Option<bool> = None;
         let mut base: Option<AstType> = None;
         let mut long_count = 0u32;
+
+        // sic `@T` / `@mut T` reference type (sic.md §"References"): a leading `@`
+        // marks the whole declared type as a scoped reference.
+        if self.at(TokenKind::At) {
+            self.advance();
+            let mutable = self.eat_contextual_mut();
+            quals.push(TypeQual::Reference { mutable });
+        }
 
         loop {
             self.skip_attributes();
@@ -906,6 +926,22 @@ impl Parser {
             | TokenKind::Attribute)
         {
             return true;
+        }
+        // sic `@T` / `@mut T` local declaration: a leading `@` followed (past an
+        // optional contextual `mut`) by a type token. `@expr;` as a bare statement
+        // stays an expression (its next token isn't a type).
+        if self.peek_kind() == TokenKind::At {
+            let mut j = self.pos + 1;
+            if self.tokens.get(j).map(|t| t.kind) == Some(TokenKind::Ident)
+                && self.tokens.get(j).map(|t| t.text.as_str()) == Some("mut")
+            {
+                j += 1;
+            }
+            return matches!(self.tokens.get(j).map(|t| t.kind), Some(
+                TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+                | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+                | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
+                | TokenKind::Enum | TokenKind::Const | TokenKind::TypeName));
         }
         self.typename_starts_decl()
     }
@@ -1541,6 +1577,13 @@ impl Parser {
                 self.advance();
                 let e = self.parse_cast()?;
                 Ok(Expr::new(ExprKind::Unary { op: UnOpKind::BitNot, expr: Box::new(e) }, sp))
+            }
+            // sic `@expr` / `@mut expr` — form a scoped reference (sic.md §"References").
+            TokenKind::At => {
+                self.advance();
+                let mutable = self.eat_contextual_mut();
+                let e = self.parse_cast()?;
+                Ok(Expr::new(ExprKind::Ref { mutable, expr: Box::new(e) }, sp))
             }
             // sic `new T` / `new T(count)` (sic.md §"Scopes and automatic release").
             TokenKind::New => {

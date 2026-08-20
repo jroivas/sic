@@ -488,6 +488,7 @@ impl Lexer {
             ('^', _, _)   => (TokenKind::Caret,    "^"),
             ('~', _, _)   => (TokenKind::Tilde,    "~"),
             ('?', _, _)   => (TokenKind::Question, "?"),
+            ('@', _, _)   => (TokenKind::At,       "@"),
             (':', _, _)   => (TokenKind::Colon,    ":"),
             (';', _, _)   => (TokenKind::Semi,     ";"),
             (',', _, _)   => (TokenKind::Comma,    ","),

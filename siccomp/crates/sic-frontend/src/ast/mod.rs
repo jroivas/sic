@@ -25,6 +25,9 @@ pub enum TypeQual {
     /// `inline` function specifier (carried on the decl-specifier `QualType` so
     /// function definitions can record it; see `Decl::Func::inline`).
     Inline,
+    /// sic-only: `@T` / `@mut T` reference type (sic.md §"References"). A scoped,
+    /// reference-counted borrow; codegen-wise it is the underlying pointer type.
+    Reference { mutable: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +287,11 @@ pub enum ExprKind {
     /// allocate `count` (default 1) elements of `T` with a refcount header;
     /// yields `T*`.
     New { ty: QualType, count: Option<BoxExpr> },
+
+    /// SIC `@expr` / `@mut expr` (sic.md §"References"): form a scoped
+    /// reference-counted borrow of `expr` — retains the referent's allocation for
+    /// the enclosing scope. Value is the referent pointer.
+    Ref { mutable: bool, expr: BoxExpr },
 
     /// Unary prefix
     Unary { op: UnOpKind, expr: BoxExpr },

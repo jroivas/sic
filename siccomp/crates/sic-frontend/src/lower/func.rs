@@ -18,6 +18,9 @@ pub enum Cleanup {
     /// sic transient `string.ptr` C-string copy: `free` the pointer held in
     /// `slot` (a `char*` slot, NULL when `.ptr` needed no copy) at scope exit.
     FreePtr { slot: Val },
+    /// sic `@` reference: release (decrement + free at 0) the referent pointer
+    /// held in `slot` at scope exit (sic.md §"References").
+    RefRelease { slot: Val },
 }
 
 /// Per-function lowering context.
@@ -213,6 +216,11 @@ impl<'m> FuncCtx<'m> {
             Cleanup::Defer(stmt) => { let _ = self.lower_stmt(&stmt); }
             Cleanup::StringRelease { addr } => self.emit_string_release_at(addr),
             Cleanup::FreePtr { slot } => self.emit_free_ptr_slot(slot),
+            Cleanup::RefRelease { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });
+                let _ = self.emit_rc_release(Val::Local(p));
+            }
         }
     }
 

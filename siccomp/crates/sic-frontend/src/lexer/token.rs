@@ -66,6 +66,7 @@ pub enum TokenKind {
     Eq, EqEq, BangEq,
     Lt, Gt, LtEq, GtEq,
     Question, Colon, Semi, Comma, Dot, Arrow, Ellipsis,
+    At,       // sic-only: `@` reference type / reference-taking (sic.md §"References")
 
     // --- Delimiters ---
     LParen, RParen,
