@@ -1,0 +1,36 @@
+// SIC struct reordering (sic.md §"Struct reordering"): fields are physically
+// placed largest-first (stable within a size) to cut padding, while declaration
+// order still governs positional init and by-name access. `__attribute__((
+// __order__))` (and `packed`) keep the declared C layout.
+#include <stddef.h>
+
+// {u8, u64, u8}: C layout is 24 bytes (a@0, pad, b@8, c@16). Reordered the u64
+// leads → 16 bytes (b@0, a@8, c@9).
+struct S { unsigned char a; unsigned long b; unsigned char c; };
+struct K { unsigned char a; unsigned long b; unsigned char c; } __attribute__((__order__));
+
+int main()
+{
+    // Reordered: smaller, u64 placed first.
+    if (sizeof(struct S) != 16) return 1;
+    if (offsetof(struct S, b) != 0) return 2;
+    if (offsetof(struct S, a) < 8) return 3;
+
+    // __order__ opts out: declared C layout preserved.
+    if (sizeof(struct K) != 24) return 4;
+    if (offsetof(struct K, a) != 0 || offsetof(struct K, b) != 8 || offsetof(struct K, c) != 16) return 5;
+
+    // Positional initializer follows DECLARATION order despite the reorder.
+    struct S s = { 1, 2, 3 };
+    if (s.a != 1 || s.b != 2 || s.c != 3) return 6;
+
+    // By-name access/mutation unaffected.
+    s.b = 99;
+    if (s.b != 99) return 7;
+
+    // A struct with no reorderable padding stays the same size either way.
+    struct T { unsigned int x; unsigned int y; };
+    if (sizeof(struct T) != 8) return 8;
+
+    return 0;
+}

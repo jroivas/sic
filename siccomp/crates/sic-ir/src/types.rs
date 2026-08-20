@@ -33,12 +33,18 @@ pub struct StructType {
     /// Type-level `__attribute__((aligned(n)))` on the struct itself, raising the
     /// whole type's alignment (QEMU's `QEMU_ALIGNED` on `CPUTLBDescFast`).
     pub min_align: Option<u32>,
+    /// sic struct reordering (sic.md §"Struct reordering"): when `Some(perm)`,
+    /// fields are physically placed in `perm` order (a permutation of field
+    /// indices) instead of declaration order, but offsets are still reported per
+    /// declaration index — so initializers and by-name access are unaffected while
+    /// padding shrinks. `None` = declaration order (the C layout).
+    pub layout_order: Option<Vec<usize>>,
 }
 
 impl StructType {
     /// Construct a plain (bit-field-free) struct.
     pub fn plain(name: Option<String>, fields: Vec<(String, Type)>, packed: bool) -> Self {
-        StructType { name, fields, packed, bitfields: Vec::new(), field_aligns: Vec::new(), min_align: None }
+        StructType { name, fields, packed, bitfields: Vec::new(), field_aligns: Vec::new(), min_align: None, layout_order: None }
     }
 
     fn bitfield_width(&self, idx: usize) -> Option<u32> {
@@ -178,12 +184,22 @@ impl StructType {
     /// bit-field packing rules (small consecutive bit-fields share a storage
     /// unit; a field that would cross a unit boundary starts a new unit).
     pub fn layout_full(&self, ptr_size: u32) -> (Vec<u64>, Vec<u32>, u64) {
-        let mut byte_offsets = Vec::with_capacity(self.fields.len());
-        let mut bit_offsets = Vec::with_capacity(self.fields.len());
+        let n = self.fields.len();
+        // Offsets are indexed by DECLARATION order even when a `layout_order`
+        // permutation places fields physically in a different sequence.
+        let mut byte_offsets = vec![0u64; n];
+        let mut bit_offsets = vec![0u32; n];
         let mut bit_pos: u64 = 0; // running position in bits
         let mut max_align = 1u64;
 
-        for (i, (_, ty)) in self.fields.iter().enumerate() {
+        // Physical placement order: the reorder permutation (sic), else declared.
+        let order: Vec<usize> = match &self.layout_order {
+            Some(p) if p.len() == n => p.clone(),
+            _ => (0..n).collect(),
+        };
+
+        for &i in &order {
+            let ty = &self.fields[i].1;
             let align = self.field_align(i, ty, ptr_size);
             let size = ty.size_of(ptr_size);
             match self.bitfield_width(i) {
@@ -193,8 +209,8 @@ impl StructType {
                     if width == 0 {
                         // Zero-width bit-field: align the next field to `align`.
                         bit_pos = round_up_bits(bit_pos, align * 8);
-                        byte_offsets.push(bit_pos / 8);
-                        bit_offsets.push(0);
+                        byte_offsets[i] = bit_pos / 8;
+                        bit_offsets[i] = 0;
                         continue;
                     }
                     let unit_bits = size * 8;
@@ -202,15 +218,15 @@ impl StructType {
                         bit_pos = round_up_bits(bit_pos, unit_bits);
                     }
                     let unit_start = if unit_bits > 0 { (bit_pos / unit_bits) * unit_bits } else { bit_pos };
-                    byte_offsets.push(unit_start / 8);
-                    bit_offsets.push((bit_pos - unit_start) as u32);
+                    byte_offsets[i] = unit_start / 8;
+                    bit_offsets[i] = (bit_pos - unit_start) as u32;
                     bit_pos += width;
                 }
                 None => {
                     max_align = max_align.max(align);
                     bit_pos = round_up_bits(bit_pos, align * 8);
-                    byte_offsets.push(bit_pos / 8);
-                    bit_offsets.push(0);
+                    byte_offsets[i] = bit_pos / 8;
+                    bit_offsets[i] = 0;
                     bit_pos += size * 8;
                 }
             }

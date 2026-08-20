@@ -66,6 +66,9 @@ pub struct StructDef {
     /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
     /// struct {...} T QEMU_ALIGNED(N)`). Raises the whole type's alignment.
     pub align: Option<u32>,
+    /// `packed` or the sic `__order__` attribute — keep declaration field order
+    /// (disables sic struct reordering, sic.md §"Struct reordering").
+    pub keep_order: bool,
     pub span: Span,
 }
 

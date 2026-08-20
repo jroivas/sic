@@ -26,6 +26,9 @@ pub struct Parser {
     /// `__attribute__((packed))` seen in the most recent attribute scan — used to
     /// size a `packed` enum's underlying type to the smallest that fits.
     pending_packed: bool,
+    /// `__attribute__((__order__))` seen in the most recent attribute scan — sic
+    /// opt-out that keeps a struct's declaration field order (no reordering).
+    pending_order: bool,
     /// `__attribute__((aligned(N)))` seen in the most recent attribute scan — the
     /// largest N. Applied to the next struct/union member to raise its (and the
     /// aggregate's) alignment (QEMU's `FPReg` union → 16-aligned `CPUX86State`).
@@ -43,7 +46,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_aligned: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -460,6 +463,9 @@ impl Parser {
     fn parse_struct_or_union(&mut self, is_union: bool) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // consume 'struct'/'union'
+        // Track packed/`__order__` for THIS struct only (sic reordering opt-out).
+        self.pending_packed = false;
+        self.pending_order = false;
         // A leading `struct __attribute__((aligned(N))) Tag {...}` raises the whole
         // type's alignment. Capture N here, before member parsing clears the slot.
         self.pending_aligned = None;
@@ -494,15 +500,18 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RBrace)?;
+            // Trailing `struct T {...} __attribute__((packed/__order__))`.
+            self.skip_attributes();
             Some(fields)
         } else {
             None
         };
+        let keep_order = self.pending_packed || self.pending_order;
 
         if is_union {
             Ok(AstType::Union(UnionDef { name, fields, align: type_align, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, span: sp }))
         }
     }
 
@@ -1960,6 +1969,8 @@ impl Parser {
                         }
                     } else if name == "packed" || name == "__packed__" {
                         self.pending_packed = true;
+                    } else if name == "order" || name == "__order__" {
+                        self.pending_order = true;
                     } else if name == "aligned" || name == "__aligned__" {
                         // `aligned(EXPR)`: force alignment to the constant EXPR
                         // (e.g. `16`, `sizeof(void*)`, `2 * sizeof(void *)` as in

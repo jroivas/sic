@@ -303,6 +303,9 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
         field_aligns: if any_align { field_aligns } else { Vec::new() },
         min_align: s.align,
+        // Inline/anonymous struct types keep declaration order; sic reordering is
+        // applied to named structs at registration (register_struct_type_from_def).
+        layout_order: None,
     }))
 }
 

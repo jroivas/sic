@@ -292,6 +292,21 @@ impl Lowerer {
                 bitfields.push(bw);
                 field_aligns.push(f.align);
             }
+            // sic struct reordering (sic.md §"Struct reordering"): place fields
+            // largest-first (stable) to minimize padding, unless the struct opts
+            // out (`packed`/`__order__`) or has bit-fields / member `aligned` /
+            // type `aligned` overrides (whose layout we leave exactly as written).
+            let layout_order = if self.sic && !s.keep_order && !any_bitfield
+                && !any_align && s.align.is_none()
+            {
+                let ps = self.ptr_size;
+                let mut order: Vec<usize> = (0..ir_fields.len()).collect();
+                order.sort_by(|&a, &b| ir_fields[b].1.size_of(ps).cmp(&ir_fields[a].1.size_of(ps)));
+                // Only bother if it actually changes the order.
+                if order.iter().enumerate().any(|(i, &o)| i != o) { Some(order) } else { None }
+            } else {
+                None
+            };
             let ir_ty = Type::Struct(StructType {
                 name: Some(name.clone()),
                 fields: ir_fields,
@@ -299,6 +314,7 @@ impl Lowerer {
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
                 min_align: s.align,
+                layout_order,
             });
             self.register_type_name(name.clone(), ir_ty);
         }
