@@ -93,6 +93,49 @@ else
     bad "link-fold" "manifest missing 'link -lm':\n$(cat module_mlib.smod)"
 fi
 
+# 6. Multi-file folder module: two files, one module, a cross-file call. The
+#    consumer links only with `-I` (the archive is self-linking via the manifest).
+mkdir -p geo
+cat > geo/core.sic <<'EOF'
+module geo;
+int power(int x){ return x * x; }
+EOF
+cat > geo/support.sic <<'EOF'
+module geo;
+int double_power(int x){ return power(x) + power(x); }   /* cross-file */
+EOF
+if ! "$SIC" --emit-module geo 2>err; then
+    bad "folder-module" "emit failed: $(cat err)"
+else
+    if [ -f geo/libgeo.a ] && [ -f geo/module_geo.h ] && [ -f geo/module_geo.def ]; then
+        ok "folder-artifacts"
+    else
+        bad "folder-artifacts" "missing archive/header/def in geo/"
+    fi
+    cat > usegeo.sic <<'EOF'
+import geo;
+int main(){ return geo.double_power(5); }   /* 25+25 = 50 */
+EOF
+    if "$SIC" usegeo.sic -Igeo -o usegeo 2>err; then
+        ./usegeo; got=$?
+        [ "$got" -eq 50 ] && ok "folder-import-run" || bad "folder-import-run" "expected 50, got $got"
+    else
+        bad "folder-import-run" "compile/link failed: $(cat err)"
+    fi
+fi
+
+# 7. A C translation unit consumes the module through the generated header.
+cat > cuser.c <<'EOF'
+#include "module_geo.h"
+int main(void){ return geo_double_power(6); }   /* 36+36 = 72 */
+EOF
+if "$CC" cuser.c -Igeo -Lgeo -lgeo -o cuser 2>err; then
+    ./cuser; got=$?
+    [ "$got" -eq 72 ] && ok "c-consumer" || bad "c-consumer" "expected 72, got $got"
+else
+    bad "c-consumer" "cc failed: $(cat err)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

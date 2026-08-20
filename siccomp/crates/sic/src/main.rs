@@ -40,6 +40,13 @@ struct Args {
     #[arg(short = 'c', long = "emit-obj")]
     emit_obj: bool,
 
+    /// sic: build a folder module. Compiles every `.sic` in DIR that declares the
+    /// same `module x;` together (cross-file visibility), archives them into
+    /// `lib<x>.a`, and writes `module_<x>.smod`/`.h`/`.def` into DIR
+    /// (sic.md §"Imports").
+    #[arg(long = "emit-module", value_name = "DIR")]
+    emit_module: Option<String>,
+
     /// Optimization level: 0 = none, 1 = const fold, 2/3 = + Cranelift optimizer
     /// (speed), s/z = optimize for size (Cranelift speed_and_size)
     #[arg(short = 'O', long = "opt", default_value = "0", value_name = "LEVEL")]
@@ -525,8 +532,12 @@ fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std:
     else { Err(format!("assembler failed with exit code {:?}", status.code()).into()) }
 }
 
-/// Compile one C source through the front end to an IR module.
-fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
+/// Preprocess, lex and parse one source into a translation unit, returning it
+/// with the source language selected from the file extension.
+fn parse_source(
+    path: &str,
+    args: &Args,
+) -> Result<(sic_frontend::ast::TranslationUnit, sic_frontend::Lang), Box<dyn std::error::Error>> {
     // Forward dependency-generation flags (`-MD`/`-MF`/...) so cpp writes the
     // `.d` file as a side effect of preprocessing.
     let dep_owned = effective_dep_flags(args);
@@ -562,14 +573,17 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     if opt_runs_constfold(&args.opt) {
         ConstFold::fold_tu(&mut tu);
     }
+    Ok((tu, lang))
+}
 
-    let module_name = PathBuf::from(path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("module")
-        .to_string();
-
-    let mut lowerer = Lowerer::new(module_name);
+/// Lower a parsed translation unit to an IR module.
+fn lower_tu(
+    tu: &sic_frontend::ast::TranslationUnit,
+    lang: sic_frontend::Lang,
+    module_name: &str,
+    args: &Args,
+) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
+    let mut lowerer = Lowerer::new(module_name.to_string());
     // `.sic` REPL inputs may synthesize a `main` from top-level statements; a C
     // translation unit must define `main` itself.
     lowerer.set_repl_main(lang == sic_frontend::Lang::Sic);
@@ -579,7 +593,18 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // manifest's triple is checked against this target (sic.md §"Imports").
     lowerer.set_include_dirs(args.includes.clone());
     lowerer.set_target_triple(target_triple());
-    let mut ir_module = lowerer.lower(&tu).map_err(|e| format!("{}", e))?;
+    lowerer.lower(tu).map_err(|e| format!("{}", e).into())
+}
+
+/// Compile one C source through the front end to an IR module.
+fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
+    let (tu, lang) = parse_source(path, args)?;
+    let module_name = PathBuf::from(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module")
+        .to_string();
+    let mut ir_module = lower_tu(&tu, lang, &module_name, args)?;
     ir_module.source_file = Some(path.to_string());
 
     if args.debug {
@@ -629,9 +654,168 @@ fn emit_module_manifest(
     Ok(())
 }
 
+/// Build a folder module (`--emit-module DIR`): compile every `.sic` in DIR that
+/// declares the *same* `module x;` together — so files can call one another's
+/// functions — archive them into `lib<x>.a`, and emit the portable interface
+/// artifacts (`module_<x>.smod`, a C header, and a Windows `.def`) into DIR.
+fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    use sic_frontend::ModuleManifest;
+
+    let dirp = PathBuf::from(dir);
+    if !dirp.is_dir() {
+        return Err(format!("--emit-module: '{}' is not a directory", dir).into());
+    }
+
+    // Gather `.sic` files (no recursion) and parse each. A file participates iff
+    // it declares a `module x;`; all participants must name the same module.
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dirp)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("sic"))
+        .collect();
+    entries.sort();
+
+    let mut module_name: Option<String> = None;
+    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string() };
+    let mut used_files: Vec<String> = Vec::new();
+    for path in &entries {
+        let ps = path.to_string_lossy().into_owned();
+        let (tu, _lang) = parse_source(&ps, args)?;
+        // Find this file's module declaration, if any.
+        let this = tu.decls.iter().find_map(|d| match d {
+            sic_frontend::ast::Decl::Module(n, _) => Some(n.clone()),
+            _ => None,
+        });
+        let Some(name) = this else { continue };
+        match &module_name {
+            None => module_name = Some(name.clone()),
+            Some(existing) if *existing != name => {
+                return Err(format!(
+                    "--emit-module: '{}' declares module '{}' but '{}' was expected \
+                     (a folder module must declare one module)",
+                    ps, name, existing
+                ).into());
+            }
+            _ => {}
+        }
+        combined.decls.extend(tu.decls);
+        used_files.push(ps);
+    }
+
+    let name = module_name.ok_or_else(|| format!(
+        "--emit-module: no `.sic` file in '{}' declares a `module`", dir))?;
+
+    // Lower the combined unit once so intra-module references across files resolve.
+    let ir_module = lower_tu(&combined, sic_frontend::Lang::Sic, &name, args)?;
+
+    // Codegen to a temp object and archive it into `lib<name>.a`.
+    let obj_bytes = compile_ir(&ir_module, args)?;
+    let mut obj = tempfile::Builder::new().suffix(".o").tempfile()?;
+    obj.write_all(&obj_bytes)?;
+    let archive = dirp.join(format!("lib{}.a", name));
+    let _ = fs::remove_file(&archive);
+    let status = Command::new("ar")
+        .arg("rcs").arg(&archive).arg(obj.path())
+        .status()?;
+    if !status.success() {
+        return Err(format!("ar failed with exit code {:?}", status.code()).into());
+    }
+
+    // Manifest link line: `-L<absdir> -l<name>` makes the archive self-linking
+    // for a consumer that only passes `-I<dir>`, plus this module's own libs and
+    // any transitively imported modules' flags (pkg-config baked in).
+    let absdir = fs::canonicalize(&dirp).unwrap_or(dirp.clone());
+    let mut links: Vec<String> = vec![format!("-L{}", absdir.display()), format!("-l{}", name)];
+    for tok in &args.link_order {
+        if tok == "-pthread" || tok.starts_with("-l") || tok.starts_with("-L") {
+            if !links.contains(tok) { links.push(tok.clone()); }
+        }
+    }
+    for l in &ir_module.imported_links {
+        if !links.contains(l) { links.push(l.clone()); }
+    }
+
+    let manifest = ModuleManifest::from_ir(&ir_module, &name, &target_triple(), &links);
+    fs::write(dirp.join(format!("module_{}.smod", name)), manifest.to_text())?;
+    fs::write(dirp.join(format!("module_{}.h", name)), c_header_for(&manifest))?;
+    fs::write(dirp.join(format!("module_{}.def", name)), def_file_for(&manifest))?;
+
+    if args.debug {
+        eprintln!("sic: module '{}' from {} file(s) -> {}", name, used_files.len(), archive.display());
+    }
+    Ok(())
+}
+
+/// Spell an IR type as C for the generated header. Only the scalar/pointer types
+/// the manifest can represent occur here.
+fn c_type_spell(ty: &sic_ir::Type) -> String {
+    use sic_ir::Type;
+    match ty {
+        Type::Void => "void".to_string(),
+        Type::Bool => "_Bool".to_string(),
+        Type::Int { bits, signed } => match (*bits, *signed) {
+            (8, true) => "int8_t", (8, false) => "uint8_t",
+            (16, true) => "int16_t", (16, false) => "uint16_t",
+            (32, true) => "int32_t", (32, false) => "uint32_t",
+            (64, true) => "int64_t", (64, false) => "uint64_t",
+            (128, true) => "__int128", (128, false) => "unsigned __int128",
+            _ => "int",
+        }.to_string(),
+        Type::Float32 => "float".to_string(),
+        Type::Float64 => "double".to_string(),
+        Type::Float80 => "long double".to_string(),
+        Type::Pointer(inner) => format!("{}*", c_type_spell(inner)),
+        // Aggregates never reach here (filtered by the manifest writer).
+        _ => "void*".to_string(),
+    }
+}
+
+/// Generate a C header exposing the module's exports under their mangled names,
+/// so a C translation unit can call into a sic module.
+fn c_header_for(manifest: &sic_frontend::ModuleManifest) -> String {
+    use sic_ir::Type;
+    let guard = format!("SIC_MODULE_{}_H", manifest.module.to_uppercase());
+    let mut s = String::new();
+    s.push_str(&format!("/* Generated by sic --emit-module. C interface for module '{}'. */\n", manifest.module));
+    s.push_str(&format!("#ifndef {}\n#define {}\n", guard, guard));
+    s.push_str("#include <stdint.h>\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+    for e in &manifest.exports {
+        match &e.ty {
+            Type::Function(ft) => {
+                let params = if ft.params.is_empty() && !ft.variadic {
+                    "void".to_string()
+                } else {
+                    let mut ps: Vec<String> = ft.params.iter().map(c_type_spell).collect();
+                    if ft.variadic { ps.push("...".to_string()); }
+                    ps.join(", ")
+                };
+                s.push_str(&format!("{} {}({});\n", c_type_spell(&ft.ret), e.symbol, params));
+            }
+            other => {
+                s.push_str(&format!("extern {} {};\n", c_type_spell(other), e.symbol));
+            }
+        }
+    }
+    s.push_str("\n#ifdef __cplusplus\n}\n#endif\n#endif\n");
+    s
+}
+
+/// Generate a Windows module-definition (`.def`) file listing the exports.
+fn def_file_for(manifest: &sic_frontend::ModuleManifest) -> String {
+    let mut s = format!("LIBRARY {}\nEXPORTS\n", manifest.module);
+    for e in &manifest.exports {
+        s.push_str(&format!("    {}\n", e.symbol));
+    }
+    s
+}
+
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.debug && !args.f_options.is_empty() {
         eprintln!("-f options: {:?}", args.f_options);
+    }
+
+    // ── Build a folder module (--emit-module DIR) ───────────────────────────────
+    if let Some(dir) = args.emit_module.clone() {
+        return emit_folder_module(&dir, args);
     }
 
     // Split inputs into C sources (compiled) and object files (linked as-is).
