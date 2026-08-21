@@ -257,6 +257,23 @@ impl<'m> FuncCtx<'m> {
                         return Ok(self.size_t_val(v));
                     }
                 }
+                // sic bigint accessors (sic.md §"Integer sizes"): `.str` is a fresh
+                // decimal `char*` (freed at scope exit); `.int` is the value as a
+                // fixed 64-bit int (low bits). A cast, by contrast, only
+                // reinterprets the pointer — it never converts.
+                if self.is_sic() && (name == "str" || name == "int") && self.is_bigint_operand(base) {
+                    let b = self.to_bigint(base)?;
+                    return if name == "int" {
+                        self.emit_bigint_call("__sic_bi_to_i64", vec![b], Type::i64())
+                    } else {
+                        let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
+                        self.push_instr(Instr::Store { val: s.clone(), ptr: Val::Local(slot) });
+                        self.register_scope_exit(super::func::Cleanup::FreePtr { slot: Val::Local(slot) });
+                        Ok(s)
+                    };
+                }
                 let lv = self.lower_lvalue_field(base, name)?;
                 // An array member decays to a pointer to its first element.
                 if matches!(lv.ty, Type::Array { .. }) {
@@ -285,25 +302,10 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
-                // sic bigint casts (sic.md §"Integer sizes"): `(intN)b` → the low
-                // bits via `__sic_bi_to_i64`; `(char*)b` → a fresh decimal string
-                // via `__sic_bi_to_str` (caller-owned; freed at scope exit).
-                if self.is_sic() && self.is_bigint_operand(inner) {
-                    if matches!(target, Type::Int { .. } | Type::Bool) {
-                        let b = self.to_bigint(inner)?;
-                        let v = self.emit_bigint_call("__sic_bi_to_i64", vec![b], Type::i64())?;
-                        return self.coerce(v, &target);
-                    }
-                    if matches!(&target, Type::Pointer(inner_ty) if matches!(inner_ty.as_ref(), Type::Int { bits: 8, .. })) {
-                        let b = self.to_bigint(inner)?;
-                        let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
-                        let slot = self.alloc_val();
-                        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
-                        self.push_instr(Instr::Store { val: s.clone(), ptr: Val::Local(slot) });
-                        self.register_scope_exit(super::func::Cleanup::FreePtr { slot: Val::Local(slot) });
-                        return Ok(s);
-                    }
-                }
+                // A `bigint` is a pointer, so casting it (`(char*)b`, `(long)b`)
+                // only reinterprets the pointer — it never converts. Use the
+                // explicit `.str` / `.int` accessors to get the decimal string or
+                // numeric value (sic.md §"Integer sizes").
                 let v = self.lower_expr(inner)?;
                 self.coerce(v, &target)
             }
@@ -4028,6 +4030,11 @@ impl<'m> FuncCtx<'m> {
                 // sic array `.length` / `.size` are `usize` (sic.md §"Arrays and lists").
                 if self.is_sic() && matches!(base_ty, Type::Array { .. }) && (name == "length" || name == "size") {
                     return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
+                }
+                // sic bigint `.str` is a `char*`, `.int` an `i64` (sic.md §"Integer sizes").
+                if self.is_sic() && super::types::is_bigint(&base_ty) {
+                    if name == "str" { return Ok(Type::char_ptr()); }
+                    if name == "int" { return Ok(Type::i64()); }
                 }
                 if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
