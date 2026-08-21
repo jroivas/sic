@@ -286,6 +286,15 @@ Strings support concatenate and substring:
         printf("%s\n", another[6:11]);
     }
 
+Support easy comparison without strcmp:
+
+    string test = "Hello world!"
+    string h = test[6:10];
+
+    if (h != "world")
+        return 1;
+    return 0;
+
 
 ## Empty brackets pointer
 
