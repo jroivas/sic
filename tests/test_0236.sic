@@ -1,0 +1,22 @@
+// sic tuples passed to functions (sic.md §"Tuples"): tuples are immutable,
+// refcounted heap values passed cheaply by pointer. A `tuple` parameter's shape
+// is inferred from call sites, so it can be unpacked and indexed.
+int sum2(tuple t) { int a, b; tuple(a, b) = t; return a + b; }   // unpack a param
+int first(tuple t) { return t[0]; }                              // index a param
+
+tuple swap2(tuple t) { int a, b; tuple(a, b) = t; return tuple(b, a); }  // tuple in, tuple out
+
+int main() {
+    tuple t = tuple(10, 20);
+    int s = sum2(t);                  // pass a variable            -> 30
+    int f = first(tuple(7, 99));      // pass a literal, index it   -> 7
+
+    tuple r = swap2(tuple(3, 8));     // returned tuple
+    int x, y; tuple(x, y) = r;        // x=8 y=3
+
+    tuple u = tuple(1, 1);
+    u = tuple(100, 5);                // reassign a tuple variable
+    int p = sum2(u);                  // 105
+
+    return s + f + (x * 10 + y) + p;  // 30 + 7 + 83 + 105 = 225
+}

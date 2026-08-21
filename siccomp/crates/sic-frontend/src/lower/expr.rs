@@ -453,9 +453,10 @@ impl<'m> FuncCtx<'m> {
         self.emit_binop(op, l, r)
     }
 
-    /// sic tuple pack (sic.md §"Tuples"): build an anonymous positional struct
-    /// from the element values and return a pointer to the temporary (decays like
-    /// any aggregate value). Element types are captured from the expressions.
+    /// sic tuple pack (sic.md §"Tuples"): allocate a refcounted heap block
+    /// (`[ size | refcount=1 | fields ]`), store the elements, and return a
+    /// pointer to it — the tuple value. Immutable and shared by pointer; the
+    /// temporary registers a scope-exit release so a discarded tuple is freed.
     fn construct_tuple(&mut self, elems: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         // Lower every element first, recording each value and its type.
         let mut vals: Vec<(Val, Type)> = Vec::with_capacity(elems.len());
@@ -470,13 +471,13 @@ impl<'m> FuncCtx<'m> {
                 vals.push((v, vt));
             }
         }
-        let tup_ty = super::types::tuple_type(vals.iter().map(|(_, t)| t.clone()).collect());
-        let slot = self.alloc_val();
-        self.push_instr(Instr::Alloca { dest: slot, ty: tup_ty.clone(), align: None });
-        self.val_types.insert(slot.0, tup_ty.clone());
+        let layout = super::types::tuple_layout(vals.iter().map(|(_, t)| t.clone()).collect());
+        // Heap-allocate the block with a refcount header (rc = 1); `data` points
+        // at the fields.
+        let data = self.emit_rc_alloc(&layout)?;
 
         for (i, (v, vt)) in vals.into_iter().enumerate() {
-            let fld = self.field_ptr_from(LValue::plain(Val::Local(slot), tup_ty.clone()), &i.to_string(), false, sp)?;
+            let fld = self.field_ptr_from(LValue::plain(data.clone(), layout.clone()), &i.to_string(), false, sp)?;
             if matches!(vt, Type::Struct(_) | Type::Union(_)) {
                 let size = vt.size_of(self.ptr_size());
                 let align = vt.align_of(self.ptr_size());
@@ -485,14 +486,52 @@ impl<'m> FuncCtx<'m> {
                 self.store_lvalue(&fld, v)?;
             }
         }
-        Ok(Val::Local(slot))
+        // Register a scope-exit release for the freshly-created temporary.
+        self.register_tuple_release(data.clone())?;
+        Ok(data)
+    }
+
+    /// Allocate a refcounted heap block `[ size | refcount=1 | payload ]` sized for
+    /// `layout` and return a pointer to the payload, typed `*layout`. Reuses the
+    /// fat-pointer header shared with `new`/`del` so `emit_rc_retain`/`release`
+    /// apply directly.
+    fn emit_rc_alloc(&mut self, layout: &Type) -> Result<Val> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let header = (2 * self.ptr_size()) as i64;
+        let size = layout.size_of(self.ptr_size()).max(1);
+        let total = self.coerce(Constant::uint(size + header as u64), &usize_ty)?;
+        let block = self.emit_malloc(total)?; // char*
+        // header[0] = payload size ; header[1] (at +ptr_size) = refcount = 1
+        let sz = self.coerce(Constant::uint(size), &usize_ty)?;
+        self.push_instr(Instr::Store { val: sz, ptr: block.clone() });
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(self.ptr_size() as i64), elem_size: 1, result_ty: Type::char_ptr() });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rc_ptr) });
+        let ptr_ty = Type::Pointer(Box::new(layout.clone()));
+        let data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
+        self.val_types.insert(data.0, ptr_ty);
+        Ok(Val::Local(data))
+    }
+
+    /// Register a scope-exit release for a tuple pointer value (spills it to a
+    /// slot so the cleanup can reach it).
+    fn register_tuple_release(&mut self, ptr: Val) -> Result<()> {
+        let pc = self.coerce(ptr, &Type::char_ptr())?;
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
+        self.push_instr(Instr::Store { val: pc, ptr: Val::Local(slot) });
+        self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(slot) });
+        Ok(())
     }
 
     /// sic tuple field pointer + type (sic.md §"Tuples"): `t[i]` addresses field
     /// `i` of the tuple. `i` must be an in-range constant.
     fn tuple_field_lvalue(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<LValue> {
-        let tup_ty = self.infer_expr_type(base)?;
-        let nfields = match &tup_ty { Type::Struct(st) => st.fields.len(), _ => 0 };
+        let layout = super::types::tuple_layout_of(&self.infer_expr_type(base)?)
+            .ok_or_else(|| CompileError::at("not a tuple".to_string(), sp.file.clone(), sp.line, sp.col))?;
+        let nfields = match &layout { Type::Struct(st) => st.fields.len(), _ => 0 };
         let idx = self.const_index(index).ok_or_else(|| CompileError::at(
             "a tuple index must be a constant".to_string(), sp.file.clone(), sp.line, sp.col))?;
         if idx < 0 || idx as usize >= nfields {
@@ -500,8 +539,9 @@ impl<'m> FuncCtx<'m> {
                 format!("tuple index {} out of range (0..{})", idx, nfields),
                 sp.file.clone(), sp.line, sp.col));
         }
-        let ptr = self.lower_aggregate_ptr(base)?;
-        self.field_ptr_from(LValue::plain(ptr, tup_ty), &idx.to_string(), false, sp)
+        // A tuple value is a pointer to its heap block; index off that pointer.
+        let ptr = self.lower_expr(base)?;
+        self.field_ptr_from(LValue::plain(ptr, layout), &idx.to_string(), false, sp)
     }
 
     /// Evaluate an expression that must be a compile-time integer index.
@@ -514,24 +554,23 @@ impl<'m> FuncCtx<'m> {
     /// assignability are checked.
     fn lower_tuple_unpack(&mut self, targets: &[Expr], rhs: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
         let rty = self.infer_expr_type(rhs)?;
-        if !super::types::is_tuple(&rty) {
-            return Err(CompileError::at(
-                "tuple unpack requires a tuple on the right-hand side".to_string(),
-                sp.file.clone(), sp.line, sp.col));
-        }
-        let fields = match &rty { Type::Struct(st) => st.fields.clone(), _ => vec![] };
+        let layout = super::types::tuple_layout_of(&rty).ok_or_else(|| CompileError::at(
+            "tuple unpack requires a tuple on the right-hand side".to_string(),
+            sp.file.clone(), sp.line, sp.col))?;
+        let fields = match &layout { Type::Struct(st) => st.fields.clone(), _ => vec![] };
         if fields.len() != targets.len() {
             return Err(CompileError::at(
                 format!("tuple unpack expects {} values, got {} targets", fields.len(), targets.len()),
                 sp.file.clone(), sp.line, sp.col));
         }
-        let src = self.lower_aggregate_ptr(rhs)?;
+        // A tuple value is a pointer to its heap block; read fields off it.
+        let src = self.lower_expr(rhs)?;
         for (i, tgt) in targets.iter().enumerate() {
             let dst_lv = self.lower_lvalue(tgt)?;
             let (_, fty) = &fields[i];
             // Type check: the field must be assignable to the target (same type,
             // or a trivial scalar conversion via `coerce`).
-            let fld = self.field_ptr_from(LValue::plain(src.clone(), rty.clone()), &i.to_string(), false, sp)?;
+            let fld = self.field_ptr_from(LValue::plain(src.clone(), layout.clone()), &i.to_string(), false, sp)?;
             if matches!(fty, Type::Struct(_) | Type::Union(_)) {
                 if dst_lv.ty != *fty {
                     return Err(CompileError::at(
@@ -550,7 +589,8 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Materialize a deferred `tuple t;` local on its first assignment: allocate
-    /// the slot with the RHS tuple type, bind it, and copy the value in.
+    /// a pointer slot, bind it to the RHS tuple pointer, and retain the shared
+    /// heap block (released at scope exit).
     fn materialize_deferred_tuple(&mut self, name: &str, rhs: &Expr) -> Result<Val> {
         let ty = self.infer_expr_type(rhs)?;
         if !super::types::is_tuple(&ty) {
@@ -562,10 +602,11 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: None });
         self.define_local(name.to_string(), ty.clone(), vid);
         self.deferred_tuples.remove(name);
-        let src = self.lower_aggregate_ptr(rhs)?;
-        let size = ty.size_of(self.ptr_size());
-        let align = ty.align_of(self.ptr_size());
-        self.push_instr(Instr::MemCopy { dst: Val::Local(vid), src, size, align });
+        let ptr = self.lower_expr(rhs)?;
+        let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
+        self.emit_rc_retain(pc)?;
+        self.push_instr(Instr::Store { val: ptr, ptr: Val::Local(vid) });
+        self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(vid) });
         Ok(Val::Local(vid))
     }
 
@@ -1067,7 +1108,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Increment the fat-pointer header refcount at `p - ptr_size`. NULL is a
     /// no-op. Used when a `@` reference retains its referent.
-    fn emit_rc_retain(&mut self, p: Val) -> Result<()> {
+    pub(crate) fn emit_rc_retain(&mut self, p: Val) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let is_null = self.alloc_val();
@@ -1416,6 +1457,21 @@ impl<'m> FuncCtx<'m> {
         }
 
         let lv = self.lower_lvalue(lhs)?;
+
+        // sic tuple variable reassignment `u = <tuple>` (sic.md §"Tuples"): rebind
+        // the pointer — retain the new shared block, release the old one (a tuple
+        // is immutable, but the *variable* may be re-pointed). Retain-before-
+        // release keeps a self-assign balanced.
+        if self.is_sic() && op.is_none() && super::types::is_tuple(&lv.ty) {
+            let newp = self.lower_expr(rhs)?;
+            let npc = self.coerce(newp.clone(), &Type::char_ptr())?;
+            self.emit_rc_retain(npc)?;
+            let old = self.alloc_val();
+            self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+            self.emit_rc_release(Val::Local(old))?;
+            self.push_instr(Instr::Store { val: newp, ptr: lv.ptr.clone() });
+            return Ok(lv.ptr);
+        }
 
         // sic: `a = None;` — assign a bare (payload-less) variant by building the
         // `{tag,union}` value from its discriminant. A same-enum RHS copies below.
@@ -3255,8 +3311,14 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Call { dest: None, func: fref, args: arg_vals, ret_ty });
             Ok(Constant::zero())
         } else {
+            let returns_tuple = self.is_sic() && super::types::is_tuple(&ret_ty);
             let dest = self.alloc_val();
             self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty });
+            // sic tuple-returning call: the result carries a reference (retained by
+            // the callee before return); release it at scope exit.
+            if returns_tuple {
+                self.register_tuple_release(Val::Local(dest))?;
+            }
             Ok(Val::Local(dest))
         }
     }
@@ -3821,11 +3883,14 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Index { base, index } => {
                 let bt = self.infer_expr_type(base)?;
-                // sic tuple element `t[const]` has the field's type.
-                if self.is_sic() && super::types::is_tuple(&bt) {
-                    if let (Type::Struct(st), Some(i)) = (&bt, self.const_index(index)) {
-                        if let Some((_, fty)) = st.fields.get(i as usize) {
-                            return Ok(fty.clone());
+                // sic tuple element `t[const]` has the field's type (deref the
+                // tuple pointer to its layout struct).
+                if self.is_sic() {
+                    if let Some(Type::Struct(st)) = super::types::tuple_layout_of(&bt) {
+                        if let Some(i) = self.const_index(index) {
+                            if let Some((_, fty)) = st.fields.get(i as usize) {
+                                return Ok(fty.clone());
+                            }
                         }
                     }
                 }

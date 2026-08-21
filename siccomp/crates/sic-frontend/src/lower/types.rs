@@ -178,18 +178,35 @@ pub fn lower_param_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: 
 /// ordinary struct. Not a valid C identifier, so it can never collide.
 pub const TUPLE_MARKER: &str = "(tuple)";
 
-/// Build the anonymous positional-struct type for a tuple with the given element
-/// types. Fields are named "0", "1", … in declaration order.
-pub fn tuple_type(elems: Vec<Type>) -> Type {
+/// The heap **layout** struct of a tuple (the pointee): positional fields named
+/// "0", "1", … in declaration order. A tuple lives in a refcounted heap block
+/// `[ size | refcount | this struct ]`; see [`tuple_type`].
+pub fn tuple_layout(elems: Vec<Type>) -> Type {
     let fields = elems.into_iter().enumerate()
         .map(|(i, t)| (i.to_string(), t))
         .collect();
     Type::Struct(StructType::plain(Some(TUPLE_MARKER.to_string()), fields, false))
 }
 
-/// True if `t` is a sic tuple representation struct.
+/// A tuple **value** is a pointer to its refcounted heap block (sic.md §"Tuples").
+/// Tuples are immutable, so they are shared by pointer and passed cheaply; the
+/// block is freed when the last reference is released.
+pub fn tuple_type(elems: Vec<Type>) -> Type {
+    Type::Pointer(Box::new(tuple_layout(elems)))
+}
+
+/// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
-    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(TUPLE_MARKER))
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(TUPLE_MARKER)))
+}
+
+/// If `t` is a tuple value, its layout struct (the pointee).
+pub fn tuple_layout_of(t: &Type) -> Option<Type> {
+    match t {
+        Type::Pointer(inner) if is_tuple(t) => Some((**inner).clone()),
+        _ => None,
+    }
 }
 
 pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {

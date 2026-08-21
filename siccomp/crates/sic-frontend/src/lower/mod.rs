@@ -69,6 +69,10 @@ pub struct Lowerer {
     /// `Variant(..)` / `Variant` when the target enum type is not otherwise known.
     /// Last definition wins (a later enum may reuse a variant name).
     pub variant_enum: HashMap<String, String>,
+    /// sic tuple parameters (sic.md §"Tuples"): `(function, param index)` → the
+    /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
+    /// param is passed by pointer, so its shape must be known to unpack/index it.
+    pub tuple_param_types: HashMap<(String, usize), Type>,
 }
 
 /// One variant of a sic tagged enum.
@@ -117,6 +121,7 @@ impl Lowerer {
             imported_links: Vec::new(),
             enum_defs: HashMap::new(),
             variant_enum: HashMap::new(),
+            tuple_param_types: HashMap::new(),
         }
     }
 
@@ -169,6 +174,9 @@ impl Lowerer {
             self.ensure_str_retain_fn();
             self.ensure_str_release_fn();
             self.ensure_bounds_fail_fn();
+            // Infer the concrete shape of every `tuple` parameter from its call
+            // sites, so tuple params can be unpacked/indexed (sic.md §"Tuples").
+            self.infer_tuple_params(tu);
         }
 
         // Second pass: lower function bodies and global initializers

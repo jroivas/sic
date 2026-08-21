@@ -366,6 +366,50 @@ pub enum LookupResult<'a> {
 }
 
 impl<'m> Lowerer {
+    /// Infer the concrete shape of every `tuple` parameter from the call sites in
+    /// the whole translation unit (sic.md §"Tuples"). A tuple param is passed by
+    /// pointer, so its element types must be known to unpack/index it. For each
+    /// call `f(…, tuple-arg, …)`, the tuple argument's type is inferred under a
+    /// throwaway FuncCtx that has the *calling* function's params and (linearly
+    /// scanned) locals bound. First consistent shape wins.
+    pub(crate) fn infer_tuple_params(&mut self, tu: &crate::ast::TranslationUnit) {
+        // Which functions have tuple params, and at which positions?
+        let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
+        for d in &tu.decls {
+            if let Decl::Func { name, params, body: Some(_), .. } = d {
+                let pos: Vec<usize> = params.iter().enumerate()
+                    .filter(|(_, p)| matches!(p.ty.ty, AstType::Tuple))
+                    .map(|(i, _)| i).collect();
+                if !pos.is_empty() { targets.insert(name.clone(), pos); }
+            }
+        }
+        if targets.is_empty() { return; }
+
+        for d in &tu.decls {
+            if let Decl::Func { params, body: Some(body), .. } = d {
+                let mut dummy = Function::new("__tparam_infer".to_string(),
+                    FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+                let blk = dummy.alloc_block();
+                dummy.blocks.push(BasicBlock::new(blk));
+                let mut found: Vec<(String, usize, Type)> = Vec::new();
+                {
+                    let mut fc = FuncCtx::new_with_func(self, &mut dummy);
+                    for p in params {
+                        if let Some(n) = &p.name {
+                            if let Ok(ty) = lower_param_type(&p.ty, &fc.lowerer.struct_types, fc.lowerer.ptr_size) {
+                                fc.define_local(n.clone(), ty, ValId(0));
+                            }
+                        }
+                    }
+                    infer_calls_in_stmts(&mut fc, &body, &targets, &mut found);
+                }
+                for (fname, idx, ty) in found {
+                    self.tuple_param_types.entry((fname, idx)).or_insert(ty);
+                }
+            }
+        }
+    }
+
     /// Infer the concrete tuple type of a `tuple`-returning function from the
     /// element expressions of its first `return tuple(...)`. Uses a throwaway
     /// FuncCtx with the parameters bound, so full expression inference applies.
@@ -399,7 +443,14 @@ impl<'m> Lowerer {
         if self.sic {
             super::borrowck::check(body)?;
         }
-        let ir_params: Result<Vec<_>> = params.iter().map(|p| {
+        let ir_params: Result<Vec<_>> = params.iter().enumerate().map(|(i, p)| {
+            // sic tuple parameter (sic.md §"Tuples"): a tuple is passed by pointer;
+            // its concrete shape was inferred from call sites in a pre-pass.
+            if self.sic && matches!(p.ty.ty, AstType::Tuple) {
+                if let Some(ty) = self.tuple_param_types.get(&(name.to_string(), i)) {
+                    return Ok(ty.clone());
+                }
+            }
             lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
         }).collect();
         let ir_params = ir_params?;
@@ -634,7 +685,15 @@ impl<'m> FuncCtx<'m> {
                     let ret = if let Some(e) = val {
                         let v = self.lower_expr(e)?;
                         let expected = self.ret_ty.clone();
-                        Some(self.coerce(v, &expected)?)
+                        let c = self.coerce(v, &expected)?;
+                        // sic tuple return (sic.md §"Tuples"): retain the shared
+                        // block before scope-exit releases run, so the returned
+                        // pointer outlives this frame (the caller releases it).
+                        if self.is_sic() && super::types::is_tuple(&expected) {
+                            let pc = self.coerce(c.clone(), &Type::char_ptr())?;
+                            self.emit_rc_retain(pc)?;
+                        }
+                        Some(c)
                     } else {
                         None
                     };
@@ -809,13 +868,26 @@ impl<'m> FuncCtx<'m> {
                         continue;
                     }
                     let mut ty = self.lower_type(&d.ty)?;
-                    // sic tuple local (sic.md §"Tuples"): a `tuple` variable's
-                    // concrete positional type comes from its initializer; a bare
-                    // `tuple t;` is deferred until its first assignment.
+                    // sic tuple local (sic.md §"Tuples"): a tuple value is a pointer
+                    // to a refcounted heap block. Bind the pointer, retain the
+                    // shared block, and release it at scope exit. A bare `tuple t;`
+                    // is deferred until its first assignment.
                     if self.is_sic() && matches!(d.ty.ty, AstType::Tuple) {
                         match &d.init {
                             Some(Initializer::Expr(e)) => {
-                                ty = self.infer_expr_type(e).unwrap_or(ty);
+                                let pty = self.infer_expr_type(e).unwrap_or(ty);
+                                let vid = self.alloc_val();
+                                self.push_instr(Instr::Alloca { dest: vid, ty: pty.clone(), align: None });
+                                self.define_local(d.name.clone(), pty.clone(), vid);
+                                let ptr = self.lower_expr(e)?;
+                                let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
+                                self.emit_rc_retain(pc)?;
+                                self.push_instr(Instr::Store { val: ptr, ptr: Val::Local(vid) });
+                                self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
+                                if !d.name.is_empty() {
+                                    self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: pty, slot: vid, is_param: false });
+                                }
+                                continue;
                             }
                             _ => {
                                 self.deferred_tuples.insert(d.name.clone());
@@ -1872,6 +1944,119 @@ fn first_return_tuple(stmts: &[Stmt]) -> Option<Vec<Expr>> {
         }
     }
     stmts.iter().find_map(in_stmt)
+}
+
+/// Walk statements for the tuple-param inference pre-pass: bind locals as we go
+/// (so a call `f(localtuple)` can infer the local's type) and record the tuple
+/// types of arguments passed to any function in `targets`.
+fn infer_calls_in_stmts(
+    fc: &mut FuncCtx<'_>, stmts: &[Stmt],
+    targets: &HashMap<String, Vec<usize>>, found: &mut Vec<(String, usize, Type)>,
+) {
+    for s in stmts { infer_calls_in_stmt(fc, s, targets, found); }
+}
+
+fn infer_calls_in_stmt(
+    fc: &mut FuncCtx<'_>, s: &Stmt,
+    targets: &HashMap<String, Vec<usize>>, found: &mut Vec<(String, usize, Type)>,
+) {
+    match s {
+        Stmt::Decl(Decl::Var { declarators, .. }) => {
+            for d in declarators {
+                if let Some(Initializer::Expr(e)) = &d.init {
+                    find_tuple_calls(fc, e, targets, found);
+                }
+                // Bind the local's type so later `f(local)` infers it.
+                let ty = if matches!(d.ty.ty, AstType::Tuple) {
+                    match &d.init {
+                        Some(Initializer::Expr(e)) => fc.infer_expr_type(e)
+                            .unwrap_or_else(|_| super::types::tuple_type(vec![])),
+                        _ => super::types::tuple_type(vec![]),
+                    }
+                } else {
+                    fc.lower_type(&d.ty).unwrap_or_else(|_| Type::i32())
+                };
+                if !d.name.is_empty() { fc.define_local(d.name.clone(), ty, ValId(0)); }
+            }
+        }
+        Stmt::Decl(_) | Stmt::Null(_) | Stmt::Break(_) | Stmt::Continue(_)
+        | Stmt::Goto(_, _) | Stmt::Fallthrough(_) | Stmt::Return(None, _) => {}
+        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) =>
+            find_tuple_calls(fc, e, targets, found),
+        Stmt::Block(ss, _) => infer_calls_in_stmts(fc, ss, targets, found),
+        Stmt::If { cond, then, else_, .. } => {
+            find_tuple_calls(fc, cond, targets, found);
+            infer_calls_in_stmt(fc, then, targets, found);
+            if let Some(e) = else_ { infer_calls_in_stmt(fc, e, targets, found); }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            find_tuple_calls(fc, cond, targets, found);
+            infer_calls_in_stmt(fc, body, targets, found);
+        }
+        Stmt::For { init, cond, post, body, .. } => {
+            match init {
+                Some(ForInit::Expr(e)) => find_tuple_calls(fc, e, targets, found),
+                Some(ForInit::Decl(d)) => infer_calls_in_stmt(fc, &Stmt::Decl(d.clone()), targets, found),
+                None => {}
+            }
+            if let Some(e) = cond { find_tuple_calls(fc, e, targets, found); }
+            if let Some(e) = post { find_tuple_calls(fc, e, targets, found); }
+            infer_calls_in_stmt(fc, body, targets, found);
+        }
+        Stmt::Switch { val, body, .. } => {
+            find_tuple_calls(fc, val, targets, found);
+            infer_calls_in_stmt(fc, body, targets, found);
+        }
+        Stmt::Match { scrutinee, arms, .. } => {
+            find_tuple_calls(fc, scrutinee, targets, found);
+            for a in arms { infer_calls_in_stmt(fc, &a.body, targets, found); }
+        }
+        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
+        | Stmt::Label(_, body, _) | Stmt::Defer(body, _) =>
+            infer_calls_in_stmt(fc, body, targets, found),
+    }
+}
+
+/// Recurse through an expression finding calls to tuple-param functions and
+/// recording the tuple argument types (inferred in `fc`'s current scope).
+fn find_tuple_calls(
+    fc: &mut FuncCtx<'_>, e: &Expr,
+    targets: &HashMap<String, Vec<usize>>, found: &mut Vec<(String, usize, Type)>,
+) {
+    use crate::ast::ExprKind::*;
+    match &e.kind {
+        Call { func, args } => {
+            if let Ident(name) = &func.kind {
+                if let Some(positions) = targets.get(name) {
+                    for &idx in positions {
+                        if let Some(arg) = args.get(idx) {
+                            if let Ok(ty) = fc.infer_expr_type(arg) {
+                                if super::types::is_tuple(&ty) {
+                                    found.push((name.clone(), idx, ty));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            find_tuple_calls(fc, func, targets, found);
+            for a in args { find_tuple_calls(fc, a, targets, found); }
+        }
+        TupleExpr(xs) => for x in xs { find_tuple_calls(fc, x, targets, found); },
+        BinOp { lhs, rhs, .. } | Assign { lhs, rhs, .. } | Comma(lhs, rhs)
+        | Swap { lhs, rhs } => { find_tuple_calls(fc, lhs, targets, found); find_tuple_calls(fc, rhs, targets, found); }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. } | Cast { expr, .. }
+        | Field { base: expr, .. } | Arrow { base: expr, .. } | Ref { expr, .. } =>
+            find_tuple_calls(fc, expr, targets, found),
+        Index { base, index } => { find_tuple_calls(fc, base, targets, found); find_tuple_calls(fc, index, targets, found); }
+        Ternary { cond, then, else_ } => {
+            find_tuple_calls(fc, cond, targets, found);
+            find_tuple_calls(fc, then, targets, found);
+            find_tuple_calls(fc, else_, targets, found);
+        }
+        Elvis { cond, else_ } => { find_tuple_calls(fc, cond, targets, found); find_tuple_calls(fc, else_, targets, found); }
+        _ => {}
+    }
 }
 
 fn ast_type_string(t: &AstType) -> String {
