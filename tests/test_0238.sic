@@ -1,0 +1,33 @@
+// sic bigint (sic.md §"Integer sizes"): arbitrary-precision integers via the
+// self-contained runtime (no external lib). Construction from oversized decimal
+// literals and from fixed ints, + - *, all comparisons, and casting back to a
+// fixed-width int. Verified by exit code (avoids float printf).
+#include <string.h>
+int main() {
+    bigint c = 123456789123456789001234567890;   // > u64
+    i64 b = 567890;
+    bigint d = 12345 + b;      // 580235, promoted from ints
+    d += c;                    // 123456789123456789001235148125
+
+    // Compare against the expected decimal via the string form.
+    char *s = (char *)d;
+    if (strcmp(s, "123456789123456789001235148125") != 0) return 1;
+
+    // Arithmetic identities.
+    bigint big = 1000000000000000000000;   // 10^21
+    if ((int)(long)(big - 999999999999999999999) != 1) return 2;   // == 1
+    if (!(c > big)) return 3;      // c (~1.2e29) > big (1e21)
+    if (!(c == c)) return 4;
+    if (c < big) return 5;
+
+    // Factorial 20 fits checks (multiplication loop).
+    bigint f = 1;
+    for (int i = 1; i <= 25; i++) f = f * i;
+    if (strcmp((char *)f, "15511210043330985984000000") != 0) return 6;
+
+    // Negative result.
+    bigint neg = 5 - big;
+    if (strcmp((char *)neg, "-999999999999999999995") != 0) return 7;
+
+    return 42;
+}

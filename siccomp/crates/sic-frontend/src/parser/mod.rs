@@ -1938,6 +1938,17 @@ impl Parser {
             }
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();
+                // sic `bigint` (sic.md §"Integer sizes"): a plain decimal literal
+                // that overflows `u64` becomes a `BigIntLit` carrying its digits,
+                // so nothing is lost before it reaches a bigint context.
+                if self.lang == Lang::Sic {
+                    let digits = text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
+                    let is_plain_decimal = digits.bytes().all(|b| b.is_ascii_digit())
+                        && !digits.starts_with('0'); // not hex/oct/binary, not a leading-zero form
+                    if is_plain_decimal && digits.parse::<u64>().is_err() {
+                        return Ok(Expr::new(ExprKind::BigIntLit(digits.to_string()), sp));
+                    }
+                }
                 let (val, is_u, is_64) = parse_int_literal(&text);
                 let kind = if is_u { ExprKind::UIntLit(val as u64, is_64) } else { ExprKind::IntLit(val, is_64) };
                 Ok(Expr::new(kind, sp))

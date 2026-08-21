@@ -215,6 +215,10 @@ impl<'m> FuncCtx<'m> {
             // `lower_assign`, so reaching here as a value is always a pack.
             ExprKind::TupleExpr(elems) => self.construct_tuple(elems, &expr.span),
 
+            // sic oversized decimal literal → a fresh `bigint` (sic.md §"Integer
+            // sizes"). Reaches here when used as a value directly.
+            ExprKind::BigIntLit(_) => self.to_bigint(expr),
+
             ExprKind::Index { base, index } => {
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
@@ -279,6 +283,25 @@ impl<'m> FuncCtx<'m> {
                             let tag = self.load_enum_tag(ptr, &src_ty, &expr.span)?;
                             return self.coerce(tag, &target);
                         }
+                    }
+                }
+                // sic bigint casts (sic.md §"Integer sizes"): `(intN)b` → the low
+                // bits via `__sic_bi_to_i64`; `(char*)b` → a fresh decimal string
+                // via `__sic_bi_to_str` (caller-owned; freed at scope exit).
+                if self.is_sic() && self.is_bigint_operand(inner) {
+                    if matches!(target, Type::Int { .. } | Type::Bool) {
+                        let b = self.to_bigint(inner)?;
+                        let v = self.emit_bigint_call("__sic_bi_to_i64", vec![b], Type::i64())?;
+                        return self.coerce(v, &target);
+                    }
+                    if matches!(&target, Type::Pointer(inner_ty) if matches!(inner_ty.as_ref(), Type::Int { bits: 8, .. })) {
+                        let b = self.to_bigint(inner)?;
+                        let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
+                        self.push_instr(Instr::Store { val: s.clone(), ptr: Val::Local(slot) });
+                        self.register_scope_exit(super::func::Cleanup::FreePtr { slot: Val::Local(slot) });
+                        return Ok(s);
                     }
                 }
                 let v = self.lower_expr(inner)?;
@@ -448,9 +471,120 @@ impl<'m> FuncCtx<'m> {
             return self.lower_string_concat(lhs, rhs);
         }
 
+        // sic `bigint` arithmetic / comparison (sic.md §"Integer sizes"): if either
+        // side is a bigint, the op runs through the arbitrary-precision runtime.
+        if self.is_sic() && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs)) {
+            use BinOpKind::*;
+            match op {
+                Add | Sub | Mul => return self.lower_bigint_binop(op, lhs, rhs),
+                Eq | Ne | Lt | Le | Gt | Ge => return self.lower_bigint_cmp(op, lhs, rhs),
+                _ => {}
+            }
+        }
+
         let l = self.lower_expr(lhs)?;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
+    }
+
+    // ─── bigint (sic.md §"Integer sizes") ──────────────────────────────────────
+
+    /// Emit a call to a bigint runtime function (defined by the prepended
+    /// runtime). Returns its result value.
+    pub(super) fn emit_bigint_call(&mut self, name: &str, args: Vec<Val>, ret: Type) -> Result<Val> {
+        let fref = self.lowerer.module.func_ref_by_name(name).ok_or_else(|| CompileError::new(
+            format!("internal: bigint runtime function '{}' not found", name)))?;
+        if ret == Type::Void {
+            self.push_instr(Instr::Call { dest: None, func: fref, args, ret_ty: Type::Void });
+            return Ok(Constant::zero());
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args, ret_ty: ret.clone() });
+        self.val_types.insert(dest.0, ret);
+        Ok(Val::Local(dest))
+    }
+
+    /// Call a bigint runtime function that returns a fresh `bigint` temporary, and
+    /// record it for freeing at the end of the current statement (so a value
+    /// re-evaluated each loop iteration does not leak). The result stays valid for
+    /// the rest of the statement.
+    fn call_bigint_new(&mut self, name: &str, args: Vec<Val>) -> Result<Val> {
+        let bt = super::types::bigint_type();
+        let v = self.emit_bigint_call(name, args, bt)?;
+        self.bigint_temps.push(v.clone());
+        Ok(v)
+    }
+
+    /// Free every `bigint` temporary created during the current statement. Called
+    /// at statement boundaries in `lower_stmt`. Straight-line by construction (a
+    /// statement's temps are produced in the block reaching its end).
+    pub(super) fn flush_bigint_temps(&mut self) {
+        if self.bigint_temps.is_empty() { return; }
+        let temps = std::mem::take(&mut self.bigint_temps);
+        for t in temps {
+            let _ = self.emit_bigint_call("__sic_bi_free", vec![t], Type::Void);
+        }
+    }
+
+    /// Evaluate `e` as a `bigint` value for use as a *borrowed operand* (of an
+    /// arithmetic/compare op): an existing bigint is used directly (no copy); a
+    /// big literal parses via the runtime; any integer is widened to a bigint.
+    fn to_bigint(&mut self, e: &Expr) -> Result<Val> {
+        if let ExprKind::BigIntLit(digits) = &e.kind {
+            let s = self.emit_cstring(digits);
+            return self.call_bigint_new("__sic_bi_from_str", vec![s]);
+        }
+        // An existing bigint value (variable, arith result temp) is borrowed as-is.
+        if matches!(self.infer_expr_type(e), Ok(t) if super::types::is_bigint(&t)) {
+            return self.lower_expr(e);
+        }
+        // An integer expression → widen to a temporary bigint.
+        let v = self.lower_expr(e)?;
+        let i64v = self.coerce(v, &Type::i64())?;
+        self.call_bigint_new("__sic_bi_from_i64", vec![i64v])
+    }
+
+    /// Evaluate `e` into an OWNED `bigint` block to store into a slot (a `bigint`
+    /// local/target — value semantics). The result is a fresh `__sic_bi_clone`
+    /// emitted *raw* (no scope-exit free of its own): it is owned solely by the
+    /// slot it is stored into, whose `BigintFree` cleanup frees it. `to_bigint`
+    /// yields the borrowed source (and registers frees for any temporaries it
+    /// materialises), so this never double-frees.
+    pub(super) fn eval_bigint_owned(&mut self, e: &Expr) -> Result<Val> {
+        let src = self.to_bigint(e)?;
+        self.emit_bigint_call("__sic_bi_clone", vec![src], super::types::bigint_type())
+    }
+
+    /// Lower a `bigint` arithmetic binary op `+ - *` (sic.md §"Integer sizes"):
+    /// coerce each operand to a bigint and call the runtime, yielding a fresh
+    /// owned result.
+    fn lower_bigint_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let fname = match op {
+            BinOpKind::Add => "__sic_bi_add",
+            BinOpKind::Sub => "__sic_bi_sub",
+            BinOpKind::Mul => "__sic_bi_mul",
+            _ => return Err(CompileError::new(
+                "bigint supports only + - * in this milestone".to_string())),
+        };
+        let a = self.to_bigint(lhs)?;
+        let b = self.to_bigint(rhs)?;
+        self.call_bigint_new(fname, vec![a, b])
+    }
+
+    /// Lower a `bigint` comparison (all six), via `__sic_bi_cmp` → {-1,0,1} then
+    /// the relational operator against 0. Yields an `i32` 0/1.
+    fn lower_bigint_cmp(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let a = self.to_bigint(lhs)?;
+        let b = self.to_bigint(rhs)?;
+        let cmp = self.emit_bigint_call("__sic_bi_cmp", vec![a, b], Type::i32())?;
+        self.emit_binop(op, cmp, Constant::int(0))
+    }
+
+    /// Whether `e` is (statically) a `bigint`-typed operand — used to route `+`,
+    /// comparisons, etc. A `BigIntLit` counts; an integer literal does not.
+    fn is_bigint_operand(&self, e: &Expr) -> bool {
+        if matches!(&e.kind, ExprKind::BigIntLit(_)) { return true; }
+        matches!(self.infer_expr_type(e), Ok(t) if super::types::is_bigint(&t))
     }
 
     /// sic tuple pack (sic.md §"Tuples"): allocate a refcounted heap block
@@ -1470,6 +1604,26 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
             self.emit_rc_release(Val::Local(old))?;
             self.push_instr(Instr::Store { val: newp, ptr: lv.ptr.clone() });
+            return Ok(lv.ptr);
+        }
+
+        // sic `bigint` (re)assignment `b = <expr>` / `b += <expr>` (sic.md
+        // §"Integer sizes"): free the old block, store a freshly-owned one (value
+        // semantics). A compound op computes `b <op> rhs` first.
+        if self.is_sic() && super::types::is_bigint(&lv.ty) {
+            // Compute the new value as a borrowed/temp bigint, then clone it into
+            // an owned block for this slot. `b op= rhs` ≡ `b = b op rhs`.
+            let computed = match op {
+                None => self.to_bigint(rhs)?,
+                Some(bin) => self.lower_bigint_binop(bin, lhs, rhs)?,
+            };
+            let newv = self.emit_bigint_call("__sic_bi_clone", vec![computed], super::types::bigint_type())?;
+            // Free the previous block, then store the freshly-owned one (the slot's
+            // scope-exit `BigintFree` will free this in turn).
+            let old = self.alloc_val();
+            self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+            self.emit_bigint_call("__sic_bi_free", vec![Val::Local(old)], Type::Void)?;
+            self.push_instr(Instr::Store { val: newv, ptr: lv.ptr.clone() });
             return Ok(lv.ptr);
         }
 
@@ -3825,6 +3979,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::CharLit(_) => Ok(Type::i32()),
             ExprKind::IntLit(_, is64) => Ok(if *is64 { Type::i64() } else { Type::i32() }),
             ExprKind::UIntLit(_, is64) => Ok(if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
+            ExprKind::BigIntLit(_) => Ok(super::types::bigint_type()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             ExprKind::StringLit(_) => Ok(Type::char_ptr()),
             ExprKind::Nullptr => Ok(Type::void_ptr()),
@@ -4025,6 +4180,12 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::BinOp { op, lhs, rhs } => {
                 use BinOpKind::*;
+                // sic `bigint` arithmetic yields a bigint; comparisons yield int.
+                if self.is_sic() && matches!(op, Add | Sub | Mul)
+                    && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs))
+                {
+                    return Ok(super::types::bigint_type());
+                }
                 match op {
                     // Relational/logical operators yield int.
                     Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),

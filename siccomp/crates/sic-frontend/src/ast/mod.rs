@@ -289,6 +289,10 @@ pub enum ExprKind {
     /// `L`/`LL` suffix or a value that doesn't fit any 32-bit type).
     IntLit(i64, bool),
     UIntLit(u64, bool),
+    /// sic-only: a decimal integer literal too large for `u64` (sic.md §"Integer
+    /// sizes"). Carries the digit string (with optional sign) for the bigint
+    /// runtime to parse; only meaningful in a `bigint` context.
+    BigIntLit(String),
     FloatLit(f64),
     StringLit(String),
     CharLit(i32),

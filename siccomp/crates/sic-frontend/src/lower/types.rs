@@ -195,6 +195,25 @@ pub fn tuple_type(elems: Vec<Type>) -> Type {
     Type::Pointer(Box::new(tuple_layout(elems)))
 }
 
+/// Struct-name marker for a sic `bigint` value (sic.md §"Integer sizes"). A
+/// bigint is an opaque pointer to this marker struct. It is deliberately DISTINCT
+/// from the runtime's own `struct __sic_bi` so that compiling the runtime (which
+/// is prepended into the same sic translation unit) does not itself trip the
+/// bigint value-semantics lowering. The two are ABI-identical (both pointers).
+pub const BIGINT_MARKER: &str = "(bigint)";
+
+/// A `bigint` value: an opaque pointer to the runtime's heap block.
+pub fn bigint_type() -> Type {
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(BIGINT_MARKER.to_string()), vec![], false))))
+}
+
+/// True if `t` is a `bigint` value (a pointer to the `__sic_bi` struct).
+pub fn is_bigint(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(BIGINT_MARKER)))
+}
+
 /// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
@@ -309,6 +328,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 // sic native string: a non-owning slice `{ char* data; usize size }`
                 // (sic.md §"Built-in string").
                 "string"          => return Ok(sic_string_type(ptr_size)),
+                // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
+                // opaque pointer to a heap block managed by the bigint runtime.
+                "bigint"          => return Ok(bigint_type()),
                 // Extended float types. sic has no true 128/80-bit float codegen,
                 // so these share `Float80` (16 bytes, computed as f64) — enough to
                 // compile code that merely passes them around. `_Float16` is 2

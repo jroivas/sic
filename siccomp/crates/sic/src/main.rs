@@ -4,6 +4,8 @@ use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::Command;
 
+mod bigint_runtime;
+
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
 use sic_frontend::{preprocess_ex, Lexer, Parser, Lowerer};
@@ -549,8 +551,18 @@ fn parse_source(
     if args.pthread {
         extra.push("-D_REENTRANT");
     }
-    let preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
+    let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
+
+    // sic `bigint` (sic.md §"Integer sizes"): only when the unit actually uses it,
+    // prepend the self-contained arbitrary-precision runtime (no external lib).
+    // A `#line` directive restores the user's line numbering for diagnostics.
+    if bigint_runtime::uses_bigint(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            bigint_runtime::BIGINT_RUNTIME, path, preprocessed
+        );
+    }
 
     // Pick the source language from the file extension: `.sic` is sic-lang (its
     // Rust-style primitive aliases `i32`/`u64`/`isize`/… are reserved types);

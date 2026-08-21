@@ -21,6 +21,9 @@ pub enum Cleanup {
     /// sic `@` reference: release (decrement + free at 0) the referent pointer
     /// held in `slot` at scope exit (sic.md §"References").
     RefRelease { slot: Val },
+    /// sic `bigint`: `__sic_bi_free` the pointer held in `slot` at scope exit
+    /// (value semantics — every bigint local/temp owns its heap block).
+    BigintFree { slot: Val },
 }
 
 /// Per-function lowering context.
@@ -85,6 +88,10 @@ pub struct FuncCtx<'m> {
     /// §"Tuples"): not yet allocated — the concrete type is fixed by the first
     /// assignment `t = tuple(...)`, which materializes the slot.
     pub deferred_tuples: std::collections::HashSet<String>,
+    /// sic `bigint` temporaries created while lowering the current statement
+    /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
+    /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
+    pub bigint_temps: Vec<Val>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -120,6 +127,7 @@ impl<'m> FuncCtx<'m> {
             fat_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
+            bigint_temps: Vec::new(),
         }
     }
 
@@ -234,6 +242,11 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });
                 let _ = self.emit_rc_release(Val::Local(p));
+            }
+            Cleanup::BigintFree { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::bigint_type() });
+                let _ = self.emit_bigint_call("__sic_bi_free", vec![Val::Local(p)], Type::Void);
             }
         }
     }
@@ -620,7 +633,12 @@ impl<'m> FuncCtx<'m> {
             }
             // sic `del <expr>;` (sic.md §"Scopes and automatic release").
             Stmt::Delete(e, _) => { self.lower_delete(e)?; }
-            Stmt::Expr(e, _) => { self.lower_expr(e)?; }
+            Stmt::Expr(e, _) => {
+                self.lower_expr(e)?;
+                // Free any bigint temporaries this statement created (sic.md
+                // §"Integer sizes") — per statement, so loop bodies don't leak.
+                if !self.is_terminated() { self.flush_bigint_temps(); }
+            }
             Stmt::Block(stmts, _) => {
                 self.enter_scope();
                 for s in stmts {
@@ -629,7 +647,10 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.exit_scope();
             }
-            Stmt::Decl(d) => self.lower_local_decl(d)?,
+            Stmt::Decl(d) => {
+                self.lower_local_decl(d)?;
+                if !self.is_terminated() { self.flush_bigint_temps(); }
+            }
             Stmt::Return(val, _) => {
                 // Evaluate the return value BEFORE running cleanups (the value
                 // must be computed while the about-to-be-destroyed locals are
@@ -955,6 +976,12 @@ impl<'m> FuncCtx<'m> {
                     if self.is_sic() && super::types::is_sic_string(&ty) {
                         self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(vid) });
                     }
+                    // sic `bigint` local: `__sic_bi_free` its block at scope exit
+                    // (value semantics). Uninitialized → NULL slot, freeing which
+                    // is a no-op.
+                    if self.is_sic() && super::types::is_bigint(&ty) {
+                        self.register_scope_exit(Cleanup::BigintFree { slot: Val::Local(vid) });
+                    }
                     // sic bounds checking: a never-moved pointer initialized from
                     // `new` (or declared as a `@`-reference) is a checkable fat
                     // pointer — `name[i]` reads the header size at `name-2*ptr`.
@@ -1032,6 +1059,15 @@ impl<'m> FuncCtx<'m> {
             {
                 let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
                 self.store_string_literal(&ptr, ty, s)?;
+            }
+            // sic `bigint x = <expr>` (sic.md §"Integer sizes"): store a
+            // freshly-owned bigint. An existing bigint value is CLONED (value
+            // semantics — the binding owns its own block); a literal/int builds a
+            // new one. The clone/new already registered its scope-exit free.
+            Initializer::Expr(e) if self.is_sic() && super::types::is_bigint(ty) => {
+                let v = self.eval_bigint_owned(e)?;
+                self.push_instr(Instr::Store { val: v, ptr });
+                return Ok(());
             }
             Initializer::Expr(e) => {
                 // `T v = <aggregate expr>` (e.g. a compound literal, a struct

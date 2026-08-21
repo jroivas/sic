@@ -530,6 +530,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `string` is the native built-in string type in sic (sic.md
             // §"Built-in string"); an ordinary identifier in C.
             "string" => return TokenKind::TypeName,
+            // `bigint` is the arbitrary-precision integer type (sic.md §"Integer
+            // sizes"); an ordinary identifier in C.
+            "bigint" => return TokenKind::TypeName,
             // `fallthrough` is an explicit switch-case terminator in sic
             // (sic.md §"Switch - case"); it is an ordinary identifier in C.
             "fallthrough" => return TokenKind::Fallthrough,
