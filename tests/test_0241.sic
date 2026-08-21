@@ -1,0 +1,23 @@
+// sic fixed-point (sic.md §"Built-in fixed point") — division at the target /
+// operand scale, plus a fixed-returning function. Verified by exit code.
+#include <string.h>
+fixed<10,2> half(fixed<10,2> x) { return x / 2.00; }   // fixed param + return
+int main() {
+    fixed<6,3> a = 10.000;
+    fixed<6,3> b = 4.000;
+    if (strcmp((a / b).str, "2.500") != 0) return 1;    // max operand frac (3)
+
+    fixed<6,6> hi = a / b;                               // divide to 6 dp
+    if (strcmp(hi.str, "2.500000") != 0) return 2;
+
+    fixed<6,4> third = 1.0000 / 3.0000;                 // 0.3333 (4dp, truncated)
+    if (strcmp(third.str, "0.3333") != 0) return 3;
+
+    fixed<10,2> per = 100.00 / 7.00;                    // 14.28
+    if (strcmp(per.str, "14.28") != 0) return 4;
+
+    fixed<10,2> h = half(19.98);                        // 9.99
+    if (strcmp(h.str, "9.99") != 0) return 5;
+
+    return 42;
+}

@@ -490,7 +490,8 @@ impl<'m> FuncCtx<'m> {
         if self.is_sic() && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs)) {
             use BinOpKind::*;
             match op {
-                Add | Sub | Mul => return self.lower_bigint_binop(op, lhs, rhs),
+                Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr =>
+                    return self.lower_bigint_binop(op, lhs, rhs),
                 Eq | Ne | Lt | Le | Gt | Ge => return self.lower_bigint_cmp(op, lhs, rhs),
                 _ => {}
             }
@@ -507,6 +508,13 @@ impl<'m> FuncCtx<'m> {
                 use BinOpKind::*;
                 match op {
                     Add | Sub | Mul => return self.lower_fixed_binop(op, lhs, rhs),
+                    Div => {
+                        // Unbound division uses the larger operand fraction; a
+                        // `fixed<_,F>` binding recomputes at F (see eval_fixed_owned).
+                        let fa = self.fixed_expr_dims(lhs).map_or(0, |d| d.1);
+                        let fb = self.fixed_expr_dims(rhs).map_or(0, |d| d.1);
+                        return self.lower_fixed_div(lhs, rhs, fa.max(fb));
+                    }
                     Eq | Ne | Lt | Le | Gt | Ge => return self.lower_fixed_cmp(op, lhs, rhs),
                     _ => {}
                 }
@@ -557,6 +565,18 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Free only the bigint/fixed temporaries recorded since `mark` (in the current
+    /// block). Used to free a conditionally-evaluated sub-expression's temps (a
+    /// `||`/`&&` right operand, a ternary arm) where they are created, since they
+    /// don't dominate the statement-end flush.
+    pub(super) fn flush_bigint_temps_from(&mut self, mark: usize) {
+        if self.bigint_temps.len() <= mark { return; }
+        let temps: Vec<Val> = self.bigint_temps.split_off(mark);
+        for t in temps {
+            let _ = self.emit_bigint_call("__sic_bi_free", vec![t], Type::Void);
+        }
+    }
+
     /// Evaluate `e` as a `bigint` value for use as a *borrowed operand* (of an
     /// arithmetic/compare op): an existing bigint is used directly (no copy); a
     /// big literal parses via the runtime; any integer is widened to a bigint.
@@ -590,12 +610,25 @@ impl<'m> FuncCtx<'m> {
     /// coerce each operand to a bigint and call the runtime, yielding a fresh
     /// owned result.
     fn lower_bigint_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // Shifts take an integer shift count on the right, not a bigint.
+        if matches!(op, BinOpKind::Shl | BinOpKind::Shr) {
+            let a = self.to_bigint(lhs)?;
+            let cnt = self.lower_expr(rhs)?;
+            let cnt = self.coerce(cnt, &Type::u32())?;
+            let f = if op == BinOpKind::Shl { "__sic_bi_shl" } else { "__sic_bi_shr" };
+            return self.call_bigint_new(f, vec![a, cnt]);
+        }
         let fname = match op {
             BinOpKind::Add => "__sic_bi_add",
             BinOpKind::Sub => "__sic_bi_sub",
             BinOpKind::Mul => "__sic_bi_mul",
+            BinOpKind::Div => "__sic_bi_div",
+            BinOpKind::Rem => "__sic_bi_mod",
+            BinOpKind::BitAnd => "__sic_bi_and",
+            BinOpKind::BitOr  => "__sic_bi_or",
+            BinOpKind::BitXor => "__sic_bi_xor",
             _ => return Err(CompileError::new(
-                "bigint supports only + - * in this milestone".to_string())),
+                format!("bigint does not support this operator"))),
         };
         let a = self.to_bigint(lhs)?;
         let b = self.to_bigint(rhs)?;
@@ -722,12 +755,32 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Result `(integral, fraction)` of a fixed op (sic.md §"Built-in fixed
-    /// point"): `+`/`-` take the larger of each; `*` sums them.
+    /// point"): `+`/`-` take the larger of each; `*` sums them; `/` keeps the
+    /// larger fraction and may grow the integral part (dividing by a small value).
     fn fixed_result_dims(op: BinOpKind, a: (u32, u32), b: (u32, u32)) -> (u32, u32) {
         match op {
             BinOpKind::Mul => (a.0 + b.0, a.1 + b.1),
+            BinOpKind::Div => (a.0 + b.1, a.1.max(b.1)),
             _ => (a.0.max(b.0), a.1.max(b.1)),
         }
+    }
+
+    /// Lower a fixed division `a / b` producing a mantissa at scale `rs`
+    /// (sic.md §"Built-in fixed point"). With mantissas Ma=a·10^Fa, Mb=b·10^Fb,
+    /// the result mantissa = round-toward-zero(Ma · 10^(rs+Fb−Fa) / Mb), computed
+    /// as an exact bigint division after scaling. Division by zero yields 0.
+    fn lower_fixed_div(&mut self, lhs: &Expr, rhs: &Expr, rs: u32) -> Result<Val> {
+        let (ma, _, fa, oa) = self.fixed_operand_owned(lhs)?;
+        let (mb, _, fb, ob) = self.fixed_operand_owned(rhs)?;
+        let e: i64 = rs as i64 + fb as i64 - fa as i64;
+        // numerator = ma · 10^max(e,0); divisor = mb · 10^max(-e,0)
+        let (num, on) = if e > 0 { self.rescale_owned(ma, 0, e as u32, oa)? } else { (ma, oa) };
+        let (den, od) = if e < 0 { self.rescale_owned(mb, 0, (-e) as u32, ob)? } else { (mb, ob) };
+        let q = self.emit_bigint_call("__sic_bi_div", vec![num.clone(), den.clone()], super::types::bigint_type())?;
+        if on { self.bi_free_now(num)?; }
+        if od { self.bi_free_now(den)?; }
+        self.bigint_temps.push(q.clone());
+        Ok(q)
     }
 
     /// Lower a fixed `+ - *` — harmonize scales then run the bigint op. Returns the
@@ -833,8 +886,15 @@ impl<'m> FuncCtx<'m> {
     /// Materialize `e` as an OWNED fixed mantissa at the target scale `to_f`, for
     /// storing into a `fixed<_,to_f>` slot (value semantics; freed with the slot).
     pub(super) fn eval_fixed_owned(&mut self, e: &Expr, to_f: u32) -> Result<Val> {
-        // If `e` is itself a fixed op, its mantissa is already at the op's result
-        // scale; rescale to the target and clone.
+        // Division binds to the target scale directly (divide to `to_f` digits).
+        if let ExprKind::BinOp { op: BinOpKind::Div, lhs, rhs } = &e.kind {
+            if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs) {
+                let m = self.lower_fixed_div(lhs, rhs, to_f)?;
+                return self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type());
+            }
+        }
+        // Otherwise: a fixed op's mantissa is at its result scale; rescale to the
+        // target and clone.
         let (m, _, ef) = if self.is_fixed_binop(e) {
             let (rm, rf) = self.fixed_binop_result(e)?;
             (rm, 0u32, rf)
@@ -845,9 +905,9 @@ impl<'m> FuncCtx<'m> {
         self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type())
     }
 
-    /// Whether `e` is a `+ - *` on fixed operands.
+    /// Whether `e` is a `+ - * /` on fixed operands.
     fn is_fixed_binop(&self, e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul, lhs, rhs }
+        matches!(&e.kind, ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div, lhs, rhs }
             if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs))
     }
 
@@ -862,8 +922,39 @@ impl<'m> FuncCtx<'m> {
         let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));
         let db = self.fixed_expr_dims(rhs).unwrap_or((20, 0));
         let (_, rf) = Self::fixed_result_dims(op, da, db);
-        let m = self.lower_fixed_binop(op, lhs, rhs)?;
+        let m = if op == BinOpKind::Div {
+            self.lower_fixed_div(lhs, rhs, rf)?
+        } else {
+            self.lower_fixed_binop(op, lhs, rhs)?
+        };
         Ok((m, rf))
+    }
+
+    /// If `pty` is a bigint or fixed parameter type, set `*pval` to the argument
+    /// built as that bignum value and return true. A same-type/scale argument is
+    /// passed as-is (the callee borrows it); a literal/int lowered as a scalar is
+    /// (re)built here — safe because such mismatched args are pure. Temps are freed
+    /// at statement end (after the call).
+    fn build_bignum_arg(&mut self, pval: &mut Val, pty: &Type, arg: &Expr) -> Result<bool> {
+        if !self.is_sic() { return Ok(false); }
+        let at = self.infer_expr_type(arg).unwrap_or_else(|_| Type::i32());
+        if super::types::is_bigint(pty) {
+            if !super::types::is_bigint(&at) {
+                *pval = self.to_bigint(arg)?;
+            }
+            return Ok(true);
+        }
+        if let Some((_, pf)) = super::types::fixed_dims(pty) {
+            let same_scale = super::types::fixed_dims(&at).map(|(_, f)| f) == Some(pf);
+            if !same_scale {
+                let (m, _, ef, owned) = self.fixed_operand_owned(arg)?;
+                let (m, mowned) = self.rescale_owned(m, ef, pf, owned)?;
+                if mowned { self.bigint_temps.push(m.clone()); }
+                *pval = m;
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     /// The fixed value's decimal string (`b.str`) via `__sic_fx_to_str`.
@@ -1840,8 +1931,13 @@ impl<'m> FuncCtx<'m> {
         }
 
         self.switch_to_block(rhs_bb);
+        // The rhs is only evaluated on one path, so any bigint/fixed temporaries it
+        // creates live in this conditional block and must be freed here — the
+        // statement-end flush runs from a block they don't dominate.
+        let rhs_mark = self.bigint_temps.len();
         let rhs_val = self.lower_expr(rhs)?;
         let rhs_bool = self.to_bool(rhs_val)?;
+        self.flush_bigint_temps_from(rhs_mark);
         // Store 0 or 1 based on rhs bool
         let rhs_ext = self.alloc_val();
         self.push_instr(Instr::Cast { dest: rhs_ext, op: CastOp::ZExt, val: rhs_bool, to_ty: Type::i32() });
@@ -2069,6 +2165,11 @@ impl<'m> FuncCtx<'m> {
                 Ok(Val::Local(dest))
             }
             UnOpKind::Neg => {
+                // sic bigint negation `-a` via the runtime.
+                if self.is_sic() && self.is_bigint_operand(inner) {
+                    let a = self.to_bigint(inner)?;
+                    return self.call_bigint_new("__sic_bi_neg", vec![a]);
+                }
                 let v = self.lower_expr(inner)?;
                 let ty = self.val_type(&v);
                 let dest = self.alloc_val();
@@ -2088,6 +2189,11 @@ impl<'m> FuncCtx<'m> {
                 Ok(Val::Local(ext))
             }
             UnOpKind::BitNot => {
+                // sic bigint bitwise-not `~a` (= -a - 1) via the runtime.
+                if self.is_sic() && self.is_bigint_operand(inner) {
+                    let a = self.to_bigint(inner)?;
+                    return self.call_bigint_new("__sic_bi_not", vec![a]);
+                }
                 let v = self.lower_expr(inner)?;
                 let ty = self.val_type(&v);
                 let dest = self.alloc_val();
@@ -2262,15 +2368,24 @@ impl<'m> FuncCtx<'m> {
 
         self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
 
+        // Each arm is conditionally evaluated: free any bigint/fixed temporaries it
+        // creates within its own block (unless the result itself is a bigint/fixed
+        // — then the arm's value IS the result and must survive to the merge).
+        let free_arm_temps = !(super::types::is_bigint(&ty) || super::types::is_fixed(&ty));
+
         self.switch_to_block(then_bb);
+        let tmark = self.bigint_temps.len();
         let tv = self.lower_expr(then)?;
         let tv = self.coerce(tv, &ty)?;
+        if free_arm_temps { self.flush_bigint_temps_from(tmark); }
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(else_bb);
+        let emark = self.bigint_temps.len();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
+        if free_arm_temps { self.flush_bigint_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
@@ -3760,6 +3875,11 @@ impl<'m> FuncCtx<'m> {
                     }
                     continue;
                 }
+                // sic bigint/fixed parameter: build the argument as the right
+                // bignum value (a decimal/int literal lowered as a scalar must be
+                // reconstructed; a matching-scale value is passed as-is). Args are
+                // borrows (the callee doesn't free them).
+                if self.build_bignum_arg(pval, pty, &args[i])? { continue; }
                 let coerced = self.coerce(pval.clone(), pty)?;
                 *pval = coerced;
             } else if is_variadic {
@@ -3789,12 +3909,19 @@ impl<'m> FuncCtx<'m> {
             Ok(Constant::zero())
         } else {
             let returns_tuple = self.is_sic() && super::types::is_tuple(&ret_ty);
+            let returns_bignum = self.is_sic()
+                && (super::types::is_bigint(&ret_ty) || super::types::is_fixed(&ret_ty));
             let dest = self.alloc_val();
             self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty });
             // sic tuple-returning call: the result carries a reference (retained by
             // the callee before return); release it at scope exit.
             if returns_tuple {
                 self.register_tuple_release(Val::Local(dest))?;
+            }
+            // sic bigint/fixed-returning call: the callee returned an owned clone;
+            // free it at statement end (value semantics, like any bigint temp).
+            if returns_bignum {
+                self.bigint_temps.push(Val::Local(dest));
             }
             Ok(Val::Local(dest))
         }
@@ -4315,6 +4442,12 @@ impl<'m> FuncCtx<'m> {
             ExprKind::TypesCompatible(..) => Ok(Type::i32()),
             ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
             | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Ok(Type::u64()),
+            // sic bigint `-a` / `~a` keep the bigint type.
+            ExprKind::Unary { op: UnOpKind::Neg | UnOpKind::BitNot, expr: inner }
+                if self.is_sic() && self.is_bigint_operand(inner) =>
+            {
+                Ok(super::types::bigint_type())
+            }
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
                 Ok(Type::Pointer(Box::new(inner_ty)))
@@ -4505,14 +4638,14 @@ impl<'m> FuncCtx<'m> {
             ExprKind::BinOp { op, lhs, rhs } => {
                 use BinOpKind::*;
                 // sic `bigint` arithmetic yields a bigint; comparisons yield int.
-                if self.is_sic() && matches!(op, Add | Sub | Mul)
+                if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr)
                     && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs))
                 {
                     return Ok(super::types::bigint_type());
                 }
                 // sic `fixed` arithmetic yields a fixed<I,F> (comparisons yield int,
                 // handled below). I/F combine per `fixed_result_dims`.
-                if self.is_sic() && matches!(op, Add | Sub | Mul)
+                if self.is_sic() && matches!(op, Add | Sub | Mul | Div)
                     && (self.is_fixed_typed(lhs) || self.is_fixed_typed(rhs))
                 {
                     let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));

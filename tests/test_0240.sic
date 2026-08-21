@@ -1,0 +1,30 @@
+// sic bigint (sic.md §"Integer sizes") — division, modulo, shifts, bitwise, and
+// value-semantic return. Verified by exit code.
+#include <string.h>
+bigint factorial(int n) { bigint r = 1; for (int i = 2; i <= n; i++) r = r * i; return r; }
+int main() {
+    bigint a = 100000000000000000000000;   // 1e23
+    bigint b = 7;
+    if (strcmp((a / b).str, "14285714285714285714285") != 0) return 1;
+    if (strcmp((a % b).str, "5") != 0) return 2;
+
+    bigint n = -17; bigint d = 5;
+    if (strcmp((n / d).str, "-3") != 0) return 3;   // trunc toward zero
+    if (strcmp((n % d).str, "-2") != 0) return 4;   // remainder has dividend sign
+
+    bigint one = 1;
+    if (strcmp((one << 80).str, "1208925819614629174706176") != 0) return 5;  // 2^80
+    bigint big = 1208925819614629174706176;
+    if (strcmp((big >> 40).str, "1099511627776") != 0) return 6;
+
+    bigint p = 14; bigint q = 9;
+    if ((p & q).int != 8 || (p | q).int != 15 || (p ^ q).int != 7) return 7;
+    bigint five = 5;
+    if ((~five).int != -6) return 8;                 // ~5 = -6
+    if ((-1 & five).int != 5) return 9;              // two's-complement on negatives
+
+    bigint f = factorial(25);                        // returned bigint (value semantics)
+    if (strcmp(f.str, "15511210043330985984000000") != 0) return 10;
+
+    return 42;
+}

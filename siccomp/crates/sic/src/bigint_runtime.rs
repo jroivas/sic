@@ -282,6 +282,144 @@ __attribute__((weak)) char *__sic_fx_to_str(const __sic_bi *m, int scale) {
     free(digits);
     return out;
 }
+
+/* ── division, shifts, bitwise ─────────────────────────────────────────────── */
+
+/* magnitude division q = |a|/|b|, *rem = |a|%|b| (binary long division).
+   Requires |b| != 0. Both outputs are non-negative. */
+__attribute__((weak)) __sic_bi *__sic_bi_udivmod(const __sic_bi *a, const __sic_bi *b, __sic_bi **rem_out) {
+    __sic_bi *q = __sic_bi_alloc(a->len);
+    for (unsigned i = 0; i < a->len; i++) q->limbs[i] = 0;
+    q->len = a->len;
+    __sic_bi *r = __sic_bi_from_i64(0);
+    int total = (int)a->len * 32;
+    for (int i = total - 1; i >= 0; i--) {
+        unsigned bit = (a->limbs[i / 32] >> (i % 32)) & 1u;
+        __sic_bi *nr = __sic_bi_muladd_small(r, 2, bit);   /* r = (r<<1) | bit */
+        __sic_bi_free(r);
+        r = nr;
+        if (__sic_bi_ucmp(r, b) >= 0) {
+            __sic_bi *sr = __sic_bi_usub(r, b);
+            __sic_bi_free(r);
+            r = sr;
+            q->limbs[i / 32] |= (1u << (i % 32));
+        }
+    }
+    __sic_bi_norm(q);
+    q->sign = q->len ? 1 : 0;
+    r->sign = r->len ? 1 : 0;
+    *rem_out = r;
+    return q;
+}
+
+/* signed divmod: quotient truncates toward zero, remainder takes the dividend's
+   sign (C semantics). Division by zero yields 0 (sic's defined behavior). */
+__attribute__((weak)) __sic_bi *__sic_bi_divmod(const __sic_bi *a, const __sic_bi *b, __sic_bi **rem_out) {
+    if (b->sign == 0) { *rem_out = __sic_bi_from_i64(0); return __sic_bi_from_i64(0); }
+    __sic_bi *rmag;
+    __sic_bi *q = __sic_bi_udivmod(a, b, &rmag);
+    q->sign = q->len ? a->sign * b->sign : 0;
+    rmag->sign = rmag->len ? a->sign : 0;
+    *rem_out = rmag;
+    return q;
+}
+
+__attribute__((weak)) __sic_bi *__sic_bi_div(const __sic_bi *a, const __sic_bi *b) {
+    __sic_bi *r; __sic_bi *q = __sic_bi_divmod(a, b, &r); __sic_bi_free(r); return q;
+}
+
+__attribute__((weak)) __sic_bi *__sic_bi_mod(const __sic_bi *a, const __sic_bi *b) {
+    __sic_bi *r; __sic_bi *q = __sic_bi_divmod(a, b, &r); __sic_bi_free(q); return r;
+}
+
+/* a << n (a * 2^n); sign preserved */
+__attribute__((weak)) __sic_bi *__sic_bi_shl(const __sic_bi *a, unsigned n) {
+    if (a->sign == 0) return __sic_bi_from_i64(0);
+    unsigned ls = n / 32, bs = n % 32;
+    __sic_bi *r = __sic_bi_alloc(a->len + ls + 1);
+    for (unsigned i = 0; i < a->len + ls + 1; i++) r->limbs[i] = 0;
+    for (unsigned i = 0; i < a->len; i++) {
+        unsigned long long v = (unsigned long long)a->limbs[i] << bs;
+        r->limbs[i + ls]     |= (unsigned)(v & 0xffffffffu);
+        r->limbs[i + ls + 1] |= (unsigned)(v >> 32);
+    }
+    r->len = a->len + ls + 1;
+    __sic_bi_norm(r);
+    r->sign = r->len ? a->sign : 0;
+    return r;
+}
+
+/* a >> n (magnitude / 2^n, truncating toward zero); sign preserved */
+__attribute__((weak)) __sic_bi *__sic_bi_shr(const __sic_bi *a, unsigned n) {
+    unsigned ls = n / 32, bs = n % 32;
+    if (ls >= a->len) return __sic_bi_from_i64(0);
+    unsigned rl = a->len - ls;
+    __sic_bi *r = __sic_bi_alloc(rl);
+    for (unsigned j = 0; j < rl; j++) {
+        unsigned lo = a->limbs[j + ls] >> bs;
+        unsigned hi = 0;
+        if (bs && (j + ls + 1) < a->len) hi = a->limbs[j + ls + 1] << (32 - bs);
+        r->limbs[j] = lo | hi;
+    }
+    r->len = rl;
+    __sic_bi_norm(r);
+    r->sign = r->len ? a->sign : 0;
+    return r;
+}
+
+/* fill out[0..W) with the two's-complement limbs of `a` over W limbs */
+__attribute__((weak)) void __sic_bi_tc(const __sic_bi *a, unsigned W, unsigned *out) {
+    for (unsigned i = 0; i < W; i++) out[i] = i < a->len ? a->limbs[i] : 0;
+    if (a->sign < 0) {
+        for (unsigned i = 0; i < W; i++) out[i] = ~out[i];
+        unsigned long long carry = 1;
+        for (unsigned i = 0; i < W && carry; i++) {
+            unsigned long long s = (unsigned long long)out[i] + carry;
+            out[i] = (unsigned)s; carry = s >> 32;
+        }
+    }
+}
+
+/* bitwise over infinite two's-complement: op 0=&, 1=|, 2=^ */
+__attribute__((weak)) __sic_bi *__sic_bi_bitop(const __sic_bi *a, const __sic_bi *b, int op) {
+    unsigned W = (a->len > b->len ? a->len : b->len) + 1;
+    unsigned *ta = (unsigned *)malloc((unsigned long)W * 4);
+    unsigned *tb = (unsigned *)malloc((unsigned long)W * 4);
+    __sic_bi_tc(a, W, ta);
+    __sic_bi_tc(b, W, tb);
+    __sic_bi *r = __sic_bi_alloc(W);
+    for (unsigned i = 0; i < W; i++) {
+        unsigned v = op == 0 ? (ta[i] & tb[i]) : op == 1 ? (ta[i] | tb[i]) : (ta[i] ^ tb[i]);
+        r->limbs[i] = v;
+    }
+    int neg = (r->limbs[W - 1] >> 31) & 1;
+    if (neg) {
+        for (unsigned i = 0; i < W; i++) r->limbs[i] = ~r->limbs[i];
+        unsigned long long carry = 1;
+        for (unsigned i = 0; i < W && carry; i++) {
+            unsigned long long s = (unsigned long long)r->limbs[i] + carry;
+            r->limbs[i] = (unsigned)s; carry = s >> 32;
+        }
+    }
+    r->len = W;
+    __sic_bi_norm(r);
+    r->sign = r->len ? (neg ? -1 : 1) : 0;
+    free(ta); free(tb);
+    return r;
+}
+
+__attribute__((weak)) __sic_bi *__sic_bi_and(const __sic_bi *a, const __sic_bi *b) { return __sic_bi_bitop(a, b, 0); }
+__attribute__((weak)) __sic_bi *__sic_bi_or (const __sic_bi *a, const __sic_bi *b) { return __sic_bi_bitop(a, b, 1); }
+__attribute__((weak)) __sic_bi *__sic_bi_xor(const __sic_bi *a, const __sic_bi *b) { return __sic_bi_bitop(a, b, 2); }
+
+/* ~a = -a - 1 */
+__attribute__((weak)) __sic_bi *__sic_bi_not(const __sic_bi *a) {
+    __sic_bi *na = __sic_bi_neg(a);
+    __sic_bi *one = __sic_bi_from_i64(1);
+    __sic_bi *r = __sic_bi_sub(na, one);
+    __sic_bi_free(na); __sic_bi_free(one);
+    return r;
+}
 "#;
 
 /// True if `src` (post-preprocess text) uses `bigint` or `fixed` as a whole

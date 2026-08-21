@@ -714,10 +714,22 @@ impl<'m> FuncCtx<'m> {
                             let pc = self.coerce(c.clone(), &Type::char_ptr())?;
                             self.emit_rc_retain(pc)?;
                         }
+                        // sic bigint/fixed return: these have value semantics (each
+                        // owner frees its own block), so a returned local would be
+                        // freed by scope cleanup before the caller reads it. Return
+                        // an independent CLONE; the caller owns and frees it.
+                        if self.is_sic() && (super::types::is_bigint(&expected) || super::types::is_fixed(&expected)) {
+                            let cl = self.emit_bigint_call("__sic_bi_clone", vec![c], super::types::bigint_type())?;
+                            self.flush_bigint_temps();  // free the returned expr's temps
+                            self.emit_cleanups_to(0);
+                            self.set_terminator(Terminator::Ret(Some(cl)));
+                            return Ok(());
+                        }
                         Some(c)
                     } else {
                         None
                     };
+                    self.flush_bigint_temps();  // free any bigint temps in the return expr
                     self.emit_cleanups_to(0);
                     self.set_terminator(Terminator::Ret(ret));
                 }
@@ -1325,6 +1337,18 @@ impl<'m> FuncCtx<'m> {
 
     // ─── Control flow ────────────────────────────────────────────────────────
 
+    /// Lower a condition expression to a bool, freeing any bigint/fixed temporaries
+    /// it creates in-place (sic.md §"Integer sizes"/"fixed point"). A loop
+    /// condition re-executes each iteration, so its temps must be freed there —
+    /// not by the statement-end flush, which runs once.
+    fn lower_cond(&mut self, cond: &Expr) -> Result<Val> {
+        let mark = self.bigint_temps.len();
+        let v = self.lower_expr(cond)?;
+        let b = self.to_bool(v)?;
+        self.flush_bigint_temps_from(mark);
+        Ok(b)
+    }
+
     fn lower_if(&mut self, cond: &Expr, then: &Stmt, else_: Option<&Stmt>) -> Result<()> {
         // Fold a compile-time-constant condition to just its taken branch, like
         // gcc/clang. QEMU's feature gates expand to a literal (`whpx_enabled()` →
@@ -1340,8 +1364,7 @@ impl<'m> FuncCtx<'m> {
             }
             return Ok(());
         }
-        let cond_val = self.lower_expr(cond)?;
-        let cond_bool = self.to_bool(cond_val)?;
+        let cond_bool = self.lower_cond(cond)?;
 
         let then_bb = self.new_block_after_current();
         let merge_bb = self.new_block_after_current();
@@ -1380,8 +1403,7 @@ impl<'m> FuncCtx<'m> {
             self.set_terminator(Terminator::Jump(cond_bb));
         }
         self.switch_to_block(cond_bb);
-        let cv = self.lower_expr(cond)?;
-        let cb = self.to_bool(cv)?;
+        let cb = self.lower_cond(cond)?;
         self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
 
         self.loop_stack.push((end_bb, cond_bb));
@@ -1421,8 +1443,7 @@ impl<'m> FuncCtx<'m> {
         self.loop_stack.pop();
 
         self.switch_to_block(cond_bb);
-        let cv = self.lower_expr(cond)?;
-        let cb = self.to_bool(cv)?;
+        let cb = self.lower_cond(cond)?;
         self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
 
         self.switch_to_block(end_bb);
