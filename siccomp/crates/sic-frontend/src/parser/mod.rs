@@ -271,6 +271,11 @@ impl Parser {
 
     fn is_expr_start_not_decl(&self) -> bool {
         // If the current token cannot start a declaration, it's a top-level expr.
+        // sic `tuple <name>` is a declaration (not an expression start); `tuple(`
+        // is the pack/unpack expression.
+        if self.peek_kind() == TokenKind::Tuple {
+            return self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LParen);
+        }
         if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
@@ -439,6 +444,14 @@ impl Parser {
                 TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
+                // sic `tuple` type (sic.md §"Tuples"). `tuple(` is instead the
+                // pack/unpack expression, handled in primary-expression parsing.
+                TokenKind::Tuple if base.is_none()
+                    && self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen) =>
+                {
+                    base = Some(AstType::Tuple);
+                    self.advance();
+                }
                 // `__int128` is a base integer type that combines with
                 // signed/unsigned (`unsigned __int128`, `__signed__ __int128`),
                 // unlike ordinary typedef names.
@@ -846,6 +859,10 @@ impl Parser {
     /// keyword/name, qualifier, or storage class). Used to detect K&R-style
     /// parameter declarations following an old-style function header.
     fn starts_decl_specifier(&self) -> bool {
+        // sic `tuple <name>` starts a declaration; `tuple(` is a pack/unpack expr.
+        if self.peek_kind() == TokenKind::Tuple {
+            return self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen);
+        }
         if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
@@ -987,6 +1004,10 @@ impl Parser {
     }
 
     fn is_decl_start(&self) -> bool {
+        // sic `tuple <name>` is a declaration; `tuple(` is a pack/unpack expression.
+        if self.peek_kind() == TokenKind::Tuple {
+            return self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen);
+        }
         if matches!(self.peek_kind(),
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
@@ -1902,6 +1923,18 @@ impl Parser {
             TokenKind::Nullptr => {
                 self.advance();
                 Ok(Expr::new(ExprKind::Nullptr, sp))
+            }
+            // sic tuple pack/unpack `tuple(e0, e1, …)` (sic.md §"Tuples").
+            TokenKind::Tuple => {
+                self.advance();
+                self.expect(TokenKind::LParen)?;
+                let mut elems = Vec::new();
+                while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                    elems.push(self.parse_assign_expr()?);
+                    if !self.eat(TokenKind::Comma) { break; }
+                }
+                self.expect(TokenKind::RParen)?;
+                Ok(Expr::new(ExprKind::TupleExpr(elems), sp))
             }
             TokenKind::IntLit => {
                 let text = self.advance().text.clone();

@@ -1,0 +1,22 @@
+// sic tuples (sic.md §"Tuples"): pack, index, deferred declaration, unpack, a
+// tuple-returning function (return-type inferred), and heterogeneous elements.
+tuple get_two(int x) { return tuple(x * 2, x * 3); }   // return type inferred
+
+int main() {
+    tuple t = tuple(88, 66, 42);        // pack + init
+    if (t[0] != 88 || t[1] != 66 || t[2] != 42) return 91;
+
+    tuple tmp;                           // deferred declaration
+    tmp = tuple(1, 2, 3);
+    if (tmp[0] != 1 || tmp[2] != 3) return 92;
+
+    int a, b;
+    tuple(a, b) = get_two(42);           // unpack from a tuple-returning fn
+    if (a != 84 || b != 126) return 93;
+
+    tuple h = tuple(7, 3.5, 100);        // heterogeneous
+    double d = h[1];
+    int acc = h[0] + (int)(d * 2) + h[2];   // 7 + 7 + 100 = 114
+
+    return a + b + t[0] - acc;           // 84 + 126 + 88 - 114 = 184
+}

@@ -57,6 +57,9 @@ pub enum AstType {
     Named(String),    // typedef name
     Builtin(String),  // __builtin_va_list etc.
     Typeof(BoxExpr),  // typeof(expr) — resolved to the operand's type
+    /// sic-only: the `tuple` type (sic.md §"Tuples"). Its concrete positional
+    /// field types are resolved from context (initializer / return value).
+    Tuple,
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
@@ -291,6 +294,10 @@ pub enum ExprKind {
     CharLit(i32),
     Ident(String),
     Nullptr,           // C23 null pointer constant
+
+    /// sic tuple pack `tuple(e0, e1, …)` (sic.md §"Tuples"). Used as a value it
+    /// builds a tuple; on the left of `=` it is an unpack pattern of lvalues.
+    TupleExpr(Vec<Expr>),
 
     /// SIC tagged-enum path `Enum::Variant` (sic.md §"Match"). As a call target
     /// it constructs (`Option::Some(5)`) or, when the argument is an instance of

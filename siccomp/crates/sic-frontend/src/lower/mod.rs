@@ -2218,6 +2218,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
                 if let OffsetDesignator::Index(e) = d { collect_expr_names(e, out); }
             }
         }
+        TupleExpr(elems) => { for e in elems { collect_expr_names(e, out); } }
         IntLit(..) | UIntLit(..) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } => {}
     }

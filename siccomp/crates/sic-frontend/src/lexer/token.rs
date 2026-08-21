@@ -47,6 +47,7 @@ pub enum TokenKind {
     New, Del,     // sic-only: typed allocation / free (sic.md §"Scopes and automatic release")
     Module, Import, // sic-only: module system (sic.md §"Imports")
     Match,          // sic-only: `match` on a tagged enum (sic.md §"Match")
+    Tuple,          // sic-only: `tuple` type / pack / unpack (sic.md §"Tuples")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)

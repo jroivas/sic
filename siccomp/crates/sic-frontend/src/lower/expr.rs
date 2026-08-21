@@ -210,6 +210,11 @@ impl<'m> FuncCtx<'m> {
                 self.construct_enum(enum_name, variant, &[], &expr.span)
             }
 
+            // sic tuple pack `tuple(e0, e1, …)` (sic.md §"Tuples"). As an rvalue
+            // it builds the tuple; the unpack form (LHS of `=`) is handled in
+            // `lower_assign`, so reaching here as a value is always a pack.
+            ExprKind::TupleExpr(elems) => self.construct_tuple(elems, &expr.span),
+
             ExprKind::Index { base, index } => {
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
@@ -446,6 +451,122 @@ impl<'m> FuncCtx<'m> {
         let l = self.lower_expr(lhs)?;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
+    }
+
+    /// sic tuple pack (sic.md §"Tuples"): build an anonymous positional struct
+    /// from the element values and return a pointer to the temporary (decays like
+    /// any aggregate value). Element types are captured from the expressions.
+    fn construct_tuple(&mut self, elems: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // Lower every element first, recording each value and its type.
+        let mut vals: Vec<(Val, Type)> = Vec::with_capacity(elems.len());
+        for e in elems {
+            let ety = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
+            if matches!(ety, Type::Struct(_) | Type::Union(_)) {
+                let p = self.lower_aggregate_ptr(e)?;
+                vals.push((p, ety));
+            } else {
+                let v = self.lower_expr(e)?;
+                let vt = self.val_type(&v);
+                vals.push((v, vt));
+            }
+        }
+        let tup_ty = super::types::tuple_type(vals.iter().map(|(_, t)| t.clone()).collect());
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: tup_ty.clone(), align: None });
+        self.val_types.insert(slot.0, tup_ty.clone());
+
+        for (i, (v, vt)) in vals.into_iter().enumerate() {
+            let fld = self.field_ptr_from(LValue::plain(Val::Local(slot), tup_ty.clone()), &i.to_string(), false, sp)?;
+            if matches!(vt, Type::Struct(_) | Type::Union(_)) {
+                let size = vt.size_of(self.ptr_size());
+                let align = vt.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: fld.ptr, src: v, size, align });
+            } else {
+                self.store_lvalue(&fld, v)?;
+            }
+        }
+        Ok(Val::Local(slot))
+    }
+
+    /// sic tuple field pointer + type (sic.md §"Tuples"): `t[i]` addresses field
+    /// `i` of the tuple. `i` must be an in-range constant.
+    fn tuple_field_lvalue(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<LValue> {
+        let tup_ty = self.infer_expr_type(base)?;
+        let nfields = match &tup_ty { Type::Struct(st) => st.fields.len(), _ => 0 };
+        let idx = self.const_index(index).ok_or_else(|| CompileError::at(
+            "a tuple index must be a constant".to_string(), sp.file.clone(), sp.line, sp.col))?;
+        if idx < 0 || idx as usize >= nfields {
+            return Err(CompileError::at(
+                format!("tuple index {} out of range (0..{})", idx, nfields),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let ptr = self.lower_aggregate_ptr(base)?;
+        self.field_ptr_from(LValue::plain(ptr, tup_ty), &idx.to_string(), false, sp)
+    }
+
+    /// Evaluate an expression that must be a compile-time integer index.
+    fn const_index(&self, e: &Expr) -> Option<i64> {
+        crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).ok()
+    }
+
+    /// sic tuple unpack `tuple(t0, t1, …) = rhs` (sic.md §"Tuples"): assign each
+    /// tuple field into the corresponding target lvalue. Arity and per-element
+    /// assignability are checked.
+    fn lower_tuple_unpack(&mut self, targets: &[Expr], rhs: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let rty = self.infer_expr_type(rhs)?;
+        if !super::types::is_tuple(&rty) {
+            return Err(CompileError::at(
+                "tuple unpack requires a tuple on the right-hand side".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let fields = match &rty { Type::Struct(st) => st.fields.clone(), _ => vec![] };
+        if fields.len() != targets.len() {
+            return Err(CompileError::at(
+                format!("tuple unpack expects {} values, got {} targets", fields.len(), targets.len()),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let src = self.lower_aggregate_ptr(rhs)?;
+        for (i, tgt) in targets.iter().enumerate() {
+            let dst_lv = self.lower_lvalue(tgt)?;
+            let (_, fty) = &fields[i];
+            // Type check: the field must be assignable to the target (same type,
+            // or a trivial scalar conversion via `coerce`).
+            let fld = self.field_ptr_from(LValue::plain(src.clone(), rty.clone()), &i.to_string(), false, sp)?;
+            if matches!(fty, Type::Struct(_) | Type::Union(_)) {
+                if dst_lv.ty != *fty {
+                    return Err(CompileError::at(
+                        format!("tuple element {} type mismatch on unpack", i),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+                let size = fty.size_of(self.ptr_size());
+                let align = fty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: dst_lv.ptr, src: fld.ptr, size, align });
+            } else {
+                let v = self.load_lvalue(&fld)?;
+                self.store_lvalue(&dst_lv, v)?;
+            }
+        }
+        Ok(src)
+    }
+
+    /// Materialize a deferred `tuple t;` local on its first assignment: allocate
+    /// the slot with the RHS tuple type, bind it, and copy the value in.
+    fn materialize_deferred_tuple(&mut self, name: &str, rhs: &Expr) -> Result<Val> {
+        let ty = self.infer_expr_type(rhs)?;
+        if !super::types::is_tuple(&ty) {
+            return Err(CompileError::at(
+                format!("tuple '{}' must be assigned a tuple value", name),
+                rhs.span.file.clone(), rhs.span.line, rhs.span.col));
+        }
+        let vid = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: None });
+        self.define_local(name.to_string(), ty.clone(), vid);
+        self.deferred_tuples.remove(name);
+        let src = self.lower_aggregate_ptr(rhs)?;
+        let size = ty.size_of(self.ptr_size());
+        let align = ty.align_of(self.ptr_size());
+        self.push_instr(Instr::MemCopy { dst: Val::Local(vid), src, size, align });
+        Ok(Val::Local(vid))
     }
 
     /// sic array concatenation `a + b` (sic.md §"Arrays and lists"): allocate a
@@ -1268,6 +1389,32 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // sic tuple unpack `tuple(a, b, …) = e` (sic.md §"Tuples"): assign each of
+        // the tuple's fields into the corresponding lvalue.
+        if op.is_none() {
+            if let ExprKind::TupleExpr(targets) = &lhs.kind {
+                return self.lower_tuple_unpack(targets, rhs, &lhs.span);
+            }
+            // sic deferred tuple local `tuple t; … t = tuple(…)`: the first
+            // assignment fixes the concrete type and materializes the slot.
+            if let ExprKind::Ident(name) = &lhs.kind {
+                if self.is_sic() && self.deferred_tuples.contains(name) {
+                    return self.materialize_deferred_tuple(name, rhs);
+                }
+            }
+            // sic tuples are immutable after creation (sic.md §"Tuples"): reject
+            // writing to a tuple element `t[i] = x`.
+            if self.is_sic() {
+                if let ExprKind::Index { base, .. } = &lhs.kind {
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_tuple(&t)) {
+                        return Err(CompileError::at(
+                            "tuples are immutable: cannot assign to a tuple element".to_string(),
+                            lhs.span.file.clone(), lhs.span.line, lhs.span.col));
+                    }
+                }
+            }
+        }
+
         let lv = self.lower_lvalue(lhs)?;
 
         // sic: `a = None;` — assign a bare (payload-less) variant by building the
@@ -3382,6 +3529,12 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_index(&mut self, base: &Expr, index: &Expr) -> Result<LValue> {
+        // sic tuple element access `t[const]` (sic.md §"Tuples").
+        if self.is_sic() {
+            if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_tuple(&t)) {
+                return self.tuple_field_lvalue(base, index, &base.span);
+            }
+        }
         let base_val = self.lower_expr(base)?;
         let idx_val = self.lower_expr(index)?;
         let idx_i64 = self.coerce(idx_val, &Type::i64())?;
@@ -3666,8 +3819,16 @@ impl<'m> FuncCtx<'m> {
                     Ok(Type::i32())
                 }
             }
-            ExprKind::Index { base, .. } => {
+            ExprKind::Index { base, index } => {
                 let bt = self.infer_expr_type(base)?;
+                // sic tuple element `t[const]` has the field's type.
+                if self.is_sic() && super::types::is_tuple(&bt) {
+                    if let (Type::Struct(st), Some(i)) = (&bt, self.const_index(index)) {
+                        if let Some((_, fty)) = st.fields.get(i as usize) {
+                            return Ok(fty.clone());
+                        }
+                    }
+                }
                 let elem = match bt {
                     Type::Pointer(t) => match *t {
                         Type::Array { elem, .. } => *elem,
@@ -3680,6 +3841,14 @@ impl<'m> FuncCtx<'m> {
                 // where `aCol` is `Column*`) must be resolved to its full
                 // definition, or `sizeof` sees an empty struct and returns 0.
                 Ok(super::types::resolve_aggregate(&elem, &self.lowerer.struct_types))
+            }
+            // A tuple pack has the anonymous positional-struct type of its elements.
+            ExprKind::TupleExpr(elems) => {
+                let mut tys = Vec::with_capacity(elems.len());
+                for e in elems {
+                    tys.push(self.infer_expr_type(e).unwrap_or_else(|_| Type::i32()));
+                }
+                Ok(super::types::tuple_type(tys))
             }
             // A tagged-enum variant path is a value of that enum's struct type.
             ExprKind::EnumVariant { enum_name, .. } => {

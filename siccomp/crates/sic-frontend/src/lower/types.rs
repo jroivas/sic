@@ -174,8 +174,30 @@ pub fn lower_param_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: 
     })
 }
 
+/// Struct-name marker distinguishing a sic tuple (sic.md §"Tuples") from an
+/// ordinary struct. Not a valid C identifier, so it can never collide.
+pub const TUPLE_MARKER: &str = "(tuple)";
+
+/// Build the anonymous positional-struct type for a tuple with the given element
+/// types. Fields are named "0", "1", … in declaration order.
+pub fn tuple_type(elems: Vec<Type>) -> Type {
+    let fields = elems.into_iter().enumerate()
+        .map(|(i, t)| (i.to_string(), t))
+        .collect();
+    Type::Struct(StructType::plain(Some(TUPLE_MARKER.to_string()), fields, false))
+}
+
+/// True if `t` is a sic tuple representation struct.
+pub fn is_tuple(t: &Type) -> bool {
+    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(TUPLE_MARKER))
+}
+
 pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     Ok(match ty {
+        // A bare `tuple` type with no element info yet — resolved from context at
+        // the declaration/return site; this placeholder should not be lowered
+        // directly, but return an empty tuple rather than erroring.
+        AstType::Tuple       => tuple_type(vec![]),
         AstType::Void        => Type::Void,
         AstType::Bool        => Type::Bool,
         AstType::Char { signed } => {

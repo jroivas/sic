@@ -546,6 +546,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `match` — pattern-match on a tagged enum (sic.md §"Match"); ordinary
             // identifier in C.
             "match" => return TokenKind::Match,
+            // `tuple` — built-in tuple type / pack / unpack (sic.md §"Tuples");
+            // ordinary identifier in C.
+            "tuple" => return TokenKind::Tuple,
             _ => {}
         }
     }

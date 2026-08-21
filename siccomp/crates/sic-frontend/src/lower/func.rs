@@ -81,6 +81,10 @@ pub struct FuncCtx<'m> {
     /// ARE reassigned / incremented (and so cannot be safely checked).
     pub fat_locals: std::collections::HashSet<String>,
     pub moved_names: std::collections::HashSet<String>,
+    /// sic deferred tuple locals (`tuple t;` with no initializer, sic.md
+    /// §"Tuples"): not yet allocated — the concrete type is fixed by the first
+    /// assignment `t = tuple(...)`, which materializes the slot.
+    pub deferred_tuples: std::collections::HashSet<String>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -115,6 +119,7 @@ impl<'m> FuncCtx<'m> {
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
+            deferred_tuples: std::collections::HashSet::new(),
         }
     }
 
@@ -361,6 +366,24 @@ pub enum LookupResult<'a> {
 }
 
 impl<'m> Lowerer {
+    /// Infer the concrete tuple type of a `tuple`-returning function from the
+    /// element expressions of its first `return tuple(...)`. Uses a throwaway
+    /// FuncCtx with the parameters bound, so full expression inference applies.
+    fn infer_tuple_return_type(&mut self, elems: &[Expr], params: &[AstParam], ir_params: &[Type]) -> Type {
+        let mut dummy = Function::new("__tuple_infer".to_string(),
+            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+        let blk = dummy.alloc_block();
+        dummy.blocks.push(BasicBlock::new(blk));
+        let tys: Vec<Type> = {
+            let mut fc = FuncCtx::new_with_func(self, &mut dummy);
+            for (p, ty) in params.iter().zip(ir_params) {
+                if let Some(n) = &p.name { fc.define_local(n.clone(), ty.clone(), ValId(0)); }
+            }
+            elems.iter().map(|e| fc.infer_expr_type(e).unwrap_or_else(|_| Type::i32())).collect()
+        };
+        super::types::tuple_type(tys)
+    }
+
     pub fn lower_function(
         &mut self,
         name: &str,
@@ -376,11 +399,20 @@ impl<'m> Lowerer {
         if self.sic {
             super::borrowck::check(body)?;
         }
-        let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
         let ir_params: Result<Vec<_>> = params.iter().map(|p| {
             lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
         }).collect();
         let ir_params = ir_params?;
+        // sic `tuple`-returning function (sic.md §"Tuples"): the concrete return
+        // type is inferred from the first `return tuple(...)` in the body.
+        let ir_ret = if self.sic && matches!(ret_ty.ty, AstType::Tuple) {
+            match first_return_tuple(body) {
+                Some(elems) => self.infer_tuple_return_type(&elems, params, &ir_params),
+                None => lower_type(ret_ty, &self.struct_types, self.ptr_size)?,
+            }
+        } else {
+            lower_type(ret_ty, &self.struct_types, self.ptr_size)?
+        };
 
         let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic, self.ptr_size);
         let is_sret = super::ret_is_sret(&ir_ret, self.ptr_size);
@@ -777,6 +809,20 @@ impl<'m> FuncCtx<'m> {
                         continue;
                     }
                     let mut ty = self.lower_type(&d.ty)?;
+                    // sic tuple local (sic.md §"Tuples"): a `tuple` variable's
+                    // concrete positional type comes from its initializer; a bare
+                    // `tuple t;` is deferred until its first assignment.
+                    if self.is_sic() && matches!(d.ty.ty, AstType::Tuple) {
+                        match &d.init {
+                            Some(Initializer::Expr(e)) => {
+                                ty = self.infer_expr_type(e).unwrap_or(ty);
+                            }
+                            _ => {
+                                self.deferred_tuples.insert(d.name.clone());
+                                continue;
+                            }
+                        }
+                    }
                     // Handle VLA (variable-length array): size was 0 because expr isn't constant
                     // Try to evaluate the size expr at compile time or use a conservative fallback
                     if let (Type::Array { elem: ref elem_ty, len: 0 }, AstType::Array { size: Some(sz_expr), .. }) = (&ty, &d.ty.ty) {
@@ -1805,6 +1851,29 @@ fn c_type_string(qt: &QualType) -> String {
     s
 }
 
+/// Find the element expressions of the first `return tuple(...)` reachable in a
+/// function body (used to infer a `tuple`-returning function's concrete type).
+fn first_return_tuple(stmts: &[Stmt]) -> Option<Vec<Expr>> {
+    fn in_stmt(s: &Stmt) -> Option<Vec<Expr>> {
+        match s {
+            Stmt::Return(Some(e), _) => match &e.kind {
+                ExprKind::TupleExpr(elems) => Some(elems.clone()),
+                _ => None,
+            },
+            Stmt::Block(ss, _) => first_return_tuple(ss),
+            Stmt::If { then, else_, .. } =>
+                in_stmt(then).or_else(|| else_.as_ref().and_then(|e| in_stmt(e))),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
+            | Stmt::Label(_, body, _) | Stmt::Default(body, _) | Stmt::Defer(body, _)
+            | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _)
+            | Stmt::Switch { body, .. } => in_stmt(body),
+            Stmt::Match { arms, .. } => arms.iter().find_map(|a| in_stmt(&a.body)),
+            _ => None,
+        }
+    }
+    stmts.iter().find_map(in_stmt)
+}
+
 fn ast_type_string(t: &AstType) -> String {
     match t {
         AstType::Void => "void".to_string(),
@@ -1833,5 +1902,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Enum(e) => format!("enum {}", e.name.clone().unwrap_or_default()),
         AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
         AstType::Typeof(_) => "typeof(...)".to_string(),
+        AstType::Tuple => "tuple".to_string(),
     }
 }
