@@ -73,6 +73,10 @@ pub struct Lowerer {
     /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
     /// param is passed by pointer, so its shape must be known to unpack/index it.
     pub tuple_param_types: HashMap<(String, usize), Type>,
+    /// Variadic extern functions called with a float argument — the backend
+    /// routes these through an `AL`-setting trampoline on x86-64 (Cranelift never
+    /// sets `AL` for variadic calls). Surfaced on the IR module for the backend.
+    pub float_vararg_externs: HashSet<String>,
 }
 
 /// One variant of a sic tagged enum.
@@ -122,6 +126,7 @@ impl Lowerer {
             enum_defs: HashMap::new(),
             variant_enum: HashMap::new(),
             tuple_param_types: HashMap::new(),
+            float_vararg_externs: HashSet::new(),
         }
     }
 
@@ -200,6 +205,8 @@ impl Lowerer {
         // emission) and any link flags pulled in from imported manifests.
         self.module.sic_module = self.current_module.clone();
         self.module.imported_links = std::mem::take(&mut self.imported_links);
+        self.module.float_vararg_externs =
+            std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
 
         Ok(self.module)
     }

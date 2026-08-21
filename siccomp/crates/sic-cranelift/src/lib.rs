@@ -144,6 +144,42 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         func_ids.insert(FuncRef::extern_(i).0, fid);
     }
 
+    // ── x86-64 variadic-float ABI fix ────────────────────────────────────────
+    // Cranelift never sets the SysV `AL` register (count of vector/SSE argument
+    // registers) for a variadic call, so libc `printf` reads garbage for float
+    // args — this completes cg_clif's `adjust_call_for_c_variadic` FIXME ("Set
+    // %al to upperbound on float args"). For each variadic extern called with a
+    // float, emit a tiny local trampoline `__sic_fva_<name>` — `movb $8,%al ;
+    // jmp <name>` — and route the extern's calls through it. `AL=8` is a safe
+    // upper bound (glibc then spills all eight `xmm` registers); the tail-`jmp`
+    // leaves the register/stack layout identical to a direct call.
+    let is_x86_64 = matches!(
+        obj_module.isa().triple().architecture,
+        target_lexicon::Architecture::X86_64,
+    );
+    if is_x86_64 {
+        for name in &ir_module.float_vararg_externs {
+            let Some(ext_idx) = ir_module.externs.iter().position(|e| &e.name == name) else { continue };
+            let ext_ref = FuncRef::extern_(ext_idx).0;
+            let Some(&import_fid) = func_ids.get(&ext_ref) else { continue };
+            let sig = build_cl_sig(&ir_module.externs[ext_idx].sig, ptr_size, obj_module.target_config().default_call_conv);
+            let tramp_fid = obj_module.declare_function(&format!("__sic_fva_{}", name), CLinkage::Local, &sig)?;
+            // `movb $8, %al` (B0 08) then `jmp <name>` (E9 + PC-relative rel32).
+            let bytes = [0xB0u8, 0x08, 0xE9, 0x00, 0x00, 0x00, 0x00];
+            let mut tf = cir::Function::new();
+            let uref = tf.declare_imported_user_function(cir::UserExternalName::new(0, import_fid.as_u32()));
+            let reloc = cranelift_codegen::FinalizedMachReloc {
+                offset: 3,
+                kind: cranelift_codegen::binemit::Reloc::X86CallPLTRel4,
+                target: cranelift_codegen::FinalizedRelocTarget::ExternalName(cir::ExternalName::User(uref)),
+                addend: -4,
+            };
+            obj_module.define_function_bytes(tramp_fid, &tf, 1, &bytes, &[reloc])?;
+            // Route all calls to the extern through the trampoline.
+            func_ids.insert(ext_ref, tramp_fid);
+        }
+    }
+
     // ── Declare globals ──────────────────────────────────────────────────────
     // An `extern` (Import) global that nothing references is not emitted as an
     // undefined symbol — otherwise the linker pulls archive members to satisfy a

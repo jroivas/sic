@@ -1,0 +1,11 @@
+// x86-64 variadic-float ABI fix: multiple floating-point arguments to a libc
+// variadic function (formatted here via snprintf) must come through correctly.
+// Before the AL-setting trampoline, the floats read as 0.0.
+#include <stdio.h>
+#include <string.h>
+int main() {
+    char b[64];
+    snprintf(b, sizeof(b), "%d %.1f %.1f %.2f", 1, 2.5, 3.5, 4.25);
+    if (strcmp(b, "1 2.5 3.5 4.25") != 0) return 1;
+    return 42;
+}

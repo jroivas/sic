@@ -128,6 +128,11 @@ pub struct Module {
     /// Link flags gathered from imported modules' manifests, to be folded into the
     /// final link order by the driver.
     pub imported_links: Vec<String>,
+    /// Names of variadic extern functions (e.g. `printf`) called with a
+    /// floating-point argument. On x86-64 the backend routes these through a tiny
+    /// trampoline that sets the SysV `AL` vector-arg count, which Cranelift never
+    /// emits for variadic calls (see cg_clif's `adjust_call_for_c_variadic`).
+    pub float_vararg_externs: Vec<String>,
 }
 
 impl Module {
@@ -141,6 +146,7 @@ impl Module {
             source_file: None,
             sic_module: None,
             imported_links: Vec::new(),
+            float_vararg_externs: Vec::new(),
         }
     }
 

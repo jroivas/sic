@@ -3307,6 +3307,17 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // x86-64 SysV: a variadic extern (libc) call carrying a float argument
+        // needs `AL` set to the vector-arg count, which Cranelift never emits. Note
+        // the callee so the backend routes it through an `AL`-setting trampoline.
+        if is_variadic && fref.is_extern() {
+            let has_float = arg_vals.iter().any(|v| self.val_type(v).is_float());
+            if has_float {
+                let name = self.lowerer.module.externs[fref.index()].name.clone();
+                self.lowerer.float_vararg_externs.insert(name);
+            }
+        }
+
         if is_void {
             self.push_instr(Instr::Call { dest: None, func: fref, args: arg_vals, ret_ty });
             Ok(Constant::zero())
