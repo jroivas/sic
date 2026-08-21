@@ -214,6 +214,34 @@ pub fn is_bigint(t: &Type) -> bool {
         if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(BIGINT_MARKER)))
 }
 
+/// A `fixed<I,F>` value (sic.md §"Built-in fixed point"): at runtime a bigint
+/// mantissa scaled by 10^F. The integral/fraction digit counts `(I, F)` are
+/// carried in the marker struct name, distinct from a plain bigint so arithmetic
+/// dispatch and the compile-time scale stay separate. Both are pointers (ABI-eq).
+pub fn fixed_type(integral: u32, fraction: u32) -> Type {
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(format!("(fixed:{},{})", integral, fraction)), vec![], false))))
+}
+
+/// True if `t` is a `fixed` value.
+pub fn is_fixed(t: &Type) -> bool {
+    fixed_dims(t).is_some()
+}
+
+/// The `(integral, fraction)` digit counts of a `fixed` value type, or `None`.
+pub fn fixed_dims(t: &Type) -> Option<(u32, u32)> {
+    let name = match t {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Struct(st) => st.name.as_deref()?,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let body = name.strip_prefix("(fixed:")?.strip_suffix(')')?;
+    let (i, f) = body.split_once(',')?;
+    Some((i.parse().ok()?, f.parse().ok()?))
+}
+
 /// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
@@ -234,6 +262,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // the declaration/return site; this placeholder should not be lowered
         // directly, but return an empty tuple rather than erroring.
         AstType::Tuple       => tuple_type(vec![]),
+        // `fixed<I,F>` → its runtime bigint-mantissa pointer; a bare `fixed`
+        // (`(0,0)`) is a placeholder resolved from the initializer at the decl site.
+        AstType::Fixed { integral, fraction } => fixed_type(*integral, *fraction),
         AstType::Void        => Type::Void,
         AstType::Bool        => Type::Bool,
         AstType::Char { signed } => {

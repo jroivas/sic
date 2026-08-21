@@ -916,6 +916,33 @@ impl<'m> FuncCtx<'m> {
                             }
                         }
                     }
+                    // sic fixed-point local (sic.md §"Built-in fixed point"): a
+                    // `fixed<I,F>` value is a bigint mantissa at scale F. A bare
+                    // `fixed` (marked `(0,0)`) infers its precision from the
+                    // initializer. Store the owned mantissa (rescaled to F) and
+                    // free it at scope exit (value semantics, like bigint).
+                    if self.is_sic() && matches!(d.ty.ty, AstType::Fixed { .. }) {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            // Concrete target type: the declared `fixed<I,F>`, or the
+                            // inferred type for a bare `fixed`.
+                            let target = match super::types::fixed_dims(&ty) {
+                                Some((0, 0)) | None => self.infer_expr_type(e).unwrap_or(ty.clone()),
+                                Some(_) => ty.clone(),
+                            };
+                            let (_, tf) = super::types::fixed_dims(&target).unwrap_or((0, 0));
+                            let vid = self.alloc_val();
+                            self.push_instr(Instr::Alloca { dest: vid, ty: target.clone(), align: None });
+                            self.define_local(d.name.clone(), target.clone(), vid);
+                            let m = self.eval_fixed_owned(e, tf)?;
+                            self.push_instr(Instr::Store { val: m, ptr: Val::Local(vid) });
+                            self.register_scope_exit(Cleanup::BigintFree { slot: Val::Local(vid) });
+                            if !d.name.is_empty() {
+                                self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: target, slot: vid, is_param: false });
+                            }
+                            self.flush_bigint_temps();
+                            continue;
+                        }
+                    }
                     // Handle VLA (variable-length array): size was 0 because expr isn't constant
                     // Try to evaluate the size expr at compile time or use a conservative fallback
                     if let (Type::Array { elem: ref elem_ty, len: 0 }, AstType::Array { size: Some(sz_expr), .. }) = (&ty, &d.ty.ty) {
@@ -2124,5 +2151,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
         AstType::Typeof(_) => "typeof(...)".to_string(),
         AstType::Tuple => "tuple".to_string(),
+        AstType::Fixed { integral, fraction } => format!("fixed<{},{}>", integral, fraction),
     }
 }

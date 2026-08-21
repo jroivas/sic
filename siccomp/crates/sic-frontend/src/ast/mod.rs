@@ -60,6 +60,10 @@ pub enum AstType {
     /// sic-only: the `tuple` type (sic.md §"Tuples"). Its concrete positional
     /// field types are resolved from context (initializer / return value).
     Tuple,
+    /// sic-only: the fixed-point type `fixed<integral,fraction>` (sic.md §"Built-in
+    /// fixed point"). `(0, 0)` marks a bare `fixed` whose precision is inferred
+    /// from its initializer.
+    Fixed { integral: u32, fraction: u32 },
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
@@ -293,6 +297,11 @@ pub enum ExprKind {
     /// sizes"). Carries the digit string (with optional sign) for the bigint
     /// runtime to parse; only meaningful in a `bigint` context.
     BigIntLit(String),
+    /// sic-only: a plain decimal-point literal, kept as its EXACT source text
+    /// (sic.md §"Built-in fixed point"). In a `fixed` context it is parsed as an
+    /// exact fixed-point value (never via a float); anywhere else it behaves as a
+    /// `double` (the text is parsed to `f64`).
+    DecimalLit(String),
     FloatLit(f64),
     StringLit(String),
     CharLit(i32),

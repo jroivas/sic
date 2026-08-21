@@ -229,17 +229,74 @@ __attribute__((weak)) char *__sic_bi_to_str(const __sic_bi *a) {
     buf[pos] = 0;
     return buf;
 }
+
+/* ── fixed-point support (sic.md §"Built-in fixed point") ──────────────────
+   A `fixed<I,F>` value is a bigint mantissa scaled by 10^F; the scale lives in
+   the compile-time type. These helpers rescale a mantissa and format one with a
+   decimal point — both purely on bigints, no floats. */
+
+/* 10^n as a bigint */
+__attribute__((weak)) __sic_bi *__sic_bi_pow10(unsigned n) {
+    __sic_bi *r = __sic_bi_from_i64(1);
+    for (unsigned i = 0; i < n; i++) {
+        __sic_bi *t = __sic_bi_muladd_small(r, 10, 0);
+        __sic_bi_free(r);
+        r = t;
+    }
+    return r;
+}
+
+/* a / 10^n, truncating toward zero (for down-scaling a fixed mantissa) */
+__attribute__((weak)) __sic_bi *__sic_bi_divpow10(const __sic_bi *a, unsigned n) {
+    __sic_bi *cur = __sic_bi_clone(a);
+    for (unsigned i = 0; i < n; i++) {
+        unsigned rem = 0;
+        __sic_bi *q = __sic_bi_divmod_small(cur, 10, &rem);
+        __sic_bi_free(cur);
+        cur = q;
+    }
+    return cur;
+}
+
+/* Format a fixed mantissa `m` at scale `scale` as a decimal string with a point
+   (e.g. m=1234567, scale=3 -> "1234.567"). malloc'd; caller frees. */
+__attribute__((weak)) char *__sic_fx_to_str(const __sic_bi *m, int scale) {
+    char *digits = __sic_bi_to_str(m);              /* "-1234567" / "1234567" / "0" */
+    if (scale <= 0) return digits;
+    int neg = digits[0] == '-';
+    char *d = digits + neg;
+    unsigned dl = 0; while (d[dl]) dl++;
+    unsigned s = (unsigned)scale;
+    unsigned intlen = dl > s ? dl - s : 0;          /* integer-part digit count */
+    unsigned pad = dl > s ? 0 : s - dl;             /* leading fraction zeros */
+    unsigned outlen = (unsigned)neg + (intlen ? intlen : 1) + 1 + s + 1;
+    char *out = (char *)malloc(outlen);
+    unsigned p = 0;
+    if (neg) out[p++] = '-';
+    if (intlen == 0) out[p++] = '0';
+    else for (unsigned i = 0; i < intlen; i++) out[p++] = d[i];
+    out[p++] = '.';
+    for (unsigned i = 0; i < pad; i++) out[p++] = '0';
+    for (unsigned i = intlen; i < dl; i++) out[p++] = d[i];
+    out[p] = 0;
+    free(digits);
+    return out;
+}
 "#;
 
-/// True if `src` (post-preprocess text) uses the `bigint` keyword as a whole
-/// word — the signal to prepend [`BIGINT_RUNTIME`]. A bare substring match is
-/// avoided so `bigintish` or a string literal doesn't trigger it.
-pub fn uses_bigint(src: &str) -> bool {
+/// True if `src` (post-preprocess text) uses `bigint` or `fixed` as a whole
+/// word — the signal to prepend [`BIGINT_RUNTIME`] (fixed-point is built on the
+/// same runtime). A bare substring match is avoided so `bigintish`/`fixedly` or a
+/// string literal doesn't trigger it.
+pub fn uses_bignum(src: &str) -> bool {
+    word_present(src, "bigint") || word_present(src, "fixed")
+}
+
+fn word_present(src: &str, word: &str) -> bool {
     let bytes = src.as_bytes();
-    let word = b"bigint";
     let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut i = 0;
-    while let Some(off) = src[i..].find("bigint") {
+    while let Some(off) = src[i..].find(word) {
         let start = i + off;
         let end = start + word.len();
         let before_ok = start == 0 || !is_ident(bytes[start - 1]);

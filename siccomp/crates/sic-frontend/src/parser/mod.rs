@@ -463,6 +463,25 @@ impl Parser {
                         if name == "__uint128_t" || signed == Some(false) { "__uint128_t" } else { "__int128" }
                             .to_string()));
                 }
+                // sic `fixed` / `fixed<integral,fraction>` (sic.md §"Built-in fixed
+                // point"). A bare `fixed` (no `<...>`) has its precision inferred
+                // from its initializer, marked here as `(0, 0)`.
+                TokenKind::TypeName if base.is_none() && signed.is_none() && long_count == 0
+                    && self.lang == Lang::Sic && self.peek().text == "fixed" =>
+                {
+                    self.advance();
+                    let (integral, fraction) = if self.at(TokenKind::Lt) {
+                        self.advance();
+                        let i = self.parse_fixed_dim()?;
+                        self.expect(TokenKind::Comma)?;
+                        let f = self.parse_fixed_dim()?;
+                        self.expect(TokenKind::Gt)?;
+                        (i, f)
+                    } else {
+                        (0, 0)
+                    };
+                    base = Some(AstType::Fixed { integral, fraction });
+                }
                 // A type-name (typedef or sic alias like `u32`) is only a type
                 // specifier when no other type info has been seen yet. Otherwise
                 // it is the declarator name — e.g. `uint32_t u32;` where the
@@ -627,6 +646,20 @@ impl Parser {
 
     /// Parse a type-name (abstract declarator), e.g. the `int`/`char*`/`string`
     /// inside a sic enum variant payload `Name<T>` / `Name(T)`.
+    /// Parse a `fixed<...>` dimension — a small non-negative integer literal.
+    fn parse_fixed_dim(&mut self) -> Result<u32> {
+        if self.at(TokenKind::IntLit) {
+            let t = self.advance().text.clone();
+            let digits = t.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
+            return digits.parse::<u32>().map_err(|_| CompileError::at(
+                format!("invalid fixed-point precision '{}'", t),
+                self.span().file.clone(), self.span().line, self.span().col));
+        }
+        Err(CompileError::at(
+            "expected an integer precision in `fixed<...>`".to_string(),
+            self.span().file.clone(), self.span().line, self.span().col))
+    }
+
     fn parse_type_name(&mut self) -> Result<QualType> {
         let (base, _) = self.parse_decl_specifiers()?;
         let (_, ty) = self.parse_declarator(base)?;
@@ -1955,6 +1988,19 @@ impl Parser {
             }
             TokenKind::FloatLit => {
                 let text = self.advance().text.clone();
+                // sic: keep a PLAIN decimal-point literal (no exponent, no hex, no
+                // suffix) as its exact text so a `fixed` binding can build it
+                // precisely (sic.md §"Built-in fixed point"); it still acts as a
+                // `double` in any float context. Suffixed/exponent/hex floats stay
+                // ordinary `FloatLit`.
+                if self.lang == Lang::Sic {
+                    let plain = text.contains('.')
+                        && text.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                        && text.bytes().filter(|&b| b == b'.').count() == 1;
+                    if plain {
+                        return Ok(Expr::new(ExprKind::DecimalLit(text), sp));
+                    }
+                }
                 let body = strip_float_suffix(&text);
                 let v = parse_c_float(body);
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))

@@ -533,6 +533,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `bigint` is the arbitrary-precision integer type (sic.md §"Integer
             // sizes"); an ordinary identifier in C.
             "bigint" => return TokenKind::TypeName,
+            // `fixed` is the built-in fixed-point type (sic.md §"Built-in fixed
+            // point"); an ordinary identifier in C.
+            "fixed" => return TokenKind::TypeName,
             // `fallthrough` is an explicit switch-case terminator in sic
             // (sic.md §"Switch - case"); it is an ordinary identifier in C.
             "fallthrough" => return TokenKind::Fallthrough,

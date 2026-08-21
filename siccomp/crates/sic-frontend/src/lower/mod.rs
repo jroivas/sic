@@ -2234,7 +2234,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             }
         }
         TupleExpr(elems) => { for e in elems { collect_expr_names(e, out); } }
-        IntLit(..) | UIntLit(..) | BigIntLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
+        IntLit(..) | UIntLit(..) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } => {}
     }
 }

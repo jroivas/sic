@@ -554,10 +554,11 @@ fn parse_source(
     let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
-    // sic `bigint` (sic.md §"Integer sizes"): only when the unit actually uses it,
-    // prepend the self-contained arbitrary-precision runtime (no external lib).
-    // A `#line` directive restores the user's line numbering for diagnostics.
-    if bigint_runtime::uses_bigint(&preprocessed) {
+    // sic `bigint` / `fixed` (sic.md §"Integer sizes", §"Built-in fixed point"):
+    // only when the unit actually uses them, prepend the self-contained
+    // arbitrary-precision runtime (no external lib; fixed builds on it). A `#line`
+    // directive restores the user's line numbering for diagnostics.
+    if bigint_runtime::uses_bignum(&preprocessed) {
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             bigint_runtime::BIGINT_RUNTIME, path, preprocessed

@@ -1,0 +1,33 @@
+// sic fixed-point (sic.md §"Built-in fixed point"): `fixed<I,F>` is a bigint
+// mantissa scaled by 10^F, so arithmetic is exact at arbitrary precision (never
+// via a float). Construction from exact decimal literals, + - * with scale
+// harmonization, comparisons, and the `.str` accessor. Verified by exit code.
+#include <string.h>
+int main() {
+    fixed<4,3> a = 1234.567;
+    fixed<10,2> b = 1234567890.12;
+    if (strcmp(a.str, "1234.567") != 0) return 1;
+    if (strcmp(b.str, "1234567890.12") != 0) return 2;
+
+    fixed c = a + b;                          // fixed<10,3>, scales harmonized
+    if (strcmp(c.str, "1234569124.687") != 0) return 3;
+
+    fixed<4,2> p = 12.50;
+    fixed<4,3> q = 2.125;
+    if (strcmp((p * q).str, "26.56250") != 0) return 4;   // scale 2+3=5
+    if (strcmp((p - q).str, "10.375") != 0) return 5;
+    if (strcmp((q - p).str, "-10.375") != 0) return 6;    // negative
+    if (!(p > q) || p < q || !(p == p)) return 7;
+
+    // Exact beyond f64 precision (19 significant digits).
+    fixed<10,9> big = 1234567890.123456789;
+    fixed<10,9> eps = 0.000000001;
+    if (strcmp((big + eps).str, "1234567890.123456790") != 0) return 8;
+
+    // Loop accumulation stays exact and leak-free.
+    fixed<10,2> total = 0.00;
+    for (int i = 0; i < 100; i++) total = total + 19.99;
+    if (strcmp(total.str, "1999.00") != 0) return 9;
+
+    return 42;
+}
