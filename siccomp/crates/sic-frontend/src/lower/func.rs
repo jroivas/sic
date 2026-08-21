@@ -935,6 +935,9 @@ impl<'m> FuncCtx<'m> {
                     // free it at scope exit (value semantics, like bigint).
                     if self.is_sic() && matches!(d.ty.ty, AstType::Fixed { .. }) {
                         if let Some(Initializer::Expr(e)) = &d.init {
+                            // The declared precision must be able to hold the value
+                            // (sic.md §"Built-in fixed point").
+                            self.check_fixed_fit(&ty, e, &e.span)?;
                             // Concrete target type: the declared `fixed<I,F>`, or the
                             // inferred type for a bare `fixed`.
                             let target = match super::types::fixed_dims(&ty) {

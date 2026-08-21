@@ -2036,6 +2036,14 @@ impl Parser {
                     "__builtin_choose_expr"  => return self.parse_choose_expr(sp),
                     "__builtin_types_compatible_p"
                                              => return self.parse_types_compatible(sp),
+                    // sic `typestr(expr)` — compile-time type name (sic.md §"Built-in
+                    // fixed point"). Only when followed by `(`; else an ordinary name.
+                    "typestr" if self.lang == Lang::Sic && self.at(TokenKind::LParen) => {
+                        self.advance();
+                        let inner = self.parse_assign_expr()?;
+                        self.expect(TokenKind::RParen)?;
+                        return Ok(Expr::new(ExprKind::TypeStr(Box::new(inner)), sp));
+                    }
                     _ => {}
                 }
                 // sic enum-variant path `Enum::Variant` (sic.md §"Match").

@@ -1,0 +1,28 @@
+// sic fixed-point: typestr(), precision rules, and modulo (sic.md §"Built-in
+// fixed point"). Verified by exit code.
+#include <string.h>
+int main() {
+    fixed<10,2> a = 123456789.55;
+    fixed<1,9> b = 1.123456789;
+
+    // typestr: `+` combines to the larger of each; `*` sums.
+    if (strcmp(typestr(a + b), "fixed<10,9>") != 0) return 1;
+    if (strcmp(typestr(a),     "fixed<10,2>") != 0) return 2;
+    if (strcmp(typestr(a * b), "fixed<11,11>") != 0) return 3;
+    if (strcmp(typestr(1.5),   "fixed<1,1>") != 0) return 4;
+
+    // Storing into a big-enough fixed is fine; an int operand doesn't inflate.
+    fixed<10,9>  c = a + b;
+    fixed<11,11> d = a + b;
+    if (strcmp(c.str, "123456790.673456789") != 0) return 5;
+    fixed<10,2> total = 0.00;
+    total = total + 5;               // int operand stays within fixed<10,2>
+    if (strcmp(total.str, "5.00") != 0) return 6;
+
+    // Modulo.
+    fixed<6,2> m1 = 10.50;
+    fixed<6,2> m2 = 3.00;
+    if (strcmp((m1 % m2).str, "1.50") != 0) return 7;
+
+    return 42;
+}

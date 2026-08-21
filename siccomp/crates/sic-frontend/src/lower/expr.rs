@@ -133,6 +133,13 @@ impl<'m> FuncCtx<'m> {
                 let v: f64 = text.parse().unwrap_or(0.0);
                 Ok(Val::Const(Constant::Float(v)))
             }
+            // sic `typestr(e)` (sic.md §"Built-in fixed point"): a compile-time
+            // `char*` naming `e`'s type. `e` itself is not lowered/evaluated.
+            ExprKind::TypeStr(inner) => {
+                let ty = self.infer_expr_type(inner).unwrap_or(Type::i32());
+                let s = self.type_name_string(inner, &ty);
+                Ok(self.emit_cstring(&s))
+            }
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
             ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
             ExprKind::Nullptr => Ok(Constant::null()),
@@ -507,7 +514,7 @@ impl<'m> FuncCtx<'m> {
             if fl || fr {
                 use BinOpKind::*;
                 match op {
-                    Add | Sub | Mul => return self.lower_fixed_binop(op, lhs, rhs),
+                    Add | Sub | Mul | Rem => return self.lower_fixed_binop(op, lhs, rhs),
                     Div => {
                         // Unbound division uses the larger operand fraction; a
                         // `fixed<_,F>` binding recomputes at F (see eval_fixed_owned).
@@ -761,6 +768,7 @@ impl<'m> FuncCtx<'m> {
         match op {
             BinOpKind::Mul => (a.0 + b.0, a.1 + b.1),
             BinOpKind::Div => (a.0 + b.1, a.1.max(b.1)),
+            // `+ - %` keep the larger of each (a remainder is bounded by the divisor).
             _ => (a.0.max(b.0), a.1.max(b.1)),
         }
     }
@@ -783,21 +791,25 @@ impl<'m> FuncCtx<'m> {
         Ok(q)
     }
 
-    /// Lower a fixed `+ - *` — harmonize scales then run the bigint op. Returns the
-    /// result mantissa (a temp); its `fixed<I,F>` type is computed by `infer`.
+    /// Lower a fixed `+ - * %` — harmonize scales then run the bigint op. Returns
+    /// the result mantissa (a temp); its `fixed<I,F>` type is computed by `infer`.
     fn lower_fixed_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let (ma, ia, fa) = self.fixed_operand(lhs)?;
         let (mb, ib, fb) = self.fixed_operand(rhs)?;
         match op {
             BinOpKind::Mul => self.call_bigint_new("__sic_bi_mul", vec![ma, mb]),
-            BinOpKind::Add | BinOpKind::Sub => {
+            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Rem => {
                 let (_, rf) = Self::fixed_result_dims(op, (ia, fa), (ib, fb));
                 let ma = self.rescale_mantissa(ma, fa, rf)?;
                 let mb = self.rescale_mantissa(mb, fb, rf)?;
-                let f = if op == BinOpKind::Add { "__sic_bi_add" } else { "__sic_bi_sub" };
+                let f = match op {
+                    BinOpKind::Add => "__sic_bi_add",
+                    BinOpKind::Sub => "__sic_bi_sub",
+                    _ => "__sic_bi_mod",
+                };
                 self.call_bigint_new(f, vec![ma, mb])
             }
-            _ => Err(CompileError::new("fixed supports only + - * in this milestone".to_string())),
+            _ => Err(CompileError::new("fixed supports only + - * / % here".to_string())),
         }
     }
 
@@ -869,15 +881,25 @@ impl<'m> FuncCtx<'m> {
         self.emit_binop(op, cmp, Constant::int(0))
     }
 
-    /// Compile-time `(integral, fraction)` of a fixed expression, for `infer`.
+    /// Compile-time `(integral, fraction)` of a fixed expression, for `infer` and
+    /// the precision-fit check. A fixed value uses its declared dims; a decimal
+    /// literal its own digit widths; an integer its digit count (a literal's exact
+    /// count, or the i64 bound for a runtime value) with 0 fraction.
     fn fixed_expr_dims(&self, e: &Expr) -> Option<(u32, u32)> {
         if let ExprKind::DecimalLit(text) = &e.kind {
             let (_, i, f) = Self::decimal_lit_parts(text);
             return Some((i, f));
         }
+        // Integer literals contribute exactly their digit count (so `total + 5`
+        // stays within `total`'s integral width, not an inflated bound).
+        match &e.kind {
+            ExprKind::IntLit(v, _) => return Some((v.unsigned_abs().to_string().len().max(1) as u32, 0)),
+            ExprKind::UIntLit(v, _) => return Some((v.to_string().len().max(1) as u32, 0)),
+            _ => {}
+        }
         match self.infer_expr_type(e) {
             Ok(t) => super::types::fixed_dims(&t).or({
-                if matches!(t, Type::Int { .. }) { Some((20, 0)) } else { None }
+                if matches!(t, Type::Int { .. }) { Some((19, 0)) } else { None }
             }),
             _ => None,
         }
@@ -905,9 +927,33 @@ impl<'m> FuncCtx<'m> {
         self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type())
     }
 
+    /// Precision-fit check for a fixed store (sic.md §"Built-in fixed point"): a
+    /// declared `fixed<TI,TF>` must be able to hold the value being stored — its
+    /// integral and fraction widths must each be ≥ the source's. `fixed<5,4> f =
+    /// a + b;` (a+b is fixed<10,9>) is a compile error. The check is skipped when
+    /// the target is a bare/inferred `fixed` (dims `(0,0)`) or the source dims are
+    /// unknown.
+    pub(super) fn check_fixed_fit(&self, target: &Type, src: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        let Some((ti, tf)) = super::types::fixed_dims(target) else { return Ok(()) };
+        if ti == 0 && tf == 0 { return Ok(()); } // bare `fixed`, precision inferred
+        // Division's integral part can't be usefully bounded at compile time
+        // (dividing by a small value grows it), and the quotient is computed
+        // directly at the target scale — so it is exempt from the fit check.
+        if matches!(&src.kind, ExprKind::BinOp { op: BinOpKind::Div, .. }) { return Ok(()); }
+        if let Some((ri, rf)) = self.fixed_expr_dims(src) {
+            if ti < ri || tf < rf {
+                return Err(CompileError::at(
+                    format!("fixed<{},{}> cannot hold a fixed<{},{}> value (declared precision is too small)",
+                        ti, tf, ri, rf),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether `e` is a `+ - * /` on fixed operands.
     fn is_fixed_binop(&self, e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div, lhs, rhs }
+        matches!(&e.kind, ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Rem, lhs, rhs }
             if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs))
     }
 
@@ -955,6 +1001,35 @@ impl<'m> FuncCtx<'m> {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    /// Format a type as its sic source name for `typestr` (sic.md §"Built-in fixed
+    /// point"). `expr`/`ty` are the operand and its inferred type; a fixed uses its
+    /// declared/inferred `<I,F>`, a bare decimal literal reports its natural fixed
+    /// dims, and other types get their canonical sic spelling.
+    fn type_name_string(&self, expr: &Expr, ty: &Type) -> String {
+        // A bare decimal literal is a fixed of its own digit widths.
+        if let ExprKind::DecimalLit(text) = &expr.kind {
+            let (_, i, f) = Self::decimal_lit_parts(text);
+            return format!("fixed<{},{}>", i, f);
+        }
+        if let Some((i, f)) = super::types::fixed_dims(ty) {
+            return format!("fixed<{},{}>", i, f);
+        }
+        if super::types::is_bigint(ty) { return "bigint".to_string(); }
+        if super::types::is_sic_string(ty) { return "string".to_string(); }
+        match ty {
+            Type::Void => "void".to_string(),
+            Type::Bool => "bool".to_string(),
+            Type::Int { bits, signed } => format!("{}{}", if *signed { 'i' } else { 'u' }, bits),
+            Type::Float32 => "f32".to_string(),
+            Type::Float64 => "f64".to_string(),
+            Type::Float80 => "f80".to_string(),
+            Type::Pointer(inner) => format!("{}*", self.type_name_string(expr, inner)),
+            Type::Struct(st) => format!("struct {}", st.name.clone().unwrap_or_default()),
+            Type::Union(u) => format!("union {}", u.name.clone().unwrap_or_default()),
+            _ => "?".to_string(),
+        }
     }
 
     /// The fixed value's decimal string (`b.str`) via `__sic_fx_to_str`.
@@ -2019,6 +2094,11 @@ impl<'m> FuncCtx<'m> {
         // rescaled to this variable's fixed scale F.
         if self.is_sic() && super::types::is_fixed(&lv.ty) {
             let (_, tf) = super::types::fixed_dims(&lv.ty).unwrap_or((0, 0));
+            // Plain `f = <expr>` must fit the variable's declared precision; a
+            // compound `f op= rhs` stays in `f`'s own type by construction.
+            if op.is_none() {
+                self.check_fixed_fit(&lv.ty, rhs, &rhs.span)?;
+            }
             let newv = match op {
                 None => self.eval_fixed_owned(rhs, tf)?,
                 Some(bin) => {
@@ -4422,6 +4502,7 @@ impl<'m> FuncCtx<'m> {
             // A bare decimal literal defaults to `double`; in a fixed context it is
             // intercepted before inference is consulted.
             ExprKind::DecimalLit(_) => Ok(Type::Float64),
+            ExprKind::TypeStr(_) => Ok(Type::char_ptr()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             ExprKind::StringLit(_) => Ok(Type::char_ptr()),
             ExprKind::Nullptr => Ok(Type::void_ptr()),
@@ -4645,7 +4726,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 // sic `fixed` arithmetic yields a fixed<I,F> (comparisons yield int,
                 // handled below). I/F combine per `fixed_result_dims`.
-                if self.is_sic() && matches!(op, Add | Sub | Mul | Div)
+                if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem)
                     && (self.is_fixed_typed(lhs) || self.is_fixed_typed(rhs))
                 {
                     let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));

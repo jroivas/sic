@@ -1,0 +1,8 @@
+// Storing a fixed result into a too-small `fixed<a,b>` is a compile error
+// (sic.md §"Built-in fixed point": `fixed<5,4> f = a + b;`).
+int main() {
+    fixed<10,2> a = 1.00;
+    fixed<1,9> b = 1.0;
+    fixed<5,4> f = a + b;   // a+b is fixed<10,9> — doesn't fit
+    return (int)(long)f.int;
+}
