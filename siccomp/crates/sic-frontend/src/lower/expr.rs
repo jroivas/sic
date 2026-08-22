@@ -236,13 +236,6 @@ impl<'m> FuncCtx<'m> {
                 let v: f64 = text.parse().unwrap_or(0.0);
                 Ok(Val::Const(Constant::Float(v)))
             }
-            // sic `typestr(e)` (sic.md §"Built-in fixed point"): a compile-time
-            // `char*` naming `e`'s type. `e` itself is not lowered/evaluated.
-            ExprKind::TypeStr(inner) => {
-                let ty = self.infer_expr_type(inner).unwrap_or(Type::i32());
-                let s = self.type_name_string(inner, &ty);
-                Ok(self.emit_cstring(&s))
-            }
             // sic RTTI (sic.md §"RTTI"): `typeid(x)` / `type(x)` → a `type` value.
             // The operand is not evaluated — only its static type is used. A bare
             // decimal literal reports its natural `fixed<I,F>` (matching typestr).
@@ -4825,7 +4818,6 @@ impl<'m> FuncCtx<'m> {
             // A bare decimal literal defaults to `double`; in a fixed context it is
             // intercepted before inference is consulted.
             ExprKind::DecimalLit(_) => Ok(Type::Float64),
-            ExprKind::TypeStr(_) => Ok(Type::char_ptr()),
             ExprKind::TypeId(_) | ExprKind::TypeIdOf(_) => Ok(super::types::type_info_type()),
             // A guard block yields an `int` status (0 clean / 1 caught).
             ExprKind::Guard { .. } => Ok(Type::i32()),

@@ -207,6 +207,7 @@ For float:
 
 - 32 bits: f32, float
 - 64 bits: f64, double
+- 80 bits: f80
 - 128 bits: f128
 
 Fixed point precision contains two parts: integral and fraction.
@@ -238,7 +239,7 @@ For example:
     fixed<1,9> b = 1.123456789;
 
     // Prints fixed<10,9>
-    printf("%s\n", typestr(a + b));
+    printf("%s\n", type(a + b).str);
 
 Similar way if storing the result to new fixed point number, reserved precision must be matching or bigger:
 

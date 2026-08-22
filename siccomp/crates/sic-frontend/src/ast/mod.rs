@@ -316,10 +316,6 @@ pub enum ExprKind {
     /// exact fixed-point value (never via a float); anywhere else it behaves as a
     /// `double` (the text is parsed to `f64`).
     DecimalLit(String),
-    /// sic-only: `typestr(expr)` (sic.md §"Built-in fixed point"): a compile-time
-    /// `char*` naming the operand's type, e.g. `fixed<10,9>`. The operand is not
-    /// evaluated — only its type is inspected.
-    TypeStr(BoxExpr),
     /// sic-only (sic.md §"RTTI"): `typeid(expr)` / `type(expr)` — a `type` value
     /// (a `const __sic_type_info*`) for the operand's type. The operand is not
     /// evaluated. Compile-time-known for statically-typed operands.
