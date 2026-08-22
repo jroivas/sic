@@ -320,6 +320,13 @@ pub enum ExprKind {
     /// `char*` naming the operand's type, e.g. `fixed<10,9>`. The operand is not
     /// evaluated — only its type is inspected.
     TypeStr(BoxExpr),
+    /// sic-only (sic.md §"RTTI"): `typeid(expr)` / `type(expr)` — a `type` value
+    /// (a `const __sic_type_info*`) for the operand's type. The operand is not
+    /// evaluated. Compile-time-known for statically-typed operands.
+    TypeId(BoxExpr),
+    /// sic-only (sic.md §"RTTI"): the `type` value of a named type — from
+    /// `typeid(int)` or a bare type name in value position (`… == i64`).
+    TypeIdOf(QualType),
     /// sic-only: an exception-guard block `overflow { … }` /
     /// `divide_by_zero { … }` / `exception { … }` (sic.md §"Integer overflow",
     /// §"Errors and exceptions"). Runs the body; if the guarded exception occurs,

@@ -2055,6 +2055,22 @@ impl Parser {
                         self.expect(TokenKind::RParen)?;
                         return Ok(Expr::new(ExprKind::TypeStr(Box::new(inner)), sp));
                     }
+                    // sic RTTI (sic.md §"RTTI"): `typeid(x)` / `type(x)` → a `type`
+                    // value. The argument may be a type (`typeid(int)`) or an
+                    // expression (`type(x)`), like `sizeof`.
+                    "typeid" | "type" if self.lang == Lang::Sic && self.at(TokenKind::LParen) => {
+                        self.advance(); // consume `(`
+                        let node = if self.starts_decl_specifier() {
+                            let (ty, _) = self.parse_decl_specifiers()?;
+                            let (_, ty) = self.parse_declarator(ty)?;
+                            ExprKind::TypeIdOf(ty)
+                        } else {
+                            let e = self.parse_assign_expr()?;
+                            ExprKind::TypeId(Box::new(e))
+                        };
+                        self.expect(TokenKind::RParen)?;
+                        return Ok(Expr::new(node, sp));
+                    }
                     // sic exception-guard blocks (sic.md §"Integer overflow",
                     // §"Errors and exceptions") — contextual: `<kw> { … }` only when
                     // immediately followed by `{`; else an ordinary identifier.

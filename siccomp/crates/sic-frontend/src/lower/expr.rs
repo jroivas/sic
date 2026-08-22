@@ -102,6 +102,86 @@ impl<'m> FuncCtx<'m> {
         Val::Local(ptr_id)
     }
 
+    /// Emit (once per canonical name) a static `__sic_type_info` record and return
+    /// a `type` value pointing at it (sic.md §"RTTI"). `name` is the canonical
+    /// spelling (`type_name_of`); `kind`/`size` classify the type for formatters.
+    pub(super) fn emit_type_info(&mut self, name: &str, kind: u32, size: u32) -> Val {
+        use super::types as t;
+        let gref = if let Some(&g) = self.lowerer.type_info_globals.get(name) {
+            g
+        } else {
+            // The canonical name string (a private cstring the record points at).
+            let mut nb = name.as_bytes().to_vec();
+            nb.push(0);
+            let name_g = {
+                let gn = format!(".str.{}", self.lowerer.module.globals.len());
+                let len = nb.len();
+                let g = Global {
+                    name: gn,
+                    ty: Type::Array { elem: Box::new(Type::i8()), len },
+                    init: Some(Constant::Bytes(nb)),
+                    linkage: Linkage::Private, constant: true, thread_local: false,
+                };
+                self.lowerer.module.add_global(g)
+            };
+            // The record: opaque bytes with a pointer reloc for `name`.
+            let id = t::type_id_hash(name);
+            let mut b = vec![0u8; t::TYPEINFO_REC_SIZE];
+            b[t::TYPEINFO_OFF_ID..t::TYPEINFO_OFF_ID + 8].copy_from_slice(&id.to_le_bytes());
+            b[t::TYPEINFO_OFF_SIZE..t::TYPEINFO_OFF_SIZE + 4].copy_from_slice(&size.to_le_bytes());
+            b[t::TYPEINFO_OFF_KIND..t::TYPEINFO_OFF_KIND + 4].copy_from_slice(&kind.to_le_bytes());
+            let rec = Global {
+                name: format!(".typeinfo.{}", self.lowerer.module.globals.len()),
+                ty: Type::Array { elem: Box::new(Type::i8()), len: t::TYPEINFO_REC_SIZE },
+                init: Some(Constant::Aggregate {
+                    bytes: b,
+                    relocs: vec![(t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0))],
+                }),
+                linkage: Linkage::Private, constant: true, thread_local: false,
+            };
+            let g = self.lowerer.module.add_global(rec);
+            self.lowerer.type_info_globals.insert(name.to_string(), g);
+            g
+        };
+        let ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: ptr, base: Val::Global(gref), index: Constant::zero(),
+            elem_size: 1, result_ty: t::type_info_type(),
+        });
+        self.val_types.insert(ptr.0, t::type_info_type());
+        Val::Local(ptr)
+    }
+
+    /// Load a field from a `type` value's `__sic_type_info` record (sic.md §"RTTI").
+    /// `.str`/`.name` → `char*`; `.id` → `u64`; `.size`/`.kind` → `u32`.
+    fn emit_type_info_field(&mut self, base: &Expr, name: &str) -> Result<Val> {
+        use super::types as t;
+        let rec = self.lower_expr(base)?; // pointer to the record
+        let (off, fty) = match name {
+            "str" | "name" => (t::TYPEINFO_OFF_NAME, Type::char_ptr()),
+            "id"           => (t::TYPEINFO_OFF_ID, Type::u64()),
+            "size"         => (t::TYPEINFO_OFF_SIZE, Type::u32()),
+            _              => (t::TYPEINFO_OFF_KIND, Type::u32()), // "kind"
+        };
+        let fptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: fptr, base: rec, index: Constant::int(off as i64),
+            elem_size: 1, result_ty: Type::Pointer(Box::new(fty.clone())),
+        });
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(fptr), ty: fty.clone() });
+        self.val_types.insert(dest.0, fty);
+        Ok(Val::Local(dest))
+    }
+
+    /// Lower a `type` value for a concrete IR type (sic.md §"RTTI").
+    pub(super) fn lower_type_value(&mut self, ty: &Type) -> Val {
+        let name = self.type_name_of(ty);
+        let kind = super::types::type_kind(ty);
+        let size = ty.size_of(self.ptr_size()) as u32;
+        self.emit_type_info(&name, kind, size)
+    }
+
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         match &expr.kind {
@@ -139,6 +219,20 @@ impl<'m> FuncCtx<'m> {
                 let ty = self.infer_expr_type(inner).unwrap_or(Type::i32());
                 let s = self.type_name_string(inner, &ty);
                 Ok(self.emit_cstring(&s))
+            }
+            // sic RTTI (sic.md §"RTTI"): `typeid(x)` / `type(x)` → a `type` value.
+            // The operand is not evaluated — only its static type is used. A bare
+            // decimal literal reports its natural `fixed<I,F>` (matching typestr).
+            ExprKind::TypeId(inner) => {
+                let ty = self.infer_expr_type(inner).unwrap_or(Type::i32());
+                let name = self.type_name_string(inner, &ty);
+                let kind = super::types::type_kind(&ty);
+                let size = ty.size_of(self.ptr_size()) as u32;
+                Ok(self.emit_type_info(&name, kind, size))
+            }
+            ExprKind::TypeIdOf(qty) => {
+                let ty = self.lower_type(qty)?;
+                Ok(self.lower_type_value(&ty))
             }
             // sic exception-guard block (sic.md §"Integer overflow", §"Errors and
             // exceptions"): run `body` with the matching exception caught; yields
@@ -252,6 +346,14 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Field { base, name } => {
+                // sic RTTI accessors (sic.md §"RTTI"): on a `type` value, `.str` /
+                // `.name` give the canonical spelling, `.id` the stable hash, `.size`
+                // the byte size, `.kind` the classification. Loaded from the record.
+                if self.is_sic() && matches!(name.as_str(), "str" | "name" | "id" | "size" | "kind") {
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_type_info(&t)) {
+                        return self.emit_type_info_field(base, name);
+                    }
+                }
                 // sic native-string computed accessors (sic.md §"Built-in string").
                 // `.size` / `.data` are ordinary struct fields and fall through.
                 // `.str` is an alias for `.ptr` (the NUL-terminated C string).
@@ -1003,11 +1105,18 @@ impl<'m> FuncCtx<'m> {
             let (_, i, f) = Self::decimal_lit_parts(text);
             return format!("fixed<{},{}>", i, f);
         }
+        self.type_name_of(ty)
+    }
+
+    /// Canonical sic spelling of a type (no operand context) — used by RTTI
+    /// `type(x).str` and `typeid` records (sic.md §"RTTI").
+    pub(super) fn type_name_of(&self, ty: &Type) -> String {
         if let Some((i, f)) = super::types::fixed_dims(ty) {
             return format!("fixed<{},{}>", i, f);
         }
         if super::types::is_bigint(ty) { return "bigint".to_string(); }
         if super::types::is_sic_string(ty) { return "string".to_string(); }
+        if super::types::is_type_info(ty) { return "type".to_string(); }
         match ty {
             Type::Void => "void".to_string(),
             Type::Bool => "bool".to_string(),
@@ -1015,7 +1124,7 @@ impl<'m> FuncCtx<'m> {
             Type::Float32 => "f32".to_string(),
             Type::Float64 => "f64".to_string(),
             Type::Float80 => "f80".to_string(),
-            Type::Pointer(inner) => format!("{}*", self.type_name_string(expr, inner)),
+            Type::Pointer(inner) => format!("{}*", self.type_name_of(inner)),
             Type::Struct(st) => format!("struct {}", st.name.clone().unwrap_or_default()),
             Type::Union(u) => format!("union {}", u.name.clone().unwrap_or_default()),
             _ => "?".to_string(),
@@ -4684,6 +4793,7 @@ impl<'m> FuncCtx<'m> {
             // intercepted before inference is consulted.
             ExprKind::DecimalLit(_) => Ok(Type::Float64),
             ExprKind::TypeStr(_) => Ok(Type::char_ptr()),
+            ExprKind::TypeId(_) | ExprKind::TypeIdOf(_) => Ok(super::types::type_info_type()),
             // A guard block yields an `int` status (0 clean / 1 caught).
             ExprKind::Guard { .. } => Ok(Type::i32()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),

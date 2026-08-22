@@ -242,6 +242,69 @@ pub fn fixed_dims(t: &Type) -> Option<(u32, u32)> {
     Some((i.parse().ok()?, f.parse().ok()?))
 }
 
+// ─── RTTI: the `type` value (sic.md §"RTTI") ──────────────────────────────────
+//
+// A `type` value is a pointer to a static `__sic_type_info` record, laid out (on
+// a 64-bit target) as opaque bytes: `[ char* name @0 | u64 id @8 | u32 size @16 |
+// u32 kind @20 ]` (24 bytes). `id` is a stable 64-bit FNV-1a hash of the canonical
+// type name, so equality is consistent across translation units. The value type
+// is a marker pointer (`Pointer(Struct("__sic_type_info"))`), like `fixed`.
+
+pub const TYPEINFO_MARKER: &str = "__sic_type_info";
+pub const TYPEINFO_REC_SIZE: usize = 24;
+pub const TYPEINFO_OFF_NAME: usize = 0;
+pub const TYPEINFO_OFF_ID: usize = 8;
+pub const TYPEINFO_OFF_SIZE: usize = 16;
+pub const TYPEINFO_OFF_KIND: usize = 20;
+
+/// The `type` value type — a pointer to a `__sic_type_info` record.
+pub fn type_info_type() -> Type {
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(TYPEINFO_MARKER.to_string()), vec![], false))))
+}
+
+/// True if `t` is a `type` value (an RTTI type-info pointer).
+pub fn is_type_info(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(TYPEINFO_MARKER)))
+}
+
+/// The `kind` discriminant stored in a `__sic_type_info` record — a coarse
+/// classification the runtime formatter switches on (sic.md §"RTTI").
+pub fn type_kind(t: &Type) -> u32 {
+    if is_sic_string(t) { return 9; }
+    if is_fixed(t)      { return 10; }
+    if is_bigint(t)     { return 16; }
+    if is_tuple(t)      { return 15; }
+    if is_type_info(t)  { return 17; }
+    match t {
+        Type::Void => 0,
+        Type::Bool => 1,
+        Type::Int { signed: true, .. } => 2,
+        Type::Int { signed: false, .. } => 3,
+        Type::Float32 => 4,
+        Type::Float64 => 5,
+        Type::Float80 => 6,
+        // `char*` prints as a C string; other pointers as an address.
+        Type::Pointer(inner) if matches!(inner.as_ref(), Type::Int { bits: 8, .. }) => 8,
+        Type::Pointer(_) => 7,
+        Type::Array { .. } => 11,
+        Type::Struct(_) => 12,
+        Type::Union(_) => 13,
+        _ => 99,
+    }
+}
+
+/// Stable 64-bit FNV-1a hash of a type's canonical name — the RTTI `id`.
+pub fn type_id_hash(name: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in name.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)

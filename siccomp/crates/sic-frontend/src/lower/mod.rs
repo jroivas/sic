@@ -77,6 +77,10 @@ pub struct Lowerer {
     /// routes these through an `AL`-setting trampoline on x86-64 (Cranelift never
     /// sets `AL` for variadic calls). Surfaced on the IR module for the backend.
     pub float_vararg_externs: HashSet<String>,
+    /// sic RTTI (sic.md §"RTTI"): canonical type name → the emitted static
+    /// `__sic_type_info` record, so repeated `typeid(x)` of the same type share
+    /// one record.
+    pub type_info_globals: HashMap<String, GlobalRef>,
 }
 
 /// One variant of a sic tagged enum.
@@ -127,6 +131,7 @@ impl Lowerer {
             variant_enum: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
+            type_info_globals: HashMap::new(),
         }
     }
 
@@ -2275,9 +2280,9 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         }
         TupleExpr(elems) => { for e in elems { collect_expr_names(e, out); } }
         Guard { body, .. } => { for s in body { collect_stmt_names(s, out); } }
-        // `typestr(e)` inspects only the type — `e` is never evaluated.
-        TypeStr(_) => {}
+        // `typestr(e)` / `typeid(e)` inspect only the type — `e` is never evaluated.
+        TypeStr(_) | TypeId(_) => {}
         IntLit(..) | UIntLit(..) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
-        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } => {}
+        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeIdOf(_) => {}
     }
 }
