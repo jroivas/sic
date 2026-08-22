@@ -899,8 +899,65 @@ impl<'m> FuncCtx<'m> {
     /// semantics). The rational is exact; the target's `F` is display precision, so
     /// nothing is rounded here. Clones so the binding owns an independent block.
     pub(super) fn eval_fixed_owned(&mut self, e: &Expr, _to_f: u32) -> Result<Val> {
-        let (r, _, _) = self.fixed_operand(e)?;
+        // A `fixed` target puts the RHS in a fixed numeric context: bare integer
+        // literals adopt `fixed`, so `fixed a = 1/3` is the exact rational ⅓
+        // rather than integer-divided to 0 (sic.md §"Built-in fixed point").
+        let pe = Self::promote_numeric_literals(e);
+        let (r, _, _) = self.fixed_operand(&pe)?;
         self.emit_rat_call("__sic_rat_clone", vec![r])
+    }
+
+    /// sic numeric-context literal promotion (sic.md §"Built-in fixed point"): in
+    /// `T v = <expr>` with a float/double/fixed target, a bare integer literal in
+    /// an arithmetic position adopts the target type — so `fixed a = 1/3` is the
+    /// exact rational ⅓ and `float b = 1/3` is 0.333…, not integer-divided to 0.
+    /// Rewrites `IntLit(_, false)` → `DecimalLit`, descending only through `+ - * /`,
+    /// unary `-`, and ternary arms. Suffixed / unsigned literals (`1U`, `1L`),
+    /// explicit casts (`(int)1`), calls, and subscripts keep their own type.
+    pub(super) fn promote_numeric_literals(e: &Expr) -> Expr {
+        use BinOpKind::*;
+        let kind = match &e.kind {
+            // Only a bare (un-suffixed, 32-bit) integer literal is promoted; the
+            // `bool=true` form marks an `L`/`LL`/oversized literal, left as-is.
+            ExprKind::IntLit(v, false) => ExprKind::DecimalLit(v.to_string()),
+            // An arithmetic op where either operand is explicitly typed (a suffixed
+            // literal or a cast) keeps standard C semantics — no operand is promoted
+            // — so `1U / 3` and `(int)1 / 3` still integer-divide.
+            ExprKind::BinOp { op: op @ (Add | Sub | Mul | Div), lhs, rhs }
+                if !Self::is_type_anchored(lhs) && !Self::is_type_anchored(rhs) => ExprKind::BinOp {
+                op: *op,
+                lhs: Box::new(Self::promote_numeric_literals(lhs)),
+                rhs: Box::new(Self::promote_numeric_literals(rhs)),
+            },
+            ExprKind::Unary { op: UnOpKind::Neg, expr } if !Self::is_type_anchored(expr) =>
+                ExprKind::Unary {
+                    op: UnOpKind::Neg,
+                    expr: Box::new(Self::promote_numeric_literals(expr)),
+                },
+            ExprKind::Ternary { cond, then, else_ } => ExprKind::Ternary {
+                cond: cond.clone(),
+                then: Box::new(Self::promote_numeric_literals(then)),
+                else_: Box::new(Self::promote_numeric_literals(else_)),
+            },
+            _ => return e.clone(),
+        };
+        Expr { kind, span: e.span.clone() }
+    }
+
+    /// Whether `e` pins an explicit numeric type that suppresses literal promotion
+    /// (sic.md §"Built-in fixed point"): a suffixed / unsigned literal (`1U`, `1L`)
+    /// or an explicit cast (`(int)1`). Propagates through arithmetic, so `(1U+2)/3`
+    /// stays integer. Bare literals, variables, calls, etc. do not anchor.
+    fn is_type_anchored(e: &Expr) -> bool {
+        use BinOpKind::*;
+        match &e.kind {
+            ExprKind::IntLit(_, true) | ExprKind::UIntLit(_, _) => true,
+            ExprKind::Cast { .. } => true,
+            ExprKind::BinOp { op: Add | Sub | Mul | Div | Rem, lhs, rhs } =>
+                Self::is_type_anchored(lhs) || Self::is_type_anchored(rhs),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => Self::is_type_anchored(expr),
+            _ => false,
+        }
     }
 
     /// Free a bigint/fixed temporary immediately (in the current block).

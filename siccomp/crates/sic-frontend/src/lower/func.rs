@@ -1246,6 +1246,19 @@ impl<'m> FuncCtx<'m> {
                         self.retain_string_at(&ptr)?;
                     }
                 } else {
+                    // sic: a float/double target puts the RHS in that numeric
+                    // context — bare integer literals adopt it, so `float b = 1/3`
+                    // computes 0.333… rather than integer-dividing to 0 (sic.md
+                    // §"Built-in fixed point").
+                    let promoted;
+                    let e = if self.is_sic()
+                        && matches!(ty, Type::Float32 | Type::Float64 | Type::Float80)
+                    {
+                        promoted = Self::promote_numeric_literals(e);
+                        &promoted
+                    } else {
+                        e
+                    };
                     let val = self.lower_expr(e)?;
                     let coerced = self.coerce(val, ty)?;
                     self.push_instr(Instr::Store { val: coerced, ptr });
