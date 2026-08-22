@@ -496,6 +496,15 @@ impl<'m> FuncCtx<'m> {
             return self.lower_string_concat(lhs, rhs);
         }
 
+        // sic native string comparison `a == b` / `a != b` (sic.md §"Built-in
+        // string"): compare bytes directly (no `.str`, no copy). Triggered when a
+        // real `string`/slice is on either side; the other side may be a literal.
+        if self.is_sic() && matches!(op, BinOpKind::Eq | BinOpKind::Ne)
+            && (self.is_string_operand(lhs) || self.is_string_operand(rhs))
+        {
+            return self.lower_string_compare(op, lhs, rhs);
+        }
+
         // sic `bigint` arithmetic / comparison (sic.md §"Integer sizes"): if either
         // side is a bigint, the op runs through the arbitrary-precision runtime.
         if self.is_sic() && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs)) {
@@ -1272,6 +1281,57 @@ impl<'m> FuncCtx<'m> {
         let size = self.load_lvalue(&size_lv)?;
         let size = self.coerce(size, &Type::i64())?;
         Ok((data, size))
+    }
+
+    /// sic native string comparison `a == b` / `a != b` (sic.md §"Built-in
+    /// string"): equal iff the byte lengths match and the bytes are identical —
+    /// `size_a == size_b && memcmp(data_a, data_b, size) == 0`. No NUL-termination,
+    /// no `.str`, no copy; slices compare their view of the shared buffer. `memcmp`
+    /// is called over `min(size_a, size_b)` so it never reads past either buffer
+    /// (a length mismatch already makes the result unequal).
+    fn lower_string_compare(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let (d1, s1) = self.string_operand_parts(lhs)?;
+        let (d2, s2) = self.string_operand_parts(rhs)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let s1u = self.coerce(s1, &usize_ty)?;
+        let s2u = self.coerce(s2, &usize_ty)?;
+
+        // min(s1, s2) — the safe memcmp length.
+        let lt = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::IULt, lhs: s1u.clone(), rhs: s2u.clone(), ty: usize_ty.clone() });
+        let minsz = self.alloc_val();
+        self.push_instr(Instr::Select { dest: minsz, cond: Val::Local(lt), on_true: s1u.clone(), on_false: s2u.clone(), ty: usize_ty.clone() });
+
+        let voidp = Type::void_ptr();
+        let memcmp = self.lowerer.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "memcmp".to_string(),
+                sig: FunctionType { ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false },
+            })
+        });
+        let d1v = self.coerce(d1, &voidp)?;
+        let d2v = self.coerce(d2, &voidp)?;
+        let cmp = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(cmp), func: memcmp, args: vec![d1v, d2v, Val::Local(minsz)], ret_ty: Type::i32() });
+
+        let content_eq = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: content_eq, op: CmpOp::IEq, lhs: Val::Local(cmp), rhs: Constant::zero(), ty: Type::i32() });
+        let size_eq = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: size_eq, op: CmpOp::IEq, lhs: s1u, rhs: s2u, ty: usize_ty });
+        let equal = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: equal, op: BinOp::And, lhs: Val::Local(size_eq), rhs: Val::Local(content_eq), ty: Type::Bool });
+
+        let bool_result = if op == BinOpKind::Ne {
+            let ne = self.alloc_val();
+            self.push_instr(Instr::UnaryOp { dest: ne, op: UnOp::BoolNot, val: Val::Local(equal), ty: Type::Bool });
+            Val::Local(ne)
+        } else {
+            Val::Local(equal)
+        };
+        // Comparisons yield i32 0/1 (C convention).
+        let ext = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: bool_result, to_ty: Type::i32() });
+        Ok(Val::Local(ext))
     }
 
     /// sic `a + b` on strings: allocate an owned refcount block

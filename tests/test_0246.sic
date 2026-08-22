@@ -1,0 +1,25 @@
+// sic native string comparison (sic.md §"Built-in string"): `==` / `!=` compare
+// bytes directly — no `.str`, no NUL-termination, no copy. Works on strings,
+// slices (views into shared data), literals, and concat results. Exit code.
+int main() {
+    string a = "Hello world!";
+    string w = a[6:11];             // "world" (half-open interval)
+
+    if (!(w == "world")) return 1;
+    if (w != "world") return 2;
+    if (!(a == "Hello world!")) return 3;
+    if (a == "Hello") return 4;     // different length
+    if (a[0:5] != "Hello") return 5;
+    if (!(a[1:3] == "el")) return 6;
+
+    string b = "world";
+    if (!(w == b)) return 7;        // slice vs string variable
+
+    string cat = a[0:5] + "!";      // "Hello!"
+    if (cat != "Hello!") return 8;
+
+    string empty = a[0:0];
+    if (!(empty == "")) return 9;
+
+    return 42;
+}
