@@ -1,0 +1,18 @@
+// sic RTTI (sic.md §"RTTI"): a bare type name is its `type` value, and
+// `==`/`!=` compare the type ids. Verified by exit code.
+int main() {
+    int x = 5;
+    long y = 7;
+    fixed<10,4> f = 1;
+    string s = "hi";
+    if (!(type(x) == i32)) return 1;
+    if (  type(x) == i64 ) return 2;      // int is i32, not i64
+    if (!(type(y) == i64)) return 3;
+    if (!(type(s) == string)) return 4;
+    if (!(type(f) == fixed<10,4>)) return 5;
+    if (  type(f) == fixed<10,2> ) return 6;   // different dims → different type
+    if (!(type(x) != string)) return 7;
+    if (!(typeid(x) == typeid(x))) return 8;   // typeid() form, reflexive
+    if (  typeid(x) == typeid(y) ) return 9;
+    return 42;
+}

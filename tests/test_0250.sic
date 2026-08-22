@@ -1,0 +1,21 @@
+// sic RTTI (sic.md §"RTTI"): typeid(x)/type(x) → a `type` value with
+// .str/.name (canonical spelling), .size, .kind. Verified by exit code.
+#include <string.h>
+int main() {
+    int x = 5;
+    long l = 7;
+    fixed<10,4> f = 1;
+    string s = "hi";
+    if (strcmp(type(x).str,  "i32") != 0) return 1;
+    if (strcmp(type(l).name, "i64") != 0) return 2;      // .name aliases .str
+    if (strcmp(typeid(f).str, "fixed<10,4>") != 0) return 3;
+    if (strcmp(type(s).str,  "string") != 0) return 4;
+    if (strcmp(typeid(char*).str, "i8*") != 0) return 5;  // type argument form
+    if (type(x).size != 4) return 6;
+    if (type(l).size != 8) return 7;
+    if (type(x).kind != 2) return 8;                      // signed int
+    if (type(s).kind != 9) return 9;                      // string
+    if (type(f).kind != 10) return 10;                    // fixed
+    if (type(x).id == 0) return 11;                       // a hash is set
+    return 42;
+}

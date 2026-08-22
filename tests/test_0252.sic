@@ -1,0 +1,8 @@
+// sic generic enums (sic.md §"Match"): declaring `enum Option<T>` /
+// `enum Result<T,E>` parses and compiles; a program not instantiating them
+// runs normally. (Instantiation lands with monomorphization.)
+#include <stdio.h>
+enum Option<T> { Some(T), None }
+enum Result<T, E> { Ok(T), Err(E) }
+enum Pair<A, B> { Both(A), Neither }
+int main() { return 42; }
