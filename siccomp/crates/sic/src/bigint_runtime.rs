@@ -565,6 +565,26 @@ __attribute__((weak)) long long __sic_rat_to_i64(const __sic_rat *a) {
     return v;
 }
 
+/* A bigint as a double (lossy — inherent to the target). Base-2^32 Horner. */
+__attribute__((weak)) double __sic_bi_to_double(const __sic_bi *a) {
+    double r = 0.0;
+    unsigned i = a->len;
+    while (i) { i--; r = r * 4294967296.0 + (double)a->limbs[i]; }
+    return a->sign < 0 ? -r : r;
+}
+
+/* The rational as a double. Split into integer quotient + remainder/den so the
+   integer part stays accurate and the fraction is in [0,1); this avoids losing
+   the whole value when num and den are individually large. */
+__attribute__((weak)) double __sic_rat_to_double(const __sic_rat *a) {
+    __sic_bi *rem;
+    __sic_bi *q = __sic_bi_divmod(a->num, a->den, &rem);  /* trunc toward zero */
+    double d = __sic_bi_to_double(q)
+             + __sic_bi_to_double(rem) / __sic_bi_to_double(a->den);
+    __sic_bi_free(q); __sic_bi_free(rem);
+    return d;
+}
+
 /* Resolve to a decimal string with `decimals` fraction digits, rounded half away
    from zero. malloc'd; caller frees. */
 __attribute__((weak)) char *__sic_rat_to_str(const __sic_rat *a, int decimals) {

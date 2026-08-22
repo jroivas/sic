@@ -1,0 +1,22 @@
+// sic fixed → numeric casts (sic.md §"Built-in fixed point"): a `fixed` is an
+// exact rational, so `(double)`/`(float)`/`(int)` CONVERT the value (float
+// resolves num/den; int truncates toward zero). Verified by exit code.
+#include <string.h>
+#include <stdio.h>
+int main() {
+    fixed a = 1; a = a / 3;               // 1/3 exact
+    if ((double)(a * 3) != 1.0) return 1; // exact round-trip
+    if ((int)(a * 7) != 2) return 2;      // 7/3 = 2.33… → 2
+    if ((float)(a * 3) != 1.0f) return 3;
+
+    fixed b = 100; b = b / 7;             // 14.2857…
+    if ((int)b != 14) return 4;
+    if ((long)(b * 7) != 100) return 5;   // exact
+
+    // printf a converted value round-trips through its text form.
+    char buf[32];
+    snprintf(buf, sizeof buf, "%.6f", (double)b);
+    if (strcmp(buf, "14.285714") != 0) return 6;
+
+    return 42;
+}

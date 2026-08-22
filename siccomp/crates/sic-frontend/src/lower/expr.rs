@@ -332,6 +332,22 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // sic `fixed` → numeric cast (sic.md §"Built-in fixed point"): a
+                // `fixed` is an exact rational, so `(double)f`/`(int)f` CONVERT the
+                // value (unlike a `bigint`, whose cast only reinterprets its pointer).
+                // Integer targets truncate toward zero; float targets resolve num/den.
+                if self.is_sic() && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_fixed(&t)) {
+                    if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
+                        let (r, _, _) = self.fixed_operand(inner)?;
+                        let d = self.emit_bigint_call("__sic_rat_to_double", vec![r], Type::Float64)?;
+                        return self.coerce(d, &target);
+                    }
+                    if matches!(target, Type::Int { .. } | Type::Bool) {
+                        let (r, _, _) = self.fixed_operand(inner)?;
+                        let iv = self.emit_bigint_call("__sic_rat_to_i64", vec![r], Type::i64())?;
+                        return self.coerce(iv, &target);
+                    }
+                }
                 // A `bigint` is a pointer, so casting it (`(char*)b`, `(long)b`)
                 // only reinterprets the pointer — it never converts. Use the
                 // explicit `.str` / `.int` accessors to get the decimal string or
