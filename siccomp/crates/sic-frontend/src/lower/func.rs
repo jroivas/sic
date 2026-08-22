@@ -111,6 +111,10 @@ pub struct FuncCtx<'m> {
     /// an active guard catches the matching exception by jumping to its `fail_bb`
     /// (the offending op is not committed). Innermost last.
     pub guard_stack: Vec<GuardFrame>,
+    /// sic generic-enum construction (sic.md §"Match"): the target type of the
+    /// value currently being lowered (a binding/return/arg), used to resolve a
+    /// generic constructor `Option::Some(5)` / `None` to its concrete monomorph.
+    pub expected_ty: Option<Type>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -149,6 +153,7 @@ impl<'m> FuncCtx<'m> {
             bigint_temps: Vec::new(),
             unsafe_depth: 0,
             guard_stack: Vec::new(),
+            expected_ty: None,
         }
     }
 
@@ -1140,6 +1145,15 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
+        // Expose the target type so a generic constructor on the RHS
+        // (`Option<int> x = Option::Some(5)`) resolves to its monomorph.
+        let prev = self.expected_ty.replace(ty.clone());
+        let r = self.lower_initializer_inner(init, ptr, ty);
+        self.expected_ty = prev;
+        r
+    }
+
+    fn lower_initializer_inner(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
         // `char a[] = { "str" }` fills the char array from the string, exactly like
         // `char a[] = "str"` — re-dispatch on the unwrapped string literal.
         if let Type::Array { elem, .. } = ty {
@@ -1197,7 +1211,11 @@ impl<'m> FuncCtx<'m> {
                 // (payload-less) variant is the discriminant, so build the
                 // `{tag,union}` value from it rather than byte-copying an int as if
                 // it were an aggregate. A same-enum RHS still copies.
-                if self.is_sic() && self.is_tagged_enum_struct(ty) {
+                // A payload constructor call (`Some(42)`, `Option::Ok(x)`) builds a
+                // full enum value and is copied below; only a *bare* variant
+                // (`None`, `BLACK`) or enum-constant is the discriminant handled here.
+                let is_ctor_call = matches!(&e.kind, ExprKind::Call { .. });
+                if self.is_sic() && self.is_tagged_enum_struct(ty) && !is_ctor_call {
                     let same = matches!(self.infer_expr_type(e), Ok(t) if &t == ty);
                     if !same {
                         let tag = self.lower_expr(e)?;

@@ -205,6 +205,16 @@ impl<'m> FuncCtx<'m> {
         self.emit_type_info(&name, kind, size)
     }
 
+    /// Lower `e` with `ty` as the expected/target type (sic.md §"Match") — lets a
+    /// generic constructor `Option::Some(5)` / `None` resolve to its monomorph.
+    /// Saves/restores the previous hint so nesting is safe.
+    pub(super) fn lower_expr_expecting(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
+        let prev = self.expected_ty.replace(ty.clone());
+        let r = self.lower_expr(e);
+        self.expected_ty = prev;
+        r
+    }
+
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         match &expr.kind {
@@ -3407,6 +3417,10 @@ impl<'m> FuncCtx<'m> {
     /// store the payload (if any). Returns a pointer to the temporary, like a
     /// compound literal, so the surrounding assignment/return copies it.
     fn construct_enum(&mut self, enum_name: &str, variant: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // A generic constructor (`Option::Some(5)` / `None`) names the template;
+        // resolve it to the concrete monomorph via the expected target type.
+        let resolved = self.resolve_generic_ctor(enum_name, sp)?;
+        let enum_name = resolved.as_deref().unwrap_or(enum_name);
         let info = self.lowerer.enum_defs.get(enum_name).cloned().ok_or_else(|| CompileError::at(
             format!("'{}' is not a tagged enum", enum_name), sp.file.clone(), sp.line, sp.col))?;
         let v = info.variant(variant).cloned().ok_or_else(|| CompileError::at(
@@ -3473,6 +3487,27 @@ impl<'m> FuncCtx<'m> {
                 sp.file.clone(), sp.line, sp.col)),
         }
         Ok(Val::Local(slot))
+    }
+
+    /// Resolve a generic-enum constructor's template name (`Option`) to its
+    /// concrete monomorph (`Option<i32>`) using the expected target type
+    /// (sic.md §"Match"). Returns `None` for an already-concrete enum name.
+    fn resolve_generic_ctor(&self, enum_name: &str, sp: &crate::lexer::Span) -> Result<Option<String>> {
+        // Already a concrete (registered) enum — nothing to resolve.
+        if self.lowerer.enum_defs.contains_key(enum_name) { return Ok(None); }
+        if !self.lowerer.generic_enum_defs.contains_key(enum_name) { return Ok(None); }
+        let prefix = format!("{}<", enum_name);
+        if let Some(Type::Struct(st)) = &self.expected_ty {
+            if let Some(n) = &st.name {
+                if n.starts_with(&prefix) && self.lowerer.enum_defs.contains_key(n) {
+                    return Ok(Some(n.clone()));
+                }
+            }
+        }
+        Err(CompileError::at(format!(
+            "cannot infer type arguments for generic enum `{}` here — annotate the \
+             target type (e.g. `{}<int> x = …`)", enum_name, enum_name),
+            sp.file.clone(), sp.line, sp.col))
     }
 
     /// True if `t` is the `{tag,union}` struct of the named tagged enum.

@@ -1,0 +1,26 @@
+// sic generic enums (sic.md §"Match"): monomorphized Option<T>/Result<T,E>,
+// type-directed construction (Option::Some / None resolve via the target type),
+// and match on the concrete instantiation. Verified by exit code.
+#include <string.h>
+enum Option<T> { Some(T), None };
+enum Result<T, E> { Ok(T), Err(E) };
+
+int main() {
+    Option<int> a = Option::Some(42);
+    Option<int> b = None;
+    int acc = 0;
+    match (a) { Some(x): acc += x; None: acc -= 1; }     // +42
+    match (b) { Some(x): acc += x; None: acc += 100; }   // +100
+
+    Result<int, string> r = Result::Ok(7);
+    Result<int, string> e = Result::Err("boom");
+    match (r) { Ok(v): acc += v; Err(m): acc -= 1; }     // +7
+    match (e) { Ok(v): acc -= 1; Err(m): acc += (int)m.length; } // +4 ("boom")
+
+    Option<string> s = Option::Some("hi");
+    match (s) { Some(x): acc += (int)x.length; None: acc -= 1; }  // +2
+
+    // 42 + 100 + 7 + 4 + 2 = 155
+    if (acc != 155) return acc;
+    return 42;
+}
