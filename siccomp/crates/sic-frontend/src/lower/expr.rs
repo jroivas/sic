@@ -140,6 +140,10 @@ impl<'m> FuncCtx<'m> {
                 let s = self.type_name_string(inner, &ty);
                 Ok(self.emit_cstring(&s))
             }
+            // sic exception-guard block (sic.md §"Integer overflow", §"Errors and
+            // exceptions"): run `body` with the matching exception caught; yields
+            // `0` on clean completion, `1` if the exception fired.
+            ExprKind::Guard { kind, body } => self.lower_guard(*kind, body),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
             ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
             ExprKind::Nullptr => Ok(Constant::null()),
@@ -1434,12 +1438,42 @@ impl<'m> FuncCtx<'m> {
         if self.is_sic()
             && matches!(ir_op, BinOp::SDiv | BinOp::UDiv | BinOp::SRem | BinOp::URem)
         {
+            // In `unsafe` / a `divide_by_zero` guard, `÷0` is an exception instead
+            // (sic.md §"Errors and exceptions"): trap or jump to the guard.
+            if self.divzero_active() {
+                let is_zero = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: rc.clone(), rhs: Constant::zero(), ty: result_ty.clone() });
+                let tgt = self.divzero_target();
+                self.branch_on_exception(Val::Local(is_zero), tgt);
+                // On the fall-through path the divisor is nonzero — divide directly.
+                if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), rc.clone(), &result_ty) {
+                    return Ok(v);
+                }
+                let dest = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: rc, ty: result_ty });
+                return Ok(Val::Local(dest));
+            }
             return Ok(self.guarded_div_rem(ir_op, lc, rc, result_ty));
         }
         // SIC defines out-of-range shifts (sic.md §"Rotate and shift"): count ≥
         // width → 0 (signed `>>` → sign-fill); count ≤ 0 → value unchanged.
         if self.is_sic() && matches!(ir_op, BinOp::Shl | BinOp::AShr | BinOp::LShr) {
             return Ok(self.guarded_shift(ir_op, lc, rc, result_ty));
+        }
+        // sic `unsafe` / `overflow` guard: integer `+ - *` traps on overflow
+        // (sic.md §"Integer overflow") instead of wrapping. The wrapping result is
+        // computed but committed only on the no-overflow path (so a caught op
+        // "changes no values").
+        if self.is_sic() && matches!(ir_op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+            && self.overflow_active()
+        {
+            let dest = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc.clone(), rhs: rc.clone(), ty: result_ty.clone() });
+            let res = Val::Local(dest);
+            let ovf = self.emit_overflow_flag(ir_op, &lc, &rc, &res, &result_ty);
+            let tgt = self.overflow_target();
+            self.branch_on_exception(ovf, tgt);
+            return Ok(res);
         }
         if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), rc.clone(), &result_ty) {
             return Ok(v);
@@ -4055,7 +4089,6 @@ impl<'m> FuncCtx<'m> {
             Type::Pointer(inner) => *inner,
             _ => self.val_type(&a),
         };
-        let signed = matches!(ty, Type::Int { signed: true, .. });
 
         // Coerce operands to the result type so the arithmetic is well-typed.
         let a = self.coerce(a, &ty)?;
@@ -4067,6 +4100,15 @@ impl<'m> FuncCtx<'m> {
         let result = Val::Local(result);
         self.push_instr(Instr::Store { val: result.clone(), ptr: res_ptr });
 
+        Ok(self.emit_overflow_flag(op, &a, &b, &result, &ty))
+    }
+
+    /// Compute the overflow flag (a `Bool` value) for a wrapping integer
+    /// `result = a op b` (op ∈ {Add, Sub, Mul}). Shared by `__builtin_*_overflow`
+    /// and sic's `unsafe`/`overflow` trapping arithmetic (sic.md §"Integer
+    /// overflow").
+    pub(super) fn emit_overflow_flag(&mut self, op: BinOp, a: &Val, b: &Val, result: &Val, ty: &Type) -> Val {
+        let signed = matches!(ty, Type::Int { signed: true, .. });
         let zero = Constant::zero();
         let ovf = self.alloc_val();
         match op {
@@ -4106,7 +4148,7 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero, ty: ty.clone() });
                 let div = if signed { BinOp::SDiv } else { BinOp::UDiv };
                 // 128-bit divide needs a libcall (see emit_div_rem_libcall).
-                let quot_val = if let Some(v) = self.emit_div_rem_libcall(div, result.clone(), a.clone(), &ty) {
+                let quot_val = if let Some(v) = self.emit_div_rem_libcall(div, result.clone(), a.clone(), ty) {
                     v
                 } else {
                     let quot = self.alloc_val();
@@ -4125,7 +4167,69 @@ impl<'m> FuncCtx<'m> {
                 });
             }
         }
-        Ok(Val::Local(ovf))
+        Val::Local(ovf)
+    }
+
+    /// Lower an exception-guard block `overflow`/`divide_by_zero`/`exception`
+    /// `{ body }` (sic.md §"Integer overflow", §"Errors and exceptions"). The body
+    /// runs with the matching exception caught; a caught exception jumps to a fail
+    /// block (skipping the rest of the body, committing nothing) and the expression
+    /// yields `1`, otherwise `0`.
+    fn lower_guard(&mut self, kind: crate::ast::GuardKind, body: &[crate::ast::Stmt]) -> Result<Val> {
+        // Result slot defaults to 0 (success).
+        let res = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: res, ty: Type::i32(), align: None });
+        self.push_instr(Instr::Store { val: Constant::zero(), ptr: Val::Local(res) });
+
+        let fail_bb = self.new_block_after_current();
+        let end_bb = self.new_block_after_current();
+
+        self.guard_stack.push(super::func::GuardFrame { kind, fail_bb });
+        self.enter_scope();
+        for s in body {
+            if self.is_terminated() { break; }
+            self.lower_stmt(s)?;
+        }
+        self.exit_scope();
+        self.guard_stack.pop();
+
+        // Success path: leave result 0, jump to the end.
+        if !self.is_terminated() {
+            self.set_terminator(Terminator::Jump(end_bb));
+        }
+        // Fail path: a caught exception lands here — set result to 1.
+        self.switch_to_block(fail_bb);
+        self.push_instr(Instr::Store { val: Constant::int(1), ptr: Val::Local(res) });
+        self.set_terminator(Terminator::Jump(end_bb));
+
+        self.switch_to_block(end_bb);
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(res), ty: Type::i32() });
+        Ok(Val::Local(dest))
+    }
+
+    /// Branch to the exception target when `cond` is true (a caught exception), or
+    /// (if there is no active guard) call `__sic_trap`. The offending operation's
+    /// commit lives on the fall-through path, so a caught/trapped op is not
+    /// committed. Continues on the no-exception path.
+    fn branch_on_exception(&mut self, cond: Val, target: Option<super::BlockId>) {
+        match target {
+            Some(fail) => {
+                let ok_bb = self.new_block_after_current();
+                self.set_terminator(Terminator::CondJump { cond, then_bb: fail, else_bb: ok_bb });
+                self.switch_to_block(ok_bb);
+            }
+            None => {
+                let trap_bb = self.new_block_after_current();
+                let ok_bb = self.new_block_after_current();
+                self.set_terminator(Terminator::CondJump { cond, then_bb: trap_bb, else_bb: ok_bb });
+                self.switch_to_block(trap_bb);
+                let fref = self.lowerer.ensure_trap_fn();
+                self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+                self.set_terminator(Terminator::Jump(ok_bb)); // abort never returns
+                self.switch_to_block(ok_bb);
+            }
+        }
     }
 
     /// Lower `__builtin_{add,sub}c[l|ll](a, b, carryin, *carryout)`: wide
@@ -4503,6 +4607,8 @@ impl<'m> FuncCtx<'m> {
             // intercepted before inference is consulted.
             ExprKind::DecimalLit(_) => Ok(Type::Float64),
             ExprKind::TypeStr(_) => Ok(Type::char_ptr()),
+            // A guard block yields an `int` status (0 clean / 1 caught).
+            ExprKind::Guard { .. } => Ok(Type::i32()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             ExprKind::StringLit(_) => Ok(Type::char_ptr()),
             ExprKind::Nullptr => Ok(Type::void_ptr()),

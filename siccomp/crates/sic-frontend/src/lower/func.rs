@@ -26,6 +26,15 @@ pub enum Cleanup {
     BigintFree { slot: Val },
 }
 
+/// An active exception-guard (sic.md §"Integer overflow", §"Errors and
+/// exceptions"): a caught exception jumps to `fail_bb`, which sets the guard
+/// expression's result to 1 without committing the offending operation.
+#[derive(Debug, Clone, Copy)]
+pub struct GuardFrame {
+    pub kind: crate::ast::GuardKind,
+    pub fail_bb: BlockId,
+}
+
 /// Per-function lowering context.
 pub struct FuncCtx<'m> {
     pub lowerer: &'m mut Lowerer,
@@ -92,6 +101,13 @@ pub struct FuncCtx<'m> {
     /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
     /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
     pub bigint_temps: Vec<Val>,
+    /// sic `unsafe { }` nesting depth (sic.md §"Integer overflow"): when > 0,
+    /// integer overflow and `÷0` trap instead of wrapping / `→0`.
+    pub unsafe_depth: u32,
+    /// sic exception-guard frames (`overflow`/`divide_by_zero`/`exception` blocks):
+    /// an active guard catches the matching exception by jumping to its `fail_bb`
+    /// (the offending op is not committed). Innermost last.
+    pub guard_stack: Vec<GuardFrame>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -128,6 +144,8 @@ impl<'m> FuncCtx<'m> {
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
+            unsafe_depth: 0,
+            guard_stack: Vec::new(),
         }
     }
 
@@ -185,6 +203,31 @@ impl<'m> FuncCtx<'m> {
 
     pub fn is_terminated(&self) -> bool {
         !matches!(self.current_block().terminator, Terminator::Unreachable)
+    }
+
+    /// Whether integer-overflow detection is active here — inside `unsafe`, or an
+    /// `overflow`/`exception` guard (sic.md §"Integer overflow").
+    pub fn overflow_active(&self) -> bool {
+        self.unsafe_depth > 0 || self.overflow_target().is_some()
+    }
+    /// Whether `÷0` detection is active — inside `unsafe`, or a
+    /// `divide_by_zero`/`exception` guard.
+    pub fn divzero_active(&self) -> bool {
+        self.unsafe_depth > 0 || self.divzero_target().is_some()
+    }
+    /// The innermost guard catching integer overflow, if any.
+    pub fn overflow_target(&self) -> Option<BlockId> {
+        use crate::ast::GuardKind::*;
+        self.guard_stack.iter().rev()
+            .find(|g| matches!(g.kind, Overflow | Exception))
+            .map(|g| g.fail_bb)
+    }
+    /// The innermost guard catching `÷0`, if any.
+    pub fn divzero_target(&self) -> Option<BlockId> {
+        use crate::ast::GuardKind::*;
+        self.guard_stack.iter().rev()
+            .find(|g| matches!(g.kind, DivZero | Exception))
+            .map(|g| g.fail_bb)
     }
 
     pub fn enter_scope(&mut self) {
@@ -740,6 +783,18 @@ impl<'m> FuncCtx<'m> {
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
             Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span)?,
+            // sic `unsafe { … }` (sic.md §"Integer overflow"): raise the trapping
+            // depth for the body so integer overflow / `÷0` become exceptions.
+            Stmt::Unsafe(body, _) => {
+                self.unsafe_depth += 1;
+                self.enter_scope();
+                for s in body {
+                    if self.is_terminated() && !stmt_is_jump_target(s) { continue; }
+                    self.lower_stmt(s)?;
+                }
+                self.exit_scope();
+                self.unsafe_depth -= 1;
+            }
             Stmt::Break(_) => {
                 // `break` targets the innermost enclosing loop *or* switch,
                 // whichever is nested deeper — a switch inside a loop breaks the
@@ -1898,7 +1953,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
-        | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) => s.line,
+        | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. } => span.line,
     }
@@ -2101,6 +2156,7 @@ fn infer_calls_in_stmt(
         Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
         | Stmt::Label(_, body, _) | Stmt::Defer(body, _) =>
             infer_calls_in_stmt(fc, body, targets, found),
+        Stmt::Unsafe(body, _) => infer_calls_in_stmts(fc, body, targets, found),
     }
 }
 

@@ -1006,6 +1006,15 @@ impl Parser {
             TokenKind::Goto => self.parse_goto(),
             TokenKind::Switch => self.parse_switch(),
             TokenKind::Match => self.parse_match(),
+            // sic `unsafe { … }` (sic.md §"Integer overflow") — contextual: only a
+            // block-keyword when immediately followed by `{`; else an identifier.
+            TokenKind::Ident if self.lang == Lang::Sic && self.peek().text == "unsafe"
+                && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LBrace) =>
+            {
+                self.advance();
+                let body = self.parse_compound_stmt_as_stmts()?;
+                Ok(Stmt::Unsafe(body, sp))
+            }
             // label: `ident :`
             TokenKind::Ident | TokenKind::TypeName if self.is_label() => self.parse_label(),
             TokenKind::Case => self.parse_case(),
@@ -2043,6 +2052,20 @@ impl Parser {
                         let inner = self.parse_assign_expr()?;
                         self.expect(TokenKind::RParen)?;
                         return Ok(Expr::new(ExprKind::TypeStr(Box::new(inner)), sp));
+                    }
+                    // sic exception-guard blocks (sic.md §"Integer overflow",
+                    // §"Errors and exceptions") — contextual: `<kw> { … }` only when
+                    // immediately followed by `{`; else an ordinary identifier.
+                    "overflow" | "divide_by_zero" | "exception"
+                        if self.lang == Lang::Sic && self.at(TokenKind::LBrace) =>
+                    {
+                        let kind = match name.as_str() {
+                            "overflow" => GuardKind::Overflow,
+                            "divide_by_zero" => GuardKind::DivZero,
+                            _ => GuardKind::Exception,
+                        };
+                        let body = self.parse_compound_stmt_as_stmts()?;
+                        return Ok(Expr::new(ExprKind::Guard { kind, body }, sp));
                     }
                     _ => {}
                 }

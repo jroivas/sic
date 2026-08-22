@@ -1,0 +1,46 @@
+// sic unsafe / overflow guards (sic.md §"Integer overflow", §"Errors and
+// exceptions"). Default arithmetic wraps; `unsafe` traps; `overflow`/
+// `divide_by_zero`/`exception` guards catch and yield 0/1 without committing the
+// offending op. Verified by exit code.
+#include <limits.h>
+int dodiv(int a, int b) {
+    unsafe {
+        int res;
+        if (divide_by_zero { res = a / b; }) { return -1; }
+        return res;
+    }
+}
+int main() {
+    // The spec's no-commit example: b=1 runs, a+=10 overflows -> break, a unchanged.
+    int a = INT_MAX;
+    int b = 0;
+    int c = overflow {
+        b = 1;
+        a += 10;      // overflows -> stop here
+        b = 2;        // not executed
+    };
+    if (!(a == INT_MAX)) return 1;   // unchanged
+    if (b != 1) return 2;            // b=2 skipped
+    if (c != 1) return 3;            // overflow was caught
+
+    // A clean guard yields 0.
+    int x = 3;
+    if (overflow { x = x + 1; } != 0) return 4;
+    if (x != 4) return 5;
+
+    // divide_by_zero guard inside unsafe.
+    if (dodiv(10, 0) != -1) return 6;
+    if (dodiv(10, 2) != 5) return 7;
+
+    // exception { } catches overflow too.
+    int y = INT_MAX;
+    if (exception { y = y * 2; } != 1) return 8;
+
+    // Default mode (no unsafe/guard) still wraps and gives ÷0 -> 0.
+    int w = INT_MAX;
+    w++;
+    if (w != INT_MIN) return 9;
+    if (10 / 0 != 0) return 10;
+
+    return 42;
+}

@@ -256,7 +256,21 @@ pub enum Stmt {
     /// sic-only: `match (e) { Variant(bind): stmt; _: stmt }` over a tagged enum
     /// (sic.md §"Match").
     Match { scrutinee: Expr, arms: Vec<MatchArm>, span: Span },
+    /// sic-only: `unsafe { … }` — inside, integer overflow and `÷0` trap (raise an
+    /// exception) instead of the default wrap / `→0` (sic.md §"Integer overflow").
+    Unsafe(Vec<Stmt>, Span),
     Null(Span),
+}
+
+/// sic exception-guard kind (sic.md §"Integer overflow", §"Errors and exceptions").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardKind {
+    /// `overflow { … }` — catch integer overflow.
+    Overflow,
+    /// `divide_by_zero { … }` — catch division by zero.
+    DivZero,
+    /// `exception { … }` — catch any of the above.
+    Exception,
 }
 
 /// One arm of a `match` (sic.md §"Match"): `Variant(binding): body`. A `variant`
@@ -306,6 +320,12 @@ pub enum ExprKind {
     /// `char*` naming the operand's type, e.g. `fixed<10,9>`. The operand is not
     /// evaluated — only its type is inspected.
     TypeStr(BoxExpr),
+    /// sic-only: an exception-guard block `overflow { … }` /
+    /// `divide_by_zero { … }` / `exception { … }` (sic.md §"Integer overflow",
+    /// §"Errors and exceptions"). Runs the body; if the guarded exception occurs,
+    /// the offending operation is not committed, the rest of the body is skipped,
+    /// and the expression yields `1` (else `0`).
+    Guard { kind: GuardKind, body: Vec<Stmt> },
     FloatLit(f64),
     StringLit(String),
     CharLit(i32),

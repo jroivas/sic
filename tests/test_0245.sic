@@ -1,0 +1,4 @@
+// An uncaught integer overflow inside `unsafe` raises an exception that
+// terminates the program (SIGABRT / exit 134) — sic.md §"Errors and exceptions".
+#include <limits.h>
+int main() { int a = INT_MAX; unsafe { a++; } return a; }
