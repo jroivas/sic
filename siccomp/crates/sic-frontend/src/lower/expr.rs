@@ -2734,6 +2734,16 @@ impl<'m> FuncCtx<'m> {
     /// Lower GNU `a ?: b`. `a` is evaluated exactly once (its SSA value is reused
     /// both as the condition and as the "then" result).
     fn lower_elvis(&mut self, cond: &Expr, else_: &Expr) -> Result<Val> {
+        // sic Option/Result unwrap-or-default (sic.md §"Match"): `opt ?: default`
+        // yields the payload of the present variant (Some/Ok — the first
+        // payload-carrying variant), else `default`. No unwrap, no panic.
+        if self.is_sic() {
+            if let Ok(t) = self.infer_expr_type(cond) {
+                if self.is_tagged_enum_struct(&t) {
+                    return self.lower_option_elvis(cond, else_, &t);
+                }
+            }
+        }
         let cond_val = self.lower_expr(cond)?;
         let cty = self.infer_expr_type(cond).unwrap_or_else(|_| Type::i32());
         let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
@@ -2770,6 +2780,83 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(merge_bb);
         let dest = self.alloc_val();
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
+        Ok(Val::Local(dest))
+    }
+
+    /// The "present" variant of an Option/Result-like enum for `?:`/`?.`/guard-bind
+    /// (sic.md §"Match"): the first payload-carrying variant (`Some`/`Ok`).
+    fn enum_present_variant(&self, sty: &Type) -> Option<(String, super::TaggedVariant)> {
+        let ename = match sty { Type::Struct(st) => st.name.clone()?, _ => return None };
+        let info = self.lowerer.enum_defs.get(&ename)?;
+        let v = info.variants.iter().find(|v| v.payload.is_some())?.clone();
+        Some((ename, v))
+    }
+
+    /// Lower `opt ?: default` (sic.md §"Match"): the present variant's payload, or
+    /// `default`. The result type is the payload type.
+    fn lower_option_elvis(&mut self, cond: &Expr, else_: &Expr, sty: &Type) -> Result<Val> {
+        let sp = cond.span.clone();
+        let (ename, present) = self.enum_present_variant(sty).ok_or_else(|| CompileError::at(
+            format!("`?:` needs an enum with a payload variant (Some/Ok)"),
+            sp.file.clone(), sp.line, sp.col))?;
+        let _ = ename;
+        let pty = present.payload.clone().unwrap();
+        let ptr = self.lower_aggregate_ptr(cond)?;
+        let tag = self.load_enum_tag(ptr.clone(), sty, &sp)?;
+        let present_bool = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: present_bool, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(present.tag), ty: Type::i32() });
+
+        let result_ptr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: pty.clone(), align: None });
+        let then_bb = self.new_block_after_current();
+        let else_bb = self.new_block_after_current();
+        let merge_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(present_bool), then_bb, else_bb });
+
+        // Present: copy out the payload (borrowed — scalars loaded, aggregates /
+        // strings memcopied). The result is transient (used in-statement).
+        self.switch_to_block(then_bb);
+        let data = self.enum_data_ptr(ptr.clone(), sty, &sp)?;
+        if super::types::is_sic_string(&pty) || matches!(pty, Type::Struct(_) | Type::Union(_)) {
+            let size = pty.size_of(self.ptr_size());
+            let align = pty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src: data, size, align });
+        } else {
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: data, ty: pty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(result_ptr) });
+        }
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        // Absent: the default expression. A `string` payload wraps a bare
+        // `char*`/literal default into a `{data,size,rc}` descriptor.
+        self.switch_to_block(else_bb);
+        if super::types::is_sic_string(&pty) {
+            let ev = self.lower_expr(else_)?;
+            let vt = self.val_type(&ev);
+            let is_str = super::types::is_sic_string(&vt)
+                || matches!(&vt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+            let src = if is_str { ev } else { self.cstr_to_string(ev)? };
+            let size = pty.size_of(self.ptr_size());
+            let align = pty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src, size, align });
+        } else {
+            let ev = self.lower_expr(else_)?;
+            let ev = self.coerce(ev, &pty)?;
+            self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
+        }
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        self.switch_to_block(merge_bb);
+        // A `string`/aggregate rvalue is the POINTER to its storage (like a compound
+        // literal); a scalar is the loaded value.
+        if super::types::is_sic_string(&pty) || matches!(pty, Type::Struct(_) | Type::Union(_)) {
+            self.val_types.insert(result_ptr.0, pty.clone());
+            return Ok(Val::Local(result_ptr));
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: pty.clone() });
+        self.val_types.insert(dest.0, pty.clone());
         Ok(Val::Local(dest))
     }
 
@@ -5024,6 +5111,17 @@ impl<'m> FuncCtx<'m> {
                     Type::Function(ft) => ft.ret.clone(),
                     _ => Type::i32(),
                 })
+            }
+            // sic Option/Result unwrap-or-default `opt ?: default` — the result is
+            // the payload type (sic.md §"Match").
+            ExprKind::Elvis { cond, else_: _ }
+                if self.is_sic() && matches!(self.infer_expr_type(cond), Ok(t) if self.is_tagged_enum_struct(&t)) =>
+            {
+                let t = self.infer_expr_type(cond)?;
+                match self.enum_present_variant(&t).and_then(|(_, v)| v.payload) {
+                    Some(pty) => Ok(pty),
+                    None => Ok(Type::i32()),
+                }
             }
             ExprKind::Ternary { then, else_, .. }
             | ExprKind::Elvis { cond: then, else_ } => {
