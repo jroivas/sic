@@ -93,6 +93,12 @@ pub fn tagged_enum_type(
     ptr_size: u32,
 ) -> Option<Result<Type>> {
     let variants = e.variants.as_ref()?;
+    // A generic enum template (`enum Option<T> {…}`) is not a concrete type — its
+    // payloads mention unbound type params. Only its `Option<int>` monomorphs are
+    // real; the bare template lowers to a placeholder int (sic.md §"Match").
+    if !e.type_params.is_empty() {
+        return None;
+    }
     if !variants.iter().any(|v| v.payload.is_some()) {
         return None;
     }
@@ -448,7 +454,47 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 CompileError::new(format!("unknown type '{}'", n))
             })?
         }
+        // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
+        // to the concrete monomorph, pre-registered under a mangled name by the
+        // instantiation pass.
+        AstType::Generic { name, args } => {
+            let mut arg_tys = Vec::new();
+            for a in args { arg_tys.push(lower_ast_type(&a.ty, named, ptr_size)?); }
+            let mangled = generic_enum_mangled(name, &arg_tys);
+            named.get(&mangled).cloned().ok_or_else(|| CompileError::new(format!(
+                "generic enum `{}` used before instantiation (monomorphization pending)", name)))?
+        }
     })
+}
+
+/// The internal mangled name of a concrete generic-enum monomorph, e.g.
+/// `Option<i32>` (sic.md §"Match"). Registered in `struct_types`/`enum_defs`.
+pub fn generic_enum_mangled(name: &str, args: &[Type]) -> String {
+    let mut s = format!("{}<", name);
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 { s.push(','); }
+        s.push_str(&mangle_type_name(a));
+    }
+    s.push('>');
+    s
+}
+
+fn mangle_type_name(t: &Type) -> String {
+    if let Some((i, f)) = fixed_dims(t) { return format!("fixed<{},{}>", i, f); }
+    if is_sic_string(t) { return "string".to_string(); }
+    if is_bigint(t) { return "bigint".to_string(); }
+    match t {
+        Type::Void => "void".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Int { bits, signed } => format!("{}{}", if *signed { 'i' } else { 'u' }, bits),
+        Type::Float32 => "f32".to_string(),
+        Type::Float64 => "f64".to_string(),
+        Type::Float80 => "f80".to_string(),
+        Type::Pointer(inner) => format!("{}p", mangle_type_name(inner)),
+        Type::Struct(st) => format!("s_{}", st.name.clone().unwrap_or_default()),
+        Type::Union(u) => format!("u_{}", u.name.clone().unwrap_or_default()),
+        _ => "x".to_string(),
+    }
 }
 
 /// Reduce a named struct/union to an opaque (field-less) reference. Used for

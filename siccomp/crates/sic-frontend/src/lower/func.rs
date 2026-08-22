@@ -2265,5 +2265,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Typeof(_) => "typeof(...)".to_string(),
         AstType::Tuple => "tuple".to_string(),
         AstType::Fixed { integral, fraction } => format!("fixed<{},{}>", integral, fraction),
+        AstType::Generic { name, .. } => name.clone(),
     }
 }

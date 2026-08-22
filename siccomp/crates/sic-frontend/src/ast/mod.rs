@@ -64,6 +64,10 @@ pub enum AstType {
     /// fixed point"). `(0, 0)` marks a bare `fixed` whose precision is inferred
     /// from its initializer.
     Fixed { integral: u32, fraction: u32 },
+    /// sic-only (sic.md §"Match"): a generic-enum instantiation `Name<Arg, …>`,
+    /// e.g. `Option<int>` / `Result<string,int>`. Monomorphized to a concrete
+    /// tagged enum when resolved.
+    Generic { name: String, args: Vec<QualType> },
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
@@ -111,6 +115,10 @@ pub struct EnumDef {
     /// `__attribute__((packed))`: underlying type is the smallest integer that
     /// holds all enumerators (1 byte for small values), affecting struct layout.
     pub packed: bool,
+    /// sic-only (sic.md §"Match"): generic type parameters, e.g. `T`/`E` in
+    /// `enum Option<T> { Some(T), None }`. Empty for an ordinary enum. A generic
+    /// enum is a monomorphization *template*, instantiated per concrete `<...>`.
+    pub type_params: Vec<String>,
     pub span: Span,
 }
 

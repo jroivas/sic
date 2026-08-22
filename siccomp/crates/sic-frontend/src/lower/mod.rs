@@ -81,6 +81,9 @@ pub struct Lowerer {
     /// `__sic_type_info` record, so repeated `typeid(x)` of the same type share
     /// one record.
     pub type_info_globals: HashMap<String, GlobalRef>,
+    /// sic generic enums (sic.md §"Match"): name → the template `EnumDef` (with
+    /// `type_params`), instantiated per concrete `Option<int>` monomorphization.
+    pub generic_enum_defs: HashMap<String, EnumDef>,
 }
 
 /// One variant of a sic tagged enum.
@@ -132,6 +135,7 @@ impl Lowerer {
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
+            generic_enum_defs: HashMap::new(),
         }
     }
 
@@ -905,6 +909,14 @@ impl Lowerer {
     }
 
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
+        // A generic enum (`enum Option<T> {…}`) is a monomorphization template,
+        // not a concrete type — store it and instantiate per `Option<int>` use.
+        if self.sic && !e.type_params.is_empty() {
+            if let Some(name) = &e.name {
+                self.generic_enum_defs.insert(name.clone(), e.clone());
+            }
+            return Ok(());
+        }
         if let Some(variants) = &e.variants {
             let mut counter = 0i64;
             for v in variants {

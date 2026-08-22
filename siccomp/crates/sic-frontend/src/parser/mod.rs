@@ -7,6 +7,9 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     typedefs: HashSet<String>,
+    /// sic generic-enum names (`enum Option<T> {…}`), so `Option<int>` in a type
+    /// position parses as an instantiation rather than a `<` comparison.
+    generic_enums: HashSet<String>,
     source_file: String,
     lang: Lang,
     /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
@@ -46,7 +49,7 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs: HashSet::new(), generic_enums: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -490,12 +493,12 @@ impl Parser {
                 // second token is a field/variable named `u32`, not a type.
                 TokenKind::TypeName if base.is_none() && signed.is_none() && long_count == 0 => {
                     let name = self.advance().text.clone();
-                    base = Some(AstType::Named(name));
+                    base = Some(self.maybe_generic_type(name)?);
                 }
                 TokenKind::Ident if base.is_none() && signed.is_none() && long_count == 0
                     && self.typedefs.contains(self.peek().text.as_str()) => {
                     let name = self.advance().text.clone();
-                    base = Some(AstType::Named(name));
+                    base = Some(self.maybe_generic_type(name)?);
                 }
                 // typeof(type-name) / typeof(expr) — GNU / C23.
                 TokenKind::Typeof if base.is_none() => {
@@ -668,6 +671,22 @@ impl Parser {
         Ok(ty)
     }
 
+    /// After reading a type name, parse a generic-enum instantiation `Name<A, …>`
+    /// (sic.md §"Match") — e.g. `Option<int>`. A non-generic name stays `Named`.
+    fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
+        if self.lang == Lang::Sic && self.generic_enums.contains(&name) && self.at(TokenKind::Lt) {
+            self.advance(); // `<`
+            let mut args = Vec::new();
+            while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+                args.push(self.parse_type_name()?);
+                if !self.eat(TokenKind::Comma) { break; }
+            }
+            self.expect(TokenKind::Gt)?;
+            return Ok(AstType::Generic { name, args });
+        }
+        Ok(AstType::Named(name))
+    }
+
     fn parse_enum(&mut self) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // 'enum'
@@ -682,6 +701,20 @@ impl Parser {
         } else {
             None
         };
+        // sic generic enum (sic.md §"Match"): `enum Option<T> { … }` — parse the
+        // type-parameter list. Their names are ordinary identifiers usable as types
+        // inside the variant payloads.
+        let mut type_params = Vec::new();
+        if self.lang == Lang::Sic && self.at(TokenKind::Lt) {
+            self.advance(); // `<`
+            while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+                let p = self.expect_name()?;
+                self.typedefs.insert(p.clone()); // a type-param spells a type
+                type_params.push(p);
+                if !self.eat(TokenKind::Comma) { break; }
+            }
+            self.expect(TokenKind::Gt)?;
+        }
         self.skip_attributes();
         let variants = if self.at(TokenKind::LBrace) {
             self.advance();
@@ -723,9 +756,15 @@ impl Parser {
                 if vs.iter().any(|v| v.payload.is_some()) {
                     self.typedefs.insert(n.clone());
                 }
+                // A generic enum name is remembered so `Option<int>` in a later type
+                // position parses as an instantiation rather than a `<` comparison.
+                if !type_params.is_empty() {
+                    self.generic_enums.insert(n.clone());
+                    self.typedefs.insert(n.clone());
+                }
             }
         }
-        Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, span: sp }))
+        Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, type_params, span: sp }))
     }
 
     // ─── Declarators ──────────────────────────────────────────────────────────
