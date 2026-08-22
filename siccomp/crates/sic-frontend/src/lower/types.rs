@@ -356,6 +356,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "u128" => return Ok(Type::Int { bits: 128, signed: false }),
                 "isize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: true  }),
                 "usize"           => return Ok(Type::Int { bits: ptr_size * 8, signed: false }),
+                // sic float aliases (sic.md §"Built-in fixed point").
+                "f32"             => return Ok(Type::Float32),
+                "f64"             => return Ok(Type::Float64),
                 // sic native string: a non-owning slice `{ char* data; usize size }`
                 // (sic.md §"Built-in string").
                 "string"          => return Ok(sic_string_type(ptr_size)),
@@ -365,8 +368,11 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 // Extended float types. sic has no true 128/80-bit float codegen,
                 // so these share `Float80` (16 bytes, computed as f64) — enough to
                 // compile code that merely passes them around. `_Float16` is 2
-                // bytes, `_Float32`/`_Float64` map to float/double.
-                "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
+                // bytes, `_Float32`/`_Float64` map to float/double. sic's `f128`
+                // (sic.md §"Built-in fixed point") and `f80` also map here — real
+                // arbitrary precision lives in `bigint`/`fixed`.
+                "f128" | "f80"
+                | "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
                 | "_Float64x"     => return Ok(Type::Float80),
                 "_Float64"        => return Ok(Type::Float64),
                 "_Float32" | "_Float32x" => return Ok(Type::Float32),

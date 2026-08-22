@@ -526,6 +526,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // fixed-width C type.
             "i8" | "i16" | "i32" | "i64" | "i128" |
             "u8" | "u16" | "u32" | "u64" | "u128" |
+            // Float aliases (sic.md §"Built-in fixed point"): f32/f64 are
+            // float/double; f128/f80 map to the 80-bit carrier (no true quad).
+            "f32" | "f64" | "f128" | "f80" |
             "isize" | "usize" => return TokenKind::TypeName,
             // `string` is the native built-in string type in sic (sic.md
             // §"Built-in string"); an ordinary identifier in C.
