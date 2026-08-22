@@ -1950,6 +1950,21 @@ impl<'m> FuncCtx<'m> {
     /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
     /// byte-offset **view** into `s` — no copy. `{ s.data + lo, hi - lo }`.
     /// Omitted bounds default to `lo=0`, `hi=s.size`.
+    /// Resolve a possibly-negative slice bound relative to `size`, Python-style
+    /// (sic.md §"Built-in string"): a negative `v` counts from the end —
+    /// `v < 0 → size + v` (so `-1` is the last byte, `-2` the one before). A
+    /// non-negative bound is unchanged. (Bounds are clamped into range afterwards.)
+    fn resolve_slice_index(&mut self, v: Val, size: &Val) -> Val {
+        let i64t = Type::i64();
+        let is_neg = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_neg, op: CmpOp::ISLt, lhs: v.clone(), rhs: Constant::int(0), ty: i64t.clone() });
+        let from_end = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: from_end, op: BinOp::Add, lhs: size.clone(), rhs: v.clone(), ty: i64t.clone() });
+        let out = self.alloc_val();
+        self.push_instr(Instr::Select { dest: out, cond: Val::Local(is_neg), on_true: Val::Local(from_end), on_false: v, ty: i64t });
+        Val::Local(out)
+    }
+
     /// Clamp a signed i64 `v` into `[lo, hi]` (assumes `lo ≤ hi`): `max(lo,
     /// min(v, hi))`. Used to keep string-slice bounds in range.
     fn clamp_signed(&mut self, v: Val, lo: Val, hi: Val) -> Val {
@@ -1990,12 +2005,15 @@ impl<'m> FuncCtx<'m> {
             None => size.clone(),
         };
 
-        // Clamp the bounds to a valid, defined range (sic.md §"Limit undefined
-        // behavior"): out-of-range or reversed slices (`s[5:3]`, `s[3:20]`) never
-        // read past the buffer — they yield a truncated or empty view instead of
-        // crashing. `lo ∈ [0, size]`, then `hi ∈ [lo, size]`, so `hi - lo ≥ 0`.
-        let lo_c = self.clamp_signed(lo_v, Constant::int(0), size.clone());
-        let hi_c = self.clamp_signed(hi_v, lo_c.clone(), size.clone());
+        // Python-style negative indices count from the end (`-1` = last byte), then
+        // clamp to a valid, defined range (sic.md §"Built-in string"): out-of-range
+        // or reversed slices (`s[5:3]`, `s[3:20]`) never read past the buffer — they
+        // yield a truncated or empty view instead of crashing. After resolving and
+        // clamping, `lo ∈ [0, size]`, `hi ∈ [lo, size]`, so `hi - lo ≥ 0`.
+        let lo_r = self.resolve_slice_index(lo_v, &size);
+        let hi_r = self.resolve_slice_index(hi_v, &size);
+        let lo_c = self.clamp_signed(lo_r, Constant::int(0), size.clone());
+        let hi_c = self.clamp_signed(hi_r, lo_c.clone(), size.clone());
 
         // A slice shares the parent's owned buffer: copy its `rc` and retain it,
         // so the parent's storage outlives the view.

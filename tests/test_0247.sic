@@ -1,23 +1,27 @@
-// sic string slices with out-of-range / reversed bounds are defined and safe
-// (sic.md §"Limit undefined behavior"): the bounds are clamped, so an invalid
-// slice yields a truncated or empty view instead of crashing. Also: `.str` is an
-// alias for `.ptr`. Verified by exit code.
+// sic string slices (sic.md §"Built-in string"): Python-style negative indices
+// count from the end (`-1` = last byte), and out-of-range / reversed bounds are
+// clamped to a defined, safe range (no crash). Also: `.str` aliases `.ptr`.
+// Verified by exit code.
 #include <string.h>
 int main() {
-    string h = "Hello World";
+    string h = "Hello World";        // length 11
 
-    if (h[5:3].size != 0) return 1;        // reversed -> empty
-    if (h[20:25].size != 0) return 2;      // fully past end -> empty
-    if (strcmp(h[3:20].str, "lo World") != 0) return 3;  // hi clamped to len
-    if (strcmp(h[-3:5].str, "Hello") != 0) return 4;     // lo clamped to 0
-    if (h[8:100].size != 3) return 5;      // "rld"
-    if (strcmp(h[8:100].str, "rld") != 0) return 6;
+    // Negative indices (Python semantics).
+    if (strcmp(h[1:-1].str, "ello Worl") != 0) return 1;   // drop first + last
+    if (strcmp(h[-5:11].str, "World") != 0) return 2;      // last 5
+    if (strcmp(h[-5:-1].str, "Worl") != 0) return 3;       // negative both
+    if (strcmp(h[0:-1].str, "Hello Worl") != 0) return 4;  // all but last
+
+    // Out-of-range / reversed bounds are clamped (safe, no crash).
+    if (h[5:3].size != 0) return 5;                        // reversed -> empty
+    if (h[20:25].size != 0) return 6;                      // past end -> empty
+    if (strcmp(h[8:100].str, "rld") != 0) return 7;        // hi clamped to len
 
     // `.str` alias for `.ptr`.
-    if (strcmp(h.str, "Hello World") != 0) return 7;
+    if (strcmp(h.str, "Hello World") != 0) return 8;
 
     // A reversed slice compares equal to the empty string (native ==).
-    if (!(h[5:3] == "")) return 8;
+    if (!(h[5:3] == "")) return 9;
 
     return 42;
 }
