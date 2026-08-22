@@ -464,17 +464,19 @@ impl Parser {
                             .to_string()));
                 }
                 // sic `fixed` / `fixed<integral,fraction>` (sic.md §"Built-in fixed
-                // point"). A bare `fixed` (no `<...>`) has its precision inferred
-                // from its initializer, marked here as `(0, 0)`.
+                // point"). A `fixed` value is an exact rational; the `<I,F>` are
+                // display precision only. Either dimension may be omitted — `fixed<,F>`
+                // (open integral, F decimals), `fixed<I,>` / bare `fixed` (default
+                // decimals) — marked here as `0` (resolved to the default at display).
                 TokenKind::TypeName if base.is_none() && signed.is_none() && long_count == 0
                     && self.lang == Lang::Sic && self.peek().text == "fixed" =>
                 {
                     self.advance();
                     let (integral, fraction) = if self.at(TokenKind::Lt) {
                         self.advance();
-                        let i = self.parse_fixed_dim()?;
+                        let i = if self.at(TokenKind::Comma) { 0 } else { self.parse_fixed_dim()? };
                         self.expect(TokenKind::Comma)?;
-                        let f = self.parse_fixed_dim()?;
+                        let f = if self.at(TokenKind::Gt) { 0 } else { self.parse_fixed_dim()? };
                         self.expect(TokenKind::Gt)?;
                         (i, f)
                     } else {

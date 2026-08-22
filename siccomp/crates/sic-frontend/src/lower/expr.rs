@@ -285,6 +285,12 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && name == "str" && self.is_fixed_typed(base) {
                     return self.fixed_to_str(base);
                 }
+                // sic fixed `.int` — the value truncated toward zero to a 64-bit
+                // integer (sic.md §"Built-in fixed point").
+                if self.is_sic() && name == "int" && self.is_fixed_typed(base) {
+                    let (r, _, _) = self.fixed_operand(base)?;
+                    return self.emit_bigint_call("__sic_rat_to_i64", vec![r], Type::i64());
+                }
                 if self.is_sic() && (name == "str" || name == "int") && self.is_bigint_operand(base) {
                     let b = self.to_bigint(base)?;
                     return if name == "int" {
@@ -519,7 +525,7 @@ impl<'m> FuncCtx<'m> {
         }
 
         // sic `fixed` arithmetic / comparison (sic.md §"Built-in fixed point"): a
-        // fixed operand routes through the scale-harmonizing fixed-point ops. A
+        // fixed operand routes through the EXACT rational ops (num/den, no scale). A
         // bare decimal literal alone stays a `double`; it only becomes fixed when
         // paired with a real `fixed` operand.
         if self.is_sic() {
@@ -528,14 +534,7 @@ impl<'m> FuncCtx<'m> {
             if fl || fr {
                 use BinOpKind::*;
                 match op {
-                    Add | Sub | Mul | Rem => return self.lower_fixed_binop(op, lhs, rhs),
-                    Div => {
-                        // Unbound division uses the larger operand fraction; a
-                        // `fixed<_,F>` binding recomputes at F (see eval_fixed_owned).
-                        let fa = self.fixed_expr_dims(lhs).map_or(0, |d| d.1);
-                        let fb = self.fixed_expr_dims(rhs).map_or(0, |d| d.1);
-                        return self.lower_fixed_div(lhs, rhs, fa.max(fb));
-                    }
+                    Add | Sub | Mul | Div | Rem => return self.lower_fixed_binop(op, lhs, rhs),
                     Eq | Ne | Lt | Le | Gt | Ge => return self.lower_fixed_cmp(op, lhs, rhs),
                     _ => {}
                 }
@@ -582,8 +581,22 @@ impl<'m> FuncCtx<'m> {
         if self.bigint_temps.is_empty() { return; }
         let temps = std::mem::take(&mut self.bigint_temps);
         for t in temps {
-            let _ = self.emit_bigint_call("__sic_bi_free", vec![t], Type::Void);
+            let f = self.temp_free_fn(&t);
+            let _ = self.emit_bigint_call(f, vec![t], Type::Void);
         }
+    }
+
+    /// The runtime free function for a bigint/fixed temporary: a `fixed` value is
+    /// an exact rational (`__sic_rat*`) freed via `__sic_rat_free`; a `bigint` (or
+    /// any other) temp is freed via `__sic_bi_free`. Dispatched on the recorded
+    /// value type so a mixed temp list frees each correctly.
+    fn temp_free_fn(&self, v: &Val) -> &'static str {
+        if let Val::Local(id) = v {
+            if matches!(self.val_types.get(&id.0), Some(t) if super::types::is_fixed(t)) {
+                return "__sic_rat_free";
+            }
+        }
+        "__sic_bi_free"
     }
 
     /// Free only the bigint/fixed temporaries recorded since `mark` (in the current
@@ -594,7 +607,8 @@ impl<'m> FuncCtx<'m> {
         if self.bigint_temps.len() <= mark { return; }
         let temps: Vec<Val> = self.bigint_temps.split_off(mark);
         for t in temps {
-            let _ = self.emit_bigint_call("__sic_bi_free", vec![t], Type::Void);
+            let f = self.temp_free_fn(&t);
+            let _ = self.emit_bigint_call(f, vec![t], Type::Void);
         }
     }
 
@@ -700,18 +714,27 @@ impl<'m> FuncCtx<'m> {
     // all on bigints — never a float), then reuses the bigint ops. Memory is
     // managed exactly like a bigint.
 
-    /// Whether `e` is a fixed operand: a `fixed`-typed expression, or a bare
-    /// decimal literal (which becomes a fixed when combined with one).
-    fn is_fixed_operand(&self, e: &Expr) -> bool {
-        if matches!(&e.kind, ExprKind::DecimalLit(_)) { return true; }
-        matches!(self.infer_expr_type(e), Ok(t) if super::types::is_fixed(&t))
-    }
-
     /// Whether `e` genuinely has a `fixed` type (a bare decimal literal does NOT —
     /// `3.5 + 2.5` on their own are `double`; they turn fixed only next to a real
     /// `fixed`). Used to *trigger* fixed lowering.
     fn is_fixed_typed(&self, e: &Expr) -> bool {
         matches!(self.infer_expr_type(e), Ok(t) if super::types::is_fixed(&t))
+    }
+
+    /// Whether `e` is a fixed *operand* in a fixed context: a `fixed`-typed value
+    /// OR a bare decimal literal. Unlike `is_fixed_typed`, a decimal literal counts
+    /// — so `1.0 / 3.0` on the RHS of a `fixed` binding is computed as an exact
+    /// rational rather than truncated `double` division.
+    fn is_fixed_operand(&self, e: &Expr) -> bool {
+        matches!(&e.kind, ExprKind::DecimalLit(_)) || self.is_fixed_typed(e)
+    }
+
+    /// Whether `e` is a `+ - * / %` arithmetic op whose operands are fixed operands
+    /// — evaluated exactly (num/den) when materialized in a fixed context.
+    fn is_fixed_binop(&self, e: &Expr) -> bool {
+        use BinOpKind::*;
+        matches!(&e.kind, ExprKind::BinOp { op: Add | Sub | Mul | Div | Rem, lhs, rhs }
+            if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs))
     }
 
     /// Split a decimal literal's exact text into `(mantissa_digits, integral,
@@ -734,178 +757,115 @@ impl<'m> FuncCtx<'m> {
         (mant, integral, fraction)
     }
 
-    /// Rescale a fixed mantissa from scale `from` to scale `to` (a fresh temp):
-    /// ×10^(to−from) when widening, ÷10^(from−to) (truncating) when narrowing.
-    fn rescale_mantissa(&mut self, m: Val, from: u32, to: u32) -> Result<Val> {
-        use std::cmp::Ordering::*;
-        match to.cmp(&from) {
-            Equal => Ok(m),
-            Greater => {
-                let n = self.coerce(Constant::uint((to - from) as u64), &Type::u32())?;
-                let p = self.call_bigint_new("__sic_bi_pow10", vec![n])?;
-                self.call_bigint_new("__sic_bi_mul", vec![m, p])
-            }
-            Less => {
-                let n = self.coerce(Constant::uint((from - to) as u64), &Type::u32())?;
-                self.call_bigint_new("__sic_bi_divpow10", vec![m, n])
-            }
-        }
+    /// Default display precision (fraction digits) for a `fixed` whose `F` is
+    /// unspecified (`fixed`, `fixed<,>`, `fixed<I,>`). ~fits a small-integral value
+    /// in 64 bits (sic.md's guidance) and is plenty for most uses.
+    const FIXED_DEFAULT_F: u32 = 18;
+
+    /// Emit a rational-runtime call yielding a `fixed` value (a `__sic_rat*`),
+    /// tagging its type so memory management frees it via `__sic_rat_free`.
+    fn emit_rat_call(&mut self, name: &str, args: Vec<Val>) -> Result<Val> {
+        self.emit_bigint_call(name, args, super::types::fixed_type(0, 0))
     }
 
-    /// Evaluate `e` as a fixed operand → `(mantissa, integral, fraction)`. A fixed
-    /// value is borrowed (its mantissa loaded); a decimal literal builds its exact
-    /// mantissa at its natural scale; an integer builds a scale-0 mantissa.
-    fn fixed_operand(&mut self, e: &Expr) -> Result<(Val, u32, u32)> {
+    /// Free a `fixed` rational temporary immediately (in the current block).
+    fn rat_free_now(&mut self, v: Val) -> Result<()> {
+        self.emit_bigint_call("__sic_rat_free", vec![v], Type::Void)?;
+        Ok(())
+    }
+
+    /// Evaluate `e` as a `fixed` rational → `(rat_ptr, integral, fraction, owned)`.
+    /// A fixed variable is borrowed (`owned=false`); a decimal literal / integer
+    /// builds a fresh owned rational. `integral`/`fraction` are the display digit
+    /// widths for `typestr` and `.str`.
+    fn fixed_operand_owned(&mut self, e: &Expr) -> Result<(Val, u32, u32, bool)> {
+        // A fixed arithmetic binop (incl. bare-literal ops like `1.0/3.0`) is
+        // computed exactly here — its result temp is statement-managed, so it is
+        // handed back as a "borrowed" (not caller-freed-in-block) operand.
+        if self.is_fixed_binop(e) {
+            let ExprKind::BinOp { op, lhs, rhs } = &e.kind else { unreachable!() };
+            let (i, f) = self.fixed_expr_dims(e).unwrap_or((0, 0));
+            let r = self.lower_fixed_binop(*op, lhs, rhs)?;
+            return Ok((r, i, f, false));
+        }
         if let ExprKind::DecimalLit(text) = &e.kind {
-            let (mant, i, f) = Self::decimal_lit_parts(text);
-            let s = self.emit_cstring(&mant);
-            let m = self.call_bigint_new("__sic_bi_from_str", vec![s])?;
-            return Ok((m, i, f));
+            let (digits, i, f) = Self::decimal_lit_parts(text);
+            let s = self.emit_cstring(&digits);
+            let scale = self.coerce(Constant::int(f as i64), &Type::i32())?;
+            let r = self.emit_rat_call("__sic_rat_from_decimal", vec![s, scale])?;
+            return Ok((r, i, f, true));
         }
         let ty = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
         if let Some((i, f)) = super::types::fixed_dims(&ty) {
-            let m = self.lower_expr(e)?; // borrowed mantissa
-            return Ok((m, i, f));
+            let r = self.lower_expr(e)?; // borrowed rational pointer
+            return Ok((r, i, f, false));
         }
-        // An integer → a scale-0 fixed. Its integral width is unknown; use a
-        // generous bound so it never limits the result precision.
+        // An integer → an exact rational with denominator 1.
         let v = self.lower_expr(e)?;
         let i64v = self.coerce(v, &Type::i64())?;
-        let m = self.call_bigint_new("__sic_bi_from_i64", vec![i64v])?;
-        Ok((m, 20, 0))
+        let r = self.emit_rat_call("__sic_rat_from_i64", vec![i64v])?;
+        Ok((r, 19, 0, true))
     }
 
-    /// Result `(integral, fraction)` of a fixed op (sic.md §"Built-in fixed
-    /// point"): `+`/`-` take the larger of each; `*` sums them; `/` keeps the
-    /// larger fraction and may grow the integral part (dividing by a small value).
+    /// Like `fixed_operand_owned` but registers an owned temp for statement-end
+    /// freeing (used where the operand isn't consumed immediately in-block).
+    fn fixed_operand(&mut self, e: &Expr) -> Result<(Val, u32, u32)> {
+        let (r, i, f, owned) = self.fixed_operand_owned(e)?;
+        if owned { self.bigint_temps.push(r.clone()); }
+        Ok((r, i, f))
+    }
+
+    /// Lower a fixed `+ - * / %` as EXACT rational arithmetic (sic.md §"Built-in
+    /// fixed point") — no scale, no rounding until display. Operand temps are freed
+    /// in-block; the fresh result is registered for statement-end freeing.
+    fn lower_fixed_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let fname = match op {
+            BinOpKind::Add => "__sic_rat_add",
+            BinOpKind::Sub => "__sic_rat_sub",
+            BinOpKind::Mul => "__sic_rat_mul",
+            BinOpKind::Div => "__sic_rat_div",
+            BinOpKind::Rem => "__sic_rat_mod",
+            _ => return Err(CompileError::new("fixed supports only + - * / % here".to_string())),
+        };
+        let (a, _, _, oa) = self.fixed_operand_owned(lhs)?;
+        let (b, _, _, ob) = self.fixed_operand_owned(rhs)?;
+        let r = self.emit_rat_call(fname, vec![a.clone(), b.clone()])?;
+        if oa { self.rat_free_now(a)?; }
+        if ob { self.rat_free_now(b)?; }
+        self.bigint_temps.push(r.clone());
+        Ok(r)
+    }
+
+    /// Lower a fixed comparison (all six) as an exact rational compare. Operand
+    /// temps are freed in-block (so a compare inside `||`/`&&` leaves nothing
+    /// behind); the result is a plain `i32`.
+    fn lower_fixed_cmp(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let (a, _, _, oa) = self.fixed_operand_owned(lhs)?;
+        let (b, _, _, ob) = self.fixed_operand_owned(rhs)?;
+        let cmp = self.emit_bigint_call("__sic_rat_cmp", vec![a.clone(), b.clone()], Type::i32())?;
+        if oa { self.rat_free_now(a)?; }
+        if ob { self.rat_free_now(b)?; }
+        self.emit_binop(op, cmp, Constant::int(0))
+    }
+
+    /// Result `(integral, fraction)` digit widths of a fixed op, for `typestr` and
+    /// `.str` display precision (the value itself is an exact rational): `+`/`-`/`%`
+    /// take the larger of each; `*` sums them; `/` keeps the larger fraction (a
+    /// non-terminating quotient like 1/3 is shown to that many digits, rounded).
     fn fixed_result_dims(op: BinOpKind, a: (u32, u32), b: (u32, u32)) -> (u32, u32) {
         match op {
             BinOpKind::Mul => (a.0 + b.0, a.1 + b.1),
             BinOpKind::Div => (a.0 + b.1, a.1.max(b.1)),
-            // `+ - %` keep the larger of each (a remainder is bounded by the divisor).
             _ => (a.0.max(b.0), a.1.max(b.1)),
         }
     }
 
-    /// Lower a fixed division `a / b` producing a mantissa at scale `rs`
-    /// (sic.md §"Built-in fixed point"). With mantissas Ma=a·10^Fa, Mb=b·10^Fb,
-    /// the result mantissa = round-toward-zero(Ma · 10^(rs+Fb−Fa) / Mb), computed
-    /// as an exact bigint division after scaling. Division by zero yields 0.
-    fn lower_fixed_div(&mut self, lhs: &Expr, rhs: &Expr, rs: u32) -> Result<Val> {
-        let (ma, _, fa, oa) = self.fixed_operand_owned(lhs)?;
-        let (mb, _, fb, ob) = self.fixed_operand_owned(rhs)?;
-        let e: i64 = rs as i64 + fb as i64 - fa as i64;
-        // numerator = ma · 10^max(e,0); divisor = mb · 10^max(-e,0)
-        let (num, on) = if e > 0 { self.rescale_owned(ma, 0, e as u32, oa)? } else { (ma, oa) };
-        let (den, od) = if e < 0 { self.rescale_owned(mb, 0, (-e) as u32, ob)? } else { (mb, ob) };
-        let q = self.emit_bigint_call("__sic_bi_div", vec![num.clone(), den.clone()], super::types::bigint_type())?;
-        if on { self.bi_free_now(num)?; }
-        if od { self.bi_free_now(den)?; }
-        self.bigint_temps.push(q.clone());
-        Ok(q)
-    }
-
-    /// Lower a fixed `+ - * %` — harmonize scales then run the bigint op. Returns
-    /// the result mantissa (a temp); its `fixed<I,F>` type is computed by `infer`.
-    fn lower_fixed_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
-        let (ma, ia, fa) = self.fixed_operand(lhs)?;
-        let (mb, ib, fb) = self.fixed_operand(rhs)?;
-        match op {
-            BinOpKind::Mul => self.call_bigint_new("__sic_bi_mul", vec![ma, mb]),
-            BinOpKind::Add | BinOpKind::Sub | BinOpKind::Rem => {
-                let (_, rf) = Self::fixed_result_dims(op, (ia, fa), (ib, fb));
-                let ma = self.rescale_mantissa(ma, fa, rf)?;
-                let mb = self.rescale_mantissa(mb, fb, rf)?;
-                let f = match op {
-                    BinOpKind::Add => "__sic_bi_add",
-                    BinOpKind::Sub => "__sic_bi_sub",
-                    _ => "__sic_bi_mod",
-                };
-                self.call_bigint_new(f, vec![ma, mb])
-            }
-            _ => Err(CompileError::new("fixed supports only + - * / % here".to_string())),
-        }
-    }
-
-    /// Free a bigint/fixed temporary immediately (in the current block).
-    fn bi_free_now(&mut self, m: Val) -> Result<()> {
-        self.emit_bigint_call("__sic_bi_free", vec![m], Type::Void)?;
-        Ok(())
-    }
-
-    /// `fixed_operand`, but tracking whether the mantissa is an OWNED temp (so a
-    /// caller can free it in-block) rather than a borrowed variable mantissa. No
-    /// statement-end registration — used where temps must be freed immediately
-    /// (e.g. a comparison inside a `||`, whose temps must not outlive their block).
-    fn fixed_operand_owned(&mut self, e: &Expr) -> Result<(Val, u32, u32, bool)> {
-        if let ExprKind::DecimalLit(text) = &e.kind {
-            let (mant, i, f) = Self::decimal_lit_parts(text);
-            let s = self.emit_cstring(&mant);
-            let m = self.emit_bigint_call("__sic_bi_from_str", vec![s], super::types::bigint_type())?;
-            return Ok((m, i, f, true));
-        }
-        let ty = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
-        if let Some((i, f)) = super::types::fixed_dims(&ty) {
-            let m = self.lower_expr(e)?; // borrowed mantissa
-            return Ok((m, i, f, false));
-        }
-        let v = self.lower_expr(e)?;
-        let i64v = self.coerce(v, &Type::i64())?;
-        let m = self.emit_bigint_call("__sic_bi_from_i64", vec![i64v], super::types::bigint_type())?;
-        Ok((m, 20, 0, true))
-    }
-
-    /// Rescale with ownership tracking: returns the (possibly new) mantissa and
-    /// whether it is an owned temp. Frees the consumed pow10 temp and, if `owned`,
-    /// the input — all in-block.
-    fn rescale_owned(&mut self, m: Val, from: u32, to: u32, owned: bool) -> Result<(Val, bool)> {
-        use std::cmp::Ordering::*;
-        let bt = super::types::bigint_type();
-        match to.cmp(&from) {
-            Equal => Ok((m, owned)),
-            Greater => {
-                let n = self.coerce(Constant::uint((to - from) as u64), &Type::u32())?;
-                let p = self.emit_bigint_call("__sic_bi_pow10", vec![n], bt.clone())?;
-                let r = self.emit_bigint_call("__sic_bi_mul", vec![m.clone(), p.clone()], bt)?;
-                self.bi_free_now(p)?;
-                if owned { self.bi_free_now(m)?; }
-                Ok((r, true))
-            }
-            Less => {
-                let n = self.coerce(Constant::uint((from - to) as u64), &Type::u32())?;
-                let r = self.emit_bigint_call("__sic_bi_divpow10", vec![m.clone(), n], bt)?;
-                if owned { self.bi_free_now(m)?; }
-                Ok((r, true))
-            }
-        }
-    }
-
-    /// Lower a fixed comparison (all six) — harmonize scales, compare mantissas.
-    /// Operand temps are freed in-block (so a comparison inside `||`/`&&` leaves no
-    /// bigint temp behind), and the result is a plain `i32`.
-    fn lower_fixed_cmp(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
-        let (ma, _, fa, oa) = self.fixed_operand_owned(lhs)?;
-        let (mb, _, fb, ob) = self.fixed_operand_owned(rhs)?;
-        let rf = fa.max(fb);
-        let (ma, oa) = self.rescale_owned(ma, fa, rf, oa)?;
-        let (mb, ob) = self.rescale_owned(mb, fb, rf, ob)?;
-        let cmp = self.emit_bigint_call("__sic_bi_cmp", vec![ma.clone(), mb.clone()], Type::i32())?;
-        if oa { self.bi_free_now(ma)?; }
-        if ob { self.bi_free_now(mb)?; }
-        self.emit_binop(op, cmp, Constant::int(0))
-    }
-
-    /// Compile-time `(integral, fraction)` of a fixed expression, for `infer` and
-    /// the precision-fit check. A fixed value uses its declared dims; a decimal
-    /// literal its own digit widths; an integer its digit count (a literal's exact
-    /// count, or the i64 bound for a runtime value) with 0 fraction.
-    fn fixed_expr_dims(&self, e: &Expr) -> Option<(u32, u32)> {
+    /// Compile-time `(integral, fraction)` display widths of a fixed expression.
+    pub(super) fn fixed_expr_dims(&self, e: &Expr) -> Option<(u32, u32)> {
         if let ExprKind::DecimalLit(text) = &e.kind {
             let (_, i, f) = Self::decimal_lit_parts(text);
             return Some((i, f));
         }
-        // Integer literals contribute exactly their digit count (so `total + 5`
-        // stays within `total`'s integral width, not an inflated bound).
         match &e.kind {
             ExprKind::IntLit(v, _) => return Some((v.unsigned_abs().to_string().len().max(1) as u32, 0)),
             ExprKind::UIntLit(v, _) => return Some((v.to_string().len().max(1) as u32, 0)),
@@ -919,75 +879,18 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-    /// Materialize `e` as an OWNED fixed mantissa at the target scale `to_f`, for
-    /// storing into a `fixed<_,to_f>` slot (value semantics; freed with the slot).
-    pub(super) fn eval_fixed_owned(&mut self, e: &Expr, to_f: u32) -> Result<Val> {
-        // Division binds to the target scale directly (divide to `to_f` digits).
-        if let ExprKind::BinOp { op: BinOpKind::Div, lhs, rhs } = &e.kind {
-            if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs) {
-                let m = self.lower_fixed_div(lhs, rhs, to_f)?;
-                return self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type());
-            }
-        }
-        // Otherwise: a fixed op's mantissa is at its result scale; rescale to the
-        // target and clone.
-        let (m, _, ef) = if self.is_fixed_binop(e) {
-            let (rm, rf) = self.fixed_binop_result(e)?;
-            (rm, 0u32, rf)
-        } else {
-            self.fixed_operand(e)?
-        };
-        let m = self.rescale_mantissa(m, ef, to_f)?;
-        self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type())
+    /// Materialize `e` as an OWNED `fixed` rational for storing into a slot (value
+    /// semantics). The rational is exact; the target's `F` is display precision, so
+    /// nothing is rounded here. Clones so the binding owns an independent block.
+    pub(super) fn eval_fixed_owned(&mut self, e: &Expr, _to_f: u32) -> Result<Val> {
+        let (r, _, _) = self.fixed_operand(e)?;
+        self.emit_rat_call("__sic_rat_clone", vec![r])
     }
 
-    /// Precision-fit check for a fixed store (sic.md §"Built-in fixed point"): a
-    /// declared `fixed<TI,TF>` must be able to hold the value being stored — its
-    /// integral and fraction widths must each be ≥ the source's. `fixed<5,4> f =
-    /// a + b;` (a+b is fixed<10,9>) is a compile error. The check is skipped when
-    /// the target is a bare/inferred `fixed` (dims `(0,0)`) or the source dims are
-    /// unknown.
-    pub(super) fn check_fixed_fit(&self, target: &Type, src: &Expr, sp: &crate::lexer::Span) -> Result<()> {
-        let Some((ti, tf)) = super::types::fixed_dims(target) else { return Ok(()) };
-        if ti == 0 && tf == 0 { return Ok(()); } // bare `fixed`, precision inferred
-        // Division's integral part can't be usefully bounded at compile time
-        // (dividing by a small value grows it), and the quotient is computed
-        // directly at the target scale — so it is exempt from the fit check.
-        if matches!(&src.kind, ExprKind::BinOp { op: BinOpKind::Div, .. }) { return Ok(()); }
-        if let Some((ri, rf)) = self.fixed_expr_dims(src) {
-            if ti < ri || tf < rf {
-                return Err(CompileError::at(
-                    format!("fixed<{},{}> cannot hold a fixed<{},{}> value (declared precision is too small)",
-                        ti, tf, ri, rf),
-                    sp.file.clone(), sp.line, sp.col));
-            }
-        }
+    /// Free a bigint/fixed temporary immediately (in the current block).
+    fn bi_free_now(&mut self, m: Val) -> Result<()> {
+        self.emit_bigint_call("__sic_bi_free", vec![m], Type::Void)?;
         Ok(())
-    }
-
-    /// Whether `e` is a `+ - * /` on fixed operands.
-    fn is_fixed_binop(&self, e: &Expr) -> bool {
-        matches!(&e.kind, ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Rem, lhs, rhs }
-            if self.is_fixed_operand(lhs) || self.is_fixed_operand(rhs))
-    }
-
-    /// Lower a fixed binop and also return its result scale.
-    fn fixed_binop_result(&mut self, e: &Expr) -> Result<(Val, u32)> {
-        let ExprKind::BinOp { op, lhs, rhs } = &e.kind else { unreachable!() };
-        self.fixed_binop_of(*op, lhs, rhs)
-    }
-
-    /// Lower `lhs <op> rhs` as fixed and return `(mantissa, result_scale)`.
-    fn fixed_binop_of(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<(Val, u32)> {
-        let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));
-        let db = self.fixed_expr_dims(rhs).unwrap_or((20, 0));
-        let (_, rf) = Self::fixed_result_dims(op, da, db);
-        let m = if op == BinOpKind::Div {
-            self.lower_fixed_div(lhs, rhs, rf)?
-        } else {
-            self.lower_fixed_binop(op, lhs, rhs)?
-        };
-        Ok((m, rf))
     }
 
     /// If `pty` is a bigint or fixed parameter type, set `*pval` to the argument
@@ -1004,12 +907,12 @@ impl<'m> FuncCtx<'m> {
             }
             return Ok(true);
         }
-        if let Some((_, pf)) = super::types::fixed_dims(pty) {
-            let same_scale = super::types::fixed_dims(&at).map(|(_, f)| f) == Some(pf);
-            if !same_scale {
-                let (m, _, ef, owned) = self.fixed_operand_owned(arg)?;
-                let (m, mowned) = self.rescale_owned(m, ef, pf, owned)?;
-                if mowned { self.bigint_temps.push(m.clone()); }
+        if super::types::is_fixed(pty) {
+            // A `fixed` value is an exact rational (`__sic_rat*`) regardless of its
+            // declared `<I,F>` (display-only), so a fixed argument is borrowed as-is;
+            // a decimal literal / integer is (re)built into a fresh rational temp.
+            if !super::types::is_fixed(&at) {
+                let (m, _, _) = self.fixed_operand(arg)?; // registers the owned temp
                 *pval = m;
             }
             return Ok(true);
@@ -1046,11 +949,15 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-    /// The fixed value's decimal string (`b.str`) via `__sic_fx_to_str`.
+    /// The fixed value's decimal string (`b.str`): resolve the EXACT rational to
+    /// its declared display precision `F` (rounded half-away-from-zero) via
+    /// `__sic_rat_to_str`. A bare/open `fixed` (F unspecified) uses the default F.
     fn fixed_to_str(&mut self, base: &Expr) -> Result<Val> {
-        let (m, _, f) = self.fixed_operand(base)?;
+        let f = self.fixed_expr_dims(base).map(|d| d.1).filter(|&f| f > 0)
+            .unwrap_or(Self::FIXED_DEFAULT_F);
+        let (r, _, _) = self.fixed_operand(base)?;
         let scale = self.coerce(Constant::int(f as i64), &Type::i32())?;
-        let s = self.emit_bigint_call("__sic_fx_to_str", vec![m, scale], Type::char_ptr())?;
+        let s = self.emit_bigint_call("__sic_rat_to_str", vec![r, scale], Type::char_ptr())?;
         let slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
         self.push_instr(Instr::Store { val: s.clone(), ptr: Val::Local(slot) });
@@ -2227,27 +2134,21 @@ impl<'m> FuncCtx<'m> {
         }
 
         // sic `fixed` (re)assignment `f = <expr>` / `f += <expr>` (sic.md §"Built-in
-        // fixed point"): same value-semantics as bigint, but the stored mantissa is
-        // rescaled to this variable's fixed scale F.
+        // fixed point"): value-semantics like bigint. The value is an EXACT rational
+        // (`__sic_rat*`); the variable's declared `<I,F>` is display-only, so nothing
+        // is rounded or rescaled on store.
         if self.is_sic() && super::types::is_fixed(&lv.ty) {
-            let (_, tf) = super::types::fixed_dims(&lv.ty).unwrap_or((0, 0));
-            // Plain `f = <expr>` must fit the variable's declared precision; a
-            // compound `f op= rhs` stays in `f`'s own type by construction.
-            if op.is_none() {
-                self.check_fixed_fit(&lv.ty, rhs, &rhs.span)?;
-            }
             let newv = match op {
-                None => self.eval_fixed_owned(rhs, tf)?,
+                None => self.eval_fixed_owned(rhs, 0)?,
                 Some(bin) => {
-                    // `f op= rhs` ≡ `f = f op rhs`; compute then rescale to F.
-                    let (m, rf) = self.fixed_binop_of(bin, lhs, rhs)?;
-                    let m = self.rescale_mantissa(m, rf, tf)?;
-                    self.emit_bigint_call("__sic_bi_clone", vec![m], super::types::bigint_type())?
+                    // `f op= rhs` ≡ `f = f op rhs`.
+                    let m = self.lower_fixed_binop(bin, lhs, rhs)?;
+                    self.emit_rat_call("__sic_rat_clone", vec![m])?
                 }
             };
             let old = self.alloc_val();
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
-            self.emit_bigint_call("__sic_bi_free", vec![Val::Local(old)], Type::Void)?;
+            self.emit_bigint_call("__sic_rat_free", vec![Val::Local(old)], Type::Void)?;
             self.push_instr(Instr::Store { val: newv, ptr: lv.ptr.clone() });
             return Ok(lv.ptr);
         }

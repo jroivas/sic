@@ -24,6 +24,9 @@ pub enum Cleanup {
     /// sic `bigint`: `__sic_bi_free` the pointer held in `slot` at scope exit
     /// (value semantics — every bigint local/temp owns its heap block).
     BigintFree { slot: Val },
+    /// sic `fixed`: `__sic_rat_free` the rational (`__sic_rat*`) held in `slot`
+    /// at scope exit (value semantics — every fixed local owns its rational).
+    RatFree { slot: Val },
 }
 
 /// An active exception-guard (sic.md §"Integer overflow", §"Errors and
@@ -290,6 +293,11 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::bigint_type() });
                 let _ = self.emit_bigint_call("__sic_bi_free", vec![Val::Local(p)], Type::Void);
+            }
+            Cleanup::RatFree { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::fixed_type(0, 0) });
+                let _ = self.emit_bigint_call("__sic_rat_free", vec![Val::Local(p)], Type::Void);
             }
         }
     }
@@ -762,7 +770,14 @@ impl<'m> FuncCtx<'m> {
                         // freed by scope cleanup before the caller reads it. Return
                         // an independent CLONE; the caller owns and frees it.
                         if self.is_sic() && (super::types::is_bigint(&expected) || super::types::is_fixed(&expected)) {
-                            let cl = self.emit_bigint_call("__sic_bi_clone", vec![c], super::types::bigint_type())?;
+                            // A `fixed` is an exact rational; clone with the matching
+                            // runtime so the returned block is a well-formed copy.
+                            let (cf, cty) = if super::types::is_fixed(&expected) {
+                                ("__sic_rat_clone", super::types::fixed_type(0, 0))
+                            } else {
+                                ("__sic_bi_clone", super::types::bigint_type())
+                            };
+                            let cl = self.emit_bigint_call(cf, vec![c], cty)?;
                             self.flush_bigint_temps();  // free the returned expr's temps
                             self.emit_cleanups_to(0);
                             self.set_terminator(Terminator::Ret(Some(cl)));
@@ -984,28 +999,33 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                     // sic fixed-point local (sic.md §"Built-in fixed point"): a
-                    // `fixed<I,F>` value is a bigint mantissa at scale F. A bare
-                    // `fixed` (marked `(0,0)`) infers its precision from the
-                    // initializer. Store the owned mantissa (rescaled to F) and
-                    // free it at scope exit (value semantics, like bigint).
+                    // `fixed` value is an EXACT rational (`__sic_rat*`); the declared
+                    // `<I,F>` is display-only precision. A bare `fixed` (marked
+                    // `(0,0)`) keeps its declared type; the value is stored exactly
+                    // and freed at scope exit (value semantics, like bigint).
                     if self.is_sic() && matches!(d.ty.ty, AstType::Fixed { .. }) {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            // The declared precision must be able to hold the value
-                            // (sic.md §"Built-in fixed point").
-                            self.check_fixed_fit(&ty, e, &e.span)?;
-                            // Concrete target type: the declared `fixed<I,F>`, or the
-                            // inferred type for a bare `fixed`.
+                            // Concrete target type: the declared `fixed<I,F>`, or —
+                            // for a bare `fixed` — the initializer's fixed type (so
+                            // `.str`/`typestr` report the operation's display dims). An
+                            // integer/decimal initializer is still a `fixed`, taking
+                            // its display dims from the literal.
                             let target = match super::types::fixed_dims(&ty) {
-                                Some((0, 0)) | None => self.infer_expr_type(e).unwrap_or(ty.clone()),
+                                Some((0, 0)) | None => match self.infer_expr_type(e) {
+                                    Ok(t) if super::types::is_fixed(&t) => t,
+                                    _ => {
+                                        let (i, f) = self.fixed_expr_dims(e).unwrap_or((0, 0));
+                                        super::types::fixed_type(i, f)
+                                    }
+                                },
                                 Some(_) => ty.clone(),
                             };
-                            let (_, tf) = super::types::fixed_dims(&target).unwrap_or((0, 0));
                             let vid = self.alloc_val();
                             self.push_instr(Instr::Alloca { dest: vid, ty: target.clone(), align: None });
                             self.define_local(d.name.clone(), target.clone(), vid);
-                            let m = self.eval_fixed_owned(e, tf)?;
+                            let m = self.eval_fixed_owned(e, 0)?;
                             self.push_instr(Instr::Store { val: m, ptr: Val::Local(vid) });
-                            self.register_scope_exit(Cleanup::BigintFree { slot: Val::Local(vid) });
+                            self.register_scope_exit(Cleanup::RatFree { slot: Val::Local(vid) });
                             if !d.name.is_empty() {
                                 self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: target, slot: vid, is_param: false });
                             }

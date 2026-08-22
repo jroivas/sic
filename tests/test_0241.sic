@@ -13,8 +13,8 @@ int main() {
     fixed<6,4> third = 1.0000 / 3.0000;                 // 0.3333 (4dp, truncated)
     if (strcmp(third.str, "0.3333") != 0) return 3;
 
-    fixed<10,2> per = 100.00 / 7.00;                    // 14.28
-    if (strcmp(per.str, "14.28") != 0) return 4;
+    fixed<10,2> per = 100.00 / 7.00;                    // 14.2857… → 14.29 (rounded)
+    if (strcmp(per.str, "14.29") != 0) return 4;
 
     fixed<10,2> h = half(19.98);                        // 9.99
     if (strcmp(h.str, "9.99") != 0) return 5;

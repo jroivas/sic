@@ -1,8 +1,18 @@
-// Storing a fixed result into a too-small `fixed<a,b>` is a compile error
-// (sic.md §"Built-in fixed point": `fixed<5,4> f = a + b;`).
+// A fixed value is an EXACT rational; storing into any declared `fixed<a,b>` is
+// lossless (the `<a,b>` is display precision only, no fit error). `.int`
+// truncates toward zero (sic.md §"Built-in fixed point").
+#include <string.h>
 int main() {
     fixed<10,2> a = 1.00;
     fixed<1,9> b = 1.0;
-    fixed<5,4> f = a + b;   // a+b is fixed<10,9> — doesn't fit
-    return (int)(long)f.int;
+    fixed<5,4> f = a + b;             // a+b = 2.0; stored exactly, shown at 4 dp
+    if (strcmp(f.str, "2.0000") != 0) return 1;
+
+    fixed x = 100.00 / 7.00;          // 14.2857…, exact rational
+    if (x.int != 14) return 2;        // .int truncates toward zero
+    fixed<10,3> y = -100.00 / 7.00;   // -14.2857…
+    if (y.int != -14) return 3;
+    if (strcmp(y.str, "-14.286") != 0) return 4;   // rounded at 3 dp
+
+    return 42;
 }

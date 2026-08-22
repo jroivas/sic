@@ -420,6 +420,172 @@ __attribute__((weak)) __sic_bi *__sic_bi_not(const __sic_bi *a) {
     __sic_bi_free(na); __sic_bi_free(one);
     return r;
 }
+
+/* ── fixed-point as a reduced rational (sic.md §"Built-in fixed point") ──────
+   A `fixed` value is an exact rational num/den (both bigint, den>0, gcd=1), so
+   `1/3` stays `1/3` and `1/3*3 == 1`. It resolves to a decimal only on demand
+   (`__sic_rat_to_str`), rounded to the type's fraction digits. */
+
+typedef struct __sic_rat { __sic_bi *num; __sic_bi *den; } __sic_rat;
+
+/* forward declarations (the rational ops are mutually recursive) */
+__attribute__((weak)) __sic_rat *__sic_rat_from_i64(long long);
+__attribute__((weak)) __sic_rat *__sic_rat_wrap(__sic_bi *, __sic_bi *);
+__attribute__((weak)) void __sic_rat_free(__sic_rat *);
+__attribute__((weak)) __sic_rat *__sic_rat_mul(const __sic_rat *, const __sic_rat *);
+__attribute__((weak)) __sic_rat *__sic_rat_sub(const __sic_rat *, const __sic_rat *);
+__attribute__((weak)) __sic_rat *__sic_rat_div(const __sic_rat *, const __sic_rat *);
+__attribute__((weak)) long long __sic_rat_to_i64(const __sic_rat *);
+
+/* gcd(|a|,|b|) via Euclid; result ≥ 0 (0 only when both are 0) */
+__attribute__((weak)) __sic_bi *__sic_bi_gcd(const __sic_bi *a, const __sic_bi *b) {
+    __sic_bi *x = __sic_bi_clone(a); if (x->len) x->sign = 1;
+    __sic_bi *y = __sic_bi_clone(b); if (y->len) y->sign = 1;
+    while (y->len != 0) {
+        __sic_bi *r = __sic_bi_mod(x, y);   /* x,y ≥ 0 ⇒ r ≥ 0 */
+        __sic_bi_free(x);
+        x = y;
+        y = r;
+    }
+    __sic_bi_free(y);
+    return x;
+}
+
+/* Reduce in place: den>0, gcd(num,den)=1; zero normalizes to 0/1. */
+__attribute__((weak)) void __sic_rat_reduce(__sic_rat *r) {
+    if (r->den->sign < 0) {
+        if (r->num->len) r->num->sign = -r->num->sign;
+        r->den->sign = -r->den->sign;
+    }
+    if (r->num->len == 0) {
+        __sic_bi_free(r->den);
+        r->den = __sic_bi_from_i64(1);
+        return;
+    }
+    __sic_bi *g = __sic_bi_gcd(r->num, r->den);
+    int is_one = (g->len == 1 && g->limbs[0] == 1);
+    if (g->len && !is_one) {
+        __sic_bi *nn = __sic_bi_div(r->num, g);
+        __sic_bi *nd = __sic_bi_div(r->den, g);
+        __sic_bi_free(r->num); __sic_bi_free(r->den);
+        r->num = nn; r->den = nd;
+    }
+    __sic_bi_free(g);
+}
+
+/* Wrap owned num/den into a reduced rational (takes ownership of both). */
+__attribute__((weak)) __sic_rat *__sic_rat_wrap(__sic_bi *num, __sic_bi *den) {
+    __sic_rat *r = (__sic_rat *)malloc(sizeof(__sic_rat));
+    r->num = num; r->den = den;
+    __sic_rat_reduce(r);
+    return r;
+}
+
+__attribute__((weak)) __sic_rat *__sic_rat_from_i64(long long v) {
+    return __sic_rat_wrap(__sic_bi_from_i64(v), __sic_bi_from_i64(1));
+}
+
+/* Build from a decimal literal's digits + fraction scale: digits / 10^scale. */
+__attribute__((weak)) __sic_rat *__sic_rat_from_decimal(const char *digits, int scale) {
+    __sic_bi *num = __sic_bi_from_str(digits);
+    __sic_bi *den = __sic_bi_pow10(scale < 0 ? 0 : (unsigned)scale);
+    return __sic_rat_wrap(num, den);
+}
+
+__attribute__((weak)) __sic_rat *__sic_rat_clone(const __sic_rat *a) {
+    __sic_rat *r = (__sic_rat *)malloc(sizeof(__sic_rat));
+    r->num = __sic_bi_clone(a->num);
+    r->den = __sic_bi_clone(a->den);
+    return r;
+}
+
+__attribute__((weak)) void __sic_rat_free(__sic_rat *a) {
+    if (!a) return;
+    __sic_bi_free(a->num);
+    __sic_bi_free(a->den);
+    free(a);
+}
+
+__attribute__((weak)) __sic_rat *__sic_rat_add(const __sic_rat *a, const __sic_rat *b) {
+    __sic_bi *t1 = __sic_bi_mul(a->num, b->den);
+    __sic_bi *t2 = __sic_bi_mul(b->num, a->den);
+    __sic_bi *num = __sic_bi_add(t1, t2);
+    __sic_bi *den = __sic_bi_mul(a->den, b->den);
+    __sic_bi_free(t1); __sic_bi_free(t2);
+    return __sic_rat_wrap(num, den);
+}
+
+__attribute__((weak)) __sic_rat *__sic_rat_sub(const __sic_rat *a, const __sic_rat *b) {
+    __sic_bi *t1 = __sic_bi_mul(a->num, b->den);
+    __sic_bi *t2 = __sic_bi_mul(b->num, a->den);
+    __sic_bi *num = __sic_bi_sub(t1, t2);
+    __sic_bi *den = __sic_bi_mul(a->den, b->den);
+    __sic_bi_free(t1); __sic_bi_free(t2);
+    return __sic_rat_wrap(num, den);
+}
+
+__attribute__((weak)) __sic_rat *__sic_rat_mul(const __sic_rat *a, const __sic_rat *b) {
+    return __sic_rat_wrap(__sic_bi_mul(a->num, b->num), __sic_bi_mul(a->den, b->den));
+}
+
+/* a / b = (na*db) / (da*nb); division by zero yields 0 (sic defined behavior). */
+__attribute__((weak)) __sic_rat *__sic_rat_div(const __sic_rat *a, const __sic_rat *b) {
+    if (b->num->sign == 0) return __sic_rat_from_i64(0);
+    return __sic_rat_wrap(__sic_bi_mul(a->num, b->den), __sic_bi_mul(a->den, b->num));
+}
+
+/* a % b = a - trunc(a/b)*b (C-style, remainder takes a's sign). */
+__attribute__((weak)) __sic_rat *__sic_rat_mod(const __sic_rat *a, const __sic_rat *b) {
+    if (b->num->sign == 0) return __sic_rat_from_i64(0);
+    __sic_rat *q = __sic_rat_div(a, b);
+    long long qi = __sic_rat_to_i64(q);          /* declared below; trunc toward 0 */
+    __sic_rat_free(q);
+    __sic_rat *qir = __sic_rat_from_i64(qi);
+    __sic_rat *prod = __sic_rat_mul(qir, b);
+    __sic_rat *r = __sic_rat_sub(a, prod);
+    __sic_rat_free(qir); __sic_rat_free(prod);
+    return r;
+}
+
+/* Compare a,b: sign(na*db - nb*da), with da,db>0. */
+__attribute__((weak)) int __sic_rat_cmp(const __sic_rat *a, const __sic_rat *b) {
+    __sic_bi *l = __sic_bi_mul(a->num, b->den);
+    __sic_bi *r = __sic_bi_mul(b->num, a->den);
+    int c = __sic_bi_cmp(l, r);
+    __sic_bi_free(l); __sic_bi_free(r);
+    return c;
+}
+
+/* Truncate toward zero to an integer (num/den). */
+__attribute__((weak)) long long __sic_rat_to_i64(const __sic_rat *a) {
+    __sic_bi *rem;
+    __sic_bi *q = __sic_bi_divmod(a->num, a->den, &rem);
+    long long v = __sic_bi_to_i64(q);
+    __sic_bi_free(q); __sic_bi_free(rem);
+    return v;
+}
+
+/* Resolve to a decimal string with `decimals` fraction digits, rounded half away
+   from zero. malloc'd; caller frees. */
+__attribute__((weak)) char *__sic_rat_to_str(const __sic_rat *a, int decimals) {
+    if (decimals < 0) decimals = 0;
+    __sic_bi *p = __sic_bi_pow10((unsigned)decimals);
+    __sic_bi *scaled = __sic_bi_mul(a->num, p);          /* num * 10^decimals */
+    __sic_bi *rem;
+    __sic_bi *q = __sic_bi_divmod(scaled, a->den, &rem); /* trunc toward zero */
+    /* round half away from zero: if 2*|rem| >= |den|, bump |q| by 1 in q's sign */
+    __sic_bi *rem2 = __sic_bi_muladd_small(rem, 2, 0);   /* 2*|rem| (magnitude) */
+    if (__sic_bi_ucmp(rem2, a->den) >= 0) {
+        long long bump = a->num->sign < 0 ? -1 : 1;
+        __sic_bi *one = __sic_bi_from_i64(bump);
+        __sic_bi *nq = __sic_bi_add(q, one);
+        __sic_bi_free(q); __sic_bi_free(one);
+        q = nq;
+    }
+    char *s = __sic_fx_to_str(q, decimals);
+    __sic_bi_free(p); __sic_bi_free(scaled); __sic_bi_free(rem); __sic_bi_free(rem2); __sic_bi_free(q);
+    return s;
+}
 "#;
 
 /// True if `src` (post-preprocess text) uses `bigint` or `fixed` as a whole
