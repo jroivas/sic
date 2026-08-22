@@ -1,0 +1,23 @@
+// sic string slices with out-of-range / reversed bounds are defined and safe
+// (sic.md §"Limit undefined behavior"): the bounds are clamped, so an invalid
+// slice yields a truncated or empty view instead of crashing. Also: `.str` is an
+// alias for `.ptr`. Verified by exit code.
+#include <string.h>
+int main() {
+    string h = "Hello World";
+
+    if (h[5:3].size != 0) return 1;        // reversed -> empty
+    if (h[20:25].size != 0) return 2;      // fully past end -> empty
+    if (strcmp(h[3:20].str, "lo World") != 0) return 3;  // hi clamped to len
+    if (strcmp(h[-3:5].str, "Hello") != 0) return 4;     // lo clamped to 0
+    if (h[8:100].size != 3) return 5;      // "rld"
+    if (strcmp(h[8:100].str, "rld") != 0) return 6;
+
+    // `.str` alias for `.ptr`.
+    if (strcmp(h.str, "Hello World") != 0) return 7;
+
+    // A reversed slice compares equal to the empty string (native ==).
+    if (!(h[5:3] == "")) return 8;
+
+    return 42;
+}

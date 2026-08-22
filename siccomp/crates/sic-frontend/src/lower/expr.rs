@@ -254,13 +254,14 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Field { base, name } => {
                 // sic native-string computed accessors (sic.md §"Built-in string").
                 // `.size` / `.data` are ordinary struct fields and fall through.
-                if self.is_sic() && (name == "ptr" || name == "length") {
+                // `.str` is an alias for `.ptr` (the NUL-terminated C string).
+                if self.is_sic() && (name == "ptr" || name == "str" || name == "length") {
                     if let Ok(bt) = self.infer_expr_type(base) {
                         if super::types::is_sic_string(&bt) {
-                            return if name == "ptr" {
-                                self.emit_string_cptr(base)
-                            } else {
+                            return if name == "length" {
                                 self.emit_string_length(base)
+                            } else {
+                                self.emit_string_cptr(base)
                             };
                         }
                     }
@@ -1949,6 +1950,23 @@ impl<'m> FuncCtx<'m> {
     /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
     /// byte-offset **view** into `s` — no copy. `{ s.data + lo, hi - lo }`.
     /// Omitted bounds default to `lo=0`, `hi=s.size`.
+    /// Clamp a signed i64 `v` into `[lo, hi]` (assumes `lo ≤ hi`): `max(lo,
+    /// min(v, hi))`. Used to keep string-slice bounds in range.
+    fn clamp_signed(&mut self, v: Val, lo: Val, hi: Val) -> Val {
+        let i64t = Type::i64();
+        // t = min(v, hi)
+        let lt_hi = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: lt_hi, op: CmpOp::ISLt, lhs: v.clone(), rhs: hi.clone(), ty: i64t.clone() });
+        let t = self.alloc_val();
+        self.push_instr(Instr::Select { dest: t, cond: Val::Local(lt_hi), on_true: v, on_false: hi, ty: i64t.clone() });
+        // r = max(t, lo)
+        let gt_lo = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: gt_lo, op: CmpOp::ISGt, lhs: Val::Local(t), rhs: lo.clone(), ty: i64t.clone() });
+        let r = self.alloc_val();
+        self.push_instr(Instr::Select { dest: r, cond: Val::Local(gt_lo), on_true: Val::Local(t), on_false: lo, ty: i64t });
+        Val::Local(r)
+    }
+
     fn lower_slice(&mut self, base: &Expr, lo: Option<&Expr>, hi: Option<&Expr>) -> Result<Val> {
         let bt = self.infer_expr_type(base)?;
         if !super::types::is_sic_string(&bt) {
@@ -1972,6 +1990,13 @@ impl<'m> FuncCtx<'m> {
             None => size.clone(),
         };
 
+        // Clamp the bounds to a valid, defined range (sic.md §"Limit undefined
+        // behavior"): out-of-range or reversed slices (`s[5:3]`, `s[3:20]`) never
+        // read past the buffer — they yield a truncated or empty view instead of
+        // crashing. `lo ∈ [0, size]`, then `hi ∈ [lo, size]`, so `hi - lo ≥ 0`.
+        let lo_c = self.clamp_signed(lo_v, Constant::int(0), size.clone());
+        let hi_c = self.clamp_signed(hi_v, lo_c.clone(), size.clone());
+
         // A slice shares the parent's owned buffer: copy its `rc` and retain it,
         // so the parent's storage outlives the view.
         let rc_lv = self.lower_lvalue_field(base, "rc")?;
@@ -1980,10 +2005,10 @@ impl<'m> FuncCtx<'m> {
 
         // new data = base data + lo
         let new_data = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: new_data, base: data, index: lo_v.clone(), elem_size: 1, result_ty: Type::char_ptr() });
-        // new size = hi - lo
+        self.push_instr(Instr::GetElemPtr { dest: new_data, base: data, index: lo_c.clone(), elem_size: 1, result_ty: Type::char_ptr() });
+        // new size = hi - lo (≥ 0 after clamping)
         let new_size = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_v, rhs: lo_v, ty: Type::i64() });
+        self.push_instr(Instr::BinOp { dest: new_size, op: BinOp::Sub, lhs: hi_c, rhs: lo_c, ty: Type::i64() });
         // The slice temp holds a reference (it retained the parent above);
         // register it for release so it balances even if never bound.
         let sv = self.make_string_val(Val::Local(new_data), Val::Local(new_size), rc)?;
@@ -4714,10 +4739,11 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Field { base, name } => {
                 let base_ty = self.infer_expr_type(base)?;
-                // sic native-string computed accessors: `.ptr` is a `char*`,
-                // `.length` is a `usize` (sic.md §"Built-in string").
+                // sic native-string computed accessors: `.ptr` (and its alias
+                // `.str`) is a `char*`, `.length` is a `usize` (sic.md §"Built-in
+                // string").
                 if self.is_sic() && super::types::is_sic_string(&base_ty) {
-                    if name == "ptr" { return Ok(Type::char_ptr()); }
+                    if name == "ptr" || name == "str" { return Ok(Type::char_ptr()); }
                     if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
                 }
                 // sic array `.length` / `.size` are `usize` (sic.md §"Arrays and lists").
