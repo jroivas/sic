@@ -188,6 +188,10 @@ impl Lowerer {
             self.ensure_str_retain_fn();
             self.ensure_str_release_fn();
             self.ensure_bounds_fail_fn();
+            // Monomorphize every generic-enum instantiation (`Option<int>`, …) used
+            // anywhere in the unit, so the concrete tagged type is registered before
+            // any type resolves against it (sic.md §"Match").
+            self.monomorphize_generics(tu)?;
             // Infer the concrete shape of every `tuple` parameter from its call
             // sites, so tuple params can be unpacked/indexed (sic.md §"Tuples").
             self.infer_tuple_params(tu);
@@ -968,6 +972,63 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// Instantiate every generic-enum use in the unit (sic.md §"Match"). Collects
+    /// all `AstType::Generic` spellings (inner args before outer, so nested
+    /// `Option<Option<int>>` register in order), then monomorphizes each.
+    fn monomorphize_generics(&mut self, tu: &TranslationUnit) -> Result<()> {
+        if self.generic_enum_defs.is_empty() { return Ok(()); }
+        let mut uses: Vec<(String, Vec<QualType>)> = Vec::new();
+        for d in &tu.decls { collect_generics_decl(d, &mut uses); }
+        for (name, args) in uses {
+            self.instantiate_generic_enum(&name, &args)?;
+        }
+        Ok(())
+    }
+
+    /// Monomorphize `name<args…>` into a concrete tagged enum registered under its
+    /// mangled name (`Option<i32>`), reusing the ordinary tagged-enum machinery.
+    /// Idempotent; returns the concrete struct type.
+    fn instantiate_generic_enum(&mut self, name: &str, args: &[QualType]) -> Result<Type> {
+        let mut arg_tys = Vec::new();
+        for a in args {
+            arg_tys.push(types::lower_type(a, &self.struct_types, self.ptr_size)?);
+        }
+        let mangled = types::generic_enum_mangled(name, &arg_tys);
+        if let Some(t) = self.struct_types.get(&mangled) { return Ok(t.clone()); }
+        let template = self.generic_enum_defs.get(name).cloned().ok_or_else(|| {
+            CompileError::new(format!("unknown generic enum '{}'", name))
+        })?;
+        if template.type_params.len() != args.len() {
+            return Err(CompileError::new(format!(
+                "generic enum '{}' expects {} type argument(s), got {}",
+                name, template.type_params.len(), args.len())));
+        }
+        let mut subst: HashMap<String, AstType> = HashMap::new();
+        for (p, a) in template.type_params.iter().zip(args) {
+            subst.insert(p.clone(), a.ty.clone());
+        }
+        let variants = template.variants.as_ref().map(|vs| {
+            vs.iter().map(|v| EnumVariant {
+                name: v.name.clone(),
+                value: v.value.clone(),
+                payload: v.payload.as_ref().map(|p| QualType {
+                    ty: subst_ast_type(&p.ty, &subst),
+                    qualifiers: p.qualifiers.clone(),
+                    storage: p.storage.clone(),
+                }),
+                span: v.span.clone(),
+            }).collect()
+        });
+        let concrete = EnumDef {
+            name: Some(mangled.clone()), variants, packed: template.packed,
+            type_params: Vec::new(), span: template.span.clone(),
+        };
+        self.register_enum(&concrete)?;
+        self.struct_types.get(&mangled).cloned().ok_or_else(|| {
+            CompileError::new(format!("failed to instantiate generic enum '{}'", name))
+        })
     }
 
     fn lower_translation_unit(&mut self, tu: &TranslationUnit) -> Result<()> {
@@ -2178,6 +2239,84 @@ fn collect_init_names(init: &Initializer, out: &mut Vec<String>) {
                 collect_init_names(&it.init, out);
             }
         }
+    }
+}
+
+// ─── generic-enum monomorphization collectors (sic.md §"Match") ────────────────
+
+/// Substitute type parameters (bound to concrete `AstType`s) throughout a type,
+/// e.g. `T` → `int`, `T*` → `int*`. Used to specialize a generic enum's payloads.
+fn subst_ast_type(ty: &AstType, subst: &HashMap<String, AstType>) -> AstType {
+    use AstType::*;
+    match ty {
+        Named(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Pointer { base, quals } => Pointer {
+            base: Box::new(QualType { ty: subst_ast_type(&base.ty, subst), qualifiers: base.qualifiers.clone(), storage: base.storage.clone() }),
+            quals: quals.clone(),
+        },
+        Array { base, size } => Array {
+            base: Box::new(QualType { ty: subst_ast_type(&base.ty, subst), qualifiers: base.qualifiers.clone(), storage: base.storage.clone() }),
+            size: size.clone(),
+        },
+        Generic { name, args } => Generic {
+            name: name.clone(),
+            args: args.iter().map(|a| QualType { ty: subst_ast_type(&a.ty, subst), qualifiers: a.qualifiers.clone(), storage: a.storage.clone() }).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Collect every generic-enum instantiation `Name<args…>` in a type (inner args
+/// pushed before the outer type, so nested instantiations register in order).
+fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
+    use AstType::*;
+    match ty {
+        Generic { name, args } => {
+            for a in args { collect_generics_type(&a.ty, out); }
+            out.push((name.clone(), args.clone()));
+        }
+        Pointer { base, .. } | Array { base, .. } => collect_generics_type(&base.ty, out),
+        Function { ret, params, .. } => {
+            collect_generics_type(&ret.ty, out);
+            for p in params { collect_generics_type(&p.ty.ty, out); }
+        }
+        _ => {}
+    }
+}
+
+fn collect_generics_decl(d: &Decl, out: &mut Vec<(String, Vec<QualType>)>) {
+    match d {
+        Decl::Var { base_ty, declarators, .. } => {
+            collect_generics_type(&base_ty.ty, out);
+            for dc in declarators { collect_generics_type(&dc.ty.ty, out); }
+        }
+        Decl::Func { ret_ty, params, body, .. } => {
+            collect_generics_type(&ret_ty.ty, out);
+            for p in params { collect_generics_type(&p.ty.ty, out); }
+            if let Some(b) = body { for s in b { collect_generics_stmt(s, out); } }
+        }
+        Decl::TypeDef { names, .. } => { for (_, qt) in names { collect_generics_type(&qt.ty, out); } }
+        _ => {}
+    }
+}
+
+fn collect_generics_stmt(s: &Stmt, out: &mut Vec<(String, Vec<QualType>)>) {
+    match s {
+        Stmt::Decl(d) => collect_generics_decl(d, out),
+        Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => for x in ss { collect_generics_stmt(x, out); },
+        Stmt::If { then, else_, .. } => {
+            collect_generics_stmt(then, out);
+            if let Some(e) = else_ { collect_generics_stmt(e, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Switch { body, .. }
+        | Stmt::Label(_, body, _) | Stmt::Default(body, _) | Stmt::Defer(body, _)
+        | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) => collect_generics_stmt(body, out),
+        Stmt::For { init, body, .. } => {
+            if let Some(crate::ast::ForInit::Decl(d)) = init { collect_generics_decl(d, out); }
+            collect_generics_stmt(body, out);
+        }
+        Stmt::Match { arms, .. } => for a in arms { collect_generics_stmt(&a.body, out); },
+        _ => {}
     }
 }
 
