@@ -893,6 +893,18 @@ impl Parser {
     /// True if the current token can begin a declaration specifier (a type
     /// keyword/name, qualifier, or storage class). Used to detect K&R-style
     /// parameter declarations following an old-style function header.
+    /// sic RTTI: whether the current token begins a bare type used as a `type`
+    /// value (sic.md §"RTTI"). Primitive-type keywords and sic `TypeName` aliases
+    /// only — deliberately NOT typedef `Ident`s, so `myTypedef * x` stays a
+    /// multiply and existing expressions are unaffected.
+    fn at_type_value_start(&self) -> bool {
+        if self.lang != Lang::Sic { return false; }
+        matches!(self.peek_kind(),
+            TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+            | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+            | TokenKind::Unsigned | TokenKind::Bool | TokenKind::TypeName)
+    }
+
     fn starts_decl_specifier(&self) -> bool {
         // sic `tuple <name>` starts a declaration; `tuple(` is a pack/unpack expr.
         if self.peek_kind() == TokenKind::Tuple {
@@ -1963,6 +1975,16 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr> {
         let sp = self.span();
+        // sic RTTI (sic.md §"RTTI"): a bare type name in value position is its
+        // `type` value, so `type(x) == i64` and `switch (type(x)) { case string: }`
+        // work. Gated to primitive-type keywords + sic type-name aliases (`i64`,
+        // `string`, `fixed<…>`, …) — NOT typedef identifiers — so `foo * bar`
+        // (a typedef times a var) is still a multiply, not a pointer type.
+        if self.at_type_value_start() {
+            let (ty, _) = self.parse_decl_specifiers()?;
+            let (_, ty) = self.parse_declarator(ty)?;
+            return Ok(Expr::new(ExprKind::TypeIdOf(ty), sp));
+        }
         match self.peek_kind() {
             TokenKind::Nullptr => {
                 self.advance();

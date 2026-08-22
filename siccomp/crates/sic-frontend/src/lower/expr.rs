@@ -174,6 +174,29 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// Load the `id` (u64) from a `type` value's record (sic.md §"RTTI").
+    fn load_type_id(&mut self, e: &Expr) -> Result<Val> {
+        use super::types as t;
+        let rec = self.lower_expr(e)?;
+        let fptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: fptr, base: rec, index: Constant::int(t::TYPEINFO_OFF_ID as i64),
+            elem_size: 1, result_ty: Type::Pointer(Box::new(Type::u64())),
+        });
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(fptr), ty: Type::u64() });
+        self.val_types.insert(dest.0, Type::u64());
+        Ok(Val::Local(dest))
+    }
+
+    /// Lower `type(a) == type(b)` / `!=` by comparing the records' `id` fields
+    /// (sic.md §"RTTI") → an `i32` boolean.
+    fn lower_type_compare(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        let a = self.load_type_id(lhs)?;
+        let b = self.load_type_id(rhs)?;
+        self.emit_binop(op, a, b)
+    }
+
     /// Lower a `type` value for a concrete IR type (sic.md §"RTTI").
     pub(super) fn lower_type_value(&mut self, ty: &Type) -> Val {
         let name = self.type_name_of(ty);
@@ -619,6 +642,16 @@ impl<'m> FuncCtx<'m> {
             && (self.is_string_operand(lhs) || self.is_string_operand(rhs))
         {
             return self.lower_string_concat(lhs, rhs);
+        }
+
+        // sic RTTI type comparison `type(x) == i64` (sic.md §"RTTI"): compare the
+        // records' `id` fields, so equality is correct even across TUs (records for
+        // the same type may have different addresses).
+        if self.is_sic() && matches!(op, BinOpKind::Eq | BinOpKind::Ne)
+            && (matches!(self.infer_expr_type(lhs), Ok(t) if super::types::is_type_info(&t))
+                || matches!(self.infer_expr_type(rhs), Ok(t) if super::types::is_type_info(&t)))
+        {
+            return self.lower_type_compare(op, lhs, rhs);
         }
 
         // sic native string comparison `a == b` / `a != b` (sic.md §"Built-in
