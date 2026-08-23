@@ -1,0 +1,30 @@
+// sic guard `… else <stmt>` (sic.md §"Match"): unwrap-free Option/Result and
+// boolean early-exit, plus pointer non-null bind. Also generic-enum
+// construction as a call argument. Verified by exit code.
+enum Option<T> { Some(T), None };
+
+int pick(Option<int> o) {
+    auto v = o else return -1;      // bind-or-exit, no unwrap
+    return v * 10;
+}
+int checked(int x) {
+    x > 0 else return -999;         // boolean guard = if (!(x>0)) return
+    return x + 1;
+}
+int firstc(int* p) {
+    auto q = p else return 0;       // pointer non-null guard-bind
+    return *q;
+}
+int main() {
+    int acc = 0;
+    acc += pick(Option::Some(5));   // 50   (arg construction infers Option<int>)
+    acc += pick(None);              // -1
+    acc += checked(7);              // 8
+    acc += checked(-3);             // -999
+    int n = 32;
+    acc += firstc(&n);              // 32
+    acc += firstc(0);               // 0
+    // 50 - 1 + 8 - 999 + 32 + 0 = -910
+    if (acc != -910) return 1;
+    return 42;
+}

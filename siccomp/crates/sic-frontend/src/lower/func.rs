@@ -803,6 +803,8 @@ impl<'m> FuncCtx<'m> {
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
             Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span)?,
+            Stmt::Guard { binding, cond, else_body, span } =>
+                self.lower_guard_stmt(binding.as_ref(), cond, else_body, span)?,
             // sic `unsafe { … }` (sic.md §"Integer overflow"): raise the trapping
             // depth for the body so integer overflow / `÷0` become exceptions.
             Stmt::Unsafe(body, _) => {
@@ -1697,6 +1699,108 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// sic guard `… else <stmt>` (sic.md §"Match"): a terse early-exit that avoids
+    /// `.unwrap()` and reduces `if` nesting. The boolean form runs `else_body` when
+    /// `cond` is false; the bind form binds the present payload (Option/Result) or a
+    /// non-null pointer into the CURRENT scope, running `else_body` (which must
+    /// diverge) when absent — so the binding is definitely valid afterward.
+    fn lower_guard_stmt(&mut self, binding: Option<&(Option<crate::ast::QualType>, String)>,
+                   cond: &Expr, else_body: &Stmt, sp: &crate::lexer::Span) -> Result<()> {
+        let else_bb = self.new_block_after_current();
+        let cont_bb = self.new_block_after_current();
+
+        match binding {
+            // Boolean guard: `cond else <stmt>` ≡ `if (!cond) <stmt>`.
+            None => {
+                let cv = self.lower_expr(cond)?;
+                let cb = self.to_bool(cv)?;
+                self.set_terminator(Terminator::CondJump { cond: cb, then_bb: cont_bb, else_bb });
+                self.switch_to_block(else_bb);
+                self.enter_scope();
+                self.lower_stmt(else_body)?;
+                self.exit_scope();
+                // The else may fall through (a plain `if (!cond) x = …;`).
+                if !self.is_terminated() { self.set_terminator(Terminator::Jump(cont_bb)); }
+                self.switch_to_block(cont_bb);
+                return Ok(());
+            }
+            Some((decl_ty, name)) => {
+                let cty = self.infer_expr_type(cond)?;
+                // Bind form over an Option/Result: present → bind payload, else exit.
+                if self.is_tagged_enum_struct(&cty) {
+                    let (_, present) = self.enum_present_variant(&cty).ok_or_else(|| CompileError::at(
+                        "guard-bind needs an enum with a payload variant (Some/Ok)".to_string(),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    let pty = present.payload.clone().unwrap();
+                    let ptr = self.lower_aggregate_ptr(cond)?;
+                    let tag = self.load_enum_tag(ptr.clone(), &cty, sp)?;
+                    let is_present = self.alloc_val();
+                    self.push_instr(Instr::Cmp { dest: is_present, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(present.tag), ty: Type::i32() });
+                    // Allocate the binding slot up front (dominates `cont`).
+                    let slot = self.alloc_val();
+                    self.push_instr(Instr::Alloca { dest: slot, ty: pty.clone(), align: None });
+                    self.define_local(name.clone(), pty.clone(), slot);
+                    let bind_bb = self.new_block_after_current();
+                    self.set_terminator(Terminator::CondJump { cond: Val::Local(is_present), then_bb: bind_bb, else_bb });
+                    // Absent → the else must diverge.
+                    self.switch_to_block(else_bb);
+                    self.enter_scope();
+                    self.lower_stmt(else_body)?;
+                    self.exit_scope();
+                    if !self.is_terminated() {
+                        return Err(CompileError::at(
+                            "guard-bind `else` must exit the scope (return/break/continue)".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
+                    // Present → copy the payload into the binding slot.
+                    self.switch_to_block(bind_bb);
+                    let data = self.enum_data_ptr(ptr, &cty, sp)?;
+                    if super::types::is_sic_string(&pty) || matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                        let size = pty.size_of(self.ptr_size());
+                        let align = pty.align_of(self.ptr_size());
+                        self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: data, size, align });
+                    } else {
+                        let d = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: d, ptr: data, ty: pty.clone() });
+                        self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(slot) });
+                    }
+                    self.set_terminator(Terminator::Jump(cont_bb));
+                    self.switch_to_block(cont_bb);
+                    let _ = decl_ty;
+                    return Ok(());
+                }
+                // Bind form over a pointer: non-null → bind, else exit.
+                if matches!(cty, Type::Pointer(_)) {
+                    let pv = self.lower_expr(cond)?;
+                    let nn = self.to_bool(pv.clone())?; // non-null
+                    let slot = self.alloc_val();
+                    self.push_instr(Instr::Alloca { dest: slot, ty: cty.clone(), align: None });
+                    self.define_local(name.clone(), cty.clone(), slot);
+                    let bind_bb = self.new_block_after_current();
+                    self.set_terminator(Terminator::CondJump { cond: nn, then_bb: bind_bb, else_bb });
+                    self.switch_to_block(else_bb);
+                    self.enter_scope();
+                    self.lower_stmt(else_body)?;
+                    self.exit_scope();
+                    if !self.is_terminated() {
+                        return Err(CompileError::at(
+                            "guard-bind `else` must exit the scope (return/break/continue)".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
+                    self.switch_to_block(bind_bb);
+                    self.push_instr(Instr::Store { val: pv, ptr: Val::Local(slot) });
+                    self.set_terminator(Terminator::Jump(cont_bb));
+                    self.switch_to_block(cont_bb);
+                    let _ = decl_ty;
+                    return Ok(());
+                }
+                Err(CompileError::at(format!(
+                    "guard-bind requires an Option/Result or pointer on the right, got a \
+                     non-optional value"), sp.file.clone(), sp.line, sp.col))
+            }
+        }
+    }
+
     /// sic `match` over a tagged enum (sic.md §"Match"). Dispatch on the value's
     /// discriminant; each arm runs in its own scope with the payload bound to the
     /// arm's name (a borrow of the value's storage). A `_` arm is the default; if
@@ -2006,7 +2110,8 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
-        | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. } => span.line,
+        | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
+        | Stmt::Guard { span, .. } => span.line,
     }
 }
 
@@ -2208,6 +2313,10 @@ fn infer_calls_in_stmt(
         | Stmt::Label(_, body, _) | Stmt::Defer(body, _) =>
             infer_calls_in_stmt(fc, body, targets, found),
         Stmt::Unsafe(body, _) => infer_calls_in_stmts(fc, body, targets, found),
+        Stmt::Guard { cond, else_body, .. } => {
+            find_tuple_calls(fc, cond, targets, found);
+            infer_calls_in_stmt(fc, else_body, targets, found);
+        }
     }
 }
 

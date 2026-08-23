@@ -188,10 +188,6 @@ impl Lowerer {
             self.ensure_str_retain_fn();
             self.ensure_str_release_fn();
             self.ensure_bounds_fail_fn();
-            // Monomorphize every generic-enum instantiation (`Option<int>`, …) used
-            // anywhere in the unit, so the concrete tagged type is registered before
-            // any type resolves against it (sic.md §"Match").
-            self.monomorphize_generics(tu)?;
             // Infer the concrete shape of every `tuple` parameter from its call
             // sites, so tuple params can be unpacked/indexed (sic.md §"Tuples").
             self.infer_tuple_params(tu);
@@ -251,6 +247,22 @@ impl Lowerer {
             if let Decl::Func { name, storage: Some(StorageClass::Static), .. } = decl {
                 self.static_funcs.insert(name.clone());
             }
+        }
+        // sic generic enums (sic.md §"Match"): register the templates and
+        // monomorphize every `Option<int>` use BEFORE function signatures (which may
+        // mention them) are lowered below.
+        if self.sic {
+            for decl in &tu.decls {
+                let e = match decl {
+                    Decl::EnumDecl(e)
+                    | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => e,
+                    _ => continue,
+                };
+                if !e.type_params.is_empty() {
+                    if let Some(n) = &e.name { self.generic_enum_defs.insert(n.clone(), e.clone()); }
+                }
+            }
+            self.monomorphize_generics(tu)?;
         }
         for decl in &tu.decls {
             // Record file-scope variable types (with array lengths inferred from
@@ -2304,6 +2316,10 @@ fn collect_generics_stmt(s: &Stmt, out: &mut Vec<(String, Vec<QualType>)>) {
     match s {
         Stmt::Decl(d) => collect_generics_decl(d, out),
         Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => for x in ss { collect_generics_stmt(x, out); },
+        Stmt::Guard { binding, else_body, .. } => {
+            if let Some((Some(ty), _)) = binding { collect_generics_type(&ty.ty, out); }
+            collect_generics_stmt(else_body, out);
+        }
         Stmt::If { then, else_, .. } => {
             collect_generics_stmt(then, out);
             if let Some(e) = else_ { collect_generics_stmt(e, out); }
@@ -2357,6 +2373,11 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             for a in arms { collect_stmt_names(&a.body, out); }
         }
         Stmt::Unsafe(body, _) => { for s in body { collect_stmt_names(s, out); } }
+        Stmt::Guard { binding, cond, else_body, .. } => {
+            collect_expr_names(cond, out);
+            if let Some((_, n)) = binding { out.push(n.clone()); }
+            collect_stmt_names(else_body, out);
+        }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
         | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}
     }

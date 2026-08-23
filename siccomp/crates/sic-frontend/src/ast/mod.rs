@@ -267,6 +267,13 @@ pub enum Stmt {
     /// sic-only: `unsafe { … }` — inside, integer overflow and `÷0` trap (raise an
     /// exception) instead of the default wrap / `→0` (sic.md §"Integer overflow").
     Unsafe(Vec<Stmt>, Span),
+    /// sic-only (sic.md §"Match"): a guard `… else <stmt>`. Two forms:
+    /// - bind: `auto x = opt else return;` — `binding = Some((ty?, name))`; binds
+    ///   the present payload (Option/Result) or non-null pointer into the CURRENT
+    ///   scope, running `else_body` (which must diverge) when absent.
+    /// - boolean: `cond else return;` (`binding = None`) — runs `else_body` when
+    ///   `cond` is false (a terse `if (!cond)` that reduces nesting).
+    Guard { binding: Option<(Option<QualType>, String)>, cond: Expr, else_body: BoxStmt, span: Span },
     Null(Span),
 }
 

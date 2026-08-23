@@ -1081,6 +1081,10 @@ impl Parser {
                 self.skip_attributes();
                 if self.eat(TokenKind::Semi) { Ok(Stmt::Null(sp)) } else { self.parse_stmt() }
             }
+            // sic guard `… else <stmt>` (sic.md §"Match"): a bind (`auto x = opt
+            // else …`) or boolean (`cond else …`) early-exit. Detected by an `else`
+            // at depth 0 before the statement's `;`.
+            _ if self.lang == Lang::Sic && self.stmt_has_guard_else() => self.parse_guard(sp),
             _ if self.is_decl_start() => {
                 let d = self.parse_local_decl()?;
                 Ok(Stmt::Decl(d))
@@ -1091,6 +1095,63 @@ impl Parser {
                 Ok(Stmt::Expr(e, sp))
             }
         }
+    }
+
+    /// Whether the statement starting here is a guard — an `else` at bracket depth
+    /// 0 before the terminating `;` (sic.md §"Match"). `if`/`while`/blocks are
+    /// dispatched earlier, so a depth-0 `else` here can only be a guard.
+    fn stmt_has_guard_else(&self) -> bool {
+        let mut depth = 0i32;
+        let mut i = self.pos;
+        while i < self.tokens.len() {
+            match self.tokens[i].kind {
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if depth == 0 { return false; }
+                    depth -= 1;
+                }
+                TokenKind::Semi if depth == 0 => return false,
+                TokenKind::Else if depth == 0 => return true,
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Parse a guard `… else <stmt>` (sic.md §"Match"): `auto x = expr else …` /
+    /// `T x = expr else …` (bind) or `cond else …` (boolean).
+    fn parse_guard(&mut self, sp: Span) -> Result<Stmt> {
+        let binding;
+        let cond;
+        if self.is_decl_start() {
+            // Bind form: `auto`/type + name + `=` + expr.
+            let ty = if self.at(TokenKind::Auto) {
+                self.advance();
+                None // inferred from the payload
+            } else {
+                let (base, _) = self.parse_decl_specifiers()?;
+                let (name, full) = self.parse_declarator(base)?;
+                // We already have the name from the declarator — stash and reuse.
+                self.expect(TokenKind::Eq)?;
+                let e = self.parse_assign_expr()?;
+                self.expect(TokenKind::Else)?;
+                let else_body = Box::new(self.parse_stmt()?);
+                return Ok(Stmt::Guard { binding: Some((Some(full), name)), cond: e, else_body, span: sp });
+            };
+            let name = self.expect_name()?;
+            self.expect(TokenKind::Eq)?;
+            cond = self.parse_assign_expr()?;
+            binding = Some((ty, name));
+        } else {
+            // Boolean form: `cond else …`.
+            cond = self.parse_expr()?;
+            binding = None;
+        }
+        self.expect(TokenKind::Else)?;
+        let else_body = Box::new(self.parse_stmt()?);
+        Ok(Stmt::Guard { binding, cond, else_body, span: sp })
     }
 
     fn is_label(&self) -> bool {

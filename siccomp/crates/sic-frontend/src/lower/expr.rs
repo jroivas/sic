@@ -2785,7 +2785,7 @@ impl<'m> FuncCtx<'m> {
 
     /// The "present" variant of an Option/Result-like enum for `?:`/`?.`/guard-bind
     /// (sic.md §"Match"): the first payload-carrying variant (`Some`/`Ok`).
-    fn enum_present_variant(&self, sty: &Type) -> Option<(String, super::TaggedVariant)> {
+    pub(super) fn enum_present_variant(&self, sty: &Type) -> Option<(String, super::TaggedVariant)> {
         let ename = match sty { Type::Struct(st) => st.name.clone()?, _ => return None };
         let info = self.lowerer.enum_defs.get(&ename)?;
         let v = info.variants.iter().find(|v| v.payload.is_some())?.clone();
@@ -4138,10 +4138,23 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
-        // Evaluate arguments
+        // Evaluate arguments. Expose each parameter's type as the expected type so a
+        // generic-enum constructor argument (`f(Option::Some(5))`) infers its
+        // monomorph (sic.md §"Match").
+        let param_types: Vec<Type> = match &func_expr.kind {
+            ExprKind::Ident(name) => match self.lookup(name) {
+                Some(LookupResult::Func(fr)) => self.lowerer.module.func_sig(fr).params.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
         let mut arg_vals = Vec::new();
-        for a in args {
-            arg_vals.push(self.lower_arg(a)?);
+        for (i, a) in args.iter().enumerate() {
+            let prev = self.expected_ty.take();
+            if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }
+            let v = self.lower_arg(a);
+            self.expected_ty = prev;
+            arg_vals.push(v?);
         }
 
         // sic namespaced module call `x.f(...)`: resolve `x.f` to the imported
