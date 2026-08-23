@@ -252,15 +252,12 @@ impl Lowerer {
         // monomorphize every `Option<int>` use BEFORE function signatures (which may
         // mention them) are lowered below.
         if self.sic {
+            // Pre-register the named types (structs/unions/enums/typedefs) a generic
+            // argument might use (`Option<Point>`), plus generic-enum templates, so
+            // monomorphization below can resolve them. Idempotently re-registered in
+            // the main pass; guarded so a failure here doesn't abort a valid unit.
             for decl in &tu.decls {
-                let e = match decl {
-                    Decl::EnumDecl(e)
-                    | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => e,
-                    _ => continue,
-                };
-                if !e.type_params.is_empty() {
-                    if let Some(n) = &e.name { self.generic_enum_defs.insert(n.clone(), e.clone()); }
-                }
+                let _ = self.register_type_decl_early(decl);
             }
             self.monomorphize_generics(tu)?;
         }
@@ -922,6 +919,38 @@ impl Lowerer {
             fc.set_terminator(Terminator::Ret(None)); // unreachable after abort
         }
         self.module.add_function(func)
+    }
+
+    /// Register the named type a declaration introduces (struct/union/enum/typedef)
+    /// — used in the early pre-pass so generic-enum monomorphization can resolve
+    /// user types in its arguments (sic.md §"Match"). Mirrors the main pass.
+    fn register_type_decl_early(&mut self, decl: &Decl) -> Result<()> {
+        match decl {
+            Decl::TypeDef { names, .. } => {
+                for (name, ty) in names {
+                    self.register_nested_struct_defs(&ty.ty)?;
+                    if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
+                        match &ty.ty {
+                            AstType::Struct(s) if s.name.is_some() && s.fields.is_some() =>
+                                { self.struct_types.insert(s.name.clone().unwrap(), ir_ty.clone()); }
+                            AstType::Union(u) if u.name.is_some() && u.fields.is_some() =>
+                                { self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone()); }
+                            AstType::Enum(e) => { self.register_enum(e)?; }
+                            _ => {}
+                        }
+                        self.register_type_name(name.clone(), ir_ty);
+                    }
+                }
+            }
+            Decl::StructDecl(s) | Decl::Var { base_ty: QualType { ty: AstType::Struct(s), .. }, .. } =>
+                self.register_struct_type_from_def(s)?,
+            Decl::UnionDecl(u) | Decl::Var { base_ty: QualType { ty: AstType::Union(u), .. }, .. } =>
+                self.register_union_type_from_def(u)?,
+            Decl::EnumDecl(e) | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } =>
+                self.register_enum(e)?,
+            _ => {}
+        }
+        Ok(())
     }
 
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {
