@@ -2389,6 +2389,28 @@ impl<'m> FuncCtx<'m> {
         // For an array-typed lvalue this only applies to a genuine aggregate RHS
         // (a vector produced by an operator/intrinsic); a scalar RHS to an
         // array-typed lvalue is a deref like `*arr = 1` (an array decayed to a
+        // sic `string s = <char*>` reassignment (`v = argv[1];`, `v = "lit";`):
+        // wrap a C string (char*/char[]/literal) into a non-owning
+        // `{data,size,rc=NULL}` descriptor via strlen, rather than byte-copying the
+        // pointer as if it were a descriptor. A real `string` RHS falls through to
+        // the aggregate copy + retain/release below.
+        if self.is_sic() && op.is_none() && super::types::is_sic_string(&lv.ty) {
+            let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+            let is_str = super::types::is_sic_string(&rt)
+                || matches!(&rt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+            if !is_str {
+                let v = self.lower_expr(rhs)?;
+                let cp = self.coerce(v, &Type::char_ptr())?;
+                let src = self.cstr_to_string(cp)?; // non-owning {data,size,rc=NULL}
+                let size = lv.ty.size_of(self.ptr_size());
+                let align = lv.ty.align_of(self.ptr_size());
+                self.retain_string_at(&src)?;       // rc=NULL → no-op
+                self.release_string_at(&lv.ptr)?;   // drop the previous value
+                self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
+                return Ok(lv.ptr);
+            }
+        }
+
         // pointer whose element type sic surfaces as the array), a scalar store.
         let aggregate_assign = op.is_none() && match &lv.ty {
             Type::Struct(_) | Type::Union(_) => true,

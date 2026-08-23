@@ -1,25 +1,34 @@
-// sic char* -> string conversion (sic.md §"Built-in string"): assigning a C
-// string (char*, char[], a function's char* param) to a native `string` wraps
-// it into a {data,size,rc} view via strlen; then == and .length work.
+// sic char* -> string (sic.md §"Built-in string"): assigning a C string (char*,
+// char[], a char* param, a literal) to a native `string` — both as an
+// initializer and a plain reassignment — wraps it via strlen; == / .length work.
 #include <string.h>
 
 string wrap(char* p) { string s = p; return s; }
 
 int main() {
     char* c = "hello";
-    string a = c;                       // char* var -> string
+    string a = c;                       // init: char* var -> string
     if (a != "hello") return 1;
     if (a.length != 5) return 2;
 
     char buf[8]; strcpy(buf, "-h");
-    string b = buf;                     // char[] -> string
+    string b = buf;                     // init: char[] -> string
     if (b != "-h") return 3;
 
     string d = wrap("world");           // char* param -> string, returned
-    if (d != "world") return 4;
-    if (d.length != 5) return 5;
+    if (d != "world" || d.length != 5) return 4;
 
-    // slice + compare on a converted string
-    if (a[1:3] != "el") return 6;
+    if (a[1:3] != "el") return 5;       // slice + compare on a converted string
+
+    // plain reassignment (not just init)
+    string s = "init";
+    s = c;                              // assign: char* -> string
+    if (s != "hello") return 6;
+    s = "literal";                      // assign: literal -> string
+    if (s != "literal" || s.length != 7) return 7;
+    strcpy(buf, "hi");
+    s = buf;                            // assign: char[] -> string
+    if (s != "hi") return 8;
+
     return 42;
 }
