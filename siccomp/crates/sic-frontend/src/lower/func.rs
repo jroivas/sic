@@ -1193,6 +1193,28 @@ impl<'m> FuncCtx<'m> {
                 let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
                 self.store_string_literal(&ptr, ty, s)?;
             }
+            // sic `string s = <char*>` (e.g. `string v = argv[1]`): wrap the C
+            // string into a non-owning `{data,size,rc=NULL}` descriptor via strlen,
+            // rather than byte-copying the pointer as if it were a descriptor. A
+            // real `string` source instead copies its descriptor + retains.
+            Initializer::Expr(e) if self.is_sic() && super::types::is_sic_string(ty) => {
+                let rt = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
+                let is_str = super::types::is_sic_string(&rt)
+                    || matches!(&rt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+                let size = ty.size_of(self.ptr_size());
+                let align = ty.align_of(self.ptr_size());
+                if is_str {
+                    let src = self.lower_aggregate_ptr(e)?;
+                    self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
+                    self.retain_string_at(&ptr)?;
+                } else {
+                    let v = self.lower_expr(e)?;
+                    let cp = self.coerce(v, &Type::char_ptr())?;
+                    let src = self.cstr_to_string(cp)?; // non-owning {data,size,rc=NULL}
+                    self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
+                }
+                return Ok(());
+            }
             // sic `bigint x = <expr>` (sic.md §"Integer sizes"): store a
             // freshly-owned bigint. An existing bigint value is CLONED (value
             // semantics — the binding owns its own block); a literal/int builds a

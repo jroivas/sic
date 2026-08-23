@@ -1,0 +1,25 @@
+// sic char* -> string conversion (sic.md §"Built-in string"): assigning a C
+// string (char*, char[], a function's char* param) to a native `string` wraps
+// it into a {data,size,rc} view via strlen; then == and .length work.
+#include <string.h>
+
+string wrap(char* p) { string s = p; return s; }
+
+int main() {
+    char* c = "hello";
+    string a = c;                       // char* var -> string
+    if (a != "hello") return 1;
+    if (a.length != 5) return 2;
+
+    char buf[8]; strcpy(buf, "-h");
+    string b = buf;                     // char[] -> string
+    if (b != "-h") return 3;
+
+    string d = wrap("world");           // char* param -> string, returned
+    if (d != "world") return 4;
+    if (d.length != 5) return 5;
+
+    // slice + compare on a converted string
+    if (a[1:3] != "el") return 6;
+    return 42;
+}
