@@ -2452,6 +2452,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         }
         TupleExpr(elems) => { for e in elems { collect_expr_names(e, out); } }
         Guard { body, .. } => { for s in body { collect_stmt_names(s, out); } }
+        OptField { base, .. } => collect_expr_names(base, out),
         // `typeid(e)` inspects only the type — `e` is never evaluated.
         TypeId(_) => {}
         IntLit(..) | UIntLit(..) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr

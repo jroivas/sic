@@ -2049,6 +2049,18 @@ impl Parser {
                     self.expect(TokenKind::RParen)?;
                     e = Expr::new(ExprKind::Call { func: Box::new(e), args }, sp.clone());
                 }
+                // sic none/null-safe access `base?.field` (sic.md §"Match"): if
+                // `base` is a present Option/Result or a non-null pointer, the
+                // field; else a zero value. Chains (`a?.b?.c`) via zero-propagation
+                // and pairs with `?:`. Only `? .` (question immediately before dot).
+                TokenKind::Question if self.lang == Lang::Sic
+                    && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Dot) =>
+                {
+                    self.advance(); // `?`
+                    self.advance(); // `.`
+                    let name = self.advance().text.clone();
+                    e = Expr::new(ExprKind::OptField { base: Box::new(e), name }, sp.clone());
+                }
                 TokenKind::Dot => {
                     self.advance();
                     let name = self.advance().text.clone();

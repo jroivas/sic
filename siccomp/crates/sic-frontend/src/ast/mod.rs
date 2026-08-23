@@ -338,6 +338,10 @@ pub enum ExprKind {
     /// sic-only (sic.md §"RTTI"): the `type` value of a named type — from
     /// `typeid(int)` or a bare type name in value position (`… == i64`).
     TypeIdOf(QualType),
+    /// sic-only (sic.md §"Match"): none/null-safe access `base?.field`. If `base`
+    /// is a present Option/Result or a non-null pointer, yields the field; else a
+    /// zero value of the field's type. Chains via zero-propagation.
+    OptField { base: BoxExpr, name: String },
     /// sic-only: an exception-guard block `overflow { … }` /
     /// `divide_by_zero { … }` / `exception { … }` (sic.md §"Integer overflow",
     /// §"Errors and exceptions"). Runs the body; if the guarded exception occurs,

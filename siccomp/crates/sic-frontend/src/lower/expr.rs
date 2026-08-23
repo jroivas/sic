@@ -260,6 +260,8 @@ impl<'m> FuncCtx<'m> {
                 let ty = self.lower_type(qty)?;
                 Ok(self.lower_type_value(&ty))
             }
+            // sic none/null-safe access `base?.field` (sic.md §"Match").
+            ExprKind::OptField { base, name } => self.lower_opt_field(base, name, &expr.span),
             // sic exception-guard block (sic.md §"Integer overflow", §"Errors and
             // exceptions"): run `body` with the matching exception caught; yields
             // `0` on clean completion, `1` if the exception fired.
@@ -2860,6 +2862,86 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// The type of `field` within a struct/union (sic.md §"Match") — for `?.` /
+    /// result sizing. Resolves through anonymous members.
+    fn opt_field_type(&self, struct_ty: &Type, field: &str) -> Option<Type> {
+        resolve_field_access(struct_ty, field, self.ptr_size(), &self.lowerer.struct_types)
+            .map(|(_, ty, _)| ty)
+    }
+
+    /// Lower none/null-safe access `base?.field` (sic.md §"Match"): if `base` is a
+    /// present Option/Result or a non-null pointer, the field; else a zero value of
+    /// the field's type. The result type is the field type, so chains
+    /// (`a?.b?.c`) propagate the zero and pair with `?:`.
+    fn lower_opt_field(&mut self, base: &Expr, field: &str, sp: &crate::lexer::Span) -> Result<Val> {
+        let bty = self.infer_expr_type(base)?;
+        // (present-flag, pointer to the struct holding the field, that struct's type)
+        let (present, struct_ptr, struct_ty) = if let Type::Pointer(pointee) = &bty {
+            let bv = self.lower_expr(base)?;
+            let nn = self.to_bool(bv.clone())?;
+            (nn, bv, (**pointee).clone())
+        } else if self.is_tagged_enum_struct(&bty) {
+            let (_, pres) = self.enum_present_variant(&bty).ok_or_else(|| CompileError::at(
+                "`?.` needs an enum with a payload variant (Some/Ok)".to_string(),
+                sp.file.clone(), sp.line, sp.col))?;
+            let pty = pres.payload.clone().unwrap();
+            let ptr = self.lower_aggregate_ptr(base)?;
+            let tag = self.load_enum_tag(ptr.clone(), &bty, sp)?;
+            let pb = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: pb, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(pres.tag), ty: Type::i32() });
+            let data = self.enum_data_ptr(ptr, &bty, sp)?;
+            (Val::Local(pb), data, pty)
+        } else {
+            return Err(CompileError::at(
+                "`?.` requires an Option/Result or a pointer on the left".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        };
+        let fty = self.opt_field_type(&struct_ty, field).ok_or_else(|| CompileError::at(
+            format!("no field '{}' in type", field), sp.file.clone(), sp.line, sp.col))?;
+
+        let result_ptr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: fty.clone(), align: None });
+        let then_bb = self.new_block_after_current();
+        let else_bb = self.new_block_after_current();
+        let merge_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: present, then_bb, else_bb });
+
+        // Present: load/copy the field into the result slot.
+        self.switch_to_block(then_bb);
+        let flv = self.field_ptr_from(LValue::plain(struct_ptr, struct_ty), field, false, sp)?;
+        if super::types::is_sic_string(&fty) || matches!(fty, Type::Struct(_) | Type::Union(_)) {
+            let size = fty.size_of(self.ptr_size());
+            let align = fty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src: flv.ptr, size, align });
+        } else {
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: flv.ptr, ty: fty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(result_ptr) });
+        }
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        // Absent: a zero value of the field type.
+        self.switch_to_block(else_bb);
+        if super::types::is_sic_string(&fty) || matches!(fty, Type::Struct(_) | Type::Union(_)) {
+            let size = fty.size_of(self.ptr_size());
+            self.push_instr(Instr::MemSet { dst: Val::Local(result_ptr), val: Constant::zero(), size, align: fty.align_of(self.ptr_size()) });
+        } else {
+            let z = self.coerce(Constant::zero(), &fty)?;
+            self.push_instr(Instr::Store { val: z, ptr: Val::Local(result_ptr) });
+        }
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        self.switch_to_block(merge_bb);
+        if super::types::is_sic_string(&fty) || matches!(fty, Type::Struct(_) | Type::Union(_)) {
+            self.val_types.insert(result_ptr.0, fty.clone());
+            return Ok(Val::Local(result_ptr));
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: fty.clone() });
+        self.val_types.insert(dest.0, fty.clone());
+        Ok(Val::Local(dest))
+    }
+
     /// Lower a call argument. Struct/union arguments are passed by value using
     /// the pointer ABI: the callee receives a pointer to the value and copies it
     /// into its own local, so passing the argument's address is sufficient.
@@ -5038,6 +5120,18 @@ impl<'m> FuncCtx<'m> {
                 } else {
                     Ok(Type::i32())
                 }
+            }
+            // `base?.field` (sic.md §"Match") has the field's type — the zero value
+            // on the absent path shares it.
+            ExprKind::OptField { base, name } => {
+                let bty = self.infer_expr_type(base)?;
+                let struct_ty = match &bty {
+                    Type::Pointer(p) => (**p).clone(),
+                    t if self.is_tagged_enum_struct(t) =>
+                        self.enum_present_variant(t).and_then(|(_, v)| v.payload).unwrap_or_else(|| Type::i32()),
+                    other => other.clone(),
+                };
+                Ok(self.opt_field_type(&struct_ty, name).unwrap_or_else(|| Type::i32()))
             }
             ExprKind::Index { base, index } => {
                 let bt = self.infer_expr_type(base)?;
