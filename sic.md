@@ -412,6 +412,27 @@ For example:
         tmp[0] = 10;
     } // Defer statenment is run here when exiting the scope
 
+## Safe access
+
+We support ternary operation, but also elvis operator `?:` and safe
+access `?.` operator.
+
+For example:
+
+    // If parse_port(s) causes NULL or error, port will be 8080
+    int port = parse_port(s) ?: 8080;
+
+    // If "user" is null "username" becomes NULL without exception
+    // Otherwise it will be result of "user.name()" call.
+    char *username = user?.name();
+
+On top of this we have `else` guard to trigger custom action:
+
+    int port = parse_port(s) else return 0;
+    auto val = table.find(key) else return -1;
+
+    x > 0 else return EINVAL;
+
 ## References
 
 First we have a reference, which is indicated by `@` at the beginning of the type declaration.
