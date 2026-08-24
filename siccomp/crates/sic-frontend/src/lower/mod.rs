@@ -252,6 +252,13 @@ impl Lowerer {
         // monomorphize every `Option<int>` use BEFORE function signatures (which may
         // mention them) are lowered below.
         if self.sic {
+            // sic prelude (sic.md §"Match"): bless `Option`/`Result` as built-in
+            // generic enums so users need not declare them. A user declaration of
+            // the same name overrides (registered from the AST below).
+            for t in blessed_enum_templates() {
+                let n = t.name.clone().unwrap();
+                self.generic_enum_defs.entry(n).or_insert(t);
+            }
             // Pre-register the named types (structs/unions/enums/typedefs) a generic
             // argument might use (`Option<Point>`), plus generic-enum templates, so
             // monomorphization below can resolve them. Idempotently re-registered in
@@ -2281,6 +2288,29 @@ fn collect_init_names(init: &Initializer, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// The sic prelude's built-in generic enums (sic.md §"Match"): `Option<T>` and
+/// `Result<T,E>`, so users get them without declaring `enum Option<T> {…}`.
+fn blessed_enum_templates() -> Vec<EnumDef> {
+    let named = |n: &str| QualType {
+        ty: AstType::Named(n.to_string()), qualifiers: Vec::new(), storage: None,
+    };
+    let variant = |name: &str, payload: Option<QualType>| EnumVariant {
+        name: name.to_string(), value: None, payload, span: crate::lexer::Span::default(),
+    };
+    vec![
+        EnumDef {
+            name: Some("Option".to_string()),
+            variants: Some(vec![variant("Some", Some(named("T"))), variant("None", None)]),
+            packed: false, type_params: vec!["T".to_string()], span: crate::lexer::Span::default(),
+        },
+        EnumDef {
+            name: Some("Result".to_string()),
+            variants: Some(vec![variant("Ok", Some(named("T"))), variant("Err", Some(named("E")))]),
+            packed: false, type_params: vec!["T".to_string(), "E".to_string()], span: crate::lexer::Span::default(),
+        },
+    ]
 }
 
 // ─── generic-enum monomorphization collectors (sic.md §"Match") ────────────────

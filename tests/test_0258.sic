@@ -1,0 +1,34 @@
+// sic prelude (sic.md §"Match"): Option/Result are built in — usable WITHOUT a
+// user `enum Option<T>` declaration — including as function return types.
+// Verified by exit code.
+#include <string.h>
+
+Result<int, string> parse(string s) {
+    if (s == "42") return Result::Ok(42);
+    return Result::Err("bad");
+}
+Option<int> firstpos(int x) {
+    x > 0 else return None;         // guard returning a bare variant
+    return Option::Some(x);
+}
+
+int main() {
+    int acc = 0;
+    Option<int> a = Option::Some(7);
+    acc += a ?: -1;                                     // +7
+
+    Result<int,string> r = parse("42");
+    acc += r ?: -1;                                     // +42
+    Result<int,string> e = parse("no");
+    match (e) { Ok(v): acc += v; Err(m): acc += (int)m.length; }  // +3 ("bad")
+
+    acc += firstpos(9) ?: -1;                           // +9
+    acc += firstpos(-2) ?: 100;                         // +100 (None)
+
+    auto v = parse("42") else return 1;                 // guard-bind on Result
+    acc += v;                                           // +42
+
+    // 7 + 42 + 3 + 9 + 100 + 42 = 203
+    if (acc != 203) return acc;
+    return 42;
+}

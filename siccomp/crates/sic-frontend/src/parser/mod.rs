@@ -49,7 +49,19 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        Parser { tokens, pos: 0, typedefs: HashSet::new(), generic_enums: HashSet::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
+        let mut typedefs = HashSet::new();
+        let mut generic_enums = HashSet::new();
+        // sic prelude (sic.md §"Match"): `Option`/`Result` are always available as
+        // generic enums, so `Option<int>` parses as an instantiation and the names
+        // are usable as types without a user declaration. A user `enum Option<T>`
+        // still overrides (its variants win at lowering).
+        if lang == Lang::Sic {
+            for n in ["Option", "Result"] {
+                typedefs.insert(n.to_string());
+                generic_enums.insert(n.to_string());
+            }
+        }
+        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {

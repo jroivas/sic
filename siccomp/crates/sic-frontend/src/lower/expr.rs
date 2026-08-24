@@ -3761,6 +3761,15 @@ impl<'m> FuncCtx<'m> {
     /// discriminant (`None`, `BLACK`) is built into a fresh temporary. Used where
     /// an enum value is needed by pointer (return, argument passing).
     pub(super) fn enum_value_ptr(&mut self, e: &Expr, enum_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        // Expose the target enum type so a generic constructor (`return
+        // Result::Ok(x)`) resolves its monomorph (sic.md §"Match").
+        let prev = self.expected_ty.replace(enum_ty.clone());
+        let out = self.enum_value_ptr_impl(e, enum_ty, sp);
+        self.expected_ty = prev;
+        out
+    }
+
+    fn enum_value_ptr_impl(&mut self, e: &Expr, enum_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
         let same = matches!(self.infer_expr_type(e), Ok(t) if &t == enum_ty);
         if same {
             self.lower_aggregate_ptr(e)
@@ -5191,12 +5200,18 @@ impl<'m> FuncCtx<'m> {
             }
             // A tagged-enum variant path is a value of that enum's struct type.
             ExprKind::EnumVariant { enum_name, .. } => {
-                self.lowerer.enum_defs.get(enum_name).map(|i| i.struct_type.clone())
+                // A generic constructor (`Option::None`) resolves via the expected
+                // target type (sic.md §"Match").
+                let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
+                let ename = resolved.as_deref().unwrap_or(enum_name);
+                self.lowerer.enum_defs.get(ename).map(|i| i.struct_type.clone())
                     .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
             }
             ExprKind::Call { func, args } => {
                 // sic tagged-enum constructor / unwrap.
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
+                    let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
+                    let enum_name = resolved.as_deref().unwrap_or(enum_name.as_str());
                     if let Some(info) = self.lowerer.enum_defs.get(enum_name) {
                         // `Enum::VARIANT(inst)` unwraps → payload type; otherwise
                         // it constructs → the enum struct.
