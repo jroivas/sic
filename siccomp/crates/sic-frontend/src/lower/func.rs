@@ -1521,15 +1521,24 @@ impl<'m> FuncCtx<'m> {
             else_bb: if else_.is_some() { else_bb } else { merge_bb },
         });
 
+        // Each branch is its own scope, even a non-`{}` statement (C block
+        // semantics). This confines any temporaries created evaluating the branch
+        // — e.g. the owned string in `if (c) return a + b;` — to that branch, so a
+        // sibling branch's `return` (which runs `emit_cleanups_to(0)`) doesn't
+        // release a temp that its own path never initialized.
         self.switch_to_block(then_bb);
+        self.enter_scope();
         self.lower_stmt(then)?;
+        self.exit_scope();
         if !self.is_terminated() {
             self.set_terminator(Terminator::Jump(merge_bb));
         }
 
         if let Some(e) = else_ {
             self.switch_to_block(else_bb);
+            self.enter_scope();
             self.lower_stmt(e)?;
+            self.exit_scope();
             if !self.is_terminated() {
                 self.set_terminator(Terminator::Jump(merge_bb));
             }
