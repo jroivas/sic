@@ -824,10 +824,14 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
-        // sic string concatenation `a + b` (sic.md §"Built-in string"): if either
-        // side is a `string`, build a fresh joined string.
+        // sic string concatenation `a + b` (sic.md §"Built-in string"): build a
+        // fresh joined string when either side is a `string`, or when BOTH sides
+        // are string literals (`"a" + "b"` — clearly concat, not pointer arith).
+        // A literal + non-string (`"abc" + 1`) stays pointer arithmetic.
+        let both_str_lits = matches!(&lhs.kind, ExprKind::StringLit(_))
+            && matches!(&rhs.kind, ExprKind::StringLit(_));
         if self.is_sic() && op == BinOpKind::Add
-            && (self.is_string_operand(lhs) || self.is_string_operand(rhs))
+            && (self.is_string_operand(lhs) || self.is_string_operand(rhs) || both_str_lits)
         {
             return self.lower_string_concat(lhs, rhs);
         }
@@ -5628,9 +5632,12 @@ impl<'m> FuncCtx<'m> {
                 match op {
                     // Relational/logical operators yield int.
                     Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),
-                    // sic string concatenation yields a `string`.
+                    // sic string concatenation yields a `string` (either side a
+                    // `string`, or both string literals — mirrors lower_binop).
                     Add if self.is_sic()
-                        && (self.is_string_operand(lhs) || self.is_string_operand(rhs)) =>
+                        && (self.is_string_operand(lhs) || self.is_string_operand(rhs)
+                            || (matches!(&lhs.kind, ExprKind::StringLit(_))
+                                && matches!(&rhs.kind, ExprKind::StringLit(_)))) =>
                         Ok(super::types::sic_string_type(self.ptr_size())),
                     // sic array concatenation yields an array of the combined
                     // length (sic.md §"Arrays and lists").
