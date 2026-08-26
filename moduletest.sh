@@ -136,11 +136,20 @@ else
     bad "c-consumer" "cc failed: $(cat err)"
 fi
 
-# 8. The `std` library (`import std;`): a plain SIC module shipped with the
-#    compiler and auto-linked when imported. `std.Fmt`/`std.Print`/`std.Println`
-#    are ordinary calls; formatting is done in SIC by dispatching on each arg's
-#    runtime type. Verified by both stdout and exit code (sic does the final link,
-#    so the std object is folded in automatically — no `-I`/manifest needed).
+# 8. The `std` library (`import std;`): an ordinary SIC module, built with the
+#    compiler (`--emit-module`) and resolved through its manifest via the module
+#    search path (`$SIC_MODULE_PATH`) — no blessed special case. `std.Fmt`/`Print`/
+#    `Println` are plain calls; formatting is done in SIC by dispatching on each
+#    arg's runtime type. Verified by stdout + exit code, both dynamic and -static.
+STD_SRC="$ROOT/siccomp/lib/std"
+mkdir -p sysroot
+cp "$STD_SRC"/*.sic sysroot/
+if "$SIC" --emit-module sysroot 2>err && [ -f sysroot/module_std.smod ]; then
+    ok "std-build"
+else
+    bad "std-build" "emit-module failed: $(cat err)"
+fi
+export SIC_MODULE_PATH="$WORK/sysroot"
 cat > stduser.sic <<'EOF'
 import std;
 int main() {
@@ -155,14 +164,26 @@ int main() {
     return (int) f.length;                          // "Hello World! Meaning 42! Half 0.500000000000000000!"
 }
 EOF
+want=$'Hello World! Meaning 42! Half 0.500000000000000000!\ni=7 s=World f=3.5 b=true false\n{} 1'
+# Dynamic (default): links libstd.so, found at run time via the manifest rpath.
 if "$SIC" -x sic stduser.sic -o stduser 2>err; then
     out="$(./stduser)"; got=$?
-    want=$'Hello World! Meaning 42! Half 0.500000000000000000!\ni=7 s=World f=3.5 b=true false\n{} 1'
     if [ "$out" = "$want" ]; then ok "std-output"; else bad "std-output" "got:\n$out"; fi
-    # f.length is the byte length of the formatted greeting.
     [ "$got" -eq 51 ] && ok "std-exit" || bad "std-exit" "expected 51, got $got"
+    ldd stduser 2>/dev/null | grep -q "libstd.so" && ok "std-dynamic" \
+        || bad "std-dynamic" "expected a dynamic libstd.so dependency"
 else
     bad "std-run" "compile/link failed: $(cat err)"
+fi
+# Static: links libstd.a; the binary has no libstd.so dependency.
+if "$SIC" -x sic -static stduser.sic -o stduser_s 2>err; then
+    out="$(./stduser_s)"
+    if [ "$out" = "$want" ]; then ok "std-static-output"; else bad "std-static-output" "got:\n$out"; fi
+    ldd stduser_s 2>&1 | grep -q "libstd.so" \
+        && bad "std-static" "unexpected libstd.so dependency in a -static build" \
+        || ok "std-static"
+else
+    bad "std-static" "static compile/link failed: $(cat err)"
 fi
 
 echo

@@ -66,8 +66,9 @@ impl ModuleManifest {
     /// Exports are the defined (bodied) functions and defined globals whose names
     /// carry the `<module>_` mangling prefix applied during lowering. An export
     /// whose type is not representable (a value-position aggregate with no name)
-    /// is skipped and a note is written to stderr.
-    pub fn from_ir(ir: &Module, module: &str, triple: &str, links: &[String]) -> Self {
+    /// is skipped and a note is written to stderr. `ptr_size` (bytes) is the
+    /// target pointer width, used to detect the hidden sret parameter.
+    pub fn from_ir(ir: &Module, module: &str, triple: &str, links: &[String], ptr_size: u32) -> Self {
         let prefix = format!("{}_", module);
         let mut exports = Vec::new();
 
@@ -76,7 +77,21 @@ impl ModuleManifest {
                 continue;
             }
             let unmangled = f.name[prefix.len()..].to_string();
-            if !fn_type_representable(&f.sig) {
+            // Compiler-internal runtime symbols (the bigint/fixed core prepended
+            // into a module that uses them) are an implementation detail, not part
+            // of the module's public API — keep them in the object, off the manifest.
+            if unmangled.starts_with("__sic_") {
+                continue;
+            }
+            // The lowered signature of a struct/union-returning function carries a
+            // hidden sret pointer as param 0 (frontend convention). Export the
+            // USER-FACING signature (sret stripped) — a consumer re-derives the sret
+            // ABI itself; leaving it in would double the pointer.
+            let mut sig = f.sig.clone();
+            if sic_ir::abi::ret_in_memory(&sig.ret, ptr_size) && !sig.params.is_empty() {
+                sig.params.remove(0);
+            }
+            if !fn_type_representable(&sig) {
                 eprintln!(
                     "sic: note: module '{}' export '{}' has an unnameable aggregate \
                      in its signature and is omitted from the manifest",
@@ -87,7 +102,7 @@ impl ModuleManifest {
             exports.push(Export {
                 name: unmangled,
                 symbol: f.name.clone(),
-                ty: Type::Function(Box::new(f.sig.clone())),
+                ty: Type::Function(Box::new(sig)),
             });
         }
 

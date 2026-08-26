@@ -1,0 +1,7 @@
+# Module build artifacts (produced by `sic --emit-module` / build.sh); only the
+# .sic source is tracked. build.sh installs into siccomp/target/lib/sic anyway.
+libstd.a
+libstd.so
+module_std.smod
+module_std.h
+module_std.def

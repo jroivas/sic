@@ -88,9 +88,6 @@ pub struct Lowerer {
     /// sic generic enums (sic.md §"Match"): name → the template `EnumDef` (with
     /// `type_params`), instantiated per concrete `Option<int>` monomorphization.
     pub generic_enum_defs: HashMap<String, EnumDef>,
-    /// sic `import std;` (sic.md std): the blessed std module was imported, so the
-    /// `std.Print`/`Fmt` intrinsics are enabled and the driver links the std lib.
-    pub std_imported: bool,
 }
 
 /// One variant of a sic tagged enum.
@@ -144,7 +141,6 @@ impl Lowerer {
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
             generic_enum_defs: HashMap::new(),
-            std_imported: false,
         }
     }
 
@@ -231,7 +227,6 @@ impl Lowerer {
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
-        self.module.std_imported = self.std_imported;
 
         Ok(self.module)
     }
@@ -410,30 +405,9 @@ impl Lowerer {
     ) -> Result<()> {
         use crate::module_manifest::ModuleManifest;
 
-        // sic `import std;` (sic.md std): the blessed standard library. No manifest —
-        // its signatures are known to the compiler; the SIC-written `module std;`
-        // (Fmt/Print/Println, symbols `std_*`) is compiled and linked by the driver
-        // when this flag is set. Register the namespaced exports so `std.Fmt(a, b)`
-        // resolves like any module call (and va_array packing triggers on the call).
-        if module == "std" && sym.is_none() {
-            self.std_imported = true;
-            let ps = self.ptr_size;
-            let strt = types::sic_string_type(ps);
-            let vat = types::va_array_type(ps);
-            let mk = |ret: Type, params: Vec<Type>| Type::Function(Box::new(
-                sic_ir::FunctionType { ret, params, variadic: false }));
-            let mut exports = HashMap::new();
-            exports.insert("Fmt".to_string(),
-                ("std_Fmt".to_string(), mk(strt.clone(), vec![strt.clone(), vat.clone()])));
-            exports.insert("Print".to_string(),
-                ("std_Print".to_string(), mk(Type::Void, vec![vat.clone()])));
-            exports.insert("Println".to_string(),
-                ("std_Println".to_string(), mk(Type::Void, vec![vat])));
-            self.imported_modules.insert("std".to_string(), exports);
-            return Ok(());
-        }
-
-        // Load the manifest once; later imports of the same module reuse it.
+        // `std` is now an ordinary module (`module std;`), built with the compiler
+        // and resolved through its manifest like any other — no blessed special
+        // case. Load the manifest once; later imports of the same module reuse it.
         if !self.imported_modules.contains_key(module) {
             let file = format!("module_{}.smod", module);
             let mut found: Option<String> = None;

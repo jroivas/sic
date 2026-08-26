@@ -133,9 +133,6 @@ pub struct Module {
     /// trampoline that sets the SysV `AL` vector-arg count, which Cranelift never
     /// emits for variadic calls (see cg_clif's `adjust_call_for_c_variadic`).
     pub float_vararg_externs: Vec<String>,
-    /// sic `import std;`: this unit imported the blessed std library, so the driver
-    /// must compile and link the std lib object.
-    pub std_imported: bool,
 }
 
 impl Module {
@@ -150,7 +147,6 @@ impl Module {
             sic_module: None,
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
-            std_imported: false,
         }
     }
 

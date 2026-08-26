@@ -1,18 +1,11 @@
-//! The sic **standard library** (`import std;`), written in SIC and shipped with
-//! the compiler. It is an ordinary sic module (`module std;`), compiled to its own
-//! object and linked in only when a unit says `import std;` (see the driver). It is
-//! NOT part of every program and is NOT special to the compiler — `std.Fmt(a, b)`
-//! is a normal call to the SIC function below, and all formatting is done in SIC
-//! (dispatching on `type(arg).kind` + native `.str`).
-//!
-//! `Fmt(fmt, args)` builds a formatted string; `Print`/`Println` format then write.
-//! `args` is a `va_array` — the trailing call arguments boxed as `any` (the caller
-//! packs them). The compiler knows the exported signatures (`resolve_import`), so
-//! this source only needs to define them under `module std;` (symbols `std_*`).
-
-/// The std library source, in SIC. Compiled to a separate object and linked when
-/// `import std;` is present.
-pub const STD_SIC: &str = r#"
+// The sic standard library (`import std;`), written in SIC and shipped with the
+// compiler. It is an ordinary sic module (`module std;`): built separately with
+// `sic --emit-module`, installed into the compiler's module sysroot, and linked
+// in only when a unit says `import std;` (dynamically by default, or statically
+// under `-static`). Nothing here is special to the compiler — `std.Fmt(a, b)` is a
+// normal call to the function below, and all formatting is done in SIC by
+// dispatching on each argument's runtime type (`type(arg).kind`) and taking its
+// native representation (`.str` for bigint/fixed).
 module std;
 
 extern int snprintf(char *s, unsigned long n, char *fmt, ...);
@@ -79,4 +72,3 @@ int Println(va_array args) {
     write(1, s.ptr, s.size);
     return 0;
 }
-"#;
