@@ -51,6 +51,68 @@ __attribute__((weak)) void __sic_print_char(unsigned int c) {
     }
 }
 __attribute__((weak)) void __sic_print_nl(void) { write(1, "\n", 1); }
+
+/* ── string builder for `std.Fmt` → a native owned string ─────────────────── */
+extern void *malloc(unsigned long);
+extern void *realloc(void *, unsigned long);
+extern void free(void *);
+
+/* The buffer is laid out as sic's owned-string block `[ rc(usize) | text | NUL ]`
+   so `__sic_sb_finish` can hand it straight to a `string` (freed at scope exit by
+   releasing `rc`). `HDR` reserves the rc cell; `len` counts only the text. */
+
+typedef struct __sic_sb { char *buf; unsigned long len; unsigned long cap; } __sic_sb;
+
+__attribute__((weak)) void *__sic_sb_new(void) {
+    __sic_sb *b = (__sic_sb *)malloc(sizeof(__sic_sb));
+    b->cap = (sizeof(unsigned long)) + 32; b->len = 0; b->buf = (char *)malloc(b->cap);
+    return b;
+}
+__attribute__((weak)) void __sic_sb_str(void *p, const char *d, unsigned long n) {
+    __sic_sb *b = (__sic_sb *)p;
+    unsigned long need = (sizeof(unsigned long)) + b->len + n + 1;
+    if (need > b->cap) {
+        while (need > b->cap) b->cap *= 2;
+        b->buf = (char *)realloc(b->buf, b->cap);
+    }
+    for (unsigned long i = 0; i < n; i++) b->buf[(sizeof(unsigned long)) + b->len + i] = d[i];
+    b->len += n;
+}
+__attribute__((weak)) void __sic_sb_cstr(void *p, const char *s) {
+    if (s) __sic_sb_str(p, s, strlen(s));
+}
+__attribute__((weak)) void __sic_sb_i64(void *p, long long v) {
+    char t[32]; int n = snprintf(t, sizeof t, "%lld", v); if (n > 0) __sic_sb_str(p, t, n);
+}
+__attribute__((weak)) void __sic_sb_u64(void *p, unsigned long long v) {
+    char t[32]; int n = snprintf(t, sizeof t, "%llu", v); if (n > 0) __sic_sb_str(p, t, n);
+}
+__attribute__((weak)) void __sic_sb_f64(void *p, double v) {
+    char t[64]; int n = snprintf(t, sizeof t, "%g", v); if (n > 0) __sic_sb_str(p, t, n);
+}
+__attribute__((weak)) void __sic_sb_bool(void *p, long long v) {
+    __sic_sb_cstr(p, v ? "true" : "false");
+}
+__attribute__((weak)) void __sic_sb_ptr(void *p, const void *v) {
+    if (!v) { __sic_sb_cstr(p, "(null)"); return; }
+    char t[32]; int n = snprintf(t, sizeof t, "%p", v); if (n > 0) __sic_sb_str(p, t, n);
+}
+__attribute__((weak)) void __sic_sb_char(void *p, unsigned int c) {
+    unsigned char t[4];
+    if (c < 0x80) { t[0] = (unsigned char)c; __sic_sb_str(p, (char *)t, 1); }
+    else if (c < 0x800) { t[0]=0xC0|(c>>6); t[1]=0x80|(c&0x3F); __sic_sb_str(p,(char*)t,2); }
+    else if (c < 0x10000) { t[0]=0xE0|(c>>12); t[1]=0x80|((c>>6)&0x3F); t[2]=0x80|(c&0x3F); __sic_sb_str(p,(char*)t,3); }
+    else { t[0]=0xF0|(c>>18); t[1]=0x80|((c>>12)&0x3F); t[2]=0x80|((c>>6)&0x3F); t[3]=0x80|(c&0x3F); __sic_sb_str(p,(char*)t,4); }
+}
+/* NUL-terminate, set rc=1, and return the block `[ rc | text | NUL ]` (ownership
+   transferred). `*outlen` = text length; the builder wrapper is freed. The caller
+   builds a `string` with data = block + HDR and rc = block. */
+__attribute__((weak)) char *__sic_sb_finish(void *p, unsigned long *outlen) {
+    __sic_sb *b = (__sic_sb *)p;
+    b->buf[(sizeof(unsigned long)) + b->len] = 0;
+    *(unsigned long *)b->buf = 1;   /* rc = 1 */
+    char *block = b->buf; *outlen = b->len; free(b); return block;
+}
 #endif
 "#;
 
@@ -59,5 +121,6 @@ __attribute__((weak)) void __sic_print_nl(void) { write(1, "\n", 1); }
 /// tokens `std.Print` only appear where the intrinsic is called.
 pub fn uses_std(src: &str) -> bool {
     src.contains("std.Print")   // covers Print / Println / Printf
+        || src.contains("std.Fmt")
         || src.contains("std.Eprint")
 }

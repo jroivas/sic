@@ -3,6 +3,13 @@ use crate::{Result, CompileError};
 use sic_ir::*;
 use super::func::{FuncCtx, LookupResult};
 
+/// Where `std.Print`/`Printf`/`Fmt` writes each formatted value (sic.md std):
+/// straight to stdout, or appended to a runtime string builder (for `std.Fmt`).
+enum PrintSink {
+    Stdout,
+    Sb(Val),
+}
+
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
 struct LValue {
     ptr: Val,
@@ -3860,12 +3867,72 @@ impl<'m> FuncCtx<'m> {
     /// newline for `Println`. Returns `void` (0).
     fn lower_std_print(&mut self, newline: bool, args: &[Expr]) -> Result<Val> {
         for a in args {
-            self.emit_print_arg(a)?;
+            self.emit_print_arg(&PrintSink::Stdout, a)?;
         }
         if newline {
             self.emit_bigint_call("__sic_print_nl", vec![], Type::Void)?;
         }
         Ok(Constant::zero())
+    }
+
+    /// Lower `std.Fmt("… {} …", a, b) -> string` (sic.md std): build the formatted
+    /// text into a runtime string builder, then wrap it as an OWNED native string
+    /// (freed at scope exit). Same `{}` grammar as `std.Printf`.
+    fn lower_std_fmt(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let (fmt, rest) = args.split_first().ok_or_else(|| CompileError::at(
+            "std.Fmt needs a format string".to_string(), sp.file.clone(), sp.line, sp.col))?;
+        let ExprKind::StringLit(f) = &fmt.kind else {
+            return Err(CompileError::at(
+                "std.Fmt: the format string must be a string literal".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        };
+        let f = f.clone();
+        let sb = self.emit_bigint_call("__sic_sb_new", vec![], Type::void_ptr())?;
+        let sink = PrintSink::Sb(sb.clone());
+        let mut ai = 0usize;
+        let mut lit = String::new();
+        let mut it = f.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '{' if it.peek() == Some(&'{') => { it.next(); lit.push('{'); }
+                '}' if it.peek() == Some(&'}') => { it.next(); lit.push('}'); }
+                '{' => {
+                    if it.peek() == Some(&'}') { it.next(); } else {
+                        return Err(CompileError::at(
+                            "std.Fmt: only `{}` placeholders are supported yet".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
+                    if !lit.is_empty() { self.emit_print_literal(&sink, &lit)?; lit.clear(); }
+                    let a = rest.get(ai).ok_or_else(|| CompileError::at(
+                        "std.Fmt: not enough arguments for the format string".to_string(),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    self.emit_print_arg(&sink, a)?;
+                    ai += 1;
+                }
+                _ => lit.push(c),
+            }
+        }
+        if !lit.is_empty() { self.emit_print_literal(&sink, &lit)?; }
+        if ai < rest.len() {
+            return Err(CompileError::at(
+                "std.Fmt: too many arguments for the format string".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        // Finish: get the owned block `[ rc | text | NUL ]` + text length, then wrap
+        // it as an owned `string` (data = block + word, rc = block) — released at
+        // scope exit like a concat result.
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let word = self.ptr_size() as i64;
+        let len_slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: len_slot, ty: usize_ty.clone(), align: None });
+        let block = self.emit_bigint_call("__sic_sb_finish", vec![sb, Val::Local(len_slot)], Type::char_ptr())?;
+        let len = self.alloc_val();
+        self.push_instr(Instr::Load { dest: len, ptr: Val::Local(len_slot), ty: usize_ty });
+        let data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: data, base: block.clone(), index: Constant::int(word), elem_size: 1, result_ty: Type::char_ptr() });
+        let sv = self.make_string_val(Val::Local(data), Val::Local(len), block)?;
+        self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
+        Ok(sv)
     }
 
     /// Lower `std.Printf("… {} … {} …", a, b)` (sic.md std): a compile-time
@@ -3895,17 +3962,17 @@ impl<'m> FuncCtx<'m> {
                             "std.Printf: only `{}` placeholders are supported yet".to_string(),
                             sp.file.clone(), sp.line, sp.col));
                     }
-                    if !lit.is_empty() { self.emit_print_literal(&lit)?; lit.clear(); }
+                    if !lit.is_empty() { self.emit_print_literal(&PrintSink::Stdout, &lit)?; lit.clear(); }
                     let a = rest.get(ai).ok_or_else(|| CompileError::at(
                         "std.Printf: not enough arguments for the format string".to_string(),
                         sp.file.clone(), sp.line, sp.col))?;
-                    self.emit_print_arg(a)?;
+                    self.emit_print_arg(&PrintSink::Stdout, a)?;
                     ai += 1;
                 }
                 _ => lit.push(c),
             }
         }
-        if !lit.is_empty() { self.emit_print_literal(&lit)?; }
+        if !lit.is_empty() { self.emit_print_literal(&PrintSink::Stdout, &lit)?; }
         if ai < rest.len() {
             return Err(CompileError::at(
                 "std.Printf: too many arguments for the format string".to_string(),
@@ -3914,32 +3981,46 @@ impl<'m> FuncCtx<'m> {
         Ok(Constant::zero())
     }
 
-    /// Write a fixed literal string as part of `std.Print` output (delimiters).
-    fn emit_print_literal(&mut self, s: &str) -> Result<()> {
-        let g = self.emit_cstring(s);
-        self.emit_bigint_call("__sic_print_cstr", vec![g], Type::Void)?;
+    /// Emit one primitive writer call to the current sink (sic.md std). `prim` is
+    /// the shared suffix (`str`/`cstr`/`i64`/…); stdout calls `__sic_print_<prim>`,
+    /// a builder calls `__sic_sb_<prim>` with the builder as the first argument.
+    fn wr(&mut self, sink: &PrintSink, prim: &str, args: Vec<Val>) -> Result<()> {
+        let (name, args) = match sink {
+            PrintSink::Stdout => (format!("__sic_print_{}", prim), args),
+            PrintSink::Sb(sb) => {
+                let mut a = vec![sb.clone()];
+                a.extend(args);
+                (format!("__sic_sb_{}", prim), a)
+            }
+        };
+        self.emit_bigint_call(&name, args, Type::Void)?;
         Ok(())
     }
 
-    /// Emit the type-directed writer call for one `std.Print` argument.
-    fn emit_print_arg(&mut self, a: &Expr) -> Result<()> {
+    /// Write a fixed literal string to the sink (delimiters `[`, `, `, …).
+    fn emit_print_literal(&mut self, sink: &PrintSink, s: &str) -> Result<()> {
+        let g = self.emit_cstring(s);
+        self.wr(sink, "cstr", vec![g])
+    }
+
+    /// Emit the type-directed writer call for one argument to the given sink
+    /// (shared by `std.Print`/`Printf` → stdout and `std.Fmt` → a string builder).
+    fn emit_print_arg(&mut self, sink: &PrintSink, a: &Expr) -> Result<()> {
         let ty = self.infer_expr_type(a).unwrap_or_else(|_| Type::i32());
         // string / slice → write the bytes directly (no NUL needed).
         if super::types::is_sic_string(&ty) {
             let (data, size) = self.string_operand_parts(a)?;
-            self.emit_bigint_call("__sic_print_str", vec![data, size], Type::Void)?;
-            return Ok(());
+            return self.wr(sink, "str", vec![data, size]);
         }
         // fixed → its decimal string at the declared display precision. Convert via
-        // the rational runtime directly (present whenever a `fixed` value exists),
-        // so the std runtime carries no dangling reference to it.
+        // the rational runtime directly (present whenever a `fixed` value exists).
         if super::types::is_fixed(&ty) {
             let f = self.fixed_expr_dims(a).map(|d| d.1).filter(|&f| f > 0)
                 .unwrap_or(Self::FIXED_DEFAULT_F);
             let (r, _, _) = self.fixed_operand(a)?;
             let dec = self.coerce(Constant::int(f as i64), &Type::i32())?;
             let s = self.emit_bigint_call("__sic_rat_to_str", vec![r, dec], Type::char_ptr())?;
-            self.emit_bigint_call("__sic_print_cstr", vec![s.clone()], Type::Void)?;
+            self.wr(sink, "cstr", vec![s.clone()])?;
             self.emit_free(s)?;
             return Ok(());
         }
@@ -3947,17 +4028,26 @@ impl<'m> FuncCtx<'m> {
         if super::types::is_bigint(&ty) {
             let b = self.to_bigint(a)?;
             let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
-            self.emit_bigint_call("__sic_print_cstr", vec![s.clone()], Type::Void)?;
+            self.wr(sink, "cstr", vec![s.clone()])?;
             self.emit_free(s)?;
             return Ok(());
         }
-        // fixed-size array → `[e0, e1, …]`, each element printed by its type. The
-        // base is re-indexed per element (fine for the common variable/lvalue case).
-        if let Type::Array { len, .. } = &ty {
-            let n = *len;
-            self.emit_print_literal("[")?;
+        // fixed-size array → `[e0, e1, …]`; tuple → `(e0, …)`: index each element and
+        // recurse (base re-indexed per element — fine for the common lvalue case).
+        let bracket = if matches!(ty, Type::Array { .. }) { Some(("[", "]")) }
+            else if super::types::tuple_layout_of(&ty).is_some() { Some(("(", ")")) }
+            else { None };
+        if let Some((open, close)) = bracket {
+            let n = match &ty {
+                Type::Array { len, .. } => *len,
+                _ => match super::types::tuple_layout_of(&ty) {
+                    Some(Type::Struct(st)) => st.fields.len(),
+                    _ => 0,
+                },
+            };
+            self.emit_print_literal(sink, open)?;
             for i in 0..n {
-                if i > 0 { self.emit_print_literal(", ")?; }
+                if i > 0 { self.emit_print_literal(sink, ", ")?; }
                 let idx = Expr::new(
                     ExprKind::Index {
                         base: Box::new(a.clone()),
@@ -3965,62 +4055,29 @@ impl<'m> FuncCtx<'m> {
                     },
                     a.span.clone(),
                 );
-                self.emit_print_arg(&idx)?;
+                self.emit_print_arg(sink, &idx)?;
             }
-            self.emit_print_literal("]")?;
-            return Ok(());
-        }
-        // tuple → `(e0, e1, …)` (sic.md §"Tuples"): index each positional element.
-        if let Some(layout) = super::types::tuple_layout_of(&ty) {
-            let n = match &layout { Type::Struct(st) => st.fields.len(), _ => 0 };
-            self.emit_print_literal("(")?;
-            for i in 0..n {
-                if i > 0 { self.emit_print_literal(", ")?; }
-                let idx = Expr::new(
-                    ExprKind::Index {
-                        base: Box::new(a.clone()),
-                        index: Box::new(Expr::new(ExprKind::IntLit(i as i64, false), a.span.clone())),
-                    },
-                    a.span.clone(),
-                );
-                self.emit_print_arg(&idx)?;
-            }
-            self.emit_print_literal(")")?;
+            self.emit_print_literal(sink, close)?;
             return Ok(());
         }
         let v = self.lower_expr(a)?;
         match &ty {
-            Type::Bool => {
-                let b = self.coerce(v, &Type::i64())?;
-                self.emit_bigint_call("__sic_print_bool", vec![b], Type::Void)?;
-            }
+            Type::Bool => { let b = self.coerce(v, &Type::i64())?; self.wr(sink, "bool", vec![b])?; }
             Type::Float32 | Type::Float64 | Type::Float80 => {
-                let d = self.coerce(v, &Type::Float64)?;
-                self.emit_bigint_call("__sic_print_f64", vec![d], Type::Void)?;
+                let d = self.coerce(v, &Type::Float64)?; self.wr(sink, "f64", vec![d])?;
             }
             // `char*` prints as a C string; any other pointer as an address.
             Type::Pointer(inner) if matches!(inner.as_ref(), Type::Int { bits: 8, .. }) => {
-                let p = self.coerce(v, &Type::char_ptr())?;
-                self.emit_bigint_call("__sic_print_cstr", vec![p], Type::Void)?;
+                let p = self.coerce(v, &Type::char_ptr())?; self.wr(sink, "cstr", vec![p])?;
             }
-            Type::Pointer(_) => {
-                let p = self.coerce(v, &Type::void_ptr())?;
-                self.emit_bigint_call("__sic_print_ptr", vec![p], Type::Void)?;
-            }
-            Type::Int { signed: false, .. } => {
-                let u = self.coerce(v, &Type::u64())?;
-                self.emit_bigint_call("__sic_print_u64", vec![u], Type::Void)?;
-            }
-            Type::Int { .. } => {
-                let i = self.coerce(v, &Type::i64())?;
-                self.emit_bigint_call("__sic_print_i64", vec![i], Type::Void)?;
-            }
-            // Aggregates (struct/array/tuple/enum) are not yet printable natively —
-            // fall back to the type name so output is still legible.
+            Type::Pointer(_) => { let p = self.coerce(v, &Type::void_ptr())?; self.wr(sink, "ptr", vec![p])?; }
+            Type::Int { signed: false, .. } => { let u = self.coerce(v, &Type::u64())?; self.wr(sink, "u64", vec![u])?; }
+            Type::Int { .. } => { let i = self.coerce(v, &Type::i64())?; self.wr(sink, "i64", vec![i])?; }
+            // Anything else (a struct/enum): the type name, so output stays legible.
             _ => {
                 let name = self.type_name_of(&ty);
-                let s = self.emit_cstring(&format!("<{}>", name));
-                self.emit_bigint_call("__sic_print_cstr", vec![s], Type::Void)?;
+                let g = self.emit_cstring(&format!("<{}>", name));
+                self.wr(sink, "cstr", vec![g])?;
             }
         }
         Ok(())
@@ -4033,11 +4090,14 @@ impl<'m> FuncCtx<'m> {
         if self.is_sic() {
             if let ExprKind::Field { base, name } = &func_expr.kind {
                 if matches!(&base.kind, ExprKind::Ident(m) if m == "std")
-                    && matches!(name.as_str(), "Print" | "Println" | "Printf")
+                    && matches!(name.as_str(), "Print" | "Println" | "Printf" | "Fmt")
                     && !self.lowerer.imported_modules.contains_key("std")
                     && !matches!(self.lookup("std"),
                         Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
                 {
+                    if name == "Fmt" {
+                        return self.lower_std_fmt(args, sp);
+                    }
                     if name == "Printf" {
                         return self.lower_std_printf(args, sp);
                     }
@@ -5397,6 +5457,14 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
             }
             ExprKind::Call { func, args } => {
+                // sic `std.Fmt(…)` yields a native `string` (sic.md std).
+                if self.is_sic() {
+                    if let ExprKind::Field { base, name } = &func.kind {
+                        if name == "Fmt" && matches!(&base.kind, ExprKind::Ident(m) if m == "std") {
+                            return Ok(super::types::sic_string_type(self.ptr_size()));
+                        }
+                    }
+                }
                 // sic tagged-enum constructor / unwrap.
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
                     let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
