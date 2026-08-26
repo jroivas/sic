@@ -1,4 +1,4 @@
-mod types;
+pub(crate) mod types;
 mod expr;
 mod func;
 mod borrowck;
@@ -444,7 +444,7 @@ impl Lowerer {
                 format!("reading module manifest '{}': {}", path, e),
                 span.file.clone(), span.line, span.col,
             ))?;
-            let manifest = ModuleManifest::parse(&text).map_err(|e| CompileError::at(
+            let manifest = ModuleManifest::parse(&text, self.ptr_size).map_err(|e| CompileError::at(
                 format!("malformed module manifest '{}': {}", path, e),
                 span.file.clone(), span.line, span.col,
             ))?;

@@ -8,26 +8,35 @@
 //! toolchain matching the triple can read the symbols and link — no compiler
 //! private blob (unlike a C++20 BMI or Rust rmeta).
 //!
-//! Format (v1):
+//! Format (v2):
 //! ```text
-//! sicmod 1
-//! module math
+//! sicmod 2
+//! module std
 //! triple x86_64-linux-gnu
-//! link -lm
-//! fn sq (i32) -> i32 math_sq
-//! fn addv (i32,i32) -> i32 math_addv
-//! var meaning i32 math_meaning
+//! link -L/opt/sic/lib -lstd
+//! struct __sic_string data:*i8 size:u64 rc:*u64
+//! struct __sic_va_array data:*@__sic_any len:u64
+//! fn Fmt (@__sic_string,@__sic_va_array) -> @__sic_string std_Fmt
+//! var meaning i32 std_meaning
 //! ```
 //! A `fn` param list is comma-separated with no spaces; a trailing `...` marks a
-//! variadic function. Types are the compact tokens produced by [`encode_type`]
-//! (scalars + pointers in v1; aggregates are not representable and their exports
-//! are skipped by the writer).
+//! variadic function. Type tokens come from [`encode_type`]: scalars (`i32`,
+//! `u64`, `f64`, `bool`, `void`), pointers (`*<t>`), and aggregates referenced by
+//! name (`@<name>`; `*@<name>` for a pointer to one). Every aggregate used **by
+//! value** gets a `struct`/`union` record (emitted in dependency order, so a
+//! nested by-value aggregate precedes its user); a pointer to an aggregate needs
+//! no record (opaque, pointer-sized). v2 also carries `bool` and the four
+//! compiler-known sic aggregates (`__sic_string`, `__sic_va_array`, `__sic_any`,
+//! `__sic_type_info`), which decode via the `types::` constructors so their
+//! layout is exactly the built-in one.
 
-use sic_ir::{Type, FunctionType, Linkage, Module};
+use sic_ir::{Type, StructType, UnionType, FunctionType, Linkage, Module};
+use crate::lower::types as ltypes;
 
 /// Current manifest format version. Bumped on any incompatible format change; a
-/// consumer hard-errors on a version it does not understand.
-pub const MANIFEST_VERSION: u32 = 1;
+/// consumer hard-errors on a version it does not understand. v2 adds `struct`/
+/// `union` records and `@name` aggregate tokens (v1 was scalars + pointers only).
+pub const MANIFEST_VERSION: u32 = 2;
 
 /// One exported symbol in a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +64,9 @@ pub struct ModuleManifest {
 impl ModuleManifest {
     /// Build a manifest by scanning a lowered IR module for this unit's exports.
     /// Exports are the defined (bodied) functions and defined globals whose names
-    /// carry the `<module>_` mangling prefix applied during lowering. Aggregate
-    /// types are not representable in v1, so such exports are skipped and a note
-    /// is written to stderr.
+    /// carry the `<module>_` mangling prefix applied during lowering. An export
+    /// whose type is not representable (a value-position aggregate with no name)
+    /// is skipped and a note is written to stderr.
     pub fn from_ir(ir: &Module, module: &str, triple: &str, links: &[String]) -> Self {
         let prefix = format!("{}_", module);
         let mut exports = Vec::new();
@@ -69,9 +78,8 @@ impl ModuleManifest {
             let unmangled = f.name[prefix.len()..].to_string();
             if !fn_type_representable(&f.sig) {
                 eprintln!(
-                    "sic: note: module '{}' export '{}' has an aggregate in its \
-                     signature and is omitted from the manifest (v1 supports \
-                     scalars and pointers)",
+                    "sic: note: module '{}' export '{}' has an unnameable aggregate \
+                     in its signature and is omitted from the manifest",
                     module, unmangled
                 );
                 continue;
@@ -121,6 +129,23 @@ impl ModuleManifest {
         if !self.links.is_empty() {
             s.push_str(&format!("link {}\n", self.links.join(" ")));
         }
+
+        // Emit a record for every by-value aggregate reachable from an export, in
+        // dependency (post-)order so a nested aggregate precedes the one using it.
+        let mut aggs: Vec<Type> = Vec::new();
+        for e in &self.exports {
+            match &e.ty {
+                Type::Function(ft) => {
+                    collect_aggregates(&ft.ret, &mut aggs);
+                    for p in &ft.params { collect_aggregates(p, &mut aggs); }
+                }
+                other => collect_aggregates(other, &mut aggs),
+            }
+        }
+        for a in &aggs {
+            if let Some(rec) = encode_aggregate_record(a) { s.push_str(&rec); s.push('\n'); }
+        }
+
         for e in &self.exports {
             match &e.ty {
                 Type::Function(ft) => {
@@ -144,14 +169,19 @@ impl ModuleManifest {
         s
     }
 
-    /// Parse the `.smod` text form. Returns an error string on any malformed line
-    /// or an unsupported version.
-    pub fn parse(text: &str) -> Result<ModuleManifest, String> {
+    /// Parse the `.smod` text form. `ptr_size` (bytes) reconstructs pointer-sized
+    /// (`usize`) fields of the compiler-known aggregates. Returns an error string
+    /// on any malformed line or an unsupported version.
+    pub fn parse(text: &str, ptr_size: u32) -> Result<ModuleManifest, String> {
         let mut version = None;
         let mut module = None;
         let mut triple = None;
         let mut links: Vec<String> = Vec::new();
         let mut exports = Vec::new();
+        // Aggregate records decoded so far, keyed by name; later records and
+        // exports resolve `@name` tokens against this (records are emitted in
+        // dependency order, so a reference is always already present).
+        let mut registry: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
 
         for (lineno, raw) in text.lines().enumerate() {
             let line = raw.trim();
@@ -177,6 +207,14 @@ impl ModuleManifest {
                 "link" => {
                     links.extend(it.map(|s| s.to_string()));
                 }
+                "struct" | "union" => {
+                    let name = it.next()
+                        .ok_or_else(|| format!("line {}: {} name missing", lineno + 1, kw))?;
+                    let is_union = kw == "union";
+                    let ty = decode_aggregate_record(name, is_union, it, ptr_size, &registry)
+                        .ok_or_else(|| format!("line {}: bad {} record", lineno + 1, kw))?;
+                    registry.insert(name.to_string(), ty);
+                }
                 "fn" => {
                     let name = it.next()
                         .ok_or_else(|| format!("line {}: fn name missing", lineno + 1))?;
@@ -196,10 +234,10 @@ impl ModuleManifest {
                     for tok in inner.split(',') {
                         if tok.is_empty() { continue; }
                         if tok == "..." { variadic = true; continue; }
-                        params.push(decode_type(tok)
+                        params.push(decode_type(tok, ptr_size, &registry)
                             .ok_or_else(|| format!("line {}: bad param type '{}'", lineno + 1, tok))?);
                     }
-                    let ret = decode_type(ret_tok)
+                    let ret = decode_type(ret_tok, ptr_size, &registry)
                         .ok_or_else(|| format!("line {}: bad return type '{}'", lineno + 1, ret_tok))?;
                     exports.push(Export {
                         name: name.to_string(),
@@ -214,7 +252,7 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: var type missing", lineno + 1))?;
                     let symbol = it.next()
                         .ok_or_else(|| format!("line {}: var linker symbol missing", lineno + 1))?;
-                    let ty = decode_type(ty_tok)
+                    let ty = decode_type(ty_tok, ptr_size, &registry)
                         .ok_or_else(|| format!("line {}: bad var type '{}'", lineno + 1, ty_tok))?;
                     exports.push(Export { name: name.to_string(), symbol: symbol.to_string(), ty });
                 }
@@ -239,8 +277,98 @@ fn fn_type_representable(ft: &FunctionType) -> bool {
     encode_type(&ft.ret).is_some() && ft.params.iter().all(|p| encode_type(p).is_some())
 }
 
+/// The aggregate's tag name, if it has one (anonymous aggregates are unnameable).
+fn agg_name(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Struct(s) => s.name.as_deref(),
+        Type::Union(u) => u.name.as_deref(),
+        _ => None,
+    }
+}
+
+/// Collect, in dependency (post-)order, every named aggregate reached **by value**
+/// from `ty` — its own by-value fields first, then itself. A pointer stops the
+/// walk (its pointee is opaque and needs no record); an array recurses into its
+/// element. Deduped by name.
+fn collect_aggregates(ty: &Type, out: &mut Vec<Type>) {
+    match ty {
+        Type::Struct(s) => {
+            for (_, fty) in &s.fields { collect_aggregates(fty, out); }
+            push_agg(ty, out);
+        }
+        Type::Union(u) => {
+            for (_, fty) in &u.fields { collect_aggregates(fty, out); }
+            push_agg(ty, out);
+        }
+        Type::Array { elem, .. } => collect_aggregates(elem, out),
+        // Pointer pointee is opaque (pointer-sized), function types don't occur
+        // by value, scalars have no aggregates.
+        _ => {}
+    }
+}
+
+fn push_agg(ty: &Type, out: &mut Vec<Type>) {
+    if let Some(name) = agg_name(ty) {
+        if !out.iter().any(|t| agg_name(t) == Some(name)) {
+            out.push(ty.clone());
+        }
+    }
+}
+
+/// Encode a `struct`/`union` record line (without the trailing newline), or
+/// `None` for an unnameable aggregate.
+fn encode_aggregate_record(ty: &Type) -> Option<String> {
+    let (kw, name, fields): (&str, &str, &Vec<(String, Type)>) = match ty {
+        Type::Struct(s) => ("struct", s.name.as_deref()?, &s.fields),
+        Type::Union(u) => ("union", u.name.as_deref()?, &u.fields),
+        _ => return None,
+    };
+    let mut toks = Vec::new();
+    for (fname, fty) in fields {
+        toks.push(format!("{}:{}", fname, encode_type(fty)?));
+    }
+    Some(format!("{} {} {}", kw, name, toks.join(" ")))
+}
+
+/// Decode a `struct`/`union` record's fields into an aggregate type. A
+/// compiler-known aggregate (by name) is rebuilt via its `types::` constructor so
+/// its layout is exactly the built-in one; the serialized fields are ignored.
+fn decode_aggregate_record<'a>(
+    name: &str,
+    is_union: bool,
+    field_toks: impl Iterator<Item = &'a str>,
+    ptr_size: u32,
+    registry: &std::collections::HashMap<String, Type>,
+) -> Option<Type> {
+    if let Some(t) = known_marker(name, ptr_size) { return Some(t); }
+    let mut fields = Vec::new();
+    for tok in field_toks {
+        let (fname, tty) = tok.split_once(':')?;
+        fields.push((fname.to_string(), decode_type(tty, ptr_size, registry)?));
+    }
+    Some(if is_union {
+        Type::Union(UnionType { name: Some(name.to_string()), fields, field_aligns: Vec::new(), min_align: None })
+    } else {
+        Type::Struct(StructType::plain(Some(name.to_string()), fields, false))
+    })
+}
+
+/// The four compiler-known sic aggregates, reconstructed with their exact
+/// built-in layout. Returns the STRUCT value type (`__sic_type_info` is the
+/// opaque pointee — a `type` value is a *pointer* to it).
+fn known_marker(name: &str, ptr_size: u32) -> Option<Type> {
+    match name {
+        n if n == ltypes::SIC_STRING_NAME => Some(ltypes::sic_string_type(ptr_size)),
+        n if n == ltypes::VA_ARRAY_MARKER => Some(ltypes::va_array_type(ptr_size)),
+        n if n == ltypes::ANY_MARKER => Some(ltypes::any_type()),
+        n if n == ltypes::TYPEINFO_MARKER => Some(Type::Struct(
+            StructType::plain(Some(ltypes::TYPEINFO_MARKER.to_string()), vec![], false))),
+        _ => None,
+    }
+}
+
 /// Encode an IR type to the compact manifest token, or `None` if not
-/// representable in v1 (aggregates, arrays, bare function types).
+/// representable (an unnameable/anonymous aggregate, a bare function type).
 pub fn encode_type(ty: &Type) -> Option<String> {
     Some(match ty {
         Type::Void => "void".to_string(),
@@ -252,20 +380,31 @@ pub fn encode_type(ty: &Type) -> Option<String> {
         Type::Float64 => "f64".to_string(),
         Type::Float80 => "f80".to_string(),
         Type::Pointer(inner) => {
-            // `*void` for opaque/aggregate pointees keeps ABI (pointer-sized)
-            // correct even when the pointee itself is not representable.
+            // `*void` for opaque pointees keeps ABI (pointer-sized) correct even
+            // when the pointee itself is not representable.
             let t = encode_type(inner).unwrap_or_else(|| "void".to_string());
             format!("*{}", t)
         }
-        Type::Array { .. } | Type::Struct(_) | Type::Union(_) | Type::Function(_) => return None,
+        // A named aggregate is referenced by `@name`; its record carries the layout.
+        Type::Struct(_) | Type::Union(_) => format!("@{}", agg_name(ty)?),
+        Type::Array { .. } | Type::Function(_) => return None,
     })
 }
 
-/// Decode a manifest type token back to an IR type.
-pub fn decode_type(tok: &str) -> Option<Type> {
+/// Decode a manifest type token back to an IR type. `registry` resolves `@name`
+/// aggregate references to their (already-decoded) type.
+pub fn decode_type(tok: &str, ptr_size: u32, registry: &std::collections::HashMap<String, Type>) -> Option<Type> {
     if let Some(rest) = tok.strip_prefix('*') {
-        let inner = decode_type(rest)?;
+        let inner = decode_type(rest, ptr_size, registry)?;
         return Some(Type::Pointer(Box::new(inner)));
+    }
+    if let Some(name) = tok.strip_prefix('@') {
+        // A by-value reference resolves from the registry; a pointer pointee not
+        // in the registry is left opaque (a named, field-less struct — pointer-
+        // sized, ABI-correct). Known markers always reconstruct exactly.
+        if let Some(t) = registry.get(name) { return Some(t.clone()); }
+        if let Some(t) = known_marker(name, ptr_size) { return Some(t); }
+        return Some(Type::Struct(StructType::plain(Some(name.to_string()), vec![], false)));
     }
     Some(match tok {
         "void" => Type::Void,
@@ -288,9 +427,11 @@ pub fn decode_type(tok: &str) -> Option<Type> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn roundtrip_types() {
+        let reg = HashMap::new();
         for ty in [
             Type::Void, Type::Bool, Type::Int { bits: 32, signed: true },
             Type::Int { bits: 64, signed: false }, Type::Float64,
@@ -298,14 +439,14 @@ mod tests {
             Type::Pointer(Box::new(Type::Void)),
         ] {
             let enc = encode_type(&ty).unwrap();
-            assert_eq!(decode_type(&enc), Some(ty));
+            assert_eq!(decode_type(&enc, 8, &reg), Some(ty));
         }
     }
 
     #[test]
     fn roundtrip_manifest() {
         let m = ModuleManifest {
-            version: 1,
+            version: MANIFEST_VERSION,
             module: "math".into(),
             triple: "x86_64-linux-gnu".into(),
             links: vec!["-lm".into()],
@@ -325,7 +466,59 @@ mod tests {
             ],
         };
         let text = m.to_text();
-        let back = ModuleManifest::parse(&text).unwrap();
+        let back = ModuleManifest::parse(&text, 8).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn roundtrip_aggregate_signature() {
+        // A std-like `string Fmt(string, va_array)` round-trips: the aggregates
+        // get `struct` records and decode via the `types::` markers.
+        let strt = ltypes::sic_string_type(8);
+        let vat = ltypes::va_array_type(8);
+        let m = ModuleManifest {
+            version: MANIFEST_VERSION,
+            module: "std".into(),
+            triple: "x86_64-linux-gnu".into(),
+            links: vec![],
+            exports: vec![Export {
+                name: "Fmt".into(), symbol: "std_Fmt".into(),
+                ty: Type::Function(Box::new(FunctionType {
+                    ret: strt.clone(), params: vec![strt.clone(), vat.clone()], variadic: false,
+                })),
+            }],
+        };
+        let text = m.to_text();
+        assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
+        assert!(text.contains("fn Fmt (@__sic_string,@__sic_va_array) -> @__sic_string std_Fmt"),
+            "manifest:\n{}", text);
+        let back = ModuleManifest::parse(&text, 8).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn roundtrip_user_struct_by_value() {
+        // A user module exporting `Point mid(Point, Point)` by value: the `Point`
+        // struct is serialized and reconstructed from its fields.
+        let point = Type::Struct(StructType::plain(Some("Point".into()), vec![
+            ("x".into(), Type::Int { bits: 32, signed: true }),
+            ("y".into(), Type::Int { bits: 32, signed: true }),
+        ], false));
+        let m = ModuleManifest {
+            version: MANIFEST_VERSION,
+            module: "geo".into(),
+            triple: "x86_64-linux-gnu".into(),
+            links: vec![],
+            exports: vec![Export {
+                name: "mid".into(), symbol: "geo_mid".into(),
+                ty: Type::Function(Box::new(FunctionType {
+                    ret: point.clone(), params: vec![point.clone(), point.clone()], variadic: false,
+                })),
+            }],
+        };
+        let text = m.to_text();
+        assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);
+        let back = ModuleManifest::parse(&text, 8).unwrap();
         assert_eq!(m, back);
     }
 }
