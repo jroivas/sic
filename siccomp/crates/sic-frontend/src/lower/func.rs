@@ -889,7 +889,13 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.switch_to_block(case_bb);
                 self.func_mut().block_mut(case_bb).label = Some(format!("case_{}", const_val));
+                // Each case body is its own scope, so a temporary it creates — e.g.
+                // the owned string in `case K: return f();` — is released only on
+                // this case's exit paths, not leaked into a sibling case's `return`
+                // (which runs `emit_cleanups_to(0)`) where its slot is uninitialized.
+                self.enter_scope();
                 self.lower_stmt(body)?;
+                self.exit_scope();
             }
             Stmt::CaseRange(lo, _hi, body, _) => {
                 // `case LOW ... HIGH:` — every value in the range was pre-created
@@ -905,7 +911,9 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.switch_to_block(case_bb);
                 self.func_mut().block_mut(case_bb).label = Some(format!("case_{}_range", low_val));
+                self.enter_scope();
                 self.lower_stmt(body)?;
+                self.exit_scope();
             }
             Stmt::Default(body, _) => {
                 // Use the enclosing switch's pre-created default block.
@@ -917,7 +925,9 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.switch_to_block(default_bb);
                 self.func_mut().block_mut(default_bb).label = Some("default".to_string());
+                self.enter_scope();
                 self.lower_stmt(body)?;
+                self.exit_scope();
             }
         }
         Ok(())
