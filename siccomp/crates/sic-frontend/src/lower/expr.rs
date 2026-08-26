@@ -3884,13 +3884,17 @@ impl<'m> FuncCtx<'m> {
             self.emit_bigint_call("__sic_print_str", vec![data, size], Type::Void)?;
             return Ok(());
         }
-        // fixed → its decimal string at the declared display precision.
+        // fixed → its decimal string at the declared display precision. Convert via
+        // the rational runtime directly (present whenever a `fixed` value exists),
+        // so the std runtime carries no dangling reference to it.
         if super::types::is_fixed(&ty) {
             let f = self.fixed_expr_dims(a).map(|d| d.1).filter(|&f| f > 0)
                 .unwrap_or(Self::FIXED_DEFAULT_F);
             let (r, _, _) = self.fixed_operand(a)?;
             let dec = self.coerce(Constant::int(f as i64), &Type::i32())?;
-            self.emit_bigint_call("__sic_print_fixed", vec![r, dec], Type::Void)?;
+            let s = self.emit_bigint_call("__sic_rat_to_str", vec![r, dec], Type::char_ptr())?;
+            self.emit_bigint_call("__sic_print_cstr", vec![s.clone()], Type::Void)?;
+            self.emit_free(s)?;
             return Ok(());
         }
         // bigint → its decimal string (a fresh malloc'd char*, freed after).

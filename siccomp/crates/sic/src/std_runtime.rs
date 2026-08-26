@@ -13,10 +13,6 @@ pub const STD_RUNTIME: &str = r#"
 extern long write(int, const void *, unsigned long);
 extern int snprintf(char *, unsigned long, const char *, ...);
 extern unsigned long strlen(const char *);
-/* `fixed` printing borrows the bigint/rational runtime (present whenever a
-   `fixed` value exists, so this is only reached when it is linked). */
-extern char *__sic_rat_to_str(const void *, int);
-extern void free(void *);
 
 __attribute__((weak)) void __sic_print_str(const char *d, unsigned long n) {
     if (d && n) write(1, d, n);
@@ -53,10 +49,6 @@ __attribute__((weak)) void __sic_print_char(unsigned int c) {
         b[0] = 0xF0 | (c >> 18); b[1] = 0x80 | ((c >> 12) & 0x3F);
         b[2] = 0x80 | ((c >> 6) & 0x3F); b[3] = 0x80 | (c & 0x3F); write(1, b, 4);
     }
-}
-__attribute__((weak)) void __sic_print_fixed(const void *rat, int decimals) {
-    char *s = __sic_rat_to_str(rat, decimals);
-    if (s) { __sic_print_cstr(s); free(s); }
 }
 __attribute__((weak)) void __sic_print_nl(void) { write(1, "\n", 1); }
 #endif
