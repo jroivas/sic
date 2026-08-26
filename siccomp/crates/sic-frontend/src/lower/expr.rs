@@ -553,6 +553,18 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // sic `s.dup` — an owned heap copy of a `string` or a C string
+                // (`char*`/`char[]`), so it can outlive a local buffer it came from.
+                if self.is_sic() && name == "dup" {
+                    if let Ok(bt) = self.infer_expr_type(base) {
+                        let is_cstr = super::types::is_sic_string(&bt)
+                            || matches!(&bt, Type::Pointer(i) if matches!(i.as_ref(), Type::Int { bits: 8, .. }))
+                            || matches!(&bt, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }));
+                        if is_cstr {
+                            return self.emit_string_dup(base);
+                        }
+                    }
+                }
                 // sic array accessors (sic.md §"Arrays and lists"): `.length` is the
                 // element count, `.size` the byte size. Both fold from the array
                 // type (fixed arrays and concat temporaries alike).
@@ -1648,6 +1660,31 @@ impl<'m> FuncCtx<'m> {
     /// sic `a + b` on strings: allocate an owned refcount block
     /// `[ rc(usize) | data...(total) | NUL ]`, copy both halves, and return the
     /// joined `string` with `rc` = 1. Released (freed) at scope exit.
+    /// sic `s.dup` (sic.md §"Strings"): an OWNED heap copy of a string / C string.
+    /// Unlike `string s = <char*>` (a non-owning VIEW), the result owns its bytes in
+    /// a `[rc=1 | text | NUL]` block — so it can safely outlive a local buffer it
+    /// was formatted into (e.g. `char b[32]; snprintf(b,…); return b.dup;`), where
+    /// returning the view would dangle.
+    fn emit_string_dup(&mut self, base: &Expr) -> Result<Val> {
+        let (data, size) = self.string_operand_parts(base)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let word = self.ptr_size() as i64; // sizeof(usize) — the rc cell
+        let bufsize = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: bufsize, op: BinOp::Add, lhs: size.clone(), rhs: Constant::int(word + 1), ty: Type::i64() });
+        let block = self.emit_malloc(Val::Local(bufsize))?; // char*
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: block.clone() }); // rc = 1
+        let dptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: dptr, base: block.clone(), index: Constant::int(word), elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_memcpy(Val::Local(dptr), data, size.clone())?;
+        let endp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(dptr), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
+        let sv = self.make_string_val(Val::Local(dptr), size, block)?;
+        self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
+        Ok(sv)
+    }
+
     fn lower_string_concat(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let (d1, s1) = self.string_operand_parts(lhs)?;
         let (d2, s2) = self.string_operand_parts(rhs)?;
@@ -5353,6 +5390,13 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && super::types::is_sic_string(&base_ty) {
                     if name == "ptr" || name == "str" { return Ok(Type::char_ptr()); }
                     if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
+                    if name == "dup" { return Ok(super::types::sic_string_type(self.ptr_size())); }
+                }
+                // `s.dup` on a C string (`char*`/`char[]`) is an owned `string`.
+                if self.is_sic() && name == "dup"
+                    && (matches!(&base_ty, Type::Pointer(i) if matches!(i.as_ref(), Type::Int { bits: 8, .. }))
+                        || matches!(&base_ty, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }))) {
+                    return Ok(super::types::sic_string_type(self.ptr_size()));
                 }
                 // sic array / va_array `.length` / `.size` are `usize`.
                 if self.is_sic() && (matches!(base_ty, Type::Array { .. }) || super::types::is_va_array(&base_ty))
