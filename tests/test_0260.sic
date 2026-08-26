@@ -1,0 +1,23 @@
+// sic va_array (sic.md std): a Python-style varargs collector — the trailing
+// call arguments are boxed into `any` and gathered into an array-slice, iterable
+// via .length and va[i]; each element carries its type. Verified by exit code.
+#include <string.h>
+
+// Sum the integer arguments, ignoring non-int ones; also count total args.
+int suminc(int base, va_array args) {
+    int acc = base;
+    for (int i = 0; i < args.length; i++) {
+        any x = args[i];
+        if (type(x) == i32) acc += (int)x;
+    }
+    return acc + (int)args.length * 1000;
+}
+
+int main() {
+    // base=1; args = (10, "skip", 20, 3.5, 30) → ints 10+20+30=60, 5 args
+    int r = suminc(1, 10, "skip", 20, 3.5, 30);
+    if (r != 1 + 60 + 5000) return 1;         // 5061
+    if (suminc(0) != 0) return 2;             // no varargs → 0 args
+    if (suminc(100, 7) != 100 + 7 + 1000) return 3;
+    return 42;
+}

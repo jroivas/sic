@@ -298,6 +298,25 @@ pub fn is_any(t: &Type) -> bool {
     matches!(t, Type::Struct(st) if st.name.as_deref() == Some(ANY_MARKER))
 }
 
+// ─── `va_array`: Python-style varargs, an array<any> slice (sic.md std) ────────
+
+pub const VA_ARRAY_MARKER: &str = "__sic_va_array";
+
+/// The `va_array` value type — a `{ any* data; usize len }` slice (a fat pointer
+/// over a run of boxed `any` arguments).
+pub fn va_array_type(ptr_size: u32) -> Type {
+    let usize_ty = Type::Int { bits: ptr_size * 8, signed: false };
+    Type::Struct(StructType::plain(Some(VA_ARRAY_MARKER.to_string()), vec![
+        ("data".to_string(), Type::Pointer(Box::new(any_type()))),
+        ("len".to_string(), usize_ty),
+    ], false))
+}
+
+/// True if `t` is a `va_array` value.
+pub fn is_va_array(t: &Type) -> bool {
+    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(VA_ARRAY_MARKER))
+}
+
 /// The `kind` discriminant stored in a `__sic_type_info` record — a coarse
 /// classification the runtime formatter switches on (sic.md §"RTTI").
 pub fn type_kind(t: &Type) -> u32 {
@@ -456,6 +475,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "string"          => return Ok(sic_string_type(ptr_size)),
                 // sic `any`: a boxed dynamically-typed value (sic.md std).
                 "any"             => return Ok(any_type()),
+                // sic `va_array`: Python-style varargs (an array<any>).
+                "va_array"        => return Ok(va_array_type(ptr_size)),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),

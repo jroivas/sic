@@ -227,6 +227,61 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(p))
     }
 
+    /// Lower `va[i]` (sic.md std): `data + i*sizeof(any)` — a pointer to the i-th
+    /// boxed `any` (the aggregate-by-pointer rvalue).
+    fn lower_va_array_index(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let any_ty = super::types::any_type();
+        let any_sz = any_ty.size_of(self.ptr_size()) as i64;
+        let p = self.lower_aggregate_ptr(base)?;
+        let data_lv = self.field_ptr_from(LValue::plain(p, super::types::va_array_type(self.ptr_size())), "data", false, sp)?;
+        let data = self.load_lvalue(&data_lv)?; // any*
+        let iv = self.lower_expr(index)?;
+        let iv = self.coerce(iv, &Type::i64())?;
+        let elem = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: elem, base: data, index: iv,
+            elem_size: any_sz as u64, result_ty: Type::Pointer(Box::new(any_ty.clone())),
+        });
+        self.val_types.insert(elem.0, any_ty);
+        Ok(Val::Local(elem))
+    }
+
+    /// Pack a call's trailing arguments into a `va_array` (sic.md std): box each
+    /// into an `any`, lay them out in a stack array, and build the `{ data, len }`
+    /// slice. Returns a pointer to the slice value (aggregate-by-pointer).
+    fn pack_va_array(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let any_ty = super::types::any_type();
+        let any_sz = any_ty.size_of(self.ptr_size());
+        let any_al = any_ty.align_of(self.ptr_size());
+        let n = args.len();
+        // A run of `n` boxed `any` values (n == 0 → a 1-elem alloca, len stays 0).
+        let arr = self.alloc_val();
+        let arr_ty = Type::Array { elem: Box::new(any_ty.clone()), len: n.max(1) };
+        self.push_instr(Instr::Alloca { dest: arr, ty: arr_ty, align: None });
+        for (i, a) in args.iter().enumerate() {
+            let boxed = self.box_any(a)?; // pointer to a fresh `any`
+            let slot = self.alloc_val();
+            self.push_instr(Instr::GetElemPtr {
+                dest: slot, base: Val::Local(arr), index: Constant::int((i * any_sz as usize) as i64),
+                elem_size: 1, result_ty: Type::Pointer(Box::new(any_ty.clone())),
+            });
+            self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: boxed, size: any_sz, align: any_al });
+        }
+        // Build the { data, len } slice.
+        let va_ty = super::types::va_array_type(self.ptr_size());
+        let p = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: p, ty: va_ty.clone(), align: None });
+        self.val_types.insert(p.0, va_ty.clone());
+        let data_lv = self.field_ptr_from(LValue::plain(Val::Local(p), va_ty.clone()), "data", false, sp)?;
+        let dptr = self.coerce(Val::Local(arr), &Type::Pointer(Box::new(any_ty)))?;
+        self.store_lvalue(&data_lv, dptr)?;
+        let len_lv = self.field_ptr_from(LValue::plain(Val::Local(p), va_ty.clone()), "len", false, sp)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let lenv = self.coerce(Constant::uint(n as u64), &usize_ty)?;
+        self.store_lvalue(&len_lv, lenv)?;
+        Ok(Val::Local(p))
+    }
+
     /// The 64-bit `slot` stored in an `any` for a value of type `ty`.
     fn box_slot(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
         // Store the value's address. `fixed`/`bigint`/pointer rvalues are already a
@@ -454,6 +509,11 @@ impl<'m> FuncCtx<'m> {
             ExprKind::BigIntLit(_) => self.to_bigint(expr),
 
             ExprKind::Index { base, index } => {
+                // sic `va_array` element `args[i]` → a pointer to the i-th `any`
+                // (aggregate-by-pointer rvalue), sic.md std.
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
+                    return self.lower_va_array_index(base, index, &expr.span);
+                }
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
                 // its first element (`a[i]` in `a[i][j]` yields the row address,
@@ -498,6 +558,12 @@ impl<'m> FuncCtx<'m> {
                         let n = len as u64;
                         let v = if name == "length" { n } else { n * elem.size_of(self.ptr_size()) };
                         return Ok(self.size_t_val(v));
+                    }
+                    // sic `va_array` (sic.md std): `.length`/`.size` = its `len` field.
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
+                        let p = self.lower_aggregate_ptr(base)?;
+                        let lv = self.field_ptr_from(LValue::plain(p, super::types::va_array_type(self.ptr_size())), "len", false, &expr.span)?;
+                        return self.load_lvalue(&lv);
                     }
                 }
                 // sic bigint accessors (sic.md §"Integer sizes"): `.str` is a fresh
@@ -4363,13 +4429,27 @@ impl<'m> FuncCtx<'m> {
             },
             _ => Vec::new(),
         };
+        // sic va_array (sic.md std): if the callee's LAST parameter is a `va_array`,
+        // the trailing call arguments (past the fixed params) are boxed into `any`
+        // and packed into one array-slice value.
+        let va_fixed = match param_types.last() {
+            Some(t) if self.is_sic() && super::types::is_va_array(t) => Some(param_types.len() - 1),
+            _ => None,
+        };
         let mut arg_vals = Vec::new();
         for (i, a) in args.iter().enumerate() {
+            if let Some(fixed) = va_fixed {
+                if i >= fixed { break; } // trailing args handled below
+            }
             let prev = self.expected_ty.take();
             if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }
             let v = self.lower_arg(a);
             self.expected_ty = prev;
             arg_vals.push(v?);
+        }
+        if let Some(fixed) = va_fixed {
+            let va = self.pack_va_array(&args[fixed.min(args.len())..], sp)?;
+            arg_vals.push(va);
         }
 
         // sic namespaced module call `x.f(...)`: resolve `x.f` to the imported
@@ -4946,6 +5026,12 @@ impl<'m> FuncCtx<'m> {
             if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_tuple(&t)) {
                 return self.tuple_field_lvalue(base, index, &base.span);
             }
+            // sic `va_array` element `va[i]` (sic.md std): a pointer to the i-th
+            // boxed `any` (also the lvalue used by `lower_aggregate_ptr`).
+            if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
+                let elem = self.lower_va_array_index(base, index, &base.span)?;
+                return Ok(LValue::plain(elem, super::types::any_type()));
+            }
         }
         let base_val = self.lower_expr(base)?;
         let idx_val = self.lower_expr(index)?;
@@ -5223,8 +5309,9 @@ impl<'m> FuncCtx<'m> {
                     if name == "ptr" || name == "str" { return Ok(Type::char_ptr()); }
                     if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
                 }
-                // sic array `.length` / `.size` are `usize` (sic.md §"Arrays and lists").
-                if self.is_sic() && matches!(base_ty, Type::Array { .. }) && (name == "length" || name == "size") {
+                // sic array / va_array `.length` / `.size` are `usize`.
+                if self.is_sic() && (matches!(base_ty, Type::Array { .. }) || super::types::is_va_array(&base_ty))
+                    && (name == "length" || name == "size") {
                     return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                 }
                 // sic bigint `.str` is a `char*`, `.int` an `i64` (sic.md §"Integer sizes").
@@ -5268,6 +5355,10 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Index { base, index } => {
                 let bt = self.infer_expr_type(base)?;
+                // sic `va_array` element `va[i]` is an `any` (sic.md std).
+                if self.is_sic() && super::types::is_va_array(&bt) {
+                    return Ok(super::types::any_type());
+                }
                 // sic tuple element `t[const]` has the field's type (deref the
                 // tuple pointer to its layout struct).
                 if self.is_sic() {
