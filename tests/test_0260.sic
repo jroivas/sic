@@ -1,0 +1,33 @@
+// sic std.Print of aggregates (sic.md std): arrays print `[e0, e1, …]`
+// (nested too) and tuples print `(e0, e1, …)`, each element by its own type.
+// Output captured via a pipe and compared exactly.
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main() {
+    int fd[2];
+    if (pipe(fd) != 0) return 1;
+    int saved = dup(1);
+    dup2(fd[1], 1);
+
+    int a[4] = { 1, 2, 3, 4 };
+    std.Print(a);
+    std.Print(" ");
+    int m[2][3] = { {1,2,3}, {4,5,6} };
+    std.Print(m);
+    std.Print(" ");
+    tuple t = tuple(7, 2.5, "hi");
+    std.Println(t);
+
+    fflush(stdout);
+    dup2(saved, 1);
+    close(fd[1]);
+
+    char buf[256]; int n = (int)read(fd[0], buf, sizeof buf - 1);
+    buf[n < 0 ? 0 : n] = 0;
+
+    const char* want = "[1, 2, 3, 4] [[1, 2, 3], [4, 5, 6]] (7, 2.5, hi)\n";
+    if (strcmp(buf, want) != 0) { fprintf(stderr, "got [%s]\n", buf); return 2; }
+    return 42;
+}

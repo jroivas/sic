@@ -3868,6 +3868,13 @@ impl<'m> FuncCtx<'m> {
         Ok(Constant::zero())
     }
 
+    /// Write a fixed literal string as part of `std.Print` output (delimiters).
+    fn emit_print_literal(&mut self, s: &str) -> Result<()> {
+        let g = self.emit_cstring(s);
+        self.emit_bigint_call("__sic_print_cstr", vec![g], Type::Void)?;
+        Ok(())
+    }
+
     /// Emit the type-directed writer call for one `std.Print` argument.
     fn emit_print_arg(&mut self, a: &Expr) -> Result<()> {
         let ty = self.infer_expr_type(a).unwrap_or_else(|_| Type::i32());
@@ -3892,6 +3899,43 @@ impl<'m> FuncCtx<'m> {
             let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
             self.emit_bigint_call("__sic_print_cstr", vec![s.clone()], Type::Void)?;
             self.emit_free(s)?;
+            return Ok(());
+        }
+        // fixed-size array → `[e0, e1, …]`, each element printed by its type. The
+        // base is re-indexed per element (fine for the common variable/lvalue case).
+        if let Type::Array { len, .. } = &ty {
+            let n = *len;
+            self.emit_print_literal("[")?;
+            for i in 0..n {
+                if i > 0 { self.emit_print_literal(", ")?; }
+                let idx = Expr::new(
+                    ExprKind::Index {
+                        base: Box::new(a.clone()),
+                        index: Box::new(Expr::new(ExprKind::IntLit(i as i64, false), a.span.clone())),
+                    },
+                    a.span.clone(),
+                );
+                self.emit_print_arg(&idx)?;
+            }
+            self.emit_print_literal("]")?;
+            return Ok(());
+        }
+        // tuple → `(e0, e1, …)` (sic.md §"Tuples"): index each positional element.
+        if let Some(layout) = super::types::tuple_layout_of(&ty) {
+            let n = match &layout { Type::Struct(st) => st.fields.len(), _ => 0 };
+            self.emit_print_literal("(")?;
+            for i in 0..n {
+                if i > 0 { self.emit_print_literal(", ")?; }
+                let idx = Expr::new(
+                    ExprKind::Index {
+                        base: Box::new(a.clone()),
+                        index: Box::new(Expr::new(ExprKind::IntLit(i as i64, false), a.span.clone())),
+                    },
+                    a.span.clone(),
+                );
+                self.emit_print_arg(&idx)?;
+            }
+            self.emit_print_literal(")")?;
             return Ok(());
         }
         let v = self.lower_expr(a)?;
