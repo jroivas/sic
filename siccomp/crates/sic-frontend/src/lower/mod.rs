@@ -84,6 +84,9 @@ pub struct Lowerer {
     /// sic generic enums (sic.md §"Match"): name → the template `EnumDef` (with
     /// `type_params`), instantiated per concrete `Option<int>` monomorphization.
     pub generic_enum_defs: HashMap<String, EnumDef>,
+    /// sic `import std;` (sic.md std): the blessed std module was imported, so the
+    /// `std.Print`/`Fmt` intrinsics are enabled and the driver links the std lib.
+    pub std_imported: bool,
 }
 
 /// One variant of a sic tagged enum.
@@ -136,6 +139,7 @@ impl Lowerer {
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
             generic_enum_defs: HashMap::new(),
+            std_imported: false,
         }
     }
 
@@ -216,6 +220,7 @@ impl Lowerer {
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
+        self.module.std_imported = self.std_imported;
 
         Ok(self.module)
     }
@@ -393,6 +398,14 @@ impl Lowerer {
         span: &crate::lexer::Span,
     ) -> Result<()> {
         use crate::module_manifest::ModuleManifest;
+
+        // sic `import std;` (sic.md std): the blessed standard library — no manifest
+        // to resolve. Enable the `std.Print`/`Fmt` intrinsics and flag the driver to
+        // link the (separately compiled) std lib.
+        if module == "std" && sym.is_none() {
+            self.std_imported = true;
+            return Ok(());
+        }
 
         // Load the manifest once; later imports of the same module reuse it.
         if !self.imported_modules.contains_key(module) {

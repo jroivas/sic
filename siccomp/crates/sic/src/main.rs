@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod bigint_runtime;
-mod std_runtime;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -563,15 +562,6 @@ fn parse_source(
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             bigint_runtime::BIGINT_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `std.Print` / `std.Println` (sic.md §"Match"/std): prepend the
-    // self-contained print runtime only when the unit actually prints.
-    if std_runtime::uses_std(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            std_runtime::STD_RUNTIME, path, preprocessed
         );
     }
 
