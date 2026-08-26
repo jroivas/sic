@@ -717,6 +717,15 @@ impl<'m> FuncCtx<'m> {
                         // sic: `return None;` builds the enum from its discriminant.
                         let src = if self.is_sic() && self.is_tagged_enum_struct(&agg_ty) {
                             self.enum_value_ptr(e, &agg_ty, &e.span)?
+                        } else if self.is_sic() && super::types::is_sic_string(&agg_ty)
+                            && !self.is_string_operand(e)
+                        {
+                            // `return "literal";` / `return some_char_ptr;` from a
+                            // `string` function: wrap the C string in a (non-owning)
+                            // descriptor so the sret copy has a real 24-byte string,
+                            // not a 4-byte char* read as a struct.
+                            let v = self.lower_expr(e)?;
+                            self.cstr_to_string(v)?
                         } else {
                             self.lower_aggregate_ptr(e)?
                         };

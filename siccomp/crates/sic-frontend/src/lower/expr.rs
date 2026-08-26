@@ -1552,7 +1552,7 @@ impl<'m> FuncCtx<'m> {
     /// `+` is string concatenation. A bare string literal does NOT count here (so
     /// `"abc" + 1` stays pointer arithmetic); the literal is still accepted as the
     /// *other* operand once concatenation is triggered by a real string.
-    fn is_string_operand(&self, e: &Expr) -> bool {
+    pub(crate) fn is_string_operand(&self, e: &Expr) -> bool {
         matches!(self.infer_expr_type(e), Ok(t) if super::types::is_sic_string(&t))
     }
 
