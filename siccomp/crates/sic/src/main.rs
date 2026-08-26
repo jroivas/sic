@@ -144,6 +144,12 @@ struct Args {
     /// Passed through to the linker; implies position-independent code.
     #[arg(skip)]
     shared: bool,
+
+    /// `-static`: link statically. Passed through to the linker (so a module's
+    /// `lib<name>.a` is chosen over its `lib<name>.so`) and suppresses the
+    /// module-dir rpath (sic.md §"Imports").
+    #[arg(skip)]
+    static_link: bool,
 }
 
 /// The dependency-generation flags to hand to cpp. When the user didn't give a
@@ -188,6 +194,34 @@ fn parse_f_option(arg: &str) -> Option<(String, FOption)> {
 /// GCC/Clang-style target triple describing this build's host.
 fn target_triple() -> String {
     format!("{}-unknown-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Default directories the compiler searches for installed module manifests
+/// (`module_<name>.smod`) and their `lib<name>.{so,a}` — so `import std;` works
+/// with no flags (sic.md §"Imports"). In order: every entry of `$SIC_MODULE_PATH`
+/// (`:`-separated), then the compiler's relocatable sysroot relative to its own
+/// binary — `<exe_dir>/../lib/sic` and `<exe_dir>/lib/sic`. Consulted before `-I`
+/// and cwd. Only existing directories are returned.
+fn module_search_dirs() -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(p) = std::env::var("SIC_MODULE_PATH") {
+        for d in p.split(':').filter(|s| !s.is_empty()) {
+            dirs.push(d.to_string());
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin) = exe.parent() {
+            for rel in [PathBuf::from("../lib/sic"), PathBuf::from("lib/sic")] {
+                let d = bin.join(rel);
+                if let Ok(c) = fs::canonicalize(&d) {
+                    dirs.push(c.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    dirs.retain(|d| std::path::Path::new(d).is_dir());
+    dirs.dedup();
+    dirs
 }
 
 /// Handle GCC/Clang-style version queries that short-circuit compilation:
@@ -241,6 +275,7 @@ fn main() {
     let mut deps_only = false;
     let mut pthread = false;
     let mut shared = false;
+    let mut static_link = false;
     let mut argv: Vec<String> = Vec::new();
     // Expand `@file` response files (GCC/Clang convention): meson passes the huge
     // link command line as `@qemu-system-*.rsp`. Read and tokenize them into the
@@ -272,6 +307,11 @@ fn main() {
         } else if a == "-shared" {
             // Produce a shared object; pass through to the linker.
             shared = true;
+        } else if a == "-static" {
+            // Static link: pass through to the linker AND keep it in link order so
+            // `cc` prefers a module's `.a` over its `.so`.
+            static_link = true;
+            link_order.push(a);
         } else if a == "-std" {
             // Accept `-std c99` in addition to clap's `--std c99`.
             argv.push("--std".to_string());
@@ -394,6 +434,7 @@ fn main() {
     args.link_order = link_order;
     args.pthread = pthread;
     args.shared = shared;
+    args.static_link = static_link;
     args.deps_only = deps_only;
 
     if let Err(e) = run(&args) {
@@ -606,6 +647,7 @@ fn lower_tu(
     // sic modules: `import x;` searches the `-I` dirs for `module_x.smod` and the
     // manifest's triple is checked against this target (sic.md §"Imports").
     lowerer.set_include_dirs(args.includes.clone());
+    lowerer.set_module_dirs(module_search_dirs());
     lowerer.set_target_triple(target_triple());
     lowerer.lower(tu).map_err(|e| format!("{}", e).into())
 }
@@ -1012,6 +1054,19 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         match src_obj.get(tok.as_str()) {
             Some(obj) => { link.arg(obj); }
             None => { link.arg(tok); }
+        }
+    }
+
+    // Point the linker at every default module dir ($SIC_MODULE_PATH + the
+    // exe-relative sysroot) so a module found there (e.g. `import std;`) links
+    // against the `lib<name>.{so,a}` sitting next to its manifest, regardless of
+    // the absolute path baked into the manifest. For dynamic linking also embed an
+    // rpath so the produced binary finds the `.so` at run time; `-static` skips
+    // the rpath and resolves against the `.a` instead.
+    for dir in module_search_dirs() {
+        link.arg(format!("-L{}", dir));
+        if !args.static_link {
+            link.arg(format!("-Wl,-rpath,{}", dir));
         }
     }
 

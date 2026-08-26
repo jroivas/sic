@@ -56,6 +56,10 @@ pub struct Lowerer {
     pub imported_modules: HashMap<String, HashMap<String, (String, Type)>>,
     /// Directories searched for `module_<name>.smod` manifests (from `-I`).
     pub include_dirs: Vec<String>,
+    /// Default module search dirs (from `$SIC_MODULE_PATH` and the compiler's
+    /// exe-relative sysroot `<exe>/../lib/sic`), searched BEFORE `-I` and cwd so a
+    /// `import std;` resolves with no flags (sic.md §"Imports").
+    pub module_dirs: Vec<String>,
     /// Target triple this unit is being compiled for; a manifest whose `triple`
     /// differs is a hard error (sic.md §"Imports").
     pub target_triple: String,
@@ -131,6 +135,7 @@ impl Lowerer {
             imported_syms: HashMap::new(),
             imported_modules: HashMap::new(),
             include_dirs: Vec::new(),
+            module_dirs: Vec::new(),
             target_triple: String::new(),
             imported_links: Vec::new(),
             enum_defs: HashMap::new(),
@@ -158,6 +163,12 @@ impl Lowerer {
     /// `import` (from the driver's `-I` include dirs).
     pub fn set_include_dirs(&mut self, dirs: Vec<String>) {
         self.include_dirs = dirs;
+    }
+
+    /// Default module search dirs (env `$SIC_MODULE_PATH` + exe-relative sysroot),
+    /// consulted before `-I` and cwd (sic.md §"Imports").
+    pub fn set_module_dirs(&mut self, dirs: Vec<String>) {
+        self.module_dirs = dirs;
     }
 
     /// The target triple to enforce against imported manifests.
@@ -426,8 +437,10 @@ impl Lowerer {
         if !self.imported_modules.contains_key(module) {
             let file = format!("module_{}.smod", module);
             let mut found: Option<String> = None;
-            // Search: `-I` dirs first, then the current directory.
-            let mut dirs: Vec<String> = self.include_dirs.clone();
+            // Search: default module dirs ($SIC_MODULE_PATH + exe-relative sysroot)
+            // first, then `-I` dirs, then the current directory.
+            let mut dirs: Vec<String> = self.module_dirs.clone();
+            dirs.extend(self.include_dirs.iter().cloned());
             dirs.push(".".to_string());
             for dir in &dirs {
                 let path = std::path::Path::new(dir).join(&file);
