@@ -4023,13 +4023,20 @@ impl<'m> FuncCtx<'m> {
 
     /// Get-or-create the extern for an imported function symbol.
     fn module_extern(&mut self, symbol: &str, ty: &Type, sp: &crate::lexer::Span) -> Result<FuncRef> {
-        let ft = match ty {
+        let mut ft = match ty {
             Type::Function(ft) => (**ft).clone(),
             _ => return Err(CompileError::at(
                 format!("imported symbol '{}' is not a function", symbol),
                 sp.file.clone(), sp.line, sp.col,
             )),
         };
+        // A struct/union return uses the sret ABI: the callee's real IR signature has
+        // a hidden pointer as param 0 (the frontend prepends it for local functions).
+        // The stored export type is user-facing (no sret), so prepend it here so the
+        // extern's cranelift signature matches the definition across objects.
+        if super::ret_is_sret(&ft.ret, self.ptr_size()) {
+            ft.params.insert(0, Type::Pointer(Box::new(ft.ret.clone())));
+        }
         Ok(self.lowerer.module.func_ref_by_name(symbol).unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc { name: symbol.to_string(), sig: ft })
         }))
@@ -4436,7 +4443,26 @@ impl<'m> FuncCtx<'m> {
         // monomorph (sic.md §"Match").
         let param_types: Vec<Type> = match &func_expr.kind {
             ExprKind::Ident(name) => match self.lookup(name) {
-                Some(LookupResult::Func(fr)) => self.lowerer.module.func_sig(fr).params.clone(),
+                Some(LookupResult::Func(fr)) => {
+                    let sig = self.lowerer.module.func_sig(fr);
+                    let mut ps = sig.params.clone();
+                    // A struct/union return adds a hidden sret pointer as param 0;
+                    // drop it so `param_types` matches the user-facing arguments (and
+                    // `va_array` packing counts the fixed params correctly).
+                    if super::ret_is_sret(&sig.ret, self.ptr_size()) && !ps.is_empty() {
+                        ps.remove(0);
+                    }
+                    ps
+                }
+                _ => Vec::new(),
+            },
+            // Namespaced module call `mod.fn(...)` (e.g. `std.Fmt`): parameter types
+            // come from the imported module's registered export signature.
+            ExprKind::Field { base, name } => match &base.kind {
+                ExprKind::Ident(m) => self.lowerer.imported_modules.get(m)
+                    .and_then(|ex| ex.get(name))
+                    .and_then(|(_, t)| match t { Type::Function(ft) => Some(ft.params.clone()), _ => None })
+                    .unwrap_or_default(),
                 _ => Vec::new(),
             },
             _ => Vec::new(),
@@ -4589,10 +4615,12 @@ impl<'m> FuncCtx<'m> {
             let slot = self.alloc_val();
             self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
             let slot = Val::Local(slot);
-            let param_tys: Vec<Type> = self.lowerer.module.func_sig(fref).params.clone();
-            // Coerce user args against params[1..] (params[0] is the sret ptr).
+            // Coerce user args against the user-facing parameter types (`param_types`
+            // already has any hidden sret pointer stripped, so index directly by `i`
+            // — the raw sig's sret offset differs between direct and module calls).
+            let param_tys = param_types.clone();
             for (i, pval) in arg_vals.iter_mut().enumerate() {
-                if let Some(pty) = param_tys.get(i + 1) {
+                if let Some(pty) = param_tys.get(i) {
                     if matches!(pty, Type::Struct(_) | Type::Union(_)) {
                         if self.build_enum_arg(pval, pty, sp)? { continue; }
                         if self.is_sic() && super::types::is_sic_string(pty) {
@@ -5449,6 +5477,19 @@ impl<'m> FuncCtx<'m> {
                 if let ExprKind::Ident(name) = &func.kind {
                     if let Some(LookupResult::Func(fref)) = self.lookup(name) {
                         return Ok(self.lowerer.module.func_sig(fref).ret.clone());
+                    }
+                }
+                // Namespaced module call `mod.fn(...)`: the result type is the export's
+                // declared return (user-facing, no sret ptr). Without this a
+                // string-returning `std.Fmt(...)` defaults to i32 and its initializer
+                // mistakes the result for a `char*`.
+                if let ExprKind::Field { base, name } = &func.kind {
+                    if let ExprKind::Ident(m) = &base.kind {
+                        if let Some(Type::Function(ft)) = self.lowerer.imported_modules
+                            .get(m).and_then(|ex| ex.get(name)).map(|(_, t)| t)
+                        {
+                            return Ok(ft.ret.clone());
+                        }
                     }
                 }
                 let fty = self.infer_expr_type(func)?;
