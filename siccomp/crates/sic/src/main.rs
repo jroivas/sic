@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod bigint_runtime;
+mod std_lib;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -626,6 +627,19 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     Ok(ir_module)
 }
 
+/// Compile the shipped SIC std library ([`std_lib::STD_SIC`]) to an object, linked
+/// in when a unit uses `import std;` (sic.md std). Written to a temp `.sic` so it
+/// goes through the normal compile pipeline (`.sic` → sic-lang; the bigint/fixed
+/// runtime it uses is prepended by the preprocess step as usual).
+fn build_std_object(args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut src = tempfile::Builder::new().suffix(".sic").tempfile()?;
+    src.write_all(std_lib::STD_SIC.as_bytes())?;
+    src.flush()?;
+    let path = src.path().to_string_lossy().into_owned();
+    let ir = build_ir(&path, args)?;
+    compile_ir(&ir, args)
+}
+
 /// Codegen a lowered IR module to object-file bytes.
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut backend = CraneliftBackend::new()
@@ -921,6 +935,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // they can be folded into the final link line (sic.md §"Imports").
     let mut tmp_objs: Vec<tempfile::NamedTempFile> = Vec::new();
     let mut module_link_flags: Vec<String> = Vec::new();
+    let mut needs_std = false;
     for src in &sources {
         let mut tmp = tempfile::Builder::new().suffix(".o").tempfile()?;
         if is_assembly(src) {
@@ -932,8 +947,18 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             for l in &ir_module.imported_links {
                 if !module_link_flags.contains(l) { module_link_flags.push(l.clone()); }
             }
+            needs_std |= ir_module.std_imported;
         }
         tmp_objs.push(tmp);
+    }
+    // sic `import std;` (sic.md std): compile the shipped SIC std library to its own
+    // object and link it in (a static sic lib, compiled once here).
+    let mut std_tmp: Option<tempfile::NamedTempFile> = None;
+    if needs_std {
+        let obj = build_std_object(args)?;
+        let mut tmp = tempfile::Builder::new().suffix(".o").tempfile()?;
+        tmp.write_all(&obj)?;
+        std_tmp = Some(tmp);
     }
 
     let out_path = args.output.as_deref().unwrap_or("a.out");
@@ -974,6 +999,11 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // objects so the archive/library symbols they name resolve.
     for flag in &module_link_flags {
         link.arg(flag);
+    }
+
+    // The SIC std library object (only when `import std;` was used).
+    if let Some(tmp) = &std_tmp {
+        link.arg(tmp.path());
     }
 
     // Produce a shared object rather than an executable.

@@ -399,11 +399,26 @@ impl Lowerer {
     ) -> Result<()> {
         use crate::module_manifest::ModuleManifest;
 
-        // sic `import std;` (sic.md std): the blessed standard library — no manifest
-        // to resolve. Enable the `std.Print`/`Fmt` intrinsics and flag the driver to
-        // link the (separately compiled) std lib.
+        // sic `import std;` (sic.md std): the blessed standard library. No manifest —
+        // its signatures are known to the compiler; the SIC-written `module std;`
+        // (Fmt/Print/Println, symbols `std_*`) is compiled and linked by the driver
+        // when this flag is set. Register the namespaced exports so `std.Fmt(a, b)`
+        // resolves like any module call (and va_array packing triggers on the call).
         if module == "std" && sym.is_none() {
             self.std_imported = true;
+            let ps = self.ptr_size;
+            let strt = types::sic_string_type(ps);
+            let vat = types::va_array_type(ps);
+            let mk = |ret: Type, params: Vec<Type>| Type::Function(Box::new(
+                sic_ir::FunctionType { ret, params, variadic: false }));
+            let mut exports = HashMap::new();
+            exports.insert("Fmt".to_string(),
+                ("std_Fmt".to_string(), mk(strt.clone(), vec![strt.clone(), vat.clone()])));
+            exports.insert("Print".to_string(),
+                ("std_Print".to_string(), mk(Type::Void, vec![vat.clone()])));
+            exports.insert("Println".to_string(),
+                ("std_Println".to_string(), mk(Type::Void, vec![vat])));
+            self.imported_modules.insert("std".to_string(), exports);
             return Ok(());
         }
 

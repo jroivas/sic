@@ -136,6 +136,35 @@ else
     bad "c-consumer" "cc failed: $(cat err)"
 fi
 
+# 8. The `std` library (`import std;`): a plain SIC module shipped with the
+#    compiler and auto-linked when imported. `std.Fmt`/`std.Print`/`std.Println`
+#    are ordinary calls; formatting is done in SIC by dispatching on each arg's
+#    runtime type. Verified by both stdout and exit code (sic does the final link,
+#    so the std object is folded in automatically — no `-I`/manifest needed).
+cat > stduser.sic <<'EOF'
+import std;
+int main() {
+    string who = "World";
+    bigint meaning = 42;
+    fixed half = 0.5;
+    string f = std.Fmt("Hello {}! Meaning {}! Half {}!", who, meaning, half);
+    std.Println(f);
+    std.Println("i=", 7, " s=", who, " f=", 3.5);
+    string braces = std.Fmt("{{}} {}", 1);        // literal {} then 1
+    std.Println(braces);
+    return (int) f.length;                          // "Hello World! Meaning 42! Half 0.500000000000000000!"
+}
+EOF
+if "$SIC" -x sic stduser.sic -o stduser 2>err; then
+    out="$(./stduser)"; got=$?
+    want=$'Hello World! Meaning 42! Half 0.500000000000000000!\ni=7 s=World f=3.5\n{} 1'
+    if [ "$out" = "$want" ]; then ok "std-output"; else bad "std-output" "got:\n$out"; fi
+    # f.length is the byte length of the formatted greeting.
+    [ "$got" -eq 51 ] && ok "std-exit" || bad "std-exit" "expected 51, got $got"
+else
+    bad "std-run" "compile/link failed: $(cat err)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
