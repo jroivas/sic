@@ -3868,6 +3868,52 @@ impl<'m> FuncCtx<'m> {
         Ok(Constant::zero())
     }
 
+    /// Lower `std.Printf("… {} … {} …", a, b)` (sic.md std): a compile-time
+    /// literal format string with `{}` placeholders (Python/Rust-style; `{{`/`}}`
+    /// are literal braces), each substituted by the next argument printed by its
+    /// static type. The format string must be a literal.
+    fn lower_std_printf(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let (fmt, rest) = args.split_first().ok_or_else(|| CompileError::at(
+            "std.Printf needs a format string".to_string(), sp.file.clone(), sp.line, sp.col))?;
+        let ExprKind::StringLit(f) = &fmt.kind else {
+            return Err(CompileError::at(
+                "std.Printf: the format string must be a string literal".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        };
+        let f = f.clone();
+        let mut ai = 0usize;
+        let mut lit = String::new();
+        let mut it = f.chars().peekable();
+        while let Some(c) = it.next() {
+            match c {
+                '{' if it.peek() == Some(&'{') => { it.next(); lit.push('{'); }
+                '}' if it.peek() == Some(&'}') => { it.next(); lit.push('}'); }
+                '{' => {
+                    // A `{}` placeholder (format specs are a later addition).
+                    if it.peek() == Some(&'}') { it.next(); } else {
+                        return Err(CompileError::at(
+                            "std.Printf: only `{}` placeholders are supported yet".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
+                    if !lit.is_empty() { self.emit_print_literal(&lit)?; lit.clear(); }
+                    let a = rest.get(ai).ok_or_else(|| CompileError::at(
+                        "std.Printf: not enough arguments for the format string".to_string(),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    self.emit_print_arg(a)?;
+                    ai += 1;
+                }
+                _ => lit.push(c),
+            }
+        }
+        if !lit.is_empty() { self.emit_print_literal(&lit)?; }
+        if ai < rest.len() {
+            return Err(CompileError::at(
+                "std.Printf: too many arguments for the format string".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        Ok(Constant::zero())
+    }
+
     /// Write a fixed literal string as part of `std.Print` output (delimiters).
     fn emit_print_literal(&mut self, s: &str) -> Result<()> {
         let g = self.emit_cstring(s);
@@ -3987,11 +4033,14 @@ impl<'m> FuncCtx<'m> {
         if self.is_sic() {
             if let ExprKind::Field { base, name } = &func_expr.kind {
                 if matches!(&base.kind, ExprKind::Ident(m) if m == "std")
-                    && matches!(name.as_str(), "Print" | "Println")
+                    && matches!(name.as_str(), "Print" | "Println" | "Printf")
                     && !self.lowerer.imported_modules.contains_key("std")
                     && !matches!(self.lookup("std"),
                         Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
                 {
+                    if name == "Printf" {
+                        return self.lower_std_printf(args, sp);
+                    }
                     return self.lower_std_print(name == "Println", args);
                 }
             }

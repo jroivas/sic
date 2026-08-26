@@ -58,6 +58,6 @@ __attribute__((weak)) void __sic_print_nl(void) { write(1, "\n", 1); }
 /// signal to prepend [`STD_RUNTIME`]. A cheap substring test is enough: the
 /// tokens `std.Print` only appear where the intrinsic is called.
 pub fn uses_std(src: &str) -> bool {
-    src.contains("std.Print") || src.contains("std.Println")
-        || src.contains("std.Eprint") || src.contains("std.Eprintln")
+    src.contains("std.Print")   // covers Print / Println / Printf
+        || src.contains("std.Eprint")
 }
