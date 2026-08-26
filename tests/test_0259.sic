@@ -1,0 +1,25 @@
+// sic `any` (sic.md std): a boxed { typeid, value }. Box (implicit or `(any)`),
+// downcast `(T)x`, and dynamic `type(x)` reading the runtime type. Verified by
+// exit code.
+#include <string.h>
+int main() {
+    any a = 5;                          // implicit box
+    if (!(type(a) == i32) || (int)a != 5) return 1;
+
+    any b = (any)2.5;                   // explicit box
+    if (!(type(b) == f64) || (double)b != 2.5) return 2;
+
+    string h = "hello"; any s = h;
+    if (!(type(s) == string)) return 3;
+    string back = (string)s;
+    if (back != "hello" || back.length != 5) return 4;
+
+    bigint big = 123456789012345678901234567890; any g = big;
+    if (!(type(g) == bigint)) return 5;
+    if (strcmp(((bigint)g).str, "123456789012345678901234567890") != 0) return 6;
+
+    fixed<10,2> fx = 1; fx = fx / 4; any q = fx;   // 0.25
+    if (strcmp(((fixed<10,2>)q).str, "0.25") != 0) return 7;
+
+    return 42;
+}

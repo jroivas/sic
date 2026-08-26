@@ -205,6 +205,93 @@ impl<'m> FuncCtx<'m> {
         self.emit_type_info(&name, kind, size)
     }
 
+    /// Box a value into an `any` (sic.md std): `{ ty = typeid(static type); slot =
+    /// the value }` — the slot holds a scalar's bits (int zero/sign-extended, float
+    /// bit-cast) or a pointer for an aggregate (string/fixed/bigint/…). Returns a
+    /// pointer to the `any` struct (aggregate-by-pointer rvalue); an already-`any`
+    /// value passes through.
+    pub(super) fn box_any(&mut self, e: &Expr) -> Result<Val> {
+        let ty = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
+        if super::types::is_any(&ty) { return self.lower_expr(e); }
+        let sp = e.span.clone();
+        let tyval = self.lower_type_value(&ty);
+        let slot = self.box_slot(e, &ty)?;
+        let any_ty = super::types::any_type();
+        let p = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: p, ty: any_ty.clone(), align: None });
+        self.val_types.insert(p.0, any_ty.clone());
+        let ty_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "ty", false, &sp)?;
+        self.store_lvalue(&ty_lv, tyval)?;
+        let slot_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "slot", false, &sp)?;
+        self.store_lvalue(&slot_lv, slot)?;
+        Ok(Val::Local(p))
+    }
+
+    /// The 64-bit `slot` stored in an `any` for a value of type `ty`.
+    fn box_slot(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
+        // Store the value's address. `fixed`/`bigint`/pointer rvalues are already a
+        // pointer-typed value; `string`/tuple/struct rvalues are the STRUCT type but
+        // a pointer at the machine level, so take their address via
+        // `lower_aggregate_ptr` (a real pointer-typed value) before reinterpreting.
+        let is_ptr_val = super::types::is_fixed(ty) || super::types::is_bigint(ty)
+            || matches!(ty, Type::Pointer(_));
+        let is_aggr = super::types::is_sic_string(ty) || super::types::is_tuple(ty)
+            || matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. });
+        if is_ptr_val || is_aggr {
+            let v = if is_ptr_val { self.lower_expr(e)? } else { self.lower_aggregate_ptr(e)? };
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Cast { dest, op: CastOp::BitCast, val: v, to_ty: Type::u64() });
+            self.val_types.insert(dest.0, Type::u64());
+            return Ok(Val::Local(dest));
+        }
+        let v = self.lower_expr(e)?;
+        if matches!(ty, Type::Float32 | Type::Float64 | Type::Float80) {
+            // Reinterpret the float's bits as u64 via a memory round-trip (a
+            // float↔int BitCast converts the value here, not the bits).
+            let d = self.coerce(v, &Type::Float64)?;
+            let mem = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: mem, ty: Type::Float64, align: None });
+            self.push_instr(Instr::Store { val: d, ptr: Val::Local(mem) });
+            let out = self.alloc_val();
+            self.push_instr(Instr::Load { dest: out, ptr: Val::Local(mem), ty: Type::u64() });
+            self.val_types.insert(out.0, Type::u64());
+            return Ok(Val::Local(out));
+        }
+        self.coerce(v, &Type::u64()) // int / bool / char → zero/sign-extend
+    }
+
+    /// Downcast an `any` value to `target` (sic.md std): read the `slot` and
+    /// reinterpret it as the target — a scalar's bits (int truncate, float bit-cast)
+    /// or an aggregate pointer (string/fixed/bigint/…). No runtime type check yet.
+    fn unbox_any(&mut self, inner: &Expr, target: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let p = self.lower_aggregate_ptr(inner)?;
+        let slot_lv = self.field_ptr_from(LValue::plain(p, super::types::any_type()), "slot", false, sp)?;
+        let slot = self.load_lvalue(&slot_lv)?; // u64
+        if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
+            // Reinterpret the u64 bits as a float via a memory round-trip.
+            let mem = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: mem, ty: Type::u64(), align: None });
+            self.push_instr(Instr::Store { val: slot, ptr: Val::Local(mem) });
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Load { dest, ptr: Val::Local(mem), ty: Type::Float64 });
+            self.val_types.insert(dest.0, Type::Float64);
+            return self.coerce(Val::Local(dest), target);
+        }
+        // Aggregates / pointers: the slot holds the value's address; reinterpret it
+        // as a pointer and label it as the value type (aggregate-by-pointer rvalue).
+        if super::types::is_sic_string(target) || super::types::is_fixed(target)
+            || super::types::is_bigint(target) || super::types::is_tuple(target)
+            || matches!(target, Type::Pointer(_) | Type::Struct(_) | Type::Union(_))
+        {
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Cast { dest, op: CastOp::BitCast, val: slot, to_ty: Type::void_ptr() });
+            self.val_types.insert(dest.0, target.clone());
+            return Ok(Val::Local(dest));
+        }
+        // Scalar integer / bool / char.
+        self.coerce(slot, target)
+    }
+
     /// Lower `e` with `ty` as the expected/target type (sic.md §"Match") — lets a
     /// generic constructor `Option::Some(5)` / `None` resolve to its monomorph.
     /// Saves/restores the previous hint so nesting is safe.
@@ -251,6 +338,13 @@ impl<'m> FuncCtx<'m> {
             // decimal literal reports its natural `fixed<I,F>` (matching typestr).
             ExprKind::TypeId(inner) => {
                 let ty = self.infer_expr_type(inner).unwrap_or(Type::i32());
+                // `type(anyval)` is DYNAMIC — read the boxed value's runtime `ty`
+                // field (sic.md std) — unlike a statically-typed operand.
+                if super::types::is_any(&ty) {
+                    let p = self.lower_aggregate_ptr(inner)?;
+                    let lv = self.field_ptr_from(LValue::plain(p, super::types::any_type()), "ty", false, &expr.span)?;
+                    return self.load_lvalue(&lv);
+                }
                 let name = self.type_name_string(inner, &ty);
                 let kind = super::types::type_kind(&ty);
                 let size = ty.size_of(self.ptr_size()) as u32;
@@ -452,6 +546,14 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Cast { ty, expr: inner } => {
                 let target = self.lower_type(ty)?;
+                // sic `any` (sic.md std): `(any)x` boxes; `(T)anyval` downcasts
+                // (reads the slot back out as T).
+                if self.is_sic() && super::types::is_any(&target) {
+                    return self.box_any(inner);
+                }
+                if self.is_sic() && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_any(&t)) {
+                    return self.unbox_any(inner, &target, &expr.span);
+                }
                 // sic: `(int)enum_value` yields the discriminant (sic.md §"Match").
                 if self.is_sic() && matches!(target, Type::Int { .. } | Type::Bool) {
                     if let Ok(src_ty) = self.infer_expr_type(inner) {

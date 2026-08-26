@@ -1224,6 +1224,18 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Store { val: v, ptr });
                 return Ok(());
             }
+            // sic `any a = <expr>` (sic.md std): box the value unless the RHS is
+            // already an `any` (then it copies below like any aggregate).
+            Initializer::Expr(e)
+                if self.is_sic() && super::types::is_any(ty)
+                    && !matches!(self.infer_expr_type(e), Ok(t) if super::types::is_any(&t)) =>
+            {
+                let boxed = self.box_any(e)?; // pointer to a fresh `any` struct
+                let size = ty.size_of(self.ptr_size());
+                let align = ty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: ptr, src: boxed, size, align });
+                return Ok(());
+            }
             Initializer::Expr(e) => {
                 // `T v = <aggregate expr>` (e.g. a compound literal, a struct
                 // returned by value, or a `vector_size` array from an element-wise

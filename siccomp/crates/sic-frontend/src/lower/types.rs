@@ -275,6 +275,29 @@ pub fn is_type_info(t: &Type) -> bool {
         if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(TYPEINFO_MARKER)))
 }
 
+// ─── `any`: a boxed dynamically-typed value (sic.md std) ──────────────────────
+//
+// `any` is a 16-byte value `{ const __sic_type_info* ty; u64 slot }`: `ty` is the
+// boxed value's runtime type (so `type(x)` reads it), and `slot` holds the value —
+// a scalar (int/float bits) or a pointer to an aggregate (string/fixed/bigint/…).
+// It's the element type of a `va_array`. Handled as an aggregate-by-pointer rvalue
+// like `string`/tuples.
+
+pub const ANY_MARKER: &str = "__sic_any";
+
+/// The `any` value type — a `{ ty; slot }` struct (16 bytes).
+pub fn any_type() -> Type {
+    Type::Struct(StructType::plain(Some(ANY_MARKER.to_string()), vec![
+        ("ty".to_string(), type_info_type()),
+        ("slot".to_string(), Type::Int { bits: 64, signed: false }),
+    ], false))
+}
+
+/// True if `t` is the `any` value struct.
+pub fn is_any(t: &Type) -> bool {
+    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(ANY_MARKER))
+}
+
 /// The `kind` discriminant stored in a `__sic_type_info` record — a coarse
 /// classification the runtime formatter switches on (sic.md §"RTTI").
 pub fn type_kind(t: &Type) -> u32 {
@@ -431,6 +454,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 // sic native string: a non-owning slice `{ char* data; usize size }`
                 // (sic.md §"Built-in string").
                 "string"          => return Ok(sic_string_type(ptr_size)),
+                // sic `any`: a boxed dynamically-typed value (sic.md std).
+                "any"             => return Ok(any_type()),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),

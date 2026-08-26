@@ -539,6 +539,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `fixed` is the built-in fixed-point type (sic.md §"Built-in fixed
             // point"); an ordinary identifier in C.
             "fixed" => return TokenKind::TypeName,
+            // `any` is a boxed dynamically-typed value `{ typeid, value }` (sic.md
+            // std) — the element type of a `va_array`; ordinary identifier in C.
+            "any" => return TokenKind::TypeName,
             // `fallthrough` is an explicit switch-case terminator in sic
             // (sic.md §"Switch - case"); it is an ordinary identifier in C.
             "fallthrough" => return TokenKind::Fallthrough,
