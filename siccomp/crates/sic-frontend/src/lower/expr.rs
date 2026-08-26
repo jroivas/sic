@@ -1565,6 +1565,18 @@ impl<'m> FuncCtx<'m> {
             return Ok((data, Constant::int(s.len() as i64)));
         }
         let ty = self.infer_expr_type(e)?;
+        // A `char*` / `char[]` operand is a NUL-terminated C string: its parts are
+        // the pointer and `strlen` (so `str + argv[1]` / `str + buf` work, not only
+        // `str + "literal"`).
+        let is_cstr = matches!(&ty, Type::Pointer(inner) if matches!(inner.as_ref(), Type::Int { bits: 8, .. }))
+            || matches!(&ty, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }));
+        if !super::types::is_sic_string(&ty) && is_cstr {
+            let v = self.lower_expr(e)?;
+            let cp = self.coerce(v, &Type::char_ptr())?;
+            let len = self.emit_strlen(cp.clone())?;
+            let len = self.coerce(len, &Type::i64())?;
+            return Ok((cp, len));
+        }
         if !super::types::is_sic_string(&ty) {
             return Err(CompileError::at(
                 "operand of string `+` is neither a string nor a string literal".to_string(),
