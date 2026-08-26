@@ -3,34 +3,34 @@
 // `sic --emit-module`, installed into the compiler's module sysroot, and linked
 // in only when a unit says `import std;` (dynamically by default, or statically
 // under `-static`). Nothing here is special to the compiler — `std.Fmt(a, b)` is a
-// normal call to the function below, and all formatting is done in SIC by
-// dispatching on each argument's runtime type (`type(arg).kind`) and taking its
-// native representation (`.str` for bigint/fixed).
+// normal call to the function below, and all formatting is done in SIC by matching
+// on each argument's runtime kind and taking its native representation.
 module std;
 
 extern int snprintf(char *s, unsigned long n, char *fmt, ...);
 extern long write(int fd, void *buf, unsigned long n);
 
-// One boxed argument formatted as an OWNED native string. Built by concatenation
-// (`x + ""`) so the result owns its bytes — a view of a local buffer would dangle.
-// Dispatch on the value's runtime kind (see the compiler's `type_kind`).
+// The runtime kind of a value's type (`type(x).kind`), in the compiler's order.
+enum Kind { VOID, BOOL, INT, UINT, F32, F64, F80, PTR, CSTR, STR, FIXED, ARRAY, STRUCT, UNION, ENUM, TUPLE, BIGINT, TYPE };
+
+// One boxed argument formatted as an OWNED native string. `.dup` makes an owned
+// heap copy, so a result built in a local `char` buffer (or a `.str` that is freed
+// at scope exit) safely outlives this function — returning the view would dangle.
 static string arg_str(any x) {
-    u32 k = type(x).kind;
-    // `s + ""` forces an OWNED copy (a view of a local buffer would dangle). A
-    // `char*` is first bound to a `string` (a view) so `+` reads it as a string,
-    // not pointer arithmetic.
-    if (k == 9) return (string)x + "";                                              // STR
-    if (k == 8) { string sc = (char *)x; return sc + ""; }                          // CSTR
-    // `.str` on bigint/fixed is auto-freed at scope exit (do NOT free it here); the
-    // `+ ""` makes an owned copy that outlives this function.
-    if (k == 16) { char *s = ((bigint)x).str; string ss = s; return ss + ""; } // BIGINT
-    if (k == 10) { char *s = ((fixed)x).str; string ss = s; return ss + ""; }  // FIXED
-    if (k == 1) { if ((bool)x) return "true"; return "false"; }                      // BOOL
-    if (k == 2) { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); string sb = b; return sb + ""; }        // INT
-    if (k == 3) { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); string sb = b; return sb + ""; } // UINT
-    if (k == 4 || k == 5 || k == 6) { char b[64]; snprintf(b, 64, "%g", (double)x); string sb = b; return sb + ""; } // FLOAT
-    if (k == 7) { char b[32]; snprintf(b, 32, "%p", (void *)x); string sb = b; return sb + ""; }       // PTR
-    return "<?>";
+    switch (type(x).kind) {
+        case STR:    return ((string)x).dup;
+        case CSTR:   return ((char *)x).dup;
+        case BIGINT: return ((bigint)x).str.dup;   // `.str` is auto-freed at scope exit
+        case FIXED:  return ((fixed)x).str.dup;
+        case BOOL:   if ((bool)x) return "true"; return "false";
+        case INT:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b.dup; }
+        case UINT: { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); return b.dup; }
+        case F32: fallthrough;
+        case F64: fallthrough;
+        case F80:  { char b[64]; snprintf(b, 64, "%g", (double)x); return b.dup; }
+        case PTR:  { char b[32]; snprintf(b, 32, "%p", (void *)x); return b.dup; }
+        default:     return "<?>";
+    }
 }
 
 // `Fmt("… {} …", a, b)` — `{}` placeholders (Python/Rust-style; `{{`/`}}` are
