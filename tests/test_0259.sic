@@ -1,0 +1,32 @@
+// sic std.Print / std.Println (sic.md std): type-directed native printing —
+// each argument formatted by its static type, no format string. Correctness of
+// the emitted text is checked by capturing it into a pipe and comparing; here we
+// at least exercise every writer path and verify the program runs cleanly.
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main() {
+    // Redirect stdout to a pipe so we can read back what std.Print wrote.
+    int fd[2];
+    if (pipe(fd) != 0) return 1;
+    int saved = dup(1);
+    dup2(fd[1], 1);
+
+    std.Print("s=", "abc", " i=", 42, " n=", -7, " f=", 2.5);
+    string v = "sic";
+    std.Print(" str=", v);
+    fixed<10,2> x = 1; x = x / 4;          // 0.25
+    std.Println(" fx=", x);
+
+    fflush(stdout);
+    dup2(saved, 1);                         // restore real stdout
+    close(fd[1]);
+
+    char buf[256]; int n = (int)read(fd[0], buf, sizeof buf - 1);
+    buf[n < 0 ? 0 : n] = 0;
+
+    const char* want = "s=abc i=42 n=-7 f=2.5 str=sic fx=0.25\n";
+    if (strcmp(buf, want) != 0) { fprintf(stderr, "got [%s]\n", buf); return 2; }
+    return 42;
+}

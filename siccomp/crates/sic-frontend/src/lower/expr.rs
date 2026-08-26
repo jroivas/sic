@@ -3855,7 +3855,99 @@ impl<'m> FuncCtx<'m> {
         }))
     }
 
+    /// Lower `std.Print(a, b, …)` / `std.Println(…)` (sic.md std): emit a
+    /// per-argument writer call chosen by each argument's static type, then a
+    /// newline for `Println`. Returns `void` (0).
+    fn lower_std_print(&mut self, newline: bool, args: &[Expr]) -> Result<Val> {
+        for a in args {
+            self.emit_print_arg(a)?;
+        }
+        if newline {
+            self.emit_bigint_call("__sic_print_nl", vec![], Type::Void)?;
+        }
+        Ok(Constant::zero())
+    }
+
+    /// Emit the type-directed writer call for one `std.Print` argument.
+    fn emit_print_arg(&mut self, a: &Expr) -> Result<()> {
+        let ty = self.infer_expr_type(a).unwrap_or_else(|_| Type::i32());
+        // string / slice → write the bytes directly (no NUL needed).
+        if super::types::is_sic_string(&ty) {
+            let (data, size) = self.string_operand_parts(a)?;
+            self.emit_bigint_call("__sic_print_str", vec![data, size], Type::Void)?;
+            return Ok(());
+        }
+        // fixed → its decimal string at the declared display precision.
+        if super::types::is_fixed(&ty) {
+            let f = self.fixed_expr_dims(a).map(|d| d.1).filter(|&f| f > 0)
+                .unwrap_or(Self::FIXED_DEFAULT_F);
+            let (r, _, _) = self.fixed_operand(a)?;
+            let dec = self.coerce(Constant::int(f as i64), &Type::i32())?;
+            self.emit_bigint_call("__sic_print_fixed", vec![r, dec], Type::Void)?;
+            return Ok(());
+        }
+        // bigint → its decimal string (a fresh malloc'd char*, freed after).
+        if super::types::is_bigint(&ty) {
+            let b = self.to_bigint(a)?;
+            let s = self.emit_bigint_call("__sic_bi_to_str", vec![b], Type::char_ptr())?;
+            self.emit_bigint_call("__sic_print_cstr", vec![s.clone()], Type::Void)?;
+            self.emit_free(s)?;
+            return Ok(());
+        }
+        let v = self.lower_expr(a)?;
+        match &ty {
+            Type::Bool => {
+                let b = self.coerce(v, &Type::i64())?;
+                self.emit_bigint_call("__sic_print_bool", vec![b], Type::Void)?;
+            }
+            Type::Float32 | Type::Float64 | Type::Float80 => {
+                let d = self.coerce(v, &Type::Float64)?;
+                self.emit_bigint_call("__sic_print_f64", vec![d], Type::Void)?;
+            }
+            // `char*` prints as a C string; any other pointer as an address.
+            Type::Pointer(inner) if matches!(inner.as_ref(), Type::Int { bits: 8, .. }) => {
+                let p = self.coerce(v, &Type::char_ptr())?;
+                self.emit_bigint_call("__sic_print_cstr", vec![p], Type::Void)?;
+            }
+            Type::Pointer(_) => {
+                let p = self.coerce(v, &Type::void_ptr())?;
+                self.emit_bigint_call("__sic_print_ptr", vec![p], Type::Void)?;
+            }
+            Type::Int { signed: false, .. } => {
+                let u = self.coerce(v, &Type::u64())?;
+                self.emit_bigint_call("__sic_print_u64", vec![u], Type::Void)?;
+            }
+            Type::Int { .. } => {
+                let i = self.coerce(v, &Type::i64())?;
+                self.emit_bigint_call("__sic_print_i64", vec![i], Type::Void)?;
+            }
+            // Aggregates (struct/array/tuple/enum) are not yet printable natively —
+            // fall back to the type name so output is still legible.
+            _ => {
+                let name = self.type_name_of(&ty);
+                let s = self.emit_cstring(&format!("<{}>", name));
+                self.emit_bigint_call("__sic_print_cstr", vec![s], Type::Void)?;
+            }
+        }
+        Ok(())
+    }
+
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // sic `std.Print(…)` / `std.Println(…)` (sic.md std): a compiler intrinsic
+        // that prints each argument by its static type — no format string. Only when
+        // `std` isn't a real variable/module in scope.
+        if self.is_sic() {
+            if let ExprKind::Field { base, name } = &func_expr.kind {
+                if matches!(&base.kind, ExprKind::Ident(m) if m == "std")
+                    && matches!(name.as_str(), "Print" | "Println")
+                    && !self.lowerer.imported_modules.contains_key("std")
+                    && !matches!(self.lookup("std"),
+                        Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
+                {
+                    return self.lower_std_print(name == "Println", args);
+                }
+            }
+        }
         // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
         // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
         if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
