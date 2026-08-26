@@ -13,14 +13,16 @@ extern long write(int fd, void *buf, unsigned long n);
 // The runtime kind of a value's type (`type(x).kind`), in the compiler's order.
 enum Kind { VOID, BOOL, INT, UINT, F32, F64, F80, PTR, CSTR, STR, FIXED, ARRAY, STRUCT, UNION, ENUM, TUPLE, BIGINT, TYPE };
 
-// One boxed argument formatted as an OWNED native string. `.dup` makes an owned
-// heap copy, so a result built in a local `char` buffer (or a `.str` that is freed
-// at scope exit) safely outlives this function — returning the view would dangle.
+// One argument as a `string` the caller can read. A `string`/`char*` argument is
+// BORROWED — returned as a descriptor over the caller's own bytes, never copied
+// (move semantics: the wrapper travels, the contents don't). The other kinds have
+// no persistent string to borrow, so they format into a local buffer (or take a
+// `.str` that is freed at scope exit) and `.dup` an owned copy that outlives it.
 static string arg_str(any x) {
     switch (type(x).kind) {
-        case STR:    return ((string)x).dup;
-        case CSTR:   return ((char *)x).dup;
-        case BIGINT: return ((bigint)x).str.dup;   // `.str` is auto-freed at scope exit
+        case STR:    return (string)x;                    // borrow — no content copy
+        case CSTR:   { string s = (char *)x; return s; }  // borrow (view) — no content copy
+        case BIGINT: return ((bigint)x).str.dup;          // `.str` is auto-freed at scope exit
         case FIXED:  return ((fixed)x).str.dup;
         case BOOL:   if ((bool)x) return "true"; return "false";
         case INT:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b.dup; }
@@ -55,20 +57,18 @@ string Fmt(string fmt, va_array args) {
     return result;
 }
 
-// `Print(a, b, …)` — format each argument (no format string) and write to stdout.
+// `Print(a, b, …)` — format each argument (no format string) and write it to
+// stdout. Each piece is written straight from its bytes (a borrowed `string`/
+// `char*` argument is never copied — its data goes to `write` directly).
 int Print(va_array args) {
-    string s = "";
     u64 i = 0;
-    while (i < args.length) { s = s + arg_str(args[i]); i = i + 1; }
-    write(1, s.ptr, s.size);
+    while (i < args.length) { string p = arg_str(args[i]); write(1, p.ptr, p.size); i = i + 1; }
     return 0;
 }
 
 int Println(va_array args) {
-    string s = "";
     u64 i = 0;
-    while (i < args.length) { s = s + arg_str(args[i]); i = i + 1; }
-    s = s + "\n";
-    write(1, s.ptr, s.size);
+    while (i < args.length) { string p = arg_str(args[i]); write(1, p.ptr, p.size); i = i + 1; }
+    write(1, "\n", 1);
     return 0;
 }
