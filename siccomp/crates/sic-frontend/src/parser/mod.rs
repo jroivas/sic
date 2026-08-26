@@ -2178,6 +2178,11 @@ impl Parser {
                 let v: i32 = text.parse().unwrap_or(0);
                 Ok(Expr::new(ExprKind::CharLit(v), sp))
             }
+            TokenKind::BoolLit => {
+                // sic `true`/`false` — lexed as text "1"/"0", typed `bool`.
+                let text = self.advance().text.clone();
+                Ok(Expr::new(ExprKind::BoolLit(text == "1"), sp))
+            }
             TokenKind::Ident => {
                 let name = self.advance().text.clone();
                 // Handle va builtins

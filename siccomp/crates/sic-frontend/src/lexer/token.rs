@@ -31,6 +31,7 @@ pub enum TokenKind {
     FloatLit,
     StringLit,
     CharLit,
+    BoolLit,     // sic: `true`/`false` typed as `bool` (text "1"/"0")
 
     // --- Identifiers / type names ---
     Ident,

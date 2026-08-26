@@ -149,7 +149,7 @@ int main() {
     fixed half = 0.5;
     string f = std.Fmt("Hello {}! Meaning {}! Half {}!", who, meaning, half);
     std.Println(f);
-    std.Println("i=", 7, " s=", who, " f=", 3.5);
+    std.Println("i=", 7, " s=", who, " f=", 3.5, " b=", true, " ", false);
     string braces = std.Fmt("{{}} {}", 1);        // literal {} then 1
     std.Println(braces);
     return (int) f.length;                          // "Hello World! Meaning 42! Half 0.500000000000000000!"
@@ -157,7 +157,7 @@ int main() {
 EOF
 if "$SIC" -x sic stduser.sic -o stduser 2>err; then
     out="$(./stduser)"; got=$?
-    want=$'Hello World! Meaning 42! Half 0.500000000000000000!\ni=7 s=World f=3.5\n{} 1'
+    want=$'Hello World! Meaning 42! Half 0.500000000000000000!\ni=7 s=World f=3.5 b=true false\n{} 1'
     if [ "$out" = "$want" ]; then ok "std-output"; else bad "std-output" "got:\n$out"; fi
     # f.length is the byte length of the formatted greeting.
     [ "$got" -eq 51 ] && ok "std-exit" || bad "std-exit" "expected 51, got $got"

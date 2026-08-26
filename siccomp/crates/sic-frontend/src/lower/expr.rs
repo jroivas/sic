@@ -380,6 +380,9 @@ impl<'m> FuncCtx<'m> {
                 let c = Constant::uint(*v);
                 if *is64 { self.coerce(c, &Type::Int { bits: 64, signed: false }) } else { Ok(c) }
             }
+            // sic `true`/`false`: a `bool`-typed constant (its `val_type` is `Bool`).
+            // Any conversion to int happens later at a use site via `coerce`.
+            ExprKind::BoolLit(b) => Ok(Val::Const(Constant::Bool(*b))),
             ExprKind::FloatLit(v) => Ok(Val::Const(Constant::Float(*v))),
             // A plain decimal literal in a non-fixed context is a `double` — parse
             // its exact text to f64. (A `fixed` binding intercepts it earlier and
@@ -5288,6 +5291,8 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::OffsetOf { .. } => Ok(Type::u64()),
             ExprKind::CharLit(_) => Ok(Type::i32()),
+            // sic `true`/`false` is `bool` (so `any b = true` boxes with BOOL kind).
+            ExprKind::BoolLit(_) => Ok(Type::Bool),
             ExprKind::IntLit(_, is64) => Ok(if *is64 { Type::i64() } else { Type::i32() }),
             ExprKind::UIntLit(_, is64) => Ok(if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
             ExprKind::BigIntLit(_) => Ok(super::types::bigint_type()),

@@ -322,6 +322,10 @@ pub enum ExprKind {
     /// `L`/`LL` suffix or a value that doesn't fit any 32-bit type).
     IntLit(i64, bool),
     UIntLit(u64, bool),
+    /// sic-only: a `bool` literal (`true`/`false`), typed `bool` (sic.md §"Types").
+    /// Kept `bool` through inference; converted to int only at a use site so it
+    /// never silently mixes with integers and boxes into `any` with the BOOL type.
+    BoolLit(bool),
     /// sic-only: a decimal integer literal too large for `u64` (sic.md §"Integer
     /// sizes"). Carries the digit string (with optional sign) for the bigint
     /// runtime to parse; only meaningful in a `bigint` context.

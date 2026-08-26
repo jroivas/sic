@@ -2152,6 +2152,7 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
             Ok(0)
         }
         ExprKind::UIntLit(v, _) => Ok(*v as i64),
+        ExprKind::BoolLit(b) => Ok(*b as i64),
         ExprKind::CharLit(v) => Ok(*v as i64),
         ExprKind::Ident(name) => {
             enum_consts.get(name.as_str()).copied().ok_or_else(|| {
@@ -2542,7 +2543,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         OptField { base, .. } => collect_expr_names(base, out),
         // `typeid(e)` inspects only the type — `e` is never evaluated.
         TypeId(_) => {}
-        IntLit(..) | UIntLit(..) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
+        IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeIdOf(_) => {}
     }
 }

@@ -32,12 +32,12 @@ static string arg_str(any x) {
     // `+ ""` makes an owned copy that outlives this function.
     if (k == 16) { char *s = ((bigint)x).str; string ss = s; return ss + ""; } // BIGINT
     if (k == 10) { char *s = ((fixed)x).str; string ss = s; return ss + ""; }  // FIXED
-    if (k == 1) { if ((bool)x) return "true" + ""; return "false" + ""; }           // BOOL
+    if (k == 1) { if ((bool)x) return "true"; return "false"; }                      // BOOL
     if (k == 2) { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); string sb = b; return sb + ""; }        // INT
     if (k == 3) { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); string sb = b; return sb + ""; } // UINT
     if (k == 4 || k == 5 || k == 6) { char b[64]; snprintf(b, 64, "%g", (double)x); string sb = b; return sb + ""; } // FLOAT
     if (k == 7) { char b[32]; snprintf(b, 32, "%p", (void *)x); string sb = b; return sb + ""; }       // PTR
-    return "<?>" + "";
+    return "<?>";
 }
 
 // `Fmt("… {} …", a, b)` — `{}` placeholders (Python/Rust-style; `{{`/`}}` are

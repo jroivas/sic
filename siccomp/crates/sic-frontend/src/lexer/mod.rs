@@ -214,9 +214,13 @@ impl Lexer {
         while self.pos < self.src.len() && (self.src[self.pos].is_alphanumeric() || self.src[self.pos] == '_') {
             text.push(self.advance());
         }
-        // C23 boolean literals are keywords equivalent to the integer
-        // constants 1 and 0; lower them here so the parser sees plain IntLits.
+        // Boolean literals. In sic they are `bool`-typed (a `BoolLit`, kept `bool`
+        // as late as possible — converted to int only at a use site, so e.g. `any
+        // b = true` boxes with the BOOL type). In C they are the C23 integer
+        // constants 1 and 0, so the parser sees plain IntLits.
         match text.as_str() {
+            "true"  if self.lang == Lang::Sic => return Token::new(TokenKind::BoolLit, "1".to_string(), sp),
+            "false" if self.lang == Lang::Sic => return Token::new(TokenKind::BoolLit, "0".to_string(), sp),
             "true"  => return Token::new(TokenKind::IntLit, "1".to_string(), sp),
             "false" => return Token::new(TokenKind::IntLit, "0".to_string(), sp),
             _ => {}
