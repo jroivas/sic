@@ -107,10 +107,10 @@ EOF
 if ! "$SIC" --emit-module geo 2>err; then
     bad "folder-module" "emit failed: $(cat err)"
 else
-    if [ -f geo/libgeo.a ] && [ -f geo/module_geo.h ] && [ -f geo/module_geo.def ]; then
+    if [ -f geo/libgeo.a ] && [ -f geo/libgeo.so ] && [ -f geo/module_geo.h ] && [ -f geo/module_geo.def ]; then
         ok "folder-artifacts"
     else
-        bad "folder-artifacts" "missing archive/header/def in geo/"
+        bad "folder-artifacts" "missing archive/shared-lib/header/def in geo/"
     fi
     cat > usegeo.sic <<'EOF'
 import geo;
@@ -129,7 +129,7 @@ cat > cuser.c <<'EOF'
 #include "module_geo.h"
 int main(void){ return geo_double_power(6); }   /* 36+36 = 72 */
 EOF
-if "$CC" cuser.c -Igeo -Lgeo -lgeo -o cuser 2>err; then
+if "$CC" cuser.c -Igeo -Lgeo -Wl,-rpath,"$WORK/geo" -lgeo -o cuser 2>err; then
     ./cuser; got=$?
     [ "$got" -eq 72 ] && ok "c-consumer" || bad "c-consumer" "expected 72, got $got"
 else

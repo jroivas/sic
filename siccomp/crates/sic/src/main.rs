@@ -747,11 +747,32 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         return Err(format!("ar failed with exit code {:?}", status.code()).into());
     }
 
-    // Manifest link line: `-L<absdir> -l<name>` makes the archive self-linking
-    // for a consumer that only passes `-I<dir>`, plus this module's own libs and
-    // any transitively imported modules' flags (pkg-config baked in).
+    // Also link a shared object `lib<name>.so` for dynamic linking (the default;
+    // `-static` consumers pick the archive instead). Its own weak runtime is in
+    // the object; libc symbols (malloc/write/…) stay undefined and resolve at load
+    // time. `-fPIC` is not needed — sic emits position-independent code.
+    let shared = dirp.join(format!("lib{}.so", name));
+    let _ = fs::remove_file(&shared);
+    let cc = resolve_linker();
+    let status = Command::new(&cc)
+        .arg("-shared").arg("-o").arg(&shared).arg(obj.path())
+        .status()?;
+    if !status.success() {
+        return Err(format!("linking {} failed with exit code {:?}", shared.display(), status.code()).into());
+    }
+
+    // Manifest link line: `-L<absdir> -Wl,-rpath,<absdir> -l<name>` makes the
+    // module self-linking for a consumer that only passes `-I<dir>`. Both `.a` and
+    // `.so` sit in `<absdir>`; the linker prefers the `.so` (dynamic — the
+    // default), and the rpath lets the produced binary find it at run time. A
+    // `-static` consumer ignores the `.so`/rpath and pulls the archive instead.
+    // Then this module's own libs and any transitively imported modules' flags.
     let absdir = fs::canonicalize(&dirp).unwrap_or(dirp.clone());
-    let mut links: Vec<String> = vec![format!("-L{}", absdir.display()), format!("-l{}", name)];
+    let mut links: Vec<String> = vec![
+        format!("-L{}", absdir.display()),
+        format!("-Wl,-rpath,{}", absdir.display()),
+        format!("-l{}", name),
+    ];
     for tok in &args.link_order {
         if tok == "-pthread" || tok.starts_with("-l") || tok.starts_with("-L") {
             if !links.contains(tok) { links.push(tok.clone()); }
