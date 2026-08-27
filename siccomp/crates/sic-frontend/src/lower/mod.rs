@@ -745,8 +745,11 @@ impl Lowerer {
             fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(slot) });
             let r = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: rcp.clone() });
+            // Skip a non-owning rc: NULL (0) is a static/borrowed view, and the
+            // sentinel 1 marks a view of a LOCAL stack buffer (copy-on-escape,
+            // never freed/refcounted). Only a real heap rc (>1) is refcounted.
             let is_null = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(r), rhs: Constant::zero(), ty: rcp.clone() });
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IULe, lhs: Val::Local(r), rhs: Constant::int(1), ty: rcp.clone() });
             let body = fc.new_block_after_current();
             let done = fc.new_block_after_current();
             fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done, else_bb: body });
@@ -793,8 +796,10 @@ impl Lowerer {
             fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(slot) });
             let r = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: rcp.clone() });
+            // rc <= 1 is non-owning: 0 = static/borrowed view, 1 = local-stack view
+            // (copy-on-escape sentinel). Neither is freed/refcounted.
             let is_null = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(r), rhs: Constant::zero(), ty: rcp.clone() });
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IULe, lhs: Val::Local(r), rhs: Constant::int(1), ty: rcp.clone() });
             let body = fc.new_block_after_current();
             let free_bb = fc.new_block_after_current();
             let done = fc.new_block_after_current();

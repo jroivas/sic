@@ -1669,8 +1669,11 @@ impl<'m> FuncCtx<'m> {
     /// a `[rc=1 | text | NUL]` block — so it can safely outlive a local buffer it
     /// was formatted into (e.g. `char b[32]; snprintf(b,…); return b.dup;`), where
     /// returning the view would dangle.
-    fn emit_string_dup(&mut self, base: &Expr) -> Result<Val> {
-        let (data, size) = self.string_operand_parts(base)?;
+    /// Build an OWNED string (`[rc=1 | text | NUL]`) copying `size` bytes from
+    /// `data`. Returns a descriptor pointer with a real heap `rc`. Does NOT register
+    /// a scope-exit release — the caller decides ownership (a temp registers one; a
+    /// returned value is moved out).
+    pub(crate) fn owned_string_from_parts(&mut self, data: Val, size: Val) -> Result<Val> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let word = self.ptr_size() as i64; // sizeof(usize) — the rc cell
         let bufsize = self.alloc_val();
@@ -1684,9 +1687,55 @@ impl<'m> FuncCtx<'m> {
         let endp = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(dptr), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
-        let sv = self.make_string_val(Val::Local(dptr), size, block)?;
+        self.make_string_val(Val::Local(dptr), size, block)
+    }
+
+    fn emit_string_dup(&mut self, base: &Expr) -> Result<Val> {
+        let (data, size) = self.string_operand_parts(base)?;
+        let sv = self.owned_string_from_parts(data, size)?;
         self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
         Ok(sv)
+    }
+
+    /// Move a `string` into the sret slot on `return`: if `src` is a copy-on-escape
+    /// view of a LOCAL stack buffer (`rc == 1` sentinel), materialize an OWNED copy
+    /// (the buffer dies with the frame); otherwise move the descriptor and retain
+    /// (a real refcount is shared with the caller; a static/borrowed view is
+    /// rc<=0-safe). Contents are copied ONLY for the escaping local-buffer case.
+    pub(crate) fn emit_string_return_into(&mut self, sret: &Val, src: &Val) -> Result<()> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let size_bytes = sty.size_of(self.ptr_size());
+        let align = sty.align_of(self.ptr_size()) as u64;
+        let rcty = self.rc_ptr_ty();
+        // rc = src->rc
+        let (rcptr, rfty, _) = self.member_at(src, &sty, 2).expect("string has rc field");
+        let rc = self.alloc_val();
+        self.push_instr(Instr::Load { dest: rc, ptr: rcptr, ty: rfty });
+        let sentinel = self.coerce(Constant::int(Self::RC_LOCAL_SENTINEL), &rcty)?;
+        let is_sent = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_sent, op: CmpOp::IEq, lhs: Val::Local(rc), rhs: sentinel, ty: rcty });
+        let dup_bb = self.new_block_after_current();
+        let move_bb = self.new_block_after_current();
+        let join = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_sent), then_bb: dup_bb, else_bb: move_bb });
+        // dup: owned copy of the local buffer's bytes
+        self.switch_to_block(dup_bb);
+        let (dptr, dty, _) = self.member_at(src, &sty, 0).unwrap();
+        let data = self.alloc_val();
+        self.push_instr(Instr::Load { dest: data, ptr: dptr, ty: dty });
+        let (sptr, s2ty, _) = self.member_at(src, &sty, 1).unwrap();
+        let size = self.alloc_val();
+        self.push_instr(Instr::Load { dest: size, ptr: sptr, ty: s2ty });
+        let owned = self.owned_string_from_parts(Val::Local(data), Val::Local(size))?;
+        self.push_instr(Instr::MemCopy { dst: sret.clone(), src: owned, size: size_bytes, align });
+        self.set_terminator(Terminator::Jump(join));
+        // move: copy descriptor + retain (noop for a non-owning view)
+        self.switch_to_block(move_bb);
+        self.push_instr(Instr::MemCopy { dst: sret.clone(), src: src.clone(), size: size_bytes, align });
+        self.retain_string_at(sret)?;
+        self.set_terminator(Terminator::Jump(join));
+        self.switch_to_block(join);
+        Ok(())
     }
 
     fn lower_string_concat(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -2039,11 +2088,34 @@ impl<'m> FuncCtx<'m> {
     /// Build a non-owning `string` (rc = NULL) from a `char*` value, computing its
     /// length with `strlen`. Used to pass a C string / literal to a `string`
     /// parameter.
+    /// Wrap a C string as a NON-owning `string` view (`rc = NULL`) — safe for
+    /// static/borrowed data (a literal, a caller's buffer) that outlives the view.
     pub(crate) fn cstr_to_string(&mut self, data: Val) -> Result<Val> {
+        self.cstr_to_string_rc(data, 0)
+    }
+
+    /// Wrap a C string as a view with an explicit `rc` sentinel. `rc = 1` marks a
+    /// view of a LOCAL stack buffer (`string s = local_char_array;`): it is not
+    /// refcounted or freed (sentinel <= 1 in retain/release), but the return path
+    /// materializes an owned copy so it never escapes as a dangling pointer.
+    pub(crate) fn cstr_to_string_rc(&mut self, data: Val, rc: i64) -> Result<Val> {
         let data = self.coerce(data, &Type::char_ptr())?;
         let len = self.emit_strlen(data.clone())?;
-        let nullrc = self.coerce(Constant::zero(), &self.rc_ptr_ty())?;
-        self.make_string_val(data, len, nullrc)
+        let rcv = self.coerce(Constant::int(rc), &self.rc_ptr_ty())?;
+        self.make_string_val(data, len, rcv)
+    }
+
+    /// The sentinel `rc` value for a view of a local stack buffer (copy-on-escape).
+    pub(crate) const RC_LOCAL_SENTINEL: i64 = 1;
+
+    /// Whether `e` names a LOCAL stack array (`char b[10]`) — a buffer whose
+    /// lifetime ends with this frame, so a `string` view of it must be copied
+    /// before it escapes. A `char*`/array PARAMETER decays to a pointer (points at
+    /// caller memory) and a global array is static, so neither counts.
+    pub(crate) fn is_local_stack_buffer(&self, e: &Expr) -> bool {
+        let ExprKind::Ident(name) = &e.kind else { return false };
+        let is_local = self.locals.iter().any(|s| s.contains_key(name));
+        is_local && matches!(self.infer_expr_type(e), Ok(Type::Array { .. }))
     }
 
     /// Emit `free(p)`.

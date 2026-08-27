@@ -720,24 +720,27 @@ impl<'m> FuncCtx<'m> {
                         } else if self.is_sic() && super::types::is_sic_string(&agg_ty)
                             && !self.is_string_operand(e)
                         {
-                            // `return "literal";` / `return some_char_ptr;` from a
-                            // `string` function: wrap the C string in a (non-owning)
-                            // descriptor so the sret copy has a real 24-byte string,
-                            // not a 4-byte char* read as a struct.
+                            // `return "literal";` / `return some_char_ptr;` / `return
+                            // local_char_array;` from a `string` function: wrap the C
+                            // string in a descriptor. A LOCAL stack array gets the
+                            // copy-on-escape sentinel so the move below materializes an
+                            // owned copy (it would otherwise dangle); a static/caller
+                            // pointer stays a plain view.
+                            let rc = if self.is_local_stack_buffer(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
                             let v = self.lower_expr(e)?;
-                            self.cstr_to_string(v)?
+                            self.cstr_to_string_rc(v, rc)?
                         } else {
                             self.lower_aggregate_ptr(e)?
                         };
-                        let ps = self.ptr_size();
-                        let size = agg_ty.size_of(ps);
-                        let align = agg_ty.align_of(ps) as u64;
-                        self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
-                        // sic: the returned `string` slot acquires a reference —
-                        // retain so it outlives this frame's scope-exit releases
-                        // (of the local and any temporaries).
                         if self.is_sic() && super::types::is_sic_string(&agg_ty) {
-                            self.retain_string_at(&sret_ptr)?;
+                            // Move the string out: materialize an owned copy iff it is
+                            // a copy-on-escape local-buffer view, else move+retain.
+                            self.emit_string_return_into(&sret_ptr, &src)?;
+                        } else {
+                            let ps = self.ptr_size();
+                            let size = agg_ty.size_of(ps);
+                            let align = agg_ty.align_of(ps) as u64;
+                            self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
                         }
                     }
                     self.emit_cleanups_to(0);
@@ -1227,9 +1230,14 @@ impl<'m> FuncCtx<'m> {
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
                     self.retain_string_at(&ptr)?;
                 } else {
+                    // `string s = <char*/char[]>` wraps a view. A local stack array
+                    // (`char b[10]`) gets the copy-on-escape sentinel so `return s`
+                    // materializes an owned copy instead of dangling; a static/caller
+                    // pointer stays a plain (rc=NULL) view.
+                    let rc = if self.is_local_stack_buffer(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
                     let v = self.lower_expr(e)?;
                     let cp = self.coerce(v, &Type::char_ptr())?;
-                    let src = self.cstr_to_string(cp)?; // non-owning {data,size,rc=NULL}
+                    let src = self.cstr_to_string_rc(cp, rc)?;
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
                 }
                 return Ok(());
