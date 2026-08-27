@@ -10,28 +10,25 @@ module std;
 extern int snprintf(char *s, unsigned long n, char *fmt, ...);
 extern long write(int fd, void *buf, unsigned long n);
 
-// The runtime kind of a value's type (`type(x).kind`), in the compiler's order.
-enum Kind { VOID, BOOL, INT, UINT, F32, F64, F80, PTR, CSTR, STR, FIXED, ARRAY, STRUCT, UNION, ENUM, TUPLE, BIGINT, TYPE };
-
-// One argument as a `string` the caller can read. A `string`/`char*` argument is
+// One argument as a `string` the caller can read, dispatched on its runtime type
+// (RTTI + `any` — no hand-written kind table). A `string`/`char*` argument is
 // BORROWED — returned as a descriptor over the caller's own bytes, never copied
 // (move semantics: the wrapper travels, the contents don't). The other kinds have
 // no persistent string to borrow, so they format into a local buffer (or take a
 // `.str` that is freed at scope exit) and `.dup` an owned copy that outlives it.
+// `int` matches any signed-int width, `float` any float (category matching).
 static string arg_str(any x) {
-    switch (type(x).kind) {
-        case STR:    return (string)x;                    // borrow — no content copy
-        case CSTR:   { string s = (char *)x; return s; }  // borrow (view) — no content copy
-        case BIGINT: return ((bigint)x).str.dup;          // `.str` is auto-freed at scope exit
-        case FIXED:  return ((fixed)x).str.dup;
-        case BOOL:   if ((bool)x) return "true"; return "false";
-        case INT:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b.dup; }
-        case UINT: { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); return b.dup; }
-        case F32: fallthrough;
-        case F64: fallthrough;
-        case F80:  { char b[64]; snprintf(b, 64, "%g", (double)x); return b.dup; }
-        case PTR:  { char b[32]; snprintf(b, 32, "%p", (void *)x); return b.dup; }
-        default:     return "<?>";
+    match (type(x)) {
+        string: return (string)x;                    // borrow — no content copy
+        cstr:   { string s = (char *)x; return s; }  // borrow (view) — no content copy
+        bigint: return ((bigint)x).str.dup;          // `.str` is auto-freed at scope exit
+        fixed:  return ((fixed)x).str.dup;
+        bool:   { if ((bool)x) return "true"; return "false"; }
+        int:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b.dup; }
+        uint: { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); return b.dup; }
+        float: { char b[64]; snprintf(b, 64, "%g", (double)x); return b.dup; }
+        ptr:  { char b[32]; snprintf(b, 32, "%p", (void *)x); return b.dup; }
+        _:      return "<?>";
     }
 }
 
