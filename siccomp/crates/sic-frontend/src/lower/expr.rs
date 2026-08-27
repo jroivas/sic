@@ -2189,6 +2189,20 @@ impl<'m> FuncCtx<'m> {
     /// sic `del p;` — decrement the header refcount of a `new`-allocated pointer
     /// and `free` the block when it reaches 0. A NULL pointer is a no-op.
     pub(crate) fn lower_delete(&mut self, e: &Expr) -> Result<()> {
+        // sic `del s` on a `string`: drop THIS reference (decrement the refcount,
+        // freeing the buffer at zero) and invalidate the descriptor in place. Other
+        // copies keep their own reference and stay valid until their scope ends.
+        // Zeroing also makes the variable's scope-exit release a no-op, so there is
+        // no double free; the variable reads as an empty string afterward.
+        if self.is_sic() && matches!(self.infer_expr_type(e), Ok(t) if super::types::is_sic_string(&t)) {
+            let ptr = self.lower_aggregate_ptr(e)?;
+            self.release_string_at(&ptr)?;
+            let sty = super::types::sic_string_type(self.ptr_size());
+            let size = sty.size_of(self.ptr_size());
+            let align = sty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemSet { dst: ptr, val: Constant::zero(), size, align });
+            return Ok(());
+        }
         let p = self.lower_expr(e)?;
         self.emit_rc_release(p)
     }

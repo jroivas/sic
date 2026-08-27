@@ -1,0 +1,33 @@
+// sic `del` on a `string`: drops THIS reference (decrements the refcount, frees
+// the buffer at zero) and invalidates the instance in place; other copies keep
+// their own reference and stay valid until their scope ends. A double-free or
+// use-after-free would fail this test. Exit code.
+#include <string.h>
+
+int main() {
+    string base = "hel";
+    string a = base + "lo";      // owned, rc = 1
+    string b = a;                // shared copy, rc = 2
+
+    del a;                       // drop a's reference (rc = 1); invalidate a
+
+    // a is now an empty string; b is still valid ("hello").
+    if (a.size != 0) return 1;
+    if (b != "hello") return 2;
+    if (strcmp(b.ptr, "hello") != 0) return 3;
+
+    // Deleting the sole owner releases the buffer (no leak, no crash).
+    string c = base + "!";       // owned, rc = 1
+    del c;
+    if (c.size != 0) return 4;
+
+    // del on a non-owning literal view is safe (nothing to free) and still
+    // invalidates the instance.
+    string lit = "world";
+    string share = lit;
+    del lit;
+    if (lit.size != 0) return 5;
+    if (share != "world") return 6;
+
+    return 0;
+}

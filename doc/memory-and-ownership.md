@@ -36,8 +36,25 @@ int main() {
 }
 ```
 
-You never call `free`/`del` on a `string`; releases are automatic and safe
-against double-free and use-after-free.
+You never *need* to call `free`/`del` on a `string`; releases are automatic and
+safe against double-free and use-after-free.
+
+### Early release with `del`
+
+You *may* drop one reference early with `del`. It decrements the refcount
+(freeing the buffer if this was the last reference) and invalidates that one
+variable in place — other copies keep their own reference and stay valid until
+their scope ends:
+
+```sic
+string a = base + "lo";   // owned, rc = 1
+string b = a;             // shared copy, rc = 2
+del a;                    // a's reference dropped (rc = 1); a is now empty
+// b is still "…lo"; the buffer frees when b's scope ends.
+```
+
+After `del a`, `a` reads as an empty string. `del` is safe on a non-owning view
+too (there is nothing to free; the instance is still invalidated).
 
 ## Copy-on-escape
 

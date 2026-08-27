@@ -7,6 +7,7 @@
 - [ ] AVX2 and SSE2 and 256 bit vector
 - [x] doc under doc/
 - [x] char b[10]; b[0] = 'H'; b[1] = 'i'; b[2] = 0; string s = b; return s;
+- [x] allow `del` on strings. It decreases refcount and invalidates the one instance. `string a = "hello"; string b = c; del a; .. ` would invalidate `a` and dec ref, but b would be valid until end of scope.
 
 ## Gaps found while writing doc/ (spec vs. implementation)
 
