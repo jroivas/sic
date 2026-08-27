@@ -1,0 +1,26 @@
+// sic switch: a `string` temporary created in one `case` must not have its
+// scope-exit release run on a sibling case's `return` (each case is its own
+// scope). Before the fix this double-freed / released an uninitialized refcount.
+// Exercises several cases with string locals + early returns. Exit code.
+#include <stdio.h>
+
+static string pick(int k) {
+    switch (k) {
+        case 1: { string a = "one"; return a + "!"; }
+        case 2: { char b[16]; snprintf(b, 16, "two%d", k); string s = b; return s; }
+        case 3: { string c = "a" + "b"; return c; }
+        default: return "def";
+    }
+}
+
+int main() {
+    string w = pick(1);
+    string x = pick(2);
+    string y = pick(3);
+    string z = pick(9);
+    if (w != "one!") return 1;
+    if (x != "two2") return 2;
+    if (y != "ab") return 3;
+    if (z != "def") return 4;
+    return 0;
+}

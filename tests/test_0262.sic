@@ -1,0 +1,26 @@
+// sic string helpers: `"a" + "b"` (literal+literal) concatenates to an owned
+// string; `.dup` makes an owned copy of a C string; a `string` function may
+// `return` a literal or a `char*`. `"abc" + 1` stays pointer arithmetic. Exit code.
+#include <stdio.h>
+
+string label(int n) { char b[32]; snprintf(b, 32, "n%d", n); return b.dup; }  // owned copy
+string greet() { return "hello"; }                                            // literal as string
+
+int main() {
+    string cat = "foo" + "bar";                 // literal + literal -> concat
+    if (cat != "foobar" || cat.length != 6) return 1;
+
+    string g = greet();
+    if (g != "hello") return 2;
+
+    string a = label(1); string c = label(2);   // distinct owned copies, no aliasing
+    if (a != "n1" || c != "n2") return 3;
+
+    string d = a.dup;                            // .dup on a string
+    if (d != "n1") return 4;
+
+    char *p = "abcdef" + 2;                      // char* + int stays pointer arithmetic
+    if (p[0] != 'c') return 5;
+
+    return 0;
+}

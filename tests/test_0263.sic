@@ -1,0 +1,32 @@
+// sic `match (type(x))` — native RTTI dispatch on a value's runtime KIND category.
+// `int` matches any signed-int width, `uint` any unsigned, `float` any float; the
+// compiler owns the vocabulary (no user-defined kind enum). Exit code.
+static int classify(any x) {
+    match (type(x)) {
+        string: return 1;
+        int:    return 2;   // any signed-int width (i8..i64)
+        uint:   return 3;
+        float:  return 4;   // f32 | f64 | f80
+        bool:   return 5;
+        bigint: return 6;
+        _:      return 0;
+    }
+}
+
+int main() {
+    string s = "hi"; any xs = s;
+    if (classify(xs) != 1) return 1;
+
+    any xi = 42;                if (classify(xi) != 2) return 2;   // i32 -> int
+    i64 v = 99; any xl = v;     if (classify(xl) != 2) return 3;   // i64 -> int category
+    any xu = 7u;                if (classify(xu) != 3) return 4;   // unsigned -> uint
+    any xf = 3.5;               if (classify(xf) != 4) return 5;   // f64 -> float category
+    any xb = true;              if (classify(xb) != 5) return 6;   // bool
+    bigint b = 42; any xg = b;  if (classify(xg) != 6) return 7;
+
+    // Exact-type match still available via `==` (i64 is not i32).
+    if (type(xl) == i32) return 8;
+    if (!(type(xl) == i64)) return 9;
+
+    return 0;
+}

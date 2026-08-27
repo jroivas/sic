@@ -1,0 +1,22 @@
+// sic `true`/`false` are `bool`-typed, not int (they box into `any` with the BOOL
+// type and take part in boolean logic; conversion to int stays late). Exit code.
+int main() {
+    if (!(type(true) == bool)) return 1;        // a bool literal is `bool`
+    if (!(type(false) == bool)) return 2;
+
+    any b = true;                               // boxes with the BOOL type
+    if (!(type(b) == bool)) return 3;
+    if ((bool)b != true) return 4;
+
+    bool t = true; bool f = false;
+    if (!(t && !f)) return 5;                   // boolean logic
+    if (t || f) { } else return 6;
+
+    int n = (int)t + 5;                         // bool -> int only at the use site
+    if (n != 6) return 7;
+
+    int m = 5;
+    if (m) { } else return 8;                   // int in a boolean context
+
+    return 0;
+}

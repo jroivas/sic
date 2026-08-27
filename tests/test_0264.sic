@@ -1,0 +1,27 @@
+// sic copy-on-escape: `string s = b;` (b a local stack buffer) is a zero-copy view
+// that is COPIED automatically on `return` (it would otherwise dangle); once `s`
+// becomes owned (via concat) the return just moves it; a borrowed `string` return
+// copies nothing. Distinct calls must NOT alias the reused stack buffer. Exit code.
+#include <stdio.h>
+
+string from_local(int n) { char b[16]; snprintf(b, 16, "%d", n); string s = b; return s; }
+string via_concat(int n) { char b[16]; snprintf(b, 16, "%d", n); string s = b; s = s + "!"; return s; }
+string borrow(string p) { return p; }
+
+int main() {
+    string a = from_local(11);
+    string c = from_local(22);                 // must be its own copy, not aliasing `a`'s buffer
+    if (a != "11") return 1;
+    if (c != "22") return 2;
+    if (a != "11") return 3;                    // still intact after the second call
+
+    string d = via_concat(5);
+    if (d != "5!") return 4;
+
+    string h = "hello";
+    string h2 = borrow(h);                      // zero-copy borrow
+    if (h2 != "hello") return 5;
+    if (h != "hello") return 6;
+
+    return 0;
+}
