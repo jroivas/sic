@@ -2118,6 +2118,24 @@ impl<'m> FuncCtx<'m> {
         is_local && matches!(self.infer_expr_type(e), Ok(Type::Array { .. }))
     }
 
+    /// Whether a `string` view built from `e` must be COPIED before it escapes the
+    /// current scope — its `char*` points at a buffer that dies at this frame's
+    /// exit: a local stack array, or a bigint/fixed `.str` (a heap buffer freed by a
+    /// scope-exit cleanup). A literal or a caller's `char*` outlives the frame, so
+    /// it stays a zero-copy view.
+    pub(crate) fn needs_copy_on_escape(&self, e: &Expr) -> bool {
+        if self.is_local_stack_buffer(e) { return true; }
+        // `((bigint)x).str` / `f.str` — a fresh heap string auto-freed at scope exit.
+        if let ExprKind::Field { base, name } = &e.kind {
+            if name == "str" {
+                if let Ok(bt) = self.infer_expr_type(base) {
+                    return super::types::is_bigint(&bt) || super::types::is_fixed(&bt);
+                }
+            }
+        }
+        false
+    }
+
     /// Emit `free(p)`.
     pub(crate) fn emit_free(&mut self, p: Val) -> Result<()> {
         let voidp = Type::void_ptr();

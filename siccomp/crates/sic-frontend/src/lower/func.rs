@@ -726,7 +726,7 @@ impl<'m> FuncCtx<'m> {
                             // copy-on-escape sentinel so the move below materializes an
                             // owned copy (it would otherwise dangle); a static/caller
                             // pointer stays a plain view.
-                            let rc = if self.is_local_stack_buffer(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
+                            let rc = if self.needs_copy_on_escape(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
                             let v = self.lower_expr(e)?;
                             self.cstr_to_string_rc(v, rc)?
                         } else {
@@ -1234,7 +1234,7 @@ impl<'m> FuncCtx<'m> {
                     // (`char b[10]`) gets the copy-on-escape sentinel so `return s`
                     // materializes an owned copy instead of dangling; a static/caller
                     // pointer stays a plain (rc=NULL) view.
-                    let rc = if self.is_local_stack_buffer(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
+                    let rc = if self.needs_copy_on_escape(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
                     let v = self.lower_expr(e)?;
                     let cp = self.coerce(v, &Type::char_ptr())?;
                     let src = self.cstr_to_string_rc(cp, rc)?;

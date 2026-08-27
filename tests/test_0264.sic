@@ -7,6 +7,7 @@
 string from_local(int n) { char b[16]; snprintf(b, 16, "%d", n); string s = b; return s; }
 string via_concat(int n) { char b[16]; snprintf(b, 16, "%d", n); string s = b; s = s + "!"; return s; }
 string borrow(string p) { return p; }
+string big_str(bigint b) { return b.str; }   // `.str` heap buffer freed at scope exit -> copied on return
 
 int main() {
     string a = from_local(11);
@@ -22,6 +23,10 @@ int main() {
     string h2 = borrow(h);                      // zero-copy borrow
     if (h2 != "hello") return 5;
     if (h != "hello") return 6;
+
+    bigint g = 123456789012345678901234567890;
+    string gs = big_str(g);                     // `.str` copied on return, original freed
+    if (gs != "123456789012345678901234567890") return 7;
 
     return 0;
 }
