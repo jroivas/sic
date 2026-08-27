@@ -14,16 +14,17 @@ extern long write(int fd, void *buf, unsigned long n);
 // (RTTI + `any` — no hand-written kind table). A `string`/`char*` argument is
 // BORROWED — returned as a descriptor over the caller's own bytes, never copied
 // (move semantics: the wrapper travels, the contents don't). The other kinds have
-// no persistent string to borrow, so they format into a local buffer and return
-// it: a `string` view of a local buffer is copied automatically on return (it
-// would otherwise dangle) — no explicit `.dup` needed. `int` matches any
-// signed-int width, `float` any float (category matching).
+// no persistent string to borrow, so they format into a scope-local buffer and
+// return it directly: a `string` view of a buffer that dies with the frame (a
+// local array, or a bigint/fixed `.str` heap buffer) is copied automatically on
+// return — no explicit `.dup`. `int` matches any signed-int width, `float` any
+// float (category matching).
 static string arg_str(any x) {
     match (type(x)) {
         string: return (string)x;                    // borrow — no content copy
         cstr:   { string s = (char *)x; return s; }  // borrow (view) — no content copy
-        bigint: return ((bigint)x).str.dup;          // `.str` is a heap buffer freed at scope exit → copy out
-        fixed:  return ((fixed)x).str.dup;
+        bigint: return ((bigint)x).str;              // `.str` freed at scope exit → copied on return
+        fixed:  return ((fixed)x).str;
         bool:   { if ((bool)x) return "true"; return "false"; }
         int:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b; }
         uint: { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); return b; }
