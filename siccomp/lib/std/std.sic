@@ -21,16 +21,50 @@ extern long write(int fd, void *buf, unsigned long n);
 // float (category matching).
 static string arg_str(any x) {
     match (type(x)) {
-        string: return (string)x;                    // borrow — no content copy
-        cstr:   { string s = (char *)x; return s; }  // borrow (view) — no content copy
-        bigint: return ((bigint)x).str;              // `.str` freed at scope exit → copied on return
-        fixed:  return ((fixed)x).str;
-        bool:   { if ((bool)x) return "true"; return "false"; }
-        int:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b; }
-        uint: { char b[32]; snprintf(b, 32, "%llu", (unsigned long long)(u64)x); return b; }
-        float: { char b[64]; snprintf(b, 64, "%g", (double)x); return b; }
-        ptr:  { char b[32]; snprintf(b, 32, "%p", (void *)x); return b; }
-        _:      return "<?>";
+        string:
+            return (string)x;       // borrow — no content copy
+
+        cstr: {
+            string s = (char *)x;   // borrow (view) — no content copy
+            return s;
+        }
+
+        bigint:
+            return ((bigint)x).str; // `.str` freed at scope exit → copied on return
+        fixed:
+            return ((fixed)x).str;
+
+        bool: {
+            if ((bool)x) return "true";
+            return "false";
+        }
+
+        int: {
+            char b[32];
+            snprintf(b, 32, "%lld", (long long)(i64)x);
+            return b;
+        }
+
+        uint: {
+            char b[32];
+            snprintf(b, 32, "%llu", (unsigned long long)(u64)x);
+            return b;
+        }
+
+        float: {
+            char b[64];
+            snprintf(b, 64, "%g", (double)x);
+            return b;
+        }
+
+        ptr: {
+            char b[32];
+            snprintf(b, 32, "%p", (void *)x);
+            return b;
+        }
+
+        _:
+            return "<?>";
     }
 }
 
@@ -39,18 +73,30 @@ static string arg_str(any x) {
 string Fmt(string fmt, va_array args) {
     string result = "";
     char *f = fmt.ptr;
-    u64 n = fmt.size;      // byte length
+    u64 n = fmt.size;   // byte length
     u64 i = 0;
     u64 ai = 0;
     while (i < n) {
         char c = f[i];
-        if (c == 123 && i + 1 < n && f[i + 1] == 123) { result = result + "{"; i = i + 2; }       // {{
-        else if (c == 125 && i + 1 < n && f[i + 1] == 125) { result = result + "}"; i = i + 2; }  // }}
-        else if (c == 123 && i + 1 < n && f[i + 1] == 125) {                                        // {}
-            if (ai < args.length) { result = result + arg_str(args[ai]); ai = ai + 1; }
+        if (c == 123 && i + 1 < n && f[i + 1] == 123) {         // `{{` → literal `{`
+            result = result + "{";
             i = i + 2;
-        } else {
-            char one[2]; one[0] = c; one[1] = 0; char *op = one; result = result + op; i = i + 1;
+        } else if (c == 125 && i + 1 < n && f[i + 1] == 125) {  // `}}` → literal `}`
+            result = result + "}";
+            i = i + 2;
+        } else if (c == 123 && i + 1 < n && f[i + 1] == 125) {  // `{}` → next argument
+            if (ai < args.length) {
+                result = result + arg_str(args[ai]);
+                ai = ai + 1;
+            }
+            i = i + 2;
+        } else {                                                // any other byte, verbatim
+            char one[2];
+            one[0] = c;
+            one[1] = 0;
+            char *op = one;
+            result = result + op;
+            i = i + 1;
         }
     }
     return result;
@@ -61,13 +107,22 @@ string Fmt(string fmt, va_array args) {
 // `char*` argument is never copied — its data goes to `write` directly).
 int Print(va_array args) {
     u64 i = 0;
-    while (i < args.length) { string p = arg_str(args[i]); write(1, p.ptr, p.size); i = i + 1; }
+    while (i < args.length) {
+        string p = arg_str(args[i]);
+        write(1, p.ptr, p.size);
+        i = i + 1;
+    }
     return 0;
 }
 
+// `Println(a, b, …)` — like `Print`, followed by a newline.
 int Println(va_array args) {
     u64 i = 0;
-    while (i < args.length) { string p = arg_str(args[i]); write(1, p.ptr, p.size); i = i + 1; }
+    while (i < args.length) {
+        string p = arg_str(args[i]);
+        write(1, p.ptr, p.size);
+        i = i + 1;
+    }
     write(1, "\n", 1);
     return 0;
 }
