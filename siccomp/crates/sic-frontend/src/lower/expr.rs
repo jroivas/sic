@@ -4620,7 +4620,18 @@ impl<'m> FuncCtx<'m> {
             arg_vals.push(v?);
         }
         if let Some(fixed) = va_fixed {
-            let va = self.pack_va_array(&args[fixed.min(args.len())..], sp)?;
+            let trailing = &args[fixed.min(args.len())..];
+            // Forward an already-collected `va_array`: a call `f(rest)` whose sole
+            // trailing argument is itself a `va_array` passes it straight through
+            // (like `f(*args)` in Python) — e.g. std's `Print` delegating to
+            // `Fmt(fmt, args)` — rather than re-boxing it as one array element.
+            let va = if trailing.len() == 1
+                && matches!(self.infer_expr_type(&trailing[0]), Ok(t) if super::types::is_va_array(&t))
+            {
+                self.lower_aggregate_ptr(&trailing[0])?
+            } else {
+                self.pack_va_array(trailing, sp)?
+            };
             arg_vals.push(va);
         }
 

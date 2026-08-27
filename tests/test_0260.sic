@@ -13,11 +13,20 @@ int suminc(int base, va_array args) {
     return acc + (int)args.length * 1000;
 }
 
+// Forward an already-collected `va_array` to another `va_array` function (like
+// `f(*args)` in Python): `args` passes through, it is NOT re-boxed as one element.
+int fwd(int base, va_array args) { return suminc(base, args); }
+
 int main() {
     // base=1; args = (10, "skip", 20, 3.5, 30) → ints 10+20+30=60, 5 args
     int r = suminc(1, 10, "skip", 20, 3.5, 30);
     if (r != 1 + 60 + 5000) return 1;         // 5061
     if (suminc(0) != 0) return 2;             // no varargs → 0 args
     if (suminc(100, 7) != 100 + 7 + 1000) return 3;
+
+    // Forwarding: fwd(...) must equal suminc(...) — if `args` were re-boxed, the
+    // callee would see a single (non-int) element instead of the ints.
+    if (fwd(1, 10, 20, 30) != suminc(1, 10, 20, 30)) return 4;   // 3061 each
+    if (fwd(5) != 5) return 5;                                    // empty forward
     return 42;
 }
