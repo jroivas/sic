@@ -35,8 +35,7 @@ static string arg_str(any x) {
             return ((fixed)x).str;
 
         bool: {
-            if ((bool)x) return "true";
-            return "false";
+            return ((bool)x) ? "true" : "false";
         }
 
         int: {
@@ -102,27 +101,19 @@ string Fmt(string fmt, va_array args) {
     return result;
 }
 
-// `Print(a, b, …)` — format each argument (no format string) and write it to
-// stdout. Each piece is written straight from its bytes (a borrowed `string`/
-// `char*` argument is never copied — its data goes to `write` directly).
-int Print(va_array args) {
-    u64 i = 0;
-    while (i < args.length) {
-        string p = arg_str(args[i]);
-        write(1, p.ptr, p.size);
-        i = i + 1;
-    }
+// `Print(fmt, a, b, …)` — format `fmt` with the arguments (the same `{}`
+// placeholders as `Fmt`) and write the result to stdout. `args` is forwarded to
+// `Fmt` as one already-collected `va_array`, not re-boxed.
+int Print(string fmt, va_array args) {
+    string s = Fmt(fmt, args);
+    write(1, s.ptr, s.size);
     return 0;
 }
 
-// `Println(a, b, …)` — like `Print`, followed by a newline.
-int Println(va_array args) {
-    u64 i = 0;
-    while (i < args.length) {
-        string p = arg_str(args[i]);
-        write(1, p.ptr, p.size);
-        i = i + 1;
-    }
+// `Println(fmt, a, b, …)` — like `Print`, followed by a newline.
+int Println(string fmt, va_array args) {
+    string s = Fmt(fmt, args);
+    write(1, s.ptr, s.size);
     write(1, "\n", 1);
     return 0;
 }
