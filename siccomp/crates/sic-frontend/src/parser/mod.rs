@@ -105,6 +105,26 @@ impl Parser {
     /// name). Besides a plain identifier, this also accepts a built-in type-alias
     /// token (`u64`, `i32`, `usize`, ...): those aliases collide with common C
     /// identifiers, so a program is free to use them as names.
+    /// A `match` arm pattern name: an identifier/typedef name (enum variant), or a
+    /// built-in type keyword (`int`, `bool`, `float`, `void`, `char`, `struct`, …)
+    /// used as a type/kind category in `match (type(x))`. Other type spellings
+    /// (`string`, `bigint`, `i32`, `f64`, `uint`, `ptr`, …) already lex as
+    /// TypeName/Ident.
+    fn parse_match_pattern_name(&mut self) -> Result<String> {
+        use TokenKind::*;
+        match self.peek().kind {
+            Ident | TypeName | Bool | Int | Char | Float | Double | Void
+            | Long | Short | Signed | Unsigned | Struct | Union | Enum =>
+                Ok(self.advance().text.clone()),
+            _ => {
+                let t = self.peek().clone();
+                Err(CompileError::at(
+                    format!("expected a match pattern but got {:?} ('{}')", t.kind, t.text),
+                    t.span.file.clone(), t.span.line, t.span.col))
+            }
+        }
+    }
+
     fn expect_name(&mut self) -> Result<String> {
         if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             Ok(self.advance().text.clone())
@@ -1430,7 +1450,10 @@ impl Parser {
         let mut arms = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             let asp = self.span();
-            let name = self.expect_name()?;
+            // A match arm's pattern is either an enum variant name (`Some`) or, for
+            // a `match (type(x))`, a type / kind category (`string`, `int`, `float`).
+            // Type keywords lex as their own token, so accept them here too.
+            let name = self.parse_match_pattern_name()?;
             // `_` is the wildcard (any remaining variant).
             let variant = if name == "_" { None } else { Some(name) };
             let binding = if variant.is_some() && self.eat(TokenKind::LParen) {

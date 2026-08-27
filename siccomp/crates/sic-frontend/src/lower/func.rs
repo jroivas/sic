@@ -1869,6 +1869,12 @@ impl<'m> FuncCtx<'m> {
     /// no arm and no `_` matches at runtime, abort via `__sic_match_fail`.
     fn lower_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<()> {
         let sty = self.infer_expr_type(scrutinee)?;
+        // sic RTTI (sic.md §"Match"): `match (type(x)) { string: …; int: …; _: … }`
+        // dispatches on the value's runtime KIND category — no hand-written kind
+        // table needed; the compiler owns the vocabulary.
+        if self.is_sic() && super::types::is_type_info(&sty) {
+            return self.lower_match_on_type(scrutinee, arms, sp);
+        }
         if !self.is_tagged_enum_struct(&sty) {
             return Err(CompileError::at(
                 "match requires a tagged enum value".to_string(), sp.file.clone(), sp.line, sp.col));
@@ -1920,6 +1926,60 @@ impl<'m> FuncCtx<'m> {
         }
 
         // Fallback: `_` arm, or a runtime abort on an unmatched variant.
+        if let Some(w) = wildcard {
+            self.enter_scope();
+            self.lower_stmt(&w.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+        } else {
+            let fref = self.lowerer.ensure_match_fail_fn();
+            self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+            self.set_terminator(Terminator::Jump(end_bb)); // abort never returns
+        }
+        self.switch_to_block(end_bb);
+        Ok(())
+    }
+
+    /// sic `match (type(x)) { <type/category>: … ; _: … }` — dispatch on the value's
+    /// runtime kind. An arm pattern is a type name or a kind category (`int`,
+    /// `float`, `ptr`, …); it matches when `type(x).kind` is in that category, so
+    /// `int` catches every signed-int width and `float` every float. Exact-type
+    /// tests remain available with `type(x) == i64`.
+    fn lower_match_on_type(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<()> {
+        let kind = self.emit_type_info_field(scrutinee, "kind")?; // u32
+        let end_bb = self.new_block_after_current();
+        let wildcard = arms.iter().find(|a| a.variant.is_none());
+
+        for arm in arms.iter().filter(|a| a.variant.is_some()) {
+            let name = arm.variant.as_ref().unwrap();
+            let kinds = match_type_kinds(name).ok_or_else(|| CompileError::at(
+                format!("'{}' is not a type or kind category in a `match` on a type", name),
+                sp.file.clone(), sp.line, sp.col))?;
+            let arm_bb = self.new_block_after_current();
+            let next_bb = self.new_block_after_current();
+            // cond = OR over the category's kinds of (kind == k).
+            let mut cond: Option<Val> = None;
+            for k in kinds {
+                let eq = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: kind.clone(), rhs: Constant::int(k as i64), ty: Type::u32() });
+                cond = Some(match cond {
+                    None => Val::Local(eq),
+                    Some(prev) => {
+                        let o = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: o, op: BinOp::Or, lhs: prev, rhs: Val::Local(eq), ty: Type::Bool });
+                        Val::Local(o)
+                    }
+                });
+            }
+            self.set_terminator(Terminator::CondJump { cond: cond.unwrap(), then_bb: arm_bb, else_bb: next_bb });
+            self.switch_to_block(arm_bb);
+            self.enter_scope();
+            self.lower_stmt(&arm.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+            self.switch_to_block(next_bb);
+        }
+
         if let Some(w) = wildcard {
             self.enter_scope();
             self.lower_stmt(&w.body)?;
@@ -2027,6 +2087,38 @@ impl<'m> FuncCtx<'m> {
 }
 
 /// Extract the (dest ValId, result Type) from instructions that produce a value.
+/// The runtime kind(s) a `match (type(x))` arm pattern selects — a type name or a
+/// kind category. A category maps to the SET of kinds it covers (`float` = the
+/// three float kinds); a concrete type maps to its single kind (all signed-int
+/// widths share INT, so `int`/`i64`/`char` all catch any signed int). Mirrors the
+/// compiler's `type_kind` numbering, kept in ONE place so nothing hand-copies it.
+fn match_type_kinds(name: &str) -> Option<Vec<u32>> {
+    Some(match name {
+        "void" => vec![0],
+        "bool" => vec![1],
+        "int" | "char" | "short" | "long" | "signed" | "isize"
+        | "i8" | "i16" | "i32" | "i64" | "i128" => vec![2],
+        "uint" | "unsigned" | "usize"
+        | "u8" | "u16" | "u32" | "u64" | "u128" => vec![3],
+        "f32" => vec![4],
+        "f64" | "double" => vec![5],
+        "f80" | "f128" => vec![6],
+        "float" | "real" => vec![4, 5, 6],
+        "ptr" | "pointer" => vec![7],
+        "cstr" => vec![8],
+        "string" | "str" => vec![9],
+        "fixed" => vec![10],
+        "array" => vec![11],
+        "struct" => vec![12],
+        "union" => vec![13],
+        "enum" => vec![14],
+        "tuple" => vec![15],
+        "bigint" => vec![16],
+        "type" => vec![17],
+        _ => return None,
+    })
+}
+
 fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
     match instr {
         Instr::Alloca { dest, ty, .. } => Some((*dest, Type::Pointer(Box::new(ty.clone())))),

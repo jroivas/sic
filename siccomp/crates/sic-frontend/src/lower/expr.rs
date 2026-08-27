@@ -154,7 +154,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Load a field from a `type` value's `__sic_type_info` record (sic.md §"RTTI").
     /// `.str`/`.name` → `char*`; `.id` → `u64`; `.size`/`.kind` → `u32`.
-    fn emit_type_info_field(&mut self, base: &Expr, name: &str) -> Result<Val> {
+    pub(crate) fn emit_type_info_field(&mut self, base: &Expr, name: &str) -> Result<Val> {
         use super::types as t;
         let rec = self.lower_expr(base)?; // pointer to the record
         let (off, fty) = match name {
