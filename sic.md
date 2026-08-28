@@ -46,15 +46,13 @@ Example:
 Traditionally in C the size of `int` may be different according the system where it's compiled into.
 We specify size of all types explicitly:
 
-- 8-32 bits: one unicode character as UTF-8 (char)
-- 8 bits: byte and unsigned byte (byte, unsigned byte)
+- 8-32 bits: one unicode character as UTF-8 (u8char)
+- 8 bits: char and unsigned char
 - 16 bits: short and unsigned short
 - 32 bits: int and unsigned int
 - 64 bits: long and unsigned long
 - 64 bits: long long and unsigned long long
 
-All chars are unsigned and may expand to max 4 bytes (UTF-8). Signed char does not exists.
-Instead byte is signed in range -128 - 127 and unsigned byte has value between 0 - 255.
 
 On top of that we have specific bit size ints:
 
