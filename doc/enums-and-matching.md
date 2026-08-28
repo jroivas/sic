@@ -68,6 +68,49 @@ if (int cv = E::TAG(c)) {     // binds cv only if c is a TAG
 }
 ```
 
+### Strict typing — no accidental `int`/enum mixing
+
+Unlike C, SIC treats a payload-less enum as its own type. A plain `int`, or a
+*different* enum, cannot flow into an `enum` slot without an explicit `(enum E)`
+cast — this catches the classic C bug of passing the wrong constant:
+
+```sic
+enum Color { RED, GREEN, BLUE };
+enum Fruit { APPLE, PEAR };
+void paint(enum Color c);
+
+paint(1);            // ERROR: `int` passed as `enum Color`
+paint(APPLE);        // ERROR: `enum Fruit` passed as `enum Color`
+paint((enum Color)1);// ok — explicit cast
+paint(BLUE);         // ok
+
+enum Color c = 0;    // ERROR: use `RED`, or `(enum Color)0`
+c = 2;               // ERROR (assignment)
+```
+
+An enum has **no arithmetic** — its value is an identity, not a number. Cast to
+`int` when you mean the number:
+
+```sic
+int n = c + 1;       // ERROR: enum has no arithmetic
+int n = (int)c + 1;  // ok
+c += 1;              // ERROR — write c = (enum Color)((int)c + 1)
+```
+
+Going the other way is free: an enum **widens to `int`** implicitly, and you may
+compare it to an integer. So indexing, `printf`, and loops read naturally:
+
+```sic
+int i = BLUE;              // ok (enum → int)
+if (c == 2) { … }          // ok (compare by value)
+arr[c];                    // ok
+for (enum Color e = RED; (int)e <= (int)BLUE; e = (enum Color)((int)e + 1)) { … }
+```
+
+Typedef enums (`typedef enum { LO, HI } Level;`, named or anonymous) are checked
+exactly the same way. Tagged enums are already distinct types, so this all falls
+out for them too.
+
 ### `.str` — the variant name
 
 A payload-less enum value renders as a native `string` naming its variant,

@@ -9,6 +9,17 @@
 - [x] char b[10]; b[0] = 'H'; b[1] = 'i'; b[2] = 0; string s = b; return s;
 - [x] allow `del` on strings. It decreases refcount and invalidates the one instance. `string a = "hello"; string b = c; del a; .. ` would invalidate `a` and dec ref, but b would be valid until end of scope.
 - [x] easy enum to str like `enum vals { NONE, ONE, TWO }; enum vals = ONE; vals.str // This should be "vals::ONE" as native string` 
+- [x] strict enum typing: reject implicit `int`↔enum and cross-enum without a cast
+      (0cdb407). Enum→int widening + comparisons stay implicit; enum arithmetic and
+      int/other-enum INTO an enum slot need `(enum E)`/`(int)e`. Covers `enum E` and
+      typedef enums. tests 0270–0273.
+- [ ] enum iteration ergonomics (follow-up to strict enum typing): allow *simple*
+      `enum ± int` to stay the same enum with a runtime RANGE CHECK, so
+      `e = e + 1` / `VAL_MAX - 1` work without a cast while arbitrary arithmetic
+      still requires `(int)e`. DESIGN WRINKLE to resolve first: the classic
+      `for (e = FIRST; e <= LAST; e++)` produces `LAST+1` on the final increment, so
+      a strict range check would trap — need a one-past allowance or a range-aware
+      loop form. Deferred until that semantics is decided.
 
 ## Gaps found while writing doc/ (spec vs. implementation)
 
