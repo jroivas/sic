@@ -863,6 +863,10 @@ impl<'m> FuncCtx<'m> {
             return self.lower_logical(op == BinOpKind::LogAnd, lhs, rhs);
         }
 
+        // sic strict enum typing (sic.md §"Enums"): a payload-less enum has no
+        // arithmetic — `e + 1` must be `(int)e + 1`. Comparisons are allowed.
+        self.check_enum_arith(op, lhs, rhs)?;
+
         // sic array concatenation `a + b` (sic.md §"Arrays and lists"): two array
         // operands joined into a fresh array of the combined length. Checked
         // before the GCC vector path, which in sic would otherwise read `+` as an
@@ -2829,6 +2833,22 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // sic strict enum typing (sic.md §"Enums"): a write to a payload-less
+        // enum-typed local must carry the same enum (or an explicit cast); a
+        // compound assignment `e += …` is enum arithmetic and is rejected outright.
+        if self.is_sic() {
+            if let ExprKind::Ident(name) = &lhs.kind {
+                if let Some(dest) = self.enum_locals.get(name).cloned() {
+                    match op {
+                        None => self.check_enum_dest(&dest, rhs, "assigned to")?,
+                        Some(_) => return Err(CompileError::at(
+                            format!("enum `{}` has no arithmetic — compute with `(int){}` and cast back, \
+                                     e.g. `{} = (enum {})((int){} + …)`", dest, name, name, dest, name),
+                            lhs.span.file.clone(), lhs.span.line, lhs.span.col)),
+                    }
+                }
+            }
+        }
         // sic tuple unpack `tuple(a, b, …) = e` (sic.md §"Tuples"): assign each of
         // the tuple's fields into the corresponding lvalue.
         if op.is_none() {
@@ -4846,10 +4866,23 @@ impl<'m> FuncCtx<'m> {
             Some(t) if self.is_sic() && super::types::is_va_array(t) => Some(param_types.len() - 1),
             _ => None,
         };
+        // sic strict enum typing (sic.md §"Enums"): the callee's payload-less-enum
+        // parameters reject a plain `int` or a different enum argument without a cast.
+        let callee_name: Option<String> = match &func_expr.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            _ => None,
+        };
         let mut arg_vals = Vec::new();
         for (i, a) in args.iter().enumerate() {
             if let Some(fixed) = va_fixed {
                 if i >= fixed { break; } // trailing args handled below
+            }
+            if self.is_sic() {
+                if let Some(fname) = &callee_name {
+                    if let Some(dest) = self.lowerer.c_enum_param.get(&(fname.clone(), i)).cloned() {
+                        self.check_enum_dest(&dest, a, "passed as")?;
+                    }
+                }
             }
             let prev = self.expected_ty.take();
             if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }

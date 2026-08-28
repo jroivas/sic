@@ -1,0 +1,8 @@
+// sic strict enum typing (sic.md §"Enums"): one enum's value cannot flow into a
+// different enum without an explicit cast. Pinned via `.xfail`.
+enum Fruit { APPLE, PEAR };
+enum Tool  { HAMMER, SAW };
+int main() {
+    enum Tool t = APPLE;   // ERROR: `enum Fruit` assigned to `enum Tool`
+    return (int)t;
+}

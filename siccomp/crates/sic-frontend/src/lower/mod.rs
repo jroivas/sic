@@ -79,6 +79,19 @@ pub struct Lowerer {
     /// Reverse index for a bare enum constant: variant name → owning payload-less
     /// enum name (so `ONE.str` knows it is a `vals`).
     pub c_enum_variant: HashMap<String, String>,
+    /// sic strict enum typing (sic.md §"Enums"): `(function, param index)` → the
+    /// param's payload-less enum name, so a call site can reject a plain `int` or a
+    /// different enum passed without an explicit cast. Populated order-independently
+    /// in a pre-pass over all function declarations.
+    pub c_enum_param: HashMap<(String, usize), String>,
+    /// sic strict enum typing: function name → its payload-less enum return type, so
+    /// `return <wrong>;` is rejected and a call's result classifies as that enum.
+    pub c_enum_ret: HashMap<String, String>,
+    /// sic strict enum typing: a typedef alias for a payload-less enum → the
+    /// canonical enum name (a key in `c_enum_defs`). Lets `typedef enum {…} E;` be
+    /// type-checked as strictly as `enum E`. An anonymous enum's typedef name is its
+    /// own canonical key.
+    pub c_enum_alias: HashMap<String, String>,
     /// sic tuple parameters (sic.md §"Tuples"): `(function, param index)` → the
     /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
     /// param is passed by pointer, so its shape must be known to unpack/index it.
@@ -145,6 +158,9 @@ impl Lowerer {
             variant_enum: HashMap::new(),
             c_enum_defs: HashMap::new(),
             c_enum_variant: HashMap::new(),
+            c_enum_param: HashMap::new(),
+            c_enum_ret: HashMap::new(),
+            c_enum_alias: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -210,6 +226,9 @@ impl Lowerer {
             // Infer the concrete shape of every `tuple` parameter from its call
             // sites, so tuple params can be unpacked/indexed (sic.md §"Tuples").
             self.infer_tuple_params(tu);
+            // Record which function params/returns are payload-less enums, so call
+            // sites and `return` can enforce strict enum typing (sic.md §"Enums").
+            self.collect_enum_signatures(tu);
         }
 
         // Second pass: lower function bodies and global initializers
@@ -369,7 +388,13 @@ impl Lowerer {
                                 AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
                                     self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
                                 }
-                                AstType::Enum(e) => { self.register_enum(e)?; }
+                                AstType::Enum(e) => {
+                                    self.register_enum(e)?;
+                                    // sic strict enum typing (sic.md §"Enums"): link
+                                    // this typedef alias to the payload-less enum so
+                                    // `typedef enum {…} E;` is checked like `enum E`.
+                                    self.register_c_enum_typedef(name, e);
+                                }
                                 _ => {}
                             }
                             self.register_type_name(name.clone(), ir_ty);
@@ -986,6 +1011,69 @@ impl Lowerer {
             _ => {}
         }
         Ok(())
+    }
+
+    /// If `ty` names a payload-less enum (one recorded in `c_enum_defs`), return
+    /// that enum's name. `enum E`, and a bare `Named`/typedef referring to one, all
+    /// resolve; a tagged (payload-carrying) enum has struct identity already and is
+    /// not tracked here.
+    pub(crate) fn c_enum_name_of_ast(&self, ty: &crate::ast::AstType) -> Option<String> {
+        use crate::ast::AstType;
+        match ty {
+            AstType::Enum(e) => e.name.as_ref()
+                .filter(|n| self.c_enum_defs.contains_key(*n)).cloned(),
+            AstType::Named(n) | AstType::Builtin(n) => {
+                if let Some(canon) = self.c_enum_alias.get(n) { return Some(canon.clone()); }
+                if self.c_enum_defs.contains_key(n) { return Some(n.clone()); }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Link a typedef alias to the payload-less enum it names (sic.md §"Enums"), so
+    /// strict enum checking treats `typedef enum {…} E;` exactly like `enum E`. A
+    /// tagged (payload-carrying) enum already has struct identity and is skipped.
+    /// An anonymous enum is registered under the alias as its own canonical name.
+    fn register_c_enum_typedef(&mut self, alias: &str, e: &EnumDef) {
+        if !self.sic { return; }
+        let Some(variants) = &e.variants else { return; };
+        if variants.iter().any(|v| v.payload.is_some()) { return; }
+        let canonical = match &e.name {
+            Some(en) if self.c_enum_defs.contains_key(en) => en.clone(),
+            _ => {
+                // Anonymous enum: register its variant table under the alias.
+                let mut vs = Vec::new();
+                for v in variants {
+                    if let Some(val) = self.enum_consts.get(&v.name).copied() {
+                        vs.push((v.name.clone(), val));
+                        self.c_enum_variant.entry(v.name.clone()).or_insert_with(|| alias.to_string());
+                    }
+                }
+                self.c_enum_defs.entry(alias.to_string()).or_insert(vs);
+                alias.to_string()
+            }
+        };
+        self.c_enum_alias.insert(alias.to_string(), canonical);
+    }
+
+    /// Record each function's payload-less-enum parameters and return type
+    /// (sic.md §"Enums") so call sites and `return` can enforce strict enum typing.
+    /// Runs after `collect_declarations` (so `c_enum_defs` is populated) and covers
+    /// prototypes and definitions alike, independent of declaration order.
+    fn collect_enum_signatures(&mut self, tu: &TranslationUnit) {
+        for d in &tu.decls {
+            if let Decl::Func { name, ret_ty, params, .. } = d {
+                if let Some(en) = self.c_enum_name_of_ast(&ret_ty.ty) {
+                    self.c_enum_ret.insert(name.clone(), en);
+                }
+                for (i, p) in params.iter().enumerate() {
+                    if let Some(en) = self.c_enum_name_of_ast(&p.ty.ty) {
+                        self.c_enum_param.insert((name.clone(), i), en);
+                    }
+                }
+            }
+        }
     }
 
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {

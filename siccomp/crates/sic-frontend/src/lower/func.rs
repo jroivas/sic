@@ -29,6 +29,28 @@ pub enum Cleanup {
     RatFree { slot: Val },
 }
 
+/// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
+/// expression as seen by the enum type-checker. A C enum collapses to `int` in the
+/// IR, so this recovers whether a value is a specific enum, a plain integer, or
+/// something we cannot positively classify (treated permissively).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EnumClass {
+    Enum(String),
+    Int,
+    Unknown,
+}
+
+/// The source symbol for a binary operator, for enum-arithmetic diagnostics.
+fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
+    use crate::ast::BinOpKind::*;
+    match op {
+        Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
+        BitAnd => "&", BitOr => "|", BitXor => "^",
+        Shl => "<<", Shr => ">>", RotL => "<<<", RotR => ">>>",
+        _ => "op",
+    }
+}
+
 /// An active exception-guard (sic.md §"Integer overflow", §"Errors and
 /// exceptions"): a caught exception jumps to `fail_bb`, which sets the guard
 /// expression's result to 1 without committing the offending operation.
@@ -119,6 +141,10 @@ pub struct FuncCtx<'m> {
     /// value currently being lowered (a binding/return/arg), used to resolve a
     /// generic constructor `Option::Some(5)` / `None` to its concrete monomorph.
     pub expected_ty: Option<Type>,
+    /// sic strict enum typing (sic.md §"Enums"): the current function's payload-less
+    /// enum return type, so `return <wrong>;` is rejected. `None` if it returns a
+    /// non-enum type.
+    pub ret_enum: Option<String>,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -159,6 +185,7 @@ impl<'m> FuncCtx<'m> {
             unsafe_depth: 0,
             guard_stack: Vec::new(),
             expected_ty: None,
+            ret_enum: None,
         }
     }
 
@@ -356,10 +383,109 @@ impl<'m> FuncCtx<'m> {
         match ty {
             AstType::Enum(e) => e.name.as_ref()
                 .filter(|n| self.lowerer.c_enum_defs.contains_key(*n)).cloned(),
-            AstType::Named(n) | AstType::Builtin(n)
-                if self.lowerer.c_enum_defs.contains_key(n) => Some(n.clone()),
+            AstType::Named(n) | AstType::Builtin(n) => {
+                if let Some(canon) = self.lowerer.c_enum_alias.get(n) { return Some(canon.clone()); }
+                if self.lowerer.c_enum_defs.contains_key(n) { return Some(n.clone()); }
+                None
+            }
             _ => None,
         }
+    }
+
+    /// sic strict enum typing (sic.md §"Enums"): classify an expression as a
+    /// specific payload-less enum, a plain integer, or unknown. A C enum collapses
+    /// to `int` in the IR, so this recovers the *nominal* identity from the AST and
+    /// the enum side-tables — enough to reject an `int`/other-enum flowing into an
+    /// `enum E` slot, or an enum operand used in arithmetic, without a cast.
+    fn classify_enum(&self, e: &Expr) -> EnumClass {
+        use crate::ast::ExprKind;
+        match &e.kind {
+            // Bare numeric constants are plainly `int`.
+            ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::CharLit(..)
+            | ExprKind::BoolLit(..) => EnumClass::Int,
+            ExprKind::Ident(id) => {
+                if let Some(en) = self.enum_locals.get(id) { return EnumClass::Enum(en.clone()); }
+                if let Some(en) = self.lowerer.c_enum_variant.get(id) { return EnumClass::Enum(en.clone()); }
+                match self.lookup(id) {
+                    Some(LookupResult::Local(ty, _))
+                        if matches!(ty, Type::Int { .. } | Type::Bool) => EnumClass::Int,
+                    _ => EnumClass::Unknown,
+                }
+            }
+            // `E::A` (namespaced enum constant).
+            ExprKind::EnumVariant { enum_name, .. }
+                if self.lowerer.c_enum_defs.contains_key(enum_name) =>
+                EnumClass::Enum(enum_name.clone()),
+            // A cast is the explicit escape hatch: `(enum E)x` is enum E; `(int)e`
+            // (or any other non-enum cast) is a plain integer.
+            ExprKind::Cast { ty, .. } => match self.c_enum_name_of(&ty.ty) {
+                Some(en) => EnumClass::Enum(en),
+                None => EnumClass::Int,
+            },
+            // Any binary op yields an int/bool, never an enum.
+            ExprKind::BinOp { .. } => EnumClass::Int,
+            ExprKind::Unary { op, .. }
+                if matches!(op, crate::ast::UnOpKind::Neg | crate::ast::UnOpKind::Not
+                    | crate::ast::UnOpKind::BitNot) => EnumClass::Int,
+            // A ternary is an enum only when both arms agree on the same enum.
+            ExprKind::Ternary { then, else_, .. } => {
+                match (self.classify_enum(then), self.classify_enum(else_)) {
+                    (EnumClass::Enum(a), EnumClass::Enum(b)) if a == b => EnumClass::Enum(a),
+                    (EnumClass::Int, EnumClass::Int) => EnumClass::Int,
+                    _ => EnumClass::Unknown,
+                }
+            }
+            // A call classifies by its (tracked) enum return type, else stays
+            // unknown — we do not reject results we cannot positively type.
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(fname) => match self.lowerer.c_enum_ret.get(fname) {
+                    Some(en) => EnumClass::Enum(en.clone()),
+                    None => EnumClass::Unknown,
+                },
+                _ => EnumClass::Unknown,
+            },
+            _ => EnumClass::Unknown,
+        }
+    }
+
+    /// sic strict enum typing (sic.md §"Enums"): reject a value flowing into an
+    /// `enum <dest>` slot whose nominal type is a plain `int` or a *different* enum.
+    /// An unknown source is allowed (no false positives). `site` names the context
+    /// (e.g. "assigned to", "passed to") for the diagnostic.
+    pub(crate) fn check_enum_dest(&self, dest: &str, src: &Expr, site: &str) -> Result<()> {
+        if !self.is_sic() { return Ok(()); }
+        let sp = &src.span;
+        match self.classify_enum(src) {
+            EnumClass::Enum(e) if e == dest => Ok(()),
+            EnumClass::Enum(other) => Err(CompileError::at(
+                format!("enum type mismatch: `enum {}` {} `enum {}` — use an explicit `(enum {})` cast",
+                    other, site, dest, dest), sp.file.clone(), sp.line, sp.col)),
+            EnumClass::Int => Err(CompileError::at(
+                format!("`int` {} `enum {}` without a cast — use `(enum {})expr`", site, dest, dest),
+                sp.file.clone(), sp.line, sp.col)),
+            EnumClass::Unknown => Ok(()),
+        }
+    }
+
+    /// sic strict enum typing (sic.md §"Enums"): a payload-less enum has no
+    /// arithmetic — `e + 1` must be written `(int)e + 1`. Rejects an enum operand of
+    /// `+ - * / % & | ^ << >> <<< >>>`; comparisons and logical ops are allowed
+    /// (an enum's numeric value is fine to compare).
+    pub(crate) fn check_enum_arith(&self, op: crate::ast::BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<()> {
+        use crate::ast::BinOpKind::*;
+        if !self.is_sic() { return Ok(()); }
+        if !matches!(op, Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr | RotL | RotR) {
+            return Ok(());
+        }
+        for e in [lhs, rhs] {
+            if let EnumClass::Enum(en) = self.classify_enum(e) {
+                return Err(CompileError::at(
+                    format!("enum `{}` has no arithmetic — cast to int first, e.g. `(int)expr {} …`",
+                        en, op_symbol(op)),
+                    e.span.file.clone(), e.span.line, e.span.col));
+            }
+        }
+        Ok(())
     }
 
     pub fn lookup(&self, name: &str) -> Option<LookupResult<'_>> {
@@ -598,6 +724,9 @@ impl<'m> Lowerer {
 
         let mut fc = FuncCtx::new_with_func(self, &mut func);
         fc.pretty_func = pretty;
+        // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
+        // makes `return <int/other-enum>;` an error without an explicit cast.
+        fc.ret_enum = fc.lowerer.c_enum_name_of_ast(&ret_ty.ty);
 
         // Alloca for each parameter and store the param sentinel value.
         // The backend maps ValId(0x10000 + i) → the i-th function parameter.
@@ -729,6 +858,11 @@ impl<'m> FuncCtx<'m> {
                 if !self.is_terminated() { self.flush_bigint_temps(); }
             }
             Stmt::Return(val, _) => {
+                // sic strict enum typing (sic.md §"Enums"): reject returning an
+                // `int`/other-enum from an `enum`-returning function without a cast.
+                if let (Some(dest), Some(e)) = (self.ret_enum.clone(), val.as_ref()) {
+                    self.check_enum_dest(&dest, e, "returned as")?;
+                }
                 // Evaluate the return value BEFORE running cleanups (the value
                 // must be computed while the about-to-be-destroyed locals are
                 // still valid), then run every enclosing scope's cleanups.
@@ -1136,8 +1270,12 @@ impl<'m> FuncCtx<'m> {
                     // `T *p = malloc(sizeof(*p))` must see `p` as a `T*` (not
                     // default to `int`, which would size the allocation wrong).
                     self.define_local(d.name.clone(), ty.clone(), vid);
-                    // Remember a payload-less enum-typed local so `v.str` works.
+                    // Remember a payload-less enum-typed local so `v.str` works, and
+                    // enforce strict enum typing on its initializer (sic.md §"Enums").
                     if let Some(en) = self.c_enum_name_of(&d.ty.ty) {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            self.check_enum_dest(&en, e, "assigned to")?;
+                        }
                         self.enum_locals.insert(d.name.clone(), en);
                     }
 

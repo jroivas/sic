@@ -1,0 +1,45 @@
+// sic strict enum typing (sic.md §"Enums"): the flip side of test_0270..0272 —
+// legitimate enum use is unaffected. enum→int is implicit; same-enum flows, casts,
+// comparisons and switch all work. Returns 0 on success.
+enum Color { RED, GREEN = 5, BLUE };   // 0, 5, 6
+typedef enum { LO, HI } Level;         // anonymous typedef enum
+
+enum Color pick(enum Color c) { return c; }   // same-enum param + return
+
+int main() {
+    // Construct + pass a same-enum value; enum constants are of their enum type.
+    enum Color a = pick(BLUE);
+    if (a != BLUE) return 1;
+
+    // enum → int is an implicit widening.
+    int n = GREEN;
+    if (n != 5) return 2;
+
+    // Compare against an int literal and against a constant.
+    if (a == 5) return 3;             // BLUE is 6, so this must NOT hit
+    if (!(a == BLUE)) return 4;
+
+    // Explicit cast is the escape hatch, both directions.
+    enum Color b = (enum Color)6;     // int → enum via cast
+    if (b != BLUE) return 5;
+
+    // Iterate with an explicit cast on the arithmetic.
+    int count = 0;
+    for (enum Color e = RED; (int)e <= (int)BLUE; e = (enum Color)((int)e + 1)) {
+        count++;
+    }
+    if (count != 7) return 6;          // 0..6 inclusive
+
+    // switch dispatches on the enum's value.
+    switch (a) {
+        case RED:  return 7;
+        case BLUE: break;
+        default:   return 8;
+    }
+
+    // Anonymous typedef enum behaves the same.
+    Level lv = HI;
+    if ((int)lv != 1) return 9;
+
+    return 0;
+}

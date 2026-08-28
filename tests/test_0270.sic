@@ -1,0 +1,9 @@
+// sic strict enum typing (sic.md §"Enums"): unlike C, a plain `int` cannot be
+// passed where an `enum` is expected without an explicit cast. Pinned via `.xfail`.
+enum Color { RED, GREEN, BLUE };
+void paint(enum Color c) { }
+int main() {
+    int n = 1;
+    paint(n);        // ERROR: `int` passed as `enum Color` without a cast
+    return 0;
+}

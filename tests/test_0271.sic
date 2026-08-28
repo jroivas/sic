@@ -1,0 +1,8 @@
+// sic strict enum typing (sic.md §"Enums"): a payload-less enum has no arithmetic;
+// `e + 1` must be written `(int)e + 1`. Pinned via `.xfail`.
+enum Color { RED, GREEN, BLUE };
+int main() {
+    enum Color c = RED;
+    int next = c + 1;   // ERROR: enum `Color` has no arithmetic
+    return next;
+}
