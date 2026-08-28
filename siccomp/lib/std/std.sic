@@ -2,7 +2,7 @@
 // compiler. It is an ordinary sic module (`module std;`): built separately with
 // `sic --emit-module`, installed into the compiler's module sysroot, and linked
 // in only when a unit says `import std;` (dynamically by default, or statically
-// under `-static`). Nothing here is special to the compiler — `std::Fmt(a, b)` is a
+// under `-static`). Nothing here is special to the compiler — `std.Fmt(a, b)` is a
 // normal call to the function below, and all formatting is done in SIC by matching
 // on each argument's runtime kind and taking its native representation.
 module std;
@@ -99,21 +99,4 @@ string Fmt(string fmt, va_array args) {
         }
     }
     return result;
-}
-
-// `Print(fmt, a, b, …)` — format `fmt` with the arguments (the same `{}`
-// placeholders as `Fmt`) and write the result to stdout. `args` is forwarded to
-// `Fmt` as one already-collected `va_array`, not re-boxed.
-int Print(string fmt, va_array args) {
-    string s = Fmt(fmt, args);
-    write(1, s.ptr, s.size);
-    return 0;
-}
-
-// `Println(fmt, a, b, …)` — like `Print`, followed by a newline.
-int Println(string fmt, va_array args) {
-    string s = Fmt(fmt, args);
-    write(1, s.ptr, s.size);
-    write(1, "\n", 1);
-    return 0;
 }

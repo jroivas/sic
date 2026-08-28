@@ -1,0 +1,86 @@
+module std;
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+
+struct File {
+    int fd;
+    string name;
+};
+typedef struct File File;
+
+enum OpenMode {
+    Read,
+    Write,
+    RW
+};
+
+enum FileStatus {
+    Success,
+    Opened(File*),
+    NotFound,
+    InvalidObject,
+    IO,
+    InvalidFileHandle,
+    ReadError,
+};
+
+
+FileStatus Open(string name, OpenMode mode)
+{
+    File tmp = new File();
+    int flags = 0;
+
+    match (mode)
+    {
+        Read: flags |= O_RDONLY;
+        Write: flags |= O_WRONLY;
+        RW: flags |= O_RDWR;
+    }
+
+    tmp.fd = open(name.str, flags);
+    if (tmp.fd < 0)
+    {
+        del tmp;
+        return FileStatus::NotFound;
+    }
+    tmp.name = name;
+
+    return FileStatus::Opened(tmp);
+}
+
+FileStatus Close(File *f)
+{
+    if (!f)
+        return FileStatus::InvalidObject;
+
+    close(f->fd);
+    del f;
+
+    return FileStatus::Success;
+}
+
+FileStatus Read(File *f, u64 offset, u64 size, Buffer::Data *buf)
+{
+    ssize_t res;
+
+    if (!f)
+        return FileStatus::InvalidObject;
+
+    if (size > buf->size)
+        size = buf->size;
+    res = read(f->fd, buf->data, size);
+    if (res < 0)
+    {
+        res = errno;
+        /* FIXME Better error handling */
+        if (res == EIO)
+            return FileStatus::IO;
+        if (res ==EBADF)
+            return FileStatus::InvalidFileHandle;
+        return FileStatus::ReadError;
+    }
+
+    return FileStatus::Success;
+}
