@@ -1,0 +1,24 @@
+// sic range-`for` over a string yields its UTF-8 code points as `u8char`
+// (sic.md §"Iterators"). ASCII is one code point per byte; multi-byte characters
+// count once.
+int main() {
+    string ascii = "ABC";
+    int n = 0;
+    for (auto cp : ascii) { n++; }
+    if (n != 3) return 1;
+
+    // "Aé" = 'A' (U+0041) then 'é' (U+00E9) — two code points, three bytes.
+    string s = "Aé";
+    int cps = 0;
+    int first = 0;
+    int second = 0;
+    for (auto cp : s) {
+        if (cps == 0) first = (int)cp;
+        if (cps == 1) second = (int)cp;
+        cps++;
+    }
+    if (cps != 2) return 2;
+    if (first != 65) return 3;             // 'A'
+    if (second != 233) return 4;           // 'é' = U+00E9 = 233
+    return 0;
+}

@@ -145,6 +145,8 @@ pub struct FuncCtx<'m> {
     /// enum return type, so `return <wrong>;` is rejected. `None` if it returns a
     /// non-enum type.
     pub ret_enum: Option<String>,
+    /// Monotonic counter for synthesized names (e.g. range-`for` temporaries).
+    pub gensym: u32,
 }
 
 // Safety: we control the lifetime, func pointer is valid as long as FuncCtx exists.
@@ -186,6 +188,7 @@ impl<'m> FuncCtx<'m> {
             guard_stack: Vec::new(),
             expected_ty: None,
             ret_enum: None,
+            gensym: 0,
         }
     }
 
@@ -968,6 +971,8 @@ impl<'m> FuncCtx<'m> {
             Stmt::While { cond, body, .. } => self.lower_while(cond, body)?,
             Stmt::DoWhile { body, cond, .. } => self.lower_do_while(body, cond)?,
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
+            Stmt::ForEach { ty, name, iterable, body, span } =>
+                self.lower_foreach(ty, name, iterable, body, span)?,
             Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
             Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span)?,
             Stmt::Guard { binding, cond, else_body, span } =>
@@ -1874,6 +1879,132 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// sic range-`for` (sic.md §"Iterators"): `for (item : iterable) body`. Desugars
+    /// to existing constructs and lowers that, so break/continue/scopes/cleanups all
+    /// come for free. Dispatches on the iterable:
+    ///   - an enum type name → a counted loop over its variant values;
+    ///   - an array/slice (incl. `string.utf8`) → a counted loop over `[i]`;
+    ///   - a `string` → its code points (`.utf8`, yielding `u8char`);
+    ///   - a struct with a `next()` method → the `Iterator<T>` protocol loop.
+    fn lower_foreach(&mut self, ty: &QualType, name: &str, iterable: &Expr, body: &Stmt, sp: &crate::lexer::Span) -> Result<()> {
+        use crate::ast::{BinOpKind, Declarator};
+        let sp = sp.clone();
+        let mk = |k: ExprKind| Expr { kind: k, span: sp.clone() };
+        let ident = |n: &str| Expr { kind: ExprKind::Ident(n.to_string()), span: sp.clone() };
+        let ulong = || QualType { ty: AstType::Long { signed: false }, qualifiers: vec![], storage: None };
+
+        // `for (unsigned long i = 0; i < <len>; ++i) { <item_ty> name = <elem>; body }`
+        let counted = |iname: &str, item_ty: QualType, len: Expr, elem: Expr, body: Stmt, sp: &crate::lexer::Span| -> Stmt {
+            let zero = Expr { kind: ExprKind::IntLit(0, false), span: sp.clone() };
+            let idx = Decl::Var {
+                base_ty: ulong(),
+                declarators: vec![Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, span: sp.clone() }],
+                weak: false, thread_local: false, span: sp.clone(),
+            };
+            let cond = Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, lhs: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }), rhs: Box::new(len) }, span: sp.clone() };
+            let post = Expr { kind: ExprKind::PreInc { inc: true, expr: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }) }, span: sp.clone() };
+            let item = Stmt::Decl(Decl::Var {
+                base_ty: item_ty.clone(),
+                declarators: vec![Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, span: sp.clone() }],
+                weak: false, thread_local: false, span: sp.clone(),
+            });
+            let inner = Stmt::Block(vec![item, body], sp.clone());
+            Stmt::For { init: Some(ForInit::Decl(idx)), cond: Some(cond), post: Some(post), body: Box::new(inner), span: sp.clone() }
+        };
+
+        let uid = self.gensym; self.gensym += 1;
+        let iname = format!("__fe_i_{}", uid);
+
+        // (1) Enum type name: iterate the variant values.
+        if let ExprKind::Ident(id) = &iterable.kind {
+            let canon = if self.lowerer.c_enum_defs.contains_key(id) { Some(id.clone()) }
+                        else { self.lowerer.c_enum_alias.get(id).cloned() };
+            if let Some(canon) = canon {
+                let vals: Vec<i64> = self.lowerer.c_enum_defs.get(&canon).cloned().unwrap_or_default()
+                    .iter().map(|(_, v)| *v).collect();
+                let vname = format!("__fe_vals_{}", uid);
+                let len = vals.len();
+                // `int __fe_vals_N[] = { v0, v1, … };`
+                let items: Vec<crate::ast::InitItem> = vals.iter().map(|v| crate::ast::InitItem {
+                    designators: vec![],
+                    init: Initializer::Expr(Expr { kind: ExprKind::IntLit(*v, false), span: sp.clone() }),
+                }).collect();
+                let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))) }, qualifiers: vec![], storage: None };
+                let arr_decl = Stmt::Decl(Decl::Var {
+                    base_ty: QualType::new(AstType::Int { signed: true }),
+                    declarators: vec![Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, span: sp.clone() }],
+                    weak: false, thread_local: false, span: sp.clone(),
+                });
+                // item = (enum Canon) __fe_vals_N[i]
+                let elem_raw = mk(ExprKind::Index { base: Box::new(ident(&vname)), index: Box::new(ident(&iname)) });
+                let enum_ast = AstType::Enum(crate::ast::EnumDef { name: Some(canon.clone()), variants: None, packed: false, type_params: vec![], span: sp.clone() });
+                let item_ty = QualType { ty: enum_ast, qualifiers: vec![], storage: None };
+                let elem = mk(ExprKind::Cast { ty: item_ty.clone(), expr: Box::new(elem_raw) });
+                let use_ty = if matches!(ty.storage, Some(StorageClass::Auto)) { item_ty } else { ty.clone() };
+                let loop_ = counted(&iname, use_ty, mk(ExprKind::IntLit(len as i64, false)), elem, body.clone(), &sp);
+                return self.lower_stmt(&Stmt::Block(vec![arr_decl, loop_], sp.clone()));
+            }
+        }
+
+        let ity = self.infer_expr_type(iterable)?;
+
+        // (3) string → its UTF-8 code points (`u8char`), via `.utf8` (a slice).
+        if super::types::is_sic_string(&ity) {
+            let sname = format!("__fe_src_{}", uid);
+            let src_decl = Stmt::Decl(Decl::Var {
+                base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
+                declarators: vec![Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, span: sp.clone() }],
+                weak: false, thread_local: false, span: sp.clone(),
+            });
+            let inner = Stmt::ForEach { ty: ty.clone(), name: name.to_string(), iterable: ident(&sname), body: Box::new(body.clone()), span: sp.clone() };
+            return self.lower_stmt(&Stmt::Block(vec![src_decl, inner], sp.clone()));
+        }
+
+        // (4) A struct with a `next()` method → the Iterator<T> protocol loop.
+        if let Type::Struct(st) = &ity {
+            if let Some(sn) = &st.name {
+                if self.lowerer.struct_methods.contains_key(&(sn.clone(), "next".to_string())) {
+                    let itname = format!("__fe_it_{}", uid);
+                    let stepname = format!("__fe_step_{}", uid);
+                    // auto __fe_it = <iterable>;   (a mutable copy the loop advances)
+                    let it_decl = Stmt::Decl(Decl::Var {
+                        base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
+                        declarators: vec![Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, span: sp.clone() }],
+                        weak: false, thread_local: false, span: sp.clone(),
+                    });
+                    // auto __fe_step = __fe_it.next();
+                    let call = mk(ExprKind::Call { func: Box::new(mk(ExprKind::Field { base: Box::new(ident(&itname)), name: "next".to_string() })), args: vec![] });
+                    let step_decl = Stmt::Decl(Decl::Var {
+                        base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
+                        declarators: vec![Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, span: sp.clone() }],
+                        weak: false, thread_local: false, span: sp.clone(),
+                    });
+                    // match (__fe_step) { Next(name): { body }  Stop: break; }
+                    let arm_next = crate::ast::MatchArm { variant: Some("Next".to_string()), binding: Some(name.to_string()), body: Box::new(body.clone()), span: sp.clone() };
+                    let arm_stop = crate::ast::MatchArm { variant: Some("Stop".to_string()), binding: None, body: Box::new(Stmt::Break(sp.clone())), span: sp.clone() };
+                    let match_stmt = Stmt::Match { scrutinee: ident(&stepname), arms: vec![arm_next, arm_stop], span: sp.clone() };
+                    let loop_body = Stmt::Block(vec![step_decl, match_stmt], sp.clone());
+                    let inf = Stmt::For { init: None, cond: None, post: None, body: Box::new(loop_body), span: sp.clone() };
+                    return self.lower_stmt(&Stmt::Block(vec![it_decl, inf], sp.clone()));
+                }
+            }
+        }
+
+        // (2) Array / slice (incl. a `string.utf8` result): counted loop over `[i]`.
+        // sic arrays and slices both answer `.length` and `[i]`.
+        if matches!(&ity, Type::Array { .. }) || super::types::is_u8char_arr(&ity) {
+            let len = mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "length".to_string() });
+            let elem = mk(ExprKind::Index { base: Box::new(iterable.clone()), index: Box::new(ident(&iname)) });
+            let use_ty = ty.clone();
+            let loop_ = counted(&iname, use_ty, len, elem, body.clone(), &sp);
+            return self.lower_stmt(&loop_);
+        }
+
+        Err(CompileError::at(
+            "range-`for` needs an array, string, enum type, or a struct with a `next()` method".to_string(),
+            sp.file.clone(), sp.line, sp.col))
+    }
+
     fn lower_switch(&mut self, val: &Expr, body: &Stmt) -> Result<()> {
         let v = self.lower_expr(val)?;
         let v_i32 = self.coerce(v, &Type::i32())?;
@@ -2464,7 +2595,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
-        | Stmt::Guard { span, .. } => span.line,
+        | Stmt::ForEach { span, .. } | Stmt::Guard { span, .. } => span.line,
     }
 }
 
@@ -2656,6 +2787,10 @@ fn infer_calls_in_stmt(
         }
         Stmt::Switch { val, body, .. } => {
             find_tuple_calls(fc, val, targets, found);
+            infer_calls_in_stmt(fc, body, targets, found);
+        }
+        Stmt::ForEach { iterable, body, .. } => {
+            find_tuple_calls(fc, iterable, targets, found);
             infer_calls_in_stmt(fc, body, targets, found);
         }
         Stmt::Match { scrutinee, arms, .. } => {

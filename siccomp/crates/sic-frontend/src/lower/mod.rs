@@ -2641,6 +2641,11 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             for a in arms { collect_stmt_names(&a.body, out); }
         }
         Stmt::Unsafe(body, _) => { for s in body { collect_stmt_names(s, out); } }
+        Stmt::ForEach { name, iterable, body, .. } => {
+            collect_expr_names(iterable, out);
+            out.push(name.clone());
+            collect_stmt_names(body, out);
+        }
         Stmt::Guard { binding, cond, else_body, .. } => {
             collect_expr_names(cond, out);
             if let Some((_, n)) = binding { out.push(n.clone()); }

@@ -1,0 +1,33 @@
+// sic range-`for` over an enum type and a custom iterator (sic.md §"Iterators").
+enum Flags { A = 1, B = 2, C = 4, D = 8 };
+
+// A struct with a `next()` returning Iterator<int> is iterable.
+struct Range {
+    int cur;
+    int end;
+    Iterator<int> next(struct Range *self) {
+        if (self->cur >= self->end) return Iterator::Stop;
+        self->cur = self->cur + 1;
+        return Iterator::Next(self->cur);
+    }
+};
+
+int main() {
+    // Enum type → its variant values, in declaration order.
+    int mask = 0;
+    int count = 0;
+    for (auto f : Flags) { mask |= (int)f; count++; }
+    if (mask != 15) return 1;
+    if (count != 4) return 2;
+
+    // Custom next(): 1..5 (the iterable is copied, so the original is untouched).
+    struct Range r;
+    r.cur = 0;
+    r.end = 5;
+    int sum = 0;
+    for (auto n : r) { sum += n; }
+    if (sum != 15) return 3;               // 1+2+3+4+5
+    if (r.cur != 0) return 4;              // original unchanged (iterated a copy)
+
+    return 0;
+}

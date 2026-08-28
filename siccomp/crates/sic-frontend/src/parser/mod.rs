@@ -1444,6 +1444,27 @@ impl Parser {
         self.advance(); // 'for'
         self.expect(TokenKind::LParen)?;
 
+        // sic range-`for` (sic.md §"Iterators"): `for (binding : iterable) body`.
+        // Detect the colon form by trial-parsing a binding `T name` and checking for
+        // `:`; on any mismatch, rewind to the classic three-clause `for`.
+        if self.lang == Lang::Sic && self.is_decl_start() {
+            let save = self.pos;
+            if let Ok((ty, name)) = (|| -> Result<(QualType, String)> {
+                let (base, _) = self.parse_decl_specifiers()?;
+                let (name, ty) = self.parse_declarator(base)?;
+                Ok((ty, name))
+            })() {
+                if self.at(TokenKind::Colon) {
+                    self.advance(); // ':'
+                    let iterable = self.parse_expr()?;
+                    self.expect(TokenKind::RParen)?;
+                    let body = Box::new(self.parse_stmt()?);
+                    return Ok(Stmt::ForEach { ty, name, iterable, body, span: sp });
+                }
+            }
+            self.pos = save;
+        }
+
         let init = if self.at(TokenKind::Semi) {
             self.advance(); None
         } else if self.is_decl_start() {

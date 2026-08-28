@@ -643,10 +643,49 @@ __attribute__((weak)) unsigned int *__sic_utf8_decode(const char *data, unsigned
 }
 "#;
 
-/// True if `src` uses the `.utf8` accessor — the signal to prepend
-/// [`UTF8_RUNTIME`].
+/// True if `src` uses the `.utf8` accessor, or a range-`for` (which may iterate a
+/// string's code points and desugars to `.utf8`) — the signal to prepend
+/// [`UTF8_RUNTIME`]. The decoder is weak, so prepending it for a non-string
+/// range-`for` only leaves a small unused function.
 pub fn uses_utf8(src: &str) -> bool {
-    word_present(src, "utf8")
+    word_present(src, "utf8") || uses_range_for(src)
+}
+
+/// True if `src` contains a range-`for` header `for ( … : … )`. A classic `for`
+/// uses `;` separators, so a `:` inside the parenthesized header (with no `;`)
+/// marks the sic colon form.
+fn uses_range_for(src: &str) -> bool {
+    let bytes = src.as_bytes();
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while let Some(off) = src[i..].find("for") {
+        let start = i + off;
+        i = start + 3;
+        // Whole-word `for`.
+        if start > 0 && is_ident(bytes[start - 1]) { continue; }
+        if i < bytes.len() && is_ident(bytes[i]) { continue; }
+        // Skip whitespace to the opening paren.
+        let mut j = i;
+        while j < bytes.len() && (bytes[j] as char).is_whitespace() { j += 1; }
+        if j >= bytes.len() || bytes[j] != b'(' { continue; }
+        // Scan the parenthesized header for `:` before any `;`.
+        let mut depth = 0i32;
+        let mut k = j;
+        let mut saw_colon = false;
+        let mut saw_semi = false;
+        while k < bytes.len() {
+            match bytes[k] {
+                b'(' => depth += 1,
+                b')' => { depth -= 1; if depth == 0 { break; } }
+                b';' if depth == 1 => saw_semi = true,
+                b':' if depth == 1 => saw_colon = true,
+                _ => {}
+            }
+            k += 1;
+        }
+        if saw_colon && !saw_semi { return true; }
+    }
+    false
 }
 
 fn word_present(src: &str, word: &str) -> bool {

@@ -265,6 +265,17 @@ pub enum Stmt {
         body: BoxStmt,
         span: Span,
     },
+    /// sic range-`for` (sic.md §"Iterators"): `for (auto item : iterable) body`.
+    /// `ty` is the binding's declared type (`storage: Auto` means infer the element
+    /// type from the iterable). Works over arrays, strings, enum types, and any
+    /// struct with a `next()` method.
+    ForEach {
+        ty: QualType,
+        name: String,
+        iterable: Expr,
+        body: BoxStmt,
+        span: Span,
+    },
     Return(Option<Expr>, Span),
     Break(Span),
     Continue(Span),
