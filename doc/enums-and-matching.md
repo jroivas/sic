@@ -68,6 +68,25 @@ if (int cv = E::TAG(c)) {     // binds cv only if c is a TAG
 }
 ```
 
+### `.str` — the variant name
+
+A payload-less enum value renders as a native `string` naming its variant,
+`"EnumName::Variant"` — handy for logging and debugging:
+
+```sic
+enum Color { RED, GREEN, BLUE };
+
+enum Color c = BLUE;
+c.str;                        // "Color::BLUE"   (from the runtime value)
+RED.str;                      // "Color::RED"    (a bare constant)
+std.Println("{}", c.str);     // Color::BLUE
+
+if (c.str == "Color::BLUE") … // it's an ordinary string
+```
+
+An out-of-range value (e.g. `(enum Color)99`) yields `"Color::?"`. This applies to
+enum-typed variables and parameters and to bare enum constants.
+
 ## Ergonomics — no `.unwrap()`
 
 SIC deliberately has no bare `.unwrap()`. Instead:
