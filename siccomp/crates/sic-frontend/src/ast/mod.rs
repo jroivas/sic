@@ -83,8 +83,31 @@ pub struct StructDef {
     /// `packed` or the sic `__order__` attribute — keep declaration field order
     /// (disables sic struct reordering, sic.md §"Struct reordering").
     pub keep_order: bool,
+    /// sic member functions (sic.md §"Memory safety"): the constructor `S()`,
+    /// destructor `~S()`, and methods `Ret m(S* self){…}` declared in the body.
+    /// Empty for C structs and for bodiless `struct S` references.
+    pub methods: Vec<StructMethod>,
     pub span: Span,
 }
+
+/// A sic struct member function (sic.md §"Memory safety" / §"Iterators").
+#[derive(Debug, Clone)]
+pub struct StructMethod {
+    pub kind: MethodKind,
+    /// The method's name; for a constructor/destructor this is the struct's name.
+    pub name: String,
+    pub ret_ty: QualType,
+    /// Explicit parameters as written, including the leading `self` for a plain
+    /// method (`Ret m(S* self)`). A constructor/destructor takes an implicit `self`
+    /// and lists none.
+    pub params: Vec<Param>,
+    pub variadic: bool,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodKind { Method, Ctor, Dtor }
 
 #[derive(Debug, Clone)]
 pub struct UnionDef {

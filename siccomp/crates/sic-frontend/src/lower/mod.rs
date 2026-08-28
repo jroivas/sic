@@ -87,6 +87,10 @@ pub struct Lowerer {
     /// sic strict enum typing: function name → its payload-less enum return type, so
     /// `return <wrong>;` is rejected and a call's result classifies as that enum.
     pub c_enum_ret: HashMap<String, String>,
+    /// sic struct methods (sic.md §"Memory safety" / §"Iterators"): `(struct name,
+    /// method name)` → the mangled free-function name the method was hoisted to.
+    /// Populated before lowering; `obj.method(args)` resolves through it.
+    pub struct_methods: HashMap<(String, String), String>,
     /// sic strict enum typing: a typedef alias for a payload-less enum → the
     /// canonical enum name (a key in `c_enum_defs`). Lets `typedef enum {…} E;` be
     /// type-checked as strictly as `enum E`. An anonymous enum's typedef name is its
@@ -161,6 +165,7 @@ impl Lowerer {
             c_enum_param: HashMap::new(),
             c_enum_ret: HashMap::new(),
             c_enum_alias: HashMap::new(),
+            struct_methods: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -205,6 +210,17 @@ impl Lowerer {
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
         let dbg = std::env::var("SIC_TIMING").is_ok();
         let t0 = std::time::Instant::now();
+        // sic struct methods (sic.md §"Memory safety" / §"Iterators"): hoist each
+        // struct's member functions into ordinary free functions before lowering,
+        // recording the method table. Only clones the unit when methods are present.
+        let owned_tu: Option<TranslationUnit> =
+            if self.sic && tu.decls.iter().any(decl_has_methods) {
+                let mut t = tu.clone();
+                self.hoist_struct_methods(&mut t);
+                Some(t)
+            } else { None };
+        let tu: &TranslationUnit = owned_tu.as_ref().unwrap_or(tu);
+
         // Decide which `inline` functions are reachable (and thus emitted).
         self.emit_inline = compute_emitted_inlines(tu);
         if dbg { eprintln!("[timing] compute_emitted_inlines: {:?} ({} inlines)", t0.elapsed(), self.emit_inline.len()); }
@@ -1055,6 +1071,36 @@ impl Lowerer {
             }
         };
         self.c_enum_alias.insert(alias.to_string(), canonical);
+    }
+
+    /// sic struct methods (sic.md §"Memory safety" / §"Iterators"): rewrite each
+    /// struct's `Method`-kind member functions into ordinary internal free functions
+    /// (mangled `__sic_m_<Struct>_<method>`) appended to the unit, and record the
+    /// `(struct, method) → mangled` table so `obj.method(args)` can resolve and pass
+    /// `&obj` as the explicit `self`. Constructors/destructors are handled elsewhere.
+    fn hoist_struct_methods(&mut self, tu: &mut TranslationUnit) {
+        let mut synthesized: Vec<Decl> = Vec::new();
+        for d in &tu.decls {
+            for (sname, sdef) in struct_defs_with_methods(d) {
+                for m in &sdef.methods {
+                    if m.kind != MethodKind::Method { continue; }
+                    let mangled = format!("__sic_m_{}_{}", sname, m.name);
+                    self.struct_methods.insert((sname.clone(), m.name.clone()), mangled.clone());
+                    synthesized.push(Decl::Func {
+                        name: mangled,
+                        ret_ty: m.ret_ty.clone(),
+                        params: m.params.clone(),
+                        variadic: m.variadic,
+                        body: Some(m.body.clone()),
+                        storage: Some(StorageClass::Static),
+                        inline: false,
+                        constructor: None,
+                        span: m.span.clone(),
+                    });
+                }
+            }
+        }
+        tu.decls.extend(synthesized);
     }
 
     /// Record each function's payload-less-enum parameters and return type
@@ -2415,6 +2461,35 @@ fn collect_init_names(init: &Initializer, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// The named struct definitions (with their canonical name) carried by a top-level
+/// declaration that actually declare member functions (sic.md §"Memory safety").
+fn struct_defs_with_methods(d: &Decl) -> Vec<(String, &StructDef)> {
+    let mut out = Vec::new();
+    match d {
+        Decl::StructDecl(s) | Decl::Var { base_ty: QualType { ty: AstType::Struct(s), .. }, .. } => {
+            if !s.methods.is_empty() {
+                if let Some(n) = &s.name { out.push((n.clone(), s)); }
+            }
+        }
+        Decl::TypeDef { names, .. } => {
+            for (alias, qt) in names {
+                if let AstType::Struct(s) = &qt.ty {
+                    if !s.methods.is_empty() {
+                        out.push((s.name.clone().unwrap_or_else(|| alias.clone()), s));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Does this declaration introduce any sic struct member functions?
+fn decl_has_methods(d: &Decl) -> bool {
+    !struct_defs_with_methods(d).is_empty()
 }
 
 /// The sic prelude's built-in generic enums (sic.md §"Match"): `Option<T>` and

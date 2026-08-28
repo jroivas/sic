@@ -613,11 +613,21 @@ impl Parser {
         self.skip_attributes();
         type_align = type_align.or(self.pending_aligned.take());
 
+        let mut methods: Vec<StructMethod> = Vec::new();
         let fields = if self.at(TokenKind::LBrace) {
             self.advance();
             let mut fields = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 let before = self.pos;
+                // sic member functions (sic.md §"Memory safety"): a constructor
+                // `S()`, destructor `~S()`, or method `Ret m(S* self){…}` in the
+                // body. C structs never have these.
+                if !is_union && self.lang == Lang::Sic {
+                    if let Some(m) = self.try_parse_struct_method(name.as_deref())? {
+                        methods.push(m);
+                        continue;
+                    }
+                }
                 fields.extend(self.parse_struct_field()?);
                 self.eat(TokenKind::Semi);
                 // Safety: never spin (and allocate unboundedly) if some construct
@@ -641,7 +651,62 @@ impl Parser {
         if is_union {
             Ok(AstType::Union(UnionDef { name, fields, align: type_align, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, methods, span: sp }))
+        }
+    }
+
+    /// sic (sic.md §"Memory safety"): try to parse a struct member function at the
+    /// current position — a destructor `~S(){…}`, constructor `S(){…}`, or method
+    /// `Ret m(S* self){…}`. Returns `None` (leaving the position untouched) when the
+    /// member is an ordinary field, so the caller falls back to `parse_struct_field`.
+    fn try_parse_struct_method(&mut self, struct_name: Option<&str>) -> Result<Option<StructMethod>> {
+        let sp = self.span();
+        // Destructor: `~S() { … }`.
+        if self.at(TokenKind::Tilde) {
+            self.advance();
+            let name = self.expect_name()?;
+            let (params, variadic) = self.parse_params()?;
+            self.skip_attributes();
+            let body = self.parse_compound_stmt_as_stmts()?;
+            self.eat(TokenKind::Semi);
+            return Ok(Some(StructMethod { kind: MethodKind::Dtor, name, ret_ty: QualType::new(AstType::Void), params, variadic, body, span: sp }));
+        }
+        let start = self.pos;
+        // Constructor: `S( … ) { … }` — a bare struct-name followed by `(`.
+        if let Some(sname) = struct_name {
+            if (self.at(TokenKind::Ident) || self.at(TokenKind::TypeName)) && self.peek().text == sname {
+                let save = self.pos;
+                self.advance(); // the name
+                if self.at(TokenKind::LParen) {
+                    let (params, variadic) = self.parse_params()?;
+                    if self.at(TokenKind::LBrace) {
+                        self.skip_attributes();
+                        let body = self.parse_compound_stmt_as_stmts()?;
+                        self.eat(TokenKind::Semi);
+                        return Ok(Some(StructMethod { kind: MethodKind::Ctor, name: sname.to_string(), ret_ty: QualType::new(AstType::Void), params, variadic, body, span: sp }));
+                    }
+                }
+                self.pos = save; // not a constructor — rewind
+            }
+        }
+        // Method: `Ret name( … ) { … }`. Parse a full declarator; if it is a
+        // function declarator immediately followed by a `{`, it is a method body.
+        let parsed = (|| -> Result<Option<StructMethod>> {
+            let (base_ty, _) = self.parse_decl_specifiers()?;
+            let (name, ty) = self.parse_declarator(base_ty)?;
+            if let AstType::Function { params, variadic, ret } = ty.ty {
+                if self.at(TokenKind::LBrace) {
+                    self.skip_attributes();
+                    let body = self.parse_compound_stmt_as_stmts()?;
+                    self.eat(TokenKind::Semi);
+                    return Ok(Some(StructMethod { kind: MethodKind::Method, name, ret_ty: *ret, params, variadic, body, span: sp.clone() }));
+                }
+            }
+            Ok(None)
+        })();
+        match parsed {
+            Ok(Some(m)) => Ok(Some(m)),
+            _ => { self.pos = start; Ok(None) }  // field: rewind for parse_struct_field
         }
     }
 

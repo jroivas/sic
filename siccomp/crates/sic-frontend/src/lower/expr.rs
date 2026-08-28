@@ -4452,6 +4452,44 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic struct method call (sic.md §"Memory safety" / §"Iterators"):
+        // `obj.method(args)` / `p->method(args)` desugars to the hoisted free
+        // function `__sic_m_<Struct>_<method>(self, args)`, with `self` the receiver
+        // as a pointer (`&obj` for a value receiver, the pointer itself otherwise).
+        // Recursing through `lower_call` reuses arg coercion + the sret ABI (the
+        // method may return an aggregate such as `Iterator<T>`).
+        if self.is_sic() && !self.lowerer.struct_methods.is_empty() {
+            let recv = match &func_expr.kind {
+                ExprKind::Field { base, name } | ExprKind::Arrow { base, name } =>
+                    Some((base.as_ref(), name.clone())),
+                _ => None,
+            };
+            if let Some((base, mname)) = recv {
+                let (sname, recv_is_ptr) = match self.infer_expr_type(base).ok() {
+                    Some(Type::Struct(st)) => (st.name, false),
+                    Some(Type::Pointer(inner)) => match *inner {
+                        Type::Struct(st) => (st.name, true),
+                        _ => (None, false),
+                    },
+                    _ => (None, false),
+                };
+                if let Some(mangled) = sname
+                    .and_then(|s| self.lowerer.struct_methods.get(&(s, mname)).cloned())
+                {
+                    let self_arg = if recv_is_ptr {
+                        base.clone()
+                    } else {
+                        Expr { kind: ExprKind::Unary { op: crate::ast::UnOpKind::Addr, expr: Box::new(base.clone()) }, span: base.span.clone() }
+                    };
+                    let mut new_args = Vec::with_capacity(args.len() + 1);
+                    new_args.push(self_arg);
+                    new_args.extend_from_slice(args);
+                    let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
+                    return self.lower_call(&callee, &new_args, sp);
+                }
+            }
+        }
+
         // A `_Generic(...)` selection used as the callee resolves to the chosen
         // association's expression, which may itself be a builtin name (e.g.
         // QEMU's `bswaps` macro: `_Generic(x, uint16_t: __builtin_bswap16, ...)(x)`).
@@ -5914,6 +5952,24 @@ impl<'m> FuncCtx<'m> {
                         if let Some(en) = self.lowerer.variant_enum.get(name) {
                             if let Some(info) = self.lowerer.enum_defs.get(en) {
                                 return Ok(info.struct_type.clone());
+                            }
+                        }
+                    }
+                }
+                // sic struct method call `obj.method(...)` → the hoisted method's
+                // return type (so `auto r = it.next();` infers `Iterator<T>`).
+                if self.is_sic() && !self.lowerer.struct_methods.is_empty() {
+                    if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
+                        let sname = match self.infer_expr_type(base).ok() {
+                            Some(Type::Struct(st)) => st.name,
+                            Some(Type::Pointer(inner)) => match *inner { Type::Struct(st) => st.name, _ => None },
+                            _ => None,
+                        };
+                        if let Some(mangled) = sname
+                            .and_then(|s| self.lowerer.struct_methods.get(&(s, name.clone())).cloned())
+                        {
+                            if let Some(fref) = self.lowerer.module.func_ref_by_name(&mangled) {
+                                return Ok(self.lowerer.module.func_sig(fref).ret.clone());
                             }
                         }
                     }
