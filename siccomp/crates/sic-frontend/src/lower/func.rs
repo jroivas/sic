@@ -1000,6 +1000,17 @@ impl<'m> FuncCtx<'m> {
                         continue;
                     }
                     let mut ty = self.lower_type(&d.ty)?;
+                    // sic `auto x = expr;` — infer the variable's type from its
+                    // initializer (rather than C's storage-class `auto`, which
+                    // defaults the type to `int`). Lets `auto cps = s.utf8;` bind the
+                    // real (marker) type so its members/indexing resolve.
+                    if self.is_sic() && matches!(base_ty.storage, Some(StorageClass::Auto)) {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            if let Ok(it) = self.infer_expr_type(e) {
+                                ty = it;
+                            }
+                        }
+                    }
                     // sic tuple local (sic.md §"Tuples"): a tuple value is a pointer
                     // to a refcounted heap block. Bind the pointer, retain the
                     // shared block, and release it at scope exit. A bare `tuple t;`
