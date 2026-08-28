@@ -1209,18 +1209,18 @@ Complex casting is not supported. However one can manually cast:
 We have been talking about errors and exceptions earlier in this document, but haven't yet specified how they work.
 In case of SIC most errors are actually just bit better error codes. Let's take an example:
 
-    int readbyte(&mut std.File f) {
+    int readbyte(&mut std::File f) {
         return f.read(1);
     }
 
 This simple function tries to read one byte from a file. We get the file as reference, read one byte from there and return the value.
-Instead of C API we use SIC API and it's `std.File` interface which implements SIC style errors.
+Instead of C API we use SIC API and it's `std::File` interface which implements SIC style errors.
 
 When we try to compile that example it fails. Reason is that we didn't actually handle the possible exception.
 For that we have two options: handle it locally, or pass it forward. Here's an example to just handle it there:
 
-    int readbyte(&mut std.File f) {
-        std.Result<int, string> res = f.read(1);
+    int readbyte(&mut std::File f) {
+        std::Result<int, string> res = f.read(1);
 
         match (res) {
             Ok(val): return val;
@@ -1230,7 +1230,7 @@ For that we have two options: handle it locally, or pass it forward. Here's an e
 
 As you can see the error in this case is actually just wrapper around an enum. In order to pass it forward one just:
 
-    std.Result<int, string> readbyte(&mut std.File f) {
+    std::Result<int, string> readbyte(&mut std::File f) {
         return f.read(1);
     }
 
@@ -1288,3 +1288,14 @@ We're borrowing multiline string syntax from Python:
         """;
 
 Those strings can be used like any strings.
+
+## Namespace
+
+Support for namespaces like in C++
+
+    namespace test {
+        int a = 4;
+    };
+
+    if (test::a != 4) return 1;
+    test::a = 5;
