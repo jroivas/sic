@@ -56,7 +56,7 @@ impl Parser {
         // are usable as types without a user declaration. A user `enum Option<T>`
         // still overrides (its variants win at lowering).
         if lang == Lang::Sic {
-            for n in ["Option", "Result"] {
+            for n in ["Option", "Result", "Iterator"] {
                 typedefs.insert(n.to_string());
                 generic_enums.insert(n.to_string());
             }

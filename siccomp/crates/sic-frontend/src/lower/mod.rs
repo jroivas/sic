@@ -2512,6 +2512,13 @@ fn blessed_enum_templates() -> Vec<EnumDef> {
             variants: Some(vec![variant("Ok", Some(named("T"))), variant("Err", Some(named("E")))]),
             packed: false, type_params: vec!["T".to_string(), "E".to_string()], span: crate::lexer::Span::default(),
         },
+        // sic iterators (sic.md §"Iterators"): a custom `next()` returns this so the
+        // range-`for` knows whether to yield another element or stop.
+        EnumDef {
+            name: Some("Iterator".to_string()),
+            variants: Some(vec![variant("Stop", None), variant("Next", Some(named("T")))]),
+            packed: false, type_params: vec!["T".to_string()], span: crate::lexer::Span::default(),
+        },
     ]
 }
 
