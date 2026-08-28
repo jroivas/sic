@@ -4203,6 +4203,19 @@ impl<'m> FuncCtx<'m> {
                     let sz = pty.size_of(self.ptr_size());
                     let al = pty.align_of(self.ptr_size());
                     self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });
+                } else if self.is_sic() && super::types::is_fixed(pty) {
+                    // A `fixed` payload is an exact rational (`__sic_rat*`). Evaluate
+                    // the arg into a freshly-owned rational (converting a literal/int,
+                    // and taking an independent copy of any source) so the enum owns
+                    // its payload — a bare `lower_expr` yields a raw float, and a
+                    // shared pointer would dangle when the source's `__sic_rat_free`
+                    // cleanup runs.
+                    let val = self.eval_fixed_owned(&args[0], 0)?;
+                    self.push_instr(Instr::Store { val, ptr: payload_ptr.ptr });
+                } else if self.is_sic() && super::types::is_bigint(pty) {
+                    // A `bigint` payload: same ownership story via `__sic_bi_clone`.
+                    let val = self.eval_bigint_owned(&args[0])?;
+                    self.push_instr(Instr::Store { val, ptr: payload_ptr.ptr });
                 } else {
                     let val = self.lower_expr(&args[0])?;
                     self.store_lvalue(&payload_ptr, val)?;

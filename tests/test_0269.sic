@@ -1,0 +1,36 @@
+// A tagged-enum `fixed` payload (sic.md §"Match"). Regression: constructing a
+// variant from a `fixed` literal used to store a raw float (or a shared pointer to
+// a soon-freed temp) into the payload union, so matching + using it crashed. The
+// enum must own an exact rational (`__sic_rat*`), independent of the source temp.
+enum Shape { Circle(fixed), Square(fixed) };
+
+// Returning a `fixed` computed from a bound payload exercises the whole path.
+fixed area(Shape s) {
+    match (s) {
+        Circle(r): return r * r * 3;   // exact: r²·3
+        Square(w): return w * w;
+    }
+}
+
+int main() {
+    // Construct from a literal (the case that crashed), match, use the payload.
+    Shape c = Shape::Circle(2.0);
+    if (area(c).int != 12) return 1;   // 2·2·3 = 12
+
+    Shape sq = Shape::Square(4.0);
+    if (area(sq).int != 16) return 2;  // 4·4 = 16
+
+    // Fractional payload preserved exactly, bound directly.
+    Shape h = Shape::Circle(2.5);
+    match (h) {
+        Circle(r): if (r.int != 2) return 3;   // 2.5 truncates to 2
+        Square(w): return 4;
+    }
+
+    // Construct from a fixed VARIABLE too (independent copy, no dangle).
+    fixed f = 3.0;
+    Shape sv = Shape::Square(f);
+    if (area(sv).int != 9) return 5;
+
+    return 0;
+}
