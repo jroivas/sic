@@ -1262,6 +1262,23 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Store { val: v, ptr });
                 return Ok(());
             }
+            // sic `u8char c = <expr>` (sic.md §"Integer sizes"): a code point held
+            // in a `{ u32 cp }` struct. Another u8char copies the struct; an integer
+            // (or ASCII char literal) is stored into the `cp` field.
+            Initializer::Expr(e) if self.is_sic() && super::types::is_u8char(ty) => {
+                if matches!(self.infer_expr_type(e), Ok(t) if super::types::is_u8char(&t)) {
+                    let src = self.lower_aggregate_ptr(e)?;
+                    let size = ty.size_of(self.ptr_size());
+                    let align = ty.align_of(self.ptr_size());
+                    self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
+                } else {
+                    let v = self.lower_expr(e)?;
+                    let cp = self.coerce(v, &Type::Int { bits: 32, signed: false })?;
+                    let dst = self.coerce(ptr.clone(), &Type::Pointer(Box::new(Type::Int { bits: 32, signed: false })))?;
+                    self.push_instr(Instr::Store { val: cp, ptr: dst });
+                }
+                return Ok(());
+            }
             // sic `any a = <expr>` (sic.md std): box the value unless the RHS is
             // already an `any` (then it copies below like any aggregate).
             Initializer::Expr(e)

@@ -246,6 +246,25 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(elem))
     }
 
+    /// Lower `cps[i]` on a `u8char[]` (from `string.utf8`) → a pointer to the i-th
+    /// `u8char` (aggregate-by-pointer rvalue).
+    fn lower_u8char_arr_index(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let u8c = super::types::u8char_type();
+        let u8c_sz = u8c.size_of(self.ptr_size()) as i64;
+        let p = self.lower_aggregate_ptr(base)?;
+        let data_lv = self.field_ptr_from(LValue::plain(p, super::types::u8char_arr_type(self.ptr_size())), "data", false, sp)?;
+        let data = self.load_lvalue(&data_lv)?; // u8char*
+        let iv = self.lower_expr(index)?;
+        let iv = self.coerce(iv, &Type::i64())?;
+        let elem = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr {
+            dest: elem, base: data, index: iv,
+            elem_size: u8c_sz as u64, result_ty: Type::Pointer(Box::new(u8c.clone())),
+        });
+        self.val_types.insert(elem.0, u8c);
+        Ok(Val::Local(elem))
+    }
+
     /// Pack a call's trailing arguments into a `va_array` (sic.md std): box each
     /// into an `any`, lay them out in a stack array, and build the `{ data, len }`
     /// slice. Returns a pointer to the slice value (aggregate-by-pointer).
@@ -517,6 +536,9 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
                     return self.lower_va_array_index(base, index, &expr.span);
                 }
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_u8char_arr(&t)) {
+                    return self.lower_u8char_arr_index(base, index, &expr.span);
+                }
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
                 // its first element (`a[i]` in `a[i][j]` yields the row address,
@@ -540,6 +562,19 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
                 // sic native-string computed accessors (sic.md §"Built-in string").
+                // sic `u8char`: `.size` is the code point's UTF-8 byte length (1..4).
+                if self.is_sic() && name == "size"
+                    && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_u8char(&t))
+                {
+                    let cp = self.u8char_cp(base)?;
+                    return self.u8char_encoded_len(cp);
+                }
+                // sic `string.utf8` — decode the string's bytes into a `u8char[]`.
+                if self.is_sic() && name == "utf8"
+                    && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_sic_string(&t))
+                {
+                    return self.lower_string_utf8(base);
+                }
                 // `.size` / `.data` are ordinary struct fields and fall through.
                 // `.str` is an alias for `.ptr` (the NUL-terminated C string).
                 if self.is_sic() && (name == "ptr" || name == "str" || name == "length") {
@@ -634,6 +669,20 @@ impl<'m> FuncCtx<'m> {
                 }
                 if self.is_sic() && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_any(&t)) {
                     return self.unbox_any(inner, &target, &expr.span);
+                }
+                // sic `u8char` (sic.md §"Integer sizes"): `(u8char)i` builds a code
+                // point from an integer; `(int)c` / `(u32)c` extracts the code point.
+                if self.is_sic() && super::types::is_u8char(&target) {
+                    let v = self.lower_expr(inner)?;
+                    let cp = self.coerce(v, &Type::Int { bits: 32, signed: false })?;
+                    return self.make_u8char(cp);
+                }
+                if self.is_sic()
+                    && matches!(target, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80)
+                    && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_u8char(&t))
+                {
+                    let cp = self.u8char_cp(inner)?;
+                    return self.coerce(cp, &target);
                 }
                 // sic: `(int)enum_value` yields the discriminant (sic.md §"Match").
                 if self.is_sic() && matches!(target, Type::Int { .. } | Type::Bool) {
@@ -809,6 +858,20 @@ impl<'m> FuncCtx<'m> {
                 (self.infer_expr_type(lhs), self.infer_expr_type(rhs))
             {
                 return self.lower_array_concat(lhs, rhs);
+            }
+        }
+
+        // sic `u8char` (sic.md §"Integer sizes"): a code point participates in
+        // comparisons/arithmetic through its `cp` value — extract it (u32) from
+        // either operand and operate on the integers, so `c == 'A'` etc. are stable
+        // (comparing the raw 4-byte struct is not).
+        if self.is_sic() {
+            let lu = matches!(self.infer_expr_type(lhs), Ok(t) if super::types::is_u8char(&t));
+            let ru = matches!(self.infer_expr_type(rhs), Ok(t) if super::types::is_u8char(&t));
+            if lu || ru {
+                let l = if lu { self.u8char_cp(lhs)? } else { self.lower_expr(lhs)? };
+                let r = if ru { self.u8char_cp(rhs)? } else { self.lower_expr(rhs)? };
+                return self.emit_binop(op, l, r);
             }
         }
 
@@ -2134,6 +2197,102 @@ impl<'m> FuncCtx<'m> {
             }
         }
         false
+    }
+
+    // ─── `u8char` code-point helpers (sic.md §"Integer sizes") ────────────────
+
+    /// The u32 type used for a `u8char`'s `cp` field.
+    fn u32_ty() -> Type { Type::Int { bits: 32, signed: false } }
+
+    /// Load the code point (`cp`, u32) out of a `u8char` value.
+    pub(crate) fn u8char_cp(&mut self, e: &Expr) -> Result<Val> {
+        let p = self.lower_aggregate_ptr(e)?;             // &{ cp }
+        let cptr = self.coerce(p, &Type::Pointer(Box::new(Self::u32_ty())))?;
+        let cp = self.alloc_val();
+        self.push_instr(Instr::Load { dest: cp, ptr: cptr, ty: Self::u32_ty() });
+        Ok(Val::Local(cp))
+    }
+
+    /// Materialize a `u8char` value (a `{ cp }` struct temp) holding code point `cp`.
+    pub(crate) fn make_u8char(&mut self, cp: Val) -> Result<Val> {
+        let ty = super::types::u8char_type();
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: ty.clone(), align: None });
+        self.val_types.insert(slot.0, ty);
+        let cp = self.coerce(cp, &Self::u32_ty())?;
+        let cptr = self.coerce(Val::Local(slot), &Type::Pointer(Box::new(Self::u32_ty())))?;
+        self.push_instr(Instr::Store { val: cp, ptr: cptr });
+        Ok(Val::Local(slot))
+    }
+
+    /// sic `string.utf8` — decode a string's UTF-8 bytes into a `u8char[]` slice
+    /// `{ data, length, size }`. Calls the prepended `__sic_utf8_decode`, then
+    /// wraps the result: `length` = code-point count, `size` = the original byte
+    /// count (== sum of each code point's `.size`).
+    pub(crate) fn lower_string_utf8(&mut self, base: &Expr) -> Result<Val> {
+        let (data, size) = self.string_operand_parts(base)?; // data: char*, size: i64
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let u8c_ptr = Type::Pointer(Box::new(super::types::u8char_type()));
+
+        // out_count slot, then decode(data, size, &out_count) -> u32*/u8char*.
+        let count_slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: count_slot, ty: usize_ty.clone(), align: None });
+        let data_c = self.coerce(data, &Type::char_ptr())?;
+        let size_u = self.coerce(size.clone(), &usize_ty)?;
+        let count_ptr = self.coerce(Val::Local(count_slot), &Type::Pointer(Box::new(usize_ty.clone())))?;
+        let ret_ty = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("__sic_utf8_decode").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "__sic_utf8_decode".to_string(),
+                sig: FunctionType {
+                    ret: Type::void_ptr(),
+                    params: vec![Type::char_ptr(), usize_ty.clone(), Type::Pointer(Box::new(usize_ty.clone()))],
+                    variadic: false,
+                },
+            })
+        });
+        let decoded = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(decoded), func: fref, args: vec![data_c, size_u, count_ptr], ret_ty });
+        let count = self.alloc_val();
+        self.push_instr(Instr::Load { dest: count, ptr: Val::Local(count_slot), ty: usize_ty.clone() });
+        // The decoded code-point buffer is malloc'd; free it at scope exit.
+        let free_slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: free_slot, ty: Type::char_ptr(), align: None });
+        let dfree = self.coerce(Val::Local(decoded), &Type::char_ptr())?;
+        self.push_instr(Instr::Store { val: dfree, ptr: Val::Local(free_slot) });
+        self.register_scope_exit(super::func::Cleanup::FreePtr { slot: Val::Local(free_slot) });
+
+        // Build the { data, length, size } slice.
+        let arr_ty = super::types::u8char_arr_type(self.ptr_size());
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: arr_ty.clone(), align: None });
+        self.val_types.insert(slot.0, arr_ty.clone());
+        let dptr = self.coerce(Val::Local(decoded), &u8c_ptr)?;
+        let data_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), arr_ty.clone()), "data", false, &base.span)?;
+        self.store_lvalue(&data_lv, dptr)?;
+        let len_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), arr_ty.clone()), "length", false, &base.span)?;
+        self.store_lvalue(&len_lv, Val::Local(count))?;
+        let siz_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), arr_ty.clone()), "size", false, &base.span)?;
+        let siz = self.coerce(size, &usize_ty)?;
+        self.store_lvalue(&siz_lv, siz)?;
+        Ok(Val::Local(slot))
+    }
+
+    /// The UTF-8 encoded byte length (1..4) of a code point `cp`, branchless:
+    /// `1 + (cp>=0x80) + (cp>=0x800) + (cp>=0x10000)`. Returned as `usize`.
+    pub(crate) fn u8char_encoded_len(&mut self, cp: Val) -> Result<Val> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let cp = self.coerce(cp, &Self::u32_ty())?;
+        let mut acc = self.coerce(Constant::int(1), &usize_ty)?;
+        for bound in [0x80i64, 0x800, 0x10000] {
+            let ge = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: ge, op: CmpOp::IUGe, lhs: cp.clone(), rhs: Constant::int(bound), ty: Self::u32_ty() });
+            let geu = self.coerce(Val::Local(ge), &usize_ty)?;
+            let sum = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: sum, op: BinOp::Add, lhs: acc, rhs: geu, ty: usize_ty.clone() });
+            acc = Val::Local(sum);
+        }
+        Ok(acc)
     }
 
     /// Emit `free(p)`.
@@ -5231,6 +5390,11 @@ impl<'m> FuncCtx<'m> {
                 let elem = self.lower_va_array_index(base, index, &base.span)?;
                 return Ok(LValue::plain(elem, super::types::any_type()));
             }
+            // sic `u8char[]` element `cps[i]` (from `string.utf8`).
+            if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_u8char_arr(&t)) {
+                let elem = self.lower_u8char_arr_index(base, index, &base.span)?;
+                return Ok(LValue::plain(elem, super::types::u8char_type()));
+            }
         }
         let base_val = self.lower_expr(base)?;
         let idx_val = self.lower_expr(index)?;
@@ -5510,6 +5674,11 @@ impl<'m> FuncCtx<'m> {
                     if name == "ptr" || name == "str" { return Ok(Type::char_ptr()); }
                     if name == "length" { return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false }); }
                     if name == "dup" { return Ok(super::types::sic_string_type(self.ptr_size())); }
+                    if name == "utf8" { return Ok(super::types::u8char_arr_type(self.ptr_size())); }
+                }
+                // sic `u8char.size` is a `usize` (UTF-8 encoded length).
+                if self.is_sic() && name == "size" && super::types::is_u8char(&base_ty) {
+                    return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                 }
                 // `s.dup` on a C string (`char*`/`char[]`) is an owned `string`.
                 if self.is_sic() && name == "dup"
@@ -5566,6 +5735,10 @@ impl<'m> FuncCtx<'m> {
                 // sic `va_array` element `va[i]` is an `any` (sic.md std).
                 if self.is_sic() && super::types::is_va_array(&bt) {
                     return Ok(super::types::any_type());
+                }
+                // sic `u8char[]` element `cps[i]` is a `u8char`.
+                if self.is_sic() && super::types::is_u8char_arr(&bt) {
+                    return Ok(super::types::u8char_type());
                 }
                 // sic tuple element `t[const]` has the field's type (deref the
                 // tuple pointer to its layout struct).

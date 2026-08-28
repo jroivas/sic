@@ -1,0 +1,33 @@
+// sic `u8char` (a Unicode code point) and `string.utf8` (sic.md §"Integer sizes").
+// `u8char` is a 32-bit scalar: `sizeof` is 4 (storage) but `.size` is the value's
+// UTF-8 byte length (1..4). `string.utf8` decodes the bytes into a `u8char[]`
+// whose `.length` is the code-point count and `.size` the total UTF-8 bytes.
+int main() {
+    // Scalar u8char: init, compare, sizeof, encoded .size.
+    u8char a = 65;                     // 'A'
+    if ((int)a != 65) return 1;
+    if (!(a == 65)) return 2;
+    if (sizeof(u8char) != 4) return 3;      // storage size, compile-time
+    if (a.size != 1) return 4;              // 'A' is 1 UTF-8 byte
+    u8char e = 0x00E9;  if (e.size != 2) return 5;   // 'é'
+    u8char u = 0x20AC;  if (u.size != 3) return 6;   // '€'
+    u8char m = 0x1F600; if (m.size != 4) return 7;   // '😀'
+
+    // string.utf8 → u8char[]: "A€😀" is 3 code points, 1+3+4 = 8 bytes.
+    string s = "A€😀";
+    auto cps = s.utf8;
+    if (cps.length != 3) return 8;          // code points
+    if (cps.size != 8) return 9;            // total UTF-8 bytes == s.size
+    if (cps.size != s.size) return 10;
+    if ((int)cps[0] != 0x41) return 11;
+    if ((unsigned)cps[1] != 0x20AC) return 12;
+    if ((unsigned)cps[2] != 0x1F600) return 13;
+    if (cps[0].size != 1 || cps[1].size != 3 || cps[2].size != 4) return 14;
+
+    // Iterating and summing each code point's byte length gives the byte total.
+    usize total = 0;
+    for (usize i = 0; i < cps.length; i++) total = total + cps[i].size;
+    if (total != cps.size) return 15;
+
+    return 0;
+}

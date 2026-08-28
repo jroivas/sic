@@ -616,6 +616,39 @@ pub fn uses_bignum(src: &str) -> bool {
     word_present(src, "bigint") || word_present(src, "fixed")
 }
 
+/// Runtime for `string.utf8` (sic.md §"Integer sizes"): decode a UTF-8 byte
+/// buffer into an array of 32-bit Unicode code points. Prepended only when a unit
+/// uses `.utf8` (see [`uses_utf8`]); `__attribute__((weak))` like the bigint one.
+pub const UTF8_RUNTIME: &str = r#"
+extern void *malloc(unsigned long);
+__attribute__((weak)) unsigned int *__sic_utf8_decode(const char *data, unsigned long size, unsigned long *out_count) {
+    unsigned int *out = (unsigned int *)malloc((size + 1) * sizeof(unsigned int));
+    unsigned long n = 0, i = 0;
+    while (i < size) {
+        unsigned char c = (unsigned char)data[i];
+        unsigned int cp;
+        unsigned long len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if (c < 0xE0) { cp = (unsigned int)(c & 0x1F); len = 2; }
+        else if (c < 0xF0) { cp = (unsigned int)(c & 0x0F); len = 3; }
+        else { cp = (unsigned int)(c & 0x07); len = 4; }
+        unsigned long k;
+        for (k = 1; k < len && i + k < size; k++)
+            cp = (cp << 6) | ((unsigned int)((unsigned char)data[i + k]) & 0x3F);
+        out[n++] = cp;
+        i += len;
+    }
+    *out_count = n;
+    return out;
+}
+"#;
+
+/// True if `src` uses the `.utf8` accessor — the signal to prepend
+/// [`UTF8_RUNTIME`].
+pub fn uses_utf8(src: &str) -> bool {
+    word_present(src, "utf8")
+}
+
 fn word_present(src: &str, word: &str) -> bool {
     let bytes = src.as_bytes();
     let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';

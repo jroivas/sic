@@ -317,6 +317,44 @@ pub fn is_va_array(t: &Type) -> bool {
     matches!(t, Type::Struct(st) if st.name.as_deref() == Some(VA_ARRAY_MARKER))
 }
 
+// ─── `u8char`: a Unicode code point (sic.md §"Integer sizes") ──────────────────
+
+pub const U8CHAR_MARKER: &str = "__sic_u8char";
+
+/// The `u8char` value type — a Unicode scalar held in 32 bits (a `{ u32 cp }`
+/// struct so it is a distinct type). `sizeof(u8char) == 4` (storage), while
+/// `c.size` is the value's UTF-8 encoded byte length (1..4, computed at runtime).
+pub fn u8char_type() -> Type {
+    Type::Struct(StructType::plain(Some(U8CHAR_MARKER.to_string()), vec![
+        ("cp".to_string(), Type::Int { bits: 32, signed: false }),
+    ], false))
+}
+
+/// True if `t` is the `u8char` code-point value type.
+pub fn is_u8char(t: &Type) -> bool {
+    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(U8CHAR_MARKER))
+}
+
+pub const U8CHAR_ARR_MARKER: &str = "__sic_u8char_arr";
+
+/// The `u8char[]` type produced by `string.utf8` — a `{ u8char* data; usize
+/// length; usize size }` slice over a decoded run of code points. Fields named
+/// `length` (code-point count) and `size` (UTF-8 byte total) so both read as plain
+/// struct fields; indexing yields a `u8char`.
+pub fn u8char_arr_type(ptr_size: u32) -> Type {
+    let usize_ty = Type::Int { bits: ptr_size * 8, signed: false };
+    Type::Struct(StructType::plain(Some(U8CHAR_ARR_MARKER.to_string()), vec![
+        ("data".to_string(), Type::Pointer(Box::new(u8char_type()))),
+        ("length".to_string(), usize_ty.clone()),
+        ("size".to_string(), usize_ty),
+    ], false))
+}
+
+/// True if `t` is the `u8char[]` slice produced by `string.utf8`.
+pub fn is_u8char_arr(t: &Type) -> bool {
+    matches!(t, Type::Struct(st) if st.name.as_deref() == Some(U8CHAR_ARR_MARKER))
+}
+
 /// The `kind` discriminant stored in a `__sic_type_info` record — a coarse
 /// classification the runtime formatter switches on (sic.md §"RTTI").
 pub fn type_kind(t: &Type) -> u32 {
@@ -475,6 +513,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "string"          => return Ok(sic_string_type(ptr_size)),
                 // sic `any`: a boxed dynamically-typed value (sic.md std).
                 "any"             => return Ok(any_type()),
+                // sic `u8char`: a Unicode code point (32-bit; `.size` = UTF-8 len).
+                "u8char"          => return Ok(u8char_type()),
                 // sic `va_array`: Python-style varargs (an array<any>).
                 "va_array"        => return Ok(va_array_type(ptr_size)),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an

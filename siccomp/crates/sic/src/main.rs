@@ -606,6 +606,15 @@ fn parse_source(
         );
     }
 
+    // sic `string.utf8` (sic.md §"Integer sizes"): prepend the UTF-8 decoder only
+    // when the unit uses `.utf8`.
+    if bigint_runtime::uses_utf8(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            bigint_runtime::UTF8_RUNTIME, path, preprocessed
+        );
+    }
+
     // Pick the source language from the file extension: `.sic` is sic-lang (its
     // Rust-style primitive aliases `i32`/`u64`/`isize`/… are reserved types);
     // everything else is C, where those names are ordinary identifiers.
