@@ -12,11 +12,24 @@
 
 ## Gaps found while writing doc/ (spec vs. implementation)
 
-- [ ] **Tagged enum with a `fixed` payload crashes.** `enum Shape { Circle(fixed),
-      Square(fixed) }; ... match (s) { Circle(r): return r*r*3.14159; ... }`
-      segfaults (exit 139). Int payloads and generic `Option<int>` work; `fixed`
-      (and likely bigint/string?) payloads in a non-generic enum need
-      investigation.
+- [x] **Tagged enum with a `fixed` payload crashes.** FIXED (84aecda). Root cause:
+      enum construction lowered a `fixed`/`bigint` payload arg with a bare
+      `lower_expr`+`store_lvalue`, so a literal stored raw float bits (not a
+      `__sic_rat*`) and any source stored a shared pointer freed independently →
+      use-after-free. Now uses `eval_fixed_owned`/`eval_bigint_owned` (own copy,
+      like the string-payload retain). fixed + bigint payloads roundtrip; test_0269.
+- [ ] **`(int)bigint` cast gives garbage** (pre-existing, not payload-specific).
+      `bigint b = 42; (int)b` → garbage even for a plain local. Likely the bigint→
+      int narrowing cast reads the pointer instead of the low limb. `bigint.str`
+      and bigint arithmetic are correct; only the `(int)` cast is wrong.
+- [ ] **bigint integer literal > i64 truncates** (pre-existing). `bigint b =
+      12345678901234567890;` stores the value reinterpreted as signed i64 (differs
+      by 2^64). A large literal is parsed as i64 before promotion to bigint; the
+      literal path needs to keep >64-bit magnitudes (decimal-string → `__sic_bi_from`).
+- [ ] **Enum payloads are never freed at scope exit** (leak, not a crash). An owned
+      `fixed`/`bigint`/`string` stored in a tagged enum leaks when the enum value
+      dies — no enum-payload RAII. The crash fix trades a use-after-free for this
+      leak (consistent with the existing string-payload behaviour).
 - [x] **char / Unicode.** DECIDED: keep `char` as a plain C `char` (8-bit signed)
       and all C interop unchanged — do NOT make it unsigned/UTF-8, and drop the
       spec's `byte`/`unsigned byte`. Instead added `u8char` (a 32-bit Unicode code

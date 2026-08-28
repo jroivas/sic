@@ -56,18 +56,18 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 ```sic
 import std;
 
-enum Shape { Circle(int), Square(int) };
+enum Shape { Circle(fixed), Square(fixed) };
 
-int area(Shape s) {
+fixed area(Shape s) {
     match (s) {
-        Circle(r): return r * r * 3;   // area ≈ πr², with π ≈ 3
+        Circle(r): return r * r * 3.14159;   // exact-rational πr²
         Square(w): return w * w;
     }
 }
 
 int main() {
-    Shape c = Shape::Circle(2);
-    std.Println("area = {}", area(c));   // area = 12
+    Shape c = Shape::Circle(2.0);
+    std.Println("area = {}", area(c).str);   // area = 12.566...
     return 0;
 }
 ```
