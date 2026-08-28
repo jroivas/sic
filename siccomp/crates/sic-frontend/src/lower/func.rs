@@ -44,6 +44,10 @@ pub struct FuncCtx<'m> {
     pub func: *mut Function, // raw pointer to avoid lifetime issues during construction
     /// Local variable map: name → (type, alloca ValId)
     pub locals: Vec<HashMap<String, (Type, ValId)>>,
+    /// sic: locals/params declared with a payload-less named enum type
+    /// (`enum vals v`) → the enum name, so `v.str` → `"vals::ONE"` can find the
+    /// variant table (the enum itself lowers to a plain int, losing its identity).
+    pub enum_locals: HashMap<String, String>,
     /// Function-scope `static` locals: name → (type, internal global). These
     /// have static storage duration, so they resolve to a module global rather
     /// than a stack slot.
@@ -131,6 +135,7 @@ impl<'m> FuncCtx<'m> {
             lowerer,
             func: func as *mut Function,
             locals: vec![HashMap::new()],
+            enum_locals: HashMap::new(),
             static_locals: HashMap::new(),
             val_types: HashMap::new(),
             current_bb: entry_id,
@@ -342,6 +347,19 @@ impl<'m> FuncCtx<'m> {
 
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
+    }
+
+    /// If AST type `ty` names a payload-less enum registered for `.str`, the enum
+    /// name (`enum vals v` → `"vals"`).
+    pub(crate) fn c_enum_name_of(&self, ty: &crate::ast::AstType) -> Option<String> {
+        use crate::ast::AstType;
+        match ty {
+            AstType::Enum(e) => e.name.as_ref()
+                .filter(|n| self.lowerer.c_enum_defs.contains_key(*n)).cloned(),
+            AstType::Named(n) | AstType::Builtin(n)
+                if self.lowerer.c_enum_defs.contains_key(n) => Some(n.clone()),
+            _ => None,
+        }
     }
 
     pub fn lookup(&self, name: &str) -> Option<LookupResult<'_>> {
@@ -630,6 +648,9 @@ impl<'m> Lowerer {
                     name: pname.clone(), ty: pty.clone(), slot: ptr_vid, is_param: true,
                 });
                 fc.define_local(pname.clone(), pty, ptr_vid);
+                if let Some(en) = fc.c_enum_name_of(&p.ty.ty) {
+                    fc.enum_locals.insert(pname.clone(), en);
+                }
             }
         }
 
@@ -1115,6 +1136,10 @@ impl<'m> FuncCtx<'m> {
                     // `T *p = malloc(sizeof(*p))` must see `p` as a `T*` (not
                     // default to `int`, which would size the allocation wrong).
                     self.define_local(d.name.clone(), ty.clone(), vid);
+                    // Remember a payload-less enum-typed local so `v.str` works.
+                    if let Some(en) = self.c_enum_name_of(&d.ty.ty) {
+                        self.enum_locals.insert(d.name.clone(), en);
+                    }
 
                     if let Some(init) = &d.init {
                         self.lower_initializer(init, Val::Local(vid), &ty)?;

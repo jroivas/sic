@@ -1,0 +1,28 @@
+// sic enum `.str` (sic.md §"Match"): a payload-less enum value renders as a native
+// `"EnumName::Variant"` string — for a variable (runtime value → name) or a bare
+// constant (statically known). An unlisted value falls back to "Enum::?".
+enum Color { RED, GREEN = 5, BLUE };   // 0, 5, 6 (non-contiguous)
+
+int main() {
+    // Variable of enum type: runtime value → variant name.
+    enum Color c = BLUE;               // == 6
+    if (c.str != "Color::BLUE") return 1;
+    c = RED;
+    if (c.str != "Color::RED") return 2;
+    c = GREEN;
+    if (c.str != "Color::GREEN") return 3;
+
+    // Bare enum constant: statically known.
+    if (RED.str != "Color::RED") return 4;
+    if (BLUE.str != "Color::BLUE") return 5;
+
+    // The result is an ordinary string.
+    string s = BLUE.str;
+    if (s.length != 11) return 6;      // "Color::BLUE"
+
+    // An out-of-range value falls back to "Enum::?".
+    enum Color bad = (enum Color)99;
+    if (bad.str != "Color::?") return 7;
+
+    return 0;
+}

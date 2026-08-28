@@ -73,6 +73,12 @@ pub struct Lowerer {
     /// `Variant(..)` / `Variant` when the target enum type is not otherwise known.
     /// Last definition wins (a later enum may reuse a variant name).
     pub variant_enum: HashMap<String, String>,
+    /// sic payload-less named enums (`enum vals { NONE, ONE, … }`): enum name →
+    /// its `(variant, value)` list, for `enumvalue.str` → `"vals::ONE"`.
+    pub c_enum_defs: HashMap<String, Vec<(String, i64)>>,
+    /// Reverse index for a bare enum constant: variant name → owning payload-less
+    /// enum name (so `ONE.str` knows it is a `vals`).
+    pub c_enum_variant: HashMap<String, String>,
     /// sic tuple parameters (sic.md §"Tuples"): `(function, param index)` → the
     /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
     /// param is passed by pointer, so its shape must be known to unpack/index it.
@@ -137,6 +143,8 @@ impl Lowerer {
             imported_links: Vec::new(),
             enum_defs: HashMap::new(),
             variant_enum: HashMap::new(),
+            c_enum_defs: HashMap::new(),
+            c_enum_variant: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -1036,6 +1044,16 @@ impl Lowerer {
                     self.enum_defs.insert(ename.clone(), TaggedEnum {
                         name: ename, struct_type, variants: tvars,
                     });
+                } else if let Some(ename) = &e.name {
+                    // Payload-less named enum (a plain C enum): record its variants
+                    // for `value.str` → `"vals::ONE"` (sic.md §"Match").
+                    let mut vs = Vec::new();
+                    for v in variants {
+                        let val = *self.enum_consts.get(&v.name).unwrap();
+                        vs.push((v.name.clone(), val));
+                        self.c_enum_variant.insert(v.name.clone(), ename.clone());
+                    }
+                    self.c_enum_defs.insert(ename.clone(), vs);
                 }
             }
         }

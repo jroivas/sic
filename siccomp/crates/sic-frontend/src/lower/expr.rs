@@ -616,6 +616,20 @@ impl<'m> FuncCtx<'m> {
                         return self.load_lvalue(&lv);
                     }
                 }
+                // sic `enumvalue.str` → a native `"EnumName::Variant"` string
+                // (sic.md §"Match"). A bare constant is statically known; an
+                // enum-typed variable maps its runtime value to the variant name.
+                if self.is_sic() && name == "str" {
+                    if let ExprKind::Ident(id) = &base.kind {
+                        if let Some(en) = self.enum_locals.get(id).cloned() {
+                            let vs = self.lowerer.c_enum_defs.get(&en).cloned().unwrap_or_default();
+                            return self.emit_enum_str(base, &en, &vs);
+                        }
+                        if let Some(en) = self.lowerer.c_enum_variant.get(id).cloned() {
+                            return self.enum_str_literal(&format!("{}::{}", en, id));
+                        }
+                    }
+                }
                 // sic bigint accessors (sic.md §"Integer sizes"): `.str` is a fresh
                 // decimal `char*` (freed at scope exit); `.int` is the value as a
                 // fixed 64-bit int (low bits). A cast, by contrast, only
@@ -2197,6 +2211,44 @@ impl<'m> FuncCtx<'m> {
             }
         }
         false
+    }
+
+    // ─── enum `.str` helpers (sic.md §"Match") ───────────────────────────────
+
+    /// A native `string` view over the static literal `s` (rc = NULL; safe to
+    /// return — the bytes are static).
+    pub(crate) fn enum_str_literal(&mut self, s: &str) -> Result<Val> {
+        let data = self.emit_cstring(s);
+        self.cstr_to_string(data)
+    }
+
+    /// `enumvalue.str` for a payload-less enum variable: map its runtime value to
+    /// `"EnumName::Variant"`, defaulting to `"EnumName::?"` for an unlisted value.
+    pub(crate) fn emit_enum_str(&mut self, base: &Expr, ename: &str, variants: &[(String, i64)]) -> Result<Val> {
+        let v = self.lower_expr(base)?;
+        let v = self.coerce(v, &Type::i64())?;
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let size = sty.size_of(self.ptr_size());
+        let align = sty.align_of(self.ptr_size()) as u64;
+        let result = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result, ty: sty.clone(), align: None });
+        self.val_types.insert(result.0, sty);
+        // Default fallback, then overwrite if the value matches a variant.
+        let deflt = self.enum_str_literal(&format!("{}::?", ename))?;
+        self.push_instr(Instr::MemCopy { dst: Val::Local(result), src: deflt, size, align });
+        for (name, val) in variants {
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: v.clone(), rhs: Constant::int(*val), ty: Type::i64() });
+            let then_bb = self.new_block_after_current();
+            let cont_bb = self.new_block_after_current();
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb, else_bb: cont_bb });
+            self.switch_to_block(then_bb);
+            let s = self.enum_str_literal(&format!("{}::{}", ename, name))?;
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result), src: s, size, align });
+            self.set_terminator(Terminator::Jump(cont_bb));
+            self.switch_to_block(cont_bb);
+        }
+        Ok(Val::Local(result))
     }
 
     // ─── `u8char` code-point helpers (sic.md §"Integer sizes") ────────────────
@@ -5679,6 +5731,15 @@ impl<'m> FuncCtx<'m> {
                 // sic `u8char.size` is a `usize` (UTF-8 encoded length).
                 if self.is_sic() && name == "size" && super::types::is_u8char(&base_ty) {
                     return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
+                }
+                // sic `enumvalue.str` is a native `string`.
+                if self.is_sic() && name == "str" {
+                    if let ExprKind::Ident(id) = &base.kind {
+                        if self.enum_locals.contains_key(id)
+                            || self.lowerer.c_enum_variant.contains_key(id) {
+                            return Ok(super::types::sic_string_type(self.ptr_size()));
+                        }
+                    }
                 }
                 // `s.dup` on a C string (`char*`/`char[]`) is an owned `string`.
                 if self.is_sic() && name == "dup"
