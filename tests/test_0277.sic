@@ -1,0 +1,39 @@
+// sic struct constructor/destructor (sic.md §"Memory safety"): `S()` runs when a
+// local is declared (implicit `self`, bare field names resolve to `self->field`),
+// `~S()` runs at scope exit. A destructor's side effects are observable here via a
+// file-scope counter.
+int dtor_calls = 0;
+
+struct Widget {
+    int id;
+    int *buf;
+    Widget() {                 // implicit self: `id`/`buf` are `self->id`/`self->buf`
+        id = 7;
+        buf = new int(4);
+        buf[0] = 100;
+    }
+    ~Widget() {
+        dtor_calls = dtor_calls + 1;
+        del buf;               // frees the new'd block — valgrind-clean
+    }
+    int total(struct Widget *self) { return self->id + self->buf[0]; }
+};
+
+void use_one() {
+    struct Widget w;           // ctor here
+    if (w.total() != 107) dtor_calls = -100;
+}                              // ~Widget here
+
+int main() {
+    use_one();
+    if (dtor_calls != 1) return 1;     // destructor ran exactly once
+
+    // Two in a scope → two destructor calls.
+    { struct Widget a; struct Widget b; if (a.id + b.id != 14) return 2; }
+    if (dtor_calls != 3) return 3;
+
+    // An explicit aggregate initializer opts out of the constructor.
+    struct Widget dummy;               // ctor (so buf is valid to free)
+    if (dummy.id != 7) return 4;
+    return 0;
+}

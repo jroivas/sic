@@ -91,6 +91,13 @@ pub struct Lowerer {
     /// method name)` → the mangled free-function name the method was hoisted to.
     /// Populated before lowering; `obj.method(args)` resolves through it.
     pub struct_methods: HashMap<(String, String), String>,
+    /// sic (sic.md §"Memory safety"): struct name → its constructor's mangled free
+    /// function `__sic_ctor_<S>(S* self)`, called when a local of that type is
+    /// declared. Present only for structs that define `S()`.
+    pub struct_ctor: HashMap<String, String>,
+    /// sic: struct name → its destructor's mangled free function
+    /// `__sic_dtor_<S>(S* self)`, called at scope exit. Present only for `~S()`.
+    pub struct_dtor: HashMap<String, String>,
     /// sic strict enum typing: a typedef alias for a payload-less enum → the
     /// canonical enum name (a key in `c_enum_defs`). Lets `typedef enum {…} E;` be
     /// type-checked as strictly as `enum E`. An anonymous enum's typedef name is its
@@ -166,6 +173,8 @@ impl Lowerer {
             c_enum_ret: HashMap::new(),
             c_enum_alias: HashMap::new(),
             struct_methods: HashMap::new(),
+            struct_ctor: HashMap::new(),
+            struct_dtor: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -1082,16 +1091,52 @@ impl Lowerer {
         let mut synthesized: Vec<Decl> = Vec::new();
         for d in &tu.decls {
             for (sname, sdef) in struct_defs_with_methods(d) {
+                // `struct S *self` — a bodiless reference to the owning struct.
+                let self_param = |sp: &crate::lexer::Span| crate::ast::Param {
+                    name: Some("self".to_string()),
+                    ty: QualType::new(AstType::Pointer {
+                        base: Box::new(QualType::new(AstType::Struct(StructDef {
+                            name: Some(sname.clone()), fields: None, align: None,
+                            keep_order: false, methods: vec![], span: sp.clone(),
+                        }))),
+                        quals: vec![],
+                    }),
+                    span: sp.clone(),
+                };
+                // Field names, so a constructor/destructor's bare `field` reference
+                // rewrites to `self->field` (implicit `self`).
+                let fields: std::collections::HashSet<String> = sdef.fields.iter().flatten()
+                    .filter_map(|f| f.name.clone()).collect();
                 for m in &sdef.methods {
-                    if m.kind != MethodKind::Method { continue; }
-                    let mangled = format!("__sic_m_{}_{}", sname, m.name);
-                    self.struct_methods.insert((sname.clone(), m.name.clone()), mangled.clone());
+                    let (mangled, params, body) = match m.kind {
+                        MethodKind::Method => {
+                            let mangled = format!("__sic_m_{}_{}", sname, m.name);
+                            self.struct_methods.insert((sname.clone(), m.name.clone()), mangled.clone());
+                            (mangled, m.params.clone(), m.body.clone())
+                        }
+                        MethodKind::Ctor | MethodKind::Dtor => {
+                            let mangled = if m.kind == MethodKind::Ctor {
+                                let n = format!("__sic_ctor_{}", sname);
+                                self.struct_ctor.insert(sname.clone(), n.clone()); n
+                            } else {
+                                let n = format!("__sic_dtor_{}", sname);
+                                self.struct_dtor.insert(sname.clone(), n.clone()); n
+                            };
+                            // Prepend the implicit `self`, then rewrite bare field
+                            // references in the body to go through it.
+                            let mut params = vec![self_param(&m.span)];
+                            params.extend(m.params.clone());
+                            let mut body = m.body.clone();
+                            rewrite_implicit_self(&mut body, &fields);
+                            (mangled, params, body)
+                        }
+                    };
                     synthesized.push(Decl::Func {
                         name: mangled,
                         ret_ty: m.ret_ty.clone(),
-                        params: m.params.clone(),
+                        params,
                         variadic: m.variadic,
-                        body: Some(m.body.clone()),
+                        body: Some(body),
                         storage: Some(StorageClass::Static),
                         inline: false,
                         constructor: None,
@@ -2490,6 +2535,127 @@ fn struct_defs_with_methods(d: &Decl) -> Vec<(String, &StructDef)> {
 /// Does this declaration introduce any sic struct member functions?
 fn decl_has_methods(d: &Decl) -> bool {
     !struct_defs_with_methods(d).is_empty()
+}
+
+/// Rewrite a constructor/destructor body so a bare reference to a struct field
+/// `f` becomes `self->f` (sic.md §"Memory safety"). A name shadowed by a local
+/// declared in the body is left alone (it refers to the local, not the field).
+fn rewrite_implicit_self(body: &mut [Stmt], fields: &HashSet<String>) {
+    let mut local_set: HashSet<String> = HashSet::new();
+    for s in body.iter() { collect_declared_locals(s, &mut local_set); }
+    let targets: HashSet<String> = fields.difference(&local_set).cloned().collect();
+    if targets.is_empty() { return; }
+    for s in body.iter_mut() { rw_self_stmt(s, &targets); }
+}
+
+/// Names of variables *declared* (not merely used) anywhere within a statement —
+/// so a field shadowed by a local is excluded from implicit-`self` rewriting.
+fn collect_declared_locals(s: &Stmt, out: &mut HashSet<String>) {
+    let decl_names = |d: &Decl, out: &mut HashSet<String>| {
+        if let Decl::Var { declarators, .. } = d {
+            for de in declarators { out.insert(de.name.clone()); }
+        }
+    };
+    match s {
+        Stmt::Decl(d) => decl_names(d, out),
+        Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => for s in ss { collect_declared_locals(s, out); },
+        Stmt::If { then, else_, .. } => {
+            collect_declared_locals(then, out);
+            if let Some(e) = else_ { collect_declared_locals(e, out); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. }
+        | Stmt::Default(body, _) | Stmt::Label(_, body, _) | Stmt::Defer(body, _) =>
+            collect_declared_locals(body, out),
+        Stmt::For { init, body, .. } => {
+            if let Some(ForInit::Decl(d)) = init { decl_names(d, out); }
+            collect_declared_locals(body, out);
+        }
+        Stmt::ForEach { name, body, .. } => { out.insert(name.clone()); collect_declared_locals(body, out); }
+        Stmt::Switch { body, .. } => collect_declared_locals(body, out),
+        Stmt::Match { arms, .. } => for a in arms {
+            if let Some(b) = &a.binding { out.insert(b.clone()); }
+            collect_declared_locals(&a.body, out);
+        },
+        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) => collect_declared_locals(body, out),
+        Stmt::Guard { binding, else_body, .. } => {
+            if let Some((_, n)) = binding { out.insert(n.clone()); }
+            collect_declared_locals(else_body, out);
+        }
+        _ => {}
+    }
+}
+
+fn rw_self_expr(e: &mut Expr, t: &HashSet<String>) {
+    use ExprKind::*;
+    match &mut e.kind {
+        Ident(n) if t.contains(n) => {
+            let name = n.clone();
+            let sp = e.span.clone();
+            e.kind = Arrow { base: Box::new(Expr { kind: Ident("self".to_string()), span: sp }), name };
+        }
+        BinOp { lhs, rhs, .. } | Assign { lhs, rhs, .. } | Swap { lhs, rhs }
+        | Comma(lhs, rhs) => { rw_self_expr(lhs, t); rw_self_expr(rhs, t); }
+        Unary { expr, .. } | PreInc { expr, .. } | Ref { expr, .. }
+        | SizeofExpr(expr) | AlignofExpr(expr) | TypeId(expr) => rw_self_expr(expr, t),
+        Cast { expr, .. } => rw_self_expr(expr, t),
+        Call { func, args } => { rw_self_expr(func, t); for a in args { rw_self_expr(a, t); } }
+        Index { base, index } => { rw_self_expr(base, t); rw_self_expr(index, t); }
+        Field { base, .. } | Arrow { base, .. } | OptField { base, .. } => rw_self_expr(base, t),
+        New { count, .. } => { if let Some(c) = count { rw_self_expr(c, t); } }
+        Slice { base, lo, hi } => {
+            rw_self_expr(base, t);
+            if let Some(x) = lo { rw_self_expr(x, t); }
+            if let Some(x) = hi { rw_self_expr(x, t); }
+        }
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+            rw_self_expr(cond, t); rw_self_expr(then, t); rw_self_expr(else_, t);
+        }
+        Elvis { cond, else_ } => { rw_self_expr(cond, t); rw_self_expr(else_, t); }
+        TupleExpr(items) => { for i in items { rw_self_expr(i, t); } }
+        _ => {}
+    }
+}
+
+fn rw_self_stmt(s: &mut Stmt, t: &HashSet<String>) {
+    match s {
+        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => rw_self_expr(e, t),
+        Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => { for s in ss { rw_self_stmt(s, t); } }
+        Stmt::Decl(Decl::Var { declarators, .. }) => {
+            for d in declarators {
+                if let Some(Initializer::Expr(e)) = &mut d.init { rw_self_expr(e, t); }
+            }
+        }
+        Stmt::If { cond, then, else_, .. } => {
+            rw_self_expr(cond, t); rw_self_stmt(then, t);
+            if let Some(e) = else_ { rw_self_stmt(e, t); }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } => {
+            rw_self_expr(cond, t); rw_self_stmt(body, t);
+        }
+        Stmt::For { init, cond, post, body, .. } => {
+            match init {
+                Some(ForInit::Expr(e)) => rw_self_expr(e, t),
+                Some(ForInit::Decl(Decl::Var { declarators, .. })) => {
+                    for d in declarators { if let Some(Initializer::Expr(e)) = &mut d.init { rw_self_expr(e, t); } }
+                }
+                _ => {}
+            }
+            if let Some(e) = cond { rw_self_expr(e, t); }
+            if let Some(e) = post { rw_self_expr(e, t); }
+            rw_self_stmt(body, t);
+        }
+        Stmt::ForEach { iterable, body, .. } => { rw_self_expr(iterable, t); rw_self_stmt(body, t); }
+        Stmt::Switch { val, body, .. } => { rw_self_expr(val, t); rw_self_stmt(body, t); }
+        Stmt::Match { scrutinee, arms, .. } => {
+            rw_self_expr(scrutinee, t);
+            for a in arms { rw_self_stmt(&mut a.body, t); }
+        }
+        Stmt::Case(e, body, _) => { rw_self_expr(e, t); rw_self_stmt(body, t); }
+        Stmt::CaseRange(lo, hi, body, _) => { rw_self_expr(lo, t); rw_self_expr(hi, t); rw_self_stmt(body, t); }
+        Stmt::Default(body, _) | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => rw_self_stmt(body, t),
+        Stmt::Guard { cond, else_body, .. } => { rw_self_expr(cond, t); rw_self_stmt(else_body, t); }
+        _ => {}
+    }
 }
 
 /// The sic prelude's built-in generic enums (sic.md §"Match"): `Option<T>` and

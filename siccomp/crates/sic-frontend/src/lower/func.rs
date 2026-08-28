@@ -1295,6 +1295,24 @@ impl<'m> FuncCtx<'m> {
                             });
                         }
                     }
+                    // sic struct constructor/destructor (sic.md §"Memory safety"):
+                    // for a struct local with a `S()`, call it on `&local` after
+                    // zero-init (only when the user gave no explicit initializer);
+                    // a `~S()` runs at scope exit via the cleanup list.
+                    if self.is_sic() {
+                        if let Type::Struct(st) = &ty {
+                            if let Some(sn) = st.name.clone() {
+                                if d.init.is_none() {
+                                    if let Some(ctor) = self.lowerer.struct_ctor.get(&sn).cloned() {
+                                        self.emit_cleanup_call(Val::Local(vid), &ctor);
+                                    }
+                                }
+                                if let Some(dtor) = self.lowerer.struct_dtor.get(&sn).cloned() {
+                                    self.register_scope_exit(Cleanup::AttrFn { addr: Val::Local(vid), fn_name: dtor });
+                                }
+                            }
+                        }
+                    }
                     // sic refcounted `string` local: release its `rc` at scope
                     // exit (RAII). Safe for the uninitialized case too — that
                     // zero-inits `rc` to NULL, and releasing NULL is a no-op.
