@@ -8,6 +8,7 @@
 - [x] doc under doc/
 - [x] char b[10]; b[0] = 'H'; b[1] = 'i'; b[2] = 0; string s = b; return s;
 - [x] allow `del` on strings. It decreases refcount and invalidates the one instance. `string a = "hello"; string b = c; del a; .. ` would invalidate `a` and dec ref, but b would be valid until end of scope.
+- [ ] easy enum to str like `enum vals { NONE, ONE, TWO }; enum vals = ONE; vals.str // This should be "vals::ONE" as native string` 
 
 ## Gaps found while writing doc/ (spec vs. implementation)
 
@@ -16,13 +17,11 @@
       segfaults (exit 139). Int payloads and generic `Option<int>` work; `fixed`
       (and likely bigint/string?) payloads in a non-generic enum need
       investigation.
-- [ ] **`char` is signed; spec says unsigned + UTF-8.** `char c = 200; c > 0` is
-      false (c is -56). sic.md §"Integer sizes" specifies chars as unsigned and
-      expandable to 4-byte UTF-8 code points — not implemented; `char` is a plain
-      8-bit signed C char.
-- [ ] **`byte` / `unsigned byte` types not implemented.** sic.md §"Integer sizes"
-      lists signed `byte` (-128..127) and `unsigned byte` (0..255); the names are
-      undefined in the compiler today (use `i8`/`u8`).
+- [x] **char / Unicode.** DECIDED: keep `char` as a plain C `char` (8-bit signed)
+      and all C interop unchanged — do NOT make it unsigned/UTF-8, and drop the
+      spec's `byte`/`unsigned byte`. Instead added `u8char` (a 32-bit Unicode code
+      point) + `string.utf8` for Unicode work (commit 8318aff). The spec's
+      unsigned/4-byte `char` and `byte` types are intentionally not pursued.
 - [ ] **Namespaced module VARIABLE access `mod.var` fails.** `import math;
       math.sq(5)` (a call) works, but `math.meaning` (an exported `var`, present
       in the `.smod` manifest as `var meaning i32 math_meaning`) gives "undefined

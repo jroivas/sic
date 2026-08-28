@@ -136,4 +136,49 @@ tests `n != 0`). Because `true`/`false` keep the `bool` type, they carry their
 type through [RTTI](rtti-and-dynamic.md) — e.g. `std.Print("{}", true)` prints
 `true`, not `1`.
 
+## `u8char` — a Unicode code point
+
+`char` stays a plain C byte (see above). For Unicode text, `u8char` is a single
+Unicode scalar value, stored in 32 bits. It behaves like its code point in
+comparisons and arithmetic:
+
+```sic
+u8char a = 65;        // 'A'
+(int)a;               // 65
+if (a == 65) { … }
+```
+
+`sizeof(u8char)` is `4` (its storage), a compile-time constant like any
+`sizeof`. But `.size` gives the value's **UTF-8 encoded length**, `1`–`4`
+depending on the character (a runtime property):
+
+```sic
+u8char a = 0x41;    a.size;   // 1  ('A')
+u8char e = 0x00E9;  e.size;   // 2  ('é')
+u8char u = 0x20AC;  u.size;   // 3  ('€')
+u8char m = 0x1F600; m.size;   // 4  ('😀')
+```
+
+### `string.utf8` — decode to code points
+
+A `string` is stored as UTF-8 bytes (`.size` bytes, `.length` code points). Its
+`.utf8` accessor decodes those bytes into a `u8char[]` you can index and iterate:
+
+```sic
+string s = "A€😀";
+auto cps = s.utf8;          // a u8char[]
+cps.length;                 // 3   (code points, == s.length)
+cps.size;                   // 8   (total UTF-8 bytes, == s.size)
+(int)cps[0];                // 0x41
+cps[2].size;                // 4   (the emoji is 4 bytes)
+
+usize bytes = 0;
+for (usize i = 0; i < cps.length; i++)
+    bytes = bytes + cps[i].size;   // == cps.size
+```
+
+`cps.length` is the code-point count and `cps.size` the byte total; `cps[i]` is a
+`u8char`. The decoded buffer is freed automatically at scope exit. Use `auto` to
+bind the result (its type is a compiler-internal slice).
+
 Next: [strings](strings.md).

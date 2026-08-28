@@ -75,6 +75,7 @@ if (h != "world") return 1;
 | `.size`   | number of bytes |
 | `.ptr` / `.str` | a NUL-terminated `char*` (copies only if the view isn't already NUL-terminated) |
 | `.dup`    | an owned heap copy (see below) |
+| `.utf8`   | the bytes decoded into a `u8char[]` of code points (see [types](types.md#u8char--a-unicode-code-point)) |
 
 ```sic
 s.length;                    // 12
