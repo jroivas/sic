@@ -5038,6 +5038,12 @@ impl<'m> FuncCtx<'m> {
                         self.check_enum_dest(&dest, a, "passed as")?;
                     }
                 }
+                // Reject a pointer/value aggregate mismatch on an argument, e.g.
+                // passing a `File` value where the parameter is `File*` (sic.md
+                // §"Memory safety").
+                if let Some(pt) = param_types.get(i) {
+                    self.check_ptr_value_mismatch(pt, a)?;
+                }
             }
             let prev = self.expected_ty.take();
             if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }

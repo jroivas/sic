@@ -451,6 +451,49 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// sic type safety (sic.md §"Memory safety"): reject a pointer/value mismatch
+    /// between a plain aggregate and a pointer to it — `File f = new File()` (a
+    /// `File*` into a `File` value) or `read(f)` passing a `File` value where a
+    /// `File*` is wanted. Both silently corrupt at runtime. sic's own aggregates
+    /// (string/tuple/va_array/any/u8char/type) have their own conversions and are
+    /// exempt. An unresolved source type is left alone (no false positives).
+    pub(crate) fn check_ptr_value_mismatch(&mut self, dest: &Type, e: &Expr) -> Result<()> {
+        if !self.is_sic() { return Ok(()); }
+        let src = match self.infer_expr_type(e) { Ok(t) => t, Err(_) => return Ok(()) };
+        fn plain_agg(t: &Type) -> bool {
+            matches!(t, Type::Struct(_) | Type::Union(_))
+                && !super::types::is_sic_string(t) && !super::types::is_tuple(t)
+                && !super::types::is_va_array(t) && !super::types::is_any(t)
+                && !super::types::is_u8char(t) && !super::types::is_type_info(t)
+        }
+        fn agg_name(t: &Type) -> String {
+            match t {
+                Type::Struct(st) => st.name.clone().unwrap_or_else(|| "struct".to_string()),
+                Type::Union(u) => u.name.clone().unwrap_or_else(|| "union".to_string()),
+                _ => "value".to_string(),
+            }
+        }
+        let sp = &e.span;
+        // A plain aggregate *value* slot fed a pointer: `File f = new File()`.
+        if plain_agg(dest) && matches!(src, Type::Pointer(_)) {
+            return Err(CompileError::at(
+                format!("type mismatch: a pointer where a `{}` value is expected — declare it as `{}*` \
+                         (`new` returns a pointer)", agg_name(dest), agg_name(dest)),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        // A pointer-to-aggregate slot fed a value: `File *f = a_file_value`, or a
+        // `File` value passed where a `File*` parameter is declared.
+        if let Type::Pointer(inner) = dest {
+            if plain_agg(inner) && plain_agg(&src) {
+                return Err(CompileError::at(
+                    format!("type mismatch: a `{}` value where a `{}*` pointer is expected — take its \
+                             address with `&`", agg_name(&src), agg_name(inner)),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+        }
+        Ok(())
+    }
+
     /// sic strict enum typing (sic.md §"Enums"): reject a value flowing into an
     /// `enum <dest>` slot whose nominal type is a plain `int` or a *different* enum.
     /// An unknown source is allowed (no false positives). `site` names the context
@@ -1284,6 +1327,9 @@ impl<'m> FuncCtx<'m> {
                         self.enum_locals.insert(d.name.clone(), en);
                     }
 
+                    if let Some(Initializer::Expr(e)) = &d.init {
+                        self.check_ptr_value_mismatch(&ty, e)?;
+                    }
                     if let Some(init) = &d.init {
                         self.lower_initializer(init, Val::Local(vid), &ty)?;
                     } else {
