@@ -1,0 +1,28 @@
+// sic namespaces (sic.md §"Namespace"): `namespace N { … }` groups declarations
+// into a compile-time scope, accessed with `N::member` (`::`, sic's scope operator).
+namespace geo {
+    int width = 4;
+    int height = 3;
+    int area() { return geo::width * geo::height; }   // qualified internal ref
+    struct Point { int x; int y; };
+    int dist2(struct Point *p) { return p->x * p->x + p->y * p->y; }
+}
+
+int main() {
+    // Member function call.
+    if (geo::area() != 12) return 1;
+
+    // Member variable read + write (an lvalue).
+    if (geo::width != 4) return 2;
+    geo::width = 10;
+    if (geo::width != 10) return 3;
+    geo::width += 2;
+    if (geo::width != 12) return 4;
+
+    // A struct declared in the namespace is a normal type here.
+    struct Point p;
+    p.x = 3; p.y = 4;
+    if (geo::dist2(&p) != 25) return 5;
+
+    return 0;
+}

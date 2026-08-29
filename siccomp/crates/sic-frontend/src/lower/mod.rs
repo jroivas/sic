@@ -91,6 +91,9 @@ pub struct Lowerer {
     /// method name)` → the mangled free-function name the method was hoisted to.
     /// Populated before lowering; `obj.method(args)` resolves through it.
     pub struct_methods: HashMap<(String, String), String>,
+    /// sic namespaces (sic.md §"Namespace"): `(namespace, member)` → the mangled
+    /// top-level symbol the member was flattened to, so `N::member` resolves.
+    pub namespace_members: HashMap<(String, String), String>,
     /// sic (sic.md §"Memory safety"): struct name → its constructor's mangled free
     /// function `__sic_ctor_<S>(S* self)`, called when a local of that type is
     /// declared. Present only for structs that define `S()`.
@@ -173,6 +176,7 @@ impl Lowerer {
             c_enum_ret: HashMap::new(),
             c_enum_alias: HashMap::new(),
             struct_methods: HashMap::new(),
+            namespace_members: HashMap::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             tuple_param_types: HashMap::new(),
@@ -222,12 +226,15 @@ impl Lowerer {
         // sic struct methods (sic.md §"Memory safety" / §"Iterators"): hoist each
         // struct's member functions into ordinary free functions before lowering,
         // recording the method table. Only clones the unit when methods are present.
-        let owned_tu: Option<TranslationUnit> =
-            if self.sic && tu.decls.iter().any(decl_has_methods) {
-                let mut t = tu.clone();
-                self.hoist_struct_methods(&mut t);
-                Some(t)
-            } else { None };
+        let needs_rewrite = self.sic && tu.decls.iter().any(|d|
+            decl_has_methods(d) || matches!(d, Decl::Namespace { .. }));
+        let owned_tu: Option<TranslationUnit> = if needs_rewrite {
+            let mut t = tu.clone();
+            // Flatten namespaces first (they may contain structs with methods).
+            self.flatten_namespaces(&mut t);
+            self.hoist_struct_methods(&mut t);
+            Some(t)
+        } else { None };
         let tu: &TranslationUnit = owned_tu.as_ref().unwrap_or(tu);
 
         // Decide which `inline` functions are reachable (and thus emitted).
@@ -1087,6 +1094,48 @@ impl Lowerer {
     /// (mangled `__sic_m_<Struct>_<method>`) appended to the unit, and record the
     /// `(struct, method) → mangled` table so `obj.method(args)` can resolve and pass
     /// `&obj` as the explicit `self`. Constructors/destructors are handled elsewhere.
+    /// sic namespaces (sic.md §"Namespace"): replace each `namespace N { … }` with
+    /// its members flattened to mangled top-level symbols (`N__member`), recording
+    /// `(N, member) → mangled` so `N::member` resolves. Nested namespaces flatten
+    /// with a combined prefix.
+    fn flatten_namespaces(&mut self, tu: &mut TranslationUnit) {
+        let decls = std::mem::take(&mut tu.decls);
+        let mut out = Vec::with_capacity(decls.len());
+        for d in decls {
+            match d {
+                Decl::Namespace { name, decls, .. } => self.flatten_ns_into(&name, decls, &mut out),
+                other => out.push(other),
+            }
+        }
+        tu.decls = out;
+    }
+
+    fn flatten_ns_into(&mut self, ns: &str, decls: Vec<Decl>, out: &mut Vec<Decl>) {
+        for d in decls {
+            match d {
+                Decl::Func { name, ret_ty, params, variadic, body, storage, inline, constructor, span } => {
+                    let mangled = format!("{}__{}", ns, name);
+                    self.namespace_members.insert((ns.to_string(), name), mangled.clone());
+                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, body, storage, inline, constructor, span });
+                }
+                Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
+                    for de in &mut declarators {
+                        let mangled = format!("{}__{}", ns, de.name);
+                        self.namespace_members.insert((ns.to_string(), de.name.clone()), mangled.clone());
+                        de.name = mangled;
+                    }
+                    out.push(Decl::Var { base_ty, declarators, weak, thread_local, span });
+                }
+                Decl::Namespace { name: inner, decls, .. } => {
+                    self.flatten_ns_into(&format!("{}__{}", ns, inner), decls, out);
+                }
+                // Types (struct/union/enum/typedef) are hoisted to file scope as-is;
+                // qualified `N::Type` access is not supported yet.
+                other => out.push(other),
+            }
+        }
+    }
+
     fn hoist_struct_methods(&mut self, tu: &mut TranslationUnit) {
         let mut synthesized: Vec<Decl> = Vec::new();
         for d in &tu.decls {
@@ -1359,6 +1408,8 @@ impl Lowerer {
             }
             // `module x;` handled in collect_declarations; `import` in a later pass.
             Decl::Module(_, _) | Decl::Import { .. } => {}
+            // Namespaces are flattened away before lowering (see flatten_namespaces).
+            Decl::Namespace { .. } => {}
         }
         Ok(())
     }

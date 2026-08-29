@@ -187,6 +187,29 @@ impl Parser {
             return Ok(Decl::ExprStmt(Expr::new(ExprKind::IntLit(0, false), sp.clone()), sp));
         }
 
+        // sic namespace (sic.md §"Namespace"): `namespace N { decls }`. `namespace`
+        // is a contextual keyword (a plain identifier elsewhere).
+        if self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "namespace" {
+            self.advance(); // `namespace`
+            let name = self.expect_name()?;
+            self.expect(TokenKind::LBrace)?;
+            let mut decls = Vec::new();
+            while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+                if self.eat(TokenKind::Semi) { continue; }
+                let before = self.pos;
+                decls.push(self.parse_external_decl()?);
+                if self.pos == before {
+                    let t = self.peek().clone();
+                    return Err(CompileError::at(
+                        format!("unexpected token {:?} ('{}') in namespace body", t.kind, t.text),
+                        t.span.file.clone(), t.span.line, t.span.col));
+                }
+            }
+            self.expect(TokenKind::RBrace)?;
+            self.eat(TokenKind::Semi); // optional trailing `;`
+            return Ok(Decl::Namespace { name, decls, span: sp });
+        }
+
         // sic module system (sic.md §"Imports").
         if self.at(TokenKind::Module) {
             self.advance();

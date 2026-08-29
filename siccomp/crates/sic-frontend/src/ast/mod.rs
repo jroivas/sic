@@ -246,6 +246,10 @@ pub enum Decl {
     /// module's exports available (namespaced, selective, or renamed). `sym` is
     /// `None` for a whole-module import; `alias` renames a selective import.
     Import { module: String, sym: Option<String>, alias: Option<String>, span: Span },
+    /// sic-only (sic.md §"Namespace"): `namespace N { decls }` — a compile-time
+    /// scope. Members are flattened to mangled top-level symbols and accessed as
+    /// `N::member`.
+    Namespace { name: String, decls: Vec<Decl>, span: Span },
 }
 
 // ─── Statements ────────────────────────────────────────────────────────────────

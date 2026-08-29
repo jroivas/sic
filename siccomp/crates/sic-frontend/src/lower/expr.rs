@@ -518,6 +518,12 @@ impl<'m> FuncCtx<'m> {
             // Bare tagged-enum variant used as a value, e.g. `Option::None`
             // (a payload-less constructor). A payload variant needs `(...)`.
             ExprKind::EnumVariant { enum_name, variant } => {
+                // sic (sic.md §"Namespace"): `N::member` is a namespace member value.
+                if self.is_sic() {
+                    if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
+                        return self.lower_expr(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() });
+                    }
+                }
                 self.construct_enum(enum_name, variant, &[], &expr.span)
             }
 
@@ -4501,6 +4507,13 @@ impl<'m> FuncCtx<'m> {
                 }, span: sp.clone() };
                 return self.lower_call(&callee, args, sp);
             }
+            // sic (sic.md §"Namespace"): `N::member(args)` calls a namespace member.
+            if self.is_sic() {
+                if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
+                    let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
+                    return self.lower_call(&callee, args, sp);
+                }
+            }
             return self.construct_enum(enum_name, variant, args, sp);
         }
         // Bare variant constructor `Variant(args)` (`Ok(5)`), resolved from the
@@ -5523,6 +5536,15 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_lvalue(&mut self, expr: &Expr) -> Result<LValue> {
         match &expr.kind {
+            // sic (sic.md §"Namespace"): `N::member` as an lvalue is the member's
+            // mangled global.
+            ExprKind::EnumVariant { enum_name, variant }
+                if self.is_sic()
+                    && self.lowerer.namespace_members.contains_key(&(enum_name.clone(), variant.clone())) =>
+            {
+                let mangled = self.lowerer.namespace_members[&(enum_name.clone(), variant.clone())].clone();
+                self.lower_lvalue(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() })
+            }
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {
@@ -5981,7 +6003,13 @@ impl<'m> FuncCtx<'m> {
                 Ok(super::types::tuple_type(tys))
             }
             // A tagged-enum variant path is a value of that enum's struct type.
-            ExprKind::EnumVariant { enum_name, .. } => {
+            ExprKind::EnumVariant { enum_name, variant } => {
+                // sic namespace member `N::member` → the mangled global's type.
+                if self.is_sic() {
+                    if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
+                        return self.infer_expr_type(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() });
+                    }
+                }
                 // A generic constructor (`Option::None`) resolves via the expected
                 // target type (sic.md §"Match").
                 let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
