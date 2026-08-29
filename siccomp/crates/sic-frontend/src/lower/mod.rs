@@ -2485,6 +2485,14 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
                 CompileError::at(format!("'{}' is not a constant", name), None, 0, 0)
             })
         }
+        // sic (sic.md §"Match"/§"Namespace"): a possibly scope-qualified enum
+        // variant `Enum::VARIANT` (`std::FileStatus::IO`) folds to its discriminant/
+        // tag — e.g. as a `switch` case label. Keyed by the variant (last segment).
+        ExprKind::EnumVariant { variant, .. } => {
+            enum_consts.get(variant.as_str()).copied().ok_or_else(|| {
+                CompileError::at(format!("'{}' is not a constant", variant), None, 0, 0)
+            })
+        }
         ExprKind::Unary { op: UnOpKind::Neg, expr } => Ok(-eval_const_expr(expr, enum_consts)?),
         ExprKind::Unary { op: UnOpKind::BitNot, expr } => Ok(!eval_const_expr(expr, enum_consts)?),
         ExprKind::Unary { op: UnOpKind::Not, expr } => {
