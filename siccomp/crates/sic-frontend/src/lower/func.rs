@@ -1955,7 +1955,7 @@ impl<'m> FuncCtx<'m> {
                 });
                 // item = (enum Canon) __fe_vals_N[i]
                 let elem_raw = mk(ExprKind::Index { base: Box::new(ident(&vname)), index: Box::new(ident(&iname)) });
-                let enum_ast = AstType::Enum(crate::ast::EnumDef { name: Some(canon.clone()), variants: None, packed: false, type_params: vec![], span: sp.clone() });
+                let enum_ast = AstType::Enum(crate::ast::EnumDef { name: Some(canon.clone()), variants: None, packed: false, type_params: vec![], private: false, span: sp.clone() });
                 let item_ty = QualType { ty: enum_ast, qualifiers: vec![], storage: None };
                 let elem = mk(ExprKind::Cast { ty: item_ty.clone(), expr: Box::new(elem_raw) });
                 let use_ty = if matches!(ty.storage, Some(StorageClass::Auto)) { item_ty } else { ty.clone() };

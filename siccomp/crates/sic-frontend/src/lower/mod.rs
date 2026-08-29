@@ -670,6 +670,7 @@ impl Lowerer {
             if self.sic && !name.starts_with("__") && !self.module_defined_types.contains(name) {
                 self.module_defined_types.push(name.clone());
             }
+            if s.private { self.private_types.insert(name.clone()); }
         }
         Ok(())
     }
@@ -1179,7 +1180,7 @@ impl Lowerer {
                     ty: QualType::new(AstType::Pointer {
                         base: Box::new(QualType::new(AstType::Struct(StructDef {
                             name: Some(sname.clone()), fields: None, align: None,
-                            keep_order: false, methods: vec![], span: sp.clone(),
+                            keep_order: false, methods: vec![], private: false, span: sp.clone(),
                         }))),
                         quals: vec![],
                     }),
@@ -1376,7 +1377,7 @@ impl Lowerer {
         });
         let concrete = EnumDef {
             name: Some(mangled.clone()), variants, packed: template.packed,
-            type_params: Vec::new(), span: template.span.clone(),
+            type_params: Vec::new(), private: template.private, span: template.span.clone(),
         };
         self.register_enum(&concrete)?;
         self.struct_types.get(&mangled).cloned().ok_or_else(|| {
@@ -2761,19 +2762,19 @@ fn blessed_enum_templates() -> Vec<EnumDef> {
         EnumDef {
             name: Some("Option".to_string()),
             variants: Some(vec![variant("Some", Some(named("T"))), variant("None", None)]),
-            packed: false, type_params: vec!["T".to_string()], span: crate::lexer::Span::default(),
+            packed: false, type_params: vec!["T".to_string()], private: false, span: crate::lexer::Span::default(),
         },
         EnumDef {
             name: Some("Result".to_string()),
             variants: Some(vec![variant("Ok", Some(named("T"))), variant("Err", Some(named("E")))]),
-            packed: false, type_params: vec!["T".to_string(), "E".to_string()], span: crate::lexer::Span::default(),
+            packed: false, type_params: vec!["T".to_string(), "E".to_string()], private: false, span: crate::lexer::Span::default(),
         },
         // sic iterators (sic.md §"Iterators"): a custom `next()` returns this so the
         // range-`for` knows whether to yield another element or stop.
         EnumDef {
             name: Some("Iterator".to_string()),
             variants: Some(vec![variant("Stop", None), variant("Next", Some(named("T")))]),
-            packed: false, type_params: vec!["T".to_string()], span: crate::lexer::Span::default(),
+            packed: false, type_params: vec!["T".to_string()], private: false, span: crate::lexer::Span::default(),
         },
     ]
 }

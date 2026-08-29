@@ -87,6 +87,9 @@ pub struct StructDef {
     /// destructor `~S()`, and methods `Ret m(S* self){…}` declared in the body.
     /// Empty for C structs and for bodiless `struct S` references.
     pub methods: Vec<StructMethod>,
+    /// sic (sic.md §"Namespace"): `private struct` — withhold this type from the
+    /// module's manifest so consumers cannot name it.
+    pub private: bool,
     pub span: Span,
 }
 
@@ -115,6 +118,8 @@ pub struct UnionDef {
     pub fields: Option<Vec<FieldDecl>>,
     /// Type-level `__attribute__((aligned(N)))` (see `StructDef::align`).
     pub align: Option<u32>,
+    /// sic (sic.md §"Namespace"): `private union` — withhold from the manifest.
+    pub private: bool,
     pub span: Span,
 }
 
@@ -142,6 +147,8 @@ pub struct EnumDef {
     /// `enum Option<T> { Some(T), None }`. Empty for an ordinary enum. A generic
     /// enum is a monomorphization *template*, instantiated per concrete `<...>`.
     pub type_params: Vec<String>,
+    /// sic (sic.md §"Namespace"): `private enum` — withhold from the manifest.
+    pub private: bool,
     pub span: Span,
 }
 

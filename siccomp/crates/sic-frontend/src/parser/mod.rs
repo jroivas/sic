@@ -36,6 +36,9 @@ pub struct Parser {
     /// largest N. Applied to the next struct/union member to raise its (and the
     /// aggregate's) alignment (QEMU's `FPReg` union → 16-aligned `CPUX86State`).
     pending_aligned: Option<u32>,
+    /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
+    /// `private` keyword has been consumed and applies to the next aggregate.
+    pending_private: bool,
     /// Names declared as variables (params + locals) in the function currently
     /// being parsed. A name here shadows a like-named typedef, so `(name)` is a
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
@@ -61,7 +64,7 @@ impl Parser {
                 generic_enums.insert(n.to_string());
             }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -359,6 +362,13 @@ impl Parser {
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
             return false;
         }
+        // sic `private struct/union/enum` is a declaration (sic.md §"Namespace").
+        if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
+            && self.peek().text == "private"
+            && self.tokens.get(self.pos + 1).map_or(false, |t|
+                matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum)) {
+            return false;
+        }
         // sic `@T` / `@mut T` reference type at the head of a declaration (e.g. a
         // `@char* f()` return type) starts a declaration, not an expression.
         if self.peek_kind() == TokenKind::At {
@@ -510,6 +520,14 @@ impl Parser {
                 TokenKind::Double   => { base = Some(AstType::Double); self.advance(); }
                 TokenKind::Bool     => { base = Some(AstType::Bool); self.advance(); }
                 TokenKind::Complex  => { base = Some(AstType::Complex); self.advance(); }
+                // sic `private struct/union/enum` (sic.md §"Namespace"): withhold
+                // the following aggregate type from the module manifest.
+                TokenKind::Ident if self.lang == Lang::Sic && self.peek().text == "private"
+                    && self.tokens.get(self.pos + 1).map_or(false, |t|
+                        matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum)) => {
+                    self.advance();
+                    self.pending_private = true;
+                }
                 TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
@@ -720,10 +738,11 @@ impl Parser {
             if let Some(n) = &name { self.typedefs.insert(n.clone()); }
         }
 
+        let private = std::mem::take(&mut self.pending_private);
         if is_union {
-            Ok(AstType::Union(UnionDef { name, fields, align: type_align, span: sp }))
+            Ok(AstType::Union(UnionDef { name, fields, align: type_align, private, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, methods, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, methods, private, span: sp }))
         }
     }
 
@@ -932,7 +951,8 @@ impl Parser {
                 }
             }
         }
-        Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, type_params, span: sp }))
+        let private = std::mem::take(&mut self.pending_private);
+        Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, type_params, private, span: sp }))
     }
 
     // ─── Declarators ──────────────────────────────────────────────────────────
