@@ -869,15 +869,14 @@ impl Parser {
         // sic tagged enum (sic.md §"Match"): register the name as a type so it can
         // be used bare (`Option a;`) like Rust, not only as `enum Option a;`.
         if self.lang == Lang::Sic {
-            if let (Some(n), Some(vs)) = (&name, &variants) {
-                if vs.iter().any(|v| v.payload.is_some()) {
-                    self.typedefs.insert(n.clone());
-                }
+            if let (Some(n), Some(_)) = (&name, &variants) {
+                // Any named enum's tag is usable as a bare type name (`OpenMode m`,
+                // not only `enum OpenMode m`) — tagged and plain C enums alike.
+                self.typedefs.insert(n.clone());
                 // A generic enum name is remembered so `Option<int>` in a later type
                 // position parses as an instantiation rather than a `<` comparison.
                 if !type_params.is_empty() {
                     self.generic_enums.insert(n.clone());
-                    self.typedefs.insert(n.clone());
                 }
             }
         }

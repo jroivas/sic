@@ -1233,6 +1233,12 @@ impl Lowerer {
                         self.c_enum_variant.insert(v.name.clone(), ename.clone());
                     }
                     self.c_enum_defs.insert(ename.clone(), vs);
+                    // sic: the bare enum tag is usable as a type name (`OpenMode m`);
+                    // resolve it to the enum's underlying integer type.
+                    if let Ok(int_ty) = lower_type(
+                        &QualType::new(AstType::Enum(e.clone())), &self.struct_types, self.ptr_size) {
+                        self.struct_types.entry(ename.clone()).or_insert(int_ty);
+                    }
                 }
             }
         }
