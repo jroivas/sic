@@ -40,6 +40,42 @@ enum EnumClass {
     Unknown,
 }
 
+/// sic type safety (sic.md §"Memory safety"): if `dest` and `src` mismatch across a
+/// plain-aggregate pointer/value boundary — a `File` value fed a `File*`, or a
+/// `File*` slot fed a `File` value — return a fix-it message. sic's own aggregates
+/// (string/tuple/va_array/any/u8char/type) have their own conversions and are exempt.
+fn ptr_value_mismatch(dest: &Type, src: &Type) -> Option<String> {
+    fn plain_agg(t: &Type) -> bool {
+        matches!(t, Type::Struct(_) | Type::Union(_))
+            && !super::types::is_sic_string(t) && !super::types::is_tuple(t)
+            && !super::types::is_va_array(t) && !super::types::is_any(t)
+            && !super::types::is_u8char(t) && !super::types::is_type_info(t)
+    }
+    fn agg_name(t: &Type) -> String {
+        match t {
+            Type::Struct(st) => st.name.clone().unwrap_or_else(|| "struct".to_string()),
+            Type::Union(u) => u.name.clone().unwrap_or_else(|| "union".to_string()),
+            _ => "value".to_string(),
+        }
+    }
+    // A plain aggregate *value* slot fed a pointer: `File f = new File()`.
+    if plain_agg(dest) && matches!(src, Type::Pointer(_)) {
+        return Some(format!(
+            "type mismatch: a pointer where a `{}` value is expected — declare it as `{}*` \
+             (`new` returns a pointer)", agg_name(dest), agg_name(dest)));
+    }
+    // A pointer-to-aggregate slot fed a value: `File *f = a_file_value`, or a `File`
+    // value where a `File*` is expected.
+    if let Type::Pointer(inner) = dest {
+        if plain_agg(inner) && plain_agg(src) {
+            return Some(format!(
+                "type mismatch: a `{}` value where a `{}*` pointer is expected — take its \
+                 address with `&`", agg_name(src), agg_name(inner)));
+        }
+    }
+    None
+}
+
 /// The source symbol for a binary operator, for enum-arithmetic diagnostics.
 fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
     use crate::ast::BinOpKind::*;
@@ -460,36 +496,9 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn check_ptr_value_mismatch(&mut self, dest: &Type, e: &Expr) -> Result<()> {
         if !self.is_sic() { return Ok(()); }
         let src = match self.infer_expr_type(e) { Ok(t) => t, Err(_) => return Ok(()) };
-        fn plain_agg(t: &Type) -> bool {
-            matches!(t, Type::Struct(_) | Type::Union(_))
-                && !super::types::is_sic_string(t) && !super::types::is_tuple(t)
-                && !super::types::is_va_array(t) && !super::types::is_any(t)
-                && !super::types::is_u8char(t) && !super::types::is_type_info(t)
-        }
-        fn agg_name(t: &Type) -> String {
-            match t {
-                Type::Struct(st) => st.name.clone().unwrap_or_else(|| "struct".to_string()),
-                Type::Union(u) => u.name.clone().unwrap_or_else(|| "union".to_string()),
-                _ => "value".to_string(),
-            }
-        }
-        let sp = &e.span;
-        // A plain aggregate *value* slot fed a pointer: `File f = new File()`.
-        if plain_agg(dest) && matches!(src, Type::Pointer(_)) {
-            return Err(CompileError::at(
-                format!("type mismatch: a pointer where a `{}` value is expected — declare it as `{}*` \
-                         (`new` returns a pointer)", agg_name(dest), agg_name(dest)),
-                sp.file.clone(), sp.line, sp.col));
-        }
-        // A pointer-to-aggregate slot fed a value: `File *f = a_file_value`, or a
-        // `File` value passed where a `File*` parameter is declared.
-        if let Type::Pointer(inner) = dest {
-            if plain_agg(inner) && plain_agg(&src) {
-                return Err(CompileError::at(
-                    format!("type mismatch: a `{}` value where a `{}*` pointer is expected — take its \
-                             address with `&`", agg_name(&src), agg_name(inner)),
-                    sp.file.clone(), sp.line, sp.col));
-            }
+        if let Some(msg) = ptr_value_mismatch(dest, &src) {
+            let sp = &e.span;
+            return Err(CompileError::at(msg, sp.file.clone(), sp.line, sp.col));
         }
         Ok(())
     }
@@ -2194,6 +2203,16 @@ impl<'m> FuncCtx<'m> {
                         "guard-bind needs an enum with a payload variant (Some/Ok)".to_string(),
                         sp.file.clone(), sp.line, sp.col))?;
                     let pty = present.payload.clone().unwrap();
+                    // sic type safety: a declared binding type must match the payload's
+                    // pointer/value shape — `File f = <Opened(File*)> else …` (a `File`
+                    // value bound from a `File*` payload) is an error; use `File *f`.
+                    if let Some(dty) = decl_ty {
+                        if let Ok(declared) = self.lower_type(dty) {
+                            if let Some(msg) = ptr_value_mismatch(&declared, &pty) {
+                                return Err(CompileError::at(msg, sp.file.clone(), sp.line, sp.col));
+                            }
+                        }
+                    }
                     let ptr = self.lower_aggregate_ptr(cond)?;
                     let tag = self.load_enum_tag(ptr.clone(), &cty, sp)?;
                     let is_present = self.alloc_val();
