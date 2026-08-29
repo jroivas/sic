@@ -1362,7 +1362,29 @@ impl Parser {
                 | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
                 | TokenKind::Enum | TokenKind::Const | TokenKind::TypeName));
         }
+        if self.qualified_scope_decl() { return true; }
         self.typename_starts_decl()
+    }
+
+    /// sic (sic.md §"Namespace"): does the statement begin with a scope-qualified
+    /// *type* used in a declaration — `A::B::Name` followed by a declarator (`*`…
+    /// then a name)? A `(` after the path means a call (`std::Open(…)`), not a decl.
+    fn qualified_scope_decl(&self) -> bool {
+        if self.lang != Lang::Sic || self.peek_kind() != TokenKind::Ident { return false; }
+        let is_seg = |k: Option<TokenKind>| matches!(k, Some(TokenKind::Ident | TokenKind::TypeName));
+        // `Ident (:: Ident)+`
+        if self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::ColonColon) { return false; }
+        let mut j = self.pos + 1; // at the first `::`
+        while self.tokens.get(j).map(|t| t.kind) == Some(TokenKind::ColonColon) {
+            if !is_seg(self.tokens.get(j + 1).map(|t| t.kind)) { return false; }
+            j += 2;
+        }
+        // Past the path: skip `*` and pointer qualifiers, then require a name.
+        while matches!(self.tokens.get(j).map(|t| t.kind),
+            Some(TokenKind::Star | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict)) {
+            j += 1;
+        }
+        is_seg(self.tokens.get(j).map(|t| t.kind))
     }
 
     /// Whether the current `TypeName`/typedef token begins a declaration rather
