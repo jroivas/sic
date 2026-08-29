@@ -1,0 +1,26 @@
+// sic scope-qualified type names (sic.md §"Namespace"): a type declared in a
+// namespace can be named `Ns::Type` (and `A::B::Type`) in a type position — here
+// as a function parameter, the common case.
+namespace Buffer {
+    struct Data { int size; int cap; };
+}
+namespace geo {
+    namespace shape {
+        struct Rect { int w; int h; };
+    }
+}
+
+int used(Buffer::Data *d) { return d->size + d->cap; }
+int area(geo::shape::Rect *r) { return r->w * r->h; }
+
+int main() {
+    struct Data d;              // the type is hoisted to file scope
+    d.size = 3; d.cap = 7;
+    if (used(&d) != 10) return 1;
+
+    struct Rect r;
+    r.w = 4; r.h = 5;
+    if (area(&r) != 20) return 2;
+
+    return 0;
+}

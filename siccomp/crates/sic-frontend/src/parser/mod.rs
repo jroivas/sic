@@ -557,6 +557,20 @@ impl Parser {
                 // specifier when no other type info has been seen yet. Otherwise
                 // it is the declarator name — e.g. `uint32_t u32;` where the
                 // second token is a field/variable named `u32`, not a type.
+                // sic scope-qualified type `A::B::Name` (sic.md §"Namespace") in a
+                // type-specifier position — e.g. a `Buffer::Data *buf` parameter.
+                // A namespace's types are hoisted to file scope, so the type is the
+                // one named by the last segment.
+                TokenKind::Ident | TokenKind::TypeName if base.is_none() && signed.is_none()
+                    && long_count == 0 && self.lang == Lang::Sic
+                    && self.tokens.get(self.pos + 1).map_or(false, |t| t.kind == TokenKind::ColonColon) => {
+                    let mut last = self.advance().text.clone();
+                    while self.at(TokenKind::ColonColon) {
+                        self.advance();
+                        last = self.expect_name()?;
+                    }
+                    base = Some(self.maybe_generic_type(last)?);
+                }
                 TokenKind::TypeName if base.is_none() && signed.is_none() && long_count == 0 => {
                     let name = self.advance().text.clone();
                     base = Some(self.maybe_generic_type(name)?);
