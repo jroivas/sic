@@ -2223,6 +2223,15 @@ impl<'m> FuncCtx<'m> {
         if self.is_sic() && super::types::is_type_info(&sty) {
             return self.lower_match_on_type(scrutinee, arms, sp);
         }
+        // sic: `match` on a plain (payload-less) C enum dispatches on the value
+        // against each variant's discriminant — a `switch` with variant-name labels.
+        if self.is_sic() {
+            if let EnumClass::Enum(ename) = self.classify_enum(scrutinee) {
+                if self.lowerer.c_enum_defs.contains_key(&ename) {
+                    return self.lower_match_c_enum(scrutinee, arms, &ename, sp);
+                }
+            }
+        }
         if !self.is_tagged_enum_struct(&sty) {
             return Err(CompileError::at(
                 "match requires a tagged enum value".to_string(), sp.file.clone(), sp.line, sp.col));
@@ -2283,6 +2292,51 @@ impl<'m> FuncCtx<'m> {
             let fref = self.lowerer.ensure_match_fail_fn();
             self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
             self.set_terminator(Terminator::Jump(end_bb)); // abort never returns
+        }
+        self.switch_to_block(end_bb);
+        Ok(())
+    }
+
+    /// sic `match` on a plain (payload-less) C enum: dispatch the value against each
+    /// variant's discriminant. Arms carry no payload binding. A `_` arm is the
+    /// fallback; without one an unmatched value aborts (like a tagged `match`).
+    fn lower_match_c_enum(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], ename: &str, sp: &crate::lexer::Span) -> Result<()> {
+        let v = self.lower_expr(scrutinee)?;
+        let val = self.coerce(v, &Type::i32())?;
+        let end_bb = self.new_block_after_current();
+        let wildcard = arms.iter().find(|a| a.variant.is_none());
+
+        for arm in arms.iter().filter(|a| a.variant.is_some()) {
+            let vname = arm.variant.as_ref().unwrap();
+            let disc = *self.lowerer.enum_consts.get(vname).ok_or_else(|| CompileError::at(
+                format!("enum '{}' has no variant '{}'", ename, vname), sp.file.clone(), sp.line, sp.col))?;
+            if arm.binding.is_some() {
+                return Err(CompileError::at(
+                    format!("variant '{}::{}' carries no payload to bind", ename, vname),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+            let arm_bb = self.new_block_after_current();
+            let next_bb = self.new_block_after_current();
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: val.clone(), rhs: Constant::int(disc), ty: Type::i32() });
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb: arm_bb, else_bb: next_bb });
+            self.switch_to_block(arm_bb);
+            self.enter_scope();
+            self.lower_stmt(&arm.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+            self.switch_to_block(next_bb);
+        }
+
+        if let Some(w) = wildcard {
+            self.enter_scope();
+            self.lower_stmt(&w.body)?;
+            self.exit_scope();
+            if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
+        } else {
+            let fref = self.lowerer.ensure_match_fail_fn();
+            self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+            self.set_terminator(Terminator::Jump(end_bb));
         }
         self.switch_to_block(end_bb);
         Ok(())
