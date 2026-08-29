@@ -624,6 +624,21 @@ impl Parser {
 
     // ─── Struct / union / enum ────────────────────────────────────────────────
 
+    /// Parse a `::`-separated scope path whose first segment is `first` (with the
+    /// leading `::` still pending). The last segment is the member; the rest join
+    /// with `::` as the scope. Two segments = an enum variant (`Option::Some`);
+    /// three or more = a nested namespace / module path (`std::Buffer::Create`).
+    fn parse_scope_path(&mut self, first: String, sp: crate::lexer::Span) -> Result<Expr> {
+        let mut segs = vec![first];
+        while self.at(TokenKind::ColonColon) {
+            self.advance();
+            segs.push(self.expect_name()?);
+        }
+        let variant = segs.pop().unwrap();
+        let enum_name = segs.join("::");
+        Ok(Expr::new(ExprKind::EnumVariant { enum_name, variant }, sp))
+    }
+
     fn parse_struct_or_union(&mut self, is_union: bool) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // consume 'struct'/'union'
@@ -2387,22 +2402,18 @@ impl Parser {
                     }
                     _ => {}
                 }
-                // sic enum-variant path `Enum::Variant` (sic.md §"Match").
+                // sic scope path `A::B::…::member` (sic.md §"Match", §"Namespace").
                 if self.at(TokenKind::ColonColon) {
-                    self.advance();
-                    let variant = self.expect_name()?;
-                    return Ok(Expr::new(ExprKind::EnumVariant { enum_name: name, variant }, sp));
+                    return self.parse_scope_path(name, sp);
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
             }
             TokenKind::TypeName => {
                 // typedef name used as an expression (shouldn't be common, but handle gracefully)
                 let name = self.advance().text.clone();
-                // sic enum-variant path `Enum::Variant` where `Enum` is a type name.
+                // sic scope path where the first segment is a type name.
                 if self.at(TokenKind::ColonColon) {
-                    self.advance();
-                    let variant = self.expect_name()?;
-                    return Ok(Expr::new(ExprKind::EnumVariant { enum_name: name, variant }, sp));
+                    return self.parse_scope_path(name, sp);
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
             }

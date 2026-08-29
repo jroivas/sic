@@ -1110,24 +1110,27 @@ impl Lowerer {
         tu.decls = out;
     }
 
-    fn flatten_ns_into(&mut self, ns: &str, decls: Vec<Decl>, out: &mut Vec<Decl>) {
+    /// `scope` is the `::`-joined path (`"A"`, `"A::B"`) used as the lookup key;
+    /// symbols are mangled with `__` (`A__B__member`), a valid linker identifier.
+    fn flatten_ns_into(&mut self, scope: &str, decls: Vec<Decl>, out: &mut Vec<Decl>) {
+        let prefix = scope.replace("::", "__");
         for d in decls {
             match d {
                 Decl::Func { name, ret_ty, params, variadic, body, storage, inline, constructor, span } => {
-                    let mangled = format!("{}__{}", ns, name);
-                    self.namespace_members.insert((ns.to_string(), name), mangled.clone());
+                    let mangled = format!("{}__{}", prefix, name);
+                    self.namespace_members.insert((scope.to_string(), name), mangled.clone());
                     out.push(Decl::Func { name: mangled, ret_ty, params, variadic, body, storage, inline, constructor, span });
                 }
                 Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
                     for de in &mut declarators {
-                        let mangled = format!("{}__{}", ns, de.name);
-                        self.namespace_members.insert((ns.to_string(), de.name.clone()), mangled.clone());
+                        let mangled = format!("{}__{}", prefix, de.name);
+                        self.namespace_members.insert((scope.to_string(), de.name.clone()), mangled.clone());
                         de.name = mangled;
                     }
                     out.push(Decl::Var { base_ty, declarators, weak, thread_local, span });
                 }
                 Decl::Namespace { name: inner, decls, .. } => {
-                    self.flatten_ns_into(&format!("{}__{}", ns, inner), decls, out);
+                    self.flatten_ns_into(&format!("{}::{}", scope, inner), decls, out);
                 }
                 // Types (struct/union/enum/typedef) are hoisted to file scope as-is;
                 // qualified `N::Type` access is not supported yet.

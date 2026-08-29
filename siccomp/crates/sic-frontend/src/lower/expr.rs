@@ -4507,6 +4507,20 @@ impl<'m> FuncCtx<'m> {
                 }, span: sp.clone() };
                 return self.lower_call(&callee, args, sp);
             }
+            // sic nested module member `mod::A::B::sym(args)` (sic.md §"Namespace"):
+            // the module exports namespace members mangled `A__B__sym`.
+            if self.is_sic() {
+                if let Some((module, rest)) = enum_name.split_once("::") {
+                    if self.lowerer.imported_modules.contains_key(module) {
+                        let export = format!("{}__{}", rest.replace("::", "__"), variant);
+                        let callee = Expr { kind: ExprKind::Field {
+                            base: Box::new(Expr { kind: ExprKind::Ident(module.to_string()), span: sp.clone() }),
+                            name: export,
+                        }, span: sp.clone() };
+                        return self.lower_call(&callee, args, sp);
+                    }
+                }
+            }
             // sic (sic.md §"Namespace"): `N::member(args)` calls a namespace member.
             if self.is_sic() {
                 if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
@@ -6085,7 +6099,12 @@ impl<'m> FuncCtx<'m> {
                         ExprKind::Ident(m) => Some((m.clone(), name.clone())),
                         _ => None,
                     },
-                    ExprKind::EnumVariant { enum_name, variant } => Some((enum_name.clone(), variant.clone())),
+                    // `Module::sym` (flat) or `Module::A::B::sym` (nested): the export
+                    // name mangles the intra-module scope path with `__`.
+                    ExprKind::EnumVariant { enum_name, variant } => match enum_name.split_once("::") {
+                        Some((module, rest)) => Some((module.to_string(), format!("{}__{}", rest.replace("::", "__"), variant))),
+                        None => Some((enum_name.clone(), variant.clone())),
+                    },
                     _ => None,
                 };
                 if let Some((m, name)) = module_sym {

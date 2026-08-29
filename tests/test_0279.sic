@@ -1,0 +1,28 @@
+// sic nested namespaces (sic.md §"Namespace"): `::` resolves an arbitrarily deep
+// scope path `A::B::C::member`, and an inner member may reference an outer one.
+namespace app {
+    int base = 100;
+    namespace math {
+        int add(int x) { return app::base + x; }        // reaches the outer scope
+        namespace deep {
+            int triple(int x) { return x * 3; }
+        }
+    }
+    int counter = 0;
+}
+
+int main() {
+    if (app::math::add(5) != 105) return 1;
+    if (app::math::deep::triple(4) != 12) return 2;      // three levels deep
+
+    // A nested member variable is a normal lvalue.
+    app::counter = 7;
+    app::counter += 3;
+    if (app::counter != 10) return 3;
+
+    // The outer base is shared.
+    app::base = 200;
+    if (app::math::add(0) != 200) return 4;
+
+    return 0;
+}
