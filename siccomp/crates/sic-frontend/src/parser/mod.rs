@@ -2064,15 +2064,21 @@ impl Parser {
                     }
                     ty = QualType::new(AstType::Pointer { base: Box::new(ty), quals: vec![] });
                 }
-                // Optional element count `(n)`.
-                let count = if self.eat(TokenKind::LParen) {
-                    let c = self.parse_expr()?;
+                // Optional `(…)`: an element count `(n)`, constructor arguments, or
+                // empty `()`. Parsed as a comma-separated list; the meaning is
+                // resolved at lowering from whether `T` has a constructor.
+                let args = if self.eat(TokenKind::LParen) {
+                    let mut args = Vec::new();
+                    while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+                        args.push(self.parse_assign_expr()?);
+                        if !self.eat(TokenKind::Comma) { break; }
+                    }
                     self.expect(TokenKind::RParen)?;
-                    Some(Box::new(c))
+                    args
                 } else {
-                    None
+                    Vec::new()
                 };
-                Ok(Expr::new(ExprKind::New { ty, count }, sp))
+                Ok(Expr::new(ExprKind::New { ty, args }, sp))
             }
             TokenKind::Sizeof => {
                 self.advance();

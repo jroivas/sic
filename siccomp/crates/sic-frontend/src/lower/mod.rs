@@ -2601,7 +2601,7 @@ fn rw_self_expr(e: &mut Expr, t: &HashSet<String>) {
         Call { func, args } => { rw_self_expr(func, t); for a in args { rw_self_expr(a, t); } }
         Index { base, index } => { rw_self_expr(base, t); rw_self_expr(index, t); }
         Field { base, .. } | Arrow { base, .. } | OptField { base, .. } => rw_self_expr(base, t),
-        New { count, .. } => { if let Some(c) = count { rw_self_expr(c, t); } }
+        New { args, .. } => { for c in args { rw_self_expr(c, t); } }
         Slice { base, lo, hi } => {
             rw_self_expr(base, t);
             if let Some(x) = lo { rw_self_expr(x, t); }
@@ -2861,7 +2861,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             if let Some(e) = lo { collect_expr_names(e, out); }
             if let Some(e) = hi { collect_expr_names(e, out); }
         }
-        New { count, .. } => { if let Some(e) = count { collect_expr_names(e, out); } }
+        New { args, .. } => { for e in args { collect_expr_names(e, out); } }
         Ref { expr, .. } => collect_expr_names(expr, out),
         Field { base, .. } | Arrow { base, .. } => collect_expr_names(base, out),
         Cast { expr, .. } => collect_expr_names(expr, out),

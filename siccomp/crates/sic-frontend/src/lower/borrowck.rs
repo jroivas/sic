@@ -221,7 +221,7 @@ fn check_expr(e: &Expr, ctx: &mut Ctx) -> Result<()> {
             if let Some(x) = lo { check_expr(x, ctx)?; }
             if let Some(x) = hi { check_expr(x, ctx)?; }
         }
-        New { count, .. } => { if let Some(x) = count { check_expr(x, ctx)?; } }
+        New { args, .. } => { for x in args { check_expr(x, ctx)?; } }
         Field { base, .. } | Arrow { base, .. } => check_expr(base, ctx)?,
         Generic { controlling, assocs } => { check_expr(controlling, ctx)?; for (_, x) in assocs { check_expr(x, ctx)?; } }
         StmtExpr(stmts) => { ctx.push(); for s in stmts { check_stmt(s, ctx)?; } ctx.pop(); }

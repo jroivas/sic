@@ -358,7 +358,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Emit `fn(&var)` for a cleanup function. The function takes a pointer to
     /// the variable; declare it as an extern `void(void*)` if not yet known.
-    fn emit_cleanup_call(&mut self, var_addr: Val, fn_name: &str) {
+    pub(crate) fn emit_cleanup_call(&mut self, var_addr: Val, fn_name: &str) {
         let fref = match self.lowerer.module.func_ref_by_name(fn_name) {
             Some(f) => f,
             None => {
@@ -2523,7 +2523,7 @@ fn scan_mutated_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
             if let Some(x) = lo { scan_mutated_expr(x, out); }
             if let Some(x) = hi { scan_mutated_expr(x, out); }
         }
-        New { count, .. } => { if let Some(x) = count { scan_mutated_expr(x, out); } }
+        New { args, .. } => { for x in args { scan_mutated_expr(x, out); } }
         Field { base, .. } | Arrow { base, .. } => scan_mutated_expr(base, out),
         Generic { controlling, assocs } => { scan_mutated_expr(controlling, out); for (_, x) in assocs { scan_mutated_expr(x, out); } }
         StmtExpr(stmts) => { for s in stmts { scan_mutated_stmt(s, out); } }

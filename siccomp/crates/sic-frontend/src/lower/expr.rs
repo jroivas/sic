@@ -501,7 +501,7 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Slice { base, lo, hi } => self.lower_slice(base, lo.as_deref(), hi.as_deref()),
 
-            ExprKind::New { ty, count } => self.lower_new(ty, count.as_deref()),
+            ExprKind::New { ty, args } => self.lower_new(ty, args),
 
             ExprKind::Ref { expr, .. } => self.lower_ref(expr),
 
@@ -2369,15 +2369,27 @@ impl<'m> FuncCtx<'m> {
     /// allocate a block with a `{ usize size; usize refcount }` header before the
     /// data, `refcount = 1`, and return the data pointer typed `T*`. `del` frees
     /// via the header; the header also carries the size for future bounds checks.
-    pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, count: Option<&Expr>) -> Result<Val> {
+    pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, args: &[Expr]) -> Result<Val> {
         let elem_ty = self.lower_type(ty)?;
         let elem_size = elem_ty.size_of(self.ptr_size()).max(1);
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let header = (2 * self.ptr_size()) as i64;
 
-        let count_val = match count {
-            Some(e) => { let v = self.lower_expr(e)?; self.coerce(v, &usize_ty)? }
-            None => self.coerce(Constant::int(1), &usize_ty)?,
+        // sic constructor via `new` (sic.md §"Memory safety"): if `T` is a struct
+        // with a constructor, `new T(args)` allocates ONE object and runs the
+        // constructor on it; otherwise the parens hold an element count.
+        let ctor = if self.is_sic() {
+            match &elem_ty {
+                Type::Struct(st) => st.name.as_ref().and_then(|n| self.lowerer.struct_ctor.get(n).cloned()),
+                _ => None,
+            }
+        } else { None };
+
+        // A struct constructor gets one object; otherwise the first (only) argument
+        // is the element count, defaulting to 1.
+        let count_val = match (&ctor, args.first()) {
+            (Some(_), _) | (None, None) => self.coerce(Constant::int(1), &usize_ty)?,
+            (None, Some(e)) => { let v = self.lower_expr(e)?; self.coerce(v, &usize_ty)? }
         };
         let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
         let data_size = self.alloc_val();
@@ -2394,10 +2406,31 @@ impl<'m> FuncCtx<'m> {
         let one = self.coerce(Constant::int(1), &usize_ty)?;
         self.push_instr(Instr::Store { val: one, ptr: Val::Local(rc_ptr) });
 
-        let ptr_ty = Type::Pointer(Box::new(elem_ty));
+        let ptr_ty = Type::Pointer(Box::new(elem_ty.clone()));
         let data = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
         self.val_types.insert(data.0, ptr_ty);
+
+        // Zero the fresh object and run the constructor `__sic_ctor_<S>(data, args…)`.
+        if let Some(ctor) = ctor {
+            let osz = elem_ty.size_of(self.ptr_size());
+            if osz > 0 {
+                self.push_instr(Instr::MemSet { dst: Val::Local(data), val: Constant::zero(), size: osz, align: elem_ty.align_of(self.ptr_size()) });
+            }
+            let fref = self.lowerer.module.func_ref_by_name(&ctor).ok_or_else(|| CompileError::new(
+                format!("internal: constructor '{}' not lowered", ctor)))?;
+            let params = self.lowerer.module.func_sig(fref).params.clone();
+            let mut cargs = vec![Val::Local(data)];
+            for (i, a) in args.iter().enumerate() {
+                let v = self.lower_expr(a)?;
+                let v = match params.get(i + 1) {
+                    Some(pt) if !matches!(pt, Type::Struct(_) | Type::Union(_)) => self.coerce(v, pt)?,
+                    _ => v,
+                };
+                cargs.push(v);
+            }
+            self.push_instr(Instr::Call { dest: None, func: fref, args: cargs, ret_ty: Type::Void });
+        }
         Ok(Val::Local(data))
     }
 
@@ -2418,14 +2451,31 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::MemSet { dst: ptr, val: Constant::zero(), size, align });
             return Ok(());
         }
+        // sic `del p` on a pointer to a struct with a destructor (sic.md §"Memory
+        // safety"): run `~S()` when the block is actually freed (refcount hits 0).
+        let dtor = if self.is_sic() {
+            match self.infer_expr_type(e) {
+                Ok(Type::Pointer(inner)) => match inner.as_ref() {
+                    Type::Struct(st) => st.name.as_ref().and_then(|n| self.lowerer.struct_dtor.get(n).cloned()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else { None };
         let p = self.lower_expr(e)?;
-        self.emit_rc_release(p)
+        self.emit_rc_release_dtor(p, dtor)
     }
 
     /// Decrement the fat-pointer header refcount at `p - ptr_size` and `free` the
     /// block (`p - 2*ptr_size`) at 0. NULL is a no-op. Shared by `del` and by a
     /// `@` reference's scope-exit release.
     pub(crate) fn emit_rc_release(&mut self, p: Val) -> Result<()> {
+        self.emit_rc_release_dtor(p, None)
+    }
+
+    /// As `emit_rc_release`, but if `dtor` is set, call it on the object right
+    /// before the block is freed (only when the refcount reaches 0).
+    pub(crate) fn emit_rc_release_dtor(&mut self, p: Val, dtor: Option<String>) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
 
@@ -2451,8 +2501,12 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
         self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
 
-        // free: block = p - 2*ptr_size
+        // free: run the destructor (if any) on the object, then free the block at
+        // `p - 2*ptr_size`.
         self.switch_to_block(free_bb);
+        if let Some(dtor) = dtor {
+            self.emit_cleanup_call(pc.clone(), &dtor);
+        }
         let block = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
         self.emit_free(Val::Local(block))?;

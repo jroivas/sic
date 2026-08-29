@@ -418,7 +418,11 @@ pub enum ExprKind {
     /// SIC `new T` / `new T(count)` (sic.md §"Scopes and automatic release"):
     /// allocate `count` (default 1) elements of `T` with a refcount header;
     /// yields `T*`.
-    New { ty: QualType, count: Option<BoxExpr> },
+    /// sic `new T` / `new T(n)` / `new T(args…)` (sic.md §"Memory safety"). The
+    /// parenthesized list is: empty for `new T`/`new T()` (one object); a single
+    /// count for a scalar/no-ctor `new T(n)` (array of n); or the constructor
+    /// arguments when `T` is a struct with a constructor.
+    New { ty: QualType, args: Vec<Expr> },
 
     /// SIC `@expr` / `@mut expr` (sic.md §"References"): form a scoped
     /// reference-counted borrow of `expr` — retains the referent's allocation for
