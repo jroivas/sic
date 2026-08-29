@@ -94,6 +94,12 @@ pub struct Lowerer {
     /// sic namespaces (sic.md §"Namespace"): `(namespace, member)` → the mangled
     /// top-level symbol the member was flattened to, so `N::member` resolves.
     pub namespace_members: HashMap<(String, String), String>,
+    /// sic module type export (sic.md §"Namespace"/§"Imports"): names of aggregate
+    /// types *defined in this module*, in definition order, to publish in the
+    /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
+    pub module_defined_types: Vec<String>,
+    /// Type names marked `private` (module-internal), excluded from the manifest.
+    pub private_types: std::collections::HashSet<String>,
     /// sic (sic.md §"Memory safety"): struct name → its constructor's mangled free
     /// function `__sic_ctor_<S>(S* self)`, called when a local of that type is
     /// declared. Present only for structs that define `S()`.
@@ -177,6 +183,8 @@ impl Lowerer {
             c_enum_alias: HashMap::new(),
             struct_methods: HashMap::new(),
             namespace_members: HashMap::new(),
+            module_defined_types: Vec::new(),
+            private_types: std::collections::HashSet::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             tuple_param_types: HashMap::new(),
@@ -283,6 +291,19 @@ impl Lowerer {
         // Surface module metadata to the driver: the module name (→ manifest
         // emission) and any link flags pulled in from imported manifests.
         self.module.sic_module = self.current_module.clone();
+        // sic module type export: publish this module's public aggregate types so a
+        // consumer can name `mod::Type`. `private` types are withheld.
+        if self.current_module.is_some() {
+            let names = std::mem::take(&mut self.module_defined_types);
+            for name in names {
+                if self.private_types.contains(&name) { continue; }
+                if let Some(ty) = self.struct_types.get(&name) {
+                    if matches!(ty, Type::Struct(_) | Type::Union(_)) {
+                        self.module.type_defs.push((name.clone(), ty.clone()));
+                    }
+                }
+            }
+        }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
@@ -520,6 +541,12 @@ impl Lowerer {
                 exports.insert(e.name.clone(), (e.symbol.clone(), e.ty.clone()));
             }
             self.imported_modules.insert(module.to_string(), exports);
+            // sic module type export (sic.md §"Namespace"): register the module's
+            // public aggregate types so the consumer can name `mod::Type` (which
+            // resolves to the last segment) and bare `Type`.
+            for (name, ty) in &manifest.types {
+                self.struct_types.entry(name.clone()).or_insert_with(|| ty.clone());
+            }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
                     self.imported_links.push(l.clone());
@@ -640,6 +667,9 @@ impl Lowerer {
                 layout_order,
             });
             self.register_type_name(name.clone(), ir_ty);
+            if self.sic && !name.starts_with("__") && !self.module_defined_types.contains(name) {
+                self.module_defined_types.push(name.clone());
+            }
         }
         Ok(())
     }

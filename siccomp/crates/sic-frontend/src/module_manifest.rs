@@ -59,6 +59,9 @@ pub struct ModuleManifest {
     /// any transitively imported modules' flags).
     pub links: Vec<String>,
     pub exports: Vec<Export>,
+    /// sic module type export (sic.md §"Namespace"): public aggregate types this
+    /// module defines, `(name, type)`, so a consumer can name `mod::Type`.
+    pub types: Vec<(String, Type)>,
 }
 
 impl ModuleManifest {
@@ -126,12 +129,20 @@ impl ModuleManifest {
             });
         }
 
+        // Public aggregate types this module defines (frontend-populated), kept
+        // only if representable as a manifest record.
+        let types: Vec<(String, Type)> = ir.type_defs.iter()
+            .filter(|(_, t)| encode_aggregate_record(t).is_some())
+            .cloned()
+            .collect();
+
         ModuleManifest {
             version: MANIFEST_VERSION,
             module: module.to_string(),
             triple: triple.to_string(),
             links: links.to_vec(),
             exports,
+            types,
         }
     }
 
@@ -157,8 +168,15 @@ impl ModuleManifest {
                 other => collect_aggregates(other, &mut aggs),
             }
         }
+        // Public exported types also need their records (and any nested aggregates),
+        // emitted before the `pubtype` markers that name them.
+        for (_, t) in &self.types { collect_aggregates(t, &mut aggs); }
         for a in &aggs {
             if let Some(rec) = encode_aggregate_record(a) { s.push_str(&rec); s.push('\n'); }
+        }
+        // Mark which records are public type exports (consumers register these).
+        for (name, _) in &self.types {
+            s.push_str(&format!("pubtype {}\n", name));
         }
 
         for e in &self.exports {
@@ -193,6 +211,7 @@ impl ModuleManifest {
         let mut triple = None;
         let mut links: Vec<String> = Vec::new();
         let mut exports = Vec::new();
+        let mut types: Vec<(String, Type)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -271,6 +290,14 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: bad var type '{}'", lineno + 1, ty_tok))?;
                     exports.push(Export { name: name.to_string(), symbol: symbol.to_string(), ty });
                 }
+                // A public type export names an already-decoded aggregate record.
+                "pubtype" => {
+                    let name = it.next()
+                        .ok_or_else(|| format!("line {}: pubtype name missing", lineno + 1))?;
+                    let ty = registry.get(name).cloned()
+                        .ok_or_else(|| format!("line {}: pubtype '{}' has no record", lineno + 1, name))?;
+                    types.push((name.to_string(), ty));
+                }
                 other => {
                     return Err(format!("line {}: unknown record '{}'", lineno + 1, other));
                 }
@@ -281,6 +308,7 @@ impl ModuleManifest {
             version: version.ok_or("missing 'sicmod' version line")?,
             module: module.ok_or("missing 'module' line")?,
             triple: triple.ok_or("missing 'triple' line")?,
+            types,
             links,
             exports,
         })
@@ -479,6 +507,7 @@ mod tests {
                     ty: Type::Int { bits: 32, signed: true },
                 },
             ],
+            types: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -502,6 +531,7 @@ mod tests {
                     ret: strt.clone(), params: vec![strt.clone(), vat.clone()], variadic: false,
                 })),
             }],
+            types: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -530,6 +560,7 @@ mod tests {
                     ret: point.clone(), params: vec![point.clone(), point.clone()], variadic: false,
                 })),
             }],
+            types: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);
