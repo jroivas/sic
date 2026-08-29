@@ -136,6 +136,10 @@ pub struct Module {
     /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
     /// module defines — `(enum name, [(variant, discriminant)])` — for the manifest.
     pub sic_enum_exports: Vec<(String, Vec<(String, i64)>)>,
+    /// sic module tagged-enum export (sic.md §"Namespace"): public tagged enums —
+    /// `(name, [(variant, tag, payload type)])` — so a consumer can construct/match
+    /// `mod::Enum::Variant`. A payload of `None` is a bare variant.
+    pub sic_tagenum_exports: Vec<(String, Vec<(String, i64, Option<Type>)>)>,
 }
 
 impl Module {
@@ -151,6 +155,7 @@ impl Module {
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
             sic_enum_exports: Vec::new(),
+            sic_tagenum_exports: Vec::new(),
         }
     }
 

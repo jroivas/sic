@@ -4244,6 +4244,11 @@ impl<'m> FuncCtx<'m> {
                 return Ok(Constant::int(v));
             }
         }
+        // A scope-qualified tagged enum `mod::Enum` / `N::Enum` resolves to its last
+        // `::` segment (sic.md §"Namespace").
+        let enum_name = if self.is_sic() && !self.lowerer.enum_defs.contains_key(enum_name) {
+            enum_name.rsplit("::").next().unwrap_or(enum_name)
+        } else { enum_name };
         // A generic constructor (`Option::Some(5)` / `None`) names the template;
         // resolve it to the concrete monomorph via the expected target type.
         let resolved = self.resolve_generic_ctor(enum_name, sp)?;
@@ -4525,10 +4530,15 @@ impl<'m> FuncCtx<'m> {
                 return self.lower_call(&callee, args, sp);
             }
             // sic nested module member `mod::A::B::sym(args)` (sic.md §"Namespace"):
-            // the module exports namespace members mangled `A__B__sym`.
+            // the module exports namespace members mangled `A__B__sym`. But a
+            // qualified *enum* path `mod::Enum::Variant(x)` is a construct/unwrap, not
+            // a member call — let it fall through to `construct_enum`.
             if self.is_sic() {
+                let leaf = enum_name.rsplit("::").next().unwrap_or(enum_name);
+                let is_enum = self.lowerer.enum_defs.contains_key(leaf)
+                    || self.resolve_plain_enum_const(enum_name, variant).is_some();
                 if let Some((module, rest)) = enum_name.split_once("::") {
-                    if self.lowerer.imported_modules.contains_key(module) {
+                    if !is_enum && self.lowerer.imported_modules.contains_key(module) {
                         let export = format!("{}__{}", rest.replace("::", "__"), variant);
                         let callee = Expr { kind: ExprKind::Field {
                             base: Box::new(Expr { kind: ExprKind::Ident(module.to_string()), span: sp.clone() }),

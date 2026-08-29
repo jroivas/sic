@@ -308,6 +308,15 @@ impl Lowerer {
                 if self.private_types.contains(ename) { continue; }
                 self.module.sic_enum_exports.push((ename.clone(), variants.clone()));
             }
+            // Public tagged enums (variant tags + payload types). Generic-enum
+            // monomorphs (`Option<i32>`) carry `<` in their name — skip those; a
+            // consumer re-instantiates built-in generics itself.
+            for (ename, info) in &self.enum_defs {
+                if ename.contains('<') || self.private_types.contains(ename) { continue; }
+                let vs: Vec<(String, i64, Option<Type>)> = info.variants.iter()
+                    .map(|v| (v.name.clone(), v.tag, v.payload.clone())).collect();
+                self.module.sic_tagenum_exports.push((ename.clone(), vs));
+            }
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -560,6 +569,28 @@ impl Lowerer {
                     self.c_enum_variant.entry(v.clone()).or_insert_with(|| ename.clone());
                 }
                 self.c_enum_defs.entry(ename.clone()).or_insert_with(|| variants.clone());
+            }
+            // Register imported tagged enums (rebuild their `{tag,union}` type +
+            // variant table) so `mod::Enum::Variant(x)` and `match` work.
+            for (ename, variants) in &manifest.tagenums {
+                let payload_fields: Vec<(String, Type)> = variants.iter()
+                    .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
+                let data = Type::Union(sic_ir::UnionType {
+                    name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
+                let struct_type = Type::Struct(sic_ir::StructType::plain(Some(ename.clone()), vec![
+                    ("tag".to_string(), Type::Int { bits: 32, signed: true }),
+                    ("data".to_string(), data),
+                ], false));
+                let tvars: Vec<TaggedVariant> = variants.iter()
+                    .map(|(v, tag, p)| TaggedVariant { name: v.clone(), tag: *tag, payload: p.clone() })
+                    .collect();
+                for (v, tag, _) in variants {
+                    self.variant_enum.entry(v.clone()).or_insert_with(|| ename.clone());
+                    self.enum_consts.entry(v.clone()).or_insert(*tag);
+                }
+                self.struct_types.entry(ename.clone()).or_insert_with(|| struct_type.clone());
+                self.enum_defs.entry(ename.clone()).or_insert(TaggedEnum {
+                    name: ename.clone(), struct_type, variants: tvars });
             }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {

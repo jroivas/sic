@@ -65,6 +65,9 @@ pub struct ModuleManifest {
     /// sic module enum export: public payload-less enums, `(name, [(variant,
     /// value)])`, so a consumer can use `mod::Enum::Variant`.
     pub enums: Vec<(String, Vec<(String, i64)>)>,
+    /// sic module tagged-enum export: `(name, [(variant, tag, payload type)])`, so a
+    /// consumer can construct/match `mod::Enum::Variant(x)`.
+    pub tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)>,
 }
 
 impl ModuleManifest {
@@ -147,6 +150,7 @@ impl ModuleManifest {
             exports,
             types,
             enums: ir.sic_enum_exports.clone(),
+            tagenums: ir.sic_tagenum_exports.clone(),
         }
     }
 
@@ -175,6 +179,12 @@ impl ModuleManifest {
         // Public exported types also need their records (and any nested aggregates),
         // emitted before the `pubtype` markers that name them.
         for (_, t) in &self.types { collect_aggregates(t, &mut aggs); }
+        // Tagged-enum payloads may be by-value aggregates — record them first.
+        for (_, variants) in &self.tagenums {
+            for (_, _, p) in variants {
+                if let Some(t) = p { collect_aggregates(t, &mut aggs); }
+            }
+        }
         for a in &aggs {
             if let Some(rec) = encode_aggregate_record(a) { s.push_str(&rec); s.push('\n'); }
         }
@@ -186,6 +196,14 @@ impl ModuleManifest {
         for (name, variants) in &self.enums {
             let vs: Vec<String> = variants.iter().map(|(v, n)| format!("{}={}", v, n)).collect();
             s.push_str(&format!("enum {} {}\n", name, vs.join(",")));
+        }
+        // Public tagged enums: `tagenum Name V:tag:ptok,…` (ptok `-` = no payload).
+        for (name, variants) in &self.tagenums {
+            let vs: Vec<String> = variants.iter().map(|(v, tag, p)| {
+                let ptok = p.as_ref().and_then(encode_type).unwrap_or_else(|| "-".to_string());
+                format!("{}:{}:{}", v, tag, ptok)
+            }).collect();
+            s.push_str(&format!("tagenum {} {}\n", name, vs.join(",")));
         }
 
         for e in &self.exports {
@@ -222,6 +240,7 @@ impl ModuleManifest {
         let mut exports = Vec::new();
         let mut types: Vec<(String, Type)> = Vec::new();
         let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
+        let mut tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -317,6 +336,41 @@ impl ModuleManifest {
                     }
                     enums.push((name.to_string(), variants));
                 }
+                // A public tagged enum: `tagenum Name V:tag:ptok,…`.
+                "tagenum" => {
+                    let name = it.next()
+                        .ok_or_else(|| format!("line {}: tagenum name missing", lineno + 1))?;
+                    let mut variants = Vec::new();
+                    if let Some(list) = it.next() {
+                        for spec in list.split(',') {
+                            if spec.is_empty() { continue; }
+                            let mut parts = spec.splitn(3, ':');
+                            let v = parts.next()
+                                .ok_or_else(|| format!("line {}: tagenum variant name missing", lineno + 1))?;
+                            let tag: i64 = parts.next().and_then(|t| t.parse().ok())
+                                .ok_or_else(|| format!("line {}: bad tagenum tag", lineno + 1))?;
+                            let ptok = parts.next()
+                                .ok_or_else(|| format!("line {}: tagenum payload token missing", lineno + 1))?;
+                            let payload = if ptok == "-" { None } else {
+                                Some(decode_type(ptok, ptr_size, &registry)
+                                    .ok_or_else(|| format!("line {}: bad tagenum payload '{}'", lineno + 1, ptok))?)
+                            };
+                            variants.push((v.to_string(), tag, payload));
+                        }
+                    }
+                    // Register the enum's `{tag,union}` struct type so a later `@Name`
+                    // token (e.g. a function returning it by value) decodes correctly.
+                    let payload_fields: Vec<(String, Type)> = variants.iter()
+                        .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
+                    let data = Type::Union(UnionType {
+                        name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
+                    let st = Type::Struct(StructType::plain(Some(name.to_string()), vec![
+                        ("tag".to_string(), Type::Int { bits: 32, signed: true }),
+                        ("data".to_string(), data),
+                    ], false));
+                    registry.insert(name.to_string(), st);
+                    tagenums.push((name.to_string(), variants));
+                }
                 // A public type export names an already-decoded aggregate record.
                 "pubtype" => {
                     let name = it.next()
@@ -337,6 +391,7 @@ impl ModuleManifest {
             triple: triple.ok_or("missing 'triple' line")?,
             types,
             enums,
+            tagenums,
             links,
             exports,
         })
@@ -537,6 +592,7 @@ mod tests {
             ],
             types: vec![],
             enums: vec![],
+            tagenums: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -562,6 +618,7 @@ mod tests {
             }],
             types: vec![],
             enums: vec![],
+            tagenums: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -592,6 +649,7 @@ mod tests {
             }],
             types: vec![],
             enums: vec![],
+            tagenums: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);
