@@ -4222,11 +4222,28 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// sic (sic.md §"Match"/§"Namespace"): the discriminant of a plain (payload-less)
+    /// C enum variant named `Enum::VARIANT`. `enum_name` may be scope-qualified
+    /// (`N::E`, `mod::E`); the enum is its last `::` segment (alias-resolved).
+    fn resolve_plain_enum_const(&self, enum_name: &str, variant: &str) -> Option<i64> {
+        let ename = enum_name.rsplit("::").next().unwrap_or(enum_name);
+        let canon = self.lowerer.c_enum_alias.get(ename).map(|s| s.as_str()).unwrap_or(ename);
+        let vs = self.lowerer.c_enum_defs.get(canon)?;
+        vs.iter().find(|(n, _)| n == variant).map(|(_, v)| *v)
+    }
+
     /// Construct a sic tagged-enum value (sic.md §"Match"): allocate the
     /// `{ tag; union }` struct on the stack, store the variant's discriminant, and
     /// store the payload (if any). Returns a pointer to the temporary, like a
     /// compound literal, so the surrounding assignment/return copies it.
     fn construct_enum(&mut self, enum_name: &str, variant: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // sic plain (payload-less) C enum: `E::VARIANT` — possibly scope-qualified
+        // (`N::E::VARIANT`, `mod::E::VARIANT`) — is the variant's discriminant.
+        if self.is_sic() && args.is_empty() {
+            if let Some(v) = self.resolve_plain_enum_const(enum_name, variant) {
+                return Ok(Constant::int(v));
+            }
+        }
         // A generic constructor (`Option::Some(5)` / `None`) names the template;
         // resolve it to the concrete monomorph via the expected target type.
         let resolved = self.resolve_generic_ctor(enum_name, sp)?;
@@ -6023,6 +6040,10 @@ impl<'m> FuncCtx<'m> {
                     if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
                         return self.infer_expr_type(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() });
                     }
+                }
+                // A plain C-enum variant `E::VARIANT` is an integer discriminant.
+                if self.is_sic() && self.resolve_plain_enum_const(enum_name, variant).is_some() {
+                    return Ok(Type::i32());
                 }
                 // A generic constructor (`Option::None`) resolves via the expected
                 // target type (sic.md §"Match").

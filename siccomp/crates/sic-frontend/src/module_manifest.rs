@@ -62,6 +62,9 @@ pub struct ModuleManifest {
     /// sic module type export (sic.md §"Namespace"): public aggregate types this
     /// module defines, `(name, type)`, so a consumer can name `mod::Type`.
     pub types: Vec<(String, Type)>,
+    /// sic module enum export: public payload-less enums, `(name, [(variant,
+    /// value)])`, so a consumer can use `mod::Enum::Variant`.
+    pub enums: Vec<(String, Vec<(String, i64)>)>,
 }
 
 impl ModuleManifest {
@@ -143,6 +146,7 @@ impl ModuleManifest {
             links: links.to_vec(),
             exports,
             types,
+            enums: ir.sic_enum_exports.clone(),
         }
     }
 
@@ -178,6 +182,11 @@ impl ModuleManifest {
         for (name, _) in &self.types {
             s.push_str(&format!("pubtype {}\n", name));
         }
+        // Public payload-less enums: `enum Name V1=0,V2=5,…`.
+        for (name, variants) in &self.enums {
+            let vs: Vec<String> = variants.iter().map(|(v, n)| format!("{}={}", v, n)).collect();
+            s.push_str(&format!("enum {} {}\n", name, vs.join(",")));
+        }
 
         for e in &self.exports {
             match &e.ty {
@@ -212,6 +221,7 @@ impl ModuleManifest {
         let mut links: Vec<String> = Vec::new();
         let mut exports = Vec::new();
         let mut types: Vec<(String, Type)> = Vec::new();
+        let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -290,6 +300,23 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: bad var type '{}'", lineno + 1, ty_tok))?;
                     exports.push(Export { name: name.to_string(), symbol: symbol.to_string(), ty });
                 }
+                // A public payload-less enum: `enum Name V1=0,V2=5,…`.
+                "enum" => {
+                    let name = it.next()
+                        .ok_or_else(|| format!("line {}: enum name missing", lineno + 1))?;
+                    let mut variants = Vec::new();
+                    if let Some(list) = it.next() {
+                        for pair in list.split(',') {
+                            if pair.is_empty() { continue; }
+                            let (v, n) = pair.split_once('=')
+                                .ok_or_else(|| format!("line {}: bad enum variant '{}'", lineno + 1, pair))?;
+                            let val: i64 = n.parse()
+                                .map_err(|_| format!("line {}: bad enum value '{}'", lineno + 1, n))?;
+                            variants.push((v.to_string(), val));
+                        }
+                    }
+                    enums.push((name.to_string(), variants));
+                }
                 // A public type export names an already-decoded aggregate record.
                 "pubtype" => {
                     let name = it.next()
@@ -309,6 +336,7 @@ impl ModuleManifest {
             module: module.ok_or("missing 'module' line")?,
             triple: triple.ok_or("missing 'triple' line")?,
             types,
+            enums,
             links,
             exports,
         })
@@ -508,6 +536,7 @@ mod tests {
                 },
             ],
             types: vec![],
+            enums: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -532,6 +561,7 @@ mod tests {
                 })),
             }],
             types: vec![],
+            enums: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -561,6 +591,7 @@ mod tests {
                 })),
             }],
             types: vec![],
+            enums: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);

@@ -303,6 +303,11 @@ impl Lowerer {
                     }
                 }
             }
+            // Public payload-less enums (their variants), for `mod::Enum::Variant`.
+            for (ename, variants) in &self.c_enum_defs {
+                if self.private_types.contains(ename) { continue; }
+                self.module.sic_enum_exports.push((ename.clone(), variants.clone()));
+            }
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -546,6 +551,15 @@ impl Lowerer {
             // resolves to the last segment) and bare `Type`.
             for (name, ty) in &manifest.types {
                 self.struct_types.entry(name.clone()).or_insert_with(|| ty.clone());
+            }
+            // Register imported payload-less enums so `mod::Enum::Variant` (and the
+            // bare variant/`Enum::Variant` forms) resolve to their discriminants.
+            for (ename, variants) in &manifest.enums {
+                for (v, val) in variants {
+                    self.enum_consts.entry(v.clone()).or_insert(*val);
+                    self.c_enum_variant.entry(v.clone()).or_insert_with(|| ename.clone());
+                }
+                self.c_enum_defs.entry(ename.clone()).or_insert_with(|| variants.clone());
             }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
@@ -1316,6 +1330,7 @@ impl Lowerer {
                         self.c_enum_variant.insert(v.name.clone(), ename.clone());
                     }
                     self.c_enum_defs.insert(ename.clone(), vs);
+                    if e.private { self.private_types.insert(ename.clone()); }
                     // sic: the bare enum tag is usable as a type name (`OpenMode m`);
                     // resolve it to the enum's underlying integer type.
                     if let Ok(int_ty) = lower_type(

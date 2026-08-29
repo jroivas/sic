@@ -133,6 +133,9 @@ pub struct Module {
     /// trampoline that sets the SysV `AL` vector-arg count, which Cranelift never
     /// emits for variadic calls (see cg_clif's `adjust_call_for_c_variadic`).
     pub float_vararg_externs: Vec<String>,
+    /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
+    /// module defines — `(enum name, [(variant, discriminant)])` — for the manifest.
+    pub sic_enum_exports: Vec<(String, Vec<(String, i64)>)>,
 }
 
 impl Module {
@@ -147,6 +150,7 @@ impl Module {
             sic_module: None,
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
+            sic_enum_exports: Vec::new(),
         }
     }
 
