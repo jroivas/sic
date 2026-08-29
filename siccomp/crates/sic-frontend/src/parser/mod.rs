@@ -152,8 +152,19 @@ impl Parser {
             if self.eat(TokenKind::Semi) { continue; }
             // Handle GCC __extension__
             if self.at(TokenKind::Extension) { self.advance(); continue; }
+            let before = self.pos;
             let d = self.parse_external_decl()?;
             decls.push(d);
+            // Never spin: a top-level declaration that consumed no tokens would
+            // otherwise loop forever (e.g. an unparseable construct that yields an
+            // empty expression-statement). Fail with a diagnostic instead.
+            if self.pos == before {
+                let t = self.peek().clone();
+                return Err(CompileError::at(
+                    format!("unexpected token {:?} ('{}') at top level", t.kind, t.text),
+                    t.span.file.clone(), t.span.line, t.span.col,
+                ));
+            }
         }
         Ok(TranslationUnit { decls, source_file: self.source_file.clone() })
     }
@@ -647,6 +658,15 @@ impl Parser {
             None
         };
         let keep_order = self.pending_packed || self.pending_order;
+
+        // sic (C++-style): a `struct`/`union` *definition* also makes its tag usable
+        // as a bare type name (`BufferData *p`, not just `struct BufferData *p`), so
+        // register it. C keeps tags and typedefs in separate namespaces, so this is
+        // sic-only; a body is required (a forward `struct X;` reference does not
+        // introduce the bare name).
+        if self.lang == Lang::Sic && fields.is_some() {
+            if let Some(n) = &name { self.typedefs.insert(n.clone()); }
+        }
 
         if is_union {
             Ok(AstType::Union(UnionDef { name, fields, align: type_align, span: sp }))
