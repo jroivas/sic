@@ -2,7 +2,7 @@
 // compiler. It is an ordinary sic module (`module std;`): built separately with
 // `sic --emit-module`, installed into the compiler's module sysroot, and linked
 // in only when a unit says `import std;` (dynamically by default, or statically
-// under `-static`). Nothing here is special to the compiler — `std.Fmt(a, b)` is a
+// under `-static`). Nothing here is special to the compiler — `std::Fmt(a, b)` is a
 // normal call to the function below, and all formatting is done in SIC by matching
 // on each argument's runtime kind and taking its native representation.
 module std;

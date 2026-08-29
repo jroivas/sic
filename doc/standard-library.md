@@ -19,9 +19,9 @@ int main() {
     string who   = "World";
     fixed  price = 19.99;
 
-    std.Println("Hello, {}!", who);                 // Hello, World!
-    std.Println("{} items at {} each", 3, price);   // 3 items at 19.99… each
-    string s = std.Fmt("{{}} then {}", 42);         // "{} then 42"
+    std::Println("Hello, {}!", who);                 // Hello, World!
+    std::Println("{} items at {} each", 3, price);   // 3 items at 19.99… each
+    string s = std::Fmt("{{}} then {}", 42);         // "{} then 42"
     return 0;
 }
 ```
@@ -37,7 +37,7 @@ you pass as many as the format needs. To print a single value with no formatting
 use `"{}"`:
 
 ```sic
-std.Println("{}", value);
+std::Println("{}", value);
 ```
 
 ## What it can format

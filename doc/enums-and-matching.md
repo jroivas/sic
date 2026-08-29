@@ -122,7 +122,7 @@ enum Color { RED, GREEN, BLUE };
 enum Color c = BLUE;
 c.str;                        // "Color::BLUE"   (from the runtime value)
 RED.str;                      // "Color::RED"    (a bare constant)
-std.Println("{}", c.str);     // Color::BLUE
+std::Println("{}", c.str);     // Color::BLUE
 
 if (c.str == "Color::BLUE") … // it's an ordinary string
 ```

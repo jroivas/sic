@@ -133,7 +133,7 @@ if (t && !f) { … }
 A `bool` converts to `int` only where an integer is actually needed (`(int)t` is
 `1`), and an integer converts to `bool` implicitly in a boolean context (`if (n)`
 tests `n != 0`). Because `true`/`false` keep the `bool` type, they carry their
-type through [RTTI](rtti-and-dynamic.md) — e.g. `std.Print("{}", true)` prints
+type through [RTTI](rtti-and-dynamic.md) — e.g. `std::Print("{}", true)` prints
 `true`, not `1`.
 
 ## `u8char` — a Unicode code point

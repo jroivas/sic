@@ -37,7 +37,7 @@ $SIC hello.sic -o hello
 // hello.sic
 import std;
 int main() {
-    std.Println("Hello, {}!", "SIC");   // Hello, SIC!
+    std::Println("Hello, {}!", "SIC");   // Hello, SIC!
     return 0;
 }
 ```

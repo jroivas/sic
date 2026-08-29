@@ -69,7 +69,7 @@ fixed area(Shape s) {
 
 int main() {
     Shape c = Shape::Circle(2.0);
-    std.Println("area = {}", area(c).str);   // area = 12.566...
+    std::Println("area = {}", area(c).str);   // area = 12.566...
     return 0;
 }
 ```

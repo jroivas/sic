@@ -46,21 +46,48 @@ functions.
 ## Importing
 
 ```sic
-import math;                    // namespaced: use as math.sq(…)
+import math;                    // scoped: use as math::sq(…)
 import math.sq;                 // selective: brings `sq` into scope unqualified
 import math.sq as square;       // renamed
 
 int main() {
-    return math.sq(5) + square(2);   // 25 + 4
+    return math::sq(5) + square(2);   // 25 + 4
 }
 ```
 
-- `import math;` makes exports available under the module's namespace: `math.sq(5)`.
+- `import math;` makes exports available under the module's scope: `math::sq(5)`.
 - `import math.sym;` imports just `sym` (unqualified); `as name` renames it.
 
-> Namespaced access currently works for **function calls** (`math.sq(5)`).
-> Accessing an exported *variable* as `math.meaning` is not yet wired up — import
+Module members are reached with `::`, sic's scope-resolution operator — the same
+operator used for enum variants (`Option::Some`) and namespaces (below). The older
+dot form `math.sq(5)` still works as a tolerated alias, but `::` is canonical.
+
+> `::`/`.` access currently works for **function calls** (`math::sq(5)`).
+> Accessing an exported *variable* as `math::meaning` is not yet wired up — import
 > it selectively (`import math.meaning;`) as a workaround.
+
+## Namespaces
+
+A `namespace` groups declarations into a compile-time scope *within* a unit (no
+import needed), reached with the same `::` operator:
+
+```sic
+namespace geo {
+    int width  = 4;
+    int height = 3;
+    int area() { return geo::width * geo::height; }
+}
+
+int main() {
+    geo::width = 10;               // member variable (an lvalue)
+    return geo::area();           // member function → 30
+}
+```
+
+Functions and variables are supported; a `struct`/`enum` declared inside is visible
+at file scope. `::` is the scope operator throughout sic — **namespaces, modules,
+and enum variants all use it**; `.` is reserved for values (`obj.field`,
+`obj.method()`).
 
 ## Finding modules — the search path
 
