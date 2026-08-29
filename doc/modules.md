@@ -89,6 +89,28 @@ at file scope. `::` is the scope operator throughout sic — **namespaces, modul
 and enum variants all use it**; `.` is reserved for values (`obj.field`,
 `obj.method()`).
 
+## Exporting types
+
+A module's `struct`/`union` types are **public by default**: they are written to
+the manifest and a consumer can name them as `mod::Type` (and access their fields).
+
+```sic
+// module gfx:  struct Color { int r; int g; int b; };  Color *make(...);
+import gfx;
+gfx::Color *c = gfx::make(200, 50, 10);
+int r = c->r;                                   // fields cross via the manifest
+```
+
+Mark a type `private` to keep it module-internal (withheld from the manifest, so
+consumers cannot name it):
+
+```sic
+private struct Impl { … };     // not exported
+```
+
+> The qualified `mod::Type` form is required in a consumer — the bare `Type`
+> spelling isn't available, because the parser resolves types before imports run.
+
 ## Finding modules — the search path
 
 At compile time the compiler looks for `module_<name>.smod` in, in order:
