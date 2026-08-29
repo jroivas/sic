@@ -30,9 +30,11 @@ unchanged; the improvements are opt-in and live in `.sic` files.
    box, `va_array` varargs, and `match (type(x))`.
 8. [Arrays & tuples](arrays-and-tuples.md) — `.length`/`.size`, array/tuple
    concatenation, tuple packing/unpacking.
-9. [Modules](modules.md) — `module`/`import`, building a module, the `.smod`
-   manifest, and static vs. dynamic linking.
-10. [Standard library](standard-library.md) — `import std;` and
+9. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
+   `Iterator<T>`, and the range-`for`.
+10. [Modules](modules.md) — `module`/`import`, building a module, the `.smod`
+    manifest, and static vs. dynamic linking.
+11. [Standard library](standard-library.md) — `import std;` and
     `Fmt`/`Print`/`Println`.
 
 ## Design goals

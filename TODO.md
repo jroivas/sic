@@ -21,6 +21,17 @@
       a strict range check would trap — need a one-past allowance or a range-aware
       loop form. Deferred until that semantics is decided.
 
+- [x] iterators (new feature): struct methods `obj.method(args)`, constructors/
+      destructors (`S()`/`~S()`, auto-invoked, RAII), built-in `Iterator<T> { Stop,
+      Next(T) }`, and range-`for` `for (auto x : iterable)` over arrays, strings
+      (→ u8char code points), enum types, and any struct with a `next()` method.
+      Commits 1a92d6e/ba88a36/3f093e9/43339c4; tests 0274–0277; doc/iterators.md.
+      Follow-ups (not blocking):
+        - `new struct S` does not yet call the constructor (only stack locals do);
+          same for a constructor with arguments (`new struct S(args)`).
+        - range-`for` binds `item` by value; no `for (auto &x : …)` by-reference form.
+        - destructors run for stack locals only (not for `del`'d heap structs).
+
 ## Gaps found while writing doc/ (spec vs. implementation)
 
 - [x] **Tagged enum with a `fixed` payload crashes.** FIXED (84aecda). Root cause:
