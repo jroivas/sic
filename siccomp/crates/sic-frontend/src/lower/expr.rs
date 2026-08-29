@@ -4492,6 +4492,15 @@ impl<'m> FuncCtx<'m> {
         // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
         // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
         if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
+            // sic (sic.md §"Namespace"): `Module::sym(args)` is the canonical scope
+            // form of a module call — resolve it like `module.sym(args)`.
+            if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
+                let callee = Expr { kind: ExprKind::Field {
+                    base: Box::new(Expr { kind: ExprKind::Ident(enum_name.clone()), span: sp.clone() }),
+                    name: variant.clone(),
+                }, span: sp.clone() };
+                return self.lower_call(&callee, args, sp);
+            }
             return self.construct_enum(enum_name, variant, args, sp);
         }
         // Bare variant constructor `Variant(args)` (`Ok(5)`), resolved from the
@@ -6041,13 +6050,21 @@ impl<'m> FuncCtx<'m> {
                 // declared return (user-facing, no sret ptr). Without this a
                 // string-returning `std.Fmt(...)` defaults to i32 and its initializer
                 // mistakes the result for a `char*`.
-                if let ExprKind::Field { base, name } = &func.kind {
-                    if let ExprKind::Ident(m) = &base.kind {
-                        if let Some(Type::Function(ft)) = self.lowerer.imported_modules
-                            .get(m).and_then(|ex| ex.get(name)).map(|(_, t)| t)
-                        {
-                            return Ok(ft.ret.clone());
-                        }
+                // Both spellings of a module call: `mod.fn(...)` (Field) and the
+                // canonical `Module::fn(...)` (EnumVariant, sic.md §"Namespace").
+                let module_sym = match &func.kind {
+                    ExprKind::Field { base, name } => match &base.kind {
+                        ExprKind::Ident(m) => Some((m.clone(), name.clone())),
+                        _ => None,
+                    },
+                    ExprKind::EnumVariant { enum_name, variant } => Some((enum_name.clone(), variant.clone())),
+                    _ => None,
+                };
+                if let Some((m, name)) = module_sym {
+                    if let Some(Type::Function(ft)) = self.lowerer.imported_modules
+                        .get(&m).and_then(|ex| ex.get(&name)).map(|(_, t)| t)
+                    {
+                        return Ok(ft.ret.clone());
                     }
                 }
                 let fty = self.infer_expr_type(func)?;
