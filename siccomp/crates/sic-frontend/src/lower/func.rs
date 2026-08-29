@@ -909,6 +909,12 @@ impl<'m> FuncCtx<'m> {
                 if let (Some(dest), Some(e)) = (self.ret_enum.clone(), val.as_ref()) {
                     self.check_enum_dest(&dest, e, "returned as")?;
                 }
+                // sic type safety: reject returning a value/pointer that mismatches
+                // the declared return type (`File*` fn returning a `File` value).
+                if let Some(e) = val.as_ref() {
+                    let rt = self.ret_ty.clone();
+                    self.check_ptr_value_mismatch(&rt, e)?;
+                }
                 // Evaluate the return value BEFORE running cleanups (the value
                 // must be computed while the about-to-be-destroyed locals are
                 // still valid), then run every enclosing scope's cleanups.

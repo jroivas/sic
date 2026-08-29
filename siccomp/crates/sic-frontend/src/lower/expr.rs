@@ -2893,6 +2893,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // sic type safety (sic.md §"Memory safety"): reject a pointer/value aggregate
+        // mismatch on a plain assignment, e.g. `f = new File()` into a `File` value.
+        if self.is_sic() && op.is_none() {
+            if let Ok(dest_ty) = self.infer_expr_type(lhs) {
+                self.check_ptr_value_mismatch(&dest_ty, rhs)?;
+            }
+        }
         // sic strict enum typing (sic.md §"Enums"): a write to a payload-less
         // enum-typed local must carry the same enum (or an explicit cast); a
         // compound assignment `e += …` is enum arithmetic and is rejected outright.
