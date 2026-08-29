@@ -27,10 +27,14 @@
       (→ u8char code points), enum types, and any struct with a `next()` method.
       Commits 1a92d6e/ba88a36/3f093e9/43339c4; tests 0274–0277; doc/iterators.md.
       Follow-ups (not blocking):
-        - `new struct S` does not yet call the constructor (only stack locals do);
-          same for a constructor with arguments (`new struct S(args)`).
+        - [x] `new S()` / `new S(args)` now call the constructor; `del p` runs the
+              destructor at refcount 0 (heap RAII). (2f981e3)
         - range-`for` binds `item` by value; no `for (auto &x : …)` by-reference form.
-        - destructors run for stack locals only (not for `del`'d heap structs).
+- [x] bare struct/union/enum tags usable as type names in sic (`BufferData *p`,
+      `OpenMode m`), not only `struct …`/`enum …` (3e001cf/7e19eaa). Also: parser no
+      longer hangs on an unknown bare type at top level (clean error instead).
+- [x] `match` on a plain (payload-less) C enum dispatches on the discriminant like a
+      variant-labelled switch (7e19eaa follow-on).
 
 ## Gaps found while writing doc/ (spec vs. implementation)
 
