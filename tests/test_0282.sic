@@ -1,0 +1,24 @@
+// sic exhaustive `match` (sic.md §"Match"): full coverage, and `_` for the rest.
+enum Shape { Circle(int), Square(int), Tri(int) };
+enum Mode { A, B, C };
+
+int area(Shape s) {
+    match (s) {                       // all three variants covered
+        Circle(r): return r * r;
+        Square(w): return w * w;
+        Tri(t):    return t;
+    }
+}
+int classify(enum Mode m) {
+    match (m) {                       // `_` covers the rest
+        A: return 1;
+        _: return 9;
+    }
+}
+int main() {
+    if (area(Shape::Square(4)) != 16) return 1;
+    if (area(Shape::Tri(7)) != 7) return 2;
+    if (classify(A) != 1) return 3;
+    if (classify(C) != 9) return 4;
+    return 0;
+}

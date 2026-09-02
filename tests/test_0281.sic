@@ -1,0 +1,11 @@
+// sic (sic.md §"Match"): a `match` must be exhaustive — this one omits `Tri` and
+// has no `_`, so it must fail to compile. Pinned via `.xfail`.
+enum Shape { Circle(int), Square(int), Tri(int) };
+int area(Shape s) {
+    match (s) {
+        Circle(r): return r;
+        Square(w): return w;
+    }
+    return 0;
+}
+int main() { return area(Shape::Circle(1)); }

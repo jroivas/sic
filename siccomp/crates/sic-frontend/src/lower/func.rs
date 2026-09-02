@@ -2329,6 +2329,22 @@ impl<'m> FuncCtx<'m> {
         // The wildcard `_` arm (if any) is the fallback.
         let wildcard = arms.iter().find(|a| a.variant.is_none());
 
+        // sic (sic.md §"Match"): a `match` must be exhaustive — every variant, or a
+        // `_`. Missing variants are a compile error (not a runtime abort).
+        if wildcard.is_none() {
+            let covered: std::collections::HashSet<&str> =
+                arms.iter().filter_map(|a| a.variant.as_deref()).collect();
+            let missing: Vec<&str> = info.variants.iter()
+                .map(|v| v.name.as_str()).filter(|n| !covered.contains(n)).collect();
+            if !missing.is_empty() {
+                return Err(CompileError::at(
+                    format!("non-exhaustive match on `{}`: missing {} — cover {} or add a `_` arm",
+                        ename, missing.join(", "),
+                        if missing.len() == 1 { "it" } else { "them" }),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+        }
+
         for arm in arms.iter().filter(|a| a.variant.is_some()) {
             let vname = arm.variant.as_ref().unwrap();
             let v = info.variant(vname).cloned().ok_or_else(|| CompileError::at(
@@ -2389,6 +2405,23 @@ impl<'m> FuncCtx<'m> {
         let val = self.coerce(v, &Type::i32())?;
         let end_bb = self.new_block_after_current();
         let wildcard = arms.iter().find(|a| a.variant.is_none());
+
+        // sic (sic.md §"Match"): exhaustiveness — cover every variant or use `_`.
+        if wildcard.is_none() {
+            if let Some(variants) = self.lowerer.c_enum_defs.get(ename) {
+                let covered: std::collections::HashSet<&str> =
+                    arms.iter().filter_map(|a| a.variant.as_deref()).collect();
+                let missing: Vec<&str> = variants.iter()
+                    .map(|(n, _)| n.as_str()).filter(|n| !covered.contains(n)).collect();
+                if !missing.is_empty() {
+                    return Err(CompileError::at(
+                        format!("non-exhaustive match on `{}`: missing {} — cover {} or add a `_` arm",
+                            ename, missing.join(", "),
+                            if missing.len() == 1 { "it" } else { "them" }),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+            }
+        }
 
         for arm in arms.iter().filter(|a| a.variant.is_some()) {
             let vname = arm.variant.as_ref().unwrap();
