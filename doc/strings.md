@@ -71,6 +71,26 @@ s[:];      // whole string
 Out-of-range or reversed ranges are clamped (safe), yielding a shorter or empty
 string rather than reading out of bounds.
 
+## Offset & indexing
+
+`s + n` drops the first `n` bytes — a cheap view, `s + n` ≡ `s[n:]`:
+
+```sic
+"hello" + 1;   // "ello"  (a string view)
+"hello" + 5;   // ""      (n == length is allowed)
+```
+
+`s[i]` is the **byte** at index `i` (a `char`):
+
+```sic
+"hello"[1];    // 'e'
+```
+
+Both are bounds-checked: a **literal** with a **constant** offset/index is checked
+at *compile time* (`"hello" + 6` and `"hi"[9]` are compile errors), and a runtime
+index traps on out-of-range. Assigning `s + n` to a `char*` gives plain pointer
+arithmetic into the bytes (`char *p = "abcdef" + 2;` → `p` at `'c'`).
+
 ## Comparison
 
 Compare bytes directly with `==` / `!=` — no `strcmp`, no NUL requirement:
