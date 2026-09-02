@@ -1640,6 +1640,14 @@ impl Parser {
     /// is `Pattern : Statement`; the pattern is a variant name with an optional
     /// `(binding)`, or `_` for the wildcard. Arms are not comma-separated.
     fn parse_match(&mut self) -> Result<Stmt> {
+        let (scrutinee, arms, sp) = self.parse_match_common()?;
+        Ok(Stmt::Match { scrutinee, arms, span: sp })
+    }
+
+    /// Parse `match (scrut) { pattern: body; … }` — the shared shape of the
+    /// statement and expression forms. Arm bodies are ordinary statements; in an
+    /// expression `match` an arm's value is its trailing expression.
+    fn parse_match_common(&mut self) -> Result<(Expr, Vec<MatchArm>, crate::lexer::Span)> {
         let sp = self.span();
         self.advance(); // 'match'
         self.expect(TokenKind::LParen)?;
@@ -1668,7 +1676,7 @@ impl Parser {
             arms.push(MatchArm { variant, binding, body, span: asp });
         }
         self.expect(TokenKind::RBrace)?;
-        Ok(Stmt::Match { scrutinee, arms, span: sp })
+        Ok((scrutinee, arms, sp))
     }
 
     /// sic requires every switch case to end explicitly with `break` or
@@ -2146,6 +2154,11 @@ impl Parser {
                 Ok(Expr::new(ExprKind::Ref { mutable, expr: Box::new(e) }, sp))
             }
             // sic `new T` / `new T(count)` (sic.md §"Scopes and automatic release").
+            // sic `match` as an expression (sic.md §"Match"): `x = match (s) { … }`.
+            TokenKind::Match if self.lang == Lang::Sic => {
+                let (scrutinee, arms, sp) = self.parse_match_common()?;
+                Ok(Expr::new(ExprKind::Match { scrutinee: Box::new(scrutinee), arms }, sp))
+            }
             TokenKind::New => {
                 self.advance();
                 let (mut ty, _storage) = self.parse_decl_specifiers()?;

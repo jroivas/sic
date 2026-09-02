@@ -1,0 +1,33 @@
+// sic `match` as an expression (sic.md §"Match"): each arm yields a value of a
+// common type; the colon form is kept. Exhaustiveness still applies.
+enum Shape { Circle(int), Square(int), Tri(int) };
+enum Mode { A, B, C };
+
+int area(Shape s) {
+    // `match` in return position — arms are expressions.
+    return match (s) {
+        Circle(r): r * r * 3;
+        Square(w): w * w;
+        Tri(t):    t;
+    };
+}
+
+int main() {
+    if (area(Shape::Square(4)) != 16) return 1;
+    if (area(Shape::Circle(2)) != 12) return 2;
+
+    // As an initializer, with `_` and a block arm whose trailing expr is the value.
+    enum Mode m = C;
+    int x = match (m) {
+        A: 1;
+        B: { int t = 10; t + 5; }     // block → 15
+        _: 99;
+    };
+    if (x != 99) return 3;
+
+    // `auto` infers the arm type.
+    auto y = match (A) { A: 7; B: 8; C: 9; };
+    if (y != 7) return 4;
+
+    return 0;
+}

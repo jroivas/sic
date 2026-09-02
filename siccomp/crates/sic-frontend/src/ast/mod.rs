@@ -451,6 +451,10 @@ pub enum ExprKind {
 
     /// Ternary: cond ? a : b
     Ternary { cond: BoxExpr, then: BoxExpr, else_: BoxExpr },
+    /// sic `match` used as an expression (sic.md §"Match"): each arm yields a value
+    /// of a common type. Arm bodies are the same `MatchArm`s as the statement form;
+    /// in expression position an arm's value is its trailing expression.
+    Match { scrutinee: BoxExpr, arms: Vec<MatchArm> },
 
     /// GNU `a ?: b`: value is `a` when `a` is truthy, else `b`. `a` is evaluated
     /// exactly once.

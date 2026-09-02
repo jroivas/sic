@@ -512,6 +512,7 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Ternary { cond, then, else_ } => self.lower_ternary(cond, then, else_),
             ExprKind::Elvis { cond, else_ } => self.lower_elvis(cond, else_),
+            ExprKind::Match { scrutinee, arms } => self.lower_match_expr(scrutinee, arms, &expr.span),
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
@@ -6179,6 +6180,8 @@ impl<'m> FuncCtx<'m> {
                     None => Ok(Type::i32()),
                 }
             }
+            // An expression `match` has the type of its value arms.
+            ExprKind::Match { arms, .. } => Ok(self.match_result_type(arms)),
             ExprKind::Ternary { then, else_, .. }
             | ExprKind::Elvis { cond: then, else_ } => {
                 // Mirror lower_ternary/lower_elvis's result-type selection.

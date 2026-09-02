@@ -2993,6 +2993,13 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             collect_expr_names(cond, out); collect_expr_names(then, out); collect_expr_names(else_, out);
         }
         Elvis { cond, else_ } => { collect_expr_names(cond, out); collect_expr_names(else_, out); }
+        Match { scrutinee, arms } => {
+            collect_expr_names(scrutinee, out);
+            for a in arms {
+                if let Some(b) = &a.binding { out.push(b.clone()); }
+                collect_stmt_names(&a.body, out);
+            }
+        }
         ChooseExpr { cond, then, else_ } => {
             collect_expr_names(cond, out); collect_expr_names(then, out); collect_expr_names(else_, out);
         }

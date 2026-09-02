@@ -76,6 +76,19 @@ fn ptr_value_mismatch(dest: &Type, src: &Type) -> Option<String> {
     None
 }
 
+/// An expression-`match` arm's value expression: an `expr;` body, or the trailing
+/// expression of a `{ …; expr }` block. `None` for a diverging/valueless arm.
+fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
+    match body {
+        Stmt::Expr(e, _) => Some(e),
+        Stmt::Block(ss, _) => ss.last().and_then(|s| match s {
+            Stmt::Expr(e, _) => Some(e),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
 /// The source symbol for a binary operator, for enum-arithmetic diagnostics.
 fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
     use crate::ast::BinOpKind::*;
@@ -2300,19 +2313,27 @@ impl<'m> FuncCtx<'m> {
     /// arm's name (a borrow of the value's storage). A `_` arm is the default; if
     /// no arm and no `_` matches at runtime, abort via `__sic_match_fail`.
     fn lower_match(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<()> {
+        self.lower_match_into(scrutinee, arms, sp, None)
+    }
+
+    /// Lower a `match`. `result = Some((slot, ty))` puts it in expression mode: each
+    /// arm's value (its trailing expression) is coerced to `ty` and stored into
+    /// `slot`; `None` is statement mode (arm bodies are ordinary statements).
+    fn lower_match_into(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span,
+                        result: Option<(Val, Type)>) -> Result<()> {
         let sty = self.infer_expr_type(scrutinee)?;
         // sic RTTI (sic.md §"Match"): `match (type(x)) { string: …; int: …; _: … }`
         // dispatches on the value's runtime KIND category — no hand-written kind
         // table needed; the compiler owns the vocabulary.
         if self.is_sic() && super::types::is_type_info(&sty) {
-            return self.lower_match_on_type(scrutinee, arms, sp);
+            return self.lower_match_on_type(scrutinee, arms, sp, result);
         }
         // sic: `match` on a plain (payload-less) C enum dispatches on the value
         // against each variant's discriminant — a `switch` with variant-name labels.
         if self.is_sic() {
             if let EnumClass::Enum(ename) = self.classify_enum(scrutinee) {
                 if self.lowerer.c_enum_defs.contains_key(&ename) {
-                    return self.lower_match_c_enum(scrutinee, arms, &ename, sp);
+                    return self.lower_match_c_enum(scrutinee, arms, &ename, sp, result);
                 }
             }
         }
@@ -2376,7 +2397,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.define_local(bind.clone(), pty, slot);
             }
-            self.lower_stmt(&arm.body)?;
+            self.lower_match_arm_body(&arm.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
             self.switch_to_block(next_bb);
@@ -2385,7 +2406,7 @@ impl<'m> FuncCtx<'m> {
         // Fallback: `_` arm, or a runtime abort on an unmatched variant.
         if let Some(w) = wildcard {
             self.enter_scope();
-            self.lower_stmt(&w.body)?;
+            self.lower_match_arm_body(&w.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
         } else {
@@ -2400,7 +2421,8 @@ impl<'m> FuncCtx<'m> {
     /// sic `match` on a plain (payload-less) C enum: dispatch the value against each
     /// variant's discriminant. Arms carry no payload binding. A `_` arm is the
     /// fallback; without one an unmatched value aborts (like a tagged `match`).
-    fn lower_match_c_enum(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], ename: &str, sp: &crate::lexer::Span) -> Result<()> {
+    fn lower_match_c_enum(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], ename: &str, sp: &crate::lexer::Span,
+                          result: Option<(Val, Type)>) -> Result<()> {
         let v = self.lower_expr(scrutinee)?;
         let val = self.coerce(v, &Type::i32())?;
         let end_bb = self.new_block_after_current();
@@ -2439,7 +2461,7 @@ impl<'m> FuncCtx<'m> {
             self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb: arm_bb, else_bb: next_bb });
             self.switch_to_block(arm_bb);
             self.enter_scope();
-            self.lower_stmt(&arm.body)?;
+            self.lower_match_arm_body(&arm.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
             self.switch_to_block(next_bb);
@@ -2447,7 +2469,7 @@ impl<'m> FuncCtx<'m> {
 
         if let Some(w) = wildcard {
             self.enter_scope();
-            self.lower_stmt(&w.body)?;
+            self.lower_match_arm_body(&w.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
         } else {
@@ -2464,7 +2486,8 @@ impl<'m> FuncCtx<'m> {
     /// `float`, `ptr`, …); it matches when `type(x).kind` is in that category, so
     /// `int` catches every signed-int width and `float` every float. Exact-type
     /// tests remain available with `type(x) == i64`.
-    fn lower_match_on_type(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<()> {
+    fn lower_match_on_type(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span,
+                           result: Option<(Val, Type)>) -> Result<()> {
         let kind = self.emit_type_info_field(scrutinee, "kind")?; // u32
         let end_bb = self.new_block_after_current();
         let wildcard = arms.iter().find(|a| a.variant.is_none());
@@ -2493,7 +2516,7 @@ impl<'m> FuncCtx<'m> {
             self.set_terminator(Terminator::CondJump { cond: cond.unwrap(), then_bb: arm_bb, else_bb: next_bb });
             self.switch_to_block(arm_bb);
             self.enter_scope();
-            self.lower_stmt(&arm.body)?;
+            self.lower_match_arm_body(&arm.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
             self.switch_to_block(next_bb);
@@ -2501,7 +2524,7 @@ impl<'m> FuncCtx<'m> {
 
         if let Some(w) = wildcard {
             self.enter_scope();
-            self.lower_stmt(&w.body)?;
+            self.lower_match_arm_body(&w.body, &result)?;
             self.exit_scope();
             if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
         } else {
@@ -2511,6 +2534,68 @@ impl<'m> FuncCtx<'m> {
         }
         self.switch_to_block(end_bb);
         Ok(())
+    }
+
+    /// Lower a match arm body. In statement mode (`result == None`) it is an ordinary
+    /// statement. In expression mode it must yield a value: an expression-statement
+    /// `expr;`, or a `{ …; expr }` block whose last statement is an expression — that
+    /// value is coerced to the result type and stored into the slot. A diverging arm
+    /// (`return`/`break`) yields no value and is lowered as-is.
+    fn lower_match_arm_body(&mut self, body: &Stmt, result: &Option<(Val, Type)>) -> Result<()> {
+        let (slot, rty) = match result {
+            None => return self.lower_stmt(body),
+            Some((s, t)) => (s.clone(), t.clone()),
+        };
+        let store_value = |this: &mut Self, e: &Expr| -> Result<()> {
+            let v = this.lower_expr(e)?;
+            let c = this.coerce(v, &rty)?;
+            this.push_instr(Instr::Store { val: c, ptr: slot.clone() });
+            Ok(())
+        };
+        match body {
+            Stmt::Expr(e, _) => store_value(self, e)?,
+            Stmt::Block(stmts, _) => {
+                self.enter_scope();
+                let n = stmts.len();
+                for (i, s) in stmts.iter().enumerate() {
+                    if i + 1 == n {
+                        if let Stmt::Expr(e, _) = s { store_value(self, e)?; continue; }
+                    }
+                    self.lower_stmt(s)?;
+                }
+                self.exit_scope();
+            }
+            // A diverging arm (return/break/…): no value to store.
+            other => self.lower_stmt(other)?,
+        }
+        Ok(())
+    }
+
+    /// sic `match` as an expression (sic.md §"Match"): allocate a result slot, run
+    /// the dispatch in expression mode (each arm stores its value), and yield the
+    /// slot's value. The result type is that of the first value-producing arm.
+    pub(crate) fn lower_match_expr(&mut self, scrutinee: &Expr, arms: &[crate::ast::MatchArm], sp: &crate::lexer::Span) -> Result<Val> {
+        let rty = self.match_result_type(arms);
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: rty.clone(), align: None });
+        self.lower_match_into(scrutinee, arms, sp, Some((Val::Local(slot), rty.clone())))?;
+        let d = self.alloc_val();
+        self.push_instr(Instr::Load { dest: d, ptr: Val::Local(slot), ty: rty.clone() });
+        self.val_types.insert(d.0, rty);
+        Ok(Val::Local(d))
+    }
+
+    /// The value type of an expression `match`: the first arm whose value expression
+    /// infers a concrete type (a `_`/literal arm usually provides it), else `int`.
+    pub(crate) fn match_result_type(&self, arms: &[crate::ast::MatchArm]) -> Type {
+        for a in arms {
+            if let Some(e) = arm_value_expr(&a.body) {
+                if let Ok(t) = self.infer_expr_type(e) {
+                    if t != Type::Void { return t; }
+                }
+            }
+        }
+        Type::i32()
     }
 
     // ─── Type coercion / helpers ─────────────────────────────────────────────
