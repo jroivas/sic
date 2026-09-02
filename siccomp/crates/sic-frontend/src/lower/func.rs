@@ -1099,6 +1099,19 @@ impl<'m> FuncCtx<'m> {
                 self.lower_stmt(inner)?;
             }
             Stmt::Case(val, body, _) => {
+                // sic (sic.md §"Match"): a qualified enum-variant case label that
+                // names no real variant (`case FS::Succcess:` — a typo) is an error,
+                // not a silently-dropped case that would fall through to `default`.
+                if self.is_sic() {
+                    if let ExprKind::EnumVariant { enum_name, variant } = &val.kind {
+                        if !self.lowerer.enum_consts.contains_key(variant) {
+                            let sp = &val.span;
+                            return Err(CompileError::at(
+                                format!("enum '{}' has no variant '{}'", enum_name, variant),
+                                sp.file.clone(), sp.line, sp.col));
+                        }
+                    }
+                }
                 // Switch to the block the enclosing switch pre-created for this
                 // case value; falling through from the previous case jumps here.
                 let const_val = eval_const_expr(val, &self.lowerer.enum_consts).unwrap_or(0);
