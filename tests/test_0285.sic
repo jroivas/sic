@@ -1,0 +1,29 @@
+// sic string offset & indexing (sic.md §"Strings"): `s + n` is a cheap view over
+// the bytes from offset n (`"hello" + 1` → "ello"), and `s[i]` is the byte at i.
+// All are strings/chars; a literal + constant offset/index is bounds-checked at
+// compile time.
+#include <stdio.h>
+int main() {
+    auto a = "hello" + 1;             // view "ello"
+    if (a.size != 4) return 1;
+    if (a[0] != 'e') return 2;
+
+    auto b = "hello" + 5;             // empty view
+    if (b.size != 0) return 3;
+
+    string h = "hello";
+    int n = 2;
+    auto c = h + n;                   // runtime offset → "llo"
+    if (c.size != 3) return 4;
+    if (c[0] != 'l') return 5;
+
+    // Indexing yields the byte.
+    if ("hello"[1] != 'e') return 6;
+    if (h[4] != 'o') return 7;
+
+    // A char* target keeps pointer arithmetic (offset into the static bytes).
+    char *p = "abcdef" + 2;
+    if (p[0] != 'c') return 8;
+
+    return 0;
+}

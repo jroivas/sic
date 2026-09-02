@@ -559,6 +559,11 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_u8char_arr(&t)) {
                     return self.lower_u8char_arr_index(base, index, &expr.span);
                 }
+                // sic `string[i]` → the byte at index i (`"hello"[1]` → 'e'), with a
+                // bounds check (compile-time for a literal + constant index).
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_sic_string(&t)) {
+                    return self.lower_string_index(base, index, &expr.span);
+                }
                 let lv = self.lower_lvalue_index(base, index)?;
                 // An array element that is itself an array decays to a pointer to
                 // its first element (`a[i]` in `a[i][j]` yields the row address,
@@ -942,6 +947,31 @@ impl<'m> FuncCtx<'m> {
             };
             if stringish(self, lhs) && stringish(self, rhs) {
                 return self.lower_string_concat(lhs, rhs);
+            }
+            // `string + int` is a cheap view offset — `s + n` ≡ `s[n:]` (drop the
+            // first n bytes): `"hello" + 1` → "ello", `"hello" + 5` → "". A native
+            // `string` or string literal on the left with an integer on the right;
+            // a real `char*` keeps C pointer arithmetic. For a literal + constant
+            // offset the bounds are checked at compile time (sic.md §"Strings").
+            let lhs_is_string = matches!(&lhs.kind, ExprKind::StringLit(_)) || self.is_string_operand(lhs);
+            let rhs_is_int = matches!(self.infer_expr_type(rhs),
+                Ok(Type::Int { .. }) | Ok(Type::Bool));
+            if lhs_is_string && rhs_is_int {
+                if let ExprKind::StringLit(s) = &lhs.kind {
+                    if let Ok(off) = crate::lower::eval_const_expr(rhs, &self.lowerer.enum_consts) {
+                        if off < 0 || off as usize > s.len() {
+                            return Err(CompileError::at(
+                                format!("offset {} is out of bounds for a string of length {}", off, s.len()),
+                                rhs.span.file.clone(), rhs.span.line, rhs.span.col));
+                        }
+                    }
+                }
+                // `char*` target ("if char* detected, don't use string") → plain
+                // pointer arithmetic on the bytes; otherwise a `string` view.
+                if self.expected_is_char_ptr() {
+                    return self.lower_string_offset_cptr(lhs, rhs);
+                }
+                return self.lower_slice(lhs, Some(rhs), None);
             }
         }
 
@@ -2661,6 +2691,65 @@ impl<'m> FuncCtx<'m> {
     /// pointer, so it correctly does not match.
     fn expected_is_char_ptr(&self) -> bool {
         matches!(&self.expected_ty, Some(Type::Pointer(_)))
+    }
+
+    /// sic `string[i]` (sic.md §"Strings"): the byte at index `i`. A literal base
+    /// with a constant index is bounds-checked at compile time; otherwise a runtime
+    /// check against the string's `size` traps on out-of-range access.
+    fn lower_string_index(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        if let ExprKind::StringLit(s) = &base.kind {
+            if let Ok(i) = crate::lower::eval_const_expr(index, &self.lowerer.enum_consts) {
+                if i < 0 || i as usize >= s.len() {
+                    return Err(CompileError::at(
+                        format!("index {} is out of bounds for a string of length {}", i, s.len()),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+            }
+        }
+        let data_lv = self.lower_lvalue_field(base, "data")?;
+        let data = self.load_lvalue(&data_lv)?;              // char*
+        let size_lv = self.lower_lvalue_field(base, "size")?;
+        let size = self.load_lvalue(&size_lv)?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let size = self.coerce(size, &usize_ty)?;
+        let idx = self.lower_expr(index)?;
+        let idx = self.coerce(idx, &usize_ty)?;
+        // Runtime bounds: i >= size (unsigned, so negatives are huge) → trap.
+        let oob = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: oob, op: CmpOp::IUGe, lhs: idx.clone(), rhs: size, ty: usize_ty });
+        let fail_bb = self.new_block_after_current();
+        let ok_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(oob), then_bb: fail_bb, else_bb: ok_bb });
+        self.switch_to_block(fail_bb);
+        let fref = self.lowerer.ensure_bounds_fail_fn();
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
+        self.set_terminator(Terminator::Jump(ok_bb));
+        self.switch_to_block(ok_bb);
+        // byte = data[i]
+        let ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: ptr, base: data, index: idx, elem_size: 1, result_ty: Type::char_ptr() });
+        let byte = self.alloc_val();
+        self.push_instr(Instr::Load { dest: byte, ptr: Val::Local(ptr), ty: Type::i8() });
+        self.val_types.insert(byte.0, Type::i8());
+        Ok(Val::Local(byte))
+    }
+
+    /// `char*`-context `string + int`: the bytes pointer offset by `int` — plain C
+    /// pointer arithmetic (`"abcdef" + 2` → a `char*` at 'c'). For a literal the
+    /// pointer is into the static (NUL-terminated) bytes; for a string it is `.data`.
+    fn lower_string_offset_cptr(&mut self, base: &Expr, off: &Expr) -> Result<Val> {
+        let data = if let ExprKind::StringLit(s) = &base.kind {
+            self.emit_cstring(s)
+        } else {
+            let lv = self.lower_lvalue_field(base, "data")?;
+            self.load_lvalue(&lv)?
+        };
+        let o = self.lower_expr(off)?;
+        let o = self.coerce(o, &Type::i64())?;
+        let dest = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest, base: data, index: o, elem_size: 1, result_ty: Type::char_ptr() });
+        self.val_types.insert(dest.0, Type::char_ptr());
+        Ok(Val::Local(dest))
     }
 
     /// Decay a `string` descriptor value to its `char*` (`data` field) — for passing
@@ -6083,6 +6172,10 @@ impl<'m> FuncCtx<'m> {
                 // sic `u8char[]` element `cps[i]` is a `u8char`.
                 if self.is_sic() && super::types::is_u8char_arr(&bt) {
                     return Ok(super::types::u8char_type());
+                }
+                // sic `string[i]` is the byte (a `char`).
+                if self.is_sic() && super::types::is_sic_string(&bt) {
+                    return Ok(Type::i8());
                 }
                 // sic tuple element `t[const]` has the field's type (deref the
                 // tuple pointer to its layout struct).

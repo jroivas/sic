@@ -1,0 +1,2 @@
+// sic: a constant offset past a string literal's length is a compile error.
+int main() { auto s = "hi" + 6; return (int)s.size; }

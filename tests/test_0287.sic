@@ -1,0 +1,2 @@
+// sic: a constant index past a string literal's length is a compile error.
+int main() { return "hi"[9]; }
