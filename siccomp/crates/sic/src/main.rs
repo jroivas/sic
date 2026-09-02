@@ -88,6 +88,13 @@ struct Args {
     #[arg(short = 'd', long = "debug")]
     debug: bool,
 
+    /// Run the compile on a spawned thread with a large (1 GiB) stack. The
+    /// parser and lowering descend recursively, so a deeply nested expression
+    /// (hundreds of operators in one chain) can overflow the default 8 MiB main
+    /// stack and abort. Off by default; enable it for pathologically nested input.
+    #[arg(long = "large-stack")]
+    large_stack: bool,
+
     /// Generate debug information (`-g` and variants). Set from the argv pre-pass
     /// rather than parsed by clap. sic emits an ELF symbol table (function-level
     /// backtraces work); full DWARF line/variable info is not yet produced.
@@ -436,7 +443,21 @@ fn main() {
     args.static_link = static_link;
     args.deps_only = deps_only;
 
-    if let Err(e) = run(&args) {
+    // `--large-stack`: run the compile on a thread with a 1 GiB stack so a
+    // pathologically deep expression doesn't overflow the default main stack.
+    // The error type isn't `Send`, so stringify it inside the thread.
+    let result: Result<(), String> = if args.large_stack {
+        const LARGE_STACK: usize = 1 << 30; // 1 GiB
+        std::thread::Builder::new()
+            .stack_size(LARGE_STACK)
+            .spawn(move || run(&args).map_err(|e| e.to_string()))
+            .expect("failed to spawn compile thread")
+            .join()
+            .unwrap_or_else(|_| std::process::exit(1))
+    } else {
+        run(&args).map_err(|e| e.to_string())
+    };
+    if let Err(e) = result {
         eprintln!("{}", e);
         std::process::exit(1);
     }
