@@ -9,8 +9,8 @@
 //! (only `dce` may remove it, and only when it is pure). So these passes need no
 //! AST-style purity check on operands.
 
-use std::collections::HashMap;
-use sic_ir::{Module, Function, Val, ValId};
+use std::collections::{HashMap, HashSet};
+use sic_ir::{Module, Function, Instr, Val, ValId};
 use crate::pass::PassConfig;
 
 pub mod pass;
@@ -50,19 +50,38 @@ pub(crate) fn apply_replacements(func: &mut Function, repl: &HashMap<ValId, Val>
     };
     for b in &mut func.blocks {
         for ins in &mut b.instrs {
+            // A `Store` carries no result type; codegen infers the width of a
+            // *constant* store as i32 (see sic-cranelift). Substituting a folded
+            // constant into the stored value would therefore silently change the
+            // store width — corrupting narrow (i8/i16) or wide (i64) stores. Keep
+            // the original, typed SSA value there and only rewrite the pointer.
+            if let Instr::Store { ptr, .. } = ins {
+                *ptr = resolve(ptr);
+                continue;
+            }
             ins.for_each_val_mut(|v| *v = resolve(v));
         }
         b.terminator.for_each_val_mut(|v| *v = resolve(v));
     }
 }
 
-/// Remove instructions whose `dest` is one of the given (now fully-substituted,
-/// hence dead) value ids. Callers only ever pass ids of *pure* defs.
+/// Remove instructions whose `dest` was folded away and is no longer used.
+/// A folded def may still be referenced — e.g. by a `Store` value, which
+/// `apply_replacements` intentionally leaves untouched — so removal is gated on
+/// there being no remaining use, not merely on membership in `dead`. Callers
+/// only ever pass ids of *pure* defs.
 pub(crate) fn prune_defs(func: &mut Function, dead: &HashMap<ValId, Val>) {
     if dead.is_empty() { return; }
+    let mut used: HashSet<ValId> = HashSet::new();
+    for b in &func.blocks {
+        for ins in &b.instrs {
+            ins.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); });
+        }
+        b.terminator.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); });
+    }
     for b in &mut func.blocks {
         b.instrs.retain(|ins| match ins.dest() {
-            Some(d) => !dead.contains_key(&d),
+            Some(d) => !(dead.contains_key(&d) && !used.contains(&d)),
             None => true,
         });
     }
