@@ -31,6 +31,44 @@ match (result) {
 }
 ```
 
+### Exhaustiveness
+
+A `match` **must be exhaustive** — cover every variant, or add a `_` catch-all.
+A missing variant is a *compile error* (not a runtime surprise):
+
+```sic
+match (s) { Circle(r): …; }
+// error: non-exhaustive match on `Shape`: missing Square — cover it or add a `_` arm
+```
+
+This is the point of `match` over a C `switch`: the compiler proves you handled
+every case. Use `_` for "everything else":
+
+```sic
+match (m) { A: …; _: …; }        // A explicitly, all other variants via `_`
+```
+
+### `match` as an expression
+
+A `match` can also *produce a value* — each arm's value is its trailing expression
+(a bare `expr;`, or the last expression of a `{ …; expr }` block). All arms share a
+common type, which `auto` infers:
+
+```sic
+int area = match (s) {
+    Circle(r): r * r * 3;
+    Square(w): w * w;
+    Tri(t):    t;
+};
+
+auto label = match (m) {
+    A: "a";
+    _: "other";
+};
+```
+
+An arm may still diverge with `return`/`break` instead of yielding a value.
+
 ## Generics
 
 Enums can be generic over their payload types and are monomorphized per
