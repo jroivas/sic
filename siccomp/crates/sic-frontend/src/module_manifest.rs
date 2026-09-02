@@ -444,14 +444,21 @@ fn push_agg(ty: &Type, out: &mut Vec<Type>) {
 /// Encode a `struct`/`union` record line (without the trailing newline), or
 /// `None` for an unnameable aggregate.
 fn encode_aggregate_record(ty: &Type) -> Option<String> {
-    let (kw, name, fields): (&str, &str, &Vec<(String, Type)>) = match ty {
-        Type::Struct(s) => ("struct", s.name.as_deref()?, &s.fields),
-        Type::Union(u) => ("union", u.name.as_deref()?, &u.fields),
+    let (kw, name, fields, order): (&str, &str, &Vec<(String, Type)>, Option<&Vec<usize>>) = match ty {
+        Type::Struct(s) => ("struct", s.name.as_deref()?, &s.fields, s.layout_order.as_ref()),
+        Type::Union(u) => ("union", u.name.as_deref()?, &u.fields, None),
         _ => return None,
     };
     let mut toks = Vec::new();
     for (fname, fty) in fields {
         toks.push(format!("{}:{}", fname, encode_type(fty)?));
+    }
+    // sic struct reordering (sic.md §"Struct reordering"): a public struct may have
+    // its fields physically reordered by size. Carry the permutation so a consumer
+    // reconstructs the *exact* layout — otherwise `s.field` reads the wrong offset.
+    if let Some(perm) = order {
+        let p: Vec<String> = perm.iter().map(|i| i.to_string()).collect();
+        toks.push(format!("@order:{}", p.join(",")));
     }
     Some(format!("{} {} {}", kw, name, toks.join(" ")))
 }
@@ -468,14 +475,22 @@ fn decode_aggregate_record<'a>(
 ) -> Option<Type> {
     if let Some(t) = known_marker(name, ptr_size) { return Some(t); }
     let mut fields = Vec::new();
+    let mut order: Option<Vec<usize>> = None;
     for tok in field_toks {
+        // The `@order:…` token carries the struct's field-reordering permutation.
+        if let Some(rest) = tok.strip_prefix("@order:") {
+            order = Some(rest.split(',').filter_map(|s| s.parse().ok()).collect());
+            continue;
+        }
         let (fname, tty) = tok.split_once(':')?;
         fields.push((fname.to_string(), decode_type(tty, ptr_size, registry)?));
     }
     Some(if is_union {
         Type::Union(UnionType { name: Some(name.to_string()), fields, field_aligns: Vec::new(), min_align: None })
     } else {
-        Type::Struct(StructType::plain(Some(name.to_string()), fields, false))
+        let mut st = StructType::plain(Some(name.to_string()), fields, false);
+        st.layout_order = order;
+        Type::Struct(st)
     })
 }
 
