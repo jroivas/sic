@@ -438,7 +438,20 @@ impl<'m> FuncCtx<'m> {
             // `0` on clean completion, `1` if the exception fired.
             ExprKind::Guard { kind, body } => self.lower_guard(*kind, body),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
-            ExprKind::StringLit(s) => Ok(self.emit_cstring(s)),
+            ExprKind::StringLit(s) => {
+                let data = self.emit_cstring(s);
+                // sic (sic.md §"Strings"): a string literal is a native `string` view
+                // over the static bytes — unless a `char*` is wanted (assigned to a
+                // `char*`, a `char*` parameter, or C). Then it stays the raw pointer.
+                if !self.is_sic() || self.expected_is_char_ptr() {
+                    return Ok(data);
+                }
+                // View: {data, size = compile-time length, rc = NULL (static, never freed)}.
+                let size = self.coerce(Constant::int(s.len() as i64),
+                    &Type::Int { bits: self.ptr_size() * 8, signed: false })?;
+                let rc = self.coerce(Constant::zero(), &self.rc_ptr_ty())?;
+                self.make_string_val(data, size, rc)
+            }
             ExprKind::Nullptr => Ok(Constant::null()),
 
             ExprKind::Ident(name) => {
@@ -913,15 +926,23 @@ impl<'m> FuncCtx<'m> {
         }
 
         // sic string concatenation `a + b` (sic.md §"Built-in string"): build a
-        // fresh joined string when either side is a `string`, or when BOTH sides
-        // are string literals (`"a" + "b"` — clearly concat, not pointer arith).
-        // A literal + non-string (`"abc" + 1`) stays pointer arithmetic.
-        let both_str_lits = matches!(&lhs.kind, ExprKind::StringLit(_))
-            && matches!(&rhs.kind, ExprKind::StringLit(_));
-        if self.is_sic() && op == BinOpKind::Add
-            && (self.is_string_operand(lhs) || self.is_string_operand(rhs) || both_str_lits)
-        {
-            return self.lower_string_concat(lhs, rhs);
+        // fresh joined string only when BOTH sides are string-ish — a native
+        // `string`, a string literal, or a C string (`char*`/`char[]`). A string
+        // literal (now a `string`) plus an integer — `"abc" + 1` — is pointer
+        // arithmetic, not concat, so a non-stringy operand disables concat.
+        if self.is_sic() && op == BinOpKind::Add {
+            let stringish = |this: &mut Self, e: &Expr| -> bool {
+                if matches!(&e.kind, ExprKind::StringLit(_)) { return true; }
+                match this.infer_expr_type(e) {
+                    Ok(t) => super::types::is_sic_string(&t)
+                        || matches!(&t, Type::Pointer(i) if matches!(i.as_ref(), Type::Int { bits: 8, .. }))
+                        || matches!(&t, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. })),
+                    Err(_) => false,
+                }
+            };
+            if stringish(self, lhs) && stringish(self, rhs) {
+                return self.lower_string_concat(lhs, rhs);
+            }
         }
 
         // sic RTTI type comparison `type(x) == i64` (sic.md §"RTTI"): compare the
@@ -2632,6 +2653,28 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Store { val: v, ptr: rptr });
         }
         Ok(base)
+    }
+
+    /// Whether the current expected/target type is a *pointer* (`char*`, `void*`,
+    /// `const char*`, …) — the signal to keep a string literal as a raw C pointer
+    /// instead of promoting it to a `string`. A `string` target is a struct, not a
+    /// pointer, so it correctly does not match.
+    fn expected_is_char_ptr(&self) -> bool {
+        matches!(&self.expected_ty, Some(Type::Pointer(_)))
+    }
+
+    /// Decay a `string` descriptor value to its `char*` (`data` field) — for passing
+    /// a string to a C variadic function (`printf`). A literal/full string's `data`
+    /// is NUL-terminated; a bare slice may not be, so prefer `.ptr`/`.str` there.
+    fn string_to_cptr_val(&mut self, s: Val) -> Result<Val> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        if let Some((dptr, dty, _)) = self.member_at(&s, &sty, 0) {
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: dptr, ty: dty.clone() });
+            self.val_types.insert(d.0, dty);
+            return Ok(Val::Local(d));
+        }
+        Ok(s)
     }
 
     /// Pointer type of the `rc` refcount cell (`usize*`).
@@ -5055,9 +5098,18 @@ impl<'m> FuncCtx<'m> {
             }
             let prev = self.expected_ty.take();
             if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }
-            let v = self.lower_arg(a);
+            let mut v = self.lower_arg(a)?;
             self.expected_ty = prev;
-            arg_vals.push(v?);
+            // sic (sic.md §"Strings"): a `string` reaching a C variadic (`printf("%s",
+            // s)`) decays to its `char*` — printf reads a pointer, not a descriptor.
+            // sic's own `va_array` (fixed params + boxing) is handled below, not here.
+            let is_c_vararg = self.is_sic() && va_fixed.is_none() && i >= param_types.len();
+            if is_c_vararg
+                && matches!(self.infer_expr_type(a), Ok(t) if super::types::is_sic_string(&t))
+            {
+                v = self.string_to_cptr_val(v)?;
+            }
+            arg_vals.push(v);
         }
         if let Some(fixed) = va_fixed {
             let trailing = &args[fixed.min(args.len())..];
@@ -5899,7 +5951,14 @@ impl<'m> FuncCtx<'m> {
             // A guard block yields an `int` status (0 clean / 1 caught).
             ExprKind::Guard { .. } => Ok(Type::i32()),
             ExprKind::FloatLit(_) => Ok(Type::Float64),
-            ExprKind::StringLit(_) => Ok(Type::char_ptr()),
+            // sic (sic.md §"Strings"): a string literal is a native `string` (a view
+            // over the static bytes) by default; it decays to `char*` only where a
+            // `char*` is expected. C keeps it a `char*`.
+            ExprKind::StringLit(_) => Ok(if self.is_sic() {
+                super::types::sic_string_type(self.ptr_size())
+            } else {
+                Type::char_ptr()
+            }),
             ExprKind::Nullptr => Ok(Type::void_ptr()),
             ExprKind::Ident(name) => {
                 match self.lookup(name) {

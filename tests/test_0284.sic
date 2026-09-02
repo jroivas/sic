@@ -1,0 +1,35 @@
+// sic (sic.md §"Strings"): a string literal is a native `string` (a view) by
+// default, and decays to `char*` only where a `char*`/pointer is expected.
+#include <stdio.h>
+#include <string.h>
+
+int take_str(string s) { return (int)s.size; }
+int take_cptr(const char *p) { return (int)strlen(p); }
+
+int main() {
+    // Default: a literal is a `string`.
+    auto s = "hello";
+    if (s.size != 5) return 1;
+    if (s.length != 5) return 2;
+
+    // Assigned to `char*` → stays a raw pointer.
+    char *p = "world!";
+    if (p[0] != 'w') return 3;
+    if (strlen(p) != 6) return 4;
+
+    // Passed to a `string` param → string; to a `char*` param → pointer.
+    if (take_str("abcd") != 4) return 5;
+    if (take_cptr("abc") != 3) return 6;
+
+    // `"literal" + int` is pointer arithmetic; string + string is concat.
+    char *q = "abcdef" + 2;
+    if (q[0] != 'c') return 7;
+    string j = "foo" + "bar";
+    if (j.size != 6) return 8;
+
+    // A string in a C variadic (printf) decays to char*.
+    int ok = 1;
+    printf("%s %s\n", "lit", ok ? "yes" : "no");   // lit yes
+
+    return 0;
+}
