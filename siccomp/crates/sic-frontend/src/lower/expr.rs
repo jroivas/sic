@@ -6381,16 +6381,23 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::BinOp { op, lhs, rhs } => {
                 use BinOpKind::*;
+                // Infer each operand's type ONCE and reuse it for every predicate
+                // below. Re-inferring per predicate (bigint/fixed/string checks
+                // each call `infer_expr_type` again) turned a left-associative
+                // chain like `a + b + c + …` into O(4^n) — each BinOp re-walked
+                // each child roughly four times.
+                let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
+                let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
                 // sic `bigint` arithmetic yields a bigint; comparisons yield int.
                 if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr)
-                    && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs))
+                    && (super::types::is_bigint(&lt) || super::types::is_bigint(&rt))
                 {
                     return Ok(super::types::bigint_type());
                 }
                 // sic `fixed` arithmetic yields a fixed<I,F> (comparisons yield int,
                 // handled below). I/F combine per `fixed_result_dims`.
                 if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem)
-                    && (self.is_fixed_typed(lhs) || self.is_fixed_typed(rhs))
+                    && (super::types::is_fixed(&lt) || super::types::is_fixed(&rt))
                 {
                     let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));
                     let db = self.fixed_expr_dims(rhs).unwrap_or((20, 0));
@@ -6401,26 +6408,24 @@ impl<'m> FuncCtx<'m> {
                     // Relational/logical operators yield int.
                     Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),
                     // sic string concatenation yields a `string` (either side a
-                    // `string`, or both string literals — mirrors lower_binop).
+                    // `string` — a literal already infers as `string` in sic).
                     Add if self.is_sic()
-                        && (self.is_string_operand(lhs) || self.is_string_operand(rhs)
-                            || (matches!(&lhs.kind, ExprKind::StringLit(_))
-                                && matches!(&rhs.kind, ExprKind::StringLit(_)))) =>
+                        && (super::types::is_sic_string(&lt) || super::types::is_sic_string(&rt)) =>
                         Ok(super::types::sic_string_type(self.ptr_size())),
                     // sic array concatenation yields an array of the combined
                     // length (sic.md §"Arrays and lists").
                     Add if self.is_sic() => {
-                        match (self.infer_expr_type(lhs), self.infer_expr_type(rhs)) {
-                            (Ok(Type::Array { elem, len: la }), Ok(Type::Array { len: lb, .. })) =>
-                                Ok(Type::Array { elem, len: la + lb }),
-                            _ => self.infer_arith_binop(op, lhs, rhs),
+                        match (&lt, &rt) {
+                            (Type::Array { elem, len: la }, Type::Array { len: lb, .. }) =>
+                                Ok(Type::Array { elem: elem.clone(), len: la + lb }),
+                            _ => Ok(self.arith_result_type(op, lt, rt)),
                         }
                     }
                     // Arithmetic: pointer/array ± integer keeps the pointer type
                     // (pointer arithmetic; arrays decay to pointer-to-element).
                     // `ptr - ptr` is ptrdiff_t. Otherwise pick the "richer" operand
                     // type so float/wider integer results survive.
-                    _ => self.infer_arith_binop(op, lhs, rhs),
+                    _ => Ok(self.arith_result_type(op, lt, rt)),
                 }
             }
             _ => Ok(Type::i32()),
@@ -6430,16 +6435,14 @@ impl<'m> FuncCtx<'m> {
     /// Result type of an arithmetic binary operator (the C usual-arithmetic /
     /// pointer-arithmetic rules), factored out so the sic array/string special
     /// cases can fall back to it.
-    fn infer_arith_binop(&self, op: &BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Type> {
-        let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
-        let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+    fn arith_result_type(&self, op: &BinOpKind, lt: Type, rt: Type) -> Type {
         let decay = |t: Type| match t {
             Type::Array { elem, .. } => Type::Pointer(elem),
             other => other,
         };
         let lt = decay(lt);
         let rt = decay(rt);
-        Ok(match (&lt, &rt) {
+        match (&lt, &rt) {
             (Type::Pointer(_), Type::Pointer(_)) if *op == BinOpKind::Sub => Type::i64(),
             (Type::Pointer(_), _) => lt,
             (_, Type::Pointer(_)) => rt,
@@ -6447,7 +6450,7 @@ impl<'m> FuncCtx<'m> {
             _ if rt.is_float() => rt,
             _ if rt.size_of(self.ptr_size()) > lt.size_of(self.ptr_size()) => rt,
             _ => lt,
-        })
+        }
     }
 
     /// Lower a `va_list` operand to the address of its `__va_list_tag`. A local
