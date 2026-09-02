@@ -1,134 +1,200 @@
-/// AST-level constant folding pass.
-/// Mirrors the Python optimizer: folds literal binary ops and unary negation.
+//! AST-level constant folding: fold operations whose operands are literals into
+//! a single literal. Value-preserving and type-neutral, so it is sound on the
+//! untyped AST (width-sensitive folding is left to the typed IR `ir-fold` pass).
 
 use sic_frontend::ast::*;
+use crate::pass::AstPass;
+use crate::visit::{MutVisitor, walk_expr};
 
-pub struct ConstFold;
+#[derive(Default)]
+pub struct ConstFold { changed: bool }
 
 impl ConstFold {
-    pub fn fold_tu(tu: &mut TranslationUnit) {
-        for decl in &mut tu.decls {
-            Self::fold_decl(decl);
-        }
+    pub fn new() -> Self { ConstFold { changed: false } }
+}
+
+impl AstPass for ConstFold {
+    fn name(&self) -> &'static str { "const-fold" }
+    fn run(&mut self, tu: &mut TranslationUnit) -> bool {
+        self.changed = false;
+        self.visit_tu(tu);
+        self.changed
+    }
+}
+
+impl MutVisitor for ConstFold {
+    fn visit_expr(&mut self, e: &mut Expr) {
+        walk_expr(self, e);   // fold children first (bottom-up)
+        self.fold(e);
+    }
+}
+
+/// A signed integer literal value + its 64-bit-ness, from either an `IntLit` or
+/// a `CharLit` (whose C type is already `int`).
+fn as_int(e: &Expr) -> Option<(i64, bool)> {
+    match &e.kind {
+        ExprKind::IntLit(v, w) => Some((*v, *w)),
+        ExprKind::CharLit(v) => Some((*v as i64, false)),
+        _ => None,
+    }
+}
+
+impl ConstFold {
+    fn set(&mut self, e: &mut Expr, kind: ExprKind) {
+        e.kind = kind;
+        self.changed = true;
     }
 
-    fn fold_decl(decl: &mut Decl) {
-        match decl {
-            Decl::Func { body: Some(stmts), .. } => {
-                for s in stmts { Self::fold_stmt(s); }
-            }
-            Decl::Var { declarators, .. } => {
-                for d in declarators {
-                    if let Some(init) = &mut d.init {
-                        Self::fold_init(init);
-                    }
-                }
-            }
-            Decl::ExprStmt(e, _) => { Self::fold_expr(e); }
-            _ => {}
-        }
-    }
-
-    fn fold_stmt(s: &mut Stmt) {
-        match s {
-            Stmt::Expr(e, _) => { Self::fold_expr(e); }
-            Stmt::Block(stmts, _) => { for s in stmts { Self::fold_stmt(s); } }
-            Stmt::If { cond, then, else_, .. } => {
-                Self::fold_expr(cond);
-                Self::fold_stmt(then);
-                if let Some(e) = else_ { Self::fold_stmt(e); }
-            }
-            Stmt::While { cond, body, .. } => { Self::fold_expr(cond); Self::fold_stmt(body); }
-            Stmt::DoWhile { body, cond, .. } => { Self::fold_stmt(body); Self::fold_expr(cond); }
-            Stmt::For { init, cond, post, body, .. } => {
-                if let Some(ForInit::Expr(e)) = init { Self::fold_expr(e); }
-                if let Some(c) = cond { Self::fold_expr(c); }
-                if let Some(p) = post { Self::fold_expr(p); }
-                Self::fold_stmt(body);
-            }
-            Stmt::Return(Some(e), _) => { Self::fold_expr(e); }
-            Stmt::Decl(d) => { Self::fold_decl(d); }
-            Stmt::Label(_, inner, _) => { Self::fold_stmt(inner); }
-            Stmt::Case(e, inner, _) => { Self::fold_expr(e); Self::fold_stmt(inner); }
-            Stmt::Switch { val, body, .. } => { Self::fold_expr(val); Self::fold_stmt(body); }
-            _ => {}
-        }
-    }
-
-    fn fold_init(init: &mut Initializer) {
-        match init {
-            Initializer::Expr(e) => { Self::fold_expr(e); }
-            Initializer::List(items) => { for i in items { Self::fold_init(&mut i.init); } }
-        }
-    }
-
-    pub fn fold_expr(e: &mut Expr) {
-        match &mut e.kind {
+    fn fold(&mut self, e: &mut Expr) {
+        match &e.kind {
             ExprKind::BinOp { op, lhs, rhs } => {
-                Self::fold_expr(lhs);
-                Self::fold_expr(rhs);
                 let op = *op;
-                if let (ExprKind::IntLit(l, lw), ExprKind::IntLit(r, rw)) = (&lhs.kind, &rhs.kind) {
-                    let l = *l; let r = *r; let operand_64 = *lw || *rw;
-                    let result = match op {
-                        BinOpKind::Add => Some(l.wrapping_add(r)),
-                        BinOpKind::Sub => Some(l.wrapping_sub(r)),
-                        BinOpKind::Mul => Some(l.wrapping_mul(r)),
-                        BinOpKind::Div if r != 0 => Some(l / r),
-                        BinOpKind::Rem if r != 0 => Some(l % r),
-                        BinOpKind::BitAnd => Some(l & r),
-                        BinOpKind::BitOr  => Some(l | r),
-                        BinOpKind::BitXor => Some(l ^ r),
-                        BinOpKind::Shl    => Some(l << (r & 63)),
-                        BinOpKind::Shr    => Some(l >> (r & 63)),
-                        _ => None,
-                    };
-                    if let Some(v) = result {
-                        // The folded literal is 64-bit if either operand was, or
-                        // the result no longer fits in a 32-bit type.
-                        let is64 = operand_64 || v < i32::MIN as i64 || v > u32::MAX as i64;
-                        e.kind = ExprKind::IntLit(v, is64);
+                if let (Some((l, lw)), Some((r, rw))) = (as_int(lhs), as_int(rhs)) {
+                    if let Some(k) = fold_int(op, l, r, lw || rw) {
+                        self.set(e, k);
                     }
-                } else if let (ExprKind::FloatLit(l), ExprKind::FloatLit(r)) = (&lhs.kind, &rhs.kind) {
-                    let l = *l; let r = *r;
-                    let result = match op {
-                        BinOpKind::Add => Some(l + r),
-                        BinOpKind::Sub => Some(l - r),
-                        BinOpKind::Mul => Some(l * r),
-                        BinOpKind::Div if r != 0.0 => Some(l / r),
-                        _ => None,
-                    };
-                    if let Some(v) = result {
-                        e.kind = ExprKind::FloatLit(v);
+                } else if let (ExprKind::UIntLit(l, lw), ExprKind::UIntLit(r, rw)) =
+                    (&lhs.kind, &rhs.kind)
+                {
+                    if let Some(k) = fold_uint(op, *l, *r, *lw || *rw) {
+                        self.set(e, k);
+                    }
+                } else if let (ExprKind::FloatLit(l), ExprKind::FloatLit(r)) =
+                    (&lhs.kind, &rhs.kind)
+                {
+                    if let Some(k) = fold_float(op, *l, *r) {
+                        self.set(e, k);
                     }
                 }
             }
             ExprKind::Unary { op, expr: inner } => {
-                Self::fold_expr(inner);
                 let op = *op;
-                if let ExprKind::IntLit(v, w) = inner.kind {
+                if let Some((v, w)) = as_int(inner) {
                     match op {
-                        UnOpKind::Neg    => { e.kind = ExprKind::IntLit(v.wrapping_neg(), w); }
-                        UnOpKind::BitNot => { e.kind = ExprKind::IntLit(!v, w); }
-                        UnOpKind::Not    => { e.kind = ExprKind::IntLit(if v == 0 { 1 } else { 0 }, false); }
+                        UnOpKind::Neg => self.set(e, ExprKind::IntLit(v.wrapping_neg(), w)),
+                        UnOpKind::BitNot => self.set(e, ExprKind::IntLit(!v, w)),
+                        UnOpKind::Not => self.set(e, ExprKind::IntLit(i64::from(v == 0), false)),
+                        _ => {}
+                    }
+                } else if let ExprKind::FloatLit(v) = inner.kind {
+                    match op {
+                        UnOpKind::Neg => self.set(e, ExprKind::FloatLit(-v)),
+                        UnOpKind::Not => self.set(e, ExprKind::IntLit(i64::from(v == 0.0), false)),
                         _ => {}
                     }
                 }
             }
-            ExprKind::Cast { expr: inner, .. } => { Self::fold_expr(inner); }
-            ExprKind::Call { func, args } => {
-                Self::fold_expr(func);
-                for a in args { Self::fold_expr(a); }
-            }
-            ExprKind::Assign { lhs, rhs, .. } => { Self::fold_expr(lhs); Self::fold_expr(rhs); }
-            ExprKind::Ternary { cond, then, else_ } => {
-                Self::fold_expr(cond); Self::fold_expr(then); Self::fold_expr(else_);
-            }
-            ExprKind::Index { base, index } => { Self::fold_expr(base); Self::fold_expr(index); }
-            ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } => { Self::fold_expr(base); }
-            ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. } => { Self::fold_expr(expr); }
-            ExprKind::Comma(l, r) => { Self::fold_expr(l); Self::fold_expr(r); }
             _ => {}
         }
+    }
+}
+
+/// Fold a signed-integer binary op. Result of a comparison/logical op is a plain
+/// 32-bit `int` `0`/`1` (as in C); arithmetic keeps the wider operand's width.
+fn fold_int(op: BinOpKind, l: i64, r: i64, w: bool) -> Option<ExprKind> {
+    use BinOpKind::*;
+    let arith = |v: i64| {
+        // Promote to 64-bit if either operand was, or the result no longer fits
+        // a 32-bit type.
+        let is64 = w || v < i32::MIN as i64 || v > u32::MAX as i64;
+        ExprKind::IntLit(v, is64)
+    };
+    let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
+    Some(match op {
+        Add => arith(l.wrapping_add(r)),
+        Sub => arith(l.wrapping_sub(r)),
+        Mul => arith(l.wrapping_mul(r)),
+        Div if r != 0 => arith(l.wrapping_div(r)),
+        Rem if r != 0 => arith(l.wrapping_rem(r)),
+        BitAnd => arith(l & r),
+        BitOr => arith(l | r),
+        BitXor => arith(l ^ r),
+        Shl => arith(l.wrapping_shl((r & 63) as u32)),
+        Shr => arith(l.wrapping_shr((r & 63) as u32)),
+        Eq => boolean(l == r),
+        Ne => boolean(l != r),
+        Lt => boolean(l < r),
+        Le => boolean(l <= r),
+        Gt => boolean(l > r),
+        Ge => boolean(l >= r),
+        LogAnd => boolean(l != 0 && r != 0),
+        LogOr => boolean(l != 0 || r != 0),
+        _ => return None,
+    })
+}
+
+fn fold_uint(op: BinOpKind, l: u64, r: u64, w: bool) -> Option<ExprKind> {
+    use BinOpKind::*;
+    let arith = |v: u64| {
+        let is64 = w || v > u32::MAX as u64;
+        ExprKind::UIntLit(v, is64)
+    };
+    let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
+    Some(match op {
+        Add => arith(l.wrapping_add(r)),
+        Sub => arith(l.wrapping_sub(r)),
+        Mul => arith(l.wrapping_mul(r)),
+        Div if r != 0 => arith(l / r),
+        Rem if r != 0 => arith(l % r),
+        BitAnd => arith(l & r),
+        BitOr => arith(l | r),
+        BitXor => arith(l ^ r),
+        Shl => arith(l.wrapping_shl((r & 63) as u32)),
+        Shr => arith(l.wrapping_shr((r & 63) as u32)),
+        Eq => boolean(l == r),
+        Ne => boolean(l != r),
+        Lt => boolean(l < r),
+        Le => boolean(l <= r),
+        Gt => boolean(l > r),
+        Ge => boolean(l >= r),
+        LogAnd => boolean(l != 0 && r != 0),
+        LogOr => boolean(l != 0 || r != 0),
+        _ => return None,
+    })
+}
+
+fn fold_float(op: BinOpKind, l: f64, r: f64) -> Option<ExprKind> {
+    use BinOpKind::*;
+    let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
+    Some(match op {
+        Add => ExprKind::FloatLit(l + r),
+        Sub => ExprKind::FloatLit(l - r),
+        Mul => ExprKind::FloatLit(l * r),
+        Div if r != 0.0 => ExprKind::FloatLit(l / r),
+        Eq => boolean(l == r),
+        Ne => boolean(l != r),
+        Lt => boolean(l < r),
+        Le => boolean(l <= r),
+        Gt => boolean(l > r),
+        Ge => boolean(l >= r),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::visit::MutVisitor;
+    use sic_frontend::lexer::Span;
+
+    fn e(k: ExprKind) -> Expr { Expr::new(k, Span::default()) }
+    fn int(n: i64) -> Box<Expr> { Box::new(e(ExprKind::IntLit(n, false))) }
+
+    #[test]
+    fn folds_nested_arithmetic() {
+        // (1 + 2) * 4  =>  12
+        let mut cf = ConstFold::new();
+        let inner = e(ExprKind::BinOp { op: BinOpKind::Add, lhs: int(1), rhs: int(2) });
+        let mut x = e(ExprKind::BinOp { op: BinOpKind::Mul, lhs: Box::new(inner), rhs: int(4) });
+        cf.visit_expr(&mut x);
+        assert!(matches!(x.kind, ExprKind::IntLit(12, _)));
+    }
+
+    #[test]
+    fn folds_comparison_to_bool_int() {
+        let mut cf = ConstFold::new();
+        let mut c = e(ExprKind::BinOp { op: BinOpKind::Lt, lhs: int(5), rhs: int(3) });
+        cf.visit_expr(&mut c);
+        assert!(matches!(c.kind, ExprKind::IntLit(0, _)));
     }
 }

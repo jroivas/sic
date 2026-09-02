@@ -155,6 +155,56 @@ impl Instr {
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
         }
     }
+
+    /// Invoke `f` on every `Val` operand of this instruction, mutably — used by
+    /// optimization passes to substitute operands (e.g. a folded constant).
+    pub fn for_each_val_mut<F: FnMut(&mut Val)>(&mut self, mut f: F) {
+        match self {
+            Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
+            | Instr::ReturnAddress { .. } => {}
+            Instr::Load { ptr, .. } => f(ptr),
+            Instr::Store { val, ptr } => { f(val); f(ptr); }
+            Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
+            Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. } => f(val),
+            Instr::Call { args, .. } => { for a in args { f(a); } }
+            Instr::CallIndirect { fptr, args, .. } => { f(fptr); for a in args { f(a); } }
+            Instr::GetFieldPtr { base, .. } => f(base),
+            Instr::GetElemPtr { base, index, .. } => { f(base); f(index); }
+            Instr::PtrOffset { base, offset, .. } => { f(base); f(offset); }
+            Instr::Select { cond, on_true, on_false, .. } => { f(cond); f(on_true); f(on_false); }
+            Instr::MemCopy { dst, src, .. } => { f(dst); f(src); }
+            Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
+            Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
+            Instr::VaArg { list_ptr, .. } => f(list_ptr),
+        }
+    }
+
+    /// The value id this instruction defines, if any.
+    pub fn dest(&self) -> Option<ValId> {
+        match self {
+            Instr::Alloca { dest, .. } | Instr::Load { dest, .. }
+            | Instr::BinOp { dest, .. } | Instr::UnaryOp { dest, .. }
+            | Instr::Cast { dest, .. } | Instr::Cmp { dest, .. }
+            | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
+            | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. }
+            | Instr::BSwap { dest, .. } | Instr::VaArg { dest, .. }
+            | Instr::ReturnAddress { dest } => Some(*dest),
+            Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
+            Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
+            | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
+            | Instr::DbgVar { .. } => None,
+        }
+    }
+
+    /// Whether removing this instruction (when its result is unused) is safe —
+    /// i.e. it has no side effect. Conservative: loads (possibly volatile MMIO),
+    /// stores, calls, allocas, and var-args are never removable.
+    pub fn is_pure(&self) -> bool {
+        matches!(self,
+            Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. }
+            | Instr::Cast { .. } | Instr::BSwap { .. } | Instr::GetFieldPtr { .. }
+            | Instr::GetElemPtr { .. } | Instr::PtrOffset { .. } | Instr::Select { .. })
+    }
 }
 
 /// Every basic block ends with exactly one terminator.
@@ -175,6 +225,16 @@ pub enum Terminator {
 impl Terminator {
     /// Invoke `f` on every `Val` operand of this terminator.
     pub fn for_each_val<F: FnMut(&Val)>(&self, mut f: F) {
+        match self {
+            Terminator::Ret(Some(v)) => f(v),
+            Terminator::CondJump { cond, .. } => f(cond),
+            Terminator::Switch { val, .. } => f(val),
+            Terminator::Ret(None) | Terminator::Jump(_) | Terminator::Unreachable => {}
+        }
+    }
+
+    /// Invoke `f` on every `Val` operand of this terminator, mutably.
+    pub fn for_each_val_mut<F: FnMut(&mut Val)>(&mut self, mut f: F) {
         match self {
             Terminator::Ret(Some(v)) => f(v),
             Terminator::CondJump { cond, .. } => f(cond),

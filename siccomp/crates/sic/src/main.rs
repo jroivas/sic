@@ -10,7 +10,7 @@ use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
 use sic_frontend::{preprocess_ex, Lexer, Parser, Lowerer};
 use sic_ir::{Backend, display::print_module};
-use sic_opt::ConstFold;
+use sic_opt::PassConfig;
 
 /// Value of a GCC/Clang-style `-f<name>` option.
 #[derive(Debug, Clone, PartialEq)]
@@ -491,10 +491,36 @@ fn resolves_to_self(prog: &str) -> bool {
     }
 }
 
-/// Whether the given `-O` level runs the frontend constant-folding pass — every
-/// level except `-O0`.
-fn opt_runs_constfold(opt: &str) -> bool {
-    opt != "0"
+/// Build the optimization [`PassConfig`] from the `-O` level and any per-pass
+/// `-f<pass>` / `-fno-<pass>` overrides. `-O` chooses a default set; the `-f`
+/// flags then force individual passes on or off (so `-O0 -fconst-fold` enables
+/// just that pass, and `-O2 -fno-dce` runs everything but DCE).
+///
+/// Pass names: `const-fold`, `dead-branch` (AST stage); `ir-fold`, `algebraic`,
+/// `dce` (typed IR stage).
+fn pass_config(args: &Args) -> PassConfig {
+    const ALL: [&str; 5] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce"];
+    let o = args.opt.as_str();
+    let level1 = o != "0";
+    let level2 = matches!(o, "2" | "3" | "s" | "z")
+        || o.parse::<u32>().map_or(false, |n| n >= 2);
+
+    let mut enabled: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if level1 {
+        for p in ["const-fold", "dead-branch", "ir-fold"] { enabled.insert(p.to_string()); }
+    }
+    if level2 {
+        for p in ["algebraic", "dce"] { enabled.insert(p.to_string()); }
+    }
+    // Per-pass overrides win over the -O default.
+    for name in ALL {
+        match args.f_options.get(name) {
+            Some(FOption::Enabled) | Some(FOption::Value(_)) => { enabled.insert(name.to_string()); }
+            Some(FOption::Disabled) => { enabled.remove(name); }
+            None => {}
+        }
+    }
+    PassConfig::new(enabled, args.debug)
 }
 
 /// Map a GCC-style `-O` level to a Cranelift `opt_level` setting.
@@ -654,9 +680,7 @@ fn parse_source(
         eprintln!("{:#?}", tu);
     }
 
-    if opt_runs_constfold(&args.opt) {
-        ConstFold::fold_tu(&mut tu);
-    }
+    sic_opt::run_ast_passes(&mut tu, &pass_config(args));
     Ok((tu, lang))
 }
 
@@ -691,6 +715,9 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .to_string();
     let mut ir_module = lower_tu(&tu, lang, &module_name, args)?;
     ir_module.source_file = Some(path.to_string());
+
+    // Typed IR optimization stage (post-lowering, pre-codegen).
+    sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
 
     if args.debug {
         eprintln!("{}", print_module(&ir_module));
