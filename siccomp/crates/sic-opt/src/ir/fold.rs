@@ -137,9 +137,20 @@ fn fold_unop(op: UnOp, v: &Constant, ty: &Type) -> Option<Constant> {
         BoolNot => Constant::Bool(as_int(v)? == 0),
         // FNeg produces a width-ambiguous float constant — leave to codegen.
         FNeg => return None,
-        Clz => wrap_int((as_uint(v)? as u64).leading_zeros() as i128, ty),
-        Ctz => wrap_int((as_uint(v)? as u64).trailing_zeros() as i128, ty),
-        Popcnt => wrap_int((as_uint(v)? as u64).count_ones() as i128, ty),
+        // Bit-count ops must operate at the operand's actual width, not u64:
+        // clz/ctz of 0 is the type width (matching Cranelift), and clz counts
+        // only within `bits` (clz(u32 1) == 31, not 63).
+        Clz | Ctz | Popcnt => {
+            let bits = ty.int_bits().unwrap_or(64).clamp(1, 64);
+            let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+            let x = (as_uint(v)? as u64) & mask;
+            let r = match op {
+                UnOp::Clz => if x == 0 { bits } else { x.leading_zeros() - (64 - bits) },
+                UnOp::Ctz => if x == 0 { bits } else { x.trailing_zeros() },
+                _ /* Popcnt */ => x.count_ones(),
+            };
+            wrap_int(r as i128, ty)
+        }
     })
 }
 
@@ -207,6 +218,17 @@ mod tests {
                    Some(Constant::Int(44)));
         // unsigned div by zero: not folded
         assert_eq!(fold_binop(BinOp::UDiv, &Constant::UInt(10), &Constant::UInt(0), &Type::u32()), None);
+    }
+
+    #[test]
+    fn bit_count_ops_use_operand_width() {
+        // clz/ctz must be computed at the operand's width, not u64.
+        assert_eq!(fold_unop(UnOp::Clz, &Constant::UInt(0), &Type::u32()), Some(Constant::UInt(32)));
+        assert_eq!(fold_unop(UnOp::Clz, &Constant::UInt(1), &Type::u32()), Some(Constant::UInt(31)));
+        assert_eq!(fold_unop(UnOp::Clz, &Constant::UInt(0), &Type::u64()), Some(Constant::UInt(64)));
+        assert_eq!(fold_unop(UnOp::Ctz, &Constant::UInt(0), &Type::u32()), Some(Constant::UInt(32)));
+        assert_eq!(fold_unop(UnOp::Ctz, &Constant::UInt(0x100), &Type::u32()), Some(Constant::UInt(8)));
+        assert_eq!(fold_unop(UnOp::Popcnt, &Constant::UInt(0xFF), &Type::u32()), Some(Constant::UInt(8)));
     }
 
     #[test]
