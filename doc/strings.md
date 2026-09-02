@@ -10,11 +10,24 @@ around copies only the descriptor, never the bytes (see
 
 ```sic
 string s = "Hello world!";
+auto   t = "inferred";        // t is a `string`
 ```
 
-A double-quoted literal is a C string (`char*`); assigning it to a `string`
-wraps it (a non-owning view of the static bytes). SIC also has Python-style
-**triple-quoted** literals:
+A double-quoted literal **is a `string` by default** — a non-owning view over the
+static bytes (so `auto`, `match`/ternary arms, and returns naturally yield a
+`string`). It **decays to a `char*`** only where a pointer is wanted, decided from
+the target type at compile time:
+
+```sic
+char *p = "raw";              // pointer target → stays a char*
+strlen("abc");                // char* parameter → char*
+printf("%s\n", name);         // C variadic → the string decays to a char*
+char *q = "abcdef" + 2;       // `literal + int` is pointer arithmetic
+```
+
+So you get the native `string` everywhere it's reasonable, and plain `char*` for C
+interop — no explicit conversions. SIC also has Python-style **triple-quoted**
+literals:
 
 ```sic
 // Non-raw: source newlines/indentation collapse to single spaces, escapes decode.
