@@ -103,6 +103,15 @@ fn fold_binop(op: BinOp, l: &Constant, r: &Constant, ty: &Type) -> Option<Consta
     // float arithmetic to codegen (source-level literal folding already happened
     // in the AST `const-fold` pass).
     if matches!(op, FAdd | FSub | FMul | FDiv | FRem) { return None; }
+    // Shift amount, when this op is a shift. A shift by >= the result width is
+    // not a normal fold: sic's bit-field packing emits `shl i1 v, 2` (the i1 type
+    // is a placeholder for a wider storage unit), and wrapping the result to the
+    // narrow type would collapse the shifted bits back down. Leave those to codegen.
+    let bits = ty.int_bits().unwrap_or(64).clamp(1, 64);
+    if matches!(op, Shl | AShr | LShr) {
+        let s = as_uint(r)?;
+        if s >= bits as u128 { return None; }
+    }
     // Integer ops, wrapped to the result width.
     Some(match op {
         Add => wrap_int(as_int(l)?.wrapping_add(as_int(r)?), ty),
@@ -111,20 +120,19 @@ fn fold_binop(op: BinOp, l: &Constant, r: &Constant, ty: &Type) -> Option<Consta
         And => wrap_int(as_int(l)? & as_int(r)?, ty),
         Or  => wrap_int(as_int(l)? | as_int(r)?, ty),
         Xor => wrap_int(as_int(l)? ^ as_int(r)?, ty),
-        Shl => wrap_int(as_int(l)?.wrapping_shl((as_uint(r)? & 63) as u32), ty),
+        Shl => wrap_int(as_int(l)?.wrapping_shl(as_uint(r)? as u32), ty),
         SDiv => { let b = as_int(r)?; if b == 0 { return None; } wrap_int(as_int(l)?.wrapping_div(b), ty) }
         SRem => { let b = as_int(r)?; if b == 0 { return None; } wrap_int(as_int(l)?.wrapping_rem(b), ty) }
         UDiv => { let b = as_uint(r)?; if b == 0 { return None; } wrap_int((as_uint(l)? / b) as i128, ty) }
         URem => { let b = as_uint(r)?; if b == 0 { return None; } wrap_int((as_uint(l)? % b) as i128, ty) }
         // Logical shift right operates on the unsigned bit pattern at width.
         LShr => {
-            let bits = ty.int_bits().unwrap_or(64).clamp(1, 64);
             let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
             let v = (as_uint(l)? as u64) & mask;
-            wrap_int((v >> ((as_uint(r)? & 63) as u32)) as i128, ty)
+            wrap_int((v >> (as_uint(r)? as u32)) as i128, ty)
         }
         // Arithmetic shift right respects the signed value.
-        AShr => wrap_int((as_int(l)? as i64 >> ((as_uint(r)? & 63) as u32)) as i128, ty),
+        AShr => wrap_int((as_int(l)? as i64 >> (as_uint(r)? as u32)) as i128, ty),
         _ => return None, // Rotl/Rotr and any float op handled above
     })
 }
