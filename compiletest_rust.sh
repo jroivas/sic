@@ -5,6 +5,7 @@ MYDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 TESTDIR="$MYDIR/tests"
 SIC="${SIC:-$MYDIR/siccomp/target/debug/sic}"
 CC="${CC:-cc}"
+CFLAGS=${CFLAGS:-}
 
 outfolder="${1:-/tmp/sic_rust_tests}"
 mkdir -p "$outfolder"
@@ -26,7 +27,7 @@ dotest() {
     # sic-only syntax, e.g. a `.sic` file that must fail because it uses a
     # reserved Rust-style type alias as an identifier).
     if [ -f "$test.xfail" ]; then
-        if "$SIC" -c "$test" -o "$obj_file" $flags 2>/tmp/sic_err_$base; then
+        if "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
             echo "FAIL $base: expected compile failure but it compiled"
             return 1
         fi
@@ -34,7 +35,7 @@ dotest() {
         return 0
     fi
 
-    if ! "$SIC" -c "$test" -o "$obj_file" $flags 2>/tmp/sic_err_$base; then
+    if ! "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
         echo "FAIL $base: compile error"
         cat /tmp/sic_err_$base
         return 1
