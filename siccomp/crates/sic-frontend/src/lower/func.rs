@@ -89,6 +89,23 @@ fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
     }
 }
 
+/// A short human-readable name for a type, for type-mismatch diagnostics.
+fn type_desc(t: &Type) -> String {
+    match t {
+        Type::Void => "void".into(),
+        Type::Bool => "bool".into(),
+        Type::Int { bits, signed } => format!("{}{}", if *signed { "i" } else { "u" }, bits),
+        Type::Float32 => "float".into(),
+        Type::Float64 => "double".into(),
+        Type::Float80 => "long double".into(),
+        Type::Pointer(_) => "a pointer".into(),
+        Type::Array { .. } => "an array".into(),
+        Type::Struct(s) => format!("struct {}", s.name.as_deref().unwrap_or("<anon>")),
+        Type::Union(u) => format!("union {}", u.name.as_deref().unwrap_or("<anon>")),
+        Type::Function(_) => "a function".into(),
+    }
+}
+
 /// The source symbol for a binary operator, for enum-arithmetic diagnostics.
 fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
     use crate::ast::BinOpKind::*;
@@ -516,6 +533,50 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// sic type safety: reject `return v;` when `v`'s type has no implicit conversion
+    /// to the declared return type — an aggregate returned as an unrelated type, or a
+    /// pointer/integer mismatch. Numeric↔numeric and pointer↔pointer stay implicit,
+    /// and sic's own aggregates (string/bigint/fixed/tuple/…) keep their conversions.
+    pub(crate) fn check_return_convertible(&mut self, ret_ty: &Type, e: &Expr) -> Result<()> {
+        if !self.is_sic() { return Ok(()); }
+        let from = match self.infer_expr_type(e) { Ok(t) => t, Err(_) => return Ok(()) };
+        let to = ret_ty;
+        if from == *to || matches!(from, Type::Void) || matches!(to, Type::Void) { return Ok(()); }
+        fn special(t: &Type) -> bool {
+            super::types::is_sic_string(t) || super::types::is_tuple(t) || super::types::is_va_array(t)
+                || super::types::is_any(t) || super::types::is_type_info(t) || super::types::is_u8char(t)
+                || super::types::is_u8char_arr(t) || super::types::is_bigint(t) || super::types::is_fixed(t)
+        }
+        // sic-native aggregates convert on their own terms — leave them alone.
+        if special(&from) || special(to) { return Ok(()); }
+        // Tagged enums are built from variant constructors (`return None;`,
+        // `return Ok(5);`), which don't infer as the enum type — exempt them.
+        if self.is_tagged_enum_struct(&from) || self.is_tagged_enum_struct(to) { return Ok(()); }
+        let plain_agg = |t: &Type| matches!(t, Type::Struct(_) | Type::Union(_));
+        let numeric = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool
+            | Type::Float32 | Type::Float64 | Type::Float80);
+        let is_ptr = |t: &Type| matches!(t, Type::Pointer(_) | Type::Array { .. });
+        let sp = &e.span;
+        let mismatch = || CompileError::at(
+            format!("cannot return `{}` as `{}` — no implicit conversion",
+                type_desc(&from), type_desc(to)),
+            sp.file.clone(), sp.line, sp.col);
+        // A plain aggregate can only become the same aggregate (== handled above).
+        // Pointer↔aggregate is `check_ptr_value_mismatch`'s job — skip it here.
+        if (plain_agg(&from) || plain_agg(to)) && !is_ptr(&from) && !is_ptr(to) {
+            return Err(mismatch());
+        }
+        // pointer ↔ integer is not implicit (except a literal `0`/`NULL` → pointer).
+        if numeric(&from) && !matches!(from, Type::Bool) && matches!(to, Type::Pointer(_)) {
+            let zero = matches!(&e.kind, ExprKind::IntLit(0, _)) || matches!(&e.kind, ExprKind::Nullptr);
+            if !zero { return Err(mismatch()); }
+        }
+        if matches!(from, Type::Pointer(_)) && numeric(to) && !matches!(to, Type::Bool) {
+            return Err(mismatch());
+        }
+        Ok(())
+    }
+
     /// sic strict enum typing (sic.md §"Enums"): reject a value flowing into an
     /// `enum <dest>` slot whose nominal type is a plain `int` or a *different* enum.
     /// An unknown source is allowed (no false positives). `site` names the context
@@ -932,10 +993,12 @@ impl<'m> FuncCtx<'m> {
                     self.check_enum_dest(&dest, e, "returned as")?;
                 }
                 // sic type safety: reject returning a value/pointer that mismatches
-                // the declared return type (`File*` fn returning a `File` value).
+                // the declared return type (`File*` fn returning a `File` value), or
+                // a value with no implicit conversion to the return type at all.
                 if let Some(e) = val.as_ref() {
                     let rt = self.ret_ty.clone();
                     self.check_ptr_value_mismatch(&rt, e)?;
+                    self.check_return_convertible(&rt, e)?;
                 }
                 // Evaluate the return value BEFORE running cleanups (the value
                 // must be computed while the about-to-be-destroyed locals are

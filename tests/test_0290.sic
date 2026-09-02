@@ -1,0 +1,16 @@
+// sic: return-type conversions that ARE allowed stay allowed.
+enum Opt { None2, Some2(int) };
+long widen()      { return 5; }          // int → long (numeric)
+char *nullp()     { return 0; }          // 0 → pointer
+void *anyp()      { char *p = "x"; return p; }   // pointer → pointer
+Opt tagged()      { return Some2(7); }   // tagged-enum constructor
+string s()        { return "hi"; }       // native string from a literal
+
+int main() {
+    if ((int)widen() != 5) return 1;
+    if (nullp() != 0) return 2;
+    if (anyp() == 0) return 3;
+    match (tagged()) { Some2(v): if (v != 7) return 4; None2: return 5; }
+    if (s().size != 2) return 6;
+    return 0;
+}

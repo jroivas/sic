@@ -1,0 +1,5 @@
+// sic (sic.md §"...): returning a value with no implicit conversion to the return
+// type is a compile error — here a struct value from an `int` function.
+struct A { int x; };
+int f() { struct A a; a.x = 1; return a; }
+int main() { return f(); }

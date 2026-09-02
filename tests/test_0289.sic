@@ -1,0 +1,3 @@
+// sic: a non-zero integer has no implicit conversion to a pointer return type.
+char *f() { return 5; }
+int main() { return 0; }
