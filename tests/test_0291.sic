@@ -1,0 +1,26 @@
+// sic atomics (sic.md §"Atomics"): atomic-qualified integers support read/store,
+// += -= &= |= ^= ++ --, .swap and .cas; atomic pointers support read/store/.swap/.cas.
+int main() {
+    atomic int a = 5;
+    a += 2; a -= 1; a |= 8; a &= 12; a ^= 4;   // 5->7->6->14->12->8
+    if (a != 8) return 1;
+    a++; ++a;                                    // 10
+    int p = a++;                                 // p=10, a=11
+    int q = --a;                                 // q=10, a=10
+    if (p != 10 || q != 10 || a != 10) return 2;
+
+    a = 5;
+    if (!a.cas(5, 10)) return 3;                 // ok, a=10
+    if (a.cas(5, 99)) return 4;                  // fails, a stays 10
+    if (a != 10) return 5;
+    if (a.swap(20) != 10) return 6;              // old 10, a=20
+    if (a != 20) return 7;
+
+    int x = 1, y = 2;
+    atomic(int*) ptr = &x;
+    if ((int*)ptr != &x) return 8;               // atomic load
+    if (!ptr.cas(&x, &y)) return 9;              // ptr = &y
+    if (ptr.swap(&x) != &y) return 10;           // old &y, ptr=&x
+    if ((int*)ptr != &x) return 11;
+    return 42;
+}

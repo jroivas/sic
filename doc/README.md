@@ -32,9 +32,11 @@ unchanged; the improvements are opt-in and live in `.sic` files.
    concatenation, tuple packing/unpacking.
 9. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
    `Iterator<T>`, and the range-`for`.
-10. [Modules](modules.md) — `module`/`import`, building a module, the `.smod`
+10. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
+    `.swap`/`.cas`, and atomic pointers.
+11. [Modules](modules.md) — `module`/`import`, building a module, the `.smod`
     manifest, and static vs. dynamic linking.
-11. [Standard library](standard-library.md) — `import std;` and
+12. [Standard library](standard-library.md) — `import std;` and
     `Fmt`/`Print`/`Println`.
 
 ## Design goals
