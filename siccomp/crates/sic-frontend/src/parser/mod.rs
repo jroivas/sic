@@ -471,7 +471,25 @@ impl Parser {
                 TokenKind::Const    => { quals.push(TypeQual::Const);    self.advance(); }
                 TokenKind::Volatile => { quals.push(TypeQual::Volatile); self.advance(); }
                 TokenKind::Restrict => { quals.push(TypeQual::Restrict); self.advance(); }
-                TokenKind::Atomic   => { quals.push(TypeQual::Atomic);   self.advance(); }
+                TokenKind::Atomic   => {
+                    self.advance();
+                    if self.at(TokenKind::LParen) {
+                        // C11 `_Atomic(type-name)` / sic `atomic(T)`: the whole
+                        // type sits inside the parens and is marked atomic. This
+                        // is how an atomic *pointer* is spelled unambiguously —
+                        // `atomic(int*)` (the pointer is atomic), vs `atomic int*`
+                        // (pointer to an atomic int).
+                        self.advance(); // (
+                        let (inner_base, _) = self.parse_decl_specifiers()?;
+                        let (_, inner_qt) = self.parse_declarator(inner_base)?;
+                        self.expect(TokenKind::RParen)?;
+                        base = Some(inner_qt.ty);
+                        quals.extend(inner_qt.qualifiers);
+                        quals.push(TypeQual::Atomic);
+                    } else {
+                        quals.push(TypeQual::Atomic);
+                    }
+                }
                 // `_Alignas(N)` / `alignas(N)` / `_Alignas(type)`.
                 TokenKind::Alignas  => {
                     self.advance();

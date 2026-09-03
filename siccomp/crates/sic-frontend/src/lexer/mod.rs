@@ -571,6 +571,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `tuple` — built-in tuple type / pack / unpack (sic.md §"Tuples");
             // ordinary identifier in C.
             "tuple" => return TokenKind::Tuple,
+            // `atomic` — atomic type qualifier (sic.md §"Atomics"), the sic
+            // spelling of C11 `_Atomic`; an ordinary identifier in C.
+            "atomic" => return TokenKind::Atomic,
             _ => {}
         }
     }
