@@ -160,6 +160,14 @@ impl fmt::Display for Instr {
                 }
                 write!(f, ")")
             }
+            Instr::AtomicLoad { dest, ptr, ty } =>
+                write!(f, "  %{} = atomic_load {} {}", dest.0, ty, ptr),
+            Instr::AtomicStore { ptr, val, ty } =>
+                write!(f, "  atomic_store {} {}, {}", ty, val, ptr),
+            Instr::AtomicRmw { dest, op, ptr, val, ty } =>
+                write!(f, "  %{} = atomic_rmw {:?} {} {}, {}", dest.0, op, ty, ptr, val),
+            Instr::AtomicCas { dest, ptr, expected, desired, ty } =>
+                write!(f, "  %{} = atomic_cas {} {}, {}, {}", dest.0, ty, ptr, expected, desired),
             Instr::SrcLine(line) => write!(f, "  .loc {}", line),
             Instr::DbgVar { name, ty, slot, is_param } => write!(
                 f, "  .dbgvar {} {} %{}{}", ty, name, slot.0,

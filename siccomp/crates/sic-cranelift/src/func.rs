@@ -285,6 +285,50 @@ fn emit_instr(
             builder.ins().store(MemFlags::new(), sv, pv, 0);
         }
 
+        // Atomic operations (sic `atomic` types). All sequentially consistent —
+        // Cranelift lowers these to the locked/fenced x86 sequences.
+        Instr::AtomicLoad { dest, ptr, ty } => {
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let v = builder.ins().atomic_load(cl_ty, MemFlags::new(), pv);
+            val_map.insert(dest.0, v);
+        }
+        Instr::AtomicStore { ptr, val, ty } => {
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let sv = coerce(sv, cl_ty, builder, ptr_ty);
+            builder.ins().atomic_store(MemFlags::new(), sv, pv);
+        }
+        Instr::AtomicRmw { dest, op, ptr, val, ty } => {
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let xv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let xv = coerce(xv, cl_ty, builder, ptr_ty);
+            let clop = match op {
+                AtomicOp::Add  => cir::AtomicRmwOp::Add,
+                AtomicOp::Sub  => cir::AtomicRmwOp::Sub,
+                AtomicOp::And  => cir::AtomicRmwOp::And,
+                AtomicOp::Or   => cir::AtomicRmwOp::Or,
+                AtomicOp::Xor  => cir::AtomicRmwOp::Xor,
+                AtomicOp::Xchg => cir::AtomicRmwOp::Xchg,
+            };
+            let old = builder.ins().atomic_rmw(cl_ty, MemFlags::new(), clop, pv, xv);
+            val_map.insert(dest.0, old);
+        }
+        Instr::AtomicCas { dest, ptr, expected, desired, ty } => {
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let ev = rval(expected, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let ev = coerce(ev, cl_ty, builder, ptr_ty);
+            let dv = rval(desired, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
+            let dv = coerce(dv, cl_ty, builder, ptr_ty);
+            // Returns the observed old value; success is old == expected (the
+            // frontend does that comparison for `.cas() -> bool`).
+            let old = builder.ins().atomic_cas(MemFlags::new(), pv, ev, dv);
+            val_map.insert(dest.0, old);
+        }
+
         Instr::BinOp { dest, op, lhs, rhs, ty } => {
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);

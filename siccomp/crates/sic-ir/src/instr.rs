@@ -54,6 +54,13 @@ pub enum CastOp {
     BoolToInt, // bool (i1) → integer
 }
 
+/// Atomic read-modify-write operation (sic `atomic` types). Maps directly to the
+/// backend's atomic-rmw ops; all are single lock-free instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicOp {
+    Add, Sub, And, Or, Xor, Xchg,
+}
+
 /// A single IR instruction (does not include terminators).
 #[derive(Debug, Clone)]
 pub enum Instr {
@@ -112,6 +119,17 @@ pub enum Instr {
     /// Byte-swap an integer value.
     BSwap { dest: ValId, val: Val, ty: Type },
 
+    /// Atomic load of `ty` from `ptr` (sequentially consistent).
+    AtomicLoad { dest: ValId, ptr: Val, ty: Type },
+    /// Atomic store of `val` (typed `ty`) to `ptr` (sequentially consistent).
+    AtomicStore { ptr: Val, val: Val, ty: Type },
+    /// Atomic read-modify-write: `dest` = old value at `ptr`; memory becomes
+    /// `old <op> val`. `ty` is the value width.
+    AtomicRmw { dest: ValId, op: AtomicOp, ptr: Val, val: Val, ty: Type },
+    /// Atomic compare-and-swap: if `*ptr == expected`, store `desired`. `dest`
+    /// receives the *old* value (success ⇔ dest == expected). `ty` is the width.
+    AtomicCas { dest: ValId, ptr: Val, expected: Val, desired: Val, ty: Type },
+
     /// Variable-argument: va_start, va_arg, va_end.
     VaStart { list_ptr: Val },
     VaArg   { dest: ValId, list_ptr: Val, ty: Type },
@@ -153,6 +171,10 @@ impl Instr {
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
+            Instr::AtomicLoad { ptr, .. } => f(ptr),
+            Instr::AtomicStore { ptr, val, .. } => { f(ptr); f(val); }
+            Instr::AtomicRmw { ptr, val, .. } => { f(ptr); f(val); }
+            Instr::AtomicCas { ptr, expected, desired, .. } => { f(ptr); f(expected); f(desired); }
         }
     }
 
@@ -176,6 +198,10 @@ impl Instr {
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
+            Instr::AtomicLoad { ptr, .. } => f(ptr),
+            Instr::AtomicStore { ptr, val, .. } => { f(ptr); f(val); }
+            Instr::AtomicRmw { ptr, val, .. } => { f(ptr); f(val); }
+            Instr::AtomicCas { ptr, expected, desired, .. } => { f(ptr); f(expected); f(desired); }
         }
     }
 
@@ -188,9 +214,12 @@ impl Instr {
             | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
             | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. }
             | Instr::BSwap { dest, .. } | Instr::VaArg { dest, .. }
+            | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. }
+            | Instr::AtomicCas { dest, .. }
             | Instr::ReturnAddress { dest } => Some(*dest),
             Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
             Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
+            | Instr::AtomicStore { .. }
             | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
             | Instr::DbgVar { .. } => None,
         }
