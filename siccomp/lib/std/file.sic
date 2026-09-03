@@ -23,6 +23,7 @@ enum FileStatus {
     IO,
     InvalidFileHandle,
     ReadError,
+    WriteError,
 };
 
 
@@ -79,6 +80,28 @@ FileStatus Read(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
         if (res == EBADF)
             return FileStatus::InvalidFileHandle;
         return FileStatus::ReadError;
+    }
+
+    return FileStatus::Success;
+}
+
+FileStatus Write(File *f, u64 offset, Buffer::Buffer *buf)
+{
+    ssize_t res;
+
+    if (!f)
+        return FileStatus::InvalidObject;
+
+    res = write(f->fd, buf->data, buf->size);
+    if (res < 0)
+    {
+        res = errno;
+        /* FIXME Better error handling */
+        if (res == EIO)
+            return FileStatus::IO;
+        if (res == EBADF)
+            return FileStatus::InvalidFileHandle;
+        return FileStatus::WriteError;
     }
 
     return FileStatus::Success;
