@@ -15,6 +15,8 @@ pub struct Lowerer {
     pub module: Module,
     /// Maps name → (type, value pointing to storage)
     pub globals_map: HashMap<String, (Type, GlobalRef)>,
+    /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
+    pub atomic_globals: std::collections::HashSet<String>,
     /// Known enum variant values
     pub enum_consts: HashMap<String, i64>,
     /// Named struct/union types
@@ -159,6 +161,7 @@ impl Lowerer {
         Lowerer {
             module: Module::new(name),
             globals_map: HashMap::new(),
+            atomic_globals: std::collections::HashSet::new(),
             enum_consts: HashMap::new(),
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
@@ -1496,6 +1499,12 @@ impl Lowerer {
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        // sic `atomic` global (sic.md §"Atomics"): record it so accesses lower to
+        // atomic ops (top-level qualifier only — see lower_local_decl).
+        if self.sic && d.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) {
+            func::FuncCtx::check_atomic_type(&ir_ty, &d.span)?;
+            self.atomic_globals.insert(d.name.clone());
+        }
         // An array dimension that `lower_type` couldn't fold (it has no global
         // symbol table) is re-evaluated with the global-aware evaluator, so
         // `T a[ARRAY_SIZE(g)]` — `sizeof(g)/sizeof(g[0])` over another global —

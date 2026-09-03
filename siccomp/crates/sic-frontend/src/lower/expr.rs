@@ -11,6 +11,9 @@ struct LValue {
     /// pointed to by `ptr`, width in bits, whether the field is signed). Reads
     /// and writes go through masked load/store.
     bitfield: Option<BitField>,
+    /// sic `atomic` (sic.md §"Atomics"): the location holds an atomic object, so
+    /// reads/stores/RMW go through the atomic IR ops.
+    atomic: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -71,7 +74,7 @@ static AES_INV_SBOX: [u8; 256] = [
 ];
 
 impl LValue {
-    fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None } }
+    fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None, atomic: false } }
 }
 
 impl<'m> FuncCtx<'m> {
@@ -455,6 +458,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Nullptr => Ok(Constant::null()),
 
             ExprKind::Ident(name) => {
+                let atomic = self.is_atomic_name(name);
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {
                         let ty = ty.clone();
@@ -463,7 +467,11 @@ impl<'m> FuncCtx<'m> {
                             return Ok(Val::Local(vid));
                         }
                         let dest = self.alloc_val();
-                        self.push_instr(Instr::Load { dest, ptr: Val::Local(vid), ty });
+                        if atomic {
+                            self.push_instr(Instr::AtomicLoad { dest, ptr: Val::Local(vid), ty });
+                        } else {
+                            self.push_instr(Instr::Load { dest, ptr: Val::Local(vid), ty });
+                        }
                         Ok(Val::Local(dest))
                     }
                     Some(LookupResult::Global(ty, gref)) => {
@@ -473,7 +481,11 @@ impl<'m> FuncCtx<'m> {
                             return Ok(Val::Global(gref));
                         }
                         let dest = self.alloc_val();
-                        self.push_instr(Instr::Load { dest, ptr: Val::Global(gref), ty });
+                        if atomic {
+                            self.push_instr(Instr::AtomicLoad { dest, ptr: Val::Global(gref), ty });
+                        } else {
+                            self.push_instr(Instr::Load { dest, ptr: Val::Global(gref), ty });
+                        }
                         Ok(Val::Local(dest))
                     }
                     // A bare tagged-enum variant is its integer discriminant here;
@@ -3077,6 +3089,39 @@ impl<'m> FuncCtx<'m> {
 
         let lv = self.lower_lvalue(lhs)?;
 
+        // sic `atomic` (sic.md §"Atomics"): a compound assignment on an atomic
+        // lvalue is a single atomic read-modify-write. Plain `a = v` falls through
+        // to the normal store path (store_lvalue emits an atomic store). Only
+        // `+= -= &= |= ^=` are allowed, and none on an atomic pointer.
+        if self.is_sic() && lv.atomic {
+            if let Some(bin) = op {
+                let aop = match bin {
+                    BinOpKind::Add => AtomicOp::Add,
+                    BinOpKind::Sub => AtomicOp::Sub,
+                    BinOpKind::BitAnd => AtomicOp::And,
+                    BinOpKind::BitOr => AtomicOp::Or,
+                    BinOpKind::BitXor => AtomicOp::Xor,
+                    _ => return Err(CompileError::at(
+                        format!("`{}=` is not an atomic operation — atomics allow only \
+                                 `= += -= &= |= ^=` (use an explicit `.cas()` loop otherwise)",
+                                super::func::op_symbol(bin)),
+                        lhs.span.file.clone(), lhs.span.line, lhs.span.col)),
+                };
+                if matches!(lv.ty, Type::Pointer(_)) {
+                    return Err(CompileError::at(
+                        "no arithmetic on an atomic pointer — only load, store, `.swap`, `.cas`".to_string(),
+                        lhs.span.file.clone(), lhs.span.line, lhs.span.col));
+                }
+                let rv = self.lower_expr(rhs)?;
+                let rv = self.coerce(rv, &lv.ty)?;
+                let old = self.alloc_val();
+                self.push_instr(Instr::AtomicRmw { dest: old, op: aop, ptr: lv.ptr.clone(), val: rv.clone(), ty: lv.ty.clone() });
+                // The expression value of `a op= v` is the new value; recompute it
+                // from the atomically-read old value (the atomic effect is done).
+                return self.emit_binop(bin, Val::Local(old), rv);
+            }
+        }
+
         // sic tuple variable reassignment `u = <tuple>` (sic.md §"Tuples"): rebind
         // the pointer — retain the new shared block, release the old one (a tuple
         // is immutable, but the *variable* may be re-pointed). Retain-before-
@@ -3351,7 +3396,11 @@ impl<'m> FuncCtx<'m> {
             return Ok(Val::Local(res));
         }
         let dest = self.alloc_val();
-        self.push_instr(Instr::Load { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+        if lv.atomic {
+            self.push_instr(Instr::AtomicLoad { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+        } else {
+            self.push_instr(Instr::Load { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+        }
         Ok(Val::Local(dest))
     }
 
@@ -3362,7 +3411,11 @@ impl<'m> FuncCtx<'m> {
             return self.store_bitfield(&lv.ptr, &lv.ty, bf, val);
         }
         let coerced = self.coerce(val, &lv.ty)?;
-        self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr.clone() });
+        if lv.atomic {
+            self.push_instr(Instr::AtomicStore { ptr: lv.ptr.clone(), val: coerced.clone(), ty: lv.ty.clone() });
+        } else {
+            self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr.clone() });
+        }
         Ok(coerced)
     }
 
@@ -3395,18 +3448,45 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_pre_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(inner)?;
-        let cur = self.load_lvalue(&lv)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+        // sic atomic `++a`/`--a` (sic.md §"Atomics"): one atomic RMW; yields the
+        // new value. Rejected on an atomic pointer (no arithmetic).
+        if self.is_sic() && lv.atomic {
+            let old = self.atomic_incdec(&lv, inc, &inner.span)?;
+            return self.emit_binop(op, Val::Local(old), Constant::int(1));
+        }
+        let cur = self.load_lvalue(&lv)?;
         let result = self.emit_binop(op, cur, Constant::int(1))?;
         self.store_lvalue(&lv, result)
     }
 
     fn lower_post_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
         let lv = self.lower_lvalue(inner)?;
-        let old = self.load_lvalue(&lv)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+        // sic atomic `a++`/`a--`: one atomic RMW; yields the old value.
+        if self.is_sic() && lv.atomic {
+            let old = self.atomic_incdec(&lv, inc, &inner.span)?;
+            return Ok(Val::Local(old));
+        }
+        let old = self.load_lvalue(&lv)?;
         let result = self.emit_binop(op, old.clone(), Constant::int(1))?;
         self.store_lvalue(&lv, result)?;
+        Ok(old)
+    }
+
+    /// Atomic `++`/`--`: emit a single `AtomicRmw` of ±1, returning the ValId of
+    /// the old value. Errors on an atomic pointer (arithmetic is disallowed).
+    fn atomic_incdec(&mut self, lv: &LValue, inc: bool, sp: &crate::lexer::Span) -> Result<ValId> {
+        if matches!(lv.ty, Type::Pointer(_)) {
+            return Err(CompileError::at(
+                "no arithmetic on an atomic pointer — only load, store, `.swap`, `.cas`".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let aop = if inc { AtomicOp::Add } else { AtomicOp::Sub };
+        let old = self.alloc_val();
+        self.push_instr(Instr::AtomicRmw {
+            dest: old, op: aop, ptr: lv.ptr.clone(), val: Constant::int(1), ty: lv.ty.clone(),
+        });
         Ok(old)
     }
 
@@ -4656,6 +4736,48 @@ impl<'m> FuncCtx<'m> {
         }))
     }
 
+    /// sic atomic pseudo-methods (sic.md §"Atomics") on an atomic lvalue `base`:
+    ///   `base.swap(v)`      → atomic exchange, yields the previous value
+    ///   `base.cas(exp, des)`→ compare-and-swap, yields `bool` success
+    fn lower_atomic_method(&mut self, base: &Expr, name: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let lv = self.lower_lvalue(base)?;
+        let ty = lv.ty.clone();
+        match name {
+            "swap" => {
+                if args.len() != 1 {
+                    return Err(CompileError::at(
+                        "`.swap` takes one argument: the value to store".to_string(),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+                let v = self.lower_expr(&args[0])?;
+                let v = self.coerce(v, &ty)?;
+                let old = self.alloc_val();
+                self.push_instr(Instr::AtomicRmw { dest: old, op: AtomicOp::Xchg, ptr: lv.ptr.clone(), val: v, ty });
+                Ok(Val::Local(old))
+            }
+            "cas" => {
+                if args.len() != 2 {
+                    return Err(CompileError::at(
+                        "`.cas` takes two arguments: `.cas(expected, desired)`".to_string(),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+                let exp = self.lower_expr(&args[0])?;
+                let exp = self.coerce(exp, &ty)?;
+                let des = self.lower_expr(&args[1])?;
+                let des = self.coerce(des, &ty)?;
+                let old = self.alloc_val();
+                self.push_instr(Instr::AtomicCas {
+                    dest: old, ptr: lv.ptr.clone(), expected: exp.clone(), desired: des, ty: ty.clone(),
+                });
+                // Success ⇔ the observed old value equals `expected`.
+                let ok = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: ok, op: CmpOp::IEq, lhs: Val::Local(old), rhs: exp, ty });
+                Ok(Val::Local(ok))
+            }
+            _ => unreachable!("atomic method dispatch"),
+        }
+    }
+
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
         // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
@@ -4706,6 +4828,27 @@ impl<'m> FuncCtx<'m> {
             {
                 let en = self.lowerer.variant_enum.get(name).cloned().unwrap();
                 return self.construct_enum(&en, name, args, sp);
+            }
+        }
+
+        // sic atomic methods (sic.md §"Atomics"): `a.swap(v)` and `a.cas(e, d)`,
+        // allowed only on an atomic lvalue (never on an ordinary value).
+        if self.is_sic() {
+            let recv = match &func_expr.kind {
+                ExprKind::Field { base, name } | ExprKind::Arrow { base, name }
+                    if name == "cas" || name == "swap" => Some((base.as_ref(), name.as_str())),
+                _ => None,
+            };
+            if let Some((base, name)) = recv {
+                if matches!(&base.kind, ExprKind::Ident(n) if self.is_atomic_name(n)) {
+                    return self.lower_atomic_method(base, name, args, sp);
+                }
+                // `.cas`/`.swap` on a non-atomic is an error (they only exist on atomics).
+                if matches!(&base.kind, ExprKind::Ident(_)) {
+                    return Err(CompileError::at(
+                        format!("`.{}` is only available on an `atomic` value", name),
+                        sp.file.clone(), sp.line, sp.col));
+                }
             }
         }
 
@@ -5742,14 +5885,15 @@ impl<'m> FuncCtx<'m> {
                 self.lower_lvalue(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() })
             }
             ExprKind::Ident(name) => {
+                let atomic = self.is_atomic_name(name);
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {
                         let ty = ty.clone();
-                        Ok(LValue::plain(Val::Local(vid), ty))
+                        Ok(LValue { atomic, ..LValue::plain(Val::Local(vid), ty) })
                     }
                     Some(LookupResult::Global(ty, gref)) => {
                         let ty = ty.clone();
-                        Ok(LValue::plain(Val::Global(gref), ty))
+                        Ok(LValue { atomic, ..LValue::plain(Val::Global(gref), ty) })
                     }
                     _ => Err(CompileError::at(
                         format!("'{}' is not an lvalue", name),
@@ -5919,7 +6063,7 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetFieldPtr {
             dest, base: base_ptr, field_idx: 0, struct_name: None, byte_offset, result_ty,
         });
-        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield })
+        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic: false })
     }
 
     // ─── Type inference ───────────────────────────────────────────────────────

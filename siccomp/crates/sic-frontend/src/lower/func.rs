@@ -107,7 +107,7 @@ fn type_desc(t: &Type) -> String {
 }
 
 /// The source symbol for a binary operator, for enum-arithmetic diagnostics.
-fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
+pub(crate) fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
     use crate::ast::BinOpKind::*;
     match op {
         Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
@@ -187,6 +187,9 @@ pub struct FuncCtx<'m> {
     /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
     /// ARE reassigned / incremented (and so cannot be safely checked).
     pub fat_locals: std::collections::HashSet<String>,
+    /// sic `atomic` locals (sic.md §"Atomics"): names whose declared type is
+    /// atomic-qualified at top level, so loads/stores/RMW use the atomic IR ops.
+    pub atomic_locals: std::collections::HashSet<String>,
     pub moved_names: std::collections::HashSet<String>,
     /// sic deferred tuple locals (`tuple t;` with no initializer, sic.md
     /// §"Tuples"): not yet allocated — the concrete type is fixed by the first
@@ -247,6 +250,7 @@ impl<'m> FuncCtx<'m> {
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
+            atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
@@ -1259,6 +1263,27 @@ impl<'m> FuncCtx<'m> {
         self.pending_gotos.retain(|(l, _)| l != label);
     }
 
+    /// Whether `name` refers to an atomic-qualified local or global.
+    pub(crate) fn is_atomic_name(&self, name: &str) -> bool {
+        self.atomic_locals.contains(name) || self.lowerer.atomic_globals.contains(name)
+    }
+
+    /// An `atomic` object must be a lock-free size: a 1/2/4/8-byte integer, a
+    /// bool, or a pointer. Anything else is rejected.
+    pub(crate) fn check_atomic_type(ty: &Type, sp: &crate::lexer::Span) -> Result<()> {
+        let ok = match ty {
+            Type::Pointer(_) | Type::Bool => true,
+            Type::Int { bits, .. } => matches!(bits, 8 | 16 | 32 | 64),
+            _ => false,
+        };
+        if ok { Ok(()) } else {
+            Err(CompileError::at(
+                "`atomic` requires a 1/2/4/8-byte integer, bool, or pointer type",
+                sp.file.clone(), sp.line, sp.col,
+            ))
+        }
+    }
+
     fn lower_local_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
             Decl::Var { base_ty, declarators, .. } => {
@@ -1282,6 +1307,15 @@ impl<'m> FuncCtx<'m> {
                 let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
                 let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
+                    // sic `atomic` (sic.md §"Atomics"): a top-level atomic-qualified
+                    // declarator becomes an atomic local. `d.ty.qualifiers` is the
+                    // TOP-level type, so `atomic int a` is atomic but `atomic int *p`
+                    // (pointer to atomic int) is not — its atomicity is on the pointee.
+                    if self.is_sic() && d.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) {
+                        let ity = self.lower_type(&d.ty)?;
+                        Self::check_atomic_type(&ity, &d.span)?;
+                        self.atomic_locals.insert(d.name.clone());
+                    }
                     // A block-scope `extern T x;` refers to the file-scope/other-TU
                     // global, NOT a new local: register it as a global (import if
                     // needed) and bind the name to that global, rather than a stack
