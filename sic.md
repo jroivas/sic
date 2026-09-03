@@ -322,10 +322,29 @@ Is internally reorganized by type size:
         u8  val3;
     }
 
-Types define the primary sorting, and the order is kept inside the type.
+The reordering follows a fixed, standardized rule set:
 
-To prevent this, use the packed struct with ` __attribute__((__packed__))`
-or new ` __attribute__((__order__))` attribute to keep the original order.
+1. **Primary key: storage size**, largest first. Each field is placed by its
+   `sizeof`, so wider fields lead and padding is minimized.
+2. **Secondary key: declaration order.** Fields of *equal* size keep the order
+   they were written in — the sort is stable — so `u32 a; u32 b;` always keeps
+   `a` before `b`, no matter how many fields sit between them.
+3. **A union member sorts by its storage size**, which is the size of its largest
+   element (rule 1 applied to the union).
+4. **The size is overridable.** A struct can pin its declared order (see below),
+   and because the physical order can differ from the source, the chosen
+   permutation is recorded in the module manifest so consumers see the same
+   layout.
+5. **Only the size is compared** — never signedness, kind, or any other property.
+   `i32` and `u32` are interchangeable for ordering purposes.
+
+Reordering is skipped entirely (the C layout is kept exactly as written) for a
+`packed` struct, any struct containing a bit-field, and any struct using an
+`aligned(n)` override on a member or on the type itself.
+
+To prevent reordering explicitly, use the packed struct with
+` __attribute__((__packed__))` or the new ` __attribute__((__order__))`
+attribute to keep the original declaration order.
 
 # Memory safety
 

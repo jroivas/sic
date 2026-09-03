@@ -268,6 +268,40 @@ impl StructType {
     pub fn field_bit_offset(&self, idx: usize, ptr_size: u32) -> u32 {
         self.layout_full(ptr_size).1[idx]
     }
+
+    /// sic struct reordering (sic.md §"Struct reordering"): compute the physical
+    /// field placement that minimizes padding, per a fixed, standardized rule set:
+    ///
+    ///   1. **Primary key** — the field's storage size (`size_of`), largest first.
+    ///   2. **Secondary key** — declaration order: fields of equal size keep their
+    ///      written order (a stable sort), so `u32 a; u32 b;` always lays out `a`
+    ///      before `b`, no matter what fields sit between them.
+    ///   3. A **union** field sorts by its storage size, i.e. its largest member
+    ///      (this is just rule 1 applied to `Type::Union::size_of`).
+    ///   4. **Only the size is compared** — never signedness, kind, or any other
+    ///      property (`i32` and `u32` are interchangeable for ordering).
+    ///
+    /// Returns `Some(perm)` — a permutation of field indices — only when it actually
+    /// changes the order. Returns `None` when the layout must stay exactly as
+    /// written: a `packed` struct, any bit-field, any member `aligned(n)`, or a
+    /// type-level `aligned(n)` (those forms pin the C layout). The reordering is
+    /// also *overridable* per struct (`__order__`) and only applies in sic mode;
+    /// that policy gating lives in the caller, and the chosen permutation is carried
+    /// in module manifests so a consumer sees the same layout.
+    pub fn compute_size_order(&self, ptr_size: u32) -> Option<Vec<usize>> {
+        if self.packed
+            || !self.bitfields.is_empty()
+            || !self.field_aligns.is_empty()
+            || self.min_align.is_some()
+        {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..self.fields.len()).collect();
+        // Stable sort on size only (descending) → rules 1, 2, 4; rule 3 falls out
+        // of `Union::size_of` returning the largest member's size.
+        order.sort_by(|&a, &b| self.fields[b].1.size_of(ptr_size).cmp(&self.fields[a].1.size_of(ptr_size)));
+        if order.iter().enumerate().any(|(i, &o)| i != o) { Some(order) } else { None }
+    }
 }
 
 fn round_up_bits(pos: u64, align: u64) -> u64 {
@@ -327,5 +361,69 @@ pub fn usual_arith_conv(a: &Type, b: &Type) -> Type {
         (Type::Pointer(_), _) => a.clone(),
         (_, Type::Pointer(_)) => b.clone(),
         _ => a.clone(),
+    }
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    fn i(bits: u32) -> Type { Type::Int { bits, signed: true } }
+    fn u(bits: u32) -> Type { Type::Int { bits, signed: false } }
+
+    fn st(fields: Vec<(&str, Type)>) -> StructType {
+        StructType::plain(Some("t".into()), fields.into_iter().map(|(n, t)| (n.into(), t)).collect(), false)
+    }
+
+    // Rule 1: largest storage size first.
+    #[test]
+    fn primary_key_is_size_largest_first() {
+        let s = st(vec![("a", i(32)), ("b", i(64)), ("c", i(8)), ("d", i(32))]);
+        assert_eq!(s.compute_size_order(8), Some(vec![1, 0, 3, 2]));
+    }
+
+    // Rule 2: equal-size fields keep declaration order (stable), across gaps.
+    #[test]
+    fn ties_keep_declaration_order() {
+        // a,b,c all size 4; big is size 8 and sits between them.
+        let s = st(vec![("a", i(32)), ("big", i(64)), ("b", i(32)), ("c", i(32))]);
+        assert_eq!(s.compute_size_order(8), Some(vec![1, 0, 2, 3]));
+        // Already sorted equal-size fields → no reorder at all.
+        let s2 = st(vec![("a", u(32)), ("b", u(32))]);
+        assert_eq!(s2.compute_size_order(8), None);
+    }
+
+    // Rule 3: a union field sorts by its largest member.
+    #[test]
+    fn union_sorts_by_largest_member() {
+        let uni = Type::Union(UnionType {
+            name: None,
+            fields: vec![("x".into(), i(16)), ("y".into(), i(64))],
+            field_aligns: Vec::new(),
+            min_align: None,
+        });
+        // union (8) should lead the i32.
+        let s = st(vec![("small", i(32)), ("un", uni)]);
+        assert_eq!(s.compute_size_order(8), Some(vec![1, 0]));
+    }
+
+    // Rule 5: only size is compared — signedness is irrelevant, so an i32/u32
+    // pair is already ordered and never swapped.
+    #[test]
+    fn signedness_is_ignored() {
+        let s = st(vec![("a", i(32)), ("b", u(32))]);
+        assert_eq!(s.compute_size_order(8), None);
+    }
+
+    // Override forms pin the C layout: no reordering.
+    #[test]
+    fn packed_and_aligned_are_not_reordered() {
+        let mut packed = st(vec![("a", i(8)), ("b", i(64))]);
+        packed.packed = true;
+        assert_eq!(packed.compute_size_order(8), None);
+
+        let mut min_aligned = st(vec![("a", i(8)), ("b", i(64))]);
+        min_aligned.min_align = Some(16);
+        assert_eq!(min_aligned.compute_size_order(8), None);
     }
 }

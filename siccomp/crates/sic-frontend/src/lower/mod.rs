@@ -690,30 +690,24 @@ impl Lowerer {
                 bitfields.push(bw);
                 field_aligns.push(f.align);
             }
-            // sic struct reordering (sic.md §"Struct reordering"): place fields
-            // largest-first (stable) to minimize padding, unless the struct opts
-            // out (`packed`/`__order__`) or has bit-fields / member `aligned` /
-            // type `aligned` overrides (whose layout we leave exactly as written).
-            let layout_order = if self.sic && !s.keep_order && !any_bitfield
-                && !any_align && s.align.is_none()
-            {
-                let ps = self.ptr_size;
-                let mut order: Vec<usize> = (0..ir_fields.len()).collect();
-                order.sort_by(|&a, &b| ir_fields[b].1.size_of(ps).cmp(&ir_fields[a].1.size_of(ps)));
-                // Only bother if it actually changes the order.
-                if order.iter().enumerate().any(|(i, &o)| i != o) { Some(order) } else { None }
-            } else {
-                None
-            };
-            let ir_ty = Type::Struct(StructType {
+            // sic struct reordering (sic.md §"Struct reordering"): place fields to
+            // minimize padding via the standardized size rule. The concrete sort
+            // lives in `StructType::compute_size_order` (which also declines to
+            // reorder packed / bit-field / `aligned` structs); here we only apply
+            // the policy gates: sic mode and the per-struct `__order__` opt-out.
+            let mut st = StructType {
                 name: Some(name.clone()),
                 fields: ir_fields,
                 packed: false,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
                 min_align: s.align,
-                layout_order,
-            });
+                layout_order: None,
+            };
+            if self.sic && !s.keep_order {
+                st.layout_order = st.compute_size_order(self.ptr_size);
+            }
+            let ir_ty = Type::Struct(st);
             self.register_type_name(name.clone(), ir_ty);
             if self.sic && !name.starts_with("__") && !self.module_defined_types.contains(name) {
                 self.module_defined_types.push(name.clone());
