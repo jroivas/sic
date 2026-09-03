@@ -1,0 +1,43 @@
+// sic struct reordering (sic.md §"Struct reordering"): per-struct order modes.
+// order_c keeps the C layout; order_sic sorts by size; order(...) is an explicit
+// field-name permutation; order_random(seed) is a deterministic shuffle.
+#include <stddef.h>
+
+struct __attribute__((order_c))          CKeep  { u8 a; u64 b; u8 c; };
+struct __attribute__((order_sic))        SizeR  { u8 a; u64 b; u8 c; };
+struct __attribute__((order(c, a, b)))   Custom { u8 a; u64 b; u8 c; };
+struct __attribute__((order_random(99))) Rnd    { u8 a; u16 b; u32 c; u64 d; u8 e; };
+
+int main() {
+    // C order: a@0, b@8, c@16 — nothing moved, padded to 24.
+    if (__builtin_offsetof(struct CKeep, a) != 0)  return 1;
+    if (__builtin_offsetof(struct CKeep, b) != 8)  return 2;
+    if (sizeof(struct CKeep) != 24)                return 3;
+
+    // Size order: the u64 leads, then the two u8 (declaration order among ties).
+    if (__builtin_offsetof(struct SizeR, b) != 0)  return 4;
+    if (__builtin_offsetof(struct SizeR, a) != 8)  return 5;
+    if (__builtin_offsetof(struct SizeR, c) != 9)  return 6;
+    if (sizeof(struct SizeR) != 16)                return 7;
+
+    // Custom c, a, b: c@0, a@1, then b aligned to 8.
+    if (__builtin_offsetof(struct Custom, c) != 0) return 8;
+    if (__builtin_offsetof(struct Custom, a) != 1) return 9;
+    if (__builtin_offsetof(struct Custom, b) != 8) return 10;
+    if (sizeof(struct Custom) != 16)               return 11;
+
+    // Random with a pinned seed is deterministic: a real permutation of all five
+    // fields, each offset in range and distinct, covering the whole object.
+    size_t offs[5] = {
+        __builtin_offsetof(struct Rnd, a), __builtin_offsetof(struct Rnd, b),
+        __builtin_offsetof(struct Rnd, c), __builtin_offsetof(struct Rnd, d),
+        __builtin_offsetof(struct Rnd, e),
+    };
+    for (int i = 0; i < 5; i++) {
+        if (offs[i] >= sizeof(struct Rnd)) return 12;
+        for (int j = i + 1; j < 5; j++)
+            if (offs[i] == offs[j]) return 13;   // no two fields overlap at offset 0+
+    }
+
+    return 42;
+}

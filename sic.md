@@ -338,13 +338,44 @@ The reordering follows a fixed, standardized rule set:
 5. **Only the size is compared** — never signedness, kind, or any other property.
    `i32` and `u32` are interchangeable for ordering purposes.
 
-Reordering is skipped entirely (the C layout is kept exactly as written) for a
-`packed` struct, any struct containing a bit-field, and any struct using an
-`aligned(n)` override on a member or on the type itself.
+The size-based layout above is the **sic** ordering mode. There are four modes,
+selectable per struct with an attribute, or globally with a flag:
 
-To prevent reordering explicitly, use the packed struct with
-` __attribute__((__packed__))` or the new ` __attribute__((__order__))`
-attribute to keep the original declaration order.
+| Mode | Per-struct attribute | Meaning |
+|------|----------------------|---------|
+| sic | `__attribute__((order_sic))` | size-based reorder (the rules above) |
+| C | `__attribute__((order_c))` — or bare `__order__`, or `packed` | keep the declaration order (the C layout) |
+| custom | `__attribute__((order(a, b, c)))` | an explicit permutation of the field *names* |
+| random | `__attribute__((order_random))` / `order_random(seed)` | randomize the layout (hardening) |
+
+A per-struct attribute always wins. With no attribute, a struct follows the global
+default set by the compiler flag:
+
+    -fstruct-order=sic       # size-based reorder for every struct (the .sic default)
+    -fstruct-order=c         # keep declaration order everywhere (the C default)
+    -fstruct-order=random    # randomize every struct
+
+**Custom order** names every field exactly once; a missing, unknown, or duplicated
+field name is a compile error (so a typo can't silently drop a field).
+
+**Random order** is a `randstruct`-style hardening measure: the layout is shuffled
+so code cannot depend on field offsets. It is deterministic in a *build seed* that
+is drawn once per compiler invocation and shared by every translation unit in that
+build — so all units agree on offsets (a differing layout across units would be a
+broken ABI) — while a later build, with a fresh seed, produces a different layout.
+Pin the seed for reproducible or split compile+link builds:
+
+    -fstruct-order=random -fstruct-order-seed=12345   # or per struct: order_random(12345)
+
+`-d` prints the chosen build seed. Because the resulting permutation (for any mode)
+is written into the module manifest, a consumer that `import`s the module always
+sees the exact same layout the producer chose.
+
+Whatever the requested mode, reordering is skipped entirely (the C layout is kept
+exactly as written) for a `packed` struct, any struct containing a bit-field, and
+any struct using an `aligned(n)` override on a member or on the type itself — those
+forms pin the C layout. Reordering also applies to *named* structs; an anonymous
+inline struct keeps its declaration order.
 
 # Memory safety
 

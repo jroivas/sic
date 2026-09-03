@@ -685,6 +685,58 @@ fn parse_source(
 }
 
 /// Lower a parsed translation unit to an IR module.
+/// The global struct-ordering default from `-fstruct-order=sic|c|random`. Absent
+/// → `Default` (the language default: Sic for `.sic`, C for C). A per-struct
+/// `order_*` attribute overrides this. (sic.md §"Struct reordering")
+fn struct_order_default(args: &Args) -> sic_frontend::ast::StructOrder {
+    use sic_frontend::ast::StructOrder;
+    match args.f_options.get("struct-order") {
+        Some(FOption::Value(v)) => match v.as_str() {
+            "sic" => StructOrder::Sic,
+            "c" | "C" => StructOrder::C,
+            "random" => StructOrder::Random(None),
+            other => {
+                eprintln!("sic: warning: unknown -fstruct-order={} (use sic|c|random); ignoring", other);
+                StructOrder::Default
+            }
+        },
+        _ => StructOrder::Default,
+    }
+}
+
+/// The build-wide seed for `order_random` layouts. `-fstruct-order-seed=N` pins it
+/// (decimal or `0x…`); otherwise a fresh seed is drawn once per process so every
+/// TU in this invocation shares it (a differing layout across TUs would break the
+/// ABI) while a later build gets a different layout.
+fn struct_order_seed(args: &Args) -> u64 {
+    use std::sync::OnceLock;
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        if let Some(FOption::Value(v)) = args.f_options.get("struct-order-seed") {
+            let s = v.trim();
+            let parsed = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                Some(h) => u64::from_str_radix(h, 16).ok(),
+                None => s.parse::<u64>().ok(),
+            };
+            if let Some(n) = parsed { return n; }
+            eprintln!("sic: warning: invalid -fstruct-order-seed={} (want an integer); using a random seed", v);
+        }
+        // Entropy without extra crates: mix wall-clock nanos, pid, and an address.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let pid = std::process::id() as u64;
+        let addr = &nanos as *const u64 as u64;
+        let mut z = nanos ^ pid.rotate_left(32) ^ addr.rotate_left(17);
+        // splitmix64 finalizer for a well-distributed seed.
+        z = z.wrapping_add(0x9e3779b97f4a7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    })
+}
+
 fn lower_tu(
     tu: &sic_frontend::ast::TranslationUnit,
     lang: sic_frontend::Lang,
@@ -702,6 +754,9 @@ fn lower_tu(
     lowerer.set_include_dirs(args.includes.clone());
     lowerer.set_module_dirs(module_search_dirs());
     lowerer.set_target_triple(target_triple());
+    // sic struct reordering (sic.md §"Struct reordering"): global default mode and
+    // the build-wide random seed. Per-struct `order_*` attributes override the mode.
+    lowerer.set_struct_order(struct_order_default(args), struct_order_seed(args));
     lowerer.lower(tu).map_err(|e| format!("{}", e).into())
 }
 
@@ -944,6 +999,11 @@ fn def_file_for(manifest: &sic_frontend::ModuleManifest) -> String {
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.debug && !args.f_options.is_empty() {
         eprintln!("-f options: {:?}", args.f_options);
+    }
+    // sic struct reordering: surface the build's random seed so a `random` layout
+    // can be reproduced later with `-fstruct-order-seed=<N>` (sic.md §"Struct reordering").
+    if args.debug && matches!(struct_order_default(args), sic_frontend::ast::StructOrder::Random(_)) {
+        eprintln!("struct-order: random, build seed = {}", struct_order_seed(args));
     }
 
     // ── Build a folder module (--emit-module DIR) ───────────────────────────────

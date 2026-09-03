@@ -72,6 +72,24 @@ pub enum AstType {
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
 
+/// sic struct field-ordering mode (sic.md §"Struct reordering"), set per struct by
+/// an `order_*` attribute and defaulted globally by `-fstruct-order`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StructOrder {
+    /// No `order_*` attribute: follow the global `-fstruct-order` default (which
+    /// itself falls back to `Sic` for `.sic` sources and `C` for C sources).
+    Default,
+    /// `order_sic`: size-based reorder to minimize padding.
+    Sic,
+    /// `order_c` / `__order__` / `packed`: keep declaration order (the C layout).
+    C,
+    /// `order_random[(seed)]`: randomize the layout (randstruct-style hardening).
+    /// `Some(seed)` pins it; `None` uses the process-wide build seed.
+    Random(Option<u64>),
+    /// `order(a, b, c)`: an explicit permutation of the field names.
+    Custom(Vec<String>),
+}
+
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: Option<String>,
@@ -80,9 +98,10 @@ pub struct StructDef {
     /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
     /// struct {...} T QEMU_ALIGNED(N)`). Raises the whole type's alignment.
     pub align: Option<u32>,
-    /// `packed` or the sic `__order__` attribute — keep declaration field order
-    /// (disables sic struct reordering, sic.md §"Struct reordering").
-    pub keep_order: bool,
+    /// sic struct field ordering (sic.md §"Struct reordering"): the mode requested
+    /// by this struct's `order_*` attribute, or `Default` to follow the global
+    /// `-fstruct-order` default. `packed` forces `C` (declaration order).
+    pub order: StructOrder,
     /// sic member functions (sic.md §"Memory safety"): the constructor `S()`,
     /// destructor `~S()`, and methods `Ret m(S* self){…}` declared in the body.
     /// Empty for C structs and for bodiless `struct S` references.

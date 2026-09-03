@@ -23,6 +23,14 @@ pub struct Lowerer {
     pub struct_types: HashMap<String, Type>,
     /// Target pointer size in bytes
     pub ptr_size: u32,
+    /// sic struct reordering (sic.md §"Struct reordering"): the global default mode
+    /// from `-fstruct-order` (a per-struct `order_*` attribute overrides it).
+    /// `StructOrder::Default` means "follow the language default" (Sic for `.sic`,
+    /// C for C sources).
+    pub struct_order_default: crate::ast::StructOrder,
+    /// Process-wide seed for `order_random` layouts, shared by every TU in one
+    /// build so they agree on field offsets (a `randstruct`-style build seed).
+    pub struct_order_seed: u64,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -165,6 +173,8 @@ impl Lowerer {
             enum_consts: HashMap::new(),
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
+            struct_order_default: crate::ast::StructOrder::Default,
+            struct_order_seed: 0,
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),
             repl_main: true,
@@ -206,6 +216,26 @@ impl Lowerer {
     /// Enable SIC-language semantics (`.sic` sources). See [`Lowerer::sic`].
     pub fn set_sic(&mut self, on: bool) {
         self.sic = on;
+    }
+
+    /// Set the global struct-ordering default (`-fstruct-order`) and the build-wide
+    /// random seed (`-fstruct-order-seed`). See sic.md §"Struct reordering".
+    pub fn set_struct_order(&mut self, default: crate::ast::StructOrder, seed: u64) {
+        self.struct_order_default = default;
+        self.struct_order_seed = seed;
+    }
+
+    /// Resolve a struct's requested order mode against the global default and the
+    /// language default (never returns `Default`).
+    fn resolve_struct_order(&self, attr: &crate::ast::StructOrder) -> crate::ast::StructOrder {
+        use crate::ast::StructOrder;
+        match attr {
+            StructOrder::Default => match &self.struct_order_default {
+                StructOrder::Default => if self.sic { StructOrder::Sic } else { StructOrder::C },
+                global => global.clone(),
+            },
+            explicit => explicit.clone(),
+        }
     }
 
     /// Directories searched for `module_<name>.smod` manifests when resolving
@@ -690,11 +720,11 @@ impl Lowerer {
                 bitfields.push(bw);
                 field_aligns.push(f.align);
             }
-            // sic struct reordering (sic.md §"Struct reordering"): place fields to
-            // minimize padding via the standardized size rule. The concrete sort
-            // lives in `StructType::compute_size_order` (which also declines to
-            // reorder packed / bit-field / `aligned` structs); here we only apply
-            // the policy gates: sic mode and the per-struct `__order__` opt-out.
+            // sic struct reordering (sic.md §"Struct reordering"): choose the
+            // physical field order per the struct's mode (its `order_*` attribute,
+            // or the global `-fstruct-order` default). The concrete permutations
+            // live on `StructType`; the override layout forms (packed / bit-field /
+            // `aligned`) are declined there and stay in declaration order.
             let mut st = StructType {
                 name: Some(name.clone()),
                 fields: ir_fields,
@@ -704,9 +734,19 @@ impl Lowerer {
                 min_align: s.align,
                 layout_order: None,
             };
-            if self.sic && !s.keep_order {
-                st.layout_order = st.compute_size_order(self.ptr_size);
-            }
+            use crate::ast::StructOrder;
+            st.layout_order = match self.resolve_struct_order(&s.order) {
+                StructOrder::C => None,
+                StructOrder::Sic => st.compute_size_order(self.ptr_size),
+                StructOrder::Random(seed) =>
+                    st.compute_random_order(seed.unwrap_or(self.struct_order_seed)),
+                StructOrder::Custom(names) => st.compute_custom_order(&names)
+                    .map_err(|m| crate::CompileError::at(
+                        &format!("struct `{}`: {}", name, m),
+                        s.span.file.clone(), s.span.line, s.span.col,
+                    ))?,
+                StructOrder::Default => unreachable!("resolve_struct_order never returns Default"),
+            };
             let ir_ty = Type::Struct(st);
             self.register_type_name(name.clone(), ir_ty);
             if self.sic && !name.starts_with("__") && !self.module_defined_types.contains(name) {
@@ -1222,7 +1262,7 @@ impl Lowerer {
                     ty: QualType::new(AstType::Pointer {
                         base: Box::new(QualType::new(AstType::Struct(StructDef {
                             name: Some(sname.clone()), fields: None, align: None,
-                            keep_order: false, methods: vec![], private: false, span: sp.clone(),
+                            order: crate::ast::StructOrder::Default, methods: vec![], private: false, span: sp.clone(),
                         }))),
                         quals: vec![],
                     }),

@@ -269,6 +269,17 @@ impl StructType {
         self.layout_full(ptr_size).1[idx]
     }
 
+    /// Whether this struct may have its fields physically reordered at all. The
+    /// "override" layout forms pin the exact C layout, so reordering (any mode:
+    /// sic / custom / random) is refused for them: a `packed` struct, any
+    /// bit-field, any member `aligned(n)`, or a type-level `aligned(n)`.
+    pub fn reorderable(&self) -> bool {
+        !self.packed
+            && self.bitfields.is_empty()
+            && self.field_aligns.is_empty()
+            && self.min_align.is_none()
+    }
+
     /// sic struct reordering (sic.md §"Struct reordering"): compute the physical
     /// field placement that minimizes padding, per a fixed, standardized rule set:
     ///
@@ -289,11 +300,7 @@ impl StructType {
     /// that policy gating lives in the caller, and the chosen permutation is carried
     /// in module manifests so a consumer sees the same layout.
     pub fn compute_size_order(&self, ptr_size: u32) -> Option<Vec<usize>> {
-        if self.packed
-            || !self.bitfields.is_empty()
-            || !self.field_aligns.is_empty()
-            || self.min_align.is_some()
-        {
+        if !self.reorderable() {
             return None;
         }
         let mut order: Vec<usize> = (0..self.fields.len()).collect();
@@ -301,6 +308,87 @@ impl StructType {
         // of `Union::size_of` returning the largest member's size.
         order.sort_by(|&a, &b| self.fields[b].1.size_of(ptr_size).cmp(&self.fields[a].1.size_of(ptr_size)));
         if order.iter().enumerate().any(|(i, &o)| i != o) { Some(order) } else { None }
+    }
+
+    /// sic struct reordering, *custom* mode (`__attribute__((order(a, b, c)))`):
+    /// place fields in the exact order named. `names` must be a permutation of the
+    /// struct's field names — every field named exactly once — or this is an error
+    /// (a typo or a forgotten field would silently drop it, so we reject instead).
+    /// Returns `Ok(Some(perm))` when it changes the order, `Ok(None)` when the
+    /// order already matches declaration order or the struct is not reorderable.
+    pub fn compute_custom_order(&self, names: &[String]) -> Result<Option<Vec<usize>>, String> {
+        let n = self.fields.len();
+        if names.len() != n {
+            return Err(format!(
+                "order(...) lists {} field(s) but the struct has {}",
+                names.len(), n
+            ));
+        }
+        let mut order = Vec::with_capacity(n);
+        let mut used = vec![false; n];
+        for want in names {
+            let idx = self.fields.iter().position(|(fname, _)| fname == want)
+                .ok_or_else(|| format!("order(...): unknown field `{}`", want))?;
+            if used[idx] {
+                return Err(format!("order(...): field `{}` listed more than once", want));
+            }
+            used[idx] = true;
+            order.push(idx);
+        }
+        // Names validated even when we ultimately can't reorder (packed/bitfield/…).
+        if !self.reorderable() {
+            return Ok(None);
+        }
+        if order.iter().enumerate().any(|(i, &o)| i != o) { Ok(Some(order)) } else { Ok(None) }
+    }
+
+    /// sic struct reordering, *random* mode (`__attribute__((order_random))` /
+    /// `-fstruct-order=random`): a hardening shuffle à la Linux `randstruct`. The
+    /// permutation is deterministic in `(seed, struct name, field count)` so every
+    /// translation unit in a build that shares the seed lays the struct out
+    /// identically (a differing layout across TUs would be a broken ABI), while a
+    /// build with a fresh seed gets a different layout.
+    pub fn compute_random_order(&self, seed: u64) -> Option<Vec<usize>> {
+        let n = self.fields.len();
+        if !self.reorderable() || n < 2 {
+            return None;
+        }
+        // Mix the seed with a stable hash of the struct's name so distinct structs
+        // shuffle independently but reproducibly (not Rust's randomized SipHash).
+        let name = self.name.as_deref().unwrap_or("");
+        let mut rng = SplitMix64::new(seed ^ fnv1a64(name.as_bytes()));
+        let mut order: Vec<usize> = (0..n).collect();
+        // Fisher–Yates.
+        for i in (1..n).rev() {
+            let j = (rng.next() % (i as u64 + 1)) as usize;
+            order.swap(i, j);
+        }
+        if order.iter().enumerate().any(|(i, &o)| i != o) { Some(order) } else { None }
+    }
+}
+
+/// FNV-1a 64-bit — a small, stable byte hash (independent of Rust's randomized
+/// `HashMap` hasher) so random struct ordering is reproducible across processes.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// SplitMix64 — a tiny, fast, dependency-free PRNG for the randstruct-style
+/// layout shuffle. Not cryptographic; layout hardening does not need it to be.
+struct SplitMix64 { state: u64 }
+impl SplitMix64 {
+    fn new(seed: u64) -> Self { SplitMix64 { state: seed } }
+    fn next(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
     }
 }
 
@@ -421,9 +509,43 @@ mod reorder_tests {
         let mut packed = st(vec![("a", i(8)), ("b", i(64))]);
         packed.packed = true;
         assert_eq!(packed.compute_size_order(8), None);
+        assert_eq!(packed.compute_custom_order(&["b".into(), "a".into()]).unwrap(), None);
+        assert_eq!(packed.compute_random_order(1), None);
 
         let mut min_aligned = st(vec![("a", i(8)), ("b", i(64))]);
         min_aligned.min_align = Some(16);
         assert_eq!(min_aligned.compute_size_order(8), None);
+    }
+
+    // Custom order: exact named permutation.
+    #[test]
+    fn custom_order_by_name() {
+        let s = st(vec![("a", i(32)), ("b", i(32)), ("c", i(32))]);
+        assert_eq!(s.compute_custom_order(&["c".into(), "a".into(), "b".into()]).unwrap(), Some(vec![2, 0, 1]));
+        // Identity list → no reorder.
+        assert_eq!(s.compute_custom_order(&["a".into(), "b".into(), "c".into()]).unwrap(), None);
+    }
+
+    #[test]
+    fn custom_order_validation() {
+        let s = st(vec![("a", i(32)), ("b", i(32))]);
+        assert!(s.compute_custom_order(&["a".into()]).is_err());               // wrong count
+        assert!(s.compute_custom_order(&["a".into(), "z".into()]).is_err());   // unknown field
+        assert!(s.compute_custom_order(&["a".into(), "a".into()]).is_err());   // duplicate
+    }
+
+    // Random order: deterministic in (seed, name), differs across seeds.
+    #[test]
+    fn random_order_is_seed_deterministic() {
+        let s = st(vec![("a", i(8)), ("b", i(8)), ("c", i(8)), ("d", i(8)), ("e", i(8))]);
+        let p1 = s.compute_random_order(12345);
+        let p2 = s.compute_random_order(12345);
+        assert_eq!(p1, p2, "same seed → same layout (ABI stability across TUs)");
+        // A valid permutation of all indices.
+        let mut sorted = p1.clone().unwrap();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2, 3, 4]);
+        // A different seed generally yields a different layout.
+        assert_ne!(s.compute_random_order(12345), s.compute_random_order(999));
     }
 }

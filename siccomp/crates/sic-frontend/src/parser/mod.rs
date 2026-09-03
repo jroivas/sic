@@ -29,9 +29,10 @@ pub struct Parser {
     /// `__attribute__((packed))` seen in the most recent attribute scan — used to
     /// size a `packed` enum's underlying type to the smallest that fits.
     pending_packed: bool,
-    /// `__attribute__((__order__))` seen in the most recent attribute scan — sic
-    /// opt-out that keeps a struct's declaration field order (no reordering).
-    pending_order: bool,
+    /// sic struct-ordering attribute seen in the most recent attribute scan
+    /// (`order_sic` / `order_c` / bare `__order__` / `order_random[(N)]` /
+    /// `order(a,b,c)`). `None` when no `order_*` attribute was present.
+    pending_order: Option<crate::ast::StructOrder>,
     /// `__attribute__((aligned(N)))` seen in the most recent attribute scan — the
     /// largest N. Applied to the next struct/union member to raise its (and the
     /// aggregate's) alignment (QEMU's `FPReg` union → 16-aligned `CPUX86State`).
@@ -64,7 +65,7 @@ impl Parser {
                 generic_enums.insert(n.to_string());
             }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: false, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -692,9 +693,9 @@ impl Parser {
     fn parse_struct_or_union(&mut self, is_union: bool) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // consume 'struct'/'union'
-        // Track packed/`__order__` for THIS struct only (sic reordering opt-out).
+        // Track packed / `order_*` for THIS struct only (sic reordering control).
         self.pending_packed = false;
-        self.pending_order = false;
+        self.pending_order = None;
         // A leading `struct __attribute__((aligned(N))) Tag {...}` raises the whole
         // type's alignment. Capture N here, before member parsing clears the slot.
         self.pending_aligned = None;
@@ -745,7 +746,14 @@ impl Parser {
         } else {
             None
         };
-        let keep_order = self.pending_packed || self.pending_order;
+        // `packed` pins the C layout (declaration order) and wins over any
+        // `order_*` attribute; otherwise use the requested mode, or `Default`
+        // (follow the global `-fstruct-order`) when none was given.
+        let order = if self.pending_packed {
+            crate::ast::StructOrder::C
+        } else {
+            self.pending_order.take().unwrap_or(crate::ast::StructOrder::Default)
+        };
 
         // sic (C++-style): a `struct`/`union` *definition* also makes its tag usable
         // as a bare type name (`BufferData *p`, not just `struct BufferData *p`), so
@@ -760,7 +768,7 @@ impl Parser {
         if is_union {
             Ok(AstType::Union(UnionDef { name, fields, align: type_align, private, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, keep_order, methods, private, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, order, methods, private, span: sp }))
         }
     }
 
@@ -2710,8 +2718,40 @@ impl Parser {
                         }
                     } else if name == "packed" || name == "__packed__" {
                         self.pending_packed = true;
+                    } else if name == "order_sic" || name == "__order_sic__" {
+                        self.pending_order = Some(crate::ast::StructOrder::Sic);
+                    } else if name == "order_c" || name == "__order_c__" {
+                        self.pending_order = Some(crate::ast::StructOrder::C);
+                    } else if name == "order_random" || name == "__order_random__" {
+                        // Optional numeric seed pins the shuffle: `order_random(42)`.
+                        let seed = if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            self.tokens.get(i + 2).and_then(|t| {
+                                let s = t.text.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '_');
+                                match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                                    Some(h) => u64::from_str_radix(h, 16).ok(),
+                                    None => s.parse::<u64>().ok(),
+                                }
+                            })
+                        } else { None };
+                        self.pending_order = Some(crate::ast::StructOrder::Random(seed));
                     } else if name == "order" || name == "__order__" {
-                        self.pending_order = true;
+                        // `order(a, b, c)` = explicit field-name order; bare `order`
+                        // (or an empty list) = keep the declaration (C) order.
+                        let mut mode = crate::ast::StructOrder::C;
+                        if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            if let Some(rp) = self.matching_rparen(i + 1) {
+                                let mut names = Vec::new();
+                                for k in (i + 2)..rp {
+                                    if matches!(self.tokens[k].kind, TokenKind::Ident | TokenKind::TypeName) {
+                                        names.push(self.tokens[k].text.clone());
+                                    }
+                                }
+                                if !names.is_empty() {
+                                    mode = crate::ast::StructOrder::Custom(names);
+                                }
+                            }
+                        }
+                        self.pending_order = Some(mode);
                     } else if name == "aligned" || name == "__aligned__" {
                         // `aligned(EXPR)`: force alignment to the constant EXPR
                         // (e.g. `16`, `sizeof(void*)`, `2 * sizeof(void *)` as in

@@ -1,0 +1,4 @@
+// sic struct reordering: order(...) must name every field exactly once — an
+// unknown field name is a compile error (sic.md §"Struct reordering").
+struct __attribute__((order(a, nope))) B { int a; int b; };
+int main() { return sizeof(struct B); }
