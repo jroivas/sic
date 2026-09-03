@@ -244,6 +244,11 @@ pub enum Decl {
         ret_ty: QualType,
         params: Vec<Param>,
         variadic: bool,
+        /// sic generic functions (sic.md §"Generics"): the `<T, U>` type-parameter
+        /// list from `T add<T>(T a, T b)`. Empty for an ordinary function. A
+        /// non-empty list makes this a *template* — kept un-lowered and
+        /// monomorphized per concrete call, not emitted directly.
+        type_params: Vec<String>,
         body: Option<Vec<Stmt>>,   // None = prototype only
         storage: Option<StorageClass>,
         /// `inline` keyword present. An inline definition may be omitted when

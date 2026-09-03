@@ -10,6 +10,13 @@ pub struct Parser {
     /// sic generic-enum names (`enum Option<T> {…}`), so `Option<int>` in a type
     /// position parses as an instantiation rather than a `<` comparison.
     generic_enums: HashSet<String>,
+    /// sic generic functions (sic.md §"Generics"): names of functions declared with
+    /// a `<T,…>` type-parameter list, discovered in a pre-scan so a later call can
+    /// be recognized as a generic instantiation.
+    generic_fns: HashSet<String>,
+    /// Type-parameter list captured while parsing the current function declarator,
+    /// consumed when the `Decl::Func` is built.
+    pending_type_params: Vec<String>,
     source_file: String,
     lang: Lang,
     /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
@@ -65,7 +72,19 @@ impl Parser {
                 generic_enums.insert(n.to_string());
             }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
+        // sic generic functions (sic.md §"Generics"): pre-scan for `name<T,…>(`
+        // headers so their type parameters parse as types (the `<T>` list follows
+        // the return type / name in the source) and calls can be recognized later.
+        let mut generic_fns = HashSet::new();
+        let mut generic_type_params = HashSet::new();
+        if lang == Lang::Sic {
+            scan_generic_fns(&tokens, &mut generic_fns, &mut generic_type_params);
+            // Make each type parameter parse as a type name everywhere in the unit,
+            // so `T` in the return/parameter types (written before the `<T>` list)
+            // is recognized. All existing type checks consult `typedefs`.
+            for p in &generic_type_params { typedefs.insert(p.clone()); }
+        }
+        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -291,6 +310,7 @@ impl Parser {
                 self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
+                    type_params: std::mem::take(&mut self.pending_type_params),
                     body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
@@ -302,13 +322,16 @@ impl Parser {
                 self.func_vars.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
+                    type_params: std::mem::take(&mut self.pending_type_params),
                     body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             } else {
                 // Prototype
                 self.eat(TokenKind::Semi);
+                self.pending_type_params.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
+                    type_params: Vec::new(),
                     body: None, storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
@@ -999,6 +1022,21 @@ impl Parser {
     }
 
     /// Parse a declarator, returning (name, fully-qualified type).
+    /// sic generic functions (sic.md §"Generics"): consume a `<T, U>` type-parameter
+    /// list (positioned at the opening `<`) and return the parameter names.
+    fn parse_type_param_list(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        self.eat(TokenKind::Lt);
+        loop {
+            if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
+                names.push(self.advance().text.clone());
+            } else { break; }
+            if !self.eat(TokenKind::Comma) { break; }
+        }
+        self.eat(TokenKind::Gt);
+        names
+    }
+
     fn parse_declarator(&mut self, base: QualType) -> Result<(String, QualType)> {
         // Collect pointer levels and apply them to the base type immediately (forward order).
         // This ensures T *f(params) produces Function{ret:Pointer(T), params} rather than
@@ -1029,6 +1067,12 @@ impl Parser {
         // Direct declarator: name, grouped, or abstract
         if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             let name = self.advance().text.clone();
+            // sic generic functions (sic.md §"Generics"): a `<T, U>` type-parameter
+            // list between the function name and its `(` parameter list. Captured
+            // into `pending_type_params` and consumed when the `Decl::Func` is built.
+            if self.lang == Lang::Sic && self.at(TokenKind::Lt) && self.generic_fns.contains(&name) {
+                self.pending_type_params = self.parse_type_param_list();
+            }
             let ty = self.parse_declarator_suffix(new_base)?;
             return Ok((name, ty));
         } else if self.at(TokenKind::LParen) && self.grouped_declarator_ahead() {
@@ -3027,5 +3071,44 @@ fn parse_c_float(body: &str) -> f64 {
         value * 2f64.powi(exp)
     } else {
         body.parse().unwrap_or(0.0)
+    }
+}
+
+/// sic generic functions (sic.md §"Generics"): pre-scan the token stream for
+/// `name<T, U>(` headers. The `<…>` list is written *after* the return type and
+/// function name, so we must learn the type-parameter identifiers up front for the
+/// return/parameter types that mention them to parse as types. Records the function
+/// name in `fns` and every type-parameter identifier in `params`.
+///
+/// The recognized shape is strict — an identifier, then `<`, then a comma-separated
+/// list of *plain identifiers* (no operators), then `>`, then `(` — so an ordinary
+/// comparison chain like `a < b > (c)` is not mistaken for a generic header.
+fn scan_generic_fns(tokens: &[Token], fns: &mut HashSet<String>, params: &mut HashSet<String>) {
+    let mut i = 0;
+    while i + 2 < tokens.len() {
+        if tokens[i].kind == TokenKind::Ident && tokens[i + 1].kind == TokenKind::Lt {
+            let mut j = i + 2;
+            let mut names = Vec::new();
+            let mut expect_ident = true;
+            let ok = loop {
+                match tokens.get(j).map(|t| t.kind) {
+                    Some(TokenKind::Ident) if expect_ident => {
+                        names.push(tokens[j].text.clone());
+                        expect_ident = false;
+                        j += 1;
+                    }
+                    Some(TokenKind::Comma) if !expect_ident => { expect_ident = true; j += 1; }
+                    Some(TokenKind::Gt) if !expect_ident && !names.is_empty() => { j += 1; break true; }
+                    _ => break false,
+                }
+            };
+            if ok && tokens.get(j).map(|t| t.kind) == Some(TokenKind::LParen) {
+                fns.insert(tokens[i].text.clone());
+                for n in names { params.insert(n); }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
     }
 }

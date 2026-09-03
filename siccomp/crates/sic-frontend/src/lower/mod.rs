@@ -137,6 +137,10 @@ pub struct Lowerer {
     /// sic generic enums (sic.md §"Match"): name → the template `EnumDef` (with
     /// `type_params`), instantiated per concrete `Option<int>` monomorphization.
     pub generic_enum_defs: HashMap<String, EnumDef>,
+    /// sic generic functions (sic.md §"Generics"): `name` → the un-lowered template
+    /// `Decl::Func` (with its `type_params`). Kept out of ordinary lowering and
+    /// monomorphized per concrete call (instantiation lands in a later step).
+    pub generic_fn_defs: HashMap<String, crate::ast::Decl>,
 }
 
 /// One variant of a sic tagged enum.
@@ -204,6 +208,7 @@ impl Lowerer {
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
             generic_enum_defs: HashMap::new(),
+            generic_fn_defs: HashMap::new(),
         }
     }
 
@@ -385,6 +390,13 @@ impl Lowerer {
             if let Decl::Func { name, storage: Some(StorageClass::Static), .. } = decl {
                 self.static_funcs.insert(name.clone());
             }
+            // sic generic functions (sic.md §"Generics"): stash templates so they are
+            // kept out of ordinary lowering and monomorphized per concrete call.
+            if let Decl::Func { name, type_params, body: Some(_), .. } = decl {
+                if !type_params.is_empty() {
+                    self.generic_fn_defs.insert(name.clone(), decl.clone());
+                }
+            }
         }
         // sic generic enums (sic.md §"Match"): register the templates and
         // monomorphize every `Option<int>` use BEFORE function signatures (which may
@@ -448,7 +460,9 @@ impl Lowerer {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
                 }
-                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, .. } => {
+                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, .. } => {
+                    // sic generic template: not emitted directly; instantiated per call.
+                    if !type_params.is_empty() { continue; }
                     // Skip unreferenced inline definitions (see `emit_inline`).
                     if *inline && !self.emit_inline.contains(name) { continue; }
                     // Register any struct/union/enum defined in the return type or
@@ -1229,10 +1243,10 @@ impl Lowerer {
         let prefix = scope.replace("::", "__");
         for d in decls {
             match d {
-                Decl::Func { name, ret_ty, params, variadic, body, storage, inline, constructor, span } => {
+                Decl::Func { name, ret_ty, params, variadic, type_params, body, storage, inline, constructor, span } => {
                     let mangled = format!("{}__{}", prefix, name);
                     self.namespace_members.insert((scope.to_string(), name), mangled.clone());
-                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, body, storage, inline, constructor, span });
+                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, body, storage, inline, constructor, span });
                 }
                 Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
                     for de in &mut declarators {
@@ -1301,6 +1315,7 @@ impl Lowerer {
                         ret_ty: m.ret_ty.clone(),
                         params,
                         variadic: m.variadic,
+                        type_params: Vec::new(),
                         body: Some(body),
                         storage: Some(StorageClass::Static),
                         inline: false,
@@ -1480,7 +1495,9 @@ impl Lowerer {
 
     fn lower_global_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
-            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, .. } => {
+            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, type_params, .. } => {
+                // sic generic template: instantiated per concrete call, not here.
+                if !type_params.is_empty() { return Ok(()); }
                 if *inline && !self.emit_inline.contains(name) { return Ok(()); }
                 self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline, *constructor)?;
             }
