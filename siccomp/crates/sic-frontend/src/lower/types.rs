@@ -287,6 +287,14 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
         "bigint" => bigint_type(),
         "s___sic_any" => any_type(),
         _ => {
+            // A named struct/union (`s_Name`/`u_Name`) reconstructs as an opaque
+            // aggregate — the caller `resolve_aggregate`s it against the type table.
+            if let Some(n) = s.strip_prefix("s_") {
+                return Type::Struct(StructType::plain(Some(n.to_string()), vec![], false));
+            }
+            if let Some(n) = s.strip_prefix("u_") {
+                return Type::Union(UnionType { name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
+            }
             if let Some(inner) = s.strip_suffix('p') {
                 return Type::Pointer(Box::new(demangle_type(inner, ptr_size)));
             }

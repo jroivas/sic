@@ -452,15 +452,16 @@ with its runtime type:
     dict<int, any> m;
     m[1] = 42;  m[2] = "hi";  m[3] = 3.14;   // mixed value types
 
-Values may be of any concrete type too — `dict<int, string>`, etc. — read back as
-the declared type.
+Values may be of any concrete type too — `dict<int, string>`, `dict<int, struct
+Point>`, etc. — read back as the declared type.
 
 > As implemented today: keys may be integers or strings, and both string keys and
 > string values are copied and owned by the dict (so they survive their source) and
 > reclaimed on delete, overwrite, and scope exit. A scalar value is one machine word;
-> a `dict<K, any>` also stores the value's runtime type. A non-string aggregate value
-> (a struct) is stored by reference. Reading a missing key yields a zero value (an
-> empty string for a `string` value).
+> a `dict<K, any>` also stores the value's runtime type. A typed struct value is
+> deep-copied and owned by the dict too (shallow for its inner pointers, like a C
+> struct copy). Reading a missing key yields a zero value (an empty string for a
+> `string` value).
 
 # Generics
 

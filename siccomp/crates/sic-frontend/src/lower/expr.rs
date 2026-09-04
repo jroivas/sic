@@ -1213,12 +1213,15 @@ impl<'m> FuncCtx<'m> {
     /// The `(key, value)` types of a dict subscript base (defaults to any/any).
     fn dict_kv_of(&mut self, base: &Expr) -> (Type, Type) {
         let bt = self.infer_expr_type(base).ok();
-        bt.and_then(|t| {
+        let (k, v) = bt.and_then(|t| {
             let t = if let Type::Pointer(i) = &t {
                 if super::types::is_dict(i) { (**i).clone() } else { t.clone() }
             } else { t };
             super::types::dict_kv(&t, self.ptr_size())
-        }).unwrap_or_else(|| (super::types::any_type(), super::types::any_type()))
+        }).unwrap_or_else(|| (super::types::any_type(), super::types::any_type()));
+        // A named struct/union value decodes opaque; fill its fields from the table.
+        let v = super::types::resolve_aggregate(&v, &self.lowerer.struct_types);
+        (k, v)
     }
 
     /// Allocate a zero-width `u64` out-slot for a runtime out-pointer argument.
@@ -1300,11 +1303,25 @@ impl<'m> FuncCtx<'m> {
         // dict — is deep-copied into one owned heap block so the entry owns it (it
         // survives its source temporary and is freed on delete/overwrite/dict-free).
         let is_owned_string = super::types::is_sic_string(&v) || super::types::is_sic_string(&ety);
+        // A concrete (non-`any`) struct/union value is deep-copied by value onto the
+        // heap, so the entry owns it (freed on delete/overwrite/dict-free).
+        let is_owned_struct = !is_owned_string && !super::types::is_any(&v)
+            && matches!(&v, Type::Struct(_) | Type::Union(_));
+        let vowned_flag = is_owned_string || is_owned_struct;
         let vslot_word = if is_owned_string {
             let (data, size) = self.string_operand_parts(val)?;
             let owned = self.emit_dict_owned_string(data, size)?; // single freeable block
             let w = self.alloc_val();
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: owned, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            Val::Local(w)
+        } else if is_owned_struct {
+            let src = self.lower_aggregate_ptr(val)?;
+            let sz = self.coerce(Constant::int(v.size_of(self.ptr_size()).max(1) as i64), &Type::i64())?;
+            let heap = self.emit_malloc(sz.clone())?;
+            self.emit_memcpy(heap.clone(), src, sz)?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: heap, to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
         } else {
@@ -1322,7 +1339,7 @@ impl<'m> FuncCtx<'m> {
         } else {
             Constant::uint(0)
         };
-        let vowned = if is_owned_string { Constant::int(1) } else { Constant::int(0) };
+        let vowned = if vowned_flag { Constant::int(1) } else { Constant::int(0) };
         let set = self.dict_runtime_fn("__sic_dict_set");
         self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word, vowned], ret_ty: Type::Void });
         Ok(())

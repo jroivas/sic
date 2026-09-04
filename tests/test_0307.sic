@@ -1,0 +1,16 @@
+// sic dict (sic.md §"Dict"): struct values are deep-copied (owned) — a value
+// survives the mutation of its source; `d[k].field` works; overwrite reclaims.
+struct Point { int x; int y; };
+int main() {
+    dict<int, struct Point> d;
+    struct Point p;
+    p.x = 3; p.y = 4;
+    d[1] = p;
+    p.x = 99;                       // mutate the source
+    struct Point q = d[1];
+    if (q.x != 3 || q.y != 4) return 1;      // dict kept its own copy
+    if (d[1].x != 3 || d[1].y != 4) return 2; // field access on a dict value
+    d[1] = p;                        // overwrite → old copy freed, new stored
+    if (d[1].x != 99) return 3;
+    return 42;
+}
