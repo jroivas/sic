@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 mod bigint_runtime;
+mod dict_runtime;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -650,6 +651,15 @@ fn parse_source(
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             bigint_runtime::BIGINT_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `dict` (sic.md §"Dict"): prepend the self-contained hash-map runtime only
+    // when the unit uses `dict`.
+    if dict_runtime::uses_dict(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            dict_runtime::DICT_RUNTIME, path, preprocessed
         );
     }
 

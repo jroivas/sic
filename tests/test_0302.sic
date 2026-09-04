@@ -1,0 +1,28 @@
+// sic built-in dict (sic.md §"Dict"): dynamic hash map, any/typed keys, del.
+#include <stdio.h>
+int main() {
+    dict data;                        // dict<any,any>
+    data["key"] = 42;
+    data[5] = 9;
+    if ((int)data["key"] != 42) return 1;
+    if ((int)data[5] != 9) return 2;
+    data["key"] = 100;                // overwrite
+    if ((int)data["key"] != 100) return 3;
+    del data["key"];                  // remove entry
+    if ((int)data["key"] != 0) return 4;   // missing → 0
+    if ((int)data[5] != 9) return 5;       // other entries intact
+
+    dict<string, int> d;              // typed
+    d["hello"] = 4;
+    d["test"] = 42;
+    if (d["hello"] != 4 || d["test"] != 42) return 6;
+
+    // dynamic growth: many entries force the index table to grow.
+    dict<int, int> big;
+    for (int i = 0; i < 200; i++) big[i] = i * i;
+    for (int i = 0; i < 200; i++) if (big[i] != i * i) return 7;
+    if ((int)big[57] != 57 * 57) return 8;
+
+    dict<int, int> *p = new dict<int, int>;   // heap-allocated
+    return 42;
+}

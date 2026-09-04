@@ -214,6 +214,72 @@ pub fn bigint_type() -> Type {
         Some(BIGINT_MARKER.to_string()), vec![], false))))
 }
 
+// ─── `dict`: a built-in hash map (sic.md §"Dict") ─────────────────────────────
+//
+// A `dict<K,V>` value is an opaque pointer to the runtime's `__sic_dict` heap table
+// (like `bigint`). The key/value types are encoded in the marker struct's name —
+// `(dict|<mangled K>|<mangled V>)` — so they can be recovered for type-checking and
+// for boxing keys / typing reads. Plain `dict` is `dict<any,any>`.
+
+/// Build a `dict<K,V>` value type.
+pub fn dict_type(key: &Type, val: &Type) -> Type {
+    let name = format!("(dict|{}|{})", mangle_type_name(key), mangle_type_name(val));
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+}
+
+/// True if `t` is a `dict` value.
+pub fn is_dict(t: &Type) -> bool {
+    dict_marker(t).is_some()
+}
+
+fn dict_marker(t: &Type) -> Option<&str> {
+    match t {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Struct(st) => {
+                let n = st.name.as_deref()?;
+                if n.starts_with("(dict|") { Some(n) } else { None }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The `(key, value)` types of a `dict`, or `None` if `t` is not a dict.
+pub fn dict_kv(t: &Type, ptr_size: u32) -> Option<(Type, Type)> {
+    let n = dict_marker(t)?;
+    let body = n.strip_prefix("(dict|")?.strip_suffix(')')?;
+    let (k, v) = body.split_once('|')?;
+    Some((demangle_type(k, ptr_size), demangle_type(v, ptr_size)))
+}
+
+/// Reconstruct a `Type` from a [`mangle_type_name`] string, for the subset used as
+/// dict key/value types. Unknown forms fall back to `any`.
+fn demangle_type(s: &str, ptr_size: u32) -> Type {
+    match s {
+        "void" => Type::Void,
+        "bool" => Type::Bool,
+        "f32" => Type::Float32,
+        "f64" => Type::Float64,
+        "f80" => Type::Float80,
+        "string" => sic_string_type(ptr_size),
+        "bigint" => bigint_type(),
+        "s___sic_any" => any_type(),
+        _ => {
+            if let Some(inner) = s.strip_suffix('p') {
+                return Type::Pointer(Box::new(demangle_type(inner, ptr_size)));
+            }
+            if let Some(bits) = s.strip_prefix('i').and_then(|b| b.parse::<u32>().ok()) {
+                return Type::Int { bits, signed: true };
+            }
+            if let Some(bits) = s.strip_prefix('u').and_then(|b| b.parse::<u32>().ok()) {
+                return Type::Int { bits, signed: false };
+            }
+            any_type()
+        }
+    }
+}
+
 /// True if `t` is a `bigint` value (a pointer to the `__sic_bi` struct).
 pub fn is_bigint(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
@@ -517,6 +583,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "u8char"          => return Ok(u8char_type()),
                 // sic `va_array`: Python-style varargs (an array<any>).
                 "va_array"        => return Ok(va_array_type(ptr_size)),
+                // sic built-in hash map (sic.md §"Dict"): plain `dict` = dict<any,any>.
+                "dict"            => return Ok(dict_type(&any_type(), &any_type())),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),
@@ -543,6 +611,14 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
         // instantiation pass.
+        // sic built-in `dict<K,V>` (sic.md §"Dict").
+        AstType::Generic { name, args } if name == "dict" => {
+            let k = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
+                .transpose()?.unwrap_or_else(any_type);
+            let v = args.get(1).map(|a| lower_ast_type(&a.ty, named, ptr_size))
+                .transpose()?.unwrap_or_else(any_type);
+            dict_type(&k, &v)
+        }
         AstType::Generic { name, args } => {
             let mut arg_tys = Vec::new();
             for a in args { arg_tys.push(lower_ast_type(&a.ty, named, ptr_size)?); }

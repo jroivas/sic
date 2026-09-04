@@ -1479,6 +1479,13 @@ impl<'m> FuncCtx<'m> {
                             });
                         }
                     }
+                    // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh
+                    // empty map, so auto-initialize the handle to `__sic_dict_new()`
+                    // (an uninitialized NULL handle would crash on first use).
+                    if self.is_sic() && super::types::is_dict(&ty) && d.init.is_none() {
+                        let handle = self.lower_dict_new(&ty, &d.span)?;
+                        self.push_instr(Instr::Store { ptr: Val::Local(vid), val: handle });
+                    }
                     // sic struct constructor/destructor (sic.md §"Memory safety"):
                     // for a struct local with a `S()`, call it on `&local` after
                     // zero-init (only when the user gave no explicit initializer);

@@ -3149,7 +3149,11 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
     match ty {
         Generic { name, args } => {
             for a in args { collect_generics_type(&a.ty, out); }
-            out.push((name.clone(), args.clone()));
+            // `dict<K,V>` is a built-in, not a user generic enum — don't try to
+            // monomorphize it as one (sic.md §"Dict").
+            if name != "dict" {
+                out.push((name.clone(), args.clone()));
+            }
         }
         Pointer { base, .. } | Array { base, .. } => collect_generics_type(&base.ty, out),
         Function { ret, params, .. } => {

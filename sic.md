@@ -411,6 +411,41 @@ name/value pairs; that type is not implemented yet.
 (To pass an actual assignment expression as an argument, parenthesize it: `f((a = b))`.
 A name that is a language keyword, e.g. `else`, cannot currently be used.)
 
+# Dict
+
+`dict` is a built-in dynamically-sized hash map. It is used like an array but allows
+any key and any value:
+
+    dict data;                 // shorthand for dict<any, any>
+    data["key"] = 42;
+    data[5] = 9;               // keys of different types are fine
+
+Keys and values may be constrained to specific types:
+
+    dict<string, int> d;
+    d["hello"] = 4;
+    d["test"]  = 42;
+    int n = d["hello"];        // 4
+
+The map grows automatically as entries are added. Reading a key that is not present
+yields a zero value. Deleting an entry — freeing its resources — is `del`:
+
+    del data["key"];           // remove "key"; data["key"] now reads back as 0
+
+A dict may be heap-allocated with `new` (and its handle is itself a pointer):
+
+    dict<int, string> *test = new dict<int, string>;
+
+The implementation is a CPython-style insertion-ordered hash table (a compact
+entries array plus a sparse index), so iteration order will be stable and deletions
+keep the surviving order intact. The key kind is tracked so key-type-specialized fast
+paths can be added later.
+
+> As implemented today: keys may be integers or strings (string keys are copied and
+> owned by the dict); values are a single machine word (an integer or pointer). A
+> `dict<…, any>` value reads back as a 64-bit integer. String/aggregate *values* and
+> the companion `va_dict`/`dict` varargs capture are planned.
+
 # Generics
 
 Functions may be generic over one or more type parameters, written in a `<…>` list

@@ -553,6 +553,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `any` is a boxed dynamically-typed value `{ typeid, value }` (sic.md
             // std) — the element type of a `va_array`; ordinary identifier in C.
             "any" => return TokenKind::TypeName,
+            // `dict` is the built-in hash map (sic.md §"Dict"); `dict<K,V>` or plain
+            // `dict` (= `dict<any,any>`); an ordinary identifier in C.
+            "dict" => return TokenKind::TypeName,
             // `u8char` is a Unicode code point (32-bit); ordinary identifier in C.
             "u8char" => return TokenKind::TypeName,
             // `va_array` is a Python-style varargs collector: a last parameter that

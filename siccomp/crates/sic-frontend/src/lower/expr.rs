@@ -576,6 +576,11 @@ impl<'m> FuncCtx<'m> {
             ExprKind::BigIntLit(_) => self.to_bigint(expr),
 
             ExprKind::Index { base, index } => {
+                // sic `dict[key]` read (sic.md §"Dict").
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
+                    return self.lower_dict_get(base, index, &expr.span);
+                }
                 // sic `va_array` element `args[i]` → a pointer to the i-th `any`
                 // (aggregate-by-pointer rvalue), sic.md std.
                 if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
@@ -1068,6 +1073,152 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Call { dest: Some(dest), func: fref, args, ret_ty: ret.clone() });
         self.val_types.insert(dest.0, ret);
         Ok(Val::Local(dest))
+    }
+
+    // ─── sic `dict` (sic.md §"Dict") ─────────────────────────────────────────
+
+    /// Widen a scalar value to a 64-bit slot for the dict runtime.
+    fn dict_scalar_to_u64(&mut self, v: Val) -> Val {
+        let ty = self.val_type(&v);
+        let op = match &ty {
+            Type::Int { bits: 64, .. } | Type::Pointer(_) if matches!(ty, Type::Pointer(_)) => CastOp::BitCast,
+            Type::Int { bits: 64, .. } => return v,
+            Type::Int { signed: true, .. } => CastOp::SExt,
+            Type::Int { .. } | Type::Bool => CastOp::ZExt,
+            Type::Pointer(_) => CastOp::BitCast,
+            _ => return v,
+        };
+        let d = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: d, op, val: v, to_ty: Type::u64() });
+        self.val_types.insert(d.0, Type::u64());
+        Val::Local(d)
+    }
+
+    /// Narrow a 64-bit dict slot back to the target scalar type.
+    fn dict_u64_to_scalar(&mut self, v: Val, ty: &Type) -> Val {
+        let op = match ty {
+            Type::Int { bits: 64, .. } => return v,
+            Type::Int { .. } | Type::Bool => CastOp::Trunc,
+            Type::Pointer(_) => CastOp::BitCast,
+            _ => return v,
+        };
+        let d = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: d, op, val: v, to_ty: ty.clone() });
+        self.val_types.insert(d.0, ty.clone());
+        Val::Local(d)
+    }
+
+    /// Box a dict key expression into the runtime's `(kind, a, b)` tagged form:
+    /// kind 1 = integer (`a` = value), 2 = string (`a` = bytes, `b` = length),
+    /// 3 = pointer. String keys (sic `string` or `char*`) hash/compare by bytes.
+    fn dict_key_box(&mut self, key: &Expr, _sp: &crate::lexer::Span) -> Result<(Val, Val, Val)> {
+        let kty = self.infer_expr_type(key)?;
+        let zero = Constant::uint(0);
+        // A string key (sic `string` or `char*`) hashes/compares by its bytes.
+        let is_str = super::types::is_sic_string(&kty)
+            || matches!(&kty, Type::Pointer(inner) if matches!(inner.as_ref(), Type::Int { bits: 8, .. }))
+            || matches!(&kty, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }));
+        if is_str {
+            let (data, size) = self.string_operand_parts(key)?;
+            let a = self.dict_scalar_to_u64(data);
+            let b = self.dict_scalar_to_u64(size);
+            Ok((Constant::int(2), a, b))
+        } else {
+            let kval = self.lower_expr(key)?;
+            let kind = if matches!(self.val_type(&kval), Type::Pointer(_)) { 3 } else { 1 };
+            let a = self.dict_scalar_to_u64(kval);
+            let _ = zero;
+            Ok((Constant::int(kind), a, Constant::uint(0)))
+        }
+    }
+
+    /// Load the `dict` handle from a base value that is either a dict or a pointer to
+    /// one (so both `dict d` and `dict *p` work as subscript bases).
+    fn dict_handle(&mut self, base: &Expr) -> Result<Val> {
+        let v = self.lower_expr(base)?;
+        let ty = self.val_type(&v);
+        if super::types::is_dict(&ty) {
+            Ok(v)
+        } else if matches!(&ty, Type::Pointer(inner) if super::types::is_dict(inner)) {
+            let d = self.alloc_val();
+            let inner = match ty { Type::Pointer(i) => *i, _ => unreachable!() };
+            self.push_instr(Instr::Load { dest: d, ptr: v, ty: inner.clone() });
+            self.val_types.insert(d.0, inner);
+            Ok(Val::Local(d))
+        } else {
+            Ok(v)
+        }
+    }
+
+    /// `dict[key]` read: `__sic_dict_get` → the value typed as V (or zero if absent).
+    pub(crate) fn lower_dict_get(&mut self, base: &Expr, key: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let dty = self.infer_expr_type(base).ok();
+        let vty = dty.as_ref().and_then(|t| {
+            let t = if let Type::Pointer(i) = t { if super::types::is_dict(i) { (**i).clone() } else { t.clone() } } else { t.clone() };
+            super::types::dict_kv(&t, self.ptr_size())
+        }).map(|(_, v)| v).unwrap_or_else(super::types::any_type);
+        // The value slot is a single 64-bit word; a `dict<…,any>` value has no
+        // stored type tag, so it reads back as a plain 64-bit integer.
+        let vty = if super::types::is_any(&vty) { Type::i64() } else { vty };
+        let d = self.dict_handle(base)?;
+        let (kind, a, b) = self.dict_key_box(key, sp)?;
+        // out slot on the stack, zero-initialized so a miss reads as 0.
+        let out_id = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: out_id, ty: Type::u64(), align: None });
+        self.val_types.insert(out_id.0, Type::Pointer(Box::new(Type::u64())));
+        let out = Val::Local(out_id);
+        let get = self.lowerer.module.func_ref_by_name("__sic_dict_get").ok_or_else(|| {
+            CompileError::at("dict runtime not linked (use `dict` to trigger it)".to_string(), sp.file.clone(), sp.line, sp.col)
+        })?;
+        let found = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(found), func: get, args: vec![d, kind, a, b, out.clone()], ret_ty: Type::i32() });
+        // value = *out (zero if not found — the slot was zero-initialized).
+        let raw = self.alloc_val();
+        self.push_instr(Instr::Load { dest: raw, ptr: out, ty: Type::u64() });
+        self.val_types.insert(raw.0, Type::u64());
+        let _ = found;
+        Ok(self.dict_u64_to_scalar(Val::Local(raw), &vty))
+    }
+
+    /// `dict[key] = val`: `__sic_dict_set`.
+    pub(crate) fn lower_dict_set(&mut self, base: &Expr, key: &Expr, val: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        let d = self.dict_handle(base)?;
+        let (kind, a, b) = self.dict_key_box(key, sp)?;
+        let vval = self.lower_expr(val)?;
+        let vty = self.val_type(&vval);
+        if !matches!(&vty, Type::Int { .. } | Type::Bool | Type::Pointer(_)) {
+            return Err(CompileError::at(
+                "dict values must currently be an integer or pointer type".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let vslot = self.dict_scalar_to_u64(vval);
+        let set = self.lowerer.module.func_ref_by_name("__sic_dict_set").ok_or_else(|| {
+            CompileError::at("dict runtime not linked".to_string(), sp.file.clone(), sp.line, sp.col)
+        })?;
+        self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vslot], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// `del dict[key]`: `__sic_dict_del` (frees the entry's resources).
+    pub(crate) fn lower_dict_del(&mut self, base: &Expr, key: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        let d = self.dict_handle(base)?;
+        let (kind, a, b) = self.dict_key_box(key, sp)?;
+        let del = self.lowerer.module.func_ref_by_name("__sic_dict_del").ok_or_else(|| {
+            CompileError::at("dict runtime not linked".to_string(), sp.file.clone(), sp.line, sp.col)
+        })?;
+        self.push_instr(Instr::Call { dest: None, func: del, args: vec![d, kind, a, b], ret_ty: Type::i32() });
+        Ok(())
+    }
+
+    /// Create a fresh empty dict handle (`dict d;` auto-init and `new dict<…>`).
+    pub(crate) fn lower_dict_new(&mut self, dty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let new = self.lowerer.module.func_ref_by_name("__sic_dict_new").ok_or_else(|| {
+            CompileError::at("dict runtime not linked (use `dict` to trigger it)".to_string(), sp.file.clone(), sp.line, sp.col)
+        })?;
+        let d = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(d), func: new, args: vec![], ret_ty: dty.clone() });
+        self.val_types.insert(d.0, dty.clone());
+        Ok(Val::Local(d))
     }
 
     /// Call a bigint runtime function that returns a fresh `bigint` temporary, and
@@ -2454,6 +2605,12 @@ impl<'m> FuncCtx<'m> {
     /// via the header; the header also carries the size for future bounds checks.
     pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, args: &[Expr]) -> Result<Val> {
         let elem_ty = self.lower_type(ty)?;
+        // sic `new dict<K,V>` (sic.md §"Dict"): allocate a fresh hash map, returning
+        // the dict handle directly (the handle is itself a heap pointer).
+        if self.is_sic() && super::types::is_dict(&elem_ty) {
+            let sp = args.first().map(|e| e.span.clone()).unwrap_or_default();
+            return self.lower_dict_new(&elem_ty, &sp);
+        }
         let elem_size = elem_ty.size_of(self.ptr_size()).max(1);
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let header = (2 * self.ptr_size()) as i64;
@@ -2520,6 +2677,16 @@ impl<'m> FuncCtx<'m> {
     /// sic `del p;` — decrement the header refcount of a `new`-allocated pointer
     /// and `free` the block when it reaches 0. A NULL pointer is a no-op.
     pub(crate) fn lower_delete(&mut self, e: &Expr) -> Result<()> {
+        // sic `del dict[key]` (sic.md §"Dict"): remove the entry and free its
+        // resources. (`del wholeDict` is not a delete-entry — falls through.)
+        if self.is_sic() {
+            if let ExprKind::Index { base, index } = &e.kind {
+                if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
+                    return self.lower_dict_del(base, index, &e.span);
+                }
+            }
+        }
         // sic `del s` on a `string`: drop THIS reference (decrement the refcount,
         // freeing the buffer at zero) and invalidate the descriptor in place. Other
         // copies keep their own reference and stay valid until their scope ends.
@@ -3071,6 +3238,16 @@ impl<'m> FuncCtx<'m> {
                                      e.g. `{} = (enum {})((int){} + …)`", dest, name, name, dest, name),
                             lhs.span.file.clone(), lhs.span.line, lhs.span.col)),
                     }
+                }
+            }
+        }
+        // sic `dict[key] = value` (sic.md §"Dict").
+        if op.is_none() && self.is_sic() {
+            if let ExprKind::Index { base, index } = &lhs.kind {
+                if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
+                    self.lower_dict_set(base, index, rhs, &lhs.span)?;
+                    return Ok(Constant::zero());
                 }
             }
         }
@@ -6487,6 +6664,21 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Index { base, index } => {
                 let bt = self.infer_expr_type(base)?;
+                // sic `dict[key]` yields the value type V (sic.md §"Dict").
+                if self.is_sic() {
+                    let dt = if super::types::is_dict(&bt) {
+                        Some(bt.clone())
+                    } else if let Type::Pointer(i) = &bt {
+                        if super::types::is_dict(i) { Some((**i).clone()) } else { None }
+                    } else { None };
+                    if let Some(dt) = dt {
+                        if let Some((_, v)) = super::types::dict_kv(&dt, self.ptr_size()) {
+                            // A `dict<…,any>` value reads back as a plain 64-bit int
+                            // (the slot carries no type tag).
+                            return Ok(if super::types::is_any(&v) { Type::i64() } else { v });
+                        }
+                    }
+                }
                 // sic `va_array` element `va[i]` is an `any` (sic.md std).
                 if self.is_sic() && super::types::is_va_array(&bt) {
                     return Ok(super::types::any_type());
@@ -6674,7 +6866,11 @@ impl<'m> FuncCtx<'m> {
             // A substring slice is itself a `string` (sic.md §"Built-in string").
             ExprKind::Slice { .. } => Ok(super::types::sic_string_type(self.ptr_size())),
             // `new T` / `new T(n)` yields `T*`.
-            ExprKind::New { ty, .. } => Ok(Type::Pointer(Box::new(self.lower_type(ty)?))),
+            ExprKind::New { ty, .. } => {
+                let elem = self.lower_type(ty)?;
+                // `new dict<…>` yields the dict handle itself (already a pointer).
+                if super::types::is_dict(&elem) { Ok(elem) } else { Ok(Type::Pointer(Box::new(elem))) }
+            }
             // `@expr` has the referent's (pointer) type.
             ExprKind::Ref { expr, .. } => self.infer_expr_type(expr),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
