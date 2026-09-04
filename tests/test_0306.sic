@@ -1,0 +1,17 @@
+// sic dict (sic.md §"Dict"): owned string values are reclaimed on overwrite and
+// delete, and a missing string key reads back as an empty string (no crash).
+#include <string.h>
+int main() {
+    dict<int, string> d;
+    char buf[16];
+    strcpy(buf, "alpha"); d[1] = buf;
+    strcpy(buf, "beta");  d[1] = buf;      // overwrite → old copy freed
+    strcpy(buf, "gamma"); d[2] = buf;
+    del d[2];                               // delete → its copy freed
+    strcpy(buf, "zzz");                     // clobber source
+    string a = d[1];
+    string m = d[2];                        // missing → empty string
+    if (a.size != 4 || a[0] != 'b') return 1;
+    if (m.size != 0) return 2;
+    return 42;
+}

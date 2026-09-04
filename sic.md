@@ -456,11 +456,11 @@ Values may be of any concrete type too — `dict<int, string>`, etc. — read ba
 the declared type.
 
 > As implemented today: keys may be integers or strings, and both string keys and
-> string values are copied and owned by the dict (so they survive their source). A
-> scalar value is one machine word; a `dict<K, any>` also stores the value's runtime
-> type. A non-string aggregate value (a struct) is stored by reference. A
-> compiler-created `dict` local is freed at scope exit; owned string values live
-> until process exit.
+> string values are copied and owned by the dict (so they survive their source) and
+> reclaimed on delete, overwrite, and scope exit. A scalar value is one machine word;
+> a `dict<K, any>` also stores the value's runtime type. A non-string aggregate value
+> (a struct) is stored by reference. Reading a missing key yields a zero value (an
+> empty string for a `string` value).
 
 # Generics
 

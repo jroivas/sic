@@ -309,6 +309,14 @@ impl<'m> FuncCtx<'m> {
     /// value boxed as `any`. Returns the dict handle.
     fn pack_va_dict(&mut self, named: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         let vd_ty = super::types::va_dict_type();
+        // No named arguments → pass a null handle (no allocation). The runtime
+        // treats a null dict as empty, so a lookup on it just misses.
+        if named.is_empty() {
+            let z = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: z, op: CastOp::BitCast, val: Constant::uint(0), to_ty: vd_ty.clone() });
+            self.val_types.insert(z.0, vd_ty);
+            return Ok(Val::Local(z));
+        }
         let handle = self.lower_dict_new(&vd_ty, sp)?;
         let set = self.dict_runtime_fn("__sic_dict_set");
         for arg in named {
@@ -328,7 +336,9 @@ impl<'m> FuncCtx<'m> {
                 let slot = self.box_slot(value, &ety)?;
                 self.push_instr(Instr::Call {
                     dest: None, func: set,
-                    args: vec![handle.clone(), Constant::int(2), Val::Local(ka), kb, Val::Local(tyw), slot],
+                    // vowned = 0: the values borrow the caller's temporaries, which
+                    // outlive the call the va_dict is consumed in.
+                    args: vec![handle.clone(), Constant::int(2), Val::Local(ka), kb, Val::Local(tyw), slot, Constant::int(0)],
                     ret_ty: Type::Void,
                 });
             }
@@ -1187,7 +1197,7 @@ impl<'m> FuncCtx<'m> {
         let i32t = Type::i32();
         let (params, ret): (Vec<Type>, Type) = match name {
             "__sic_dict_new" => (vec![], ptr.clone()),
-            "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone()], Type::Void),
+            "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), i32t.clone()], Type::Void),
             "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
             "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t], i32t.clone()),
             "__sic_dict_free" => (vec![ptr], Type::Void),
@@ -1228,7 +1238,6 @@ impl<'m> FuncCtx<'m> {
         let get = self.dict_runtime_fn("__sic_dict_get");
         let found = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(found), func: get, args: vec![d, kind, a, b, ot.clone(), os.clone()], ret_ty: Type::i32() });
-        let _ = found;
         let slot = self.alloc_val();
         self.push_instr(Instr::Load { dest: slot, ptr: os, ty: Type::u64() });
         self.val_types.insert(slot.0, Type::u64());
@@ -1253,7 +1262,26 @@ impl<'m> FuncCtx<'m> {
         }
         // A concrete value type V (scalar, string, struct, …) is reconstructed from
         // the slot bits/address directly.
-        self.reinterpret_slot(Val::Local(slot), &v)
+        let val = self.reinterpret_slot(Val::Local(slot), &v)?;
+        // A missing string key would reinterpret a null slot into a null descriptor
+        // (crashing any read); return an empty string on a miss instead.
+        if super::types::is_sic_string(&v) {
+            let empty = self.emit_empty_string()?;
+            let sel = self.alloc_val();
+            self.push_instr(Instr::Select { dest: sel, cond: Val::Local(found), on_true: val, on_false: empty, ty: Type::void_ptr() });
+            self.val_types.insert(sel.0, v.clone());
+            return Ok(Val::Local(sel));
+        }
+        Ok(val)
+    }
+
+    /// An empty `string` value (`{ data: "", size: 0, rc: null }`).
+    fn emit_empty_string(&mut self) -> Result<Val> {
+        let data = self.emit_cstring("");
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let zero = self.coerce(Constant::int(0), &usize_ty)?;
+        let null_rc = self.coerce(Constant::int(0), &Type::Pointer(Box::new(usize_ty)))?;
+        self.make_string_val(data, zero, null_rc)
     }
 
     /// `dict[key] = val`: `__sic_dict_set`. The value is boxed into `(type-info,
@@ -1266,25 +1294,24 @@ impl<'m> FuncCtx<'m> {
         let (kind, a, b) = self.dict_key_box(key, sp)?;
         let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
         // A `string` value — or a `char*`/`char[]` stored into a `string`-typed
-        // dict — is deep-copied onto the heap (both bytes and descriptor) so the
-        // entry owns it and it survives its source temporary (sic.md §"Dict"; the
-        // dict does not free it, so it lives until process exit).
-        let vslot_word = if super::types::is_sic_string(&v) || super::types::is_sic_string(&ety) {
+        // dict — is deep-copied into one owned heap block so the entry owns it (it
+        // survives its source temporary and is freed on delete/overwrite/dict-free).
+        let is_owned_string = super::types::is_sic_string(&v) || super::types::is_sic_string(&ety);
+        let vslot_word = if is_owned_string {
             let (data, size) = self.string_operand_parts(val)?;
-            let owned = self.owned_string_from_parts(data, size)?; // heap bytes, stack descriptor
-            let sty = super::types::sic_string_type(self.ptr_size());
-            let ssz = self.coerce(Constant::int(sty.size_of(self.ptr_size()) as i64), &Type::i64())?;
-            let heap = self.emit_malloc(ssz.clone())?;            // heap descriptor
-            self.emit_memcpy(heap.clone(), owned, ssz)?;
+            let owned = self.emit_dict_owned_string(data, size)?; // single freeable block
             let w = self.alloc_val();
-            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: heap, to_ty: Type::u64() });
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: owned, to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
         } else {
             self.box_slot(val, &ety)?
         };
         let vty_word = if super::types::is_any(&v) {
-            let tyval = self.lower_type_value(&ety); // type-info*
+            // For a `dict<…, any>` the value's runtime type is stored — an owned
+            // string's type is `string` (not the source `char*`).
+            let store_ty = if is_owned_string { super::types::sic_string_type(self.ptr_size()) } else { ety.clone() };
+            let tyval = self.lower_type_value(&store_ty); // type-info*
             let tyw = self.alloc_val();
             self.push_instr(Instr::Cast { dest: tyw, op: CastOp::BitCast, val: tyval, to_ty: Type::u64() });
             self.val_types.insert(tyw.0, Type::u64());
@@ -1292,8 +1319,9 @@ impl<'m> FuncCtx<'m> {
         } else {
             Constant::uint(0)
         };
+        let vowned = if is_owned_string { Constant::int(1) } else { Constant::int(0) };
         let set = self.dict_runtime_fn("__sic_dict_set");
-        self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word], ret_ty: Type::Void });
+        self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word, vowned], ret_ty: Type::Void });
         Ok(())
     }
 
@@ -2097,6 +2125,38 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(dptr), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
         self.make_string_val(Val::Local(dptr), size, block)
+    }
+
+    /// Build a `string` in a SINGLE heap block — `[ descriptor | rc | bytes | NUL ]`
+    /// — and return the descriptor pointer (which is the block base), so the whole
+    /// value is reclaimed by one `free(ptr)`. Used for dict-owned string values.
+    fn emit_dict_owned_string(&mut self, data: Val, size: Val) -> Result<Val> {
+        let ps = self.ptr_size() as i64;
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let hdr = sty.size_of(self.ptr_size()) as i64; // 24: the descriptor
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let size_i = self.coerce(size.clone(), &Type::i64())?;
+        let total = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: size_i.clone(), rhs: Constant::int(hdr + ps + 1), ty: Type::i64() });
+        let block = self.emit_malloc(Val::Local(total))?; // char*
+        // rc cell at block + hdr.
+        let rccell = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rccell, base: block.clone(), index: Constant::int(hdr), elem_size: 1, result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rccell) });
+        // bytes at block + hdr + word; copy `size` bytes and NUL-terminate.
+        let bytes = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: bytes, base: block.clone(), index: Constant::int(hdr + ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_memcpy(Val::Local(bytes), data, size.clone())?;
+        let endp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(bytes), index: size_i, elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
+        // Descriptor at block+0: { data = bytes, size, rc = rccell }.
+        let block_str = self.coerce(block.clone(), &Type::Pointer(Box::new(sty.clone())))?;
+        if let Some((dptr, dty, _)) = self.member_at(&block_str, &sty, 0) { let v = self.coerce(Val::Local(bytes), &dty)?; self.push_instr(Instr::Store { val: v, ptr: dptr }); }
+        if let Some((sptr, sfty, _)) = self.member_at(&block_str, &sty, 1) { let v = self.coerce(size, &sfty)?; self.push_instr(Instr::Store { val: v, ptr: sptr }); }
+        if let Some((rptr, rfty, _)) = self.member_at(&block_str, &sty, 2) { let v = self.coerce(Val::Local(rccell), &rfty)?; self.push_instr(Instr::Store { val: v, ptr: rptr }); }
+        Ok(block)
     }
 
     fn emit_string_dup(&mut self, base: &Expr) -> Result<Val> {

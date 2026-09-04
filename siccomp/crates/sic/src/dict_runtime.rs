@@ -32,6 +32,7 @@ typedef struct __sic_dent {
     unsigned long vslot; /* value slot (scalar bits or aggregate pointer) */
     int kind;            /* 1 int, 2 string, 3 pointer */
     int live;            /* 0 = tombstone */
+    int vowned;          /* 1 = `vslot` is a single owned heap block to free */
 } __sic_dent;
 
 typedef struct __sic_dict {
@@ -112,11 +113,15 @@ __attribute__((weak)) void __sic_dict_grow_index(__sic_dict *d) {
 
 __attribute__((weak)) void __sic_dict_set(
         __sic_dict *d, int kind, unsigned long a, unsigned long b,
-        unsigned long vty, unsigned long vslot) {
+        unsigned long vty, unsigned long vslot, int vowned) {
     unsigned long h = __sic_dict_hash(kind, a, b);
     int ent;
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
-    if (ent >= 0) { d->ents[ent].vty = vty; d->ents[ent].vslot = vslot; return; }
+    if (ent >= 0) {
+        if (d->ents[ent].vowned) free((void *)d->ents[ent].vslot); /* reclaim old */
+        d->ents[ent].vty = vty; d->ents[ent].vslot = vslot; d->ents[ent].vowned = vowned;
+        return;
+    }
     /* Grow the index if it is getting full (load factor 2/3), then re-probe. */
     if ((d->live + 1) * 3 >= d->cap * 2) {
         __sic_dict_grow_index(d);
@@ -135,7 +140,7 @@ __attribute__((weak)) void __sic_dict_set(
     unsigned long e = d->nents++;
     d->ents[e].hash = h; d->ents[e].kind = kind; d->ents[e].a = ka;
     d->ents[e].b = b; d->ents[e].vty = vty; d->ents[e].vslot = vslot;
-    d->ents[e].live = 1;
+    d->ents[e].vowned = vowned; d->ents[e].live = 1;
     d->index[slot] = (int)e;
     d->live++;
 }
@@ -143,6 +148,7 @@ __attribute__((weak)) void __sic_dict_set(
 __attribute__((weak)) int __sic_dict_get(
         __sic_dict *d, int kind, unsigned long a, unsigned long b,
         unsigned long *out_ty, unsigned long *out_slot) {
+    if (!d) { *out_ty = 0; *out_slot = 0; return 0; }   /* a null (empty) va_dict */
     unsigned long h = __sic_dict_hash(kind, a, b);
     int ent;
     __sic_dict_probe(d, h, kind, a, b, &ent);
@@ -153,11 +159,13 @@ __attribute__((weak)) int __sic_dict_get(
 }
 
 __attribute__((weak)) int __sic_dict_del(__sic_dict *d, int kind, unsigned long a, unsigned long b) {
+    if (!d) return 0;
     unsigned long h = __sic_dict_hash(kind, a, b);
     int ent;
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
     if (ent < 0) return 0;
-    if (d->ents[ent].kind == 2) free((void *)d->ents[ent].a);
+    if (d->ents[ent].kind == 2) free((void *)d->ents[ent].a);   /* string key bytes */
+    if (d->ents[ent].vowned) free((void *)d->ents[ent].vslot);  /* owned value */
     d->ents[ent].live = 0;
     d->index[slot] = -2;
     d->live--;
@@ -168,8 +176,11 @@ __attribute__((weak)) unsigned long __sic_dict_len(__sic_dict *d) { return d ? d
 
 __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     if (!d) return;
-    for (unsigned long e = 0; e < d->nents; e++)
-        if (d->ents[e].live && d->ents[e].kind == 2) free((void *)d->ents[e].a);
+    for (unsigned long e = 0; e < d->nents; e++) {
+        if (!d->ents[e].live) continue;
+        if (d->ents[e].kind == 2) free((void *)d->ents[e].a);   /* string key bytes */
+        if (d->ents[e].vowned) free((void *)d->ents[e].vslot);  /* owned value */
+    }
     free(d->ents);
     free(d->index);
     free(d);
