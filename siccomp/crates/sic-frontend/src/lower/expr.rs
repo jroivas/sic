@@ -4831,6 +4831,19 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic generic functions (sic.md §"Generics"): a call to a `name<T,…>`
+        // template — infer the type arguments from the argument types, monomorphize,
+        // and dispatch to the concrete instance. A real local/global of that name
+        // shadows the template.
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            if self.is_sic() && self.lowerer.generic_fn_defs.contains_key(name)
+                && !matches!(self.lookup(name),
+                    Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
+            {
+                return self.lower_generic_call(name, args, sp);
+            }
+        }
+
         // sic atomic methods (sic.md §"Atomics"): `a.swap(v)` and `a.cas(e, d)`,
         // allowed only on an atomic lvalue (never on an ordinary value).
         if self.is_sic() {
@@ -5590,6 +5603,52 @@ impl<'m> FuncCtx<'m> {
             }
             Ok(Val::Local(dest))
         }
+    }
+
+    /// sic generic functions (sic.md §"Generics"): infer the type arguments of a
+    /// `name<T,…>` call from its argument types, monomorphize the template, and
+    /// re-dispatch as an ordinary call to the concrete instance. Each instantiation
+    /// is fully, strongly type-checked by the normal lowerer.
+    fn lower_generic_call(&mut self, name: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // The template's type parameters and its declared parameter type patterns.
+        let (type_params, param_tys): (Vec<String>, Vec<crate::ast::AstType>) = {
+            match self.lowerer.generic_fn_defs.get(name) {
+                Some(crate::ast::Decl::Func { type_params, params, .. }) =>
+                    (type_params.clone(), params.iter().map(|p| p.ty.ty.clone()).collect()),
+                _ => return Err(CompileError::at(
+                    format!("`{}` is not a generic function", name),
+                    sp.file.clone(), sp.line, sp.col)),
+            }
+        };
+        let params_set: std::collections::HashSet<String> = type_params.iter().cloned().collect();
+
+        // Infer each type parameter from the corresponding argument's type.
+        let mut subst: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
+        for (i, pat) in param_tys.iter().enumerate() {
+            if let Some(arg) = args.get(i) {
+                let at = self.infer_expr_type(arg)?;
+                super::unify_type(pat, &at, &params_set, &mut subst)
+                    .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
+            }
+        }
+
+        // Every type parameter must be solved (no explicit `name<…>()` form yet).
+        let mut ordered = Vec::with_capacity(type_params.len());
+        for tp in &type_params {
+            match subst.get(tp) {
+                Some(t) => ordered.push(t.clone()),
+                None => return Err(CompileError::at(format!(
+                    "cannot infer type parameter `{}` of generic function `{}` from the arguments",
+                    tp, name), sp.file.clone(), sp.line, sp.col)),
+            }
+        }
+
+        let mangled = self.lowerer.instantiate_generic_fn(name, &ordered)
+            .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
+
+        // Dispatch as an ordinary direct call to the concrete monomorph.
+        let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
+        self.lower_call(&callee, args, sp)
     }
 
     /// Lower an indirect call to an aggregate-returning function (sret ABI):

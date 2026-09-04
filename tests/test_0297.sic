@@ -1,0 +1,17 @@
+// sic generic functions (sic.md §"Generics"): monomorphized, type-inferred,
+// strongly typed. One template, several concrete instantiations.
+T add<T>(T a, T b) { return a + b; }
+T id<T>(T x) { return x; }
+T first<T>(T *p) { return p[0]; }
+int countdown<U>(U n) { if (n <= 0) return 0; return 1 + countdown(n - 1); }
+
+int main() {
+    if (add(3, 4) != 7) return 1;              // T = int
+    if (add(10L, 20L) != 30L) return 2;        // T = long  (distinct monomorph)
+    if (add(1.5, 2.5) != 4.0) return 3;        // T = double
+    if (id(99) != 99) return 4;
+    int a[3] = { 5, 6, 7 };
+    if (first(a) != 5) return 5;               // T* param, array arg decays
+    if (countdown(4) != 4) return 6;           // recursion inside a template
+    return 42;
+}

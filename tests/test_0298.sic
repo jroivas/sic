@@ -1,0 +1,4 @@
+// sic generics: a type parameter must resolve to a single type — inferring `T`
+// as both int and double from one call is an error (sic.md §"Generics").
+T add<T>(T a, T b) { return a + b; }
+int main() { return add(1, 2.0); }

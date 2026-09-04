@@ -377,6 +377,31 @@ any struct using an `aligned(n)` override on a member or on the type itself — 
 forms pin the C layout. Reordering also applies to *named* structs; an anonymous
 inline struct keeps its declaration order.
 
+# Generics
+
+Functions may be generic over one or more type parameters, written in a `<…>` list
+after the function name:
+
+    T add<T>(T a, T b) { return a + b; }
+    T first<T>(T *p)   { return p[0]; }
+    U cast<T, U>(T x)  { return (U)x; }
+
+Generics are resolved **entirely at compile time by monomorphization** (as in Rust):
+each distinct set of concrete type arguments produces its own specialized, fully
+type-checked copy of the function — there is no runtime dispatch. The copies get
+distinct symbols (`add$i32`, `add$i64`, `add$f64`).
+
+The type arguments are **inferred from the argument types**, and each type parameter
+must resolve to a single type:
+
+    add(3, 4);        // T = int
+    add(1.5, 2.5);    // T = double  (a second instantiation)
+    add(1, 2.0);      // error: conflicting types for `T` (int vs double)
+
+A type parameter that appears only in the return type cannot be inferred from the
+arguments yet (explicit type arguments are planned). Generic functions are currently
+resolved within a single translation unit; exporting them across modules is planned.
+
 # Memory safety
 
 ## Scopes and automatic release

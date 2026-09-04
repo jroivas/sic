@@ -1483,6 +1483,64 @@ impl Lowerer {
         })
     }
 
+    /// sic generic functions (sic.md §"Generics"): monomorphize `name<args…>` into a
+    /// concrete function under its mangled name (`add$i32`) and lower it, reusing the
+    /// ordinary function machinery. Idempotent; returns the mangled name.
+    ///
+    /// The type parameters are bound in the type table for the duration of lowering,
+    /// so every `Named(T)` in the signature *and body* resolves to its concrete type
+    /// with no AST rewriting. A defined placeholder is registered first so a
+    /// recursive call inside the body resolves to the same symbol.
+    pub fn instantiate_generic_fn(&mut self, base_name: &str, arg_tys: &[Type]) -> Result<String> {
+        let decl = self.generic_fn_defs.get(base_name).cloned().ok_or_else(|| {
+            CompileError::new(format!("unknown generic function '{}'", base_name))
+        })?;
+        let (type_params, ret_ty, params, variadic, body) = match decl {
+            Decl::Func { type_params, ret_ty, params, variadic, body: Some(body), .. } =>
+                (type_params, ret_ty, params, variadic, body),
+            _ => return Err(CompileError::new(format!("'{}' is not a generic function", base_name))),
+        };
+        if type_params.len() != arg_tys.len() {
+            return Err(CompileError::new(format!(
+                "generic function '{}' expects {} type argument(s), got {}",
+                base_name, type_params.len(), arg_tys.len())));
+        }
+        let mangled = types::generic_fn_mangled(base_name, arg_tys);
+        if self.module.func_ref_by_name(&mangled).is_some() { return Ok(mangled); }
+
+        // Bind each type parameter to its concrete type; save the previous binding.
+        let saved: Vec<(String, Option<Type>)> = type_params.iter()
+            .map(|p| (p.clone(), self.struct_types.get(p).cloned())).collect();
+        for (p, t) in type_params.iter().zip(arg_tys) {
+            self.struct_types.insert(p.clone(), t.clone());
+        }
+
+        let res = (|| -> Result<()> {
+            // Pre-register a defined placeholder so recursion resolves to this symbol.
+            let ir_ret = lower_type(&ret_ty, &self.struct_types, self.ptr_size)?;
+            let ir_params: Result<Vec<_>> = params.iter()
+                .map(|p| lower_param_type(&p.ty, &self.struct_types, self.ptr_size)).collect();
+            let sig = build_fn_sig(ir_ret, ir_params?, variadic, self.ptr_size);
+            if self.module.func_ref_by_name(&mangled).is_none() {
+                // Monomorphs are internal: each TU that needs one gets its own copy,
+                // so two objects instantiating `add<i32>` don't clash at link time.
+                let linkage = fn_linkage(&Some(StorageClass::Static), false, true);
+                self.module.add_function(Function::new(mangled.clone(), sig, vec![], linkage));
+            }
+            self.lower_function(&mangled, &ret_ty, &params, variadic, &body,
+                &Some(StorageClass::Static), false, None)
+        })();
+
+        // Restore the type-parameter bindings.
+        for (p, old) in saved {
+            match old {
+                Some(t) => { self.struct_types.insert(p, t); }
+                None => { self.struct_types.remove(&p); }
+            }
+        }
+        res.map(|_| mangled)
+    }
+
     fn lower_translation_unit(&mut self, tu: &TranslationUnit) -> Result<()> {
         // All enums are registered by now; make them available to array-size
         // folding in the global-lowering pass.
@@ -2897,6 +2955,47 @@ fn blessed_enum_templates() -> Vec<EnumDef> {
 
 /// Substitute type parameters (bound to concrete `AstType`s) throughout a type,
 /// e.g. `T` → `int`, `T*` → `int*`. Used to specialize a generic enum's payloads.
+/// sic generic functions (sic.md §"Generics"): infer type parameters by matching a
+/// parameter's declared type `pattern` (which may mention type parameters) against
+/// the concrete argument type. A bare type parameter binds to `concrete`; `T*`/`T[]`
+/// recurse into the pointee/element. Re-binding a parameter to a different type is a
+/// conflict (`add(1, 2.0)`). Positions that don't mention a parameter contribute
+/// nothing; an ultimately-unbound parameter is reported by the caller.
+fn unify_type(
+    pattern: &AstType,
+    concrete: &Type,
+    params: &std::collections::HashSet<String>,
+    out: &mut HashMap<String, Type>,
+) -> Result<()> {
+    use AstType::*;
+    match pattern {
+        Named(n) if params.contains(n) => {
+            if let Some(prev) = out.get(n) {
+                if prev != concrete {
+                    return Err(CompileError::new(format!(
+                        "conflicting types for type parameter `{}`: `{}` vs `{}`",
+                        n, types::type_display_name(prev), types::type_display_name(concrete))));
+                }
+            } else {
+                out.insert(n.clone(), concrete.clone());
+            }
+        }
+        // A `T*` parameter also matches an array argument (it decays to a pointer).
+        Pointer { base, .. } => match concrete {
+            Type::Pointer(inner) | Type::Array { elem: inner, .. } =>
+                unify_type(&base.ty, inner, params, out)?,
+            _ => {}
+        },
+        Array { base, .. } => match concrete {
+            Type::Pointer(inner) | Type::Array { elem: inner, .. } =>
+                unify_type(&base.ty, inner, params, out)?,
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
 fn subst_ast_type(ty: &AstType, subst: &HashMap<String, AstType>) -> AstType {
     use AstType::*;
     match ty {

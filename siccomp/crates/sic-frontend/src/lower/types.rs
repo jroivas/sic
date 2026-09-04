@@ -565,6 +565,19 @@ pub fn generic_enum_mangled(name: &str, args: &[Type]) -> String {
     s
 }
 
+/// sic generic functions (sic.md §"Generics"): the linker symbol of a concrete
+/// monomorph, e.g. `add<i32>` → `add$i32`, `cast<i32,f64>` → `cast$i32$f64`. Unlike
+/// `generic_enum_mangled` (an internal type-table key that may contain `<`/`>`),
+/// this must be a valid identifier, so the type list is `$`-separated.
+pub fn generic_fn_mangled(name: &str, args: &[Type]) -> String {
+    let mut s = name.to_string();
+    for a in args { s.push('$'); s.push_str(&mangle_type_name(a)); }
+    s
+}
+
+/// A short human-readable name for a type, for diagnostics.
+pub fn type_display_name(t: &Type) -> String { mangle_type_name(t) }
+
 fn mangle_type_name(t: &Type) -> String {
     if let Some((i, f)) = fixed_dims(t) { return format!("fixed<{},{}>", i, f); }
     if is_sic_string(t) { return "string".to_string(); }
