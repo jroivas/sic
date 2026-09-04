@@ -1,0 +1,18 @@
+// sic dict (sic.md §"Dict"): a string value is deep-copied (owned by the dict),
+// so it survives the mutation/loss of its source; `d[k].field`/`d[k][i]` work.
+#include <string.h>
+int main() {
+    dict<int, string> d;
+    char buf[16];
+    strcpy(buf, "first");
+    d[1] = buf;                 // copy from a mutable buffer
+    strcpy(buf, "second-longer");
+    d[2] = buf;
+    strcpy(buf, "clobbered");   // clobber the source
+    string a = d[1];
+    string b = d[2];
+    if (a.size != 5 || b.size != 13) return 1;   // copies kept their own bytes
+    if (a[0] != 'f' || b[0] != 's') return 2;
+    if (d[1].size != 5) return 3;                // field access on a dict value
+    return 42;
+}

@@ -1265,7 +1265,24 @@ impl<'m> FuncCtx<'m> {
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
         let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
-        let vslot_word = self.box_slot(val, &ety)?;
+        // A `string` value — or a `char*`/`char[]` stored into a `string`-typed
+        // dict — is deep-copied onto the heap (both bytes and descriptor) so the
+        // entry owns it and it survives its source temporary (sic.md §"Dict"; the
+        // dict does not free it, so it lives until process exit).
+        let vslot_word = if super::types::is_sic_string(&v) || super::types::is_sic_string(&ety) {
+            let (data, size) = self.string_operand_parts(val)?;
+            let owned = self.owned_string_from_parts(data, size)?; // heap bytes, stack descriptor
+            let sty = super::types::sic_string_type(self.ptr_size());
+            let ssz = self.coerce(Constant::int(sty.size_of(self.ptr_size()) as i64), &Type::i64())?;
+            let heap = self.emit_malloc(ssz.clone())?;            // heap descriptor
+            self.emit_memcpy(heap.clone(), owned, ssz)?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: heap, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            Val::Local(w)
+        } else {
+            self.box_slot(val, &ety)?
+        };
         let vty_word = if super::types::is_any(&v) {
             let tyval = self.lower_type_value(&ety); // type-info*
             let tyw = self.alloc_val();
@@ -6451,6 +6468,19 @@ impl<'m> FuncCtx<'m> {
             if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_u8char_arr(&t)) {
                 let elem = self.lower_u8char_arr_index(base, index, &base.span)?;
                 return Ok(LValue::plain(elem, super::types::u8char_type()));
+            }
+            // sic `dict[key]` whose value is an aggregate (`string`, a struct, `any`):
+            // the dict-get result is a pointer to the value, usable as a (read)
+            // lvalue so `d[k].field` works. (A write `d[k] = v` is intercepted in
+            // `lower_assign`, so this read-lvalue is never used for assignment.)
+            if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
+                || matches!(&t, Type::Pointer(i) if super::types::is_dict(i)))
+            {
+                let (_k, v) = self.dict_kv_of(base);
+                if matches!(v, Type::Struct(_) | Type::Union(_)) {
+                    let ptr = self.lower_dict_get(base, index, &base.span)?;
+                    return Ok(LValue::plain(ptr, v));
+                }
             }
         }
         let base_val = self.lower_expr(base)?;

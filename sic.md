@@ -455,11 +455,12 @@ with its runtime type:
 Values may be of any concrete type too — `dict<int, string>`, etc. — read back as
 the declared type.
 
-> As implemented today: keys may be integers or strings (string keys are copied and
-> owned by the dict). A scalar value is one machine word; a `dict<K, any>` also
-> stores the value's runtime type. An *aggregate* value (e.g. a `string`) is stored
-> by reference (not deep-copied), so it must outlive the entry. A compiler-created
-> `dict` local is freed at scope exit.
+> As implemented today: keys may be integers or strings, and both string keys and
+> string values are copied and owned by the dict (so they survive their source). A
+> scalar value is one machine word; a `dict<K, any>` also stores the value's runtime
+> type. A non-string aggregate value (a struct) is stored by reference. A
+> compiler-created `dict` local is freed at scope exit; owned string values live
+> until process exit.
 
 # Generics
 
