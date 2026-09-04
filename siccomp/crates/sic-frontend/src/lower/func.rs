@@ -201,6 +201,10 @@ pub struct FuncCtx<'m> {
     /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
     /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
     pub bigint_temps: Vec<Val>,
+    /// sic `va_dict` (sic.md §"Named parameters"): dict handles packed for a call's
+    /// named arguments, freed at the end of the statement (the callee consumes the
+    /// va_dict during the call and never keeps it).
+    pub va_dict_temps: Vec<Val>,
     /// sic `unsafe { }` nesting depth (sic.md §"Integer overflow"): when > 0,
     /// integer overflow and `÷0` trap instead of wrapping / `→0`.
     pub unsafe_depth: u32,
@@ -256,6 +260,7 @@ impl<'m> FuncCtx<'m> {
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
+            va_dict_temps: Vec::new(),
             unsafe_depth: 0,
             guard_stack: Vec::new(),
             expected_ty: None,

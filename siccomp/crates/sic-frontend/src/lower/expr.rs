@@ -318,6 +318,9 @@ impl<'m> FuncCtx<'m> {
             return Ok(Val::Local(z));
         }
         let handle = self.lower_dict_new(&vd_ty, sp)?;
+        // Free this per-call va_dict at the end of the statement (the callee only
+        // borrows it for the duration of the call).
+        self.va_dict_temps.push(handle.clone());
         let set = self.dict_runtime_fn("__sic_dict_set");
         for arg in named {
             if let ExprKind::NamedArg { name, value } = &arg.kind {
@@ -1358,6 +1361,15 @@ impl<'m> FuncCtx<'m> {
     /// at statement boundaries in `lower_stmt`. Straight-line by construction (a
     /// statement's temps are produced in the block reaching its end).
     pub(super) fn flush_bigint_temps(&mut self) {
+        // sic `va_dict` (sic.md §"Named parameters"): free each per-call va_dict
+        // packed in this statement (the callee only borrowed it for the call).
+        if !self.va_dict_temps.is_empty() {
+            let vds = std::mem::take(&mut self.va_dict_temps);
+            let free = self.dict_runtime_fn("__sic_dict_free");
+            for h in vds {
+                self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
+            }
+        }
         if self.bigint_temps.is_empty() { return; }
         let temps = std::mem::take(&mut self.bigint_temps);
         for t in temps {
