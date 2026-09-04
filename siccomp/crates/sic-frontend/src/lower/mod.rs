@@ -141,6 +141,11 @@ pub struct Lowerer {
     /// `Decl::Func` (with its `type_params`). Kept out of ordinary lowering and
     /// monomorphized per concrete call (instantiation lands in a later step).
     pub generic_fn_defs: HashMap<String, crate::ast::Decl>,
+    /// sic named parameters (sic.md §"Named parameters"): source function name →
+    /// (fixed parameter names, is-variadic), so a call site can map `name = value`
+    /// arguments to positions. An empty name marks a parameter whose name is unknown
+    /// (e.g. an imported prototype), which only positional/variadic use can fill.
+    pub fn_param_names: HashMap<String, (Vec<String>, bool)>,
 }
 
 /// One variant of a sic tagged enum.
@@ -209,6 +214,7 @@ impl Lowerer {
             type_info_globals: HashMap::new(),
             generic_enum_defs: HashMap::new(),
             generic_fn_defs: HashMap::new(),
+            fn_param_names: HashMap::new(),
         }
     }
 
@@ -404,6 +410,23 @@ impl Lowerer {
             if let Decl::Func { name, type_params, body: Some(_), .. } = decl {
                 if !type_params.is_empty() {
                     self.generic_fn_defs.insert(name.clone(), decl.clone());
+                }
+            }
+            // sic named parameters (sic.md §"Named parameters"): record each
+            // function's parameter names + variadic flag, so a call site can bind
+            // `name = value`. A definition's names win over a prior prototype's.
+            if let Decl::Func { name, params, variadic, body, .. } = decl {
+                let names: Vec<String> = params.iter()
+                    .map(|p| p.name.clone().unwrap_or_default()).collect();
+                let entry = self.fn_param_names.entry(name.clone());
+                match entry {
+                    std::collections::hash_map::Entry::Vacant(v) => { v.insert((names, *variadic)); }
+                    std::collections::hash_map::Entry::Occupied(mut o) => {
+                        // Prefer the definition (or any record with more real names).
+                        if body.is_some() || o.get().0.iter().all(|n| n.is_empty()) {
+                            o.insert((names, *variadic));
+                        }
+                    }
                 }
             }
         }
@@ -2992,6 +3015,72 @@ fn blessed_enum_templates() -> Vec<EnumDef> {
 
 /// Substitute type parameters (bound to concrete `AstType`s) throughout a type,
 /// e.g. `T` → `int`, `T*` → `int*`. Used to specialize a generic enum's payloads.
+/// sic named parameters (sic.md §"Named parameters"): map a call's arguments — some
+/// positional, some `name = value` — onto the callee's fixed parameters, returning a
+/// purely positional list (fixed slots in order, then the variadic tail in written
+/// order). Rules: named arguments may only follow positional ones; each name must
+/// match an as-yet-unfilled fixed parameter (or, for a variadic callee, drop to the
+/// tail with its name discarded — a future `va_dict` will capture the pairs); and
+/// every fixed parameter must end up filled.
+fn reorder_named_args(
+    args: &[Expr],
+    param_names: &[String],
+    variadic: bool,
+    sp: &crate::lexer::Span,
+) -> Result<Vec<Expr>> {
+    use crate::ast::ExprKind;
+    let err = |m: String| CompileError::at(m, sp.file.clone(), sp.line, sp.col);
+    let k = param_names.len();
+    let mut slots: Vec<Option<Expr>> = (0..k).map(|_| None).collect();
+    let mut tail: Vec<Expr> = Vec::new();
+    let mut seen_named = false;
+    let mut pos = 0usize;
+    for arg in args {
+        match &arg.kind {
+            ExprKind::NamedArg { name, value } => {
+                seen_named = true;
+                if let Some(i) = param_names.iter().position(|p| !p.is_empty() && p == name) {
+                    if slots[i].is_some() {
+                        return Err(err(format!("parameter `{}` given more than once", name)));
+                    }
+                    slots[i] = Some((**value).clone());
+                } else if variadic {
+                    // A variadic (or unknown-name) argument: drop the name, keep order.
+                    tail.push((**value).clone());
+                } else {
+                    return Err(err(format!("function has no parameter named `{}`", name)));
+                }
+            }
+            _ => {
+                if seen_named {
+                    return Err(err("positional argument after a named argument".to_string()));
+                }
+                if pos < k {
+                    slots[pos] = Some(arg.clone());
+                } else {
+                    // Beyond the fixed parameters: a variadic positional (or an
+                    // arity error the normal call path will report).
+                    tail.push(arg.clone());
+                }
+                pos += 1;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(k + tail.len());
+    for (i, slot) in slots.into_iter().enumerate() {
+        match slot {
+            Some(e) => out.push(e),
+            None => {
+                let pname = &param_names[i];
+                let which = if pname.is_empty() { format!("#{}", i + 1) } else { format!("`{}`", pname) };
+                return Err(err(format!("missing argument for parameter {}", which)));
+            }
+        }
+    }
+    out.extend(tail);
+    Ok(out)
+}
+
 /// sic generic functions (sic.md §"Generics"): infer type parameters by matching a
 /// parameter's declared type `pattern` (which may mention type parameters) against
 /// the concrete argument type. A bare type parameter binds to `concrete`; `T*`/`T[]`
@@ -3204,6 +3293,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             for a in args { collect_expr_names(a, out); }
         }
         GenericRef { name, .. } => out.push(name.clone()),
+        NamedArg { value, .. } => collect_expr_names(value, out),
         Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
         Slice { base, lo, hi } => {
             collect_expr_names(base, out);

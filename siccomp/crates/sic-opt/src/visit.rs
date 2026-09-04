@@ -124,6 +124,7 @@ pub fn walk_expr<V: MutVisitor>(v: &mut V, e: &mut Expr) {
         | ExprKind::PostInc { expr: inner, .. } | ExprKind::Cast { expr: inner, .. }
         | ExprKind::SizeofExpr(inner) | ExprKind::AlignofExpr(inner)
         | ExprKind::Field { base: inner, .. } | ExprKind::Arrow { base: inner, .. }
+        | ExprKind::NamedArg { value: inner, .. }
         | ExprKind::OptField { base: inner, .. } => v.visit_expr(inner),
 
         ExprKind::BinOp { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. }

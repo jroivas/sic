@@ -491,6 +491,14 @@ pub enum ExprKind {
     /// Function call: f(args)
     Call { func: BoxExpr, args: Vec<Expr> },
 
+    /// sic named argument (sic.md §"Named parameters"): `name = value` in a call's
+    /// argument list. Purely a caller-side construct — the call site maps it to the
+    /// callee's parameter of that name (or, for a variadic argument, drops the name
+    /// and passes the value positionally; a future `va_dict` will capture the
+    /// name/value pairs). Only ever appears inside `Call`/`GenericRef` argument
+    /// lists; it is resolved away before ordinary expression lowering.
+    NamedArg { name: String, value: BoxExpr },
+
     /// sic generic functions (sic.md §"Generics"): an explicit-type-argument
     /// reference `name<T, U>` (turbofish), used as a call target
     /// (`add<int>(1, 2)`). Carries the written type arguments so the call site can

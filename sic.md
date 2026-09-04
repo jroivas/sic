@@ -377,6 +377,40 @@ any struct using an `aligned(n)` override on a member or on the type itself — 
 forms pin the C layout. Reordering also applies to *named* structs; an anonymous
 inline struct keeps its declaration order.
 
+# Named parameters
+
+A call may pass arguments **by name**, `name = value`, in addition to positionally.
+Named arguments are matched to the callee's parameters of that name, so they can be
+given in any order:
+
+    int sum(int a, int b) { return a + b; }
+
+    sum(2, 4);         // positional
+    sum(b = 4, a = 2); // all named, reordered
+    sum(2, b = 4);     // positional, then named
+
+The rules are:
+
+- **Named arguments may only follow positional ones** — `sum(a = 1, 2)` is an error.
+  (Once you start naming, keep naming; the named ones may be in any order.)
+- **Every mandatory parameter must be filled**, and no parameter may be given twice
+  (whether positionally and by name, or by two names).
+- Only parameter names are accepted; an unknown name is an error.
+
+Named parameters are a purely caller-side convenience — the callee is unchanged.
+
+For a **variadic** callee (a C `...` function or a sic `va_array` function such as
+`std::Print`), a named argument whose name is not a fixed parameter is a *variadic*
+argument: its name is currently dropped and the value is passed positionally.
+
+    std::Print("{} {}", first = "Something", other = 42);   // names dropped for now
+
+The names are preserved in the AST so a future `va_dict`/`dict` type can capture the
+name/value pairs; that type is not implemented yet.
+
+(To pass an actual assignment expression as an argument, parenthesize it: `f((a = b))`.
+A name that is a language keyword, e.g. `else`, cannot currently be used.)
+
 # Generics
 
 Functions may be generic over one or more type parameters, written in a `<…>` list

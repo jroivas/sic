@@ -939,6 +939,24 @@ impl Parser {
         Ok(ty)
     }
 
+    /// Parse one function-call argument, recognizing a sic named argument
+    /// `name = value` (sic.md §"Named parameters"): an identifier immediately
+    /// followed by a single `=` (never `==`). To pass an assignment expression as an
+    /// argument instead, parenthesize it — `f((a = b))`.
+    fn parse_call_arg(&mut self) -> Result<Expr> {
+        if self.lang == Lang::Sic
+            && self.at(TokenKind::Ident)
+            && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Eq)
+        {
+            let sp = self.span();
+            let name = self.advance().text.clone();
+            self.advance(); // `=`
+            let value = self.parse_assign_expr()?;
+            return Ok(Expr::new(ExprKind::NamedArg { name, value: Box::new(value) }, sp));
+        }
+        self.parse_assign_expr()
+    }
+
     /// sic generic functions (sic.md §"Generics"): try to parse a turbofish type
     /// argument list `<T, U>` that is immediately followed by a `(` call. Positioned
     /// at the `<`. Returns the type arguments and leaves the cursor at the `(` on
@@ -2424,7 +2442,7 @@ impl Parser {
                     self.advance();
                     let mut args = Vec::new();
                     while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
-                        args.push(self.parse_assign_expr()?);
+                        args.push(self.parse_call_arg()?);
                         if !self.eat(TokenKind::Comma) { break; }
                     }
                     self.expect(TokenKind::RParen)?;

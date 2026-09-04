@@ -541,6 +541,13 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
+            // sic named argument (sic.md §"Named parameters") outside a call's
+            // argument list — the call site resolves these, so reaching here means
+            // `name = value` was written where a value was expected.
+            ExprKind::NamedArg { name, .. } => Err(CompileError::at(
+                format!("named argument `{} = …` is only allowed in a function call", name),
+                expr.span.file.clone(), expr.span.line, expr.span.col)),
+
             // sic generic functions (sic.md §"Generics"): `add<int>` outside a call
             // has no single symbol to name — it must be applied.
             ExprKind::GenericRef { name, .. } => Err(CompileError::at(
@@ -4785,6 +4792,15 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // sic named parameters (sic.md §"Named parameters"): if any argument is
+        // `name = value`, map every argument to the callee's parameters — reordering,
+        // filling, and (for a variadic) dropping unmatched names to the tail — then
+        // re-enter with a purely positional list.
+        if args.iter().any(|a| matches!(a.kind, ExprKind::NamedArg { .. })) {
+            let reordered = self.resolve_named_args(func_expr, args, sp)?;
+            return self.lower_call(func_expr, &reordered, sp);
+        }
+
         // sic generic call with explicit type arguments (turbofish), `add<int>(…)`
         // (sic.md §"Generics"): monomorphize with the written types (no inference).
         if let ExprKind::GenericRef { name, type_args } = &func_expr.kind {
@@ -5614,6 +5630,71 @@ impl<'m> FuncCtx<'m> {
             }
             Ok(Val::Local(dest))
         }
+    }
+
+    /// sic named parameters (sic.md §"Named parameters"): map a call's arguments
+    /// (which include one or more `name = value`) onto the callee's parameters,
+    /// returning a purely positional argument list. Errors on an unknown/duplicate
+    /// name, a missing mandatory argument, a positional argument after a named one,
+    /// or a callee whose parameters aren't known by name.
+    fn resolve_named_args(&self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Vec<Expr>> {
+        let (param_names, variadic) = self.callee_param_info(func_expr).ok_or_else(|| {
+            CompileError::at(
+                "named arguments are only supported when the called function is known by name".to_string(),
+                sp.file.clone(), sp.line, sp.col)
+        })?;
+        super::reorder_named_args(args, &param_names, variadic, sp)
+    }
+
+    /// The callee's fixed parameter names and variadic flag, for named-argument
+    /// binding. `None` when the callee isn't a statically-known function. An unknown
+    /// parameter name (imported prototype) is returned as an empty string.
+    fn callee_param_info(&self, func_expr: &Expr) -> Option<(Vec<String>, bool)> {
+        match &func_expr.kind {
+            ExprKind::Ident(name) | ExprKind::GenericRef { name, .. } => {
+                if let Some(crate::ast::Decl::Func { params, variadic, .. }) =
+                    self.lowerer.generic_fn_defs.get(name)
+                {
+                    return Some((params.iter().map(|p| p.name.clone().unwrap_or_default()).collect(), *variadic));
+                }
+                self.lowerer.fn_param_names.get(name).cloned()
+            }
+            // Module member call `mod.fn(...)` or `mod::fn(...)`: names aren't carried
+            // in the manifest, but the exported signature gives the fixed arity +
+            // variadic flag — enough for the variadic name-drop case
+            // (`std.Print("{}", x=…)` / `std::Print(...)`).
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                if let ExprKind::Ident(m) = &base.kind {
+                    return self.module_export_param_info(m, name);
+                }
+                None
+            }
+            ExprKind::EnumVariant { enum_name, variant } => {
+                self.module_export_param_info(enum_name, variant)
+            }
+            _ => None,
+        }
+    }
+
+    /// Fixed arity + variadic flag of an imported module export `module::name`, from
+    /// its exported function signature (parameter names aren't carried in a manifest,
+    /// so they come back empty — enough for the variadic name-drop case).
+    fn module_export_param_info(&self, module: &str, name: &str) -> Option<(Vec<String>, bool)> {
+        if let Some((_, Type::Function(ft))) =
+            self.lowerer.imported_modules.get(module).and_then(|e| e.get(name))
+        {
+            // A sic `va_array` trailing parameter (`std::Print(string, va_array)`) is
+            // the Python-style varargs sink: treat it as variadic and exclude it from
+            // the fixed parameters, so extra (named or positional) args drop to the
+            // tail that the call site packs into the va_array.
+            if let Some(last) = ft.params.last() {
+                if super::types::is_va_array(last) {
+                    return Some((vec![String::new(); ft.params.len() - 1], true));
+                }
+            }
+            return Some((vec![String::new(); ft.params.len()], ft.variadic));
+        }
+        None
     }
 
     /// sic generic functions (sic.md §"Generics"): infer the type arguments of a

@@ -1,0 +1,4 @@
+// sic named parameters: a positional argument may not follow a named one
+// (sic.md §"Named parameters").
+int f(int a, int b, int c) { return a + b + c; }
+int main() { return f(1, b=2, 3); }

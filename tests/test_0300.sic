@@ -1,0 +1,20 @@
+// sic named parameters (sic.md §"Named parameters"): caller-side name→slot
+// mapping. Named args may only follow positional ones and may be reordered.
+#include <stdio.h>
+int sub(int a, int b) { return a - b; }
+int three(int a, int b, int c) { return a*100 + b*10 + c; }
+
+int main() {
+    if (sub(2, 4) != -2)          return 1;   // positional
+    if (sub(b=4, a=2) != -2)      return 2;   // all named, reordered
+    if (sub(2, b=4) != -2)        return 3;   // positional then named
+    if (three(1, c=2, b=3) != 132) return 4;  // 1→a, c=2, b=3
+    if (three(a=1, b=2, c=3) != 123) return 5;
+
+    // variadic: names on the tail are dropped, values passed positionally.
+    char buf[8];
+    snprintf(buf, 8, "%d", value=7);          // named variadic arg → name dropped
+    if (buf[0] != '7') return 6;
+
+    return 42;
+}
