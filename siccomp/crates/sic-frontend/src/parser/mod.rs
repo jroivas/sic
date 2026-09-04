@@ -1809,7 +1809,14 @@ impl Parser {
             // A match arm's pattern is either an enum variant name (`Some`) or, for
             // a `match (type(x))`, a type / kind category (`string`, `int`, `float`).
             // Type keywords lex as their own token, so accept them here too.
-            let name = self.parse_match_pattern_name()?;
+            let mut name = self.parse_match_pattern_name()?;
+            // Accept a qualified pattern path `Mod::Enum::Variant` (or
+            // `Enum::Variant`) — the final segment is the variant/kind matched
+            // against the scrutinee, matching the bare-variant form.
+            while self.at(TokenKind::ColonColon) {
+                self.advance(); // `::`
+                name = self.parse_match_pattern_name()?;
+            }
             // `_` is the wildcard (any remaining variant).
             let variant = if name == "_" { None } else { Some(name) };
             let binding = if variant.is_some() && self.eat(TokenKind::LParen) {
