@@ -487,6 +487,12 @@ pub enum ExprKind {
     /// Function call: f(args)
     Call { func: BoxExpr, args: Vec<Expr> },
 
+    /// sic generic functions (sic.md §"Generics"): an explicit-type-argument
+    /// reference `name<T, U>` (turbofish), used as a call target
+    /// (`add<int>(1, 2)`). Carries the written type arguments so the call site can
+    /// monomorphize without inference.
+    GenericRef { name: String, type_args: Vec<QualType> },
+
     /// Array subscript: a[i]
     Index { base: BoxExpr, index: BoxExpr },
 

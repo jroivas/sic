@@ -116,6 +116,7 @@ pub fn walk_expr<V: MutVisitor>(v: &mut V, e: &mut Expr) {
         | ExprKind::StringLit(_) | ExprKind::CharLit(_) | ExprKind::Ident(_)
         | ExprKind::Nullptr | ExprKind::EnumVariant { .. } | ExprKind::TypeIdOf(_)
         | ExprKind::SizeofType(_) | ExprKind::AlignofType(_)
+        | ExprKind::GenericRef { .. }
         | ExprKind::TypesCompatible(..) => {}
 
         ExprKind::TypeId(inner) | ExprKind::Ref { expr: inner, .. }

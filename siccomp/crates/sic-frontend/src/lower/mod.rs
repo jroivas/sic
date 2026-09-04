@@ -3166,6 +3166,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             collect_expr_names(func, out);
             for a in args { collect_expr_names(a, out); }
         }
+        GenericRef { name, .. } => out.push(name.clone()),
         Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
         Slice { base, lo, hi } => {
             collect_expr_names(base, out);

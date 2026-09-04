@@ -908,6 +908,33 @@ impl Parser {
         Ok(ty)
     }
 
+    /// sic generic functions (sic.md §"Generics"): try to parse a turbofish type
+    /// argument list `<T, U>` that is immediately followed by a `(` call. Positioned
+    /// at the `<`. Returns the type arguments and leaves the cursor at the `(` on
+    /// success; on any mismatch it fully restores the cursor and returns `None`, so
+    /// an ordinary comparison chain (`a < b > (c)`) is never consumed as a turbofish.
+    fn try_parse_turbofish(&mut self) -> Option<Vec<QualType>> {
+        let save = self.pos;
+        self.eat(TokenKind::Lt);
+        let mut args = Vec::new();
+        loop {
+            // The first token of each argument must actually begin a type; otherwise
+            // this `<` is the less-than operator.
+            if !self.starts_decl_specifier() { self.pos = save; return None; }
+            match self.parse_type_name() {
+                Ok(t) => args.push(t),
+                Err(_) => { self.pos = save; return None; }
+            }
+            if self.eat(TokenKind::Comma) { continue; }
+            break;
+        }
+        if args.is_empty() || !self.eat(TokenKind::Gt) || !self.at(TokenKind::LParen) {
+            self.pos = save;
+            return None;
+        }
+        Some(args)
+    }
+
     /// After reading a type name, parse a generic-enum instantiation `Name<A, …>`
     /// (sic.md §"Match") — e.g. `Option<int>`. A non-generic name stays `Named`.
     fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
@@ -2544,6 +2571,16 @@ impl Parser {
                 // sic scope path `A::B::…::member` (sic.md §"Match", §"Namespace").
                 if self.at(TokenKind::ColonColon) {
                     return self.parse_scope_path(name, sp);
+                }
+                // sic generic call with explicit type arguments (turbofish),
+                // `add<int>(…)` (sic.md §"Generics"). Only for a known generic
+                // function and a well-formed `<type,…>(` — else `<` is comparison.
+                if self.lang == Lang::Sic && self.generic_fns.contains(&name)
+                    && self.at(TokenKind::Lt)
+                {
+                    if let Some(type_args) = self.try_parse_turbofish() {
+                        return Ok(Expr::new(ExprKind::GenericRef { name, type_args }, sp));
+                    }
                 }
                 Ok(Expr::new(ExprKind::Ident(name), sp))
             }

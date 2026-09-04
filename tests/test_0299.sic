@@ -1,0 +1,13 @@
+// sic generics: explicit type arguments (turbofish) — needed when a type
+// parameter can't be inferred from the arguments (sic.md §"Generics").
+T add<T>(T a, T b) { return a + b; }
+T make<T>(int n) { T x = (T)n; return x; }   // T appears only in the return type
+U conv<T, U>(T x) { return (U)x; }
+
+int main() {
+    if (add<int>(3, 4) != 7) return 1;         // explicit where inference also works
+    if ((int)make<double>(5) != 5) return 2;   // uninferable without turbofish
+    if (make<long>(9) != 9L) return 3;
+    if (conv<double, int>(9.7) != 9) return 4; // two type parameters
+    return 42;
+}

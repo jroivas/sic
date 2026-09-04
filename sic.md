@@ -398,9 +398,15 @@ must resolve to a single type:
     add(1.5, 2.5);    // T = double  (a second instantiation)
     add(1, 2.0);      // error: conflicting types for `T` (int vs double)
 
-A type parameter that appears only in the return type cannot be inferred from the
-arguments yet (explicit type arguments are planned). Generic functions are currently
-resolved within a single translation unit; exporting them across modules is planned.
+Type arguments may also be given **explicitly** (turbofish), which is required when a
+type parameter appears only in the return type and so cannot be inferred:
+
+    add<int>(3, 4);          // explicit, equivalent to the inferred form
+    make<double>(5);         // T is the return type only → must be explicit
+    conv<double, int>(9.7);  // two type parameters
+
+Generic functions are currently resolved within a single translation unit; exporting
+them across modules is planned.
 
 # Memory safety
 

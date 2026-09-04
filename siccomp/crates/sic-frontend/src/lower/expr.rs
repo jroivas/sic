@@ -541,6 +541,12 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
+            // sic generic functions (sic.md §"Generics"): `add<int>` outside a call
+            // has no single symbol to name — it must be applied.
+            ExprKind::GenericRef { name, .. } => Err(CompileError::at(
+                format!("generic function `{}` must be called (`{}<…>(…)`)", name, name),
+                expr.span.file.clone(), expr.span.line, expr.span.col)),
+
             // Bare tagged-enum variant used as a value, e.g. `Option::None`
             // (a payload-less constructor). A payload variant needs `(...)`.
             ExprKind::EnumVariant { enum_name, variant } => {
@@ -4779,6 +4785,11 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // sic generic call with explicit type arguments (turbofish), `add<int>(…)`
+        // (sic.md §"Generics"): monomorphize with the written types (no inference).
+        if let ExprKind::GenericRef { name, type_args } = &func_expr.kind {
+            return self.lower_generic_call_explicit(name, type_args, args, sp);
+        }
         // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
         // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
         if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
@@ -5647,6 +5658,33 @@ impl<'m> FuncCtx<'m> {
             .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
 
         // Dispatch as an ordinary direct call to the concrete monomorph.
+        let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
+        self.lower_call(&callee, args, sp)
+    }
+
+    /// sic generic functions (sic.md §"Generics"): a call with explicit type
+    /// arguments, `add<int>(1, 2)`. The written types supply the monomorphization
+    /// directly (used when a type parameter can't be inferred, e.g. it appears only
+    /// in the return type). Arity must match the template's type-parameter list.
+    fn lower_generic_call_explicit(
+        &mut self, name: &str, type_args: &[crate::ast::QualType], args: &[Expr], sp: &crate::lexer::Span,
+    ) -> Result<Val> {
+        let n_params = match self.lowerer.generic_fn_defs.get(name) {
+            Some(crate::ast::Decl::Func { type_params, .. }) => type_params.len(),
+            _ => return Err(CompileError::at(
+                format!("`{}` is not a generic function", name), sp.file.clone(), sp.line, sp.col)),
+        };
+        if type_args.len() != n_params {
+            return Err(CompileError::at(format!(
+                "generic function `{}` expects {} type argument(s), got {}",
+                name, n_params, type_args.len()), sp.file.clone(), sp.line, sp.col));
+        }
+        let mut ordered = Vec::with_capacity(type_args.len());
+        for ta in type_args {
+            ordered.push(super::lower_type(ta, &self.lowerer.struct_types, self.ptr_size())?);
+        }
+        let mangled = self.lowerer.instantiate_generic_fn(name, &ordered)
+            .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
         let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
         self.lower_call(&callee, args, sp)
     }
