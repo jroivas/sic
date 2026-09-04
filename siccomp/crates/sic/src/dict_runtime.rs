@@ -28,7 +28,8 @@ typedef struct __sic_dent {
     unsigned long hash;
     unsigned long a;     /* int value / string byte pointer / address */
     unsigned long b;     /* string length (0 otherwise) */
-    unsigned long val;   /* value slot */
+    unsigned long vty;   /* value type-info pointer (0 for a plain scalar) */
+    unsigned long vslot; /* value slot (scalar bits or aggregate pointer) */
     int kind;            /* 1 int, 2 string, 3 pointer */
     int live;            /* 0 = tombstone */
 } __sic_dent;
@@ -110,11 +111,12 @@ __attribute__((weak)) void __sic_dict_grow_index(__sic_dict *d) {
 }
 
 __attribute__((weak)) void __sic_dict_set(
-        __sic_dict *d, int kind, unsigned long a, unsigned long b, unsigned long val) {
+        __sic_dict *d, int kind, unsigned long a, unsigned long b,
+        unsigned long vty, unsigned long vslot) {
     unsigned long h = __sic_dict_hash(kind, a, b);
     int ent;
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
-    if (ent >= 0) { d->ents[ent].val = val; return; }
+    if (ent >= 0) { d->ents[ent].vty = vty; d->ents[ent].vslot = vslot; return; }
     /* Grow the index if it is getting full (load factor 2/3), then re-probe. */
     if ((d->live + 1) * 3 >= d->cap * 2) {
         __sic_dict_grow_index(d);
@@ -132,18 +134,21 @@ __attribute__((weak)) void __sic_dict_set(
     }
     unsigned long e = d->nents++;
     d->ents[e].hash = h; d->ents[e].kind = kind; d->ents[e].a = ka;
-    d->ents[e].b = b; d->ents[e].val = val; d->ents[e].live = 1;
+    d->ents[e].b = b; d->ents[e].vty = vty; d->ents[e].vslot = vslot;
+    d->ents[e].live = 1;
     d->index[slot] = (int)e;
     d->live++;
 }
 
 __attribute__((weak)) int __sic_dict_get(
-        __sic_dict *d, int kind, unsigned long a, unsigned long b, unsigned long *out) {
+        __sic_dict *d, int kind, unsigned long a, unsigned long b,
+        unsigned long *out_ty, unsigned long *out_slot) {
     unsigned long h = __sic_dict_hash(kind, a, b);
     int ent;
     __sic_dict_probe(d, h, kind, a, b, &ent);
-    if (ent < 0) { *out = 0; return 0; }
-    *out = d->ents[ent].val;
+    if (ent < 0) { *out_ty = 0; *out_slot = 0; return 0; }
+    *out_ty = d->ents[ent].vty;
+    *out_slot = d->ents[ent].vslot;
     return 1;
 }
 

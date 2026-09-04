@@ -27,6 +27,8 @@ pub enum Cleanup {
     /// sic `fixed`: `__sic_rat_free` the rational (`__sic_rat*`) held in `slot`
     /// at scope exit (value semantics — every fixed local owns its rational).
     RatFree { slot: Val },
+    /// sic `dict`: `__sic_dict_free` the handle held in `slot` at scope exit.
+    DictFree { slot: Val },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -408,6 +410,11 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::fixed_type(0, 0) });
                 let _ = self.emit_bigint_call("__sic_rat_free", vec![Val::Local(p)], Type::Void);
+            }
+            Cleanup::DictFree { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
+                let _ = self.emit_bigint_call("__sic_dict_free", vec![Val::Local(p)], Type::Void);
             }
         }
     }
@@ -1485,6 +1492,8 @@ impl<'m> FuncCtx<'m> {
                     if self.is_sic() && super::types::is_dict(&ty) && d.init.is_none() {
                         let handle = self.lower_dict_new(&ty, &d.span)?;
                         self.push_instr(Instr::Store { ptr: Val::Local(vid), val: handle });
+                        // We created this dict, so we own it: free it at scope exit.
+                        self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
                     }
                     // sic struct constructor/destructor (sic.md §"Memory safety"):
                     // for a struct local with a `S()`, call it on `&local` after
