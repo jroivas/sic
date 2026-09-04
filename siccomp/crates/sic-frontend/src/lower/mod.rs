@@ -382,9 +382,14 @@ impl Lowerer {
     /// `static` (Internal/Private) symbols and imports/externs keep their names.
     fn mangle_module_exports(&mut self, module: &str) {
         for f in &mut self.module.functions {
-            // `main` is reserved by the C runtime and never mangled.
+            // `main` is reserved by the C runtime and never mangled. Compiler runtime
+            // helpers (`__sic_*`: the bigint/dict/… weak runtime) keep their stable
+            // global names so a consumer that didn't prepend the runtime itself (e.g.
+            // it only calls a `va_dict`-taking `std::Print`) resolves them from this
+            // module's object; the weak copies dedupe at link.
             if f.linkage == Linkage::External
                 && f.name != "main"
+                && !f.name.starts_with("__sic_")
                 && !f.name.starts_with(&format!("{}_", module))
             {
                 f.name = format!("{}_{}", module, f.name);

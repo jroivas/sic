@@ -304,6 +304,38 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(p))
     }
 
+    /// Pack a call's *named* trailing arguments into a `va_dict` (sic.md §"Named
+    /// parameters"): a fresh `dict<string, any>` mapping each argument's name to its
+    /// value boxed as `any`. Returns the dict handle.
+    fn pack_va_dict(&mut self, named: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let vd_ty = super::types::va_dict_type();
+        let handle = self.lower_dict_new(&vd_ty, sp)?;
+        let set = self.dict_runtime_fn("__sic_dict_set");
+        for arg in named {
+            if let ExprKind::NamedArg { name, value } = &arg.kind {
+                // Key: the argument name as a string (kind 2 = string bytes).
+                let name_data = self.emit_cstring(name);
+                let ka = self.alloc_val();
+                self.push_instr(Instr::Cast { dest: ka, op: CastOp::BitCast, val: name_data, to_ty: Type::u64() });
+                self.val_types.insert(ka.0, Type::u64());
+                let kb = Constant::uint(name.len() as u64);
+                // Value: box into (type-info, slot).
+                let ety = self.infer_expr_type(value).unwrap_or_else(|_| Type::i32());
+                let tyval = self.lower_type_value(&ety);
+                let tyw = self.alloc_val();
+                self.push_instr(Instr::Cast { dest: tyw, op: CastOp::BitCast, val: tyval, to_ty: Type::u64() });
+                self.val_types.insert(tyw.0, Type::u64());
+                let slot = self.box_slot(value, &ety)?;
+                self.push_instr(Instr::Call {
+                    dest: None, func: set,
+                    args: vec![handle.clone(), Constant::int(2), Val::Local(ka), kb, Val::Local(tyw), slot],
+                    ret_ty: Type::Void,
+                });
+            }
+        }
+        Ok(handle)
+    }
+
     /// The 64-bit `slot` stored in an `any` for a value of type `ty`.
     fn box_slot(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
         // Store the value's address. `fixed`/`bigint`/pointer rvalues are already a
@@ -1150,6 +1182,28 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Resolve a `__sic_dict_*` runtime function, declaring it as an extern if it is
+    /// not already present. The definition comes from the prepended dict runtime (when
+    /// this unit uses `dict`) or from an imported module's object (e.g. `libstd`,
+    /// which now uses `va_dict`) — the weak copies dedupe at link.
+    fn dict_runtime_fn(&mut self, name: &str) -> FuncRef {
+        if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
+        let u64t = Type::u64();
+        let ptr = Type::void_ptr();
+        let u64p = Type::Pointer(Box::new(u64t.clone()));
+        let i32t = Type::i32();
+        let (params, ret): (Vec<Type>, Type) = match name {
+            "__sic_dict_new" => (vec![], ptr.clone()),
+            "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone()], Type::Void),
+            "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
+            "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t], i32t.clone()),
+            "__sic_dict_free" => (vec![ptr], Type::Void),
+            _ => (vec![], Type::Void),
+        };
+        let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
+        self.lowerer.module.add_extern(sic_ir::ExternFunc { name: name.to_string(), sig })
+    }
+
     /// The `(key, value)` types of a dict subscript base (defaults to any/any).
     fn dict_kv_of(&mut self, base: &Expr) -> (Type, Type) {
         let bt = self.infer_expr_type(base).ok();
@@ -1178,9 +1232,7 @@ impl<'m> FuncCtx<'m> {
         let (kind, a, b) = self.dict_key_box(key, sp)?;
         let ot = self.dict_out_slot();
         let os = self.dict_out_slot();
-        let get = self.lowerer.module.func_ref_by_name("__sic_dict_get").ok_or_else(|| {
-            CompileError::at("dict runtime not linked (use `dict` to trigger it)".to_string(), sp.file.clone(), sp.line, sp.col)
-        })?;
+        let get = self.dict_runtime_fn("__sic_dict_get");
         let found = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(found), func: get, args: vec![d, kind, a, b, ot.clone(), os.clone()], ret_ty: Type::i32() });
         let _ = found;
@@ -1233,9 +1285,7 @@ impl<'m> FuncCtx<'m> {
             }
             (Constant::uint(0), self.dict_scalar_to_u64(vval))
         };
-        let set = self.lowerer.module.func_ref_by_name("__sic_dict_set").ok_or_else(|| {
-            CompileError::at("dict runtime not linked".to_string(), sp.file.clone(), sp.line, sp.col)
-        })?;
+        let set = self.dict_runtime_fn("__sic_dict_set");
         self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word], ret_ty: Type::Void });
         Ok(())
     }
@@ -1244,18 +1294,14 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn lower_dict_del(&mut self, base: &Expr, key: &Expr, sp: &crate::lexer::Span) -> Result<()> {
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
-        let del = self.lowerer.module.func_ref_by_name("__sic_dict_del").ok_or_else(|| {
-            CompileError::at("dict runtime not linked".to_string(), sp.file.clone(), sp.line, sp.col)
-        })?;
+        let del = self.dict_runtime_fn("__sic_dict_del");
         self.push_instr(Instr::Call { dest: None, func: del, args: vec![d, kind, a, b], ret_ty: Type::i32() });
         Ok(())
     }
 
     /// Create a fresh empty dict handle (`dict d;` auto-init and `new dict<…>`).
-    pub(crate) fn lower_dict_new(&mut self, dty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
-        let new = self.lowerer.module.func_ref_by_name("__sic_dict_new").ok_or_else(|| {
-            CompileError::at("dict runtime not linked (use `dict` to trigger it)".to_string(), sp.file.clone(), sp.line, sp.col)
-        })?;
+    pub(crate) fn lower_dict_new(&mut self, dty: &Type, _sp: &crate::lexer::Span) -> Result<Val> {
+        let new = self.dict_runtime_fn("__sic_dict_new");
         let d = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(d), func: new, args: vec![], ret_ty: dty.clone() });
         self.val_types.insert(d.0, dty.clone());
@@ -5025,8 +5071,12 @@ impl<'m> FuncCtx<'m> {
         // filling, and (for a variadic) dropping unmatched names to the tail — then
         // re-enter with a purely positional list.
         if args.iter().any(|a| matches!(a.kind, ExprKind::NamedArg { .. })) {
-            let reordered = self.resolve_named_args(func_expr, args, sp)?;
-            return self.lower_call(func_expr, &reordered, sp);
+            // If the callee has a `va_dict` parameter, the named arguments are kept
+            // (not flattened) and packed into it during argument lowering below.
+            if !self.callee_has_va_dict(func_expr) {
+                let reordered = self.resolve_named_args(func_expr, args, sp)?;
+                return self.lower_call(func_expr, &reordered, sp);
+            }
         }
 
         // sic generic call with explicit type arguments (turbofish), `add<int>(…)`
@@ -5539,38 +5589,18 @@ impl<'m> FuncCtx<'m> {
         // Evaluate arguments. Expose each parameter's type as the expected type so a
         // generic-enum constructor argument (`f(Option::Some(5))`) infers its
         // monomorph (sic.md §"Match").
-        let param_types: Vec<Type> = match &func_expr.kind {
-            ExprKind::Ident(name) => match self.lookup(name) {
-                Some(LookupResult::Func(fr)) => {
-                    let sig = self.lowerer.module.func_sig(fr);
-                    let mut ps = sig.params.clone();
-                    // A struct/union return adds a hidden sret pointer as param 0;
-                    // drop it so `param_types` matches the user-facing arguments (and
-                    // `va_array` packing counts the fixed params correctly).
-                    if super::ret_is_sret(&sig.ret, self.ptr_size()) && !ps.is_empty() {
-                        ps.remove(0);
-                    }
-                    ps
-                }
-                _ => Vec::new(),
-            },
-            // Namespaced module call `mod.fn(...)` (e.g. `std.Fmt`): parameter types
-            // come from the imported module's registered export signature.
-            ExprKind::Field { base, name } => match &base.kind {
-                ExprKind::Ident(m) => self.lowerer.imported_modules.get(m)
-                    .and_then(|ex| ex.get(name))
-                    .and_then(|(_, t)| match t { Type::Function(ft) => Some(ft.params.clone()), _ => None })
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            },
-            _ => Vec::new(),
-        };
-        // sic va_array (sic.md std): if the callee's LAST parameter is a `va_array`,
-        // the trailing call arguments (past the fixed params) are boxed into `any`
-        // and packed into one array-slice value.
-        let va_fixed = match param_types.last() {
-            Some(t) if self.is_sic() && super::types::is_va_array(t) => Some(param_types.len() - 1),
-            _ => None,
+        let param_types: Vec<Type> = self.callee_param_types(func_expr);
+        // sic va_array / va_dict (sic.md std, §"Named parameters"): a trailing
+        // `va_array` collects the positional trailing arguments (boxed into `any`);
+        // a trailing `va_dict` collects the named (`name = value`) ones. The fixed
+        // parameters are everything before the first such collector.
+        let va_array_idx = if self.is_sic() { param_types.iter().position(super::types::is_va_array) } else { None };
+        let va_dict_idx = if self.is_sic() { param_types.iter().position(super::types::is_va_dict) } else { None };
+        let va_fixed = match (va_array_idx, va_dict_idx) {
+            (Some(a), Some(d)) => Some(a.min(d)),
+            (Some(a), None) => Some(a),
+            (None, Some(d)) => Some(d),
+            (None, None) => None,
         };
         // sic strict enum typing (sic.md §"Enums"): the callee's payload-less-enum
         // parameters reject a plain `int` or a different enum argument without a cast.
@@ -5613,18 +5643,46 @@ impl<'m> FuncCtx<'m> {
         }
         if let Some(fixed) = va_fixed {
             let trailing = &args[fixed.min(args.len())..];
-            // Forward an already-collected `va_array`: a call `f(rest)` whose sole
-            // trailing argument is itself a `va_array` passes it straight through
-            // (like `f(*args)` in Python) — e.g. std's `Print` delegating to
-            // `Fmt(fmt, args)` — rather than re-boxing it as one array element.
-            let va = if trailing.len() == 1
-                && matches!(self.infer_expr_type(&trailing[0]), Ok(t) if super::types::is_va_array(&t))
-            {
-                self.lower_aggregate_ptr(&trailing[0])?
-            } else {
-                self.pack_va_array(trailing, sp)?
-            };
-            arg_vals.push(va);
+            // Classify trailing args: a named one feeds the va_dict; a plain one that
+            // is itself a va_array / va_dict is *forwarded* to that slot (like
+            // `f(*args, **kw)`); anything else is a plain positional → va_array.
+            let mut fwd_va_array: Option<Expr> = None;
+            let mut fwd_va_dict: Option<Expr> = None;
+            let mut plain: Vec<Expr> = Vec::new();
+            let mut named: Vec<Expr> = Vec::new();
+            for a in trailing {
+                if matches!(a.kind, ExprKind::NamedArg { .. }) { named.push(a.clone()); continue; }
+                let t = self.infer_expr_type(a).ok();
+                if va_array_idx.is_some() && fwd_va_array.is_none()
+                    && matches!(&t, Some(t) if super::types::is_va_array(t)) {
+                    fwd_va_array = Some(a.clone());
+                } else if va_dict_idx.is_some() && fwd_va_dict.is_none()
+                    && matches!(&t, Some(t) if super::types::is_va_dict(t)) {
+                    fwd_va_dict = Some(a.clone());
+                } else {
+                    plain.push(a.clone());
+                }
+            }
+            // Emit the collectors in signature order.
+            let mut packed: Vec<(usize, Val)> = Vec::new();
+            if let Some(ai) = va_array_idx {
+                let va = match fwd_va_array {
+                    Some(e) => self.lower_aggregate_ptr(&e)?,
+                    None => self.pack_va_array(&plain, sp)?,
+                };
+                packed.push((ai, va));
+            }
+            if let Some(di) = va_dict_idx {
+                let vd = match fwd_va_dict {
+                    // A `va_dict` is a handle (pointer); forward its value, not its
+                    // address (unlike the struct-valued `va_array`).
+                    Some(e) => self.lower_expr(&e)?,
+                    None => self.pack_va_dict(&named, sp)?,
+                };
+                packed.push((di, vd));
+            }
+            packed.sort_by_key(|(i, _)| *i);
+            for (_, v) in packed { arg_vals.push(v); }
         }
 
         // sic namespaced module call `x.f(...)`: resolve `x.f` to the imported
@@ -5790,6 +5848,11 @@ impl<'m> FuncCtx<'m> {
         let is_variadic = self.lowerer.module.func_sig(fref).variadic;
         for (i, pval) in arg_vals.iter_mut().enumerate() {
             if let Some(pty) = param_tys.get(i) {
+                // A packed `va_array` / `va_dict` collector is already a finished
+                // pointer value and has no matching `args[i]` — never coerce it.
+                if super::types::is_va_array(pty) || super::types::is_va_dict(pty) {
+                    continue;
+                }
                 // Struct/union args are already lowered to a pointer to the value
                 // (by-value ABI); leave them as-is.
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {
@@ -5872,6 +5935,43 @@ impl<'m> FuncCtx<'m> {
                 sp.file.clone(), sp.line, sp.col)
         })?;
         super::reorder_named_args(args, &param_names, variadic, sp)
+    }
+
+    /// The callee's IR parameter types (user-facing: any hidden sret pointer
+    /// stripped). Empty when the callee isn't a statically-known function.
+    fn callee_param_types(&self, func_expr: &Expr) -> Vec<Type> {
+        match &func_expr.kind {
+            ExprKind::Ident(name) => match self.lookup(name) {
+                Some(LookupResult::Func(fr)) => {
+                    let sig = self.lowerer.module.func_sig(fr);
+                    let mut ps = sig.params.clone();
+                    if super::ret_is_sret(&sig.ret, self.ptr_size()) && !ps.is_empty() {
+                        ps.remove(0);
+                    }
+                    ps
+                }
+                _ => Vec::new(),
+            },
+            // Namespaced module call `mod.fn(...)` / `mod::fn(...)`: parameter types
+            // come from the imported module's registered export signature.
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => match &base.kind {
+                ExprKind::Ident(m) => self.lowerer.imported_modules.get(m)
+                    .and_then(|ex| ex.get(name))
+                    .and_then(|(_, t)| match t { Type::Function(ft) => Some(ft.params.clone()), _ => None })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            },
+            ExprKind::EnumVariant { enum_name, variant } => self.lowerer.imported_modules.get(enum_name)
+                .and_then(|ex| ex.get(variant))
+                .and_then(|(_, t)| match t { Type::Function(ft) => Some(ft.params.clone()), _ => None })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the callee declares a `va_dict` parameter (the named-varargs sink).
+    fn callee_has_va_dict(&self, func_expr: &Expr) -> bool {
+        self.callee_param_types(func_expr).iter().any(super::types::is_va_dict)
     }
 
     /// The callee's fixed parameter names and variadic flag, for named-argument

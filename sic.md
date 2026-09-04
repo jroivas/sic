@@ -399,14 +399,18 @@ The rules are:
 
 Named parameters are a purely caller-side convenience — the callee is unchanged.
 
-For a **variadic** callee (a C `...` function or a sic `va_array` function such as
-`std::Print`), a named argument whose name is not a fixed parameter is a *variadic*
-argument: its name is currently dropped and the value is passed positionally.
+For a **variadic** callee, named arguments are collected into a **`va_dict`** — a
+`dict<string, any>` the function declares as a trailing parameter — while positional
+trailing arguments still go to a `va_array`:
 
-    std::Print("{} {}", first = "Something", other = 42);   // names dropped for now
+    int show(va_dict kw) { return (int)kw["a"] + (int)kw["b"]; }
+    show(a = 1, b = 2);        // → kw = { "a": 1, "b": 2 }
 
-The names are preserved in the AST so a future `va_dict`/`dict` type can capture the
-name/value pairs; that type is not implemented yet.
+`std::Print`/`Println`/`Fmt` use this for **named placeholders** `{name}` alongside
+the positional `{}`:
+
+    std::Print("{name} is {age}\n", name = "Sam", age = 42);   // Sam is 42
+    std::Println("{} then {key}", 1, key = "two");             // 1 then two
 
 (To pass an actual assignment expression as an argument, parenthesize it: `f((a = b))`.
 A name that is a language keyword, e.g. `else`, cannot currently be used.)
@@ -441,10 +445,17 @@ entries array plus a sparse index), so iteration order will be stable and deleti
 keep the surviving order intact. The key kind is tracked so key-type-specialized fast
 paths can be added later.
 
+A dict can hold values of **any** type via `dict<K, any>`, which stores each value
+with its runtime type:
+
+    dict<int, any> m;
+    m[1] = 42;  m[2] = "hi";  m[3] = 3.14;   // mixed value types
+
 > As implemented today: keys may be integers or strings (string keys are copied and
-> owned by the dict); values are a single machine word (an integer or pointer). A
-> `dict<…, any>` value reads back as a 64-bit integer. String/aggregate *values* and
-> the companion `va_dict`/`dict` varargs capture are planned.
+> owned by the dict). A scalar-typed value (`dict<K, int>`) is one machine word; a
+> `dict<K, any>` stores the value's type too. A compiler-created `dict` local is
+> freed at scope exit. Typed *aggregate* values (e.g. `dict<int, string>`) should go
+> through `dict<int, any>` for now.
 
 # Generics
 

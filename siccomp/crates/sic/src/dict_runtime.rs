@@ -181,16 +181,19 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
 pub fn uses_dict(src: &str) -> bool {
     let bytes = src.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0;
-    while let Some(pos) = src[i..].find("dict") {
-        let start = i + pos;
-        let end = start + 4;
-        let before_ok = start == 0 || !is_word(bytes[start - 1]);
-        let after_ok = end >= bytes.len() || !is_word(bytes[end]);
-        if before_ok && after_ok {
-            return true;
+    // Match the word `dict` or `va_dict` (both need the runtime).
+    for kw in ["dict", "va_dict"] {
+        let mut i = 0;
+        while let Some(pos) = src[i..].find(kw) {
+            let start = i + pos;
+            let end = start + kw.len();
+            let before_ok = start == 0 || !is_word(bytes[start - 1]);
+            let after_ok = end >= bytes.len() || !is_word(bytes[end]);
+            if before_ok && after_ok {
+                return true;
+            }
+            i = end;
         }
-        i = end;
     }
     false
 }

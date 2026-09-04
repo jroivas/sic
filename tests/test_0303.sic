@@ -1,0 +1,10 @@
+// sic va_dict (sic.md §"Named parameters"): a variadic function collects the
+// call's named arguments into a `dict<string, any>`; values keep their types.
+int pick(va_dict kw) {
+    return (int)kw["a"] + (int)kw["b"] - (int)kw["c"];
+}
+int main() {
+    if (pick(a = 10, b = 5, c = 3) != 12) return 1;     // 10+5-3
+    if (pick(c = 1, a = 100, b = 1) != 100) return 2;   // order-independent
+    return 42;
+}

@@ -821,7 +821,14 @@ impl<'m> Lowerer {
         let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic, self.ptr_size);
         let is_sret = super::ret_is_sret(&ir_ret, self.ptr_size);
 
-        let linkage = super::fn_linkage(storage, inline, self.static_funcs.contains(name));
+        let mut linkage = super::fn_linkage(storage, inline, self.static_funcs.contains(name));
+        // Compiler runtime helpers (`__sic_*`: the bigint / dict / … prepended
+        // runtimes, all `__attribute__((weak))`) are emitted weak so the copies that
+        // land in several objects — including an imported module's — dedupe at link
+        // instead of colliding. (Function `weak` isn't otherwise threaded here.)
+        if linkage == Linkage::External && name.starts_with("__sic_") {
+            linkage = Linkage::Weak;
+        }
 
         let mut ir_param_decls: Vec<sic_ir::Param> = params.iter().zip(&ir_params).map(|(p, ty)| {
             sic_ir::Param {

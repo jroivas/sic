@@ -556,6 +556,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `dict` is the built-in hash map (sic.md §"Dict"); `dict<K,V>` or plain
             // `dict` (= `dict<any,any>`); an ordinary identifier in C.
             "dict" => return TokenKind::TypeName,
+            // `va_dict` collects a variadic call's named arguments (sic.md §"Named
+            // parameters"); an ordinary identifier in C.
+            "va_dict" => return TokenKind::TypeName,
             // `u8char` is a Unicode code point (32-bit); ordinary identifier in C.
             "u8char" => return TokenKind::TypeName,
             // `va_array` is a Python-style varargs collector: a last parameter that

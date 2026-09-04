@@ -227,7 +227,7 @@ pub fn dict_type(key: &Type, val: &Type) -> Type {
     Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
 }
 
-/// True if `t` is a `dict` value.
+/// True if `t` is a `dict` value (including a `va_dict`).
 pub fn is_dict(t: &Type) -> bool {
     dict_marker(t).is_some()
 }
@@ -237,7 +237,7 @@ fn dict_marker(t: &Type) -> Option<&str> {
         Type::Pointer(inner) => match inner.as_ref() {
             Type::Struct(st) => {
                 let n = st.name.as_deref()?;
-                if n.starts_with("(dict|") { Some(n) } else { None }
+                if n.starts_with("(dict|") || n == VA_DICT_MARKER { Some(n) } else { None }
             }
             _ => None,
         },
@@ -245,12 +245,33 @@ fn dict_marker(t: &Type) -> Option<&str> {
     }
 }
 
-/// The `(key, value)` types of a `dict`, or `None` if `t` is not a dict.
+/// The `(key, value)` types of a `dict`, or `None` if `t` is not a dict. A
+/// `va_dict` is a `dict<string, any>`.
 pub fn dict_kv(t: &Type, ptr_size: u32) -> Option<(Type, Type)> {
     let n = dict_marker(t)?;
+    if n == VA_DICT_MARKER {
+        return Some((sic_string_type(ptr_size), any_type()));
+    }
     let body = n.strip_prefix("(dict|")?.strip_suffix(')')?;
     let (k, v) = body.split_once('|')?;
     Some((demangle_type(k, ptr_size), demangle_type(v, ptr_size)))
+}
+
+// ─── `va_dict`: named-varargs capture (sic.md §"Named parameters"/§"Dict") ─────
+
+pub const VA_DICT_MARKER: &str = "__sic_va_dict";
+
+/// The `va_dict` value type — a `dict<string, any>` handle that a variadic function
+/// declares as a trailing parameter to receive the call's *named* arguments.
+pub fn va_dict_type() -> Type {
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(VA_DICT_MARKER.to_string()), vec![], false))))
+}
+
+/// True if `t` is a `va_dict` (the named-varargs collector).
+pub fn is_va_dict(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(VA_DICT_MARKER)))
 }
 
 /// Reconstruct a `Type` from a [`mangle_type_name`] string, for the subset used as
@@ -585,6 +606,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "va_array"        => return Ok(va_array_type(ptr_size)),
                 // sic built-in hash map (sic.md §"Dict"): plain `dict` = dict<any,any>.
                 "dict"            => return Ok(dict_type(&any_type(), &any_type())),
+                // sic named-varargs collector (sic.md §"Named parameters").
+                "va_dict"         => return Ok(va_dict_type()),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),

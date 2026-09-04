@@ -3,15 +3,16 @@ module std;
 // `Print(fmt, a, b, …)` — format `fmt` with the arguments (the same `{}`
 // placeholders as `Fmt`) and write the result to stdout. `args` is forwarded to
 // `Fmt` as one already-collected `va_array`, not re-boxed.
-int Print(string fmt, va_array args) {
-    string s = Fmt(fmt, args);
+int Print(string fmt, va_array args, va_dict kwargs) {
+    string s = Fmt(fmt, args, kwargs);
     write(1, s.ptr, s.size);
     return 0;
 }
 
-// `Println(fmt, a, b, …)` — like `Print`, followed by a newline.
-int Println(string fmt, va_array args) {
-    string s = Fmt(fmt, args);
+// `Println(fmt, a, b, …)` — like `Print`, followed by a newline. Named arguments
+// (`name = value`) are collected into `kwargs` for `{name}` placeholders.
+int Println(string fmt, va_array args, va_dict kwargs) {
+    string s = Fmt(fmt, args, kwargs);
     write(1, s.ptr, s.size);
     write(1, "\n", 1);
     return 0;
