@@ -376,6 +376,13 @@ impl<'m> FuncCtx<'m> {
         let p = self.lower_aggregate_ptr(inner)?;
         let slot_lv = self.field_ptr_from(LValue::plain(p, super::types::any_type()), "slot", false, sp)?;
         let slot = self.load_lvalue(&slot_lv)?; // u64
+        self.reinterpret_slot(slot, target)
+    }
+
+    /// Reinterpret a 64-bit `slot` (from an `any` box or a dict value) as `target`:
+    /// a float's bits (memory round-trip), an aggregate/pointer address (bit-cast,
+    /// aggregate-by-pointer rvalue), or a scalar (coerce).
+    fn reinterpret_slot(&mut self, slot: Val, target: &Type) -> Result<Val> {
         if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
             // Reinterpret the u64 bits as a float via a memory round-trip.
             let mem = self.alloc_val();
@@ -1126,20 +1133,6 @@ impl<'m> FuncCtx<'m> {
         Val::Local(d)
     }
 
-    /// Narrow a 64-bit dict slot back to the target scalar type.
-    fn dict_u64_to_scalar(&mut self, v: Val, ty: &Type) -> Val {
-        let op = match ty {
-            Type::Int { bits: 64, .. } => return v,
-            Type::Int { .. } | Type::Bool => CastOp::Trunc,
-            Type::Pointer(_) => CastOp::BitCast,
-            _ => return v,
-        };
-        let d = self.alloc_val();
-        self.push_instr(Instr::Cast { dest: d, op, val: v, to_ty: ty.clone() });
-        self.val_types.insert(d.0, ty.clone());
-        Val::Local(d)
-    }
-
     /// Box a dict key expression into the runtime's `(kind, a, b)` tagged form:
     /// kind 1 = integer (`a` = value), 2 = string (`a` = bytes, `b` = length),
     /// 3 = pointer. String keys (sic `string` or `char*`) hash/compare by bytes.
@@ -1258,32 +1251,29 @@ impl<'m> FuncCtx<'m> {
             self.store_lvalue(&slot_lv, Val::Local(slot))?;
             return Ok(Val::Local(p));
         }
-        Ok(self.dict_u64_to_scalar(Val::Local(slot), &v))
+        // A concrete value type V (scalar, string, struct, …) is reconstructed from
+        // the slot bits/address directly.
+        self.reinterpret_slot(Val::Local(slot), &v)
     }
 
-    /// `dict[key] = val`: `__sic_dict_set`. A scalar value is stored as `(0, bits)`;
-    /// an `any`-valued dict boxes the value into `(type-info, slot)`.
+    /// `dict[key] = val`: `__sic_dict_set`. The value is boxed into `(type-info,
+    /// slot)`: the `slot` holds a scalar's bits or an aggregate's address (`box_slot`
+    /// handles every value type); the `type-info` word is stored only for an
+    /// `any`-valued dict (a concrete V reconstructs from its static type).
     pub(crate) fn lower_dict_set(&mut self, base: &Expr, key: &Expr, val: &Expr, sp: &crate::lexer::Span) -> Result<()> {
         let (_k, v) = self.dict_kv_of(base);
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
-        let (vty_word, vslot_word) = if super::types::is_any(&v) {
-            let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
+        let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
+        let vslot_word = self.box_slot(val, &ety)?;
+        let vty_word = if super::types::is_any(&v) {
             let tyval = self.lower_type_value(&ety); // type-info*
             let tyw = self.alloc_val();
             self.push_instr(Instr::Cast { dest: tyw, op: CastOp::BitCast, val: tyval, to_ty: Type::u64() });
             self.val_types.insert(tyw.0, Type::u64());
-            let slot = self.box_slot(val, &ety)?;
-            (Val::Local(tyw), slot)
+            Val::Local(tyw)
         } else {
-            let vval = self.lower_expr(val)?;
-            let vt = self.val_type(&vval);
-            if !matches!(&vt, Type::Int { .. } | Type::Bool | Type::Pointer(_)) {
-                return Err(CompileError::at(
-                    "a typed dict value must be an integer or pointer (use `dict<…, any>` for other types)".to_string(),
-                    sp.file.clone(), sp.line, sp.col));
-            }
-            (Constant::uint(0), self.dict_scalar_to_u64(vval))
+            Constant::uint(0)
         };
         let set = self.dict_runtime_fn("__sic_dict_set");
         self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word], ret_ty: Type::Void });

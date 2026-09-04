@@ -944,15 +944,24 @@ impl Parser {
     /// followed by a single `=` (never `==`). To pass an assignment expression as an
     /// argument instead, parenthesize it — `f((a = b))`.
     fn parse_call_arg(&mut self) -> Result<Expr> {
+        // The name may be a plain identifier or a language keyword whose lexeme is a
+        // valid identifier (`else = 42`) — useful for a `va_dict` sink, where the
+        // name is arbitrary. It must be immediately followed by a single `=`.
         if self.lang == Lang::Sic
-            && self.at(TokenKind::Ident)
             && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Eq)
         {
-            let sp = self.span();
-            let name = self.advance().text.clone();
-            self.advance(); // `=`
-            let value = self.parse_assign_expr()?;
-            return Ok(Expr::new(ExprKind::NamedArg { name, value: Box::new(value) }, sp));
+            let tok = self.peek();
+            let is_name = matches!(tok.kind, TokenKind::Ident | TokenKind::TypeName)
+                || (!tok.text.is_empty()
+                    && tok.text.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                    && tok.text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+            if is_name {
+                let sp = self.span();
+                let name = self.advance().text.clone();
+                self.advance(); // `=`
+                let value = self.parse_assign_expr()?;
+                return Ok(Expr::new(ExprKind::NamedArg { name, value: Box::new(value) }, sp));
+            }
         }
         self.parse_assign_expr()
     }

@@ -221,13 +221,15 @@ import std;
 int main() {
     std::Print("{name}={val}\n", val = 42, name = "answer");
     std::Println("mix {} and {k}", 7, k = "named");
+    std::Println("{else}", else = "keyword-name");   // keyword as an arg name
     return 0;
 }
 EOF
 if "$SIC" kwuser.sic -I. -o kwuser 2>err; then
     out="$(./kwuser)"
     want="answer=42
-mix 7 and named"
+mix 7 and named
+keyword-name"
     if [ "$out" = "$want" ]; then ok "std-named-args"; else bad "std-named-args" "got:\n$out"; fi
 else
     bad "std-named-args" "compile/link failed: $(cat err)"

@@ -412,8 +412,9 @@ the positional `{}`:
     std::Print("{name} is {age}\n", name = "Sam", age = 42);   // Sam is 42
     std::Println("{} then {key}", 1, key = "two");             // 1 then two
 
-(To pass an actual assignment expression as an argument, parenthesize it: `f((a = b))`.
-A name that is a language keyword, e.g. `else`, cannot currently be used.)
+An argument name may be any identifier, including a language keyword (`else = 42`),
+which is handy for a `va_dict` sink. (To pass an actual assignment expression as an
+argument, parenthesize it: `f((a = b))`.)
 
 # Dict
 
@@ -451,11 +452,14 @@ with its runtime type:
     dict<int, any> m;
     m[1] = 42;  m[2] = "hi";  m[3] = 3.14;   // mixed value types
 
+Values may be of any concrete type too — `dict<int, string>`, etc. — read back as
+the declared type.
+
 > As implemented today: keys may be integers or strings (string keys are copied and
-> owned by the dict). A scalar-typed value (`dict<K, int>`) is one machine word; a
-> `dict<K, any>` stores the value's type too. A compiler-created `dict` local is
-> freed at scope exit. Typed *aggregate* values (e.g. `dict<int, string>`) should go
-> through `dict<int, any>` for now.
+> owned by the dict). A scalar value is one machine word; a `dict<K, any>` also
+> stores the value's runtime type. An *aggregate* value (e.g. a `string`) is stored
+> by reference (not deep-copied), so it must outlive the entry. A compiler-created
+> `dict` local is freed at scope exit.
 
 # Generics
 

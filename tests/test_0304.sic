@@ -1,0 +1,15 @@
+// sic dict: values of any concrete type, including aggregates like `string`
+// (sic.md §"Dict"). Read back keeps the declared value type.
+int main() {
+    dict<int, string> d;
+    d[1] = "hello";
+    d[2] = "world";
+    string a = d[1];
+    string b = d[2];
+    if (a.size != 5 || b.size != 5) return 1;
+    if (a[0] != 'h' || b[0] != 'w') return 2;
+    d[1] = "hi";               // overwrite with a shorter string
+    string c = d[1];
+    if (c.size != 2) return 3;
+    return 42;
+}
