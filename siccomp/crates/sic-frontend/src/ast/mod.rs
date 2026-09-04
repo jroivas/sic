@@ -263,6 +263,9 @@ pub enum Decl {
         /// `__attribute__((constructor[(prio)]))`: run before `main` via
         /// `.init_array`. `Some(priority)` (lower priority runs earlier).
         constructor: Option<i32>,
+        /// sic `async` (sic.md §"Async"): the function is asynchronous — it returns
+        /// a `Task<ret>`, and each `return v` wraps `v` into a task. `await` runs it.
+        is_async: bool,
         span: Span,
     },
     TypeDef {
@@ -490,6 +493,10 @@ pub enum ExprKind {
 
     /// Function call: f(args)
     Call { func: BoxExpr, args: Vec<Expr> },
+
+    /// sic `await expr` (sic.md §"Async"): drive an async `Task<T>` to completion and
+    /// yield its `T`. Lowers to a runtime hook (`__sic_await`).
+    Await(BoxExpr),
 
     /// sic named argument (sic.md §"Named parameters"): `name = value` in a call's
     /// argument list. Purely a caller-side construct — the call site maps it to the

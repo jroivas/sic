@@ -6,6 +6,7 @@ use std::process::Command;
 
 mod bigint_runtime;
 mod dict_runtime;
+mod async_runtime;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -651,6 +652,15 @@ fn parse_source(
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             bigint_runtime::BIGINT_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `async`/`await` (sic.md §"Async"): prepend the stub task runtime only when
+    // the unit uses async support.
+    if async_runtime::uses_async(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            async_runtime::ASYNC_RUNTIME, path, preprocessed
         );
     }
 

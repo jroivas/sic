@@ -31,6 +31,8 @@ pub struct Parser {
     /// `__attribute__((weak))` seen while parsing the current declaration; the
     /// declared symbols get weak linkage so duplicate definitions merge.
     pending_weak: bool,
+    /// sic `async` (sic.md §"Async"): a leading `async` on the function being parsed.
+    pending_async: bool,
     /// `__attribute__((cleanup(fn)))` function name seen in the most recent
     /// `skip_attributes`/`skip_decl_tail` run, applied to the next declarator.
     pending_cleanup: Option<String>,
@@ -87,7 +89,7 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -224,6 +226,9 @@ impl Parser {
         self.pending_constructor = None;
         self.pending_weak = false;
         self.pending_thread_local = false;
+        // sic `async` (sic.md §"Async"): a leading `async` marks the function.
+        self.pending_async = self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "async";
+        if self.pending_async { self.advance(); }
         self.skip_attributes();
         // Start of this declaration in the token stream, for recovering a generic
         // template's exact source text (exported to the module manifest).
@@ -338,7 +343,7 @@ impl Parser {
                     else { self.src_between(decl_start_tok, self.pos.saturating_sub(1)) };
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic, type_params, template_src,
-                    body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
+                    body: Some(body), storage, inline: is_inline, constructor: ctor, is_async: std::mem::take(&mut self.pending_async), span: sp,
                 });
             }
 
@@ -354,7 +359,7 @@ impl Parser {
                     else { self.src_between(decl_start_tok, self.pos.saturating_sub(1)) };
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic, type_params, template_src,
-                    body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
+                    body: Some(body), storage, inline: is_inline, constructor: ctor, is_async: std::mem::take(&mut self.pending_async), span: sp,
                 });
             } else {
                 // Prototype
@@ -363,7 +368,7 @@ impl Parser {
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
                     type_params: Vec::new(), template_src: None,
-                    body: None, storage, inline: is_inline, constructor: ctor, span: sp,
+                    body: None, storage, inline: is_inline, constructor: ctor, is_async: false, span: sp,
                 });
             }
         }
@@ -998,7 +1003,7 @@ impl Parser {
     fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
         // sic built-in `dict<K,V>` (sic.md §"Dict") parses its type arguments like a
         // generic enum; plain `dict` (no `<`) stays `Named("dict")` = `dict<any,any>`.
-        let is_generic = self.generic_enums.contains(&name) || name == "dict";
+        let is_generic = self.generic_enums.contains(&name) || name == "dict" || name == "Task";
         if self.lang == Lang::Sic && is_generic && self.at(TokenKind::Lt) {
             self.advance(); // `<`
             let mut args = Vec::new();
@@ -2270,6 +2275,12 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr> {
         let sp = self.span();
+        // sic `await expr` (sic.md §"Async"): drive a `Task<T>` to completion.
+        if self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "await" {
+            self.advance();
+            let inner = self.parse_unary()?;
+            return Ok(Expr::new(ExprKind::Await(Box::new(inner)), sp));
+        }
         match self.peek_kind() {
             TokenKind::PlusPlus => {
                 self.advance();

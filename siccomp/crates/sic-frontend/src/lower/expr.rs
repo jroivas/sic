@@ -593,6 +593,9 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
 
+            // sic `await expr` (sic.md §"Async").
+            ExprKind::Await(inner) => self.lower_await(inner),
+
             // sic named argument (sic.md §"Named parameters") outside a call's
             // argument list — the call site resolves these, so reaching here means
             // `name = value` was written where a value was expected.
@@ -1208,6 +1211,78 @@ impl<'m> FuncCtx<'m> {
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
         self.lowerer.module.add_extern(sic_ir::ExternFunc { name: name.to_string(), sig })
+    }
+
+    // ─── sic `async` / `await` (sic.md §"Async") ─────────────────────────────
+
+    /// Resolve a `__sic_task_*` runtime function, declaring it as an extern if absent
+    /// (the definition comes from the prepended async runtime).
+    fn task_runtime_fn(&mut self, name: &str) -> FuncRef {
+        if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
+        let u64t = Type::u64();
+        let ptr = Type::void_ptr();
+        let (params, ret): (Vec<Type>, Type) = match name {
+            "__sic_task_new" => (vec![u64t], ptr),
+            "__sic_await" => (vec![ptr], u64t),
+            _ => (vec![], Type::Void),
+        };
+        let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
+        self.lowerer.module.add_extern(sic_ir::ExternFunc { name: name.to_string(), sig })
+    }
+
+    /// Widen an async result value to the 64-bit task slot (inverse of
+    /// `reinterpret_slot`): a float's bits via a memory round-trip, a pointer/scalar
+    /// by cast/coercion.
+    pub(crate) fn async_box_u64(&mut self, v: Val, elem: &Type) -> Result<Val> {
+        match elem {
+            Type::Float32 | Type::Float64 | Type::Float80 => {
+                let d = self.coerce(v, &Type::Float64)?;
+                let mem = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: mem, ty: Type::Float64, align: None });
+                self.push_instr(Instr::Store { val: d, ptr: Val::Local(mem) });
+                let out = self.alloc_val();
+                self.push_instr(Instr::Load { dest: out, ptr: Val::Local(mem), ty: Type::u64() });
+                self.val_types.insert(out.0, Type::u64());
+                Ok(Val::Local(out))
+            }
+            Type::Pointer(_) => {
+                let d = self.alloc_val();
+                self.push_instr(Instr::Cast { dest: d, op: CastOp::BitCast, val: v, to_ty: Type::u64() });
+                self.val_types.insert(d.0, Type::u64());
+                Ok(Val::Local(d))
+            }
+            _ => self.coerce(v, &Type::u64()),
+        }
+    }
+
+    /// `__sic_task_new(v)` → a `Task<elem>` holding the async result `v` (already a
+    /// 64-bit slot). The synchronous stub runtime makes a ready task.
+    pub(crate) fn emit_task_new(&mut self, v: Val, elem: &Type) -> Result<Val> {
+        let f = self.task_runtime_fn("__sic_task_new");
+        let tt = super::types::task_type(elem);
+        let d = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(d), func: f, args: vec![v], ret_ty: tt.clone() });
+        self.val_types.insert(d.0, tt);
+        Ok(Val::Local(d))
+    }
+
+    /// `await task` → `__sic_await(task)` driven to completion, its `T` value.
+    fn lower_await(&mut self, inner: &Expr) -> Result<Val> {
+        let task = self.lower_expr(inner)?;
+        let tt = self.val_type(&task);
+        if !super::types::is_task(&tt) {
+            return Err(CompileError::at(
+                "`await` expects a `Task<T>` (the result of an async call)".to_string(),
+                inner.span.file.clone(), inner.span.line, inner.span.col));
+        }
+        let elem = super::types::task_elem(&tt, self.ptr_size());
+        let taskp = self.coerce(task, &Type::void_ptr())?;
+        let f = self.task_runtime_fn("__sic_await");
+        let raw = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(raw), func: f, args: vec![taskp], ret_ty: Type::u64() });
+        self.val_types.insert(raw.0, Type::u64());
+        // Unbox the 64-bit slot back to the result type.
+        self.reinterpret_slot(Val::Local(raw), &elem)
     }
 
     /// The `(key, value)` types of a dict subscript base (defaults to any/any).

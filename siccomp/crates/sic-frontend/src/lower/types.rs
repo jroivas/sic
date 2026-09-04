@@ -309,6 +309,38 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
     }
 }
 
+// ─── `Task<T>`: an async result handle (sic.md §"Async") ──────────────────────
+//
+// A `Task<T>` is an opaque pointer to the runtime's task object (like `bigint`),
+// carrying the eventual `T`. `async` functions return it; `await` drives it to
+// completion and yields the `T`. The element type is encoded in the marker name.
+
+/// Build a `Task<T>` value type.
+pub fn task_type(elem: &Type) -> Type {
+    let name = format!("(task|{})", mangle_type_name(elem));
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+}
+
+/// True if `t` is a `Task<T>` value.
+pub fn is_task(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(task|"))))
+}
+
+/// The result type `T` of a `Task<T>` (defaults to `void`).
+pub fn task_elem(t: &Type, ptr_size: u32) -> Type {
+    match t {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Struct(st) => match st.name.as_deref().and_then(|n| n.strip_prefix("(task|")).and_then(|n| n.strip_suffix(')')) {
+                Some(e) => demangle_type(e, ptr_size),
+                None => Type::Void,
+            },
+            _ => Type::Void,
+        },
+        _ => Type::Void,
+    }
+}
+
 /// True if `t` is a `bigint` value (a pointer to the `__sic_bi` struct).
 pub fn is_bigint(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
@@ -642,6 +674,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
         // instantiation pass.
+        // sic `Task<T>` async handle (sic.md §"Async").
+        AstType::Generic { name, args } if name == "Task" => {
+            let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
+                .transpose()?.unwrap_or(Type::Void);
+            task_type(&e)
+        }
         // sic built-in `dict<K,V>` (sic.md §"Dict").
         AstType::Generic { name, args } if name == "dict" => {
             let k = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))

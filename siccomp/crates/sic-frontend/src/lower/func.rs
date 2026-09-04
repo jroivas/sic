@@ -201,6 +201,9 @@ pub struct FuncCtx<'m> {
     /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
     /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
     pub bigint_temps: Vec<Val>,
+    /// sic `async` (sic.md §"Async"): `Some(elem)` when the current function is
+    /// async — its `return v` wraps `v` into a `Task<elem>`.
+    pub async_elem: Option<Type>,
     /// sic `va_dict` (sic.md §"Named parameters"): dict handles packed for a call's
     /// named arguments, freed at the end of the statement (the callee consumes the
     /// va_dict during the call and never keeps it).
@@ -260,6 +263,7 @@ impl<'m> FuncCtx<'m> {
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
+            async_elem: None,
             va_dict_temps: Vec::new(),
             unsafe_depth: 0,
             guard_stack: Vec::new(),
@@ -796,6 +800,7 @@ impl<'m> Lowerer {
         storage: &Option<StorageClass>,
         inline: bool,
         constructor: Option<i32>,
+        is_async: bool,
     ) -> Result<()> {
         // sic `@` reference borrow-checking (sic.md §"References").
         if self.sic {
@@ -821,6 +826,14 @@ impl<'m> Lowerer {
             }
         } else {
             lower_type(ret_ty, &self.struct_types, self.ptr_size)?
+        };
+        // sic `async` (sic.md §"Async"): the function returns a `Task<ret>`; its
+        // `return v` wraps `v` into a task (handled during return lowering).
+        let (ir_ret, async_elem) = if is_async {
+            let elem = ir_ret;
+            (super::types::task_type(&elem), Some(elem))
+        } else {
+            (ir_ret, None)
         };
 
         let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic, self.ptr_size);
@@ -876,6 +889,7 @@ impl<'m> Lowerer {
 
         let mut fc = FuncCtx::new_with_func(self, &mut func);
         fc.pretty_func = pretty;
+        fc.async_elem = async_elem;
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
         // makes `return <int/other-enum>;` an error without an explicit cast.
         fc.ret_enum = fc.lowerer.c_enum_name_of_ast(&ret_ty.ty);
@@ -1010,6 +1024,19 @@ impl<'m> FuncCtx<'m> {
                 if !self.is_terminated() { self.flush_bigint_temps(); }
             }
             Stmt::Return(val, _) => {
+                // sic `async` (sic.md §"Async"): wrap the returned value in a
+                // `Task<elem>` (the stub runtime makes it ready) and return that.
+                if let Some(elem) = self.async_elem.clone() {
+                    let boxed = match val {
+                        Some(e) => { let v = self.lower_expr(e)?; self.async_box_u64(v, &elem)? }
+                        None => Constant::uint(0),
+                    };
+                    let task = self.emit_task_new(boxed, &elem)?;
+                    self.flush_bigint_temps();
+                    self.emit_cleanups_to(0);
+                    self.set_terminator(Terminator::Ret(Some(task)));
+                    return Ok(());
+                }
                 // sic strict enum typing (sic.md §"Enums"): reject returning an
                 // `int`/other-enum from an `enum`-returning function without a cast.
                 if let (Some(dest), Some(e)) = (self.ret_enum.clone(), val.as_ref()) {

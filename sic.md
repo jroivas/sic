@@ -463,6 +463,28 @@ Point>`, etc. — read back as the declared type.
 > struct copy). Reading a missing key yields a zero value (an empty string for a
 > `string` value).
 
+# Async
+
+A function marked `async` is asynchronous: it returns a `Task<T>` (where `T` is its
+written return type) instead of running to completion at the call site. `await` drives
+a task to completion and yields its `T`:
+
+    async int fetch(int id) { return id * 2; }
+
+    Task<int> t = fetch(21);   // start it; get a handle
+    int a = await t;           // 42
+    int b = await fetch(50);   // 100 — await a call directly
+
+Inside an `async` function, `return v` completes the task with `v`. `await` accepts
+any `Task<T>` and produces the `T`.
+
+> This is language-level support. The current runtime is a **synchronous stub**: an
+> async call runs eagerly and `await` returns the stored result. The real executor —
+> scheduling, suspension, and asynchronous I/O — is a separate runtime module that
+> replaces the stub's (weak) `__sic_task_new`/`__sic_await` symbols, the same way a
+> program links its own allocator. Composition operators (`spawn`, `select`, `join`)
+> are planned.
+
 # Generics
 
 Functions may be generic over one or more type parameters, written in a `<…>` list

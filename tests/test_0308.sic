@@ -1,0 +1,12 @@
+// sic async/await (sic.md §"Async"): an `async` function returns a `Task<T>`;
+// `await` drives it and yields the T. (Synchronous stub runtime for now.)
+async int dbl(int x) { return x * 2; }
+async int addk(int a, int b) { int s = a + b; return s; }
+
+int main() {
+    Task<int> t = dbl(21);
+    if (await t != 42) return 1;              // await a stored task
+    if (await dbl(50) != 100) return 2;       // await a call directly
+    if (await addk(40, 2) != 42) return 3;    // locals across the async body
+    return 42;
+}

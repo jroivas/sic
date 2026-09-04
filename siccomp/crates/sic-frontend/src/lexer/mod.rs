@@ -559,6 +559,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `va_dict` collects a variadic call's named arguments (sic.md §"Named
             // parameters"); an ordinary identifier in C.
             "va_dict" => return TokenKind::TypeName,
+            // `Task<T>` is an async result handle (sic.md §"Async"); ordinary
+            // identifier in C.
+            "Task" => return TokenKind::TypeName,
             // `u8char` is a Unicode code point (32-bit); ordinary identifier in C.
             "u8char" => return TokenKind::TypeName,
             // `va_array` is a Python-style varargs collector: a last parameter that

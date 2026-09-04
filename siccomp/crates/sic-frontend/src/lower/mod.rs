@@ -482,13 +482,14 @@ impl Lowerer {
                 }
             }
             match decl {
-                Decl::Func { name, ret_ty, params, variadic, body: None, .. } => {
+                Decl::Func { name, ret_ty, params, variadic, body: None, is_async, .. } => {
                     // Forward declaration / extern. A struct/union/enum *defined*
                     // in the return type or a parameter (`struct S {..} *f(void)`)
                     // must be registered so its fields resolve later.
                     self.register_nested_struct_defs(&ret_ty.ty)?;
                     for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
-                    let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                    let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                    if *is_async { ir_ret = types::task_type(&ir_ret); }
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
@@ -497,7 +498,7 @@ impl Lowerer {
                         self.module.add_extern(ExternFunc { name: name.clone(), sig });
                     }
                 }
-                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, .. } => {
+                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, is_async, .. } => {
                     // sic generic template: not emitted directly; instantiated per call.
                     if !type_params.is_empty() { continue; }
                     // Skip unreferenced inline definitions (see `emit_inline`).
@@ -507,7 +508,9 @@ impl Lowerer {
                     self.register_nested_struct_defs(&ret_ty.ty)?;
                     for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
                     // Function definition — pre-register with empty body for stable FuncRef
-                    let ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                    let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                    // sic async: the signature returns `Task<ret>` (sic.md §"Async").
+                    if *is_async { ir_ret = types::task_type(&ir_ret); }
                     let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
@@ -1307,10 +1310,10 @@ impl Lowerer {
         let prefix = scope.replace("::", "__");
         for d in decls {
             match d {
-                Decl::Func { name, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, span } => {
+                Decl::Func { name, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, is_async, span } => {
                     let mangled = format!("{}__{}", prefix, name);
                     self.namespace_members.insert((scope.to_string(), name), mangled.clone());
-                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, span });
+                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, is_async, span });
                 }
                 Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
                     for de in &mut declarators {
@@ -1381,6 +1384,7 @@ impl Lowerer {
                         variadic: m.variadic,
                         type_params: Vec::new(),
                         template_src: None,
+                        is_async: false,
                         body: Some(body),
                         storage: Some(StorageClass::Static),
                         inline: false,
@@ -1593,7 +1597,7 @@ impl Lowerer {
                 self.module.add_function(Function::new(mangled.clone(), sig, vec![], linkage));
             }
             self.lower_function(&mangled, &ret_ty, &params, variadic, &body,
-                &Some(StorageClass::Static), false, None)
+                &Some(StorageClass::Static), false, None, false)
         })();
 
         // Restore the type-parameter bindings.
@@ -1618,11 +1622,11 @@ impl Lowerer {
 
     fn lower_global_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
-            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, type_params, .. } => {
+            Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, type_params, is_async, .. } => {
                 // sic generic template: instantiated per concrete call, not here.
                 if !type_params.is_empty() { return Ok(()); }
                 if *inline && !self.emit_inline.contains(name) { return Ok(()); }
-                self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline, *constructor)?;
+                self.lower_function(name, ret_ty, params, *variadic, body, storage, *inline, *constructor, *is_async)?;
             }
             Decl::Func { body: None, .. } => {
                 // Already handled in collect_declarations
@@ -3154,9 +3158,9 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
     match ty {
         Generic { name, args } => {
             for a in args { collect_generics_type(&a.ty, out); }
-            // `dict<K,V>` is a built-in, not a user generic enum — don't try to
-            // monomorphize it as one (sic.md §"Dict").
-            if name != "dict" {
+            // `dict<K,V>` / `Task<T>` are built-ins, not user generic enums — don't
+            // try to monomorphize them as one (sic.md §"Dict", §"Async").
+            if name != "dict" && name != "Task" {
                 out.push((name.clone(), args.clone()));
             }
         }
@@ -3303,6 +3307,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         }
         GenericRef { name, .. } => out.push(name.clone()),
         NamedArg { value, .. } => collect_expr_names(value, out),
+        Await(e) => collect_expr_names(e, out),
         Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
         Slice { base, lo, hi } => {
             collect_expr_names(base, out);
