@@ -355,6 +355,15 @@ impl Lowerer {
                     .map(|v| (v.name.clone(), v.tag, v.payload.clone())).collect();
                 self.module.sic_tagenum_exports.push((ename.clone(), vs));
             }
+            // sic generic functions (sic.md §"Generics"): export each public
+            // template's source text so a consumer re-instantiates it locally.
+            // `static` templates are module-private.
+            for decl in self.generic_fn_defs.values() {
+                if let Decl::Func { storage, template_src: Some(src), .. } = decl {
+                    if matches!(storage, Some(StorageClass::Static)) { continue; }
+                    self.module.sic_generic_fn_exports.push(src.clone());
+                }
+            }
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -538,6 +547,20 @@ impl Lowerer {
         Ok(())
     }
 
+    /// sic generic functions (sic.md §"Generics"): re-parse a generic-function
+    /// template's source text (from a module manifest) back into declarations. A
+    /// parse error yields nothing (the import simply won't offer that template).
+    fn parse_generic_template(src: &str) -> Vec<Decl> {
+        use crate::{lexer::Lexer, parser::Parser};
+        let mut lexer = Lexer::new_lang(src, std::collections::HashSet::new(), crate::Lang::Sic);
+        let tokens = match lexer.tokenize() { Ok(t) => t, Err(_) => return Vec::new() };
+        let mut parser = Parser::new_lang(tokens, String::new(), crate::Lang::Sic);
+        match parser.parse() {
+            Ok(tu) => tu.decls,
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Resolve one `import` declaration: load the module's `module_<name>.smod`
     /// manifest (once per module), hard-error on a triple/version mismatch, make
     /// every export available namespaced as `module.sym`, and — for a selective
@@ -642,6 +665,19 @@ impl Lowerer {
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
                     self.imported_links.push(l.clone());
+                }
+            }
+            // sic generic functions (sic.md §"Generics"): re-parse each exported
+            // template's source into a `Decl::Func` and register it, so the consumer
+            // monomorphizes it locally (like a C++ template in a header). There is no
+            // symbol to import — each instance is internal to whoever instantiates.
+            for src in &manifest.generic_fns {
+                for decl in Self::parse_generic_template(src) {
+                    if let Decl::Func { name, type_params, .. } = &decl {
+                        if !type_params.is_empty() {
+                            self.generic_fn_defs.entry(name.clone()).or_insert(decl);
+                        }
+                    }
                 }
             }
         }
@@ -1243,10 +1279,10 @@ impl Lowerer {
         let prefix = scope.replace("::", "__");
         for d in decls {
             match d {
-                Decl::Func { name, ret_ty, params, variadic, type_params, body, storage, inline, constructor, span } => {
+                Decl::Func { name, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, span } => {
                     let mangled = format!("{}__{}", prefix, name);
                     self.namespace_members.insert((scope.to_string(), name), mangled.clone());
-                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, body, storage, inline, constructor, span });
+                    out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, span });
                 }
                 Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
                     for de in &mut declarators {
@@ -1316,6 +1352,7 @@ impl Lowerer {
                         params,
                         variadic: m.variadic,
                         type_params: Vec::new(),
+                        template_src: None,
                         body: Some(body),
                         storage: Some(StorageClass::Static),
                         inline: false,

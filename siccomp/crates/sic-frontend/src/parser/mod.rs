@@ -17,6 +17,9 @@ pub struct Parser {
     /// Type-parameter list captured while parsing the current function declarator,
     /// consumed when the `Decl::Func` is built.
     pending_type_params: Vec<String>,
+    /// Source characters, for recovering the exact text of a construct (a generic
+    /// function template exported to a module manifest). Empty if not provided.
+    src_chars: Vec<char>,
     source_file: String,
     lang: Lang,
     /// `vector_size(N)` seen in the most recent `skip_attributes` run (GCC/Clang
@@ -84,7 +87,7 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -93,6 +96,25 @@ impl Parser {
 
     pub fn is_typedef(&self, name: &str) -> bool {
         self.typedefs.contains(name)
+    }
+
+    /// Provide the source characters so exact source text can be recovered for
+    /// generic-function templates (see [`Parser::src_between`]).
+    pub fn set_source_chars(&mut self, chars: &[char]) {
+        self.src_chars = chars.to_vec();
+    }
+
+    /// The exact source text spanning tokens `[start_tok, end_tok]` (inclusive),
+    /// using their char-index ranges. Empty if source wasn't provided.
+    fn src_between(&self, start_tok: usize, end_tok: usize) -> Option<String> {
+        if self.src_chars.is_empty() { return None; }
+        let s = self.tokens.get(start_tok)?.start as usize;
+        let e = self.tokens.get(end_tok)?.end as usize;
+        if s <= e && e <= self.src_chars.len() {
+            Some(self.src_chars[s..e].iter().collect())
+        } else {
+            None
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -203,6 +225,9 @@ impl Parser {
         self.pending_weak = false;
         self.pending_thread_local = false;
         self.skip_attributes();
+        // Start of this declaration in the token stream, for recovering a generic
+        // template's exact source text (exported to the module manifest).
+        let decl_start_tok = self.pos;
 
         // __asm__ at top level: skip
         if self.at(TokenKind::Asm) {
@@ -308,9 +333,11 @@ impl Parser {
                 self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
                 let body = self.parse_compound_stmt_as_stmts()?;
                 self.func_vars.clear();
+                let type_params = std::mem::take(&mut self.pending_type_params);
+                let template_src = if type_params.is_empty() { None }
+                    else { self.src_between(decl_start_tok, self.pos.saturating_sub(1)) };
                 return Ok(Decl::Func {
-                    name, ret_ty, params, variadic,
-                    type_params: std::mem::take(&mut self.pending_type_params),
+                    name, ret_ty, params, variadic, type_params, template_src,
                     body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
@@ -320,9 +347,13 @@ impl Parser {
                 self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
                 let body = self.parse_compound_stmt_as_stmts()?;
                 self.func_vars.clear();
+                let type_params = std::mem::take(&mut self.pending_type_params);
+                // For a generic template, capture its exact source text (from the
+                // decl start through the closing `}`) for module-manifest export.
+                let template_src = if type_params.is_empty() { None }
+                    else { self.src_between(decl_start_tok, self.pos.saturating_sub(1)) };
                 return Ok(Decl::Func {
-                    name, ret_ty, params, variadic,
-                    type_params: std::mem::take(&mut self.pending_type_params),
+                    name, ret_ty, params, variadic, type_params, template_src,
                     body: Some(body), storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             } else {
@@ -331,7 +362,7 @@ impl Parser {
                 self.pending_type_params.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
-                    type_params: Vec::new(),
+                    type_params: Vec::new(), template_src: None,
                     body: None, storage, inline: is_inline, constructor: ctor, span: sp,
                 });
             }
@@ -2573,11 +2604,11 @@ impl Parser {
                     return self.parse_scope_path(name, sp);
                 }
                 // sic generic call with explicit type arguments (turbofish),
-                // `add<int>(…)` (sic.md §"Generics"). Only for a known generic
-                // function and a well-formed `<type,…>(` — else `<` is comparison.
-                if self.lang == Lang::Sic && self.generic_fns.contains(&name)
-                    && self.at(TokenKind::Lt)
-                {
+                // `add<int>(…)` (sic.md §"Generics"). Recognized by the strict shape
+                // `<type,…>(` (which fully backtracks, so `a < b > (c)` stays a
+                // comparison) — not gated on a locally-known generic name, so a
+                // turbofish call to an *imported* module template also parses.
+                if self.lang == Lang::Sic && self.at(TokenKind::Lt) {
                     if let Some(type_args) = self.try_parse_turbofish() {
                         return Ok(Expr::new(ExprKind::GenericRef { name, type_args }, sp));
                     }

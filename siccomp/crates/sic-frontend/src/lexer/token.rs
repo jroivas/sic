@@ -14,11 +14,17 @@ pub struct Token {
     pub kind: TokenKind,
     pub text: String,
     pub span: Span,
+    /// Half-open char-index range `[start, end)` of this token in the source
+    /// character stream, filled in by the lexer. Used to recover the exact source
+    /// text of a construct (e.g. a generic-function template exported to a module
+    /// manifest). Defaults to `0..0` for synthesized tokens.
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, text: String, span: Span) -> Self {
-        Token { kind, text, span }
+        Token { kind, text, span, start: 0, end: 0 }
     }
 
     pub fn is(&self, kind: TokenKind) -> bool { self.kind == kind }

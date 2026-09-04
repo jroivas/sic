@@ -674,6 +674,9 @@ fn parse_source(
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
     let mut parser = Parser::new_lang(tokens, path.to_string(), lang);
+    // Give the parser the source so it can recover the exact text of generic
+    // function templates (sic.md §"Generics"), exported to the module manifest.
+    parser.set_source_chars(lexer.source_chars());
     let mut tu = parser.parse().map_err(|e| format!("{}", e))?;
 
     if args.ast {

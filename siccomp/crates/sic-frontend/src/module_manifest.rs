@@ -68,6 +68,10 @@ pub struct ModuleManifest {
     /// sic module tagged-enum export: `(name, [(variant, tag, payload type)])`, so a
     /// consumer can construct/match `mod::Enum::Variant(x)`.
     pub tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)>,
+    /// sic module generic-function export (sic.md §"Generics"): the source text of
+    /// each public generic function template. A consumer re-parses and instantiates
+    /// these locally (no importable symbol, like a C++ template in a header).
+    pub generic_fns: Vec<String>,
 }
 
 impl ModuleManifest {
@@ -151,6 +155,7 @@ impl ModuleManifest {
             types,
             enums: ir.sic_enum_exports.clone(),
             tagenums: ir.sic_tagenum_exports.clone(),
+            generic_fns: ir.sic_generic_fn_exports.clone(),
         }
     }
 
@@ -206,6 +211,12 @@ impl ModuleManifest {
             s.push_str(&format!("tagenum {} {}\n", name, vs.join(",")));
         }
 
+        // Public generic-function templates: the whole source text, escaped onto a
+        // single line (`\` → `\\`, newline → `\n`).
+        for src in &self.generic_fns {
+            s.push_str(&format!("genericfn {}\n", escape_line(src)));
+        }
+
         for e in &self.exports {
             match &e.ty {
                 Type::Function(ft) => {
@@ -241,6 +252,7 @@ impl ModuleManifest {
         let mut types: Vec<(String, Type)> = Vec::new();
         let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
         let mut tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)> = Vec::new();
+        let mut generic_fns: Vec<String> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -249,6 +261,12 @@ impl ModuleManifest {
         for (lineno, raw) in text.lines().enumerate() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') { continue; }
+            // A generic-function template's source is a single escaped line whose
+            // payload contains spaces — handle it before the whitespace split.
+            if let Some(rest) = line.strip_prefix("genericfn ") {
+                generic_fns.push(unescape_line(rest));
+                continue;
+            }
             let mut it = line.split_whitespace();
             let kw = it.next().unwrap();
             match kw {
@@ -392,10 +410,45 @@ impl ModuleManifest {
             types,
             enums,
             tagenums,
+            generic_fns,
             links,
             exports,
         })
     }
+}
+
+/// Escape a string onto one manifest line: backslash → `\\`, newline → `\n`,
+/// carriage return → `\r`. Reversed by [`unescape_line`].
+fn escape_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('\\') => out.push('\\'),
+                Some(other) => { out.push('\\'); out.push(other); }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// True if every type in a function signature is representable in the manifest.
@@ -608,6 +661,7 @@ mod tests {
             types: vec![],
             enums: vec![],
             tagenums: vec![],
+            generic_fns: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -634,6 +688,7 @@ mod tests {
             types: vec![],
             enums: vec![],
             tagenums: vec![],
+            generic_fns: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -665,6 +720,7 @@ mod tests {
             types: vec![],
             enums: vec![],
             tagenums: vec![],
+            generic_fns: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);

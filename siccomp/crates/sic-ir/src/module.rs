@@ -140,6 +140,10 @@ pub struct Module {
     /// `(name, [(variant, tag, payload type)])` — so a consumer can construct/match
     /// `mod::Enum::Variant`. A payload of `None` is a bare variant.
     pub sic_tagenum_exports: Vec<(String, Vec<(String, i64, Option<Type>)>)>,
+    /// sic module generic-function export (sic.md §"Generics"): the exact source
+    /// text of each public generic function template, so a consumer re-instantiates
+    /// its monomorphs locally (there is no single symbol to import).
+    pub sic_generic_fn_exports: Vec<String>,
 }
 
 impl Module {
@@ -156,6 +160,7 @@ impl Module {
             float_vararg_externs: Vec::new(),
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),
+            sic_generic_fn_exports: Vec::new(),
         }
     }
 

@@ -185,6 +185,36 @@ else
     bad "std-static" "static compile/link failed: $(cat err)"
 fi
 
+# ── Generic functions across modules (sic.md §"Generics") ────────────────────
+# A module exports generic function templates; the consumer re-instantiates them
+# locally (inference and turbofish), with no imported symbol.
+cat > gmath.sic <<'EOF'
+module gmath;
+T gadd<T>(T a, T b) { return a + b; }
+T gmax<T>(T a, T b) { return a > b ? a : b; }
+EOF
+cat > gapp.sic <<'EOF'
+import gmath;
+int main() {
+    int s = gadd(3, 4);                  // inferred T=int -> 7
+    int m = gmax(9, 2);                  // -> 9
+    int d = (int)gadd<double>(1, 2);     // turbofish across module -> 3
+    return s + m + d - 19;               // 7+9+3-19 = 0
+}
+EOF
+if "$SIC" -c gmath.sic -o gmath.o 2>err; then
+    grep -q "genericfn" module_gmath.smod \
+        && ok "generic-manifest" || bad "generic-manifest" "no genericfn record:\n$(cat module_gmath.smod)"
+    if "$SIC" gapp.sic gmath.o -I. -o gapp 2>err; then
+        ./gapp; got=$?
+        [ "$got" -eq 0 ] && ok "generic-import-run" || bad "generic-import-run" "expected 0, got $got"
+    else
+        bad "generic-import-run" "consumer compile/link failed: $(cat err)"
+    fi
+else
+    bad "generic-manifest" "module compile failed: $(cat err)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

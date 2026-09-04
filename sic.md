@@ -405,8 +405,18 @@ type parameter appears only in the return type and so cannot be inferred:
     make<double>(5);         // T is the return type only → must be explicit
     conv<double, int>(9.7);  // two type parameters
 
-Generic functions are currently resolved within a single translation unit; exporting
-them across modules is planned.
+Generic functions may also be **exported across modules**. A module's public
+templates are carried in its manifest as source, and a consumer re-instantiates the
+monomorphs it needs locally — like a template in a C++ header, there is no single
+symbol to import:
+
+    // module gmath;   T gadd<T>(T a, T b) { return a + b; }
+    import gmath;
+    int s = gadd(3, 4);              // inferred, instantiated in the consumer
+    double d = gadd<double>(1, 2);   // turbofish across the module boundary
+
+An imported template's body may reference only primitives, its type parameters, and
+its arguments; a body that calls other module functions is not yet supported.
 
 # Memory safety
 

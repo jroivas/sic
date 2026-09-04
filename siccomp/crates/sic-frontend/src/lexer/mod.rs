@@ -46,6 +46,10 @@ impl Lexer {
         }
     }
 
+    /// The source as a character vector, for recovering exact source text of a
+    /// construct from token char-index ranges (`Token::start`/`end`).
+    pub fn source_chars(&self) -> &[char] { &self.src }
+
     /// Tokenize all input and return the token stream (excludes whitespace/comments).
     pub fn tokenize(&mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
@@ -60,7 +64,10 @@ impl Lexer {
                 self.handle_line_marker();
                 continue;
             }
-            let tok = self.next_token()?;
+            let start = self.pos;
+            let mut tok = self.next_token()?;
+            tok.start = start as u32;
+            tok.end = self.pos as u32;
             tokens.push(tok);
         }
         Ok(tokens)

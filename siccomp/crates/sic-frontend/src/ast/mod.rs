@@ -249,6 +249,10 @@ pub enum Decl {
         /// non-empty list makes this a *template* — kept un-lowered and
         /// monomorphized per concrete call, not emitted directly.
         type_params: Vec<String>,
+        /// sic generic functions (sic.md §"Generics"): for a template, its exact
+        /// source text, captured so a module can export it in its manifest for a
+        /// consumer to re-instantiate. `None` for ordinary functions.
+        template_src: Option<String>,
         body: Option<Vec<Stmt>>,   // None = prototype only
         storage: Option<StorageClass>,
         /// `inline` keyword present. An inline definition may be omitted when
