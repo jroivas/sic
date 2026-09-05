@@ -30,5 +30,18 @@ mkdir -p "$SYSROOT"
 cp "$ROOT"/siccomp/lib/std/*.sic "$SYSROOT/"
 "$SIC" --emit-module "$SYSROOT"
 
+echo ">> building + installing asrun (async runtime) into $SYSROOT"
+# asrun declares its own module, so it can't share std's emit dir (one module per
+# folder). Build it in a scratch dir, then install into the sysroot with the baked
+# -L/-rpath rewritten to point at the sysroot.
+ASRUN_BUILD="$ROOT/siccomp/target/asrun_build"
+rm -rf "$ASRUN_BUILD"; mkdir -p "$ASRUN_BUILD"
+cp "$ROOT"/siccomp/lib/asrun/*.sic "$ASRUN_BUILD/"
+"$SIC" --emit-module "$ASRUN_BUILD"
+cp "$ASRUN_BUILD"/libasrun.* "$SYSROOT/"
+sed "s|$ASRUN_BUILD|$SYSROOT|g" "$ASRUN_BUILD/module_asrun.smod" > "$SYSROOT/module_asrun.smod"
+[ -f "$ASRUN_BUILD/module_asrun.h" ] && cp "$ASRUN_BUILD/module_asrun.h" "$SYSROOT/"
+
 echo ">> done. installed:"
-ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so
+ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
+      "$SYSROOT"/module_asrun.smod "$SYSROOT"/libasrun.a "$SYSROOT"/libasrun.so

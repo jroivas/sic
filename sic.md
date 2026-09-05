@@ -478,12 +478,33 @@ a task to completion and yields its `T`:
 Inside an `async` function, `return v` completes the task with `v`. `await` accepts
 any `Task<T>` and produces the `T`.
 
-> This is language-level support. The current runtime is a **synchronous stub**: an
-> async call runs eagerly and `await` returns the stored result. The real executor —
-> scheduling, suspension, and asynchronous I/O — is a separate runtime module that
-> replaces the stub's (weak) `__sic_task_new`/`__sic_await` symbols, the same way a
-> program links its own allocator. Composition operators (`spawn`, `select`, `join`)
-> are planned.
+> This is language-level support. The compiler emits only the surface; the executor
+> lives in a **module**. A built-in synchronous stub keeps `async`/`await` working
+> standalone (an async call runs eagerly and `await` returns the stored result).
+
+## The `asrun` runtime module
+
+`asrun` is sic's async runtime — a small **cooperative, single-threaded coroutine
+executor** built on stackful `ucontext` coroutines. It lives entirely in a module
+(`import asrun;`), so scheduling can grow — timers, an I/O reactor, `join`/`select` —
+without touching the compiler.
+
+    import asrun;
+
+    void worker(void *arg) {
+        for (int i = 0; i < 3; i++) { /* … */ asrun::yield_now(); }
+    }
+
+    int main() {
+        asrun::spawn(worker, a);   // schedule a coroutine
+        asrun::spawn(worker, b);
+        asrun::run();              // drive them to completion (round-robin)
+        return 0;
+    }
+
+Two spawned coroutines that `yield_now()` interleave cooperatively. This is the
+foundation the richer async API (and a bridge from `async`/`await` to real
+suspension) builds on.
 
 # Generics
 
