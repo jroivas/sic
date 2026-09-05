@@ -9,25 +9,7 @@
 //! weak symbols.
 
 /// The runtime source, prepended (post-preprocess) ahead of the user code.
-pub const ASYNC_RUNTIME: &str = r#"
-extern void *malloc(unsigned long);
-extern void free(void *);
-
-typedef struct __sic_task { unsigned long value; } __sic_task;
-
-__attribute__((weak)) __sic_task *__sic_task_new(unsigned long v) {
-    __sic_task *t = (__sic_task *)malloc(sizeof(__sic_task));
-    t->value = v;
-    return t;
-}
-
-__attribute__((weak)) unsigned long __sic_await(__sic_task *t) {
-    if (!t) return 0;
-    unsigned long v = t->value;
-    free(t);
-    return v;
-}
-"#;
+pub const ASYNC_RUNTIME: &str = include_str!("async_runtime.c");
 
 /// True if `src` uses async support (so the runtime must be prepended). A crude
 /// word-boundary scan for `async`, `await`, or `Task`.
