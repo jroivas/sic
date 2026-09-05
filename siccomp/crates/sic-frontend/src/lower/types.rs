@@ -237,7 +237,7 @@ fn dict_marker(t: &Type) -> Option<&str> {
         Type::Pointer(inner) => match inner.as_ref() {
             Type::Struct(st) => {
                 let n = st.name.as_deref()?;
-                if n.starts_with("(dict|") || n == VA_DICT_MARKER { Some(n) } else { None }
+                if n.starts_with("(dict|") || n.starts_with("(set|") || n == VA_DICT_MARKER { Some(n) } else { None }
             }
             _ => None,
         },
@@ -246,15 +246,38 @@ fn dict_marker(t: &Type) -> Option<&str> {
 }
 
 /// The `(key, value)` types of a `dict`, or `None` if `t` is not a dict. A
-/// `va_dict` is a `dict<string, any>`.
+/// `va_dict` is a `dict<string, any>`; a `set<T>` is a `dict<T, bool>`.
 pub fn dict_kv(t: &Type, ptr_size: u32) -> Option<(Type, Type)> {
     let n = dict_marker(t)?;
     if n == VA_DICT_MARKER {
         return Some((sic_string_type(ptr_size), any_type()));
     }
+    if let Some(body) = n.strip_prefix("(set|").and_then(|b| b.strip_suffix(')')) {
+        return Some((demangle_type(body, ptr_size), Type::Bool));
+    }
     let body = n.strip_prefix("(dict|")?.strip_suffix(')')?;
     let (k, v) = body.split_once('|')?;
     Some((demangle_type(k, ptr_size), demangle_type(v, ptr_size)))
+}
+
+// ─── `set<T>`: a hash set, a `dict<T, bool>` under the hood (sic.md §"Set") ────
+
+/// Build a `set<T>` value type (reuses the dict runtime; membership is a `true`
+/// value). Recognized by `is_dict`, so subscript/ownership/`del` all apply.
+pub fn set_type(elem: &Type) -> Type {
+    let name = format!("(set|{})", mangle_type_name(elem));
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+}
+
+/// True if `t` is a `set<T>` value.
+pub fn is_set(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(set|"))))
+}
+
+/// The element type `T` of a `set<T>`.
+pub fn set_elem(t: &Type, ptr_size: u32) -> Type {
+    dict_kv(t, ptr_size).map(|(k, _)| k).unwrap_or_else(any_type)
 }
 
 // ─── `va_dict`: named-varargs capture (sic.md §"Named parameters"/§"Dict") ─────
@@ -648,6 +671,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "dict"            => return Ok(dict_type(&any_type(), &any_type())),
                 // sic named-varargs collector (sic.md §"Named parameters").
                 "va_dict"         => return Ok(va_dict_type()),
+                // sic built-in hash set (sic.md §"Set"): plain `set` = set<any>.
+                "set"             => return Ok(set_type(&any_type())),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),
@@ -674,6 +699,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
         // instantiation pass.
+        // sic `set<T>` hash set (sic.md §"Set").
+        AstType::Generic { name, args } if name == "set" => {
+            let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
+                .transpose()?.unwrap_or_else(any_type);
+            set_type(&e)
+        }
         // sic `Task<T>` async handle (sic.md §"Async").
         AstType::Generic { name, args } if name == "Task" => {
             let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))

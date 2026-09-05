@@ -1,0 +1,24 @@
+// sic set (sic.md §"Set"): a hash set built on the dict runtime — keys with a
+// `true` membership value. add / contains / has / remove / size, and subscript.
+int main() {
+    set<int> s;
+    s.add(3); s.add(7); s.add(3);         // dup ignored
+    if (!s.contains(3)) return 1;
+    if (s.has(4)) return 2;
+    if (s.size != 2) return 3;
+    s.remove(3);
+    if (s.contains(3)) return 4;
+    if (s.size != 1) return 5;
+
+    set<string> names;                     // string elements (owned copies)
+    names.add("alice"); names.add("bob");
+    if (!names.contains("alice") || names.contains("carol")) return 6;
+
+    // subscript form also works (a set is a dict<T,bool>)
+    set<int> b;
+    b[10] = true;
+    if (!b[10] || b[11]) return 7;
+    del b[10];
+    if (b[10]) return 8;
+    return 42;
+}

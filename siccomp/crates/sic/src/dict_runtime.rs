@@ -24,8 +24,8 @@ pub const DICT_RUNTIME: &str = include_str!("dict_runtime.c");
 pub fn uses_dict(src: &str) -> bool {
     let bytes = src.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    // Match the word `dict` or `va_dict` (both need the runtime).
-    for kw in ["dict", "va_dict"] {
+    // Match the word `dict`, `va_dict`, or `set` (all use this runtime).
+    for kw in ["dict", "va_dict", "set"] {
         let mut i = 0;
         while let Some(pos) = src[i..].find(kw) {
             let start = i + pos;

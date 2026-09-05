@@ -3160,7 +3160,7 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
             for a in args { collect_generics_type(&a.ty, out); }
             // `dict<K,V>` / `Task<T>` are built-ins, not user generic enums — don't
             // try to monomorphize them as one (sic.md §"Dict", §"Async").
-            if name != "dict" && name != "Task" {
+            if name != "dict" && name != "Task" && name != "set" {
                 out.push((name.clone(), args.clone()));
             }
         }

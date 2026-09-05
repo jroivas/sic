@@ -725,6 +725,16 @@ impl<'m> FuncCtx<'m> {
                         let lv = self.field_ptr_from(LValue::plain(p, super::types::va_array_type(self.ptr_size())), "len", false, &expr.span)?;
                         return self.load_lvalue(&lv);
                     }
+                    // sic `dict`/`set` (sic.md §"Dict", §"Set"): entry count.
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
+                        let d = self.dict_handle(base)?;
+                        let f = self.dict_runtime_fn("__sic_dict_len");
+                        let r = self.alloc_val();
+                        self.push_instr(Instr::Call { dest: Some(r), func: f, args: vec![d], ret_ty: Type::u64() });
+                        self.val_types.insert(r.0, Type::u64());
+                        return Ok(Val::Local(r));
+                    }
                 }
                 // sic `enumvalue.str` → a native `"EnumName::Variant"` string
                 // (sic.md §"Match"). A bare constant is statically known; an
@@ -1205,8 +1215,9 @@ impl<'m> FuncCtx<'m> {
             "__sic_dict_new" => (vec![], ptr.clone()),
             "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), i32t.clone()], Type::Void),
             "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
-            "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t], i32t.clone()),
-            "__sic_dict_free" => (vec![ptr], Type::Void),
+            "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone()], i32t.clone()),
+            "__sic_dict_free" => (vec![ptr.clone()], Type::Void),
+            "__sic_dict_len" => (vec![ptr], u64t),
             _ => (vec![], Type::Void),
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
@@ -5317,6 +5328,30 @@ impl<'m> FuncCtx<'m> {
                     Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
             {
                 return self.lower_generic_call(name, args, sp);
+            }
+        }
+
+        // sic `set` methods (sic.md §"Set"): `s.add(x)`, `s.contains(x)` / `s.has(x)`,
+        // `s.remove(x)` — thin sugar over the underlying `dict<T, bool>`.
+        if self.is_sic() {
+            if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                if matches!(name.as_str(), "add" | "contains" | "has" | "remove")
+                    && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_set(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_set(i)))
+                {
+                    let key = args.first().ok_or_else(|| CompileError::at(
+                        format!("`.{}` takes one element argument", name),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    return match name.as_str() {
+                        "add" => {
+                            let t = Expr::new(ExprKind::BoolLit(true), sp.clone());
+                            self.lower_dict_set(base, key, &t, sp)?;
+                            Ok(Constant::zero())
+                        }
+                        "remove" => { self.lower_dict_del(base, key, sp)?; Ok(Constant::zero()) }
+                        _ => self.lower_dict_get(base, key, sp), // contains / has → bool
+                    };
+                }
             }
         }
 

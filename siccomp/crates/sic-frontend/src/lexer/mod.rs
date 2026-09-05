@@ -562,6 +562,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `Task<T>` is an async result handle (sic.md §"Async"); ordinary
             // identifier in C.
             "Task" => return TokenKind::TypeName,
+            // `set<T>` is a built-in hash set (sic.md §"Set"); ordinary identifier in C.
+            "set" => return TokenKind::TypeName,
             // `u8char` is a Unicode code point (32-bit); ordinary identifier in C.
             "u8char" => return TokenKind::TypeName,
             // `va_array` is a Python-style varargs collector: a last parameter that

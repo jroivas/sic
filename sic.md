@@ -463,6 +463,23 @@ Point>`, etc. — read back as the declared type.
 > struct copy). Reading a missing key yields a zero value (an empty string for a
 > `string` value).
 
+# Set
+
+`set<T>` is a built-in hash set — unique elements of `T`, built on the same table as
+`dict` (a `set<T>` is a `dict<T, bool>` under the hood). Plain `set` is `set<any>`.
+
+    set<string> tags;
+    tags.add("red");
+    tags.add("red");                 // already present — no effect
+    bool has = tags.contains("red"); // (also `.has`)
+    tags.remove("red");
+    usize n = tags.size;
+
+Elements are owned by the set (string elements are copied), reclaimed on `remove`
+and at scope exit — the same ownership rules as `dict` keys. The subscript form works
+too, since a set is a dict: `s[x] = true` adds, `s[x]` tests membership, `del s[x]`
+removes.
+
 # Async
 
 A function marked `async` is asynchronous: it returns a `Task<T>` (where `T` is its
