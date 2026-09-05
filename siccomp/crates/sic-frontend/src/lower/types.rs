@@ -338,6 +338,12 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
         "bigint" => bigint_type(),
         "s___sic_any" => any_type(),
         _ => {
+            // A pointer is `p_<inner>` — peel it outermost-first (before the
+            // `s_`/`u_` aggregate prefixes) so `p_s_<name>` round-trips to a real
+            // pointer-to-aggregate instead of a struct whose name ends in `p`.
+            if let Some(inner) = s.strip_prefix("p_") {
+                return Type::Pointer(Box::new(demangle_type(inner, ptr_size)));
+            }
             // A named struct/union (`s_Name`/`u_Name`) reconstructs as an opaque
             // aggregate — the caller `resolve_aggregate`s it against the type table.
             if let Some(n) = s.strip_prefix("s_") {
@@ -345,9 +351,6 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
             }
             if let Some(n) = s.strip_prefix("u_") {
                 return Type::Union(UnionType { name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
-            }
-            if let Some(inner) = s.strip_suffix('p') {
-                return Type::Pointer(Box::new(demangle_type(inner, ptr_size)));
             }
             if let Some(bits) = s.strip_prefix('i').and_then(|b| b.parse::<u32>().ok()) {
                 return Type::Int { bits, signed: true };
@@ -801,7 +804,11 @@ fn mangle_type_name(t: &Type) -> String {
         Type::Float32 => "f32".to_string(),
         Type::Float64 => "f64".to_string(),
         Type::Float80 => "f80".to_string(),
-        Type::Pointer(inner) => format!("{}p", mangle_type_name(inner)),
+        // A leading `p_` marks a pointer (unambiguous vs. the `s_`/`u_` aggregate
+        // prefixes): a `p`-suffix would be swallowed by `s_<name>` when the pointee
+        // is a struct, so `p_<inner>` and demangle-outermost-first round-trips
+        // pointer-to-aggregate — e.g. `list<list<int>>` elements (sic.md §"List").
+        Type::Pointer(inner) => format!("p_{}", mangle_type_name(inner)),
         Type::Struct(st) => format!("s_{}", st.name.clone().unwrap_or_default()),
         Type::Union(u) => format!("u_{}", u.name.clone().unwrap_or_default()),
         _ => "x".to_string(),

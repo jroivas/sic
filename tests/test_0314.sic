@@ -1,0 +1,32 @@
+// sic: nested containers whose element/value is itself a container handle round-
+// trip correctly (sic.md §"List"/§"Dict"). Regression for the ambiguous type
+// mangling — `list<int>` = pointer-to-marker mangled `s_(list|i32)p`, whose `p`
+// used to be swallowed into the struct name, so `list<list<int>>[0]` came back as
+// a bogus value instead of a `list<int>` handle. Pointers now mangle `p_<inner>`.
+int main() {
+    // list of lists.
+    list<list<int>> outer;
+    list<int> inner;
+    inner.add(5); inner.add(6);
+    outer.add(inner);
+    list<int> got = outer[0];
+    if (got.size != 2 || got[0] != 5 || got[1] != 6) return 1;
+
+    // dict whose value is a list.
+    dict<int, list<int>> d;
+    list<int> l;
+    l.add(9); l.add(8); l.add(7);
+    d[1] = l;
+    list<int> g = d[1];
+    if (g.size != 3 || g[0] != 9) return 2;
+
+    // dict of dict.
+    dict<int, dict<int, int>> dd;
+    dict<int, int> row;
+    row[10] = 100;
+    dd[1] = row;
+    dict<int, int> back = dd[1];
+    if (back[10] != 100) return 3;
+
+    return 42;
+}
