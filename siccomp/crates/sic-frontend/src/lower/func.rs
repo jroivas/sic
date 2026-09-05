@@ -2261,7 +2261,11 @@ impl<'m> FuncCtx<'m> {
 
         // (2) Array / slice (incl. a `string.utf8` result): counted loop over `[i]`.
         // sic arrays and slices both answer `.length` and `[i]`.
-        if matches!(&ity, Type::Array { .. }) || super::types::is_u8char_arr(&ity) {
+        // A `list<T>` (sic.md §"List") answers the same protocol, so it iterates
+        // its elements in index order the same way.
+        if matches!(&ity, Type::Array { .. }) || super::types::is_u8char_arr(&ity)
+            || super::types::is_list(&ity)
+        {
             let len = mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "length".to_string() });
             let elem = mk(ExprKind::Index { base: Box::new(iterable.clone()), index: Box::new(ident(&iname)) });
             let use_ty = ty.clone();

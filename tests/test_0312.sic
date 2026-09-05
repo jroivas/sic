@@ -1,0 +1,29 @@
+// sic range-`for` over a `list<T>` (sic.md §"List"/§"Iterators"): a list answers
+// the array `.length`/`[i]` protocol, so `for (x : l)` iterates it in index order.
+int main() {
+    list<int> nums;
+    nums.add(10); nums.add(20); nums.add(12);
+    int sum = 0;
+    for (int x : nums) sum += x;          // 42
+    if (sum != 42) return 1;
+
+    // element type may be a `string`; iterate and total the lengths.
+    list<string> words;
+    words.add("ab"); words.add("cde");    // 2 + 3 = 5
+    int chars = 0;
+    for (string w : words) chars += (int)w.size;
+    if (chars != 5) return 2;
+
+    // break/continue work because the loop desugars to a counted `for`.
+    list<int> more;
+    for (int i = 0; i < 100; i++) more.add(i);
+    int seen = 0;
+    for (int v : more) {
+        if (v == 5) break;
+        if (v % 2 == 0) continue;
+        seen += v;                        // 1 + 3 = 4
+    }
+    if (seen != 4) return 3;
+
+    return sum;                           // 42
+}
