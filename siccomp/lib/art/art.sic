@@ -1,0 +1,95 @@
+// art — sic's async runtime (sic.md §"Async"). A small cooperative,
+// single-threaded coroutine executor built on `ucontext` stackful coroutines. This
+// is the "as much as possible in a module" implementation: the compiler only emits
+// the `async`/`await`/`Task<T>` surface; the scheduling lives here and can grow
+// (timers, I/O reactor, join/select) without touching the compiler.
+//
+// Usage:
+//   import art;
+//   void worker(void *arg) { … art::yield_now(); … }
+//   art::spawn(worker, arg);
+//   art::run();          // drive all coroutines to completion
+module art;
+
+#include <ucontext.h>
+
+extern void *malloc(unsigned long);
+extern void free(void *);
+
+// Fixed-capacity scheduler state (single-threaded, so plain statics are fine).
+#define ART_MAX   256
+#define ART_STACK 65536
+
+static ucontext_t art_main;
+static ucontext_t *art_ctx[ART_MAX];
+static void *art_stack[ART_MAX];
+static void (*art_fn[ART_MAX])(void *);
+static void *art_arg[ART_MAX];
+static int art_alive[ART_MAX];
+static int art_n = 0;
+static int art_cur = -1;
+
+// Each coroutine starts here, runs its function, then marks itself done and
+// switches back to the scheduler (uc_link also points there as a safety net).
+static void art_trampoline(void) {
+    int i = art_cur;
+    art_fn[i](art_arg[i]);
+    art_alive[i] = 0;
+    swapcontext(art_ctx[i], &art_main);
+}
+
+// Schedule `fn(arg)` to run as a coroutine. It does not start until `run()`.
+int spawn(void (*fn)(void *), void *arg) {
+    if (art_n >= ART_MAX) return -1;
+    int i = art_n;
+    art_n = art_n + 1;
+    art_ctx[i] = (ucontext_t *)malloc(sizeof(ucontext_t));
+    art_stack[i] = malloc(ART_STACK);
+    getcontext(art_ctx[i]);
+    art_ctx[i]->uc_stack.ss_sp = art_stack[i];
+    art_ctx[i]->uc_stack.ss_size = ART_STACK;
+    art_ctx[i]->uc_link = &art_main;
+    art_fn[i] = fn;
+    art_arg[i] = arg;
+    art_alive[i] = 1;
+    makecontext(art_ctx[i], art_trampoline, 0);
+    return i;
+}
+
+// Yield from the current coroutine back to the scheduler (call only inside a
+// coroutine started by `spawn`).
+void yield_now(void) {
+    int i = art_cur;
+    if (i < 0) return;
+    swapcontext(art_ctx[i], &art_main);
+}
+
+// Run the scheduler until every spawned coroutine has finished. Round-robin: each
+// pass resumes every still-alive coroutine once.
+void run(void) {
+    int progress = 1;
+    while (progress) {
+        progress = 0;
+        for (int i = 0; i < art_n; i++) {
+            if (art_alive[i]) {
+                progress = 1;
+                art_cur = i;
+                swapcontext(&art_main, art_ctx[i]);
+            }
+        }
+    }
+    // All done — reclaim stacks/contexts and reset for a fresh run.
+    for (int i = 0; i < art_n; i++) {
+        free(art_stack[i]);
+        free(art_ctx[i]);
+    }
+    art_n = 0;
+    art_cur = -1;
+}
+
+// The number of coroutines still scheduled (alive) — handy for tests/diagnostics.
+int pending(void) {
+    int c = 0;
+    for (int i = 0; i < art_n; i++) if (art_alive[i]) c = c + 1;
+    return c;
+}

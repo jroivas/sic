@@ -235,36 +235,36 @@ else
     bad "std-named-args" "compile/link failed: $(cat err)"
 fi
 
-# ── asrun (async runtime module): cooperative coroutines (sic.md §"Async") ────
-# Build asrun into its own module dir, then a consumer spawns two coroutines that
+# ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
+# Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
-ASRUN_SRC="$ROOT/siccomp/lib/asrun"
-mkdir -p arun; cp "$ASRUN_SRC"/*.sic arun/
-if "$SIC" --emit-module arun 2>err && [ -f arun/module_asrun.smod ]; then
-    ok "asrun-build"
+ART_SRC="$ROOT/siccomp/lib/art"
+mkdir -p arun; cp "$ART_SRC"/*.sic arun/
+if "$SIC" --emit-module arun 2>err && [ -f arun/module_art.smod ]; then
+    ok "art-build"
 else
-    bad "asrun-build" "emit-module failed: $(cat err)"
+    bad "art-build" "emit-module failed: $(cat err)"
 fi
 cat > coro.sic <<'EOF'
-import asrun;
+import art;
 #include <stdio.h>
 static int seq[16];
 static int si = 0;
-void ta(void *a) { for (int i = 0; i < 3; i++) { seq[si++] = 10 + i; asrun::yield_now(); } }
-void tb(void *a) { for (int i = 0; i < 3; i++) { seq[si++] = 20 + i; asrun::yield_now(); } }
+void ta(void *a) { for (int i = 0; i < 3; i++) { seq[si++] = 10 + i; art::yield_now(); } }
+void tb(void *a) { for (int i = 0; i < 3; i++) { seq[si++] = 20 + i; art::yield_now(); } }
 int main() {
-    asrun::spawn(ta, 0);
-    asrun::spawn(tb, 0);
-    asrun::run();
+    art::spawn(ta, 0);
+    art::spawn(tb, 0);
+    art::run();
     for (int i = 0; i < si; i++) printf("%d ", seq[i]);
     return 0;
 }
 EOF
-if "$SIC" coro.sic arun/libasrun.a -Iarun -o coro 2>err; then
+if "$SIC" coro.sic arun/libart.a -Iarun -o coro 2>err; then
     out="$(./coro)"
-    [ "$out" = "10 20 11 21 12 22 " ] && ok "asrun-coroutines" || bad "asrun-coroutines" "interleave wrong: [$out]"
+    [ "$out" = "10 20 11 21 12 22 " ] && ok "art-coroutines" || bad "art-coroutines" "interleave wrong: [$out]"
 else
-    bad "asrun-coroutines" "compile/link failed: $(cat err)"
+    bad "art-coroutines" "compile/link failed: $(cat err)"
 fi
 
 echo

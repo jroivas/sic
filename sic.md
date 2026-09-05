@@ -482,23 +482,23 @@ any `Task<T>` and produces the `T`.
 > lives in a **module**. A built-in synchronous stub keeps `async`/`await` working
 > standalone (an async call runs eagerly and `await` returns the stored result).
 
-## The `asrun` runtime module
+## The `art` runtime module
 
-`asrun` is sic's async runtime — a small **cooperative, single-threaded coroutine
+`art` is sic's async runtime — a small **cooperative, single-threaded coroutine
 executor** built on stackful `ucontext` coroutines. It lives entirely in a module
-(`import asrun;`), so scheduling can grow — timers, an I/O reactor, `join`/`select` —
+(`import art;`), so scheduling can grow — timers, an I/O reactor, `join`/`select` —
 without touching the compiler.
 
-    import asrun;
+    import art;
 
     void worker(void *arg) {
-        for (int i = 0; i < 3; i++) { /* … */ asrun::yield_now(); }
+        for (int i = 0; i < 3; i++) { /* … */ art::yield_now(); }
     }
 
     int main() {
-        asrun::spawn(worker, a);   // schedule a coroutine
-        asrun::spawn(worker, b);
-        asrun::run();              // drive them to completion (round-robin)
+        art::spawn(worker, a);   // schedule a coroutine
+        art::spawn(worker, b);
+        art::run();              // drive them to completion (round-robin)
         return 0;
     }
 
