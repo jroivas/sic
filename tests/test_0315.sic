@@ -1,0 +1,29 @@
+// sic: `(T)bigint` CONVERTS and truncates the arbitrary-precision value to the
+// target primitive type (sic.md §"Integer sizes") — not a pointer reinterpret.
+// Every integer width (u8..u64 / i8..i64), bool, and float are supported.
+#include <stdint.h>
+
+int main() {
+    bigint b = 1000000;
+    b = b * b;                          // 10^12 = 0xE8_D4A5_1000
+
+    if ((uint8_t)b  != 0)             return 1;   // low byte 0x00
+    if ((uint16_t)b != 4096)          return 2;   // 0x1000
+    if ((uint32_t)b != 3567587328u)   return 3;   // 0xD4A51000
+    if ((uint64_t)b != 1000000000000) return 4;
+    if ((int16_t)b  != 4096)          return 5;
+    if ((int32_t)b  != -727379968)    return 6;   // signed truncation
+    if ((int64_t)b  != 1000000000000) return 7;
+
+    bigint n = -300;
+    if ((uint8_t)n != 212)            return 8;   // -300 & 0xFF
+    if ((int8_t)n  != -44)            return 9;
+    if ((bool)n    != 1)              return 10;
+
+    bigint small = 42;
+    if ((int)small != 42)             return 11;
+    if ((double)small != 42.0)        return 12;
+    if ((int)(small % 7) != 0)        return 13;  // 42 % 7
+
+    return 42;
+}

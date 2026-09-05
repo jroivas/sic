@@ -859,10 +859,23 @@ impl<'m> FuncCtx<'m> {
                         return self.coerce(iv, &target);
                     }
                 }
-                // A `bigint` is a pointer, so casting it (`(char*)b`, `(long)b`)
-                // only reinterprets the pointer — it never converts. Use the
-                // explicit `.str` / `.int` accessors to get the decimal string or
-                // numeric value (sic.md §"Integer sizes").
+                // sic `bigint` → numeric cast (sic.md §"Integer sizes"): a `bigint`
+                // is arbitrary-precision, so `(int)b`/`(long)b` CONVERT and truncate
+                // toward the target width (like `.int`), and `(double)b` converts to
+                // floating point. Anything else (`(char*)b`, `(void*)b`) still just
+                // reinterprets the underlying pointer.
+                if self.is_sic() && self.is_bigint_operand(inner) {
+                    if matches!(target, Type::Int { .. } | Type::Bool) {
+                        let b = self.to_bigint(inner)?;
+                        let iv = self.emit_bigint_call("__sic_bi_to_i64", vec![b], Type::i64())?;
+                        return self.coerce(iv, &target);
+                    }
+                    if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
+                        let b = self.to_bigint(inner)?;
+                        let d = self.emit_bigint_call("__sic_bi_to_double", vec![b], Type::Float64)?;
+                        return self.coerce(d, &target);
+                    }
+                }
                 let v = self.lower_expr(inner)?;
                 self.coerce(v, &target)
             }
