@@ -521,6 +521,15 @@ impl Parser {
                 // `__thread`/`_Thread_local`: per-thread storage. Orthogonal to
                 // the storage class, so it doesn't set `storage`.
                 TokenKind::ThreadLocal => { self.pending_thread_local = true; self.advance(); }
+                // sic strict mode (sic.md §"Strict mode"): `mut` (a mutable binding
+                // when immutable-by-default is on) and `strict` (mark a function
+                // strict) are accepted here. Immutability enforcement is not yet done,
+                // so for now they parse and are otherwise no-ops.
+                TokenKind::Ident if self.lang == Lang::Sic
+                    && (self.peek().text == "mut" || self.peek().text == "strict") =>
+                {
+                    self.advance();
+                }
                 // Storage classes
                 TokenKind::Auto     => { storage = Some(StorageClass::Auto);     self.advance(); }
                 TokenKind::Register => { storage = Some(StorageClass::Register); self.advance(); }
@@ -1296,6 +1305,13 @@ impl Parser {
     }
 
     fn starts_decl_specifier(&self) -> bool {
+        // sic strict mode (sic.md §"Strict mode"): a leading `mut`/`strict` begins a
+        // declaration (`mut int x`, `strict int f()`).
+        if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
+            && (self.peek().text == "mut" || self.peek().text == "strict")
+        {
+            return true;
+        }
         // sic `tuple <name>` starts a declaration; `tuple(` is a pack/unpack expr.
         if self.peek_kind() == TokenKind::Tuple {
             return self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen);
@@ -1511,6 +1527,12 @@ impl Parser {
     }
 
     fn is_decl_start(&self) -> bool {
+        // sic strict mode (sic.md §"Strict mode"): a local `mut int x` / `strict …`.
+        if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
+            && (self.peek().text == "mut" || self.peek().text == "strict")
+        {
+            return true;
+        }
         // sic `tuple <name>` is a declaration; `tuple(` is a pack/unpack expression.
         if self.peek_kind() == TokenKind::Tuple {
             return self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen);
