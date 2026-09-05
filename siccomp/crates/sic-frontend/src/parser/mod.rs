@@ -1009,6 +1009,30 @@ impl Parser {
 
     /// After reading a type name, parse a generic-enum instantiation `Name<A, …>`
     /// (sic.md §"Match") — e.g. `Option<int>`. A non-generic name stays `Named`.
+    /// Consume the closing `>` of a generic type-argument list, splitting a `>>`
+    /// (lexed as a single shift token) so nested generics like `dict<K, list<V>>`
+    /// close correctly (the C++ `>>` problem). A `>>` is rewritten in place to a
+    /// single `>` — one level consumes one `>`, leaving the other for the enclosing
+    /// level (works for any nesting depth).
+    fn eat_generic_gt(&mut self) -> Result<()> {
+        if self.eat(TokenKind::Gt) {
+            return Ok(());
+        }
+        if self.peek_kind() == TokenKind::Shr {
+            self.tokens[self.pos].kind = TokenKind::Gt;
+            self.tokens[self.pos].text = ">".to_string();
+            return Ok(());
+        }
+        // `>>>` (the rotate-right operator) closes three generic levels: peel one `>`
+        // off, leaving `>>` for the enclosing levels.
+        if self.peek_kind() == TokenKind::RotR {
+            self.tokens[self.pos].kind = TokenKind::Shr;
+            self.tokens[self.pos].text = ">>".to_string();
+            return Ok(());
+        }
+        self.expect(TokenKind::Gt).map(|_| ())
+    }
+
     fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
         // sic built-in `dict<K,V>` (sic.md §"Dict") parses its type arguments like a
         // generic enum; plain `dict` (no `<`) stays `Named("dict")` = `dict<any,any>`.
@@ -1016,11 +1040,11 @@ impl Parser {
         if self.lang == Lang::Sic && is_generic && self.at(TokenKind::Lt) {
             self.advance(); // `<`
             let mut args = Vec::new();
-            while !self.at(TokenKind::Gt) && !self.at(TokenKind::Eof) {
+            while !self.at(TokenKind::Gt) && !self.at(TokenKind::Shr) && !self.at(TokenKind::RotR) && !self.at(TokenKind::Eof) {
                 args.push(self.parse_type_name()?);
                 if !self.eat(TokenKind::Comma) { break; }
             }
-            self.expect(TokenKind::Gt)?;
+            self.eat_generic_gt()?;
             return Ok(AstType::Generic { name, args });
         }
         Ok(AstType::Named(name))

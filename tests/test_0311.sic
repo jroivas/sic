@@ -1,0 +1,24 @@
+// sic feature interactions + nested generic types (the C++ `>>` problem).
+T id<T>(T x) { return x; }
+void fill(dict<int, int> d) { d[1] = 10; d[2] = 20; }   // container passed by handle
+async void nothing(int x) { return; }                   // async void
+
+int main() {
+    // nested generic type args must parse (>> and >>> lex as shift/rotate ops).
+    dict<string, list<int>> a;
+    dict<int, dict<int, list<int>>> b;
+    (void)a; (void)b;
+
+    // a dict handle passed to a function mutates the caller's dict.
+    dict<int, int> m;
+    fill(m);
+    if (m.size != 2 || m[1] != 10 || m[2] != 20) return 1;
+
+    // generic function feeding a container.
+    dict<int, int> g;
+    g[id(3)] = id(9);
+    if (g[3] != 9) return 2;
+
+    await nothing(7);          // async void awaits cleanly
+    return 42;
+}
