@@ -1003,7 +1003,7 @@ impl Parser {
     fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
         // sic built-in `dict<K,V>` (sic.md §"Dict") parses its type arguments like a
         // generic enum; plain `dict` (no `<`) stays `Named("dict")` = `dict<any,any>`.
-        let is_generic = self.generic_enums.contains(&name) || name == "dict" || name == "Task" || name == "set";
+        let is_generic = self.generic_enums.contains(&name) || name == "dict" || name == "Task" || name == "set" || name == "list";
         if self.lang == Lang::Sic && is_generic && self.at(TokenKind::Lt) {
             self.advance(); // `<`
             let mut args = Vec::new();

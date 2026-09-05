@@ -232,7 +232,18 @@ impl Lexer {
             "false" => return Token::new(TokenKind::IntLit, "0".to_string(), sp),
             _ => {}
         }
-        let kind = keyword_or_ident(&text, &self.typedefs, self.lang);
+        let mut kind = keyword_or_ident(&text, &self.typedefs, self.lang);
+        // `list`/`set` are common identifiers (`const Node *list`), so treat them as
+        // the container type ONLY when written generic, `list<…>` / `set<…>`; a bare
+        // `list`/`set` stays an ordinary identifier. (`dict` is uncommon, so its bare
+        // form is still a type.)
+        if kind == TokenKind::TypeName && (text == "list" || text == "set") {
+            let mut i = self.pos;
+            while i < self.src.len() && (self.src[i] == ' ' || self.src[i] == '\t') { i += 1; }
+            if self.src.get(i) != Some(&'<') {
+                kind = TokenKind::Ident;
+            }
+        }
         Token::new(kind, text, sp)
     }
 
@@ -564,6 +575,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             "Task" => return TokenKind::TypeName,
             // `set<T>` is a built-in hash set (sic.md §"Set"); ordinary identifier in C.
             "set" => return TokenKind::TypeName,
+            // `list<T>` is a built-in growable array (sic.md §"List"); ordinary in C.
+            "list" => return TokenKind::TypeName,
             // `u8char` is a Unicode code point (32-bit); ordinary identifier in C.
             "u8char" => return TokenKind::TypeName,
             // `va_array` is a Python-style varargs collector: a last parameter that

@@ -463,6 +463,27 @@ Point>`, etc. — read back as the declared type.
 > struct copy). Reading a missing key yields a zero value (an empty string for a
 > `string` value).
 
+# List
+
+`list<T>` is a built-in growable array (a dynamic vector). Use `list<any>` for a
+heterogeneous list.
+
+    list<int> xs;
+    xs.add(10);              // also .push / .append
+    xs.add(20);
+    int a = xs[1];           // 20
+    xs[1] = 99;              // update in place
+    usize n = xs.size;       // element count (also .length)
+    for (int i = 0; i < xs.size; i++) { /* xs[i] */ }
+
+Elements are owned by the list — string and struct elements are copied and freed
+with the list (and reclaimed when overwritten via `l[i] = …`). `l[i].field` and
+`l[i][j]` work for aggregate elements.
+
+> A bare `list` (or `set`) is an ordinary identifier — the type form is always
+> written generic (`list<T>` / `set<T>`), so existing code that uses `list`/`set` as a
+> variable name is unaffected.
+
 # Set
 
 `set<T>` is a built-in hash set — unique elements of `T`, built on the same table as

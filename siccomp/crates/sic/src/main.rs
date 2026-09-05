@@ -7,6 +7,7 @@ use std::process::Command;
 mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
+mod list_runtime;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -661,6 +662,14 @@ fn parse_source(
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             async_runtime::ASYNC_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `list` (sic.md §"List"): prepend the growable-array runtime when used.
+    if list_runtime::uses_list(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            list_runtime::LIST_RUNTIME, path, preprocessed
         );
     }
 

@@ -1,0 +1,25 @@
+// sic list (sic.md §"List"): a growable array. add/push/append, index get/set,
+// .size; owned string/any elements (reuses the dict value box).
+int main() {
+    list<int> xs;
+    xs.add(10); xs.push(20); xs.append(30);
+    if (xs.size != 3) return 1;
+    if (xs[0] != 10 || xs[1] != 20 || xs[2] != 30) return 2;
+    xs[1] = 99;
+    if (xs[1] != 99) return 3;
+    int sum = 0;
+    for (int i = 0; i < xs.size; i++) sum = sum + xs[i];
+    if (sum != 139) return 4;                 // 10+99+30
+
+    list<string> names;
+    names.add("alice"); names.add("bob");
+    string a = names[0];
+    if (a.size != 5 || names.size != 2) return 5;   // owned string element
+    names[0] = "carol";
+    if (names[0].size != 5) return 6;
+
+    list<any> mixed;
+    mixed.add(7); mixed.add(3.5);
+    if ((int)mixed[0] != 7) return 7;         // heterogeneous via any
+    return 42;
+}

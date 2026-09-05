@@ -631,6 +631,11 @@ impl<'m> FuncCtx<'m> {
             ExprKind::BigIntLit(_) => self.to_bigint(expr),
 
             ExprKind::Index { base, index } => {
+                // sic `list[i]` read (sic.md §"List").
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_list(i))) {
+                    return self.lower_list_get(base, index, &expr.span);
+                }
                 // sic `dict[key]` read (sic.md §"Dict").
                 if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
                     || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
@@ -732,6 +737,16 @@ impl<'m> FuncCtx<'m> {
                         let f = self.dict_runtime_fn("__sic_dict_len");
                         let r = self.alloc_val();
                         self.push_instr(Instr::Call { dest: Some(r), func: f, args: vec![d], ret_ty: Type::u64() });
+                        self.val_types.insert(r.0, Type::u64());
+                        return Ok(Val::Local(r));
+                    }
+                    // sic `list` (sic.md §"List"): element count.
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_list(i))) {
+                        let l = self.list_handle(base)?;
+                        let f = self.list_runtime_fn("__sic_list_len");
+                        let r = self.alloc_val();
+                        self.push_instr(Instr::Call { dest: Some(r), func: f, args: vec![l], ret_ty: Type::u64() });
                         self.val_types.insert(r.0, Type::u64());
                         return Ok(Val::Local(r));
                     }
@@ -1296,6 +1311,98 @@ impl<'m> FuncCtx<'m> {
         self.reinterpret_slot(Val::Local(raw), &elem)
     }
 
+    // ─── sic `list` (sic.md §"List") ─────────────────────────────────────────
+
+    /// Resolve a `__sic_list_*` runtime function, declaring it as an extern if absent.
+    fn list_runtime_fn(&mut self, name: &str) -> FuncRef {
+        if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
+        let u64t = Type::u64();
+        let ptr = Type::void_ptr();
+        let u64p = Type::Pointer(Box::new(u64t.clone()));
+        let i32t = Type::i32();
+        let (params, ret): (Vec<Type>, Type) = match name {
+            "__sic_list_new" => (vec![], ptr),
+            "__sic_list_push" => (vec![ptr, u64t.clone(), u64t, i32t], Type::Void),
+            "__sic_list_get" => (vec![ptr, u64t, u64p.clone(), u64p], i32t.clone()),
+            "__sic_list_set" => (vec![ptr, u64t.clone(), u64t.clone(), u64t, i32t], Type::Void),
+            "__sic_list_len" => (vec![ptr], u64t),
+            "__sic_list_free" => (vec![ptr], Type::Void),
+            _ => (vec![], Type::Void),
+        };
+        let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
+        self.lowerer.module.add_extern(sic_ir::ExternFunc { name: name.to_string(), sig })
+    }
+
+    /// The element type of a `list` subscript/method base.
+    fn list_elem_of(&mut self, base: &Expr) -> Type {
+        let t = self.infer_expr_type(base).ok();
+        let t = t.map(|t| if let Type::Pointer(i) = &t {
+            if super::types::is_list(i) { (**i).clone() } else { t.clone() }
+        } else { t }).unwrap_or_else(super::types::any_type);
+        super::types::resolve_aggregate(&super::types::list_elem(&t, self.ptr_size()), &self.lowerer.struct_types)
+    }
+
+    /// The `list` handle from a base that is a list or a pointer to one.
+    fn list_handle(&mut self, base: &Expr) -> Result<Val> {
+        let v = self.lower_expr(base)?;
+        let ty = self.val_type(&v);
+        if super::types::is_list(&ty) { return Ok(v); }
+        if let Type::Pointer(inner) = ty {
+            if super::types::is_list(&inner) {
+                let d = self.alloc_val();
+                self.push_instr(Instr::Load { dest: d, ptr: v, ty: (*inner).clone() });
+                self.val_types.insert(d.0, *inner);
+                return Ok(Val::Local(d));
+            }
+        }
+        Ok(v)
+    }
+
+    /// `l.add(x)` / `l.push(x)` — append `x`.
+    pub(crate) fn lower_list_push(&mut self, base: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
+        let elem = self.list_elem_of(base);
+        let l = self.list_handle(base)?;
+        let (vty, vslot, vowned) = self.container_box_value(val, &elem)?;
+        let f = self.list_runtime_fn("__sic_list_push");
+        self.push_instr(Instr::Call { dest: None, func: f, args: vec![l, vty, vslot, vowned], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// `l[i]` read.
+    pub(crate) fn lower_list_get(&mut self, base: &Expr, index: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let elem = self.list_elem_of(base);
+        let l = self.list_handle(base)?;
+        let iv = self.lower_expr(index)?;
+        let iv = self.coerce(iv, &Type::u64())?;
+        let ot = self.dict_out_slot();
+        let os = self.dict_out_slot();
+        let f = self.list_runtime_fn("__sic_list_get");
+        let found = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(found), func: f, args: vec![l, iv, ot.clone(), os.clone()], ret_ty: Type::i32() });
+        self.container_read_value(ot, os, &elem, Some(Val::Local(found)), sp)
+    }
+
+    /// `l[i] = x`.
+    pub(crate) fn lower_list_set(&mut self, base: &Expr, index: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
+        let elem = self.list_elem_of(base);
+        let l = self.list_handle(base)?;
+        let iv = self.lower_expr(index)?;
+        let iv = self.coerce(iv, &Type::u64())?;
+        let (vty, vslot, vowned) = self.container_box_value(val, &elem)?;
+        let f = self.list_runtime_fn("__sic_list_set");
+        self.push_instr(Instr::Call { dest: None, func: f, args: vec![l, iv, vty, vslot, vowned], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// Create a fresh empty list handle (`list<T> l;` auto-init).
+    pub(crate) fn lower_list_new(&mut self, lty: &Type) -> Result<Val> {
+        let f = self.list_runtime_fn("__sic_list_new");
+        let d = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(d), func: f, args: vec![], ret_ty: lty.clone() });
+        self.val_types.insert(d.0, lty.clone());
+        Ok(Val::Local(d))
+    }
+
     /// The `(key, value)` types of a dict subscript base (defaults to any/any).
     fn dict_kv_of(&mut self, base: &Expr) -> (Type, Type) {
         let bt = self.infer_expr_type(base).ok();
@@ -1330,41 +1437,7 @@ impl<'m> FuncCtx<'m> {
         let get = self.dict_runtime_fn("__sic_dict_get");
         let found = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(found), func: get, args: vec![d, kind, a, b, ot.clone(), os.clone()], ret_ty: Type::i32() });
-        let slot = self.alloc_val();
-        self.push_instr(Instr::Load { dest: slot, ptr: os, ty: Type::u64() });
-        self.val_types.insert(slot.0, Type::u64());
-        if super::types::is_any(&v) {
-            // Rebuild the `any { ty, slot }` value (aggregate-by-pointer).
-            let tyw = self.alloc_val();
-            self.push_instr(Instr::Load { dest: tyw, ptr: ot, ty: Type::u64() });
-            self.val_types.insert(tyw.0, Type::u64());
-            let tinfo = super::types::type_info_type();
-            let typ = self.alloc_val();
-            self.push_instr(Instr::Cast { dest: typ, op: CastOp::BitCast, val: Val::Local(tyw), to_ty: tinfo.clone() });
-            self.val_types.insert(typ.0, tinfo);
-            let any_ty = super::types::any_type();
-            let p = self.alloc_val();
-            self.push_instr(Instr::Alloca { dest: p, ty: any_ty.clone(), align: None });
-            self.val_types.insert(p.0, any_ty.clone());
-            let ty_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "ty", false, sp)?;
-            self.store_lvalue(&ty_lv, Val::Local(typ))?;
-            let slot_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty), "slot", false, sp)?;
-            self.store_lvalue(&slot_lv, Val::Local(slot))?;
-            return Ok(Val::Local(p));
-        }
-        // A concrete value type V (scalar, string, struct, …) is reconstructed from
-        // the slot bits/address directly.
-        let val = self.reinterpret_slot(Val::Local(slot), &v)?;
-        // A missing string key would reinterpret a null slot into a null descriptor
-        // (crashing any read); return an empty string on a miss instead.
-        if super::types::is_sic_string(&v) {
-            let empty = self.emit_empty_string()?;
-            let sel = self.alloc_val();
-            self.push_instr(Instr::Select { dest: sel, cond: Val::Local(found), on_true: val, on_false: empty, ty: Type::void_ptr() });
-            self.val_types.insert(sel.0, v.clone());
-            return Ok(Val::Local(sel));
-        }
-        Ok(val)
+        self.container_read_value(ot, os, &v, Some(Val::Local(found)), sp)
     }
 
     /// An empty `string` value (`{ data: "", size: 0, rc: null }`).
@@ -1384,19 +1457,24 @@ impl<'m> FuncCtx<'m> {
         let (_k, v) = self.dict_kv_of(base);
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
+        let (vty_word, vslot_word, vowned) = self.container_box_value(val, &v)?;
+        let set = self.dict_runtime_fn("__sic_dict_set");
+        self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word, vowned], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// Box a value for a dict/list container into `(type-info word, slot word, vowned)`.
+    /// The slot holds a scalar's bits or an aggregate's address; strings and structs
+    /// are deep-copied into one owned heap block (`vowned = 1`, freed on
+    /// overwrite/remove/free); the type word is stored only for an `any` element.
+    pub(crate) fn container_box_value(&mut self, val: &Expr, v: &Type) -> Result<(Val, Val, Val)> {
         let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
-        // A `string` value — or a `char*`/`char[]` stored into a `string`-typed
-        // dict — is deep-copied into one owned heap block so the entry owns it (it
-        // survives its source temporary and is freed on delete/overwrite/dict-free).
-        let is_owned_string = super::types::is_sic_string(&v) || super::types::is_sic_string(&ety);
-        // A concrete (non-`any`) struct/union value is deep-copied by value onto the
-        // heap, so the entry owns it (freed on delete/overwrite/dict-free).
-        let is_owned_struct = !is_owned_string && !super::types::is_any(&v)
-            && matches!(&v, Type::Struct(_) | Type::Union(_));
-        let vowned_flag = is_owned_string || is_owned_struct;
+        let is_owned_string = super::types::is_sic_string(v) || super::types::is_sic_string(&ety);
+        let is_owned_struct = !is_owned_string && !super::types::is_any(v)
+            && matches!(v, Type::Struct(_) | Type::Union(_));
         let vslot_word = if is_owned_string {
             let (data, size) = self.string_operand_parts(val)?;
-            let owned = self.emit_dict_owned_string(data, size)?; // single freeable block
+            let owned = self.emit_dict_owned_string(data, size)?;
             let w = self.alloc_val();
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: owned, to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
@@ -1413,11 +1491,9 @@ impl<'m> FuncCtx<'m> {
         } else {
             self.box_slot(val, &ety)?
         };
-        let vty_word = if super::types::is_any(&v) {
-            // For a `dict<…, any>` the value's runtime type is stored — an owned
-            // string's type is `string` (not the source `char*`).
+        let vty_word = if super::types::is_any(v) {
             let store_ty = if is_owned_string { super::types::sic_string_type(self.ptr_size()) } else { ety.clone() };
-            let tyval = self.lower_type_value(&store_ty); // type-info*
+            let tyval = self.lower_type_value(&store_ty);
             let tyw = self.alloc_val();
             self.push_instr(Instr::Cast { dest: tyw, op: CastOp::BitCast, val: tyval, to_ty: Type::u64() });
             self.val_types.insert(tyw.0, Type::u64());
@@ -1425,10 +1501,46 @@ impl<'m> FuncCtx<'m> {
         } else {
             Constant::uint(0)
         };
-        let vowned = if vowned_flag { Constant::int(1) } else { Constant::int(0) };
-        let set = self.dict_runtime_fn("__sic_dict_set");
-        self.push_instr(Instr::Call { dest: None, func: set, args: vec![d, kind, a, b, vty_word, vslot_word, vowned], ret_ty: Type::Void });
-        Ok(())
+        let vowned = if is_owned_string || is_owned_struct { Constant::int(1) } else { Constant::int(0) };
+        Ok((vty_word, vslot_word, vowned))
+    }
+
+    /// Reconstruct a container element from its `(type-info, slot)` out-slots: an
+    /// `any` element rebuilds the `{ ty, slot }` box; a concrete element reinterprets
+    /// the slot. `found` (a bool ValId) guards a missing `string` → empty string.
+    pub(crate) fn container_read_value(&mut self, oty: Val, oslot: Val, v: &Type, found: Option<Val>, sp: &crate::lexer::Span) -> Result<Val> {
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Load { dest: slot, ptr: oslot, ty: Type::u64() });
+        self.val_types.insert(slot.0, Type::u64());
+        if super::types::is_any(v) {
+            let tyw = self.alloc_val();
+            self.push_instr(Instr::Load { dest: tyw, ptr: oty, ty: Type::u64() });
+            self.val_types.insert(tyw.0, Type::u64());
+            let tinfo = super::types::type_info_type();
+            let typ = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: typ, op: CastOp::BitCast, val: Val::Local(tyw), to_ty: tinfo.clone() });
+            self.val_types.insert(typ.0, tinfo);
+            let any_ty = super::types::any_type();
+            let p = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: p, ty: any_ty.clone(), align: None });
+            self.val_types.insert(p.0, any_ty.clone());
+            let ty_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty.clone()), "ty", false, sp)?;
+            self.store_lvalue(&ty_lv, Val::Local(typ))?;
+            let slot_lv = self.field_ptr_from(LValue::plain(Val::Local(p), any_ty), "slot", false, sp)?;
+            self.store_lvalue(&slot_lv, Val::Local(slot))?;
+            return Ok(Val::Local(p));
+        }
+        let val = self.reinterpret_slot(Val::Local(slot), v)?;
+        if super::types::is_sic_string(v) {
+            if let Some(found) = found {
+                let empty = self.emit_empty_string()?;
+                let sel = self.alloc_val();
+                self.push_instr(Instr::Select { dest: sel, cond: found, on_true: val, on_false: empty, ty: Type::void_ptr() });
+                self.val_types.insert(sel.0, v.clone());
+                return Ok(Val::Local(sel));
+            }
+        }
+        Ok(val)
     }
 
     /// `del dict[key]`: `__sic_dict_del` (frees the entry's resources).
@@ -3510,9 +3622,14 @@ impl<'m> FuncCtx<'m> {
                 }
             }
         }
-        // sic `dict[key] = value` (sic.md §"Dict").
+        // sic `list[i] = value` (sic.md §"List") / `dict[key] = value` (sic.md §"Dict").
         if op.is_none() && self.is_sic() {
             if let ExprKind::Index { base, index } = &lhs.kind {
+                if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_list(i))) {
+                    self.lower_list_set(base, index, rhs, &lhs.span)?;
+                    return Ok(Constant::zero());
+                }
                 if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
                     || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
                     self.lower_dict_set(base, index, rhs, &lhs.span)?;
@@ -4902,6 +5019,10 @@ impl<'m> FuncCtx<'m> {
                     || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
                     return self.lower_dict_get(base, index, &e.span);
                 }
+                if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                    || matches!(&t, Type::Pointer(i) if super::types::is_list(i))) {
+                    return self.lower_list_get(base, index, &e.span);
+                }
             }
         }
         if let Ok(lv) = self.lower_lvalue(e) {
@@ -5351,6 +5472,23 @@ impl<'m> FuncCtx<'m> {
                         "remove" => { self.lower_dict_del(base, key, sp)?; Ok(Constant::zero()) }
                         _ => self.lower_dict_get(base, key, sp), // contains / has → bool
                     };
+                }
+            }
+        }
+
+        // sic `list` methods (sic.md §"List"): `l.add(x)` / `l.push(x)` /
+        // `l.append(x)` append an element.
+        if self.is_sic() {
+            if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                if matches!(name.as_str(), "add" | "push" | "append")
+                    && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_list(i)))
+                {
+                    let v = args.first().ok_or_else(|| CompileError::at(
+                        format!("`.{}` takes one element argument", name),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    self.lower_list_push(base, v, sp)?;
+                    return Ok(Constant::zero());
                 }
             }
         }
@@ -6681,6 +6819,17 @@ impl<'m> FuncCtx<'m> {
                     return Ok(LValue::plain(ptr, v));
                 }
             }
+            // sic `list[i]` whose element is an aggregate — a read-lvalue for
+            // `l[i].field` (sic.md §"List").
+            if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_list(&t)
+                || matches!(&t, Type::Pointer(i) if super::types::is_list(i)))
+            {
+                let v = self.list_elem_of(base);
+                if matches!(v, Type::Struct(_) | Type::Union(_)) {
+                    let ptr = self.lower_list_get(base, index, &base.span)?;
+                    return Ok(LValue::plain(ptr, v));
+                }
+            }
         }
         let base_val = self.lower_expr(base)?;
         let idx_val = self.lower_expr(index)?;
@@ -7045,6 +7194,14 @@ impl<'m> FuncCtx<'m> {
                         if let Some((_, v)) = super::types::dict_kv(&dt, self.ptr_size()) {
                             return Ok(v);
                         }
+                    }
+                    // sic `list[i]` yields the element type T (sic.md §"List").
+                    let lt = if super::types::is_list(&bt) { Some(bt.clone()) }
+                        else if let Type::Pointer(i) = &bt {
+                            if super::types::is_list(i) { Some((**i).clone()) } else { None }
+                        } else { None };
+                    if let Some(lt) = lt {
+                        return Ok(super::types::list_elem(&lt, self.ptr_size()));
                     }
                 }
                 // sic `va_array` element `va[i]` is an `any` (sic.md std).

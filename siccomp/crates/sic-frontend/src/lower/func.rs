@@ -29,6 +29,8 @@ pub enum Cleanup {
     RatFree { slot: Val },
     /// sic `dict`: `__sic_dict_free` the handle held in `slot` at scope exit.
     DictFree { slot: Val },
+    /// sic `list`: `__sic_list_free` the handle held in `slot` at scope exit.
+    ListFree { slot: Val },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -424,6 +426,11 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
                 let _ = self.emit_bigint_call("__sic_dict_free", vec![Val::Local(p)], Type::Void);
+            }
+            Cleanup::ListFree { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
+                let _ = self.emit_bigint_call("__sic_list_free", vec![Val::Local(p)], Type::Void);
             }
         }
     }
@@ -1528,6 +1535,11 @@ impl<'m> FuncCtx<'m> {
                     // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh
                     // empty map, so auto-initialize the handle to `__sic_dict_new()`
                     // (an uninitialized NULL handle would crash on first use).
+                    if self.is_sic() && super::types::is_list(&ty) && d.init.is_none() {
+                        let handle = self.lower_list_new(&ty)?;
+                        self.push_instr(Instr::Store { ptr: Val::Local(vid), val: handle });
+                        self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                    }
                     if self.is_sic() && super::types::is_dict(&ty) && d.init.is_none() {
                         let handle = self.lower_dict_new(&ty, &d.span)?;
                         self.push_instr(Instr::Store { ptr: Val::Local(vid), val: handle });

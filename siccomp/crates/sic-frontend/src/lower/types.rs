@@ -260,6 +260,34 @@ pub fn dict_kv(t: &Type, ptr_size: u32) -> Option<(Type, Type)> {
     Some((demangle_type(k, ptr_size), demangle_type(v, ptr_size)))
 }
 
+// ─── `list<T>`: a growable array (sic.md §"List") ─────────────────────────────
+
+/// Build a `list<T>` value type — an opaque pointer to the runtime's growable array.
+pub fn list_type(elem: &Type) -> Type {
+    let name = format!("(list|{})", mangle_type_name(elem));
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+}
+
+/// True if `t` is a `list<T>` value.
+pub fn is_list(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(list|"))))
+}
+
+/// The element type `T` of a `list<T>`.
+pub fn list_elem(t: &Type, ptr_size: u32) -> Type {
+    match t {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Struct(st) => match st.name.as_deref().and_then(|n| n.strip_prefix("(list|")).and_then(|n| n.strip_suffix(')')) {
+                Some(e) => demangle_type(e, ptr_size),
+                None => any_type(),
+            },
+            _ => any_type(),
+        },
+        _ => any_type(),
+    }
+}
+
 // ─── `set<T>`: a hash set, a `dict<T, bool>` under the hood (sic.md §"Set") ────
 
 /// Build a `set<T>` value type (reuses the dict runtime; membership is a `true`
@@ -673,6 +701,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "va_dict"         => return Ok(va_dict_type()),
                 // sic built-in hash set (sic.md §"Set"): plain `set` = set<any>.
                 "set"             => return Ok(set_type(&any_type())),
+                // sic built-in growable array (sic.md §"List"): plain `list` = list<any>.
+                "list"            => return Ok(list_type(&any_type())),
                 // sic arbitrary-precision integer (sic.md §"Integer sizes"): an
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),
@@ -699,6 +729,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
         // instantiation pass.
+        // sic `list<T>` growable array (sic.md §"List").
+        AstType::Generic { name, args } if name == "list" => {
+            let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
+                .transpose()?.unwrap_or_else(any_type);
+            list_type(&e)
+        }
         // sic `set<T>` hash set (sic.md §"Set").
         AstType::Generic { name, args } if name == "set" => {
             let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
