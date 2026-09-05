@@ -1,0 +1,24 @@
+// sic: `list`/`dict`/`set` fields of a `struct` local auto-initialize to fresh
+// empty containers (sic.md §"List"/§"Dict"). A zero handle would crash on first
+// use, so a struct local installs one per container field and frees it at scope
+// exit. Nested struct fields recurse.
+struct Bag { list<int> items; int tag; };
+struct Nested { struct Bag inner; dict<int, int> counts; };
+
+int main() {
+    struct Bag b;
+    b.tag = 7;
+    b.items.add(10); b.items.add(20); b.items.add(12);
+    if (b.items.size != 3 || b.tag != 7) return 1;
+
+    struct Nested n;
+    n.inner.items.add(1); n.inner.items.add(2);
+    n.counts[5] = 99;
+    if (n.inner.items.size != 2) return 2;
+    if (n.counts[5] != 99) return 3;
+
+    // sum the direct list field via range-`for`.
+    int sum = 0;
+    for (int x : b.items) sum += x;         // 42
+    return sum;
+}

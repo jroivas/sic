@@ -1551,6 +1551,12 @@ impl<'m> FuncCtx<'m> {
                     // zero-init (only when the user gave no explicit initializer);
                     // a `~S()` runs at scope exit via the cleanup list.
                     if self.is_sic() {
+                        // Auto-init any `list`/`dict`/`set` fields to fresh empty
+                        // containers (a zero handle crashes on first use). Runs
+                        // before the ctor so a `S()` can further populate them.
+                        if matches!(&ty, Type::Struct(_)) && d.init.is_none() {
+                            self.init_struct_container_fields(&Val::Local(vid), &ty)?;
+                        }
                         if let Type::Struct(st) = &ty {
                             if let Some(sn) = st.name.clone() {
                                 if d.init.is_none() {
@@ -1851,6 +1857,36 @@ impl<'m> FuncCtx<'m> {
                     }
                     cursor = next;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// sic: a `struct` local whose fields include `list`/`dict`/`set` handles must
+    /// have those fields initialized to fresh empty containers — a zero handle
+    /// crashes on first use (`b.items.add(x)` dereferences NULL). Walk the resolved
+    /// struct's direct fields, install a fresh empty container in each container
+    /// field, and register its free at scope exit. Recurses into nested `struct`
+    /// fields; skips `union`s (only one member is live, so auto-init is unsound).
+    fn init_struct_container_fields(&mut self, base: &Val, sty: &Type) -> Result<()> {
+        let resolved = super::types::resolve_aggregate(sty, &self.lowerer.struct_types);
+        let Type::Struct(st) = &resolved else { return Ok(()); };
+        let st = st.clone();
+        for (i, (_name, fty)) in st.fields.iter().enumerate() {
+            let off = st.field_offset(i, self.ptr_size());
+            if super::types::is_list(fty) {
+                let fp = self.gep_offset(base, off, fty);
+                let handle = self.lower_list_new(fty)?;
+                self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
+                self.register_scope_exit(Cleanup::ListFree { slot: fp });
+            } else if super::types::is_dict(fty) {
+                let fp = self.gep_offset(base, off, fty);
+                let handle = self.lower_dict_new(fty, &crate::lexer::Span::default())?;
+                self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
+                self.register_scope_exit(Cleanup::DictFree { slot: fp });
+            } else if matches!(super::types::resolve_aggregate(fty, &self.lowerer.struct_types), Type::Struct(_)) {
+                let fp = self.gep_offset(base, off, fty);
+                self.init_struct_container_fields(&fp, fty)?;
             }
         }
         Ok(())
