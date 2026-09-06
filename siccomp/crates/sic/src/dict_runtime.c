@@ -165,3 +165,57 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     free(d->index);
     free(d);
 }
+
+/* ── Enumeration → `list` (sic.md §"Iterators", `.keys`/`.values`) ────────────
+   These build a `list` handle from a dict's live entries in insertion order,
+   reusing the list runtime (prepended alongside dict). The list value-box is the
+   same (vty, vslot, vowned) triple as a dict value, so `values` copies it
+   directly (BORROWED, vowned=0 — the dict keeps ownership). Scalar keys box as
+   (0, key, 0); string keys are rebuilt as OWNED sic strings so the list can
+   outlive the dict's own key bytes. */
+struct __sic_list;
+extern struct __sic_list *__sic_list_new(void);
+extern void __sic_list_push(struct __sic_list *, unsigned long, unsigned long, int);
+
+/* Build an OWNED sic `string` block from raw bytes, matching the frontend's
+   `emit_dict_owned_string` layout: [ {data,size,rc} descriptor (3 words) | rc
+   cell (1 word) | bytes | NUL ]. sic targets 64-bit, so a word is 8 bytes. */
+__attribute__((weak)) void *__sic_str_owned(const char *src, unsigned long n) {
+    unsigned long hdr = 24, ps = 8;             /* descriptor size, pointer size */
+    char *block = (char *)malloc(n + hdr + ps + 1);
+    unsigned long *rc = (unsigned long *)(block + hdr);
+    *rc = 1;
+    char *bytes = block + hdr + ps;
+    if (n) memcpy(bytes, src, n);
+    bytes[n] = 0;
+    void **dsc = (void **)block;
+    dsc[0] = bytes;                              /* data */
+    ((unsigned long *)block)[1] = n;             /* size */
+    dsc[2] = rc;                                 /* rc */
+    return block;
+}
+
+__attribute__((weak)) void *__sic_dict_values(__sic_dict *d) {
+    struct __sic_list *l = __sic_list_new();
+    if (d) for (unsigned long e = 0; e < d->nents; e++)
+        if (d->ents[e].live)
+            __sic_list_push(l, d->ents[e].vty, d->ents[e].vslot, 0);
+    return l;
+}
+
+__attribute__((weak)) void *__sic_dict_keys_scalar(__sic_dict *d) {
+    struct __sic_list *l = __sic_list_new();
+    if (d) for (unsigned long e = 0; e < d->nents; e++)
+        if (d->ents[e].live)
+            __sic_list_push(l, 0, d->ents[e].a, 0);
+    return l;
+}
+
+__attribute__((weak)) void *__sic_dict_keys_string(__sic_dict *d) {
+    struct __sic_list *l = __sic_list_new();
+    if (d) for (unsigned long e = 0; e < d->nents; e++)
+        if (d->ents[e].live)
+            __sic_list_push(l, 0, (unsigned long)__sic_str_owned(
+                (const char *)d->ents[e].a, d->ents[e].b), 1);
+    return l;
+}

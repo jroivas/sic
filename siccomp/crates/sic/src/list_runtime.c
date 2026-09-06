@@ -53,6 +53,23 @@ __attribute__((weak)) void __sic_list_set(__sic_list *l, unsigned long i, unsign
 
 __attribute__((weak)) unsigned long __sic_list_len(__sic_list *l) { return l ? l->len : 0; }
 
+/* `.values` (sic.md §"Iterators"): a fresh list with each element BORROWED
+   (vowned=0 — the source list keeps ownership). */
+__attribute__((weak)) __sic_list *__sic_list_values(__sic_list *l) {
+    __sic_list *r = __sic_list_new();
+    if (l) for (unsigned long i = 0; i < l->len; i++)
+        __sic_list_push(r, l->vty[i], l->vslot[i], 0);
+    return r;
+}
+
+/* `.keys` (sic.md §"Iterators"): a fresh list of the indices 0..len-1. */
+__attribute__((weak)) __sic_list *__sic_list_keys(__sic_list *l) {
+    __sic_list *r = __sic_list_new();
+    if (l) for (unsigned long i = 0; i < l->len; i++)
+        __sic_list_push(r, 0, i, 0);
+    return r;
+}
+
 __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     if (!l) return;
     for (unsigned long i = 0; i < l->len; i++)

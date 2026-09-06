@@ -751,6 +751,16 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Val::Local(r));
                     }
                 }
+                // sic `.keys` / `.values` (sic.md §"Iterators"): materialize a
+                // `list` of a dict/set/list's keys or values.
+                if self.is_sic() && (name == "keys" || name == "values") {
+                    if matches!(self.infer_expr_type(base), Ok(t)
+                        if super::types::is_dict(&t) || super::types::is_list(&t)
+                            || matches!(&t, Type::Pointer(i) if super::types::is_dict(i) || super::types::is_list(i)))
+                    {
+                        return self.lower_container_projection(base, name == "values");
+                    }
+                }
                 // sic `enumvalue.str` → a native `"EnumName::Variant"` string
                 // (sic.md §"Match"). A bare constant is statically known; an
                 // enum-typed variable maps its runtime value to the variant name.
@@ -1245,7 +1255,10 @@ impl<'m> FuncCtx<'m> {
             "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
             "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone()], i32t.clone()),
             "__sic_dict_free" => (vec![ptr.clone()], Type::Void),
-            "__sic_dict_len" => (vec![ptr], u64t),
+            "__sic_dict_len" => (vec![ptr.clone()], u64t),
+            // `.keys`/`.values` (sic.md §"Iterators"): dict → fresh `list` handle.
+            "__sic_dict_values" | "__sic_dict_keys_scalar" | "__sic_dict_keys_string"
+                => (vec![ptr.clone()], ptr.clone()),
             _ => (vec![], Type::Void),
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
@@ -1340,6 +1353,8 @@ impl<'m> FuncCtx<'m> {
             "__sic_list_set" => (vec![ptr, u64t.clone(), u64t.clone(), u64t, i32t], Type::Void),
             "__sic_list_len" => (vec![ptr], u64t),
             "__sic_list_free" => (vec![ptr], Type::Void),
+            // `.keys`/`.values` (sic.md §"Iterators"): list → fresh `list` handle.
+            "__sic_list_values" | "__sic_list_keys" => (vec![ptr.clone()], ptr),
             _ => (vec![], Type::Void),
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
@@ -1405,6 +1420,62 @@ impl<'m> FuncCtx<'m> {
         let f = self.list_runtime_fn("__sic_list_set");
         self.push_instr(Instr::Call { dest: None, func: f, args: vec![l, iv, vty, vslot, vowned], ret_ty: Type::Void });
         Ok(())
+    }
+
+    /// sic `.keys` / `.values` on a container (sic.md §"Iterators"): materialize a
+    /// fresh `list<T>` of the keys (or values) and register it as a statement temp
+    /// (freed at statement end unless a binding takes it over via `take_list_temp`).
+    /// dict/set pick the key runtime fn from `K` (string keys are rebuilt as owned
+    /// sic strings); a list's keys are the indices `0..len`.
+    pub(crate) fn lower_container_projection(&mut self, base: &Expr, want_values: bool) -> Result<Val> {
+        let bt = self.infer_expr_type(base)?;
+        let is_dict = super::types::is_dict(&bt)
+            || matches!(&bt, Type::Pointer(i) if super::types::is_dict(i));
+        let is_list = super::types::is_list(&bt)
+            || matches!(&bt, Type::Pointer(i) if super::types::is_list(i));
+        let (fname, elem): (&'static str, Type) = if is_dict {
+            let (k, v) = self.dict_kv_of(base);
+            if want_values { ("__sic_dict_values", v) }
+            else if super::types::is_sic_string(&k) { ("__sic_dict_keys_string", k) }
+            else { ("__sic_dict_keys_scalar", k) }
+        } else if is_list {
+            if want_values { ("__sic_list_values", self.list_elem_of(base)) }
+            else { ("__sic_list_keys", Type::Int { bits: self.ptr_size() * 8, signed: false }) }
+        } else {
+            return Err(CompileError::at(
+                format!("`.{}` needs a dict, set, or list", if want_values { "values" } else { "keys" }),
+                base.span.file.clone(), base.span.line, base.span.col));
+        };
+        let handle = if is_dict { self.dict_handle(base)? } else { self.list_handle(base)? };
+        let lty = super::types::list_type(&elem);
+        let f = if is_dict { self.dict_runtime_fn(fname) } else { self.list_runtime_fn(fname) };
+        let r = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(r), func: f, args: vec![handle], ret_ty: lty.clone() });
+        self.val_types.insert(r.0, lty.clone());
+        self.list_temps.push(Val::Local(r));
+        Ok(Val::Local(r))
+    }
+
+    /// True if `e` is a `.keys`/`.values` projection over a dict/set/list — an
+    /// expression that materializes a fresh owned `list` (sic.md §"Iterators").
+    pub(crate) fn is_container_projection(&self, e: &Expr) -> bool {
+        if let ExprKind::Field { base, name } = &e.kind {
+            if name == "keys" || name == "values" {
+                if let Ok(t) = self.infer_expr_type(base) {
+                    return super::types::is_dict(&t) || super::types::is_list(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_dict(i) || super::types::is_list(i));
+                }
+            }
+        }
+        false
+    }
+
+    /// A binding is taking ownership of a materialized `.keys`/`.values` list: drop
+    /// it from the statement-temp free list so it isn't double-freed.
+    pub(crate) fn take_list_temp(&mut self, v: &Val) {
+        if let Some(pos) = self.list_temps.iter().position(|t| t == v) {
+            self.list_temps.remove(pos);
+        }
     }
 
     /// Create a fresh empty list handle (`list<T> l;` auto-init).
@@ -1598,6 +1669,15 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
             }
         }
+        // sic `.keys`/`.values` (sic.md §"Iterators"): free each materialized list
+        // that wasn't taken over by a binding.
+        if !self.list_temps.is_empty() {
+            let ls = std::mem::take(&mut self.list_temps);
+            let free = self.list_runtime_fn("__sic_list_free");
+            for h in ls {
+                self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
+            }
+        }
         if self.bigint_temps.is_empty() { return; }
         let temps = std::mem::take(&mut self.bigint_temps);
         for t in temps {
@@ -1629,6 +1709,25 @@ impl<'m> FuncCtx<'m> {
         for t in temps {
             let f = self.temp_free_fn(&t);
             let _ = self.emit_bigint_call(f, vec![t], Type::Void);
+        }
+    }
+
+    /// A snapshot of the pending statement-temp counts (bigint/fixed + `.keys`/
+    /// `.values` list temps), for freeing a conditionally-evaluated sub-expression's
+    /// temps where they were created (they don't dominate the statement-end flush).
+    pub(super) fn temp_mark(&self) -> (usize, usize) {
+        (self.bigint_temps.len(), self.list_temps.len())
+    }
+
+    /// Free every bigint/fixed and materialized-`list` temp recorded since `mark`.
+    pub(super) fn flush_temps_from(&mut self, mark: (usize, usize)) {
+        self.flush_bigint_temps_from(mark.0);
+        if self.list_temps.len() > mark.1 {
+            let ls: Vec<Val> = self.list_temps.split_off(mark.1);
+            let free = self.list_runtime_fn("__sic_list_free");
+            for h in ls {
+                self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
+            }
         }
     }
 
@@ -3595,10 +3694,10 @@ impl<'m> FuncCtx<'m> {
         // The rhs is only evaluated on one path, so any bigint/fixed temporaries it
         // creates live in this conditional block and must be freed here — the
         // statement-end flush runs from a block they don't dominate.
-        let rhs_mark = self.bigint_temps.len();
+        let rhs_mark = self.temp_mark();
         let rhs_val = self.lower_expr(rhs)?;
         let rhs_bool = self.to_bool(rhs_val)?;
-        self.flush_bigint_temps_from(rhs_mark);
+        self.flush_temps_from(rhs_mark);
         // Store 0 or 1 based on rhs bool
         let rhs_ext = self.alloc_val();
         self.push_instr(Instr::Cast { dest: rhs_ext, op: CastOp::ZExt, val: rhs_bool, to_ty: Type::i32() });
@@ -4162,18 +4261,18 @@ impl<'m> FuncCtx<'m> {
         let free_arm_temps = !(super::types::is_bigint(&ty) || super::types::is_fixed(&ty));
 
         self.switch_to_block(then_bb);
-        let tmark = self.bigint_temps.len();
+        let tmark = self.temp_mark();
         let tv = self.lower_expr(then)?;
         let tv = self.coerce(tv, &ty)?;
-        if free_arm_temps { self.flush_bigint_temps_from(tmark); }
+        if free_arm_temps { self.flush_temps_from(tmark); }
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(else_bb);
-        let emark = self.bigint_temps.len();
+        let emark = self.temp_mark();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
-        if free_arm_temps { self.flush_bigint_temps_from(emark); }
+        if free_arm_temps { self.flush_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
@@ -7163,6 +7262,38 @@ impl<'m> FuncCtx<'m> {
                 // sic fixed `.str` is a `char*` (sic.md §"Built-in fixed point").
                 if self.is_sic() && super::types::is_fixed(&base_ty) && name == "str" {
                     return Ok(Type::char_ptr());
+                }
+                // sic container accessors (sic.md §"Iterators"): dict/set/list
+                // `.size`/`.length` = usize; `.keys`/`.values` = a `list<T>`.
+                if self.is_sic() {
+                    // A container value is `Pointer(marker)`; a `dict*`/`list*` is
+                    // `Pointer(Pointer(marker))` — recognize the direct form first.
+                    let cty = if super::types::is_dict(&base_ty) || super::types::is_list(&base_ty) {
+                        Some(base_ty.clone())
+                    } else if let Type::Pointer(i) = &base_ty {
+                        if super::types::is_dict(i) || super::types::is_list(i) { Some((**i).clone()) } else { None }
+                    } else { None };
+                    if let Some(cty) = cty {
+                        if name == "size" || name == "length" {
+                            return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
+                        }
+                        if name == "keys" {
+                            let elem = if super::types::is_list(&cty) {
+                                Type::Int { bits: self.ptr_size() * 8, signed: false }
+                            } else {
+                                super::types::dict_kv(&cty, self.ptr_size()).map(|(k, _)| k).unwrap_or_else(super::types::any_type)
+                            };
+                            return Ok(super::types::list_type(&elem));
+                        }
+                        if name == "values" {
+                            let elem = if super::types::is_list(&cty) {
+                                super::types::list_elem(&cty, self.ptr_size())
+                            } else {
+                                super::types::dict_kv(&cty, self.ptr_size()).map(|(_, v)| v).unwrap_or_else(super::types::any_type)
+                            };
+                            return Ok(super::types::list_type(&elem));
+                        }
+                    }
                 }
                 if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)

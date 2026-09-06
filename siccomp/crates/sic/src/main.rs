@@ -665,8 +665,10 @@ fn parse_source(
         );
     }
 
-    // sic `list` (sic.md §"List"): prepend the growable-array runtime when used.
-    if list_runtime::uses_list(&preprocessed) {
+    // sic `list` (sic.md §"List"): prepend the growable-array runtime when used —
+    // also whenever `dict` is used, since dict's `.keys`/`.values` enumeration
+    // (sic.md §"Iterators") builds `list` handles via the list runtime.
+    if list_runtime::uses_list(&preprocessed) || dict_runtime::uses_dict(&preprocessed) {
         preprocessed = format!(
             "{}\n#line 1 \"{}\"\n{}",
             list_runtime::LIST_RUNTIME, path, preprocessed

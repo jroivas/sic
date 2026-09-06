@@ -210,6 +210,10 @@ pub struct FuncCtx<'m> {
     /// named arguments, freed at the end of the statement (the callee consumes the
     /// va_dict during the call and never keeps it).
     pub va_dict_temps: Vec<Val>,
+    /// sic `.keys`/`.values` (sic.md §"Iterators"): freshly-materialized `list`
+    /// handles, freed (`__sic_list_free`) at the end of the statement unless the
+    /// value flows into a binding that takes ownership (`take_list_temp`).
+    pub list_temps: Vec<Val>,
     /// sic `unsafe { }` nesting depth (sic.md §"Integer overflow"): when > 0,
     /// integer overflow and `÷0` trap instead of wrapping / `→0`.
     pub unsafe_depth: u32,
@@ -265,6 +269,7 @@ impl<'m> FuncCtx<'m> {
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
+            list_temps: Vec::new(),
             async_elem: None,
             va_dict_temps: Vec::new(),
             unsafe_depth: 0,
@@ -1521,7 +1526,19 @@ impl<'m> FuncCtx<'m> {
                     if let Some(Initializer::Expr(e)) = &d.init {
                         self.check_ptr_value_mismatch(&ty, e)?;
                     }
-                    if let Some(init) = &d.init {
+                    // sic `list<T> x = c.keys/c.values;` (sic.md §"Iterators"): the
+                    // local OWNS the freshly materialized list — store it, take it out
+                    // of the statement temps, and free it at scope exit.
+                    let takes_projection = self.is_sic() && super::types::is_list(&ty)
+                        && matches!(&d.init, Some(Initializer::Expr(e)) if self.is_container_projection(e));
+                    if takes_projection {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            let h = self.lower_expr(e)?;
+                            self.take_list_temp(&h);
+                            self.push_instr(Instr::Store { ptr: Val::Local(vid), val: h });
+                            self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                        }
+                    } else if let Some(init) = &d.init {
                         self.lower_initializer(init, Val::Local(vid), &ty)?;
                     } else {
                         // Zero-initialize
@@ -2015,10 +2032,10 @@ impl<'m> FuncCtx<'m> {
     /// condition re-executes each iteration, so its temps must be freed there —
     /// not by the statement-end flush, which runs once.
     fn lower_cond(&mut self, cond: &Expr) -> Result<Val> {
-        let mark = self.bigint_temps.len();
+        let mark = self.temp_mark();
         let v = self.lower_expr(cond)?;
         let b = self.to_bool(v)?;
-        self.flush_bigint_temps_from(mark);
+        self.flush_temps_from(mark);
         Ok(b)
     }
 
@@ -2217,6 +2234,19 @@ impl<'m> FuncCtx<'m> {
             Stmt::For { init: Some(ForInit::Decl(idx)), cond: Some(cond), post: Some(post), body: Box::new(inner), span: sp.clone() }
         };
 
+        // `auto <name> = <init>;` — an inferred-type local (used to materialize the
+        // `.keys`/`.values` lists a container iteration walks).
+        let auto_local = |lname: &str, init: Expr, sp: &crate::lexer::Span| -> Stmt {
+            let at = QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) };
+            Stmt::Decl(Decl::Var {
+                base_ty: at.clone(),
+                declarators: vec![Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, span: sp.clone() }],
+                weak: false, thread_local: false, span: sp.clone(),
+            })
+        };
+        let field = |b: &Expr, n: &str, sp: &crate::lexer::Span| Expr { kind: ExprKind::Field { base: Box::new(b.clone()), name: n.to_string() }, span: sp.clone() };
+        let index = |b: Expr, i: Expr, sp: &crate::lexer::Span| Expr { kind: ExprKind::Index { base: Box::new(b), index: Box::new(i) }, span: sp.clone() };
+
         let uid = self.gensym; self.gensym += 1;
         let iname = format!("__fe_i_{}", uid);
 
@@ -2251,7 +2281,60 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // (2a) A `.keys`/`.values` projection (sic.md §"Iterators") iterates the
+        // materialized `list` PLAINLY — each key/value directly, not a `tuple`.
+        if self.is_container_projection(iterable) {
+            let pname = format!("__fe_proj_{}", uid);
+            let proj_decl = auto_local(&pname, iterable.clone(), &sp);
+            let len = field(&ident(&pname), "length", &sp);
+            let elem = index(ident(&pname), ident(&iname), &sp);
+            let loop_ = counted(&iname, ty.clone(), len, elem, body.clone(), &sp);
+            return self.lower_stmt(&Stmt::Block(vec![proj_decl, loop_], sp.clone()));
+        }
+
         let ity = self.infer_expr_type(iterable)?;
+        let is_set = super::types::is_set(&ity)
+            || matches!(&ity, Type::Pointer(i) if super::types::is_set(i));
+        let is_dict = super::types::is_dict(&ity)
+            || matches!(&ity, Type::Pointer(i) if super::types::is_dict(i));
+        let is_list = super::types::is_list(&ity)
+            || matches!(&ity, Type::Pointer(i) if super::types::is_list(i));
+
+        // (2b) `set<T>` (sic.md §"Set"): iterate its elements (keys) directly.
+        if is_set {
+            let kname = format!("__fe_k_{}", uid);
+            let kdecl = auto_local(&kname, field(iterable, "keys", &sp), &sp);
+            let len = field(&ident(&kname), "length", &sp);
+            let elem = index(ident(&kname), ident(&iname), &sp);
+            let loop_ = counted(&iname, ty.clone(), len, elem, body.clone(), &sp);
+            return self.lower_stmt(&Stmt::Block(vec![kdecl, loop_], sp.clone()));
+        }
+
+        // (2c) `dict<K,V>` (sic.md §"Dict"): each step yields `tuple(key, value)`.
+        if is_dict {
+            let kname = format!("__fe_k_{}", uid);
+            let vname = format!("__fe_v_{}", uid);
+            let kdecl = auto_local(&kname, field(iterable, "keys", &sp), &sp);
+            let vdecl = auto_local(&vname, field(iterable, "values", &sp), &sp);
+            let len = field(&ident(&kname), "length", &sp);
+            let kv = Expr { kind: ExprKind::TupleExpr(vec![
+                index(ident(&kname), ident(&iname), &sp),
+                index(ident(&vname), ident(&iname), &sp),
+            ]), span: sp.clone() };
+            let loop_ = counted(&iname, ty.clone(), len, kv, body.clone(), &sp);
+            return self.lower_stmt(&Stmt::Block(vec![kdecl, vdecl, loop_], sp.clone()));
+        }
+
+        // (2d) `list<T>` (sic.md §"List"): each step yields `tuple(index, value)`.
+        if is_list {
+            let len = field(iterable, "length", &sp);
+            let iv = Expr { kind: ExprKind::TupleExpr(vec![
+                ident(&iname),
+                index(iterable.clone(), ident(&iname), &sp),
+            ]), span: sp.clone() };
+            let loop_ = counted(&iname, ty.clone(), len, iv, body.clone(), &sp);
+            return self.lower_stmt(&loop_);
+        }
 
         // (3) string → its UTF-8 code points (`u8char`), via `.utf8` (a slice).
         if super::types::is_sic_string(&ity) {
@@ -2295,13 +2378,10 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
-        // (2) Array / slice (incl. a `string.utf8` result): counted loop over `[i]`.
-        // sic arrays and slices both answer `.length` and `[i]`.
-        // A `list<T>` (sic.md §"List") answers the same protocol, so it iterates
-        // its elements in index order the same way.
-        if matches!(&ity, Type::Array { .. }) || super::types::is_u8char_arr(&ity)
-            || super::types::is_list(&ity)
-        {
+        // (2) Array / slice (incl. a `string.utf8` result): counted loop over `[i]`,
+        // yielding each element directly. sic arrays and slices both answer
+        // `.length` and `[i]`.
+        if matches!(&ity, Type::Array { .. }) || super::types::is_u8char_arr(&ity) {
             let len = mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "length".to_string() });
             let elem = mk(ExprKind::Index { base: Box::new(iterable.clone()), index: Box::new(ident(&iname)) });
             let use_ty = ty.clone();
@@ -2310,7 +2390,7 @@ impl<'m> FuncCtx<'m> {
         }
 
         Err(CompileError::at(
-            "range-`for` needs an array, string, enum type, or a struct with a `next()` method".to_string(),
+            "range-`for` needs an array, string, enum, dict, set, list, or a struct with a `next()` method".to_string(),
             sp.file.clone(), sp.line, sp.col))
     }
 

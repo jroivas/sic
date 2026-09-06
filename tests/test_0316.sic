@@ -1,0 +1,51 @@
+// sic container iterators (sic.md §"Iterators"): iterating a dict yields
+// `tuple(key, value)`, a set yields each element, a list yields
+// `tuple(index, value)`; `.keys`/`.values` project to a `list` of just the keys
+// or values (which iterate as plain elements).
+#include <stdint.h>
+
+int main() {
+    dict<int, int> d;
+    d[1] = 10; d[2] = 20; d[3] = 30;
+
+    // dict → tuple(key, value)
+    int ksum = 0, vsum = 0;
+    for (tuple kv : d) { ksum += (int)kv[0]; vsum += (int)kv[1]; }
+    if (ksum != 6 || vsum != 60) return 1;
+
+    // dict.keys / dict.values are list<K> / list<V>
+    if (d.keys.length != 3 || d.values.length != 3) return 2;
+    int ks = 0; for (int k : d.keys)   ks += k;   if (ks != 6)  return 3;
+    int vs = 0; for (int v : d.values) vs += v;   if (vs != 60) return 4;
+
+    // materialized projection is a real, indexable list
+    list<int> keys = d.keys;
+    if (keys.length != 3) return 5;
+
+    // string keys round-trip through `.keys` as owned strings
+    dict<string, int> sd;
+    sd["ab"] = 1; sd["cde"] = 2;
+    int chars = 0;
+    for (string k : sd.keys) chars += (int)k.size;
+    if (chars != 5) return 6;
+
+    // set → each element
+    set<int> s;
+    s.add(5); s.add(7); s.add(5);          // 5 counted once
+    int ssum = 0, scount = 0;
+    for (int x : s) { ssum += x; scount++; }
+    if (ssum != 12 || scount != 2) return 7;
+
+    // list → tuple(index, value)
+    list<int> l;
+    l.add(100); l.add(200); l.add(300);
+    int isum = 0, lsum = 0;
+    for (tuple iv : l) { isum += (int)iv[0]; lsum += (int)iv[1]; }
+    if (isum != 3 || lsum != 600) return 8;
+
+    // list.values / list.keys
+    int lv = 0; for (int v : l.values) lv += v;   if (lv != 600) return 9;
+    int lk = 0; for (int i : l.keys)   lk += i;   if (lk != 3)   return 10;
+
+    return 42;
+}

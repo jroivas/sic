@@ -17,8 +17,8 @@ int main() {
     if (n.inner.items.size != 2) return 2;
     if (n.counts[5] != 99) return 3;
 
-    // sum the direct list field via range-`for`.
+    // sum the direct list field via range-`for` over its `.values`.
     int sum = 0;
-    for (int x : b.items) sum += x;         // 42
+    for (int x : b.items.values) sum += x;  // 42
     return sum;
 }
