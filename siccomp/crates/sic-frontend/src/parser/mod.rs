@@ -2383,7 +2383,22 @@ impl Parser {
             }
             TokenKind::New => {
                 self.advance();
-                let (mut ty, _storage) = self.parse_decl_specifiers()?;
+                // `new set` / `new list` (bare, no `<…>`): the lexer only makes
+                // `set`/`list` a type when followed by `<`/`*`/ident, so after `new`
+                // they arrive as plain idents — recognize them as the any-element
+                // container type here (sic.md §"Set"/§"List").
+                // (`set`/`list` followed by `<` lex as TypeName, so an *Ident* here
+                // is always the bare, any-element form.)
+                let (mut ty, _storage) = if self.lang == Lang::Sic
+                    && matches!(self.peek_kind(), TokenKind::Ident)
+                    && (self.peek().text == "set" || self.peek().text == "list")
+                {
+                    let name = self.peek().text.clone();
+                    self.advance();
+                    (QualType::new(AstType::Named(name)), None)
+                } else {
+                    self.parse_decl_specifiers()?
+                };
                 // Pointer suffixes (`new char*`); qualifiers after `*` are ignored.
                 while self.eat(TokenKind::Star) {
                     while matches!(self.peek_kind(),

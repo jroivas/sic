@@ -1,0 +1,41 @@
+// sic (sic.md §"Match"): `.` and `?.` auto-deref a plain-struct pointer, so
+// `p.field`, `p?.field`, and `p->field` are interchangeable. `?.` is null-guarded
+// (a null base reads a zero and drops a write). `->` still works.
+struct Inner { int x; };
+struct S { int a; struct Inner in; struct Inner *ip; };
+
+int main() {
+    struct S *p = new S;
+
+    // `.` write/read on a pointer (auto-deref).
+    p.a = 5;
+    if (p.a != 5) return 1;
+
+    // `->` still works and is the same slot.
+    p->a = 7;
+    if (p.a != 7) return 2;
+
+    // nested value struct through `.`.
+    p.in.x = 9;
+    if (p.in.x != 9) return 3;
+
+    // `.` chains through a pointer field.
+    struct Inner *q = new Inner;
+    q.x = 11;
+    p.ip = q;
+    if (p.ip.x != 11) return 4;
+
+    // `?.` present: write and read.
+    p?.a = 20;
+    p?.a += 2;
+    if (p?.a != 22) return 5;
+
+    // `?.` on a null pointer: write is a no-op, read is zero (no crash).
+    struct S *n = 0;
+    n?.a = 99;
+    if (n?.a != 0) return 6;
+
+    del q;
+    del p;
+    return 42;
+}

@@ -3779,6 +3779,14 @@ impl<'m> FuncCtx<'m> {
                 }
             }
         }
+        // sic `base?.field = value` (sic.md §"Match"): a null-guarded store — assign
+        // only when `base` is present (a non-null pointer / a Some/Ok payload);
+        // otherwise the write is a no-op. `.` and `?.` both auto-deref a pointer.
+        if self.is_sic() {
+            if let ExprKind::OptField { base, name } = &lhs.kind {
+                return self.lower_opt_field_assign(base, name, op, rhs, &lhs.span);
+            }
+        }
         // sic `list[i] = value` (sic.md §"List") / `dict[key] = value` (sic.md §"Dict").
         if op.is_none() && self.is_sic() {
             if let ExprKind::Index { base, index } = &lhs.kind {
@@ -4467,13 +4475,15 @@ impl<'m> FuncCtx<'m> {
     /// present Option/Result or a non-null pointer, the field; else a zero value of
     /// the field's type. The result type is the field type, so chains
     /// (`a?.b?.c`) propagate the zero and pair with `?:`.
-    fn lower_opt_field(&mut self, base: &Expr, field: &str, sp: &crate::lexer::Span) -> Result<Val> {
+    /// The `?.` target: `(present-flag, pointer to the struct holding the field,
+    /// that struct's type)`. A pointer base is present when non-null (and its
+    /// pointee is the struct); a tagged-enum base is present on its Some/Ok variant.
+    fn opt_field_target(&mut self, base: &Expr, sp: &crate::lexer::Span) -> Result<(Val, Val, Type)> {
         let bty = self.infer_expr_type(base)?;
-        // (present-flag, pointer to the struct holding the field, that struct's type)
-        let (present, struct_ptr, struct_ty) = if let Type::Pointer(pointee) = &bty {
+        if let Type::Pointer(pointee) = &bty {
             let bv = self.lower_expr(base)?;
             let nn = self.to_bool(bv.clone())?;
-            (nn, bv, (**pointee).clone())
+            Ok((nn, bv, (**pointee).clone()))
         } else if self.is_tagged_enum_struct(&bty) {
             let (_, pres) = self.enum_present_variant(&bty).ok_or_else(|| CompileError::at(
                 "`?.` needs an enum with a payload variant (Some/Ok)".to_string(),
@@ -4484,12 +4494,40 @@ impl<'m> FuncCtx<'m> {
             let pb = self.alloc_val();
             self.push_instr(Instr::Cmp { dest: pb, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(pres.tag), ty: Type::i32() });
             let data = self.enum_data_ptr(ptr, &bty, sp)?;
-            (Val::Local(pb), data, pty)
+            Ok((Val::Local(pb), data, pty))
         } else {
-            return Err(CompileError::at(
+            Err(CompileError::at(
                 "`?.` requires an Option/Result or a pointer on the left".to_string(),
-                sp.file.clone(), sp.line, sp.col));
+                sp.file.clone(), sp.line, sp.col))
+        }
+    }
+
+    /// sic `base?.field = value` (sic.md §"Match"): store into `base`'s field only
+    /// when `base` is present; the write is a no-op otherwise. Supports compound
+    /// assignment (`?.f += x`) by loading the current field in the present branch.
+    fn lower_opt_field_assign(&mut self, base: &Expr, field: &str, op: Option<BinOpKind>, rhs: &Expr, sp: &crate::lexer::Span) -> Result<Val> {
+        let (present, struct_ptr, struct_ty) = self.opt_field_target(base, sp)?;
+        let rhs_val = self.lower_expr(rhs)?;
+        let then_bb = self.new_block_after_current();
+        let merge_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: present, then_bb, else_bb: merge_bb });
+        self.switch_to_block(then_bb);
+        let flv = self.field_ptr_from(LValue::plain(struct_ptr, struct_ty), field, false, sp)?;
+        let store_val = if let Some(binop) = op {
+            let cur = self.load_lvalue(&flv)?;
+            let r = self.emit_binop(binop, cur, rhs_val.clone())?;
+            self.coerce(r, &flv.ty)?
+        } else {
+            self.coerce(rhs_val.clone(), &flv.ty)?
         };
+        self.store_lvalue(&flv, store_val)?;
+        self.set_terminator(Terminator::Jump(merge_bb));
+        self.switch_to_block(merge_bb);
+        Ok(rhs_val)
+    }
+
+    fn lower_opt_field(&mut self, base: &Expr, field: &str, sp: &crate::lexer::Span) -> Result<Val> {
+        let (present, struct_ptr, struct_ty) = self.opt_field_target(base, sp)?;
         let fty = self.opt_field_type(&struct_ty, field).ok_or_else(|| CompileError::at(
             format!("no field '{}' in type", field), sp.file.clone(), sp.line, sp.col))?;
 
@@ -7035,7 +7073,37 @@ impl<'m> FuncCtx<'m> {
         Ok(LValue::plain(Val::Local(dest), elem_ty))
     }
 
+    /// sic (sic.md §"Match"): true if `ty` is a pointer to a *plain* aggregate — a
+    /// user `struct`/`union`, not one of sic's built-in pointer-shaped aggregates
+    /// (string/tuple/fixed/bigint/dict/list/set/…). Such a pointer auto-derefs under
+    /// `.`/`?.`, so `p.field` means `p->field` (the `->` form still works too).
+    pub(crate) fn is_plain_aggregate_ptr(&self, ty: &Type) -> bool {
+        if let Type::Pointer(inner) = ty {
+            let special = super::types::is_sic_string(ty) || super::types::is_tuple(ty)
+                || super::types::is_fixed(ty) || super::types::is_bigint(ty)
+                || super::types::is_dict(ty) || super::types::is_list(ty)
+                || super::types::is_va_array(ty) || super::types::is_any(ty)
+                || super::types::is_u8char(ty) || super::types::is_type_info(ty)
+                || super::types::is_task(ty);
+            if special { return false; }
+            let resolved = super::types::resolve_aggregate(inner, &self.lowerer.struct_types);
+            return matches!(resolved, Type::Struct(_) | Type::Union(_));
+        }
+        false
+    }
+
+    /// Whether `base.field` should auto-deref (sic): `base` is a plain-aggregate
+    /// pointer, so `.` behaves like `->`.
+    fn field_auto_derefs(&self, base: &Expr) -> bool {
+        self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if self.is_plain_aggregate_ptr(&t))
+    }
+
     fn lower_lvalue_field(&mut self, base: &Expr, name: &str) -> Result<LValue> {
+        // sic: `.` on a plain-struct pointer auto-derefs (like `->`), so `p.field`
+        // and `p->field` are interchangeable (sic.md §"Match").
+        if self.field_auto_derefs(base) {
+            return self.lower_lvalue_arrow(base, name);
+        }
         // base is normally a struct lvalue; but it can also be a struct *rvalue*
         // (e.g. `f().field` where `f` returns a struct by value), whose address is
         // the materialized temporary.
@@ -7340,7 +7408,13 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
-                if let Some((_, fty, _)) = resolve_field_access(&base_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
+                // sic `.` on a plain-struct pointer auto-derefs (like `->`).
+                let lookup_ty = if self.is_sic() && self.is_plain_aggregate_ptr(&base_ty) {
+                    match &base_ty { Type::Pointer(inner) => (**inner).clone(), _ => base_ty.clone() }
+                } else {
+                    base_ty.clone()
+                };
+                if let Some((_, fty, _)) = resolve_field_access(&lookup_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
                     Ok(fty)
                 } else {
                     Ok(Type::i32())

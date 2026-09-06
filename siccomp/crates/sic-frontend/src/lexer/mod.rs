@@ -234,13 +234,20 @@ impl Lexer {
         }
         let mut kind = keyword_or_ident(&text, &self.typedefs, self.lang);
         // `list`/`set` are common identifiers (`const Node *list`), so treat them as
-        // the container type ONLY when written generic, `list<…>` / `set<…>`; a bare
-        // `list`/`set` stays an ordinary identifier. (`dict` is uncommon, so its bare
-        // form is still a type.)
+        // the container type only in a type position: when the next token is `<`
+        // (generic `list<…>`), `*` (`set *p`), or another identifier (`set a` — a
+        // type followed by its declarator name). A bare `list`/`set` followed by
+        // anything else (`= list;`, `list)`, `list;`) stays an ordinary identifier,
+        // so a variable named `list`/`set` keeps working. (`dict` is uncommon, so
+        // its bare form is always a type; `new set`/`new list` are handled in the
+        // parser.)
         if kind == TokenKind::TypeName && (text == "list" || text == "set") {
             let mut i = self.pos;
             while i < self.src.len() && (self.src[i] == ' ' || self.src[i] == '\t') { i += 1; }
-            if self.src.get(i) != Some(&'<') {
+            let next = self.src.get(i).copied();
+            let is_type_pos = next == Some('<') || next == Some('*')
+                || matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '_');
+            if !is_type_pos {
                 kind = TokenKind::Ident;
             }
         }

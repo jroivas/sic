@@ -1,0 +1,28 @@
+// sic `set` bare + pointer forms (sic.md §"Set"): `set a;`, `set *b = new set;`,
+// and `set<T> *c = new set<T>;` all work and are accessed directly — `set` and
+// `set *` are the same handle type (a pointer-to-handle collapses to the handle),
+// like `dict`. Bare `list` behaves the same.
+int main() {
+    set a;
+    set *b = new set;
+    a.add(5); a.add(5); a.add(7);       // 5 counted once
+    b.add(5); b.add(9);
+    if (a.size != 2 || !a.contains(5)) return 1;
+    if (b.size != 2 || !b.contains(9)) return 2;
+
+    set<int> *c = new set<int>;
+    c.add(1); c.add(2); c.add(1);
+    int sum = 0;
+    for (int x : c) sum += x;            // iterate a set* directly
+    if (c.size != 2 || sum != 3) return 3;
+
+    list<int> a2;
+    list<int> *b2 = new list<int>;
+    a2.add(10); a2.add(20);
+    b2.add(1); b2.add(2); b2.add(3);
+    int t = 0;
+    for (int v : b2.values) t += v;      // iterate a list* directly
+    if (a2.size != 2 || b2.size != 3 || t != 6) return 4;
+
+    return 42;
+}
