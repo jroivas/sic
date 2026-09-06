@@ -385,9 +385,18 @@ impl<'m> FuncCtx<'m> {
     /// Downcast an `any` value to `target` (sic.md std): read the `slot` and
     /// reinterpret it as the target — a scalar's bits (int truncate, float bit-cast)
     /// or an aggregate pointer (string/fixed/bigint/…). No runtime type check yet.
-    fn unbox_any(&mut self, inner: &Expr, target: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+    fn unbox_any(&mut self, inner: &Expr, target: &Type, _sp: &crate::lexer::Span) -> Result<Val> {
         let p = self.lower_aggregate_ptr(inner)?;
-        let slot_lv = self.field_ptr_from(LValue::plain(p, super::types::any_type()), "slot", false, sp)?;
+        self.unbox_any_val(p, target)
+    }
+
+    /// Downcast an already-lowered `any` value (a pointer to the `{ ty, slot }`
+    /// struct) to `target`, reinterpreting its `slot`. Used for the implicit
+    /// `any → T` conversion in `coerce` (sic.md std: an `any` converts to the
+    /// assigned type without a cast when the reinterpretation is well-defined).
+    pub(crate) fn unbox_any_val(&mut self, any_ptr: Val, target: &Type) -> Result<Val> {
+        let sp = crate::lexer::Span::default();
+        let slot_lv = self.field_ptr_from(LValue::plain(any_ptr, super::types::any_type()), "slot", false, &sp)?;
         let slot = self.load_lvalue(&slot_lv)?; // u64
         self.reinterpret_slot(slot, target)
     }
@@ -517,6 +526,17 @@ impl<'m> FuncCtx<'m> {
                         // Arrays and structs decay to pointer-to-first-element in rvalue context
                         if matches!(ty, Type::Array { .. }) {
                             return Ok(Val::Local(vid));
+                        }
+                        // sic `any` is an aggregate handled by-pointer (box/unbox/
+                        // copy) — decay to its address, labeled `any`, so an implicit
+                        // `any → T` conversion in `coerce` finds the `{ty,slot}`
+                        // struct (matching the container-read convention). Otherwise
+                        // a whole-struct Load would hand `coerce` a non-address.
+                        if self.is_sic() && super::types::is_any(&ty) {
+                            let a = self.alloc_val();
+                            self.push_instr(Instr::Cast { dest: a, op: CastOp::BitCast, val: Val::Local(vid), to_ty: Type::void_ptr() });
+                            self.val_types.insert(a.0, super::types::any_type());
+                            return Ok(Val::Local(a));
                         }
                         let dest = self.alloc_val();
                         if atomic {
@@ -4579,6 +4599,12 @@ impl<'m> FuncCtx<'m> {
     /// into its own local, so passing the argument's address is sufficient.
     fn lower_arg(&mut self, a: &Expr) -> Result<Val> {
         let aty = self.infer_expr_type(a).unwrap_or_else(|_| Type::i32());
+        // sic `any` argument: `lower_expr` yields the address labeled `any`, so a
+        // scalar/string parameter's `coerce` can implicitly unbox it, while an `any`
+        // parameter receives it by-pointer unchanged (sic.md std).
+        if self.is_sic() && super::types::is_any(&aty) {
+            return self.lower_expr(a);
+        }
         if matches!(aty, Type::Struct(_) | Type::Union(_)) {
             if let Ok(lv) = self.lower_lvalue(a) {
                 return Ok(lv.ptr);

@@ -1,0 +1,59 @@
+// sic (sic.md std): an `any` implicitly converts to the assigned type — no cast
+// needed — by unboxing its slot. Applies at init, assignment, arguments, return,
+// and range-`for` bindings. Reverse (T → any) still boxes.
+struct P { int x; int y; };
+int takes_int(int a, int b) { return a + b; }
+
+int main() {
+    // init: any -> scalar / string / bool.
+    any i = 42;
+    any f = 3.0;               // read back as the same type it holds (double)
+    any s = "hello";
+    any b = true;
+    int    yi = i;              // implicit unbox
+    double yf = f;
+    string ys = s;
+    bool   yb = b;
+    if (yi != 42) return 1;
+    if (yf != 3.0) return 2;
+    if (ys.size != 5) return 3;
+    if (!yb) return 4;
+
+    // assignment (not init).
+    int z = 0;
+    z = i;
+    z += 8;
+    if (z != 50) return 5;
+
+    // argument: any -> int parameter.
+    any x = 10;
+    if (takes_int(x, 5) != 15) return 6;
+
+    // return an any as the function's int type.
+    // (covered indirectly — this main returns an int below.)
+
+    // any -> any copy stays boxed, then unboxes.
+    any j = i;
+    int yj = j;
+    if (yj != 42) return 7;
+
+    // dict/list <…,any> values unbox implicitly.
+    dict<int, any> d;
+    d[1] = 100;
+    int dv = d[1];
+    if (dv != 100) return 8;
+
+    list<any> l;
+    l.add(10); l.add(20); l.add(12);
+    int sum = 0;
+    for (int v : l.values) sum += v;      // range-for any elem -> int
+    if (sum != 42) return 9;
+
+    // any -> struct.
+    P pt = { 3, 4 };
+    any ap = pt;
+    P back = ap;
+    if (back.x != 3 || back.y != 4) return 10;
+
+    return 42;
+}

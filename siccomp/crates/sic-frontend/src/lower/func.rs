@@ -1733,6 +1733,15 @@ impl<'m> FuncCtx<'m> {
                     || matches!(&rt, Type::Pointer(inner) if super::types::is_sic_string(inner));
                 let size = ty.size_of(self.ptr_size());
                 let align = ty.align_of(self.ptr_size());
+                // `string s = <any>`: unbox the `any` to the string descriptor and
+                // copy it (an `any` wrapping a string converts without a cast).
+                if super::types::is_any(&rt) {
+                    let anyp = self.lower_aggregate_ptr(e)?;
+                    let src = self.unbox_any_val(anyp, ty)?;
+                    self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
+                    self.retain_string_at(&ptr)?;
+                    return Ok(());
+                }
                 if is_str {
                     let src = self.lower_aggregate_ptr(e)?;
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
@@ -1841,7 +1850,18 @@ impl<'m> FuncCtx<'m> {
                     _ => false,
                 };
                 if aggregate_init {
-                    let src = self.lower_aggregate_ptr(e)?;
+                    // sic `struct S x = <any>`: unbox the `any` to the struct pointer
+                    // it wraps, then copy (an `any` converts to the assigned aggregate
+                    // without a cast). Otherwise the raw `{ty,slot}` bytes get copied.
+                    let src = if self.is_sic()
+                        && matches!(self.infer_expr_type(e), Ok(t) if super::types::is_any(&t))
+                        && !super::types::is_any(ty)
+                    {
+                        let anyp = self.lower_aggregate_ptr(e)?;
+                        self.unbox_any_val(anyp, ty)?
+                    } else {
+                        self.lower_aggregate_ptr(e)?
+                    };
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
@@ -2928,6 +2948,15 @@ impl<'m> FuncCtx<'m> {
         match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
             _ => {}
+        }
+
+        // sic (sic.md std): an `any` implicitly converts to the assigned type — read
+        // its boxed slot and reinterpret it as `target`. Applies wherever a value is
+        // coerced (init, assignment, return, arguments), so `int y = anyval;` and
+        // `for (int v : list<any>.values)` work without an explicit `(int)` cast.
+        // (Boxing the other way, `T → any`, is handled at the box sites, not here.)
+        if self.is_sic() && super::types::is_any(&src_ty) && !super::types::is_any(target) {
+            return self.unbox_any_val(val, target);
         }
 
         // Conversion TO `_Bool` is `x != 0`, not a bit-truncation. A wide value
