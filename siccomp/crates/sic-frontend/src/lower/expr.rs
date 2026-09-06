@@ -396,8 +396,33 @@ impl<'m> FuncCtx<'m> {
     /// assigned type without a cast when the reinterpretation is well-defined).
     pub(crate) fn unbox_any_val(&mut self, any_ptr: Val, target: &Type) -> Result<Val> {
         let sp = crate::lexer::Span::default();
-        let slot_lv = self.field_ptr_from(LValue::plain(any_ptr, super::types::any_type()), "slot", false, &sp)?;
+        let any_ty = super::types::any_type();
+        let slot_lv = self.field_ptr_from(LValue::plain(any_ptr.clone(), any_ty.clone()), "slot", false, &sp)?;
         let slot = self.load_lvalue(&slot_lv)?; // u64
+        // sic (sic.md std): NUMERIC targets convert by the `any`'s runtime kind, not
+        // a bit-reinterpret — `any a = 3; double d = a;` yields 3.0 and `any a = 3.5;
+        // int i = a;` yields 3. The `__sic_any_to_{i64,f64}` helpers dispatch on the
+        // type-info `kind` (a boxed float's slot is its f64 bits; an int's slot holds
+        // the value). Other targets (pointer/string/struct/…) still reinterpret.
+        if self.is_sic() && matches!(target, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80) {
+            let ty_lv = self.field_ptr_from(LValue::plain(any_ptr, any_ty), "ty", false, &sp)?;
+            let tyv = self.load_lvalue(&ty_lv)?;
+            let tyv = self.coerce(tyv, &Type::void_ptr())?;
+            let slot_u64 = self.coerce(slot, &Type::u64())?;
+            if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
+                let f = self.lowerer.ensure_any_to_f64_fn();
+                let d = self.alloc_val();
+                self.push_instr(Instr::Call { dest: Some(d), func: f, args: vec![tyv, slot_u64], ret_ty: Type::Float64 });
+                self.val_types.insert(d.0, Type::Float64);
+                return self.coerce(Val::Local(d), target);
+            } else {
+                let f = self.lowerer.ensure_any_to_i64_fn();
+                let n = self.alloc_val();
+                self.push_instr(Instr::Call { dest: Some(n), func: f, args: vec![tyv, slot_u64], ret_ty: Type::i64() });
+                self.val_types.insert(n.0, Type::i64());
+                return self.coerce(Val::Local(n), target);
+            }
+        }
         self.reinterpret_slot(slot, target)
     }
 

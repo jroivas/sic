@@ -1161,6 +1161,149 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// Synthesize `i64 __sic_any_to_i64(void* ty, u64 slot)` — convert the value an
+    /// `any` wraps to a 64-bit integer using its RTTI kind (sic.md std): a boxed
+    /// FLOAT (kind 4/5/6, whose slot is its f64 bits) is truncated toward zero; any
+    /// other kind's slot already holds the integer, so it passes through. A null `ty`
+    /// passes the bits through. Lets `any a = 3.5; int i = a;` yield 3 (not the bit
+    /// pattern), i.e. a real numeric conversion rather than a reinterpret.
+    pub(crate) fn ensure_any_to_i64_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_any_to_i64") { return f; }
+        let u64_ty = Type::u64();
+        let i64_ty = Type::i64();
+        let u32_ty = Type::Int { bits: 32, signed: false };
+        let voidp = Type::void_ptr();
+        let sig = FunctionType { ret: i64_ty.clone(), params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
+        let params = vec![
+            sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
+            sic_ir::Param { name: "slot".to_string(), ty: u64_ty.clone() },
+        ];
+        let mut func = Function::new("__sic_any_to_i64".to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let ty_arg = Val::Local(ValId(0x10000));
+            let slot_arg = Val::Local(ValId(0x10001));
+            let check_bb = fc.new_block_after_current();
+            let fbb = fc.new_block_after_current();       // float → truncate
+            let passthru_bb = fc.new_block_after_current(); // int-kinds → bits
+            // if (ty == NULL) goto passthru;
+            let ty_i = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: ty_i, op: CastOp::BitCast, val: ty_arg.clone(), to_ty: u64_ty.clone() });
+            let is_null = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(ty_i), rhs: Constant::int(0), ty: u64_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: passthru_bb, else_bb: check_bb });
+            // check: is the kind a float (4..=6)?  (kind-4) <=u 2
+            fc.switch_to_block(check_bb);
+            let kindp = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: kindp, base: ty_arg.clone(), index: Constant::int(types::TYPEINFO_OFF_KIND as i64), elem_size: 1, result_ty: Type::Pointer(Box::new(u32_ty.clone())) });
+            let kind = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: kind, ptr: Val::Local(kindp), ty: u32_ty.clone() });
+            let km4 = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: km4, op: BinOp::Sub, lhs: Val::Local(kind), rhs: Constant::int(4), ty: u32_ty.clone() });
+            let is_f = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_f, op: CmpOp::IULe, lhs: Val::Local(km4), rhs: Constant::int(2), ty: u32_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_f), then_bb: fbb, else_bb: passthru_bb });
+            // float: truncate `*(double*)&slot`. Reinterpret the slot's bits as a
+            // double via a memory round-trip — an int↔float `BitCast` would CONVERT
+            // the value, not reinterpret the bits.
+            fc.switch_to_block(fbb);
+            let mem = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: mem, ty: u64_ty.clone(), align: None });
+            fc.push_instr(Instr::Store { val: slot_arg.clone(), ptr: Val::Local(mem) });
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: d, ptr: Val::Local(mem), ty: Type::Float64 });
+            let n = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: n, op: CastOp::FPToSI, val: Val::Local(d), to_ty: i64_ty.clone() });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(n))));
+            // int kinds: the slot already holds the value.
+            fc.switch_to_block(passthru_bb);
+            let n2 = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: n2, op: CastOp::BitCast, val: slot_arg, to_ty: i64_ty.clone() });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(n2))));
+        }
+        self.module.add_function(func)
+    }
+
+    /// Synthesize `f64 __sic_any_to_f64(void* ty, u64 slot)` — convert the value an
+    /// `any` wraps to a double using its RTTI kind (sic.md std): a boxed float's slot
+    /// is its f64 bits (reinterpret); a signed int (kind 2) uses `SIToFP`; any other
+    /// integer kind uses `UIToFP`. A null `ty` reinterprets the bits as a double
+    /// (matching the old cast). Lets `any a = 3; double d = a;` yield 3.0.
+    pub(crate) fn ensure_any_to_f64_fn(&mut self) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name("__sic_any_to_f64") { return f; }
+        let u64_ty = Type::u64();
+        let i64_ty = Type::i64();
+        let u32_ty = Type::Int { bits: 32, signed: false };
+        let voidp = Type::void_ptr();
+        let sig = FunctionType { ret: Type::Float64, params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
+        let params = vec![
+            sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
+            sic_ir::Param { name: "slot".to_string(), ty: u64_ty.clone() },
+        ];
+        let mut func = Function::new("__sic_any_to_f64".to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let ty_arg = Val::Local(ValId(0x10000));
+            let slot_arg = Val::Local(ValId(0x10001));
+            let check_bb = fc.new_block_after_current();
+            let floatbits_bb = fc.new_block_after_current();
+            let intcvt_bb = fc.new_block_after_current();
+            let sbb = fc.new_block_after_current();
+            let ubb = fc.new_block_after_current();
+            let read_kind = |fc: &mut func::FuncCtx| -> Val {
+                let kindp = fc.alloc_val();
+                fc.push_instr(Instr::GetElemPtr { dest: kindp, base: ty_arg.clone(), index: Constant::int(types::TYPEINFO_OFF_KIND as i64), elem_size: 1, result_ty: Type::Pointer(Box::new(u32_ty.clone())) });
+                let kind = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: kind, ptr: Val::Local(kindp), ty: u32_ty.clone() });
+                Val::Local(kind)
+            };
+            // if (ty == NULL) goto floatbits (reinterpret, matching the old cast);
+            let ty_i = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: ty_i, op: CastOp::BitCast, val: ty_arg.clone(), to_ty: u64_ty.clone() });
+            let is_null = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(ty_i), rhs: Constant::int(0), ty: u64_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: floatbits_bb, else_bb: check_bb });
+            // check: float kind (4..=6)? → reinterpret; else → integer convert.
+            fc.switch_to_block(check_bb);
+            let kind = read_kind(&mut fc);
+            let km4 = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: km4, op: BinOp::Sub, lhs: kind, rhs: Constant::int(4), ty: u32_ty.clone() });
+            let is_f = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_f, op: CmpOp::IULe, lhs: Val::Local(km4), rhs: Constant::int(2), ty: u32_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_f), then_bb: floatbits_bb, else_bb: intcvt_bb });
+            // floatbits: reinterpret the slot's bits as a double via a memory
+            // round-trip (an int↔float `BitCast` would convert, not reinterpret).
+            fc.switch_to_block(floatbits_bb);
+            let mem = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: mem, ty: u64_ty.clone(), align: None });
+            fc.push_instr(Instr::Store { val: slot_arg.clone(), ptr: Val::Local(mem) });
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: d, ptr: Val::Local(mem), ty: Type::Float64 });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(d))));
+            // intcvt: signed (kind 2) → SIToFP, else UIToFP.
+            fc.switch_to_block(intcvt_bb);
+            let kind2 = read_kind(&mut fc);
+            let is_signed = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_signed, op: CmpOp::IEq, lhs: kind2, rhs: Constant::int(2), ty: u32_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_signed), then_bb: sbb, else_bb: ubb });
+            fc.switch_to_block(sbb);
+            let si = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: si, op: CastOp::BitCast, val: slot_arg.clone(), to_ty: i64_ty.clone() });
+            let ds = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: ds, op: CastOp::SIToFP, val: Val::Local(si), to_ty: Type::Float64 });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(ds))));
+            fc.switch_to_block(ubb);
+            let du = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: du, op: CastOp::UIToFP, val: slot_arg, to_ty: Type::Float64 });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(du))));
+        }
+        self.module.add_function(func)
+    }
+
     /// Synthesize `void __sic_bounds_fail()` — write a message to stderr (fd 2)
     /// and `abort()` on a failed fat-pointer bounds check (sic.md §"Scopes and
     /// automatic release": "runtime exception").

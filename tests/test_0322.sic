@@ -7,7 +7,7 @@ int takes_int(int a, int b) { return a + b; }
 int main() {
     // init: any -> scalar / string / bool.
     any i = 42;
-    any f = 3.0;               // read back as the same type it holds (double)
+    any f = 3.5;
     any s = "hello";
     any b = true;
     int    yi = i;              // implicit unbox
@@ -15,9 +15,15 @@ int main() {
     string ys = s;
     bool   yb = b;
     if (yi != 42) return 1;
-    if (yf != 3.0) return 2;
+    if (yf != 3.5) return 2;
     if (ys.size != 5) return 3;
     if (!yb) return 4;
+
+    // RTTI-driven NUMERIC conversion (not a bit-reinterpret):
+    double id = i;             // any(int 42) -> double 42.0
+    int    fi = f;             // any(double 3.5) -> int 3 (truncated)
+    if (id != 42.0) return 11;
+    if (fi != 3) return 12;
 
     // assignment (not init).
     int z = 0;
