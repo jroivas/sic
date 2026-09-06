@@ -7,6 +7,11 @@ module std;
 struct File {
     int fd;
     string name;
+    ~Fild()
+    {
+        if (fd > 0)
+            close(fd);
+    }
 };
 
 enum OpenMode {
@@ -56,6 +61,7 @@ FileStatus Close(File *f)
         return FileStatus::InvalidObject;
 
     close(f->fd);
+    f->fd = -1;
     del f;
 
     return FileStatus::Success;

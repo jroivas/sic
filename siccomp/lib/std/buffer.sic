@@ -5,6 +5,9 @@ namespace Buffer
     struct Buffer {
         u64 size;
         u8 *data;
+        ~Buffer() {
+            del data;
+        }
     };
 
 
