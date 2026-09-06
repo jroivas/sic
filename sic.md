@@ -708,6 +708,25 @@ For example:
         tmp[0] = 10;
     } // Defer statenment is run here when exiting the scope
 
+## Field access
+
+Prefer `.` for field access — it works on both a value and a pointer, so a
+pointer is dereferenced automatically. The compiler knows statically whether the
+base is a pointer and generates the right access, so `p.field` and `p->field` are
+equivalent:
+
+    struct Point { int x; int y; };
+    Point *p = new Point;
+    p.x = 5;            // same as p->x
+    int y = p.y;        // reads through the pointer
+
+The C `->` operator still works, but `.` is the idiom. The null-safe `?.` operator
+(below) also auto-derefs a pointer, and works as an assignment target too — a write
+through a null base is simply dropped:
+
+    p?.x = 10;          // if p is null, no write happens
+    int v = p?.x;       // if p is null, v is 0
+
 ## Safe access
 
 We support ternary operation, but also elvis operator `?:` and safe
