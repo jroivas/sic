@@ -437,9 +437,17 @@ yields a zero value. Deleting an entry — freeing its resources — is `del`:
 
     del data["key"];           // remove "key"; data["key"] now reads back as 0
 
-A dict may be heap-allocated with `new` (and its handle is itself a pointer):
+A dict may be heap-allocated with `new`. Because a dict handle is itself already a
+pointer, a pointer-to-dict is the same thing as a dict — `dict d` and `dict *p` are
+interchangeable, and both are subscripted, iterated, and freed directly:
 
-    dict<int, string> *test = new dict<int, string>;
+    dict<int, string> d;
+    dict<int, string> *p = new dict<int, string>;   // same handle type as `d`
+    d[5] = "five";
+    p[5] = "five";                                    // no deref needed
+
+A `new`-allocated container is owned by its binding and freed automatically at scope
+exit, the same as a locally-declared one.
 
 The implementation is a CPython-style insertion-ordered hash table (a compact
 entries array plus a sparse index), so iteration order will be stable and deletions
