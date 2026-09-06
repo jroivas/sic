@@ -1,0 +1,26 @@
+// sic `new` container handles are owned by the binding and freed at scope exit
+// (sic.md §"Dict"/§"List"/§"Set") — a `new`-allocated dict/list/set no longer
+// leaks. `new list<T>` is now supported alongside `new dict`/`new set`.
+int main() {
+    // `new dict` (no star): the handle is owned and auto-freed at scope exit.
+    dict<int, int> d = new dict<int, int>;
+    d[1] = 10; d[2] = 20;
+    if (d.size != 2 || d[1] != 10) return 1;
+
+    // `new list<T>`.
+    list<int> l = new list<int>;
+    l.add(100); l.add(200);
+    if (l.size != 2 || l[1] != 200) return 2;
+
+    // `new set<T>`.
+    set<int> s = new set<int>;
+    s.add(5); s.add(5); s.add(7);
+    if (s.size != 2) return 3;
+
+    // pointer-declared form (`dict *p = new dict`): the handle is still owned and
+    // freed (keyed on the `new`'s produced type, not the slot's declared type).
+    dict<string, int> *p = new dict<string, int>;
+    (void)p;
+
+    return 42;
+}

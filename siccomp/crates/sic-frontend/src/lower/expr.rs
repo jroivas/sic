@@ -1718,20 +1718,29 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-    /// A snapshot of the pending statement-temp counts (bigint/fixed + `.keys`/
-    /// `.values` list temps), for freeing a conditionally-evaluated sub-expression's
-    /// temps where they were created (they don't dominate the statement-end flush).
-    pub(super) fn temp_mark(&self) -> (usize, usize) {
-        (self.bigint_temps.len(), self.list_temps.len())
+    /// A snapshot of the pending statement-temp counts (bigint/fixed, `.keys`/
+    /// `.values` list temps, and per-call `va_dict` temps), for freeing a
+    /// conditionally-evaluated sub-expression's temps where they were created (they
+    /// don't dominate the statement-end flush — e.g. a call in an `if` condition).
+    pub(super) fn temp_mark(&self) -> (usize, usize, usize) {
+        (self.bigint_temps.len(), self.list_temps.len(), self.va_dict_temps.len())
     }
 
-    /// Free every bigint/fixed and materialized-`list` temp recorded since `mark`.
-    pub(super) fn flush_temps_from(&mut self, mark: (usize, usize)) {
+    /// Free every bigint/fixed, materialized-`list`, and `va_dict` temp recorded
+    /// since `mark`.
+    pub(super) fn flush_temps_from(&mut self, mark: (usize, usize, usize)) {
         self.flush_bigint_temps_from(mark.0);
         if self.list_temps.len() > mark.1 {
             let ls: Vec<Val> = self.list_temps.split_off(mark.1);
             let free = self.list_runtime_fn("__sic_list_free");
             for h in ls {
+                self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
+            }
+        }
+        if self.va_dict_temps.len() > mark.2 {
+            let vds: Vec<Val> = self.va_dict_temps.split_off(mark.2);
+            let free = self.dict_runtime_fn("__sic_dict_free");
+            for h in vds {
                 self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
             }
         }
@@ -3112,11 +3121,15 @@ impl<'m> FuncCtx<'m> {
     /// via the header; the header also carries the size for future bounds checks.
     pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, args: &[Expr]) -> Result<Val> {
         let elem_ty = self.lower_type(ty)?;
-        // sic `new dict<K,V>` (sic.md §"Dict"): allocate a fresh hash map, returning
-        // the dict handle directly (the handle is itself a heap pointer).
+        // sic `new dict<K,V>` / `new set<T>` (sic.md §"Dict"/§"Set"): allocate a
+        // fresh hash map, returning the handle directly (it is itself a heap pointer).
         if self.is_sic() && super::types::is_dict(&elem_ty) {
             let sp = args.first().map(|e| e.span.clone()).unwrap_or_default();
             return self.lower_dict_new(&elem_ty, &sp);
+        }
+        // sic `new list<T>` (sic.md §"List"): a fresh growable array handle.
+        if self.is_sic() && super::types::is_list(&elem_ty) {
+            return self.lower_list_new(&elem_ty);
         }
         let elem_size = elem_ty.size_of(self.ptr_size()).max(1);
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
@@ -7569,8 +7582,10 @@ impl<'m> FuncCtx<'m> {
             // `new T` / `new T(n)` yields `T*`.
             ExprKind::New { ty, .. } => {
                 let elem = self.lower_type(ty)?;
-                // `new dict<…>` yields the dict handle itself (already a pointer).
-                if super::types::is_dict(&elem) { Ok(elem) } else { Ok(Type::Pointer(Box::new(elem))) }
+                // `new dict<…>` / `new set<…>` / `new list<…>` yield the container
+                // handle itself (already a heap pointer), not a pointer to it.
+                if super::types::is_dict(&elem) || super::types::is_list(&elem) { Ok(elem) }
+                else { Ok(Type::Pointer(Box::new(elem))) }
             }
             // `@expr` has the referent's (pointer) type.
             ExprKind::Ref { expr, .. } => self.infer_expr_type(expr),

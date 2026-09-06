@@ -1568,6 +1568,27 @@ impl<'m> FuncCtx<'m> {
                         // We created this dict, so we own it: free it at scope exit.
                         self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
                     }
+                    // sic `dict/list/set p = new dict/list/set<…>` (sic.md §"Dict"/
+                    // §"List"/§"Set"): the local owns the freshly `new`-allocated
+                    // handle, so free it at scope exit (else it leaks — `new` returns
+                    // an owned handle, and a bare `dict d;` already frees the same
+                    // way). Keyed on the `new`'s produced type, so it works whether
+                    // the slot is declared `dict d` or `dict *p` (the handle bits are
+                    // stored either way). Aliasing an EXISTING handle (`dict d =
+                    // other;`) is not a `new`, so it is left un-freed (no double free).
+                    if self.is_sic() {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            if matches!(&e.kind, ExprKind::New { .. }) {
+                                match self.infer_expr_type(e) {
+                                    Ok(nt) if super::types::is_list(&nt) =>
+                                        self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) }),
+                                    Ok(nt) if super::types::is_dict(&nt) =>
+                                        self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) }),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     // sic struct constructor/destructor (sic.md §"Memory safety"):
                     // for a struct local with a `S()`, call it on `&local` after
                     // zero-init (only when the user gave no explicit initializer);
