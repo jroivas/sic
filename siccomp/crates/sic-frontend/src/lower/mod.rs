@@ -1090,6 +1090,77 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// Synthesize `void __sic_any_{retain,release}(void* ty, u64 slot)` — refcount
+    /// the string an `any` wraps (sic.md std / §"Built-in string"). An `any` is
+    /// `{ ty, slot }`; when its runtime `type` is a `string` (RTTI kind 9), `slot`
+    /// is a string descriptor and its `rc` field (offset 16) is the block's refcount
+    /// cell — so `retain`/`release` forward to `__sic_str_{retain,release}`. For any
+    /// other kind (or a null `ty`) it is a no-op. This lets an `any` local that read
+    /// a refcounted container string share ownership of it (retain on bind, release
+    /// at scope exit), so a later container overwrite/remove doesn't dangle it.
+    pub(crate) fn ensure_any_release_fn(&mut self) -> FuncRef {
+        self.ensure_any_refcount_fn("__sic_any_release", false)
+    }
+    pub(crate) fn ensure_any_retain_fn(&mut self) -> FuncRef {
+        self.ensure_any_refcount_fn("__sic_any_retain", true)
+    }
+    fn ensure_any_refcount_fn(&mut self, name: &str, retain: bool) -> FuncRef {
+        if let Some(f) = self.module.func_ref_by_name(name) {
+            return f;
+        }
+        let inner = if retain { self.ensure_str_retain_fn() } else { self.ensure_str_release_fn() };
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+        let voidp = Type::void_ptr();
+        let u32_ty = Type::Int { bits: 32, signed: false };
+        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone(), usize_ty.clone()], variadic: false };
+        let params = vec![
+            sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
+            sic_ir::Param { name: "slot".to_string(), ty: usize_ty.clone() },
+        ];
+        let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            // Params: ty = %0x10000, slot = %0x10001 (arg ValIds).
+            let ty_arg = Val::Local(ValId(0x10000));
+            let slot_arg = Val::Local(ValId(0x10001));
+            let kindok_bb = fc.new_block_after_current();
+            let body_bb = fc.new_block_after_current();
+            let done_bb = fc.new_block_after_current();
+            // if (ty == NULL) goto done;
+            let ty_i = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: ty_i, op: CastOp::BitCast, val: ty_arg.clone(), to_ty: usize_ty.clone() });
+            let is_null = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(ty_i), rhs: Constant::int(0), ty: usize_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: kindok_bb });
+            // kindok: k = *(u32*)(ty + 20); if (k != 9) goto done;
+            fc.switch_to_block(kindok_bb);
+            let kindp = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: kindp, base: ty_arg, index: Constant::int(types::TYPEINFO_OFF_KIND as i64), elem_size: 1, result_ty: Type::Pointer(Box::new(u32_ty.clone())) });
+            let k = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: k, ptr: Val::Local(kindp), ty: u32_ty.clone() });
+            let is_str = fc.alloc_val();
+            let str_kind = types::type_kind(&types::sic_string_type(fc.ptr_size())) as i64;
+            fc.push_instr(Instr::Cmp { dest: is_str, op: CmpOp::IEq, lhs: Val::Local(k), rhs: Constant::int(str_kind), ty: u32_ty.clone() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_str), then_bb: body_bb, else_bb: done_bb });
+            // body: rc = *(usize*)(slot + 16); __sic_str_{retain,release}(rc);
+            fc.switch_to_block(body_bb);
+            let slotp = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: slotp, op: CastOp::BitCast, val: slot_arg, to_ty: voidp.clone() });
+            let rcfieldp = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: rcfieldp, base: Val::Local(slotp), index: Constant::int(16), elem_size: 1, result_ty: Type::Pointer(Box::new(rcp.clone())) });
+            let rc = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rcfieldp), ty: rcp.clone() });
+            fc.push_instr(Instr::Call { dest: None, func: inner, args: vec![Val::Local(rc)], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Jump(done_bb));
+            fc.switch_to_block(done_bb);
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func)
+    }
+
     /// Synthesize `void __sic_bounds_fail()` — write a message to stderr (fd 2)
     /// and `abort()` on a failed fat-pointer bounds check (sic.md §"Scopes and
     /// automatic release": "runtime exception").

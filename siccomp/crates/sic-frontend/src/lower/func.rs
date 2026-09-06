@@ -31,6 +31,10 @@ pub enum Cleanup {
     DictFree { slot: Val },
     /// sic `list`: `__sic_list_free` the handle held in `slot` at scope exit.
     ListFree { slot: Val },
+    /// sic `any` local: if the `any` at `addr` wraps a refcounted `string` (e.g.
+    /// read from a container), release that string's `rc` at scope exit
+    /// (`__sic_any_release`). A no-op for any other wrapped type.
+    AnyRelease { addr: Val },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -437,6 +441,7 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
                 let _ = self.emit_bigint_call("__sic_list_free", vec![Val::Local(p)], Type::Void);
             }
+            Cleanup::AnyRelease { addr } => { let _ = self.any_refcount_at(addr, false); }
         }
     }
 
@@ -1592,6 +1597,17 @@ impl<'m> FuncCtx<'m> {
                     // zero-inits `rc` to NULL, and releasing NULL is a no-op.
                     if self.is_sic() && super::types::is_sic_string(&ty) {
                         self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(vid) });
+                    }
+                    // sic `any` local: if it wraps a refcounted `string` (e.g. read
+                    // from a container), share ownership — retain on bind, release at
+                    // scope exit. A no-op for any other wrapped type (and for the
+                    // uninitialized case, whose zero `ty` short-circuits the check),
+                    // so it never touches non-refcounted values.
+                    if self.is_sic() && super::types::is_any(&ty) {
+                        if d.init.is_some() {
+                            self.any_refcount_at(Val::Local(vid), true)?;
+                        }
+                        self.register_scope_exit(Cleanup::AnyRelease { addr: Val::Local(vid) });
                     }
                     // sic `bigint` local: `__sic_bi_free` its block at scope exit
                     // (value semantics). Uninitialized → NULL slot, freeing which

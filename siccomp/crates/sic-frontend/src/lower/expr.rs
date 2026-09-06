@@ -3509,6 +3509,24 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// Retain (`retain=true`) or release the `string` an `any` at `addr` wraps
+    /// (sic.md §"Iterators"/std): loads `{ ty, slot }` and calls
+    /// `__sic_any_{retain,release}` (a no-op unless the runtime type is a string).
+    /// Lets an `any` local that read a refcounted container string share ownership.
+    pub(crate) fn any_refcount_at(&mut self, addr: Val, retain: bool) -> Result<()> {
+        let any_ty = super::types::any_type();
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let ty_lv = self.field_ptr_from(LValue::plain(addr.clone(), any_ty.clone()), "ty", false, &crate::lexer::Span::default())?;
+        let tyv = self.load_lvalue(&ty_lv)?;
+        let tyv = self.coerce(tyv, &Type::void_ptr())?;
+        let slot_lv = self.field_ptr_from(LValue::plain(addr, any_ty), "slot", false, &crate::lexer::Span::default())?;
+        let slotv = self.load_lvalue(&slot_lv)?;
+        let slotv = self.coerce(slotv, &usize_ty)?;
+        let fref = if retain { self.lowerer.ensure_any_retain_fn() } else { self.lowerer.ensure_any_release_fn() };
+        self.push_instr(Instr::Call { dest: None, func: fref, args: vec![tyv, slotv], ret_ty: Type::Void });
+        Ok(())
+    }
+
     /// sic substring slice `s[lo:hi]` (sic.md §"Built-in string"): a half-open,
     /// byte-offset **view** into `s` — no copy. `{ s.data + lo, hi - lo }`.
     /// Omitted bounds default to `lo=0`, `hi=s.size`.

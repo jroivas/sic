@@ -1,0 +1,42 @@
+// sic `any` values that wrap a refcounted container `string` share ownership
+// (sic.md §"Iterators"/std): binding a container string into an `any` local
+// retains it, and the local releases at scope exit — so a later overwrite / `del`
+// doesn't dangle it. Retain/release are no-ops for any other wrapped type.
+int main() {
+    // any wrapping non-strings: retain/release must not touch them.
+    any i = 42;
+    any f = 3.14;
+    if ((int)i != 42) return 1;
+
+    // dict<K,any> string value: keep it across an overwrite of the same key.
+    dict<int, any> d;
+    d[0] = "alice";
+    any keep = d[0];               // shares the refcounted block (retain)
+    d[0] = "carol";                // releases old; `keep` still owns a ref
+    string ks = (string)keep;
+    if (ks.size != 5) return 2;    // "alice" — not freed
+    string ns = (string)d[0];
+    if (ns.size != 5) return 3;    // "carol"
+
+    // list<any> string element across an in-place set.
+    list<any> l;
+    l.add("x"); l.add(1); l.add("yz");
+    any e0 = l[0];
+    l[0] = "replaced";
+    string es = (string)e0;
+    if (es.size != 1) return 4;    // "x"
+
+    // any-to-any copy of a wrapped string is balanced (no double free/leak).
+    any t = keep;
+    string tts = (string)t;
+    if (tts.size != 5) return 5;
+
+    // iterate values of a dict holding strings (transient reads must not leak).
+    dict<string, any> m;
+    m["a"] = "apple"; m["b"] = 7; m["c"] = "cherry";
+    int strs = 0;
+    for (any v : m.values) strs++;
+    if (strs != 3) return 6;
+
+    return 42;
+}
