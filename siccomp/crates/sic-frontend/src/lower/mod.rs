@@ -370,6 +370,17 @@ impl Lowerer {
                     self.module.sic_generic_fn_exports.push(src.clone());
                 }
             }
+            // sic struct constructors/destructors (sic.md §"Memory safety"): publish
+            // `(struct, symbol)` so a consumer's `new S()` / `del p` / scope-exit runs
+            // the module's `S()` / `~S()`. The symbols are exported (see `in_module`).
+            for (sname, sym) in &self.struct_ctor {
+                if self.private_types.contains(sname) { continue; }
+                self.module.sic_struct_ctors.push((sname.clone(), sym.clone()));
+            }
+            for (sname, sym) in &self.struct_dtor {
+                if self.private_types.contains(sname) { continue; }
+                self.module.sic_struct_dtors.push((sname.clone(), sym.clone()));
+            }
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -692,6 +703,16 @@ impl Lowerer {
                 self.struct_types.entry(ename.clone()).or_insert_with(|| struct_type.clone());
                 self.enum_defs.entry(ename.clone()).or_insert(TaggedEnum {
                     name: ename.clone(), struct_type, variants: tvars });
+            }
+            // sic module struct ctor/dtor (sic.md §"Memory safety"): register the
+            // module's `S()`/`~S()` symbols so the consumer's `new S()` / `del p` /
+            // scope-exit cleanup calls them (the symbol is exported by the module;
+            // `emit_cleanup_call` declares the extern on first use).
+            for (sname, sym) in &manifest.struct_ctors {
+                self.struct_ctor.entry(sname.clone()).or_insert_with(|| sym.clone());
+            }
+            for (sname, sym) in &manifest.struct_dtors {
+                self.struct_dtor.entry(sname.clone()).or_insert_with(|| sym.clone());
             }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
@@ -1548,6 +1569,10 @@ impl Lowerer {
     }
 
     fn hoist_struct_methods(&mut self, tu: &mut TranslationUnit) {
+        // In a module build the synthesized ctor/dtor must be EXTERNAL so an
+        // importing unit can link them (a struct's `~S()` runs on the consumer's
+        // `del p` / scope exit); in a plain build they stay `static` (unit-local).
+        let in_module = tu.decls.iter().any(|d| matches!(d, Decl::Module(..)));
         let mut synthesized: Vec<Decl> = Vec::new();
         for d in &tu.decls {
             for (sname, sdef) in struct_defs_with_methods(d) {
@@ -1600,7 +1625,13 @@ impl Lowerer {
                         template_src: None,
                         is_async: false,
                         body: Some(body),
-                        storage: Some(StorageClass::Static),
+                        // Methods stay local; a module's ctor/dtor is exported so
+                        // consumers can link it (see `in_module`).
+                        storage: if in_module && matches!(m.kind, MethodKind::Ctor | MethodKind::Dtor) {
+                            None
+                        } else {
+                            Some(StorageClass::Static)
+                        },
                         inline: false,
                         constructor: None,
                         span: m.span.clone(),

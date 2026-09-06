@@ -144,6 +144,11 @@ pub struct Module {
     /// text of each public generic function template, so a consumer re-instantiates
     /// its monomorphs locally (there is no single symbol to import).
     pub sic_generic_fn_exports: Vec<String>,
+    /// sic module struct constructor/destructor export (sic.md §"Memory safety"):
+    /// `(struct name, ctor/dtor linker symbol)`, so a consumer's `new S()` / `del p`
+    /// / scope-exit cleanup calls the module's `S()` / `~S()`.
+    pub sic_struct_ctors: Vec<(String, String)>,
+    pub sic_struct_dtors: Vec<(String, String)>,
 }
 
 impl Module {
@@ -161,6 +166,8 @@ impl Module {
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),
             sic_generic_fn_exports: Vec::new(),
+            sic_struct_ctors: Vec::new(),
+            sic_struct_dtors: Vec::new(),
         }
     }
 

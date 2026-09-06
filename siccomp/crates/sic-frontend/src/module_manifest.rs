@@ -72,6 +72,11 @@ pub struct ModuleManifest {
     /// each public generic function template. A consumer re-parses and instantiates
     /// these locally (no importable symbol, like a C++ template in a header).
     pub generic_fns: Vec<String>,
+    /// sic module struct constructor/destructor export (sic.md §"Memory safety"):
+    /// `(struct name, ctor symbol)` / `(struct name, dtor symbol)`, so a consumer's
+    /// `new S()` / `del p` / scope-exit cleanup calls the module's `S()` / `~S()`.
+    pub struct_ctors: Vec<(String, String)>,
+    pub struct_dtors: Vec<(String, String)>,
 }
 
 impl ModuleManifest {
@@ -156,6 +161,8 @@ impl ModuleManifest {
             enums: ir.sic_enum_exports.clone(),
             tagenums: ir.sic_tagenum_exports.clone(),
             generic_fns: ir.sic_generic_fn_exports.clone(),
+            struct_ctors: ir.sic_struct_ctors.clone(),
+            struct_dtors: ir.sic_struct_dtors.clone(),
         }
     }
 
@@ -217,6 +224,14 @@ impl ModuleManifest {
             s.push_str(&format!("genericfn {}\n", escape_line(src)));
         }
 
+        // Struct constructor/destructor symbols: `ctor Struct symbol` / `dtor …`.
+        for (name, sym) in &self.struct_ctors {
+            s.push_str(&format!("ctor {} {}\n", name, sym));
+        }
+        for (name, sym) in &self.struct_dtors {
+            s.push_str(&format!("dtor {} {}\n", name, sym));
+        }
+
         for e in &self.exports {
             match &e.ty {
                 Type::Function(ft) => {
@@ -253,6 +268,8 @@ impl ModuleManifest {
         let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
         let mut tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)> = Vec::new();
         let mut generic_fns: Vec<String> = Vec::new();
+        let mut struct_ctors: Vec<(String, String)> = Vec::new();
+        let mut struct_dtors: Vec<(String, String)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -397,6 +414,14 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: pubtype '{}' has no record", lineno + 1, name))?;
                     types.push((name.to_string(), ty));
                 }
+                "ctor" | "dtor" => {
+                    let name = it.next()
+                        .ok_or_else(|| format!("line {}: {} struct name missing", lineno + 1, kw))?;
+                    let sym = it.next()
+                        .ok_or_else(|| format!("line {}: {} symbol missing", lineno + 1, kw))?;
+                    if kw == "ctor" { struct_ctors.push((name.to_string(), sym.to_string())); }
+                    else { struct_dtors.push((name.to_string(), sym.to_string())); }
+                }
                 other => {
                     return Err(format!("line {}: unknown record '{}'", lineno + 1, other));
                 }
@@ -411,6 +436,8 @@ impl ModuleManifest {
             enums,
             tagenums,
             generic_fns,
+            struct_ctors,
+            struct_dtors,
             links,
             exports,
         })
@@ -662,6 +689,8 @@ mod tests {
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
+            struct_ctors: vec![],
+            struct_dtors: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -689,6 +718,8 @@ mod tests {
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
+            struct_ctors: vec![],
+            struct_dtors: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -721,6 +752,8 @@ mod tests {
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
+            struct_ctors: vec![],
+            struct_dtors: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);

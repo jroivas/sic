@@ -267,6 +267,36 @@ else
     bad "art-coroutines" "compile/link failed: $(cat err)"
 fi
 
+# ── std::Buffer cross-module ctor/dtor (sic.md §"Memory safety") ─────────────
+# A consumer's `del buf` must run the module's `~Buffer()` (freeing the data
+# block), not just free the handle — the dtor symbol + association cross the
+# module boundary via the manifest. Verified leak-free under valgrind if present.
+cat > bufuser.sic <<'EOF'
+import std;
+int main() {
+    auto buf = std::Buffer::Create(256);
+    if (!buf) return 1;
+    del buf;                 // runs ~Buffer() from libstd → frees buf.data
+    return 0;
+}
+EOF
+if "$SIC" bufuser.sic -I. -o bufuser 2>err; then
+    ./bufuser; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        bad "std-buffer-dtor" "exit $rc"
+    elif command -v valgrind >/dev/null 2>&1; then
+        if valgrind -q --error-exitcode=99 --leak-check=full ./bufuser >/dev/null 2>&1; then
+            ok "std-buffer-dtor"
+        else
+            bad "std-buffer-dtor" "valgrind found a leak/error (cross-module ~Buffer not run?)"
+        fi
+    else
+        ok "std-buffer-dtor"
+    fi
+else
+    bad "std-buffer-dtor" "compile/link failed: $(cat err)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
