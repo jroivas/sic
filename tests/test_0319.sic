@@ -17,10 +17,24 @@ int main() {
     s.add(5); s.add(5); s.add(7);
     if (s.size != 2) return 3;
 
-    // pointer-declared form (`dict *p = new dict`): the handle is still owned and
-    // freed (keyed on the `new`'s produced type, not the slot's declared type).
-    dict<string, int> *p = new dict<string, int>;
-    (void)p;
+    // pointer-declared form (`dict *p`): a pointer-to-handle collapses to the
+    // handle itself, so `dict *p` and `dict d` behave identically — subscript,
+    // methods, `.size`, and iteration all work directly on `p`, and it is freed.
+    dict<int, int> a;
+    dict<int, int> *p = new dict<int, int>;
+    a[5] = 10;
+    p[5] = 10;                          // same as `a[5]` — no deref needed
+    p[6] = 20;
+    if (a[5] != 10 || p[5] != 10) return 4;
+    if (p.size != 2) return 5;
+    del p[5];
+    if (p.size != 1 || p[5] != 0) return 6;
+
+    list<int> *lp = new list<int>;
+    lp.add(1); lp.add(2);
+    int sum = 0;
+    for (int v : lp.values) sum += v;
+    if (sum != 3) return 7;
 
     return 42;
 }

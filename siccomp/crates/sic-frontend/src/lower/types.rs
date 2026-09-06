@@ -613,6 +613,14 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Complex     => Type::Float64, // simplified
         AstType::Pointer { base, .. } => {
             let inner = lower_type(base, named, ptr_size)?;
+            // A container handle (`dict`/`list`/`set`) is ALREADY a heap pointer, so
+            // a pointer-to-handle (`dict *p`) is redundant — collapse it to the
+            // handle itself, so `dict *p = new dict` and `dict d` behave identically
+            // and both subscript/iterate directly (sic.md §"Dict"/§"List"/§"Set").
+            // (Container markers aren't valid C names, so this only affects sic.)
+            if is_dict(&inner) || is_list(&inner) {
+                return Ok(inner);
+            }
             // Keep pointee aggregates *opaque* (name only, no fields). A pointer
             // is always `ptr_size` bytes, so the pointee's layout is not needed
             // here — and fully expanding it makes densely pointer-connected
