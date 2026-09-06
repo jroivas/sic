@@ -501,6 +501,38 @@ and at scope exit — the same ownership rules as `dict` keys. The subscript for
 too, since a set is a dict: `s[x] = true` adds, `s[x]` tests membership, `del s[x]`
 removes.
 
+# Iterators
+
+The containers are iterable with range-`for` (as are arrays, strings, enums, and any
+struct with a `next()` method). Each container has a natural iteration shape:
+
+    dict<string, int> ages;
+    for (tuple kv : ages) { string k = kv[0]; int v = kv[1]; }  // key/value pair
+
+    set<int> seen;
+    for (int x : seen) { /* each element */ }
+
+    list<string> words;
+    for (tuple iv : words) { usize i = iv[0]; string w = iv[1]; }  // index/value pair
+
+So iterating a `dict` yields a `tuple(key, value)`, a `set` yields each element, and a
+`list` yields a `tuple(index, value)`.
+
+To iterate just the keys or just the values, use `.keys` / `.values`. Each returns a
+`list` — of the keys, or of the values — which iterates as plain elements:
+
+    for (string name : ages.keys)   { /* … */ }
+    for (int    age  : ages.values) { /* … */ }
+    for (string w    : words.values){ /* each element, no index */ }
+
+A `list`'s `.keys` are its indices `0 .. length-1`; its `.values` are the elements.
+The projected list is a real, indexable `list` you can also bind and keep:
+
+    list<string> names = ages.keys;   // owns a snapshot of the keys
+
+Values in a projection are borrowed from the source container; string keys are copied
+into the returned list, so the projection is safe to keep after the source changes.
+
 # Async
 
 A function marked `async` is asynchronous: it returns a `Task<T>` (where `T` is its
