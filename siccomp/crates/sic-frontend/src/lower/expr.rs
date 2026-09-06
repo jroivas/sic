@@ -1585,7 +1585,13 @@ impl<'m> FuncCtx<'m> {
         } else {
             Constant::uint(0)
         };
-        let vowned = if is_owned_string || is_owned_struct { Constant::int(1) } else { Constant::int(0) };
+        // `vowned`: 0 = borrowed (nothing to free), 1 = a plain owned heap block
+        // (a deep-copied struct — raw `free`), 2 = a refcounted `string` block
+        // (release: decrement its rc, free only at 0 — so a reader that copied the
+        // descriptor and retained keeps it alive past an overwrite/remove).
+        let vowned = if is_owned_string { Constant::int(2) }
+            else if is_owned_struct { Constant::int(1) }
+            else { Constant::int(0) };
         Ok((vty_word, vslot_word, vowned))
     }
 
@@ -2466,9 +2472,15 @@ impl<'m> FuncCtx<'m> {
         self.make_string_val(Val::Local(dptr), size, block)
     }
 
-    /// Build a `string` in a SINGLE heap block — `[ descriptor | rc | bytes | NUL ]`
-    /// — and return the descriptor pointer (which is the block base), so the whole
-    /// value is reclaimed by one `free(ptr)`. Used for dict-owned string values.
+    /// Build a refcounted `string` in a SINGLE heap block — `[ rc | descriptor |
+    /// bytes | NUL ]` — and return the DESCRIPTOR pointer (`block + wordsize`). The
+    /// rc cell sits at the block base, so `descriptor.rc == block`: a
+    /// `__sic_str_release(rc)` frees the whole block, exactly like a normal owned
+    /// string. This lets a container value be SHARED (refcounted) with any local
+    /// that reads it — an overwrite/remove/free releases (decrements) the block
+    /// instead of raw-freeing it out from under an outstanding reader
+    /// (sic.md §"Dict"/§"List"; must stay in sync with the runtime's
+    /// `__sic_str_owned`). Stored with `vowned = 2` (refcounted).
     fn emit_dict_owned_string(&mut self, data: Val, size: Val) -> Result<Val> {
         let ps = self.ptr_size() as i64;
         let sty = super::types::sic_string_type(self.ptr_size());
@@ -2477,25 +2489,27 @@ impl<'m> FuncCtx<'m> {
         let size_i = self.coerce(size.clone(), &Type::i64())?;
         let total = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: size_i.clone(), rhs: Constant::int(hdr + ps + 1), ty: Type::i64() });
-        let block = self.emit_malloc(Val::Local(total))?; // char*
-        // rc cell at block + hdr.
-        let rccell = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: rccell, base: block.clone(), index: Constant::int(hdr), elem_size: 1, result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
+        let block = self.emit_malloc(Val::Local(total))?; // char* — the rc cell base
+        // rc cell at block+0.
         let one = self.coerce(Constant::int(1), &usize_ty)?;
-        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rccell) });
-        // bytes at block + hdr + word; copy `size` bytes and NUL-terminate.
+        let rcslot = self.coerce(block.clone(), &Type::Pointer(Box::new(usize_ty.clone())))?;
+        self.push_instr(Instr::Store { val: one, ptr: rcslot });
+        // descriptor pointer = block + wordsize.
+        let desc = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: desc, base: block.clone(), index: Constant::int(ps), elem_size: 1, result_ty: Type::char_ptr() });
+        // bytes at block + word + hdr; copy `size` bytes and NUL-terminate.
         let bytes = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: bytes, base: block.clone(), index: Constant::int(hdr + ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: bytes, base: block.clone(), index: Constant::int(ps + hdr), elem_size: 1, result_ty: Type::char_ptr() });
         self.emit_memcpy(Val::Local(bytes), data, size.clone())?;
         let endp = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: endp, base: Val::Local(bytes), index: size_i, elem_size: 1, result_ty: Type::char_ptr() });
         self.push_instr(Instr::MemSet { dst: Val::Local(endp), val: Constant::zero(), size: 1, align: 1 });
-        // Descriptor at block+0: { data = bytes, size, rc = rccell }.
-        let block_str = self.coerce(block.clone(), &Type::Pointer(Box::new(sty.clone())))?;
-        if let Some((dptr, dty, _)) = self.member_at(&block_str, &sty, 0) { let v = self.coerce(Val::Local(bytes), &dty)?; self.push_instr(Instr::Store { val: v, ptr: dptr }); }
-        if let Some((sptr, sfty, _)) = self.member_at(&block_str, &sty, 1) { let v = self.coerce(size, &sfty)?; self.push_instr(Instr::Store { val: v, ptr: sptr }); }
-        if let Some((rptr, rfty, _)) = self.member_at(&block_str, &sty, 2) { let v = self.coerce(Val::Local(rccell), &rfty)?; self.push_instr(Instr::Store { val: v, ptr: rptr }); }
-        Ok(block)
+        // Descriptor at block+word: { data = bytes, size, rc = block }.
+        let desc_str = self.coerce(Val::Local(desc), &Type::Pointer(Box::new(sty.clone())))?;
+        if let Some((dptr, dty, _)) = self.member_at(&desc_str, &sty, 0) { let v = self.coerce(Val::Local(bytes), &dty)?; self.push_instr(Instr::Store { val: v, ptr: dptr }); }
+        if let Some((sptr, sfty, _)) = self.member_at(&desc_str, &sty, 1) { let v = self.coerce(size, &sfty)?; self.push_instr(Instr::Store { val: v, ptr: sptr }); }
+        if let Some((rptr, rfty, _)) = self.member_at(&desc_str, &sty, 2) { let v = self.coerce(block.clone(), &rfty)?; self.push_instr(Instr::Store { val: v, ptr: rptr }); }
+        Ok(Val::Local(desc))
     }
 
     fn emit_string_dup(&mut self, base: &Expr) -> Result<Val> {

@@ -3,6 +3,9 @@ extern void *realloc(void *, unsigned long);
 extern void free(void *);
 extern void *memcpy(void *, const void *, unsigned long);
 extern int memcmp(const void *, const void *, unsigned long);
+/* Reclaim an owned value box by its `vowned` kind (1 = plain block, 2 = refcounted
+   string). Defined in the list runtime, which is prepended whenever dict is used. */
+extern void __sic_box_free(unsigned long vslot, int vowned);
 
 typedef struct __sic_dent {
     unsigned long hash;
@@ -98,7 +101,7 @@ __attribute__((weak)) void __sic_dict_set(
     int ent;
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
     if (ent >= 0) {
-        if (d->ents[ent].vowned) free((void *)d->ents[ent].vslot); /* reclaim old */
+        __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned); /* reclaim old */
         d->ents[ent].vty = vty; d->ents[ent].vslot = vslot; d->ents[ent].vowned = vowned;
         return;
     }
@@ -145,7 +148,7 @@ __attribute__((weak)) int __sic_dict_del(__sic_dict *d, int kind, unsigned long 
     unsigned long slot = __sic_dict_probe(d, h, kind, a, b, &ent);
     if (ent < 0) return 0;
     if (d->ents[ent].kind == 2) free((void *)d->ents[ent].a);   /* string key bytes */
-    if (d->ents[ent].vowned) free((void *)d->ents[ent].vslot);  /* owned value */
+    __sic_box_free(d->ents[ent].vslot, d->ents[ent].vowned);    /* owned value */
     d->ents[ent].live = 0;
     d->index[slot] = -2;
     d->live--;
@@ -159,7 +162,7 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     for (unsigned long e = 0; e < d->nents; e++) {
         if (!d->ents[e].live) continue;
         if (d->ents[e].kind == 2) free((void *)d->ents[e].a);   /* string key bytes */
-        if (d->ents[e].vowned) free((void *)d->ents[e].vslot);  /* owned value */
+        __sic_box_free(d->ents[e].vslot, d->ents[e].vowned);    /* owned value */
     }
     free(d->ents);
     free(d->index);
@@ -177,22 +180,24 @@ struct __sic_list;
 extern struct __sic_list *__sic_list_new(void);
 extern void __sic_list_push(struct __sic_list *, unsigned long, unsigned long, int);
 
-/* Build an OWNED sic `string` block from raw bytes, matching the frontend's
-   `emit_dict_owned_string` layout: [ {data,size,rc} descriptor (3 words) | rc
-   cell (1 word) | bytes | NUL ]. sic targets 64-bit, so a word is 8 bytes. */
+/* Build a refcounted OWNED sic `string` block from raw bytes, matching the
+   frontend's `emit_dict_owned_string` layout: [ rc cell (1 word) | {data,size,rc}
+   descriptor (3 words) | bytes | NUL ]. The rc cell sits at the block base, so the
+   descriptor's rc field == the block base and one __sic_box_free (vowned 2)
+   reclaims the whole thing. Returns the DESCRIPTOR pointer. 64-bit word = 8. */
 __attribute__((weak)) void *__sic_str_owned(const char *src, unsigned long n) {
     unsigned long hdr = 24, ps = 8;             /* descriptor size, pointer size */
     char *block = (char *)malloc(n + hdr + ps + 1);
-    unsigned long *rc = (unsigned long *)(block + hdr);
-    *rc = 1;
-    char *bytes = block + hdr + ps;
+    *(unsigned long *)block = 1;                 /* rc cell at the block base */
+    char *desc = block + ps;
+    char *bytes = block + ps + hdr;
     if (n) memcpy(bytes, src, n);
     bytes[n] = 0;
-    void **dsc = (void **)block;
-    dsc[0] = bytes;                              /* data */
-    ((unsigned long *)block)[1] = n;             /* size */
-    dsc[2] = rc;                                 /* rc */
-    return block;
+    void **dsc = (void **)desc;
+    dsc[0] = bytes;                             /* data */
+    ((unsigned long *)desc)[1] = n;             /* size */
+    dsc[2] = block;                             /* rc = block base */
+    return desc;
 }
 
 __attribute__((weak)) void *__sic_dict_values(__sic_dict *d) {
@@ -216,6 +221,6 @@ __attribute__((weak)) void *__sic_dict_keys_string(__sic_dict *d) {
     if (d) for (unsigned long e = 0; e < d->nents; e++)
         if (d->ents[e].live)
             __sic_list_push(l, 0, (unsigned long)__sic_str_owned(
-                (const char *)d->ents[e].a, d->ents[e].b), 1);
+                (const char *)d->ents[e].a, d->ents[e].b), 2);
     return l;
 }

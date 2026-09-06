@@ -1,0 +1,36 @@
+// sic container string values are refcounted (sic.md §"Dict"/§"List"): reading an
+// owned string element into a local SHARES the block (retain), so a later
+// overwrite / `del` / container-free releases it instead of freeing it out from
+// under the reader. Regression for a use-after-free.
+int main() {
+    // dict: alias survives an overwrite of the same key.
+    dict<int, string> d;
+    d[0] = "alice";
+    string a = d[0];               // shares the block, retains
+    d[0] = "carol";                // releases the old block; `a` still owns a ref
+    if (a.size != 5) return 1;     // "alice" — not freed
+    if (d[0].size != 5) return 2;  // "carol"
+
+    // list: alias survives an in-place set.
+    list<string> l;
+    l.add("hello");
+    string h = l[0];
+    l[0] = "hi";
+    if (h.size != 5) return 3;     // "hello"
+    if (l[0].size != 2) return 4;  // "hi"
+
+    // dict: alias survives a `del` of its entry.
+    dict<int, string> e;
+    e[1] = "keepme";
+    string k = e[1];
+    del e[1];
+    if (k.size != 6) return 5;     // "keepme" — still valid after del
+    if (e[1].size != 0) return 6;  // removed → empty string
+
+    // overwriting in a loop must not leak or double-free.
+    dict<int, string> m;
+    for (int i = 0; i < 50; i++) m[0] = "value";
+    if (m[0].size != 5) return 7;
+
+    return 42;
+}
