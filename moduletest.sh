@@ -297,6 +297,45 @@ else
     bad "std-buffer-dtor" "compile/link failed: $(cat err)"
 fi
 
+# ── same-named structs in two modules don't collide (module-qualified ctor/dtor) ─
+# Two modules each export `struct Widget { ~Widget() }`; a consumer importing both
+# must link (distinct `ma_Widget__dtor` / `mb_Widget__dtor`) and `del` each via the
+# right module's destructor.
+mkdir -p cma cmb
+cat > cma/a.sic <<'EOF'
+module cma;
+namespace A { struct Widget { int *p; ~Widget() { del p; } };
+    Widget *make() { Widget *w = new Widget(); w->p = new int(4); return w; } }
+EOF
+cat > cmb/b.sic <<'EOF'
+module cmb;
+namespace B { struct Widget { int *q; ~Widget() { del q; } };
+    Widget *make() { Widget *w = new Widget(); w->q = new int(8); return w; } }
+EOF
+if "$SIC" --emit-module cma 2>err && "$SIC" --emit-module cmb 2>err2; then
+    cat > cwuser.sic <<'EOF'
+import cma;
+import cmb;
+int main() { auto a = cma::A::make(); auto b = cmb::B::make(); del a; del b; return 0; }
+EOF
+    if "$SIC" cwuser.sic -Icma -Icmb -o cwuser 2>err; then
+        ./cwuser; rc=$?
+        if [ "$rc" -ne 0 ]; then
+            bad "module-struct-name-collision" "exit $rc"
+        elif command -v valgrind >/dev/null 2>&1; then
+            valgrind -q --error-exitcode=99 --leak-check=full ./cwuser >/dev/null 2>&1 \
+                && ok "module-struct-name-collision" \
+                || bad "module-struct-name-collision" "valgrind leak/error"
+        else
+            ok "module-struct-name-collision"
+        fi
+    else
+        bad "module-struct-name-collision" "consumer compile/link failed: $(cat err)"
+    fi
+else
+    bad "module-struct-name-collision" "module build failed: $(cat err err2)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

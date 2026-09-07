@@ -1572,7 +1572,12 @@ impl Lowerer {
         // In a module build the synthesized ctor/dtor must be EXTERNAL so an
         // importing unit can link them (a struct's `~S()` runs on the consumer's
         // `del p` / scope exit); in a plain build they stay `static` (unit-local).
-        let in_module = tu.decls.iter().any(|d| matches!(d, Decl::Module(..)));
+        // The exported symbol is module-qualified (`{module}_{S}__ctor`) so two
+        // modules that each export a struct of the same name don't collide.
+        let module_name: Option<String> = tu.decls.iter().find_map(|d| match d {
+            Decl::Module(name, _) => Some(name.clone()), _ => None,
+        });
+        let in_module = module_name.is_some();
         let mut synthesized: Vec<Decl> = Vec::new();
         for d in &tu.decls {
             for (sname, sdef) in struct_defs_with_methods(d) {
@@ -1600,13 +1605,20 @@ impl Lowerer {
                             (mangled, m.params.clone(), m.body.clone())
                         }
                         MethodKind::Ctor | MethodKind::Dtor => {
-                            let mangled = if m.kind == MethodKind::Ctor {
-                                let n = format!("__sic_ctor_{}", sname);
-                                self.struct_ctor.insert(sname.clone(), n.clone()); n
-                            } else {
-                                let n = format!("__sic_dtor_{}", sname);
-                                self.struct_dtor.insert(sname.clone(), n.clone()); n
+                            // Module ctor/dtor symbols are module-qualified and
+                            // exported (`{module}_{S}__ctor`), unique across modules;
+                            // a plain build keeps the unit-local `__sic_ctor_{S}` form.
+                            let kind = if m.kind == MethodKind::Ctor { "ctor" } else { "dtor" };
+                            let n = match &module_name {
+                                Some(md) => format!("{}_{}__{}", md, sname, kind),
+                                None => format!("__sic_{}_{}", kind, sname),
                             };
+                            let mangled = n.clone();
+                            if m.kind == MethodKind::Ctor {
+                                self.struct_ctor.insert(sname.clone(), n);
+                            } else {
+                                self.struct_dtor.insert(sname.clone(), n);
+                            }
                             // Prepend the implicit `self`, then rewrite bare field
                             // references in the body to go through it.
                             let mut params = vec![self_param(&m.span)];
