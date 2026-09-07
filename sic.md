@@ -1175,6 +1175,22 @@ We can import specific symbols from module, or assign a new local identifier to 
         printf("%d\n", my_power(5));
     }
 
+A module may itself import other modules:
+
+    module extra;
+    import std;
+
+    namespace Extra {
+        string greet(string name) { return std::Fmt("Hello, {}!", name); }
+    }
+
+A module's dependencies are chain-loaded: importing `extra` transitively pulls in
+`std`, so `extra`'s std-backed API works and `std::` is reachable, without the
+consumer importing `std` itself. Each module's manifest records only what that
+module defines (plus a `dep` on each module it imports) — it does not re-export its
+dependencies' symbols. Symbols are module-qualified internally, so two modules that
+export a struct or function of the same name never collide.
+
 Idea of modules is to be separate compilation units, which can be tested and exported separately.
 Modules could be described as libraries.
 For C compatibility normal header files can be generated from the module.
