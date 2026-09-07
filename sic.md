@@ -1145,7 +1145,9 @@ Example of module:
     }
 
 
-Everything is by default exported, unless defined as static.
+Everything is by default exported, unless defined as `static`. There's new
+special keyword called `private` to mark certain structs as module
+private and not exported. For functions `static` should be used.
 Difference from C headers is, that implementation is not exported,
 but only definitions of non-static symbols from the module.
 
@@ -1155,18 +1157,18 @@ To use the module:
 
     void main()
     {
-        printf("%d\n", test.double_int(5));
-        printf("%d\n", test.power(5));
-        printf("%d\n", test.meaning);
+        printf("%d\n", test::double_int(5));
+        printf("%d\n", test::power(5));
+        printf("%d\n", test::meaning);
     }
 
 Note that exported symbols are accessible only from module's namespace.
 We can import specific symbols from module, or assign a new local identifier to them:
 
     // Imports only "double_int" from test and specifies it as "double_int" here
-    import test.double_int;
+    import test::double_int;
     // Imports "power" from test, but renames it to "my_power"
-    import test.power as my_power;
+    import test::power as my_power;
     // Module "test" itself is NOT imported, only those two symbols from it
 
     void main()
@@ -1174,6 +1176,12 @@ We can import specific symbols from module, or assign a new local identifier to 
         printf("%d\n", double_int(5));
         printf("%d\n", my_power(5));
     }
+
+If really needed there's special syntax to import all symbols to global namespace:
+
+    import test::*
+
+This is same as importing all symbols from `test` separately.
 
 A module may itself import other modules:
 
@@ -1247,8 +1255,6 @@ When compiling a module in C compatiblae mode, it produces these outputs
 - module\_[module\_name].h
 - module\_[module\_name].def
 - module\_[module\_name].sicmod
-
-TODO FIXME: See C++20 modules and import, compatibility?
 
 ## Match
 
