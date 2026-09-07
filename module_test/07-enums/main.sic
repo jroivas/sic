@@ -1,16 +1,10 @@
 import shapes;
-// Imported enums register their variants, so the bare `Enum::Variant` forms work
-// (matching how enums are used within a unit); the module namespace is used for the
-// exported functions.
+// A plain `import shapes;` keeps enums namespaced: use `shapes::Enum::Variant`.
 int main() {
-    int c = (int)Color::Green;              // 5 (imported payload-less enum)
-    auto sq = Shape::Square(4);              // construct imported tagged enum
-    int a = shapes::Shapes::area(sq);        // 16 (module function on it)
-    auto ci = shapes::Shapes::circle(2);     // module returns a Shape
-    int b = shapes::Shapes::area(ci);        // 12
-    match (ci) {                             // match an imported tagged enum
-        Circle(r): if (r != 2) return 2;
-        Square(w): return 3;
-    }
-    return c + a + b - 33;                    // 5+16+12-33 = 0
+    int c = (int)shapes::Color::Green;          // 5
+    auto sq = shapes::Shape::Square(4);          // construct imported tagged enum
+    int a = shapes::Shapes::area(sq);            // 16
+    auto ci = shapes::Shapes::circle(2);
+    int b = shapes::Shapes::area(ci);            // 12
+    return c + a + b - 33;                        // 0
 }

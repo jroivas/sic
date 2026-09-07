@@ -657,6 +657,15 @@ impl<'m> FuncCtx<'m> {
             // Bare tagged-enum variant used as a value, e.g. `Option::None`
             // (a payload-less constructor). A payload variant needs `(...)`.
             ExprKind::EnumVariant { enum_name, variant } => {
+                // sic (sic.md §"Imports"): `module::var` — read an imported module's
+                // exported global via the scope form (mirrors `module.var`).
+                if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
+                    if let Some((g, ty)) = self.resolve_module_global(enum_name, variant) {
+                        let lv = LValue::plain(Val::Global(g), ty);
+                        if matches!(lv.ty, Type::Array { .. }) { return Ok(lv.ptr); }
+                        return self.load_lvalue(&lv);
+                    }
+                }
                 // sic (sic.md §"Namespace"): `N::member` is a namespace member value.
                 if self.is_sic() {
                     if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
@@ -5296,11 +5305,27 @@ impl<'m> FuncCtx<'m> {
         vs.iter().find(|(n, _)| n == variant).map(|(_, v)| *v)
     }
 
+    /// sic (sic.md §"Imports"): reject an UNQUALIFIED use of a name that a plain
+    /// `import module;` made namespace-only (an imported enum or generic). A
+    /// module-qualified path (`module::name`) is not gated.
+    pub(crate) fn gate_qualified(&self, name: &str, sp: &crate::lexer::Span) -> Result<()> {
+        if name.contains("::") { return Ok(()); }
+        if let Some(m) = self.lowerer.qualified_only.get(name) {
+            return Err(CompileError::at(
+                format!("`{0}` is only available as `{1}::{0}` (a plain `import {1};` \
+                    keeps it namespaced) — write `{1}::{0}`, or `import {1}::{0};` / \
+                    `import {1}::*;` to use it unqualified", name, m),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        Ok(())
+    }
+
     /// Construct a sic tagged-enum value (sic.md §"Match"): allocate the
     /// `{ tag; union }` struct on the stack, store the variant's discriminant, and
     /// store the payload (if any). Returns a pointer to the temporary, like a
     /// compound literal, so the surrounding assignment/return copies it.
     fn construct_enum(&mut self, enum_name: &str, variant: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        self.gate_qualified(enum_name, sp)?;
         // sic plain (payload-less) C enum: `E::VARIANT` — possibly scope-qualified
         // (`N::E::VARIANT`, `mod::E::VARIANT`) — is the variant's discriminant.
         if self.is_sic() && args.is_empty() {
@@ -5677,6 +5702,14 @@ impl<'m> FuncCtx<'m> {
         // sic tagged-enum constructor `Enum::Variant(args)` (sic.md §"Match").
         // (Unwrap `Enum::VARIANT(inst)` is handled inside `construct_enum`.)
         if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
+            // sic (sic.md §"Imports"): `module::generic(args)` — a namespaced generic
+            // template of an imported module. It has no importable symbol (re-
+            // instantiated locally), so dispatch it as a generic call by its name.
+            if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name)
+                && self.lowerer.generic_fn_defs.contains_key(variant)
+            {
+                return self.lower_generic_call(variant, args, sp);
+            }
             // sic (sic.md §"Namespace"): `Module::sym(args)` is the canonical scope
             // form of a module call — resolve it like `module.sym(args)`.
             if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
@@ -5735,6 +5768,7 @@ impl<'m> FuncCtx<'m> {
                 && !matches!(self.lookup(name),
                     Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
             {
+                self.gate_qualified(name, sp)?;   // bare use of an imported generic → error
                 return self.lower_generic_call(name, args, sp);
             }
         }
@@ -7624,6 +7658,12 @@ impl<'m> FuncCtx<'m> {
             }
             // A tagged-enum variant path is a value of that enum's struct type.
             ExprKind::EnumVariant { enum_name, variant } => {
+                // sic `module::var` (sic.md §"Imports"): imported module global's type.
+                if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
+                    if let Some((_, ty)) = self.lowerer.imported_modules.get(enum_name).and_then(|e| e.get(variant)) {
+                        if !matches!(ty, Type::Function(_)) { return Ok(ty.clone()); }
+                    }
+                }
                 // sic namespace member `N::member` → the mangled global's type.
                 if self.is_sic() {
                     if let Some(mangled) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
@@ -7637,7 +7677,11 @@ impl<'m> FuncCtx<'m> {
                 // A generic constructor (`Option::None`) resolves via the expected
                 // target type (sic.md §"Match").
                 let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
-                let ename = resolved.as_deref().unwrap_or(enum_name);
+                let ename0 = resolved.as_deref().unwrap_or(enum_name);
+                // A module/namespace-qualified enum (`mod::Enum`) is keyed by its
+                // last segment.
+                let ename = if self.lowerer.enum_defs.contains_key(ename0) { ename0 }
+                            else { ename0.rsplit("::").next().unwrap_or(ename0) };
                 self.lowerer.enum_defs.get(ename).map(|i| i.struct_type.clone())
                     .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
             }
@@ -7645,7 +7689,9 @@ impl<'m> FuncCtx<'m> {
                 // sic tagged-enum constructor / unwrap.
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
                     let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
-                    let enum_name = resolved.as_deref().unwrap_or(enum_name.as_str());
+                    let enum_name0 = resolved.as_deref().unwrap_or(enum_name.as_str());
+                    let enum_name = if self.lowerer.enum_defs.contains_key(enum_name0) { enum_name0 }
+                                    else { enum_name0.rsplit("::").next().unwrap_or(enum_name0) };
                     if let Some(info) = self.lowerer.enum_defs.get(enum_name) {
                         // `Enum::VARIANT(inst)` unwraps → payload type; otherwise
                         // it constructs → the enum struct.

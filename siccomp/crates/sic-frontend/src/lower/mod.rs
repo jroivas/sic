@@ -115,6 +115,14 @@ pub struct Lowerer {
     /// are excluded from its manifest — a module re-exports only what it defines, not
     /// its dependencies' symbols (a consumer imports those modules directly).
     pub imported_type_names: std::collections::HashSet<String>,
+    /// sic (sic.md §"Imports"): a plain `import module;` makes the module's symbols
+    /// (enums, generics) reachable ONLY as `module::name`; using such a name bare is
+    /// an error. This maps each such name → its module. `import module::name` /
+    /// `import module::*` removes the entry (brings the name into the global scope).
+    pub qualified_only: HashMap<String, String>,
+    /// sic: per imported module, the enum + generic-template names it contributes —
+    /// so `import module::*` can un-gate all of them at once.
+    pub module_ns_names: HashMap<String, Vec<String>>,
     /// sic (sic.md §"Memory safety"): struct name → its constructor's mangled free
     /// function `__sic_ctor_<S>(S* self)`, called when a local of that type is
     /// declared. Present only for structs that define `S()`.
@@ -212,6 +220,8 @@ impl Lowerer {
             namespace_members: HashMap::new(),
             module_defined_types: Vec::new(),
             imported_type_names: std::collections::HashSet::new(),
+            qualified_only: HashMap::new(),
+            module_ns_names: HashMap::new(),
             private_types: std::collections::HashSet::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
@@ -752,28 +762,63 @@ impl Lowerer {
             // template's source into a `Decl::Func` and register it, so the consumer
             // monomorphizes it locally (like a C++ template in a header). There is no
             // symbol to import — each instance is internal to whoever instantiates.
+            let mut ns_names: Vec<String> = Vec::new();
             for src in &manifest.generic_fns {
                 for decl in Self::parse_generic_template(src) {
                     if let Decl::Func { name, type_params, .. } = &decl {
                         if !type_params.is_empty() {
+                            ns_names.push(name.clone());
                             self.generic_fn_defs.entry(name.clone()).or_insert(decl);
                         }
                     }
                 }
             }
+            // sic (sic.md §"Imports"): the module's enum and generic-template names
+            // are, by a plain `import module;`, reachable ONLY as `module::name`.
+            // Record them as qualified-only; a later `import module::name` / `::*`
+            // un-gates them. (Functions/globals are already namespaced via
+            // `imported_modules`, and locally-defined names are never gated.)
+            for (e, _) in &manifest.enums { ns_names.push(e.clone()); }
+            for (e, _) in &manifest.tagenums { ns_names.push(e.clone()); }
+            for n in &ns_names {
+                if !self.module_defined_types.contains(n) {
+                    self.qualified_only.entry(n.clone()).or_insert_with(|| module.to_string());
+                }
+            }
+            self.module_ns_names.insert(module.to_string(), ns_names);
         }
 
-        // Selective / renamed import: bind the bare (or aliased) name.
+        // `import module::*;` — bring every symbol into the global namespace: bind
+        // each exported function/global bare, and un-gate every namespaced enum /
+        // generic (sic.md §"Imports").
+        if sym == Some("*") {
+            if let Some(exports) = self.imported_modules.get(module).cloned() {
+                for (name, export) in exports {
+                    self.imported_syms.entry(name).or_insert(export);
+                }
+            }
+            if let Some(names) = self.module_ns_names.get(module).cloned() {
+                for n in names { self.qualified_only.remove(&n); }
+            }
+            return Ok(());
+        }
+        // Selective / renamed import `import module::sym [as alias];` — bring one
+        // symbol into the global namespace. A function/global binds its bare (or
+        // aliased) name; a namespaced enum / generic is simply un-gated.
         if let Some(s) = sym {
-            let export = self.imported_modules.get(module)
-                .and_then(|m| m.get(s))
-                .cloned()
-                .ok_or_else(|| CompileError::at(
+            if let Some(export) = self.imported_modules.get(module).and_then(|m| m.get(s)).cloned() {
+                let bind = alias.unwrap_or(s);
+                self.imported_syms.insert(bind.to_string(), export);
+            } else if self.qualified_only.get(s).map(|m| m == module).unwrap_or(false) {
+                // An enum/generic export: un-gate it (an alias for these is not
+                // supported — they keep their own name).
+                self.qualified_only.remove(s);
+            } else {
+                return Err(CompileError::at(
                     format!("module '{}' has no exported symbol '{}'", module, s),
                     span.file.clone(), span.line, span.col,
-                ))?;
-            let bind = alias.unwrap_or(s);
-            self.imported_syms.insert(bind.to_string(), export);
+                ));
+            }
         }
         Ok(())
     }

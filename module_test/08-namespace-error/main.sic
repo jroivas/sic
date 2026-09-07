@@ -1,0 +1,6 @@
+import shapes;
+// `import shapes;` keeps `Color` namespaced — the bare form must NOT compile.
+int main() {
+    int c = (int)Color::Green;      // ERROR: use shapes::Color::Green
+    return c;
+}

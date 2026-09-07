@@ -194,7 +194,7 @@ T gadd<T>(T a, T b) { return a + b; }
 T gmax<T>(T a, T b) { return a > b ? a : b; }
 EOF
 cat > gapp.sic <<'EOF'
-import gmath;
+import gmath::*;                          // bring the module's generics in globally
 int main() {
     int s = gadd(3, 4);                  // inferred T=int -> 7
     int m = gmax(9, 2);                  // -> 9

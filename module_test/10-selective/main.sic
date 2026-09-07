@@ -1,0 +1,6 @@
+import gmath::gadd;            // just gadd, unqualified
+int main() {
+    int s = gadd(10, 5);       // bare OK (selectively imported)
+    int m = gmath::gmax(9, 2); // gmax still only namespaced -> qualified
+    return s + m - 24;         // 15+9-24 = 0
+}

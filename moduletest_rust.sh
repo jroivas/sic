@@ -51,6 +51,22 @@ run_case() {
         echo "FAIL $name: no main.sic"
         return 1
     fi
+    # `main.xfail`: the consumer MUST fail to compile (a namespacing/typing rule).
+    # Any non-empty content is required to appear in the error output.
+    if [ -f "$dir/main.xfail" ]; then
+        if "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main" 2>"$work/compile.err"; then
+            echo "FAIL $name: expected a compile error but it compiled"
+            return 1
+        fi
+        local need; need="$(cat "$dir/main.xfail")"
+        if [ -n "$need" ] && ! grep -qF "$need" "$work/compile.err"; then
+            echo "FAIL $name: compile error did not mention '$need'"
+            sed 's/^/    /' "$work/compile.err"
+            return 1
+        fi
+        echo "PASS $name (expected compile error)"
+        return 0
+    fi
     if ! "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main" 2>"$work/compile.err"; then
         echo "FAIL $name: consumer compile/link failed"
         sed 's/^/    /' "$work/compile.err"

@@ -273,9 +273,16 @@ impl Parser {
         if self.at(TokenKind::Import) {
             self.advance();
             let module = self.expect_name()?;
-            // Optional `.sym` (selective import) and `as alias` (rename).
-            let sym = if self.eat(TokenKind::Dot) { Some(self.expect_name()?) } else { None };
-            let alias = if sym.is_some()
+            // `import module;`            — namespaced only (use `module::sym`)
+            // `import module::sym;`       — bring `sym` into the global namespace
+            // `import module::sym as g;`  — … under the name `g`
+            // `import module::*;`         — bring ALL of the module in globally
+            // (`.` is accepted as a legacy separator for the selective forms.)
+            let sym = if self.eat(TokenKind::ColonColon) || self.eat(TokenKind::Dot) {
+                if self.eat(TokenKind::Star) { Some("*".to_string()) }
+                else { Some(self.expect_name()?) }
+            } else { None };
+            let alias = if matches!(sym.as_deref(), Some(s) if s != "*")
                 && self.peek_kind() == TokenKind::Ident && self.peek().text == "as"
             {
                 self.advance(); // `as`

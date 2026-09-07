@@ -1,0 +1,10 @@
+import shapes::*;               // everything global
+int main() {
+    int c = (int)Color::Green;   // bare OK now
+    auto sq = Shape::Square(4);  // bare tagged-enum ctor OK
+    match (sq) {
+        Circle(r): return 1;
+        Square(w): if (w != 4) return 2;
+    }
+    return c - 5;                 // 0
+}

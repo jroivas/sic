@@ -1,7 +1,7 @@
 import gmath;
+// A plain `import gmath;` keeps its generics namespaced: call them `gmath::name`.
 int main() {
-    int s = gadd(3, 4);              // inferred T=int -> 7 (bare, re-instantiated)
-    int m = gmax(9, 2);             // -> 9
-    int d = (int)gadd<double>(1, 2); // turbofish across module -> 3
-    return s + m + d - 19;          // 0
+    int s = gmath::gadd(3, 4);              // inferred T=int -> 7
+    int m = gmath::gmax(9, 2);              // -> 9
+    return s + m - 16;                      // 0
 }
