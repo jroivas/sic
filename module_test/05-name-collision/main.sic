@@ -1,0 +1,9 @@
+import cma;
+import cmb;
+int main() {
+    auto a = cma::A::make(10);
+    auto b = cmb::B::make(20);
+    int sum = cma::A::val(a) + cmb::B::val(b);   // 30
+    del a; del b;                                 // distinct dtors, no clash
+    return sum - 30;                              // 0
+}

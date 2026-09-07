@@ -1,0 +1,6 @@
+module cmb;
+namespace B {
+    struct Widget { int *q; ~Widget() { del q; } };
+    Widget *make(int v) { Widget *w = new Widget(); w->q = new int(1); w->q[0] = v; return w; }
+    int val(Widget *w) { return w.q[0]; }
+}

@@ -1,0 +1,3 @@
+module gmath;
+T gadd<T>(T a, T b) { return a + b; }
+T gmax<T>(T a, T b) { return a > b ? a : b; }

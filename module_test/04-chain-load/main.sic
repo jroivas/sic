@@ -1,0 +1,8 @@
+import extra;                 // std is NOT imported directly — chain-loaded
+int main() {
+    string g = extra::Extra::greet("world");
+    std::Println("{} {}", g, extra::Extra::answer());   // std reachable via extra
+    auto buf = std::Buffer::Create(32);                 // and usable directly
+    del buf;
+    return extra::Extra::answer() - 42;                 // 0
+}

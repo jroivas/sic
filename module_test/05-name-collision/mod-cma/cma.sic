@@ -1,0 +1,6 @@
+module cma;
+namespace A {
+    struct Widget { int *p; ~Widget() { del p; } };
+    Widget *make(int v) { Widget *w = new Widget(); w->p = new int(1); w->p[0] = v; return w; }
+    int val(Widget *w) { return w.p[0]; }
+}

@@ -1,0 +1,6 @@
+module extra;
+import std;
+namespace Extra {
+    string greet(string name) { return std::Fmt("Hello, {}!", name); }
+    int answer() { return 42; }
+}

@@ -713,6 +713,14 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Field { base, name } => {
+                // sic `module.var` (sic.md §"Imports"): read an imported module's
+                // exported global. Checked before base-type inference (the base is a
+                // module name, not a value).
+                if self.is_sic() && self.is_module_global(base, name) {
+                    let lv = self.lower_lvalue_field(base, name)?;
+                    if matches!(lv.ty, Type::Array { .. }) { return Ok(lv.ptr); }
+                    return self.load_lvalue(&lv);
+                }
                 // sic RTTI accessors (sic.md §"RTTI"): on a `type` value, `.str` /
                 // `.name` give the canonical spelling, `.id` the stable hash, `.size`
                 // the byte size, `.kind` the classification. Loaded from the record.
@@ -5551,6 +5559,39 @@ impl<'m> FuncCtx<'m> {
         self.module_extern(&symbol, &ty, sp)
     }
 
+    /// Resolve `module.var` / `module::var` — an imported module's exported GLOBAL
+    /// (a non-function export, sic.md §"Imports") — to a get-or-created extern global
+    /// `(ref, type)`. Returns `None` if `module` isn't imported or `var` isn't an
+    /// exported non-function symbol (a function member is handled as a call instead).
+    fn resolve_module_global(&mut self, module: &str, sym: &str) -> Option<(GlobalRef, Type)> {
+        let (symbol, ty) = self.lowerer.imported_modules.get(module)?.get(sym)?.clone();
+        if matches!(ty, Type::Function(_)) { return None; }
+        if let Some((t, g)) = self.lowerer.globals_map.get(&symbol) {
+            return Some((*g, t.clone()));
+        }
+        // `Import`, not `External`: this is an undefined reference to the module's
+        // definition elsewhere — an `External` global with no initializer would
+        // become a tentative (BSS) definition in this object and shadow the real
+        // value at link time.
+        let g = self.lowerer.module.add_global(sic_ir::Global {
+            name: symbol.clone(), ty: ty.clone(), init: None,
+            linkage: sic_ir::Linkage::Import, constant: false, thread_local: false,
+        });
+        self.lowerer.globals_map.insert(symbol.clone(), (ty.clone(), g));
+        Some((g, ty))
+    }
+
+    /// True if `base.name` (or `base::name`) names an imported module's exported
+    /// global variable — a `module` identifier and an exported non-function `name`.
+    fn is_module_global(&self, base: &Expr, name: &str) -> bool {
+        if let ExprKind::Ident(m) = &base.kind {
+            if let Some(exports) = self.lowerer.imported_modules.get(m) {
+                return matches!(exports.get(name), Some((_, ty)) if !matches!(ty, Type::Function(_)));
+            }
+        }
+        false
+    }
+
     /// Get-or-create the extern for an imported function symbol.
     fn module_extern(&mut self, symbol: &str, ty: &Type, sp: &crate::lexer::Span) -> Result<FuncRef> {
         let mut ft = match ty {
@@ -7150,6 +7191,15 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_field(&mut self, base: &Expr, name: &str) -> Result<LValue> {
+        // sic `module.var` (sic.md §"Imports"): an imported module's exported global
+        // is an lvalue over the module's extern symbol (readable and writable).
+        if self.is_sic() && self.is_module_global(base, name) {
+            if let ExprKind::Ident(m) = &base.kind {
+                if let Some((g, ty)) = self.resolve_module_global(&m.clone(), name) {
+                    return Ok(LValue::plain(Val::Global(g), ty));
+                }
+            }
+        }
         // sic: `.` on a plain-struct pointer auto-derefs (like `->`), so `p.field`
         // and `p->field` are interchangeable (sic.md §"Match").
         if self.field_auto_derefs(base) {
@@ -7384,6 +7434,16 @@ impl<'m> FuncCtx<'m> {
                 })
             }
             ExprKind::Field { base, name } => {
+                // sic `module.var` (sic.md §"Imports"): an imported module global has
+                // its exported value type (checked before base inference — the base
+                // is a module name).
+                if self.is_sic() && self.is_module_global(base, name) {
+                    if let ExprKind::Ident(m) = &base.kind {
+                        if let Some((_, ty)) = self.lowerer.imported_modules.get(m).and_then(|e| e.get(name)) {
+                            return Ok(ty.clone());
+                        }
+                    }
+                }
                 let base_ty = self.infer_expr_type(base)?;
                 // sic native-string computed accessors: `.ptr` (and its alias
                 // `.str`) is a `char*`, `.length` is a `usize` (sic.md §"Built-in

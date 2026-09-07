@@ -1,0 +1,10 @@
+// Namespaced, selective, and renamed imports of a plain module.
+import math;
+import math.sq as square;
+int main() {
+    int a = math.sq(5);            // 25
+    int b = square(4);             // 16 (renamed selective import)
+    int m = math.meaning;          // 42 (exported global)
+    if (a != 25 || b != 16 || m != 42) return 1;
+    return math.addv(a, b) - 41;   // 25+16-41 = 0
+}

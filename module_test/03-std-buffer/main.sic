@@ -1,0 +1,9 @@
+import std;
+int main() {
+    auto a = std::Buffer::Create(256);
+    auto b = std::Buffer::Create(64);
+    if (!a || !b) return 1;
+    del a;                    // runs libstd's ~Buffer() → frees the data block
+    del b;
+    return 0;
+}

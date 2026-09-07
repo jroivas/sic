@@ -1,0 +1,8 @@
+import std;
+int main() {
+    std::Println("int={} str={} float={}", 42, "hi", 3.5);
+    std::Print("named {a}+{b}={c}\n", a = 2, b = 3, c = 5);
+    string s = std::Fmt("[{}]", 7);
+    std::Println("{}", s);
+    return 0;
+}

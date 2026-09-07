@@ -1,0 +1,12 @@
+module shapes;
+enum Color { Red, Green = 5, Blue };          // payload-less
+enum Shape { Circle(int), Square(int) };      // tagged
+namespace Shapes {
+    int area(Shape s) {
+        match (s) {
+            Circle(r): return 3 * r * r;
+            Square(w): return w * w;
+        }
+    }
+    Shape circle(int r) { return Shape::Circle(r); }
+}
