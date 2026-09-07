@@ -77,6 +77,9 @@ pub struct ModuleManifest {
     /// `new S()` / `del p` / scope-exit cleanup calls the module's `S()` / `~S()`.
     pub struct_ctors: Vec<(String, String)>,
     pub struct_dtors: Vec<(String, String)>,
+    /// sic module dependencies (sic.md §"Imports"): the other modules this one
+    /// `import`s, so a consumer chain-loads them (their types/enums/dtors + links).
+    pub deps: Vec<String>,
 }
 
 impl ModuleManifest {
@@ -163,6 +166,7 @@ impl ModuleManifest {
             generic_fns: ir.sic_generic_fn_exports.clone(),
             struct_ctors: ir.sic_struct_ctors.clone(),
             struct_dtors: ir.sic_struct_dtors.clone(),
+            deps: ir.sic_module_deps.clone(),
         }
     }
 
@@ -174,6 +178,10 @@ impl ModuleManifest {
         s.push_str(&format!("triple {}\n", self.triple));
         if !self.links.is_empty() {
             s.push_str(&format!("link {}\n", self.links.join(" ")));
+        }
+        // Dependency modules (chain-loaded by a consumer): `dep <module>`.
+        for d in &self.deps {
+            s.push_str(&format!("dep {}\n", d));
         }
 
         // Emit a record for every by-value aggregate reachable from an export, in
@@ -270,6 +278,7 @@ impl ModuleManifest {
         let mut generic_fns: Vec<String> = Vec::new();
         let mut struct_ctors: Vec<(String, String)> = Vec::new();
         let mut struct_dtors: Vec<(String, String)> = Vec::new();
+        let mut deps: Vec<String> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -304,6 +313,11 @@ impl ModuleManifest {
                 }
                 "link" => {
                     links.extend(it.map(|s| s.to_string()));
+                }
+                "dep" => {
+                    deps.push(it.next()
+                        .ok_or_else(|| format!("line {}: dep module missing", lineno + 1))?
+                        .to_string());
                 }
                 "struct" | "union" => {
                     let name = it.next()
@@ -438,6 +452,7 @@ impl ModuleManifest {
             generic_fns,
             struct_ctors,
             struct_dtors,
+            deps,
             links,
             exports,
         })
@@ -691,6 +706,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            deps: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -720,6 +736,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            deps: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -754,6 +771,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            deps: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);

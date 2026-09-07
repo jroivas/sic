@@ -336,6 +336,57 @@ else
     bad "module-struct-name-collision" "module build failed: $(cat err err2)"
 fi
 
+# ── a module that imports another module (chain loading) ─────────────────────
+# `module extra; import std;` — building extra pulls in std; the manifest records
+# `dep std` (not std's symbols). A consumer importing ONLY extra chain-loads std,
+# so extra's std-using API works and `std::` is reachable transitively.
+mkdir -p emod
+cat > emod/extra.sic <<'EOF'
+module extra;
+import std;
+namespace Extra {
+    string greet(string name) { return std::Fmt("Hello, {}!", name); }
+    int answer() { return 42; }
+}
+EOF
+if "$SIC" --emit-module emod 2>err; then
+    # extra's manifest must NOT re-export std's symbols, but must record `dep std`.
+    if grep -q '^dep std' emod/module_extra.smod \
+       && ! grep -qE '^(dtor|enum|tagenum) ' emod/module_extra.smod; then
+        cat > exuser.sic <<'EOF'
+import extra;                 // std NOT imported directly
+#include <stdio.h>
+int main() {
+    string g = extra::Extra::greet("world");
+    printf("%s|%d\n", g.ptr, extra::Extra::answer());
+    auto buf = std::Buffer::Create(64);   // std reachable via chain load
+    del buf;
+    return 0;
+}
+EOF
+        if "$SIC" exuser.sic -Iemod -o exuser 2>err; then
+            out="$(./exuser)"
+            if [ "$out" = "Hello, world!|42" ]; then
+                if command -v valgrind >/dev/null 2>&1; then
+                    valgrind -q --error-exitcode=99 --leak-check=full ./exuser >/dev/null 2>&1 \
+                        && ok "module-imports-module" \
+                        || bad "module-imports-module" "valgrind leak/error"
+                else
+                    ok "module-imports-module"
+                fi
+            else
+                bad "module-imports-module" "got: $out"
+            fi
+        else
+            bad "module-imports-module" "consumer compile/link failed: $(cat err)"
+        fi
+    else
+        bad "module-imports-module" "manifest not clean / missing 'dep std':\n$(cat emod/module_extra.smod)"
+    fi
+else
+    bad "module-imports-module" "extra module build failed: $(cat err)"
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

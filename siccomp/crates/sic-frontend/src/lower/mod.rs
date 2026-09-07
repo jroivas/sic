@@ -110,6 +110,11 @@ pub struct Lowerer {
     pub module_defined_types: Vec<String>,
     /// Type names marked `private` (module-internal), excluded from the manifest.
     pub private_types: std::collections::HashSet<String>,
+    /// sic (sic.md §"Imports"): type/enum/struct names brought in from an *imported*
+    /// module (via its manifest). When THIS unit is itself built as a module, these
+    /// are excluded from its manifest — a module re-exports only what it defines, not
+    /// its dependencies' symbols (a consumer imports those modules directly).
+    pub imported_type_names: std::collections::HashSet<String>,
     /// sic (sic.md §"Memory safety"): struct name → its constructor's mangled free
     /// function `__sic_ctor_<S>(S* self)`, called when a local of that type is
     /// declared. Present only for structs that define `S()`.
@@ -206,6 +211,7 @@ impl Lowerer {
             struct_methods: HashMap::new(),
             namespace_members: HashMap::new(),
             module_defined_types: Vec::new(),
+            imported_type_names: std::collections::HashSet::new(),
             private_types: std::collections::HashSet::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
@@ -347,16 +353,20 @@ impl Lowerer {
                     }
                 }
             }
+            // A module re-exports only what IT defines — not symbols pulled in from
+            // its own imports (those travel via `dep` chain-loading). `imp` filters
+            // an imported name out of this module's manifest.
+            let imp = |name: &str| self.imported_type_names.contains(name);
             // Public payload-less enums (their variants), for `mod::Enum::Variant`.
             for (ename, variants) in &self.c_enum_defs {
-                if self.private_types.contains(ename) { continue; }
+                if self.private_types.contains(ename) || imp(ename) { continue; }
                 self.module.sic_enum_exports.push((ename.clone(), variants.clone()));
             }
             // Public tagged enums (variant tags + payload types). Generic-enum
             // monomorphs (`Option<i32>`) carry `<` in their name — skip those; a
             // consumer re-instantiates built-in generics itself.
             for (ename, info) in &self.enum_defs {
-                if ename.contains('<') || self.private_types.contains(ename) { continue; }
+                if ename.contains('<') || self.private_types.contains(ename) || imp(ename) { continue; }
                 let vs: Vec<(String, i64, Option<Type>)> = info.variants.iter()
                     .map(|v| (v.name.clone(), v.tag, v.payload.clone())).collect();
                 self.module.sic_tagenum_exports.push((ename.clone(), vs));
@@ -374,13 +384,17 @@ impl Lowerer {
             // `(struct, symbol)` so a consumer's `new S()` / `del p` / scope-exit runs
             // the module's `S()` / `~S()`. The symbols are exported (see `in_module`).
             for (sname, sym) in &self.struct_ctor {
-                if self.private_types.contains(sname) { continue; }
+                if self.private_types.contains(sname) || imp(sname) { continue; }
                 self.module.sic_struct_ctors.push((sname.clone(), sym.clone()));
             }
             for (sname, sym) in &self.struct_dtor {
-                if self.private_types.contains(sname) { continue; }
+                if self.private_types.contains(sname) || imp(sname) { continue; }
                 self.module.sic_struct_dtors.push((sname.clone(), sym.clone()));
             }
+            // Dependencies: the other modules this one imports, for chain-loading.
+            let mut deps: Vec<String> = self.imported_modules.keys().cloned().collect();
+            deps.sort();
+            self.module.sic_module_deps = deps;
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -672,6 +686,7 @@ impl Lowerer {
             // resolves to the last segment) and bare `Type`.
             for (name, ty) in &manifest.types {
                 self.struct_types.entry(name.clone()).or_insert_with(|| ty.clone());
+                self.imported_type_names.insert(name.clone());
             }
             // Register imported payload-less enums so `mod::Enum::Variant` (and the
             // bare variant/`Enum::Variant` forms) resolve to their discriminants.
@@ -681,6 +696,7 @@ impl Lowerer {
                     self.c_enum_variant.entry(v.clone()).or_insert_with(|| ename.clone());
                 }
                 self.c_enum_defs.entry(ename.clone()).or_insert_with(|| variants.clone());
+                self.imported_type_names.insert(ename.clone());
             }
             // Register imported tagged enums (rebuild their `{tag,union}` type +
             // variant table) so `mod::Enum::Variant(x)` and `match` work.
@@ -703,6 +719,7 @@ impl Lowerer {
                 self.struct_types.entry(ename.clone()).or_insert_with(|| struct_type.clone());
                 self.enum_defs.entry(ename.clone()).or_insert(TaggedEnum {
                     name: ename.clone(), struct_type, variants: tvars });
+                self.imported_type_names.insert(ename.clone());
             }
             // sic module struct ctor/dtor (sic.md §"Memory safety"): register the
             // module's `S()`/`~S()` symbols so the consumer's `new S()` / `del p` /
@@ -710,13 +727,25 @@ impl Lowerer {
             // `emit_cleanup_call` declares the extern on first use).
             for (sname, sym) in &manifest.struct_ctors {
                 self.struct_ctor.entry(sname.clone()).or_insert_with(|| sym.clone());
+                self.imported_type_names.insert(sname.clone());
             }
             for (sname, sym) in &manifest.struct_dtors {
                 self.struct_dtor.entry(sname.clone()).or_insert_with(|| sym.clone());
+                self.imported_type_names.insert(sname.clone());
             }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
                     self.imported_links.push(l.clone());
+                }
+            }
+            // sic chain-loading (sic.md §"Imports"): a module names the other modules
+            // it imports; pull each in so its types/enums/dtors + link flags come
+            // along (`import extra` transitively loads `std`). Recurse before this
+            // import returns; the `imported_modules` guard above breaks any cycle.
+            let deps: Vec<String> = manifest.deps.clone();
+            for dep in deps {
+                if !self.imported_modules.contains_key(&dep) {
+                    self.resolve_import(&dep, None, None, span)?;
                 }
             }
             // sic generic functions (sic.md §"Generics"): re-parse each exported
