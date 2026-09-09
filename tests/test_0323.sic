@@ -1,0 +1,33 @@
+// sic tagged-enum `.str` (sic.md §"Match"): a tagged-enum value renders as a
+// native `"EnumName::Variant"` string by mapping its runtime tag to the variant
+// name — the same as a payload-less enum's `.str`, but for enums with payloads.
+enum Status { Ok, Bad(int), Gone };
+
+Status pick(int n) {
+    if (n == 0) return Status::Ok;
+    if (n == 1) return Status::Bad(n);
+    return Status::Gone;
+}
+
+int main() {
+    Status s = Status::Gone;
+    if (s.str != "Status::Gone") return 1;
+
+    s = Status::Ok;
+    if (s.str != "Status::Ok") return 2;
+
+    // A variant with a payload still renders just the variant name.
+    s = Status::Bad(7);
+    if (s.str != "Status::Bad") return 3;
+
+    // `.str` on a value returned from a function (not just a local).
+    if (pick(0).str != "Status::Ok") return 4;
+    if (pick(1).str != "Status::Bad") return 5;
+    if (pick(9).str != "Status::Gone") return 6;
+
+    // The result is an ordinary string usable like any other.
+    string a = pick(9).str;
+    if (a.length != 12) return 7;   // "Status::Gone"
+
+    return 42;
+}

@@ -836,6 +836,13 @@ impl<'m> FuncCtx<'m> {
                             return self.enum_str_literal(&format!("{}::{}", en, id));
                         }
                     }
+                    // A tagged-enum value (any expression) → its variant name from
+                    // the runtime tag.
+                    if let Ok(t) = self.infer_expr_type(base) {
+                        if self.is_tagged_enum_struct(&t) {
+                            return self.emit_tagged_enum_str(base, &t, &expr.span);
+                        }
+                    }
                 }
                 // sic bigint accessors (sic.md §"Integer sizes"): `.str` is a fresh
                 // decimal `char*` (freed at scope exit); `.int` is the value as a
@@ -3055,6 +3062,40 @@ impl<'m> FuncCtx<'m> {
         for (name, val) in variants {
             let eq = self.alloc_val();
             self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: v.clone(), rhs: Constant::int(*val), ty: Type::i64() });
+            let then_bb = self.new_block_after_current();
+            let cont_bb = self.new_block_after_current();
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb, else_bb: cont_bb });
+            self.switch_to_block(then_bb);
+            let s = self.enum_str_literal(&format!("{}::{}", ename, name))?;
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result), src: s, size, align });
+            self.set_terminator(Terminator::Jump(cont_bb));
+            self.switch_to_block(cont_bb);
+        }
+        Ok(Val::Local(result))
+    }
+
+    /// `enumvalue.str` for a TAGGED enum value (sic.md §"Match"): map its runtime
+    /// tag to `"EnumName::Variant"`, defaulting to `"EnumName::?"`. Mirrors
+    /// `emit_enum_str` but compares the loaded tag against each variant's tag.
+    pub(crate) fn emit_tagged_enum_str(&mut self, base: &Expr, struct_ty: &Type, sp: &crate::lexer::Span) -> Result<Val> {
+        let ename = match struct_ty { Type::Struct(st) => st.name.clone().unwrap_or_default(), _ => String::new() };
+        let variants: Vec<(String, i64)> = self.lowerer.enum_defs.get(&ename)
+            .map(|i| i.variants.iter().map(|v| (v.name.clone(), v.tag)).collect())
+            .unwrap_or_default();
+        let ptr = self.lower_aggregate_ptr(base)?;
+        let tag = self.load_enum_tag(ptr, struct_ty, sp)?;
+        let tag = self.coerce(tag, &Type::i64())?;
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let size = sty.size_of(self.ptr_size());
+        let align = sty.align_of(self.ptr_size()) as u64;
+        let result = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result, ty: sty.clone(), align: None });
+        self.val_types.insert(result.0, sty);
+        let deflt = self.enum_str_literal(&format!("{}::?", ename))?;
+        self.push_instr(Instr::MemCopy { dst: Val::Local(result), src: deflt, size, align });
+        for (name, val) in variants {
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: tag.clone(), rhs: Constant::int(val), ty: Type::i64() });
             let then_bb = self.new_block_after_current();
             let cont_bb = self.new_block_after_current();
             self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb, else_bb: cont_bb });
@@ -7492,13 +7533,17 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && name == "size" && super::types::is_u8char(&base_ty) {
                     return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                 }
-                // sic `enumvalue.str` is a native `string`.
+                // sic `enumvalue.str` is a native `string` — for a payload-less
+                // enum variable/constant, or any tagged-enum value.
                 if self.is_sic() && name == "str" {
                     if let ExprKind::Ident(id) = &base.kind {
                         if self.enum_locals.contains_key(id)
                             || self.lowerer.c_enum_variant.contains_key(id) {
                             return Ok(super::types::sic_string_type(self.ptr_size()));
                         }
+                    }
+                    if self.is_tagged_enum_struct(&base_ty) {
+                        return Ok(super::types::sic_string_type(self.ptr_size()));
                     }
                 }
                 // `s.dup` on a C string (`char*`/`char[]`) is an owned `string`.
