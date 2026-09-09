@@ -1196,6 +1196,23 @@ impl<'m> FuncCtx<'m> {
             return self.lower_string_compare(op, lhs, rhs);
         }
 
+        // sic tagged-enum equality `a == b` / `a != b` (sic.md §"Match"): compare the
+        // discriminant TAGS, so `status == Enum::Variant` tests the variant. (Without
+        // this the two `{tag,union}` temporaries compare by address — always unequal.
+        // Payload equality is not implied; use `match` to inspect a payload.)
+        if self.is_sic() && matches!(op, BinOpKind::Eq | BinOpKind::Ne)
+            && (matches!(self.infer_expr_type(lhs), Ok(t) if self.is_tagged_enum_struct(&t))
+                || matches!(self.infer_expr_type(rhs), Ok(t) if self.is_tagged_enum_struct(&t)))
+        {
+            let lt = self.enum_operand_tag(lhs)?;
+            let rt = self.enum_operand_tag(rhs)?;
+            let dest = self.alloc_val();
+            let cmp = if op == BinOpKind::Eq { CmpOp::IEq } else { CmpOp::INe };
+            self.push_instr(Instr::Cmp { dest, op: cmp, lhs: lt, rhs: rt, ty: Type::i32() });
+            self.val_types.insert(dest.0, Type::Bool);
+            return Ok(Val::Local(dest));
+        }
+
         // sic `bigint` arithmetic / comparison (sic.md §"Integer sizes"): if either
         // side is a bigint, the op runs through the arbitrary-precision runtime.
         if self.is_sic() && (self.is_bigint_operand(lhs) || self.is_bigint_operand(rhs)) {
@@ -3072,6 +3089,20 @@ impl<'m> FuncCtx<'m> {
             self.switch_to_block(cont_bb);
         }
         Ok(Val::Local(result))
+    }
+
+    /// The discriminant tag of an operand in a tagged-enum comparison (sic.md
+    /// §"Match"): a tagged-enum value yields its loaded `tag`; anything else (a bare
+    /// discriminant / int) is taken as the tag directly.
+    fn enum_operand_tag(&mut self, e: &Expr) -> Result<Val> {
+        if matches!(self.infer_expr_type(e), Ok(t) if self.is_tagged_enum_struct(&t)) {
+            let ty = self.infer_expr_type(e)?;
+            let ptr = self.lower_aggregate_ptr(e)?;
+            let tag = self.load_enum_tag(ptr, &ty, &e.span)?;
+            return self.coerce(tag, &Type::i32());
+        }
+        let v = self.lower_expr(e)?;
+        self.coerce(v, &Type::i32())
     }
 
     /// `enumvalue.str` for a TAGGED enum value (sic.md §"Match"): map its runtime

@@ -29,5 +29,14 @@ int main() {
     string a = pick(9).str;
     if (a.length != 12) return 7;   // "Status::Gone"
 
+    // `==` / `!=` on tagged enums compare the discriminant tag, so testing against
+    // a variant works (they are not compared by temporary address).
+    s = Status::Ok;
+    if (!(s == Status::Ok)) return 8;
+    if (s != Status::Ok) return 9;
+    if (s == Status::Gone) return 10;
+    if (pick(9) != Status::Gone) return 11;
+    if (pick(1) == Status::Ok) return 12;   // Bad != Ok
+
     return 42;
 }
