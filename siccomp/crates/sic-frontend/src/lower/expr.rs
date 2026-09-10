@@ -786,6 +786,15 @@ impl<'m> FuncCtx<'m> {
                         let v = if name == "length" { n } else { n * elem.size_of(self.ptr_size()) };
                         return Ok(self.size_t_val(v));
                     }
+                    // sic tuple `.length`/`.size` (sic.md §"Tuples"): its runtime
+                    // element count (e.g. `split` reports 1 when the separator was
+                    // absent, 2 otherwise). A tuple value IS the heap-block pointer,
+                    // so `lower_expr` (not `lower_aggregate_ptr`, which would give the
+                    // address of the variable's slot) yields the block to read from.
+                    if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_tuple(&t)) {
+                        let p = self.lower_expr(base)?;
+                        return self.tuple_len_val(p);
+                    }
                     // sic `va_array` (sic.md std): `.length`/`.size` = its `len` field.
                     if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_va_array(&t)) {
                         let p = self.lower_aggregate_ptr(base)?;
@@ -2297,9 +2306,11 @@ impl<'m> FuncCtx<'m> {
         let size = layout.size_of(self.ptr_size()).max(1);
         let total = self.coerce(Constant::uint(size + header as u64), &usize_ty)?;
         let block = self.emit_malloc(total)?; // char*
-        // header[0] = payload size ; header[1] (at +ptr_size) = refcount = 1
-        let sz = self.coerce(Constant::uint(size), &usize_ty)?;
-        self.push_instr(Instr::Store { val: sz, ptr: block.clone() });
+        // header[0] = element COUNT (a tuple's runtime `.length`; the byte size is
+        // recoverable from malloc and never read) ; header[1] (at +ptr_size) = rc = 1.
+        let nelem = match layout { Type::Struct(st) => st.fields.len(), _ => 0 };
+        let cnt = self.coerce(Constant::uint(nelem as u64), &usize_ty)?;
+        self.push_instr(Instr::Store { val: cnt, ptr: block.clone() });
         let rc_ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(self.ptr_size() as i64), elem_size: 1, result_ty: Type::char_ptr() });
         let one = self.coerce(Constant::int(1), &usize_ty)?;
@@ -2309,6 +2320,38 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
         self.val_types.insert(data.0, ptr_ty);
         Ok(Val::Local(data))
+    }
+
+    /// Build an empty tuple value (`tuple t;`): a refcounted block with element
+    /// count 0 and no payload. `.length` reads 0; there are no valid indices.
+    pub(crate) fn build_empty_tuple(&mut self) -> Result<Val> {
+        let layout = super::types::tuple_layout(vec![]);
+        self.emit_rc_alloc(&layout)
+    }
+
+    /// Load a tuple's runtime element count from its header (`data - 2*ptr_size`);
+    /// this is what `t.length` reports (sic.md §"Tuples").
+    fn tuple_len_val(&mut self, tuple_ptr: Val) -> Result<Val> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let pc = self.coerce(tuple_ptr, &Type::char_ptr())?;
+        let hp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: hp, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
+        let n = self.alloc_val();
+        self.push_instr(Instr::Load { dest: n, ptr: Val::Local(hp), ty: usize_ty.clone() });
+        self.val_types.insert(n.0, usize_ty);
+        Ok(Val::Local(n))
+    }
+
+    /// Overwrite a tuple's runtime element count (e.g. `split` records 1 when the
+    /// separator was absent, 2 when it split — while still allocating both slots).
+    fn set_tuple_len(&mut self, tuple_ptr: Val, count: Val) -> Result<()> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let pc = self.coerce(tuple_ptr, &Type::char_ptr())?;
+        let hp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: hp, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
+        let c = self.coerce(count, &usize_ty)?;
+        self.push_instr(Instr::Store { val: c, ptr: Val::Local(hp) });
+        Ok(())
     }
 
     /// Register a scope-exit release for a tuple pointer value (spills it to a
@@ -3813,7 +3856,14 @@ impl<'m> FuncCtx<'m> {
         let ap = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: ap, base: hd, index: Val::Local(after_start), elem_size: 1, result_ty: Type::char_ptr() });
         let after = self.make_string_val(Val::Local(ap), Val::Local(after_len), Constant::int(0))?;
-        self.build_string_pair(before, after, sp)
+        let tup = self.build_string_pair(before, after, sp)?;
+        // `.length` is 2 when the separator was found, 1 when absent (`(whole,)`),
+        // so `res.length > 1` distinguishes a real split. Both slots are always
+        // allocated, so indexing `res[0]`/`res[1]` stays valid either way.
+        let n = self.alloc_val();
+        self.push_instr(Instr::Select { dest: n, cond: Val::Local(found), on_true: Constant::int(2), on_false: Constant::int(1), ty: Type::i64() });
+        self.set_tuple_len(tup.clone(), Val::Local(n))?;
+        Ok(tup)
     }
 
     /// Build a `tuple(string, string)` from two already-lowered string descriptor
@@ -4080,6 +4130,16 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
             self.emit_rc_release(Val::Local(old))?;
             self.push_instr(Instr::Store { val: newp, ptr: lv.ptr.clone() });
+            // Refine an empty/looser `tuple t;` to the assigned tuple's element types
+            // (sic.md §"Tuples"), so a later `t[i]` in the same scope is typed. The
+            // stored value is a pointer either way, so the slot is unchanged.
+            if let ExprKind::Ident(name) = &lhs.kind {
+                if let Ok(nt) = self.infer_expr_type(rhs) {
+                    if super::types::is_tuple(&nt) && nt != lv.ty {
+                        self.refine_local_type(name, nt);
+                    }
+                }
+            }
             return Ok(lv.ptr);
         }
 
@@ -7675,7 +7735,8 @@ impl<'m> FuncCtx<'m> {
                     return Ok(super::types::sic_string_type(self.ptr_size()));
                 }
                 // sic array / va_array `.length` / `.size` are `usize`.
-                if self.is_sic() && (matches!(base_ty, Type::Array { .. }) || super::types::is_va_array(&base_ty))
+                if self.is_sic() && (matches!(base_ty, Type::Array { .. }) || super::types::is_va_array(&base_ty)
+                        || super::types::is_tuple(&base_ty))
                     && (name == "length" || name == "size") {
                     return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                 }

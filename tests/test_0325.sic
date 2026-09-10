@@ -1,0 +1,42 @@
+// sic tuple length + split arity (sic.md §"Tuples"/§"Built-in string"): a tuple
+// answers `.length` (its runtime element count); `tuple t;` is an empty tuple
+// (length 0). `s.split(sep)` yields a 2-tuple when `sep` is found and a 1-tuple
+// `(whole,)` when absent — so `res.length > 1` distinguishes a real split, and a
+// peel-first loop terminates.
+int main() {
+    // empty tuple.
+    tuple e;
+    if (e.length != 0) return 1;
+
+    // fixed tuple length.
+    tuple t = tuple("a", "b", "c");
+    if (t.length != 3) return 2;
+
+    // split found → length 2; absent → length 1.
+    string s = "a.b.c";
+    tuple f = s.split(".");
+    if (f.length != 2) return 3;
+    tuple n = s.split("X");
+    if (n.length != 1) return 4;
+    string n0 = n[0];
+    if (n0 != s) return 5;               // the whole string
+
+    // deferred `tuple res;` reassigned in a loop: peel the first "."-segment until
+    // none remain. Exercises tuple `.length` in the condition + refined `res[0]`.
+    tuple res;
+    string tmp = s;
+    do {
+        res = tmp.split(".");
+        string first = res[0];
+        tmp = first;
+    } while (res.length > 1);
+    if (tmp != "a") return 6;
+
+    // rsplit likewise: found → 2, absent → 1.
+    tuple r = s.rsplit(".");
+    if (r.length != 2) return 7;
+    tuple rn = s.rsplit("/");
+    if (rn.length != 1) return 8;
+
+    return 42;
+}

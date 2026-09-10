@@ -482,6 +482,18 @@ impl<'m> FuncCtx<'m> {
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
     }
 
+    /// Update an existing local's recorded type in place, keeping its slot — used to
+    /// refine an empty `tuple t;` to the element types of an assigned tuple value
+    /// (sic.md §"Tuples") so a subsequent `t[i]` is typed. Searches innermost-out.
+    pub(crate) fn refine_local_type(&mut self, name: &str, ty: Type) {
+        for scope in self.locals.iter_mut().rev() {
+            if let Some(entry) = scope.get_mut(name) {
+                entry.0 = ty;
+                return;
+            }
+        }
+    }
+
     /// If AST type `ty` names a payload-less enum registered for `.str`, the enum
     /// name (`enum vals v` → `"vals"`).
     pub(crate) fn c_enum_name_of(&self, ty: &crate::ast::AstType) -> Option<String> {
@@ -1437,7 +1449,21 @@ impl<'m> FuncCtx<'m> {
                                 continue;
                             }
                             _ => {
-                                self.deferred_tuples.insert(d.name.clone());
+                                // sic `tuple t;` (sic.md §"Tuples"): a real binding
+                                // to an EMPTY tuple — `t.length == 0` and any `t[i]`
+                                // is out of range — visible in its whole scope (so a
+                                // later `t = …` in a loop persists). Reassigning a
+                                // concrete tuple refines the element types.
+                                let empty = super::types::tuple_type(vec![]);
+                                let vid = self.alloc_val();
+                                self.push_instr(Instr::Alloca { dest: vid, ty: empty.clone(), align: None });
+                                self.define_local(d.name.clone(), empty.clone(), vid);
+                                let t = self.build_empty_tuple()?;
+                                self.push_instr(Instr::Store { val: t, ptr: Val::Local(vid) });
+                                self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
+                                if !d.name.is_empty() {
+                                    self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: empty, slot: vid, is_param: false });
+                                }
                                 continue;
                             }
                         }
