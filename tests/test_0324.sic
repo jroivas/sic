@@ -1,0 +1,48 @@
+// sic string ops (sic.md §"Built-in string"): `s.contains(sub)` (substring test;
+// a single-char `sub` is a character search), and `s.split(sep)`/`s.rsplit(sep)`
+// → a `tuple(before, after)` split at the first/last occurrence (whole + "" when
+// absent). The two parts are borrowed views into `s`.
+int main() {
+    string s = "path/to/file.txt";
+
+    // contains: substring + single-char.
+    if (!s.contains("/")) return 1;
+    if (!s.contains("file")) return 2;
+    if (s.contains("zzz")) return 3;
+    if (!s.contains(".")) return 4;
+
+    // split at the FIRST separator.
+    tuple a = s.split("/");
+    string a0 = a[0];
+    string a1 = a[1];
+    if (a0 != "path") return 5;
+    if (a1 != "to/file.txt") return 6;
+
+    // rsplit at the LAST separator.
+    tuple b = s.rsplit(".");
+    string b0 = b[0];
+    string b1 = b[1];
+    if (b0 != "path/to/file") return 7;
+    if (b1 != "txt") return 8;
+
+    // multi-character separator.
+    string t = "this!=that";
+    tuple c = t.split("!=");
+    string c0 = c[0];
+    string c1 = c[1];
+    if (c0 != "this" || c1 != "that") return 9;
+
+    // separator absent → (whole, "").
+    tuple d = s.split("XYZ");
+    string d0 = d[0];
+    string d1 = d[1];
+    if (d0 != s) return 10;
+    if (d1 != "") return 11;
+
+    // rsplit absent → (whole, "") too.
+    tuple e = t.rsplit("/");
+    string e0 = e[0];
+    if (e0 != t) return 12;
+
+    return 42;
+}

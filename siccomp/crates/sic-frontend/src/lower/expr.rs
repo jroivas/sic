@@ -3761,6 +3761,77 @@ impl<'m> FuncCtx<'m> {
         Ok(sv)
     }
 
+    /// Byte index of the first (or, with `reverse`, last) occurrence of `sub` in
+    /// `base`, or -1 (sic.md §"Built-in string"). Both are length-counted strings;
+    /// a single-character `sub` gives an efficient character search.
+    fn lower_string_find(&mut self, base: &Expr, sub: &Expr, reverse: bool) -> Result<(Val, Val, Val, Val)> {
+        let (hd, hs) = self.string_operand_parts(base)?;
+        let (nd, ns) = self.string_operand_parts(sub)?;
+        let hd = self.coerce(hd, &Type::char_ptr())?;
+        let nd = self.coerce(nd, &Type::char_ptr())?;
+        let hs = self.coerce(hs, &Type::i64())?;
+        let ns = self.coerce(ns, &Type::i64())?;
+        let f = self.lowerer.ensure_str_find_fn(reverse);
+        let idx = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(idx), func: f, args: vec![hd.clone(), hs.clone(), nd, ns.clone()], ret_ty: Type::i64() });
+        self.val_types.insert(idx.0, Type::i64());
+        Ok((Val::Local(idx), hd, hs, ns))
+    }
+
+    /// `s.contains(sub)` (sic.md §"Built-in string") → `bool`: `find(sub) >= 0`.
+    pub(crate) fn lower_string_contains(&mut self, base: &Expr, sub: &Expr) -> Result<Val> {
+        let (idx, _, _, _) = self.lower_string_find(base, sub, false)?;
+        let r = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: r, op: CmpOp::ISGe, lhs: idx, rhs: Constant::int(0), ty: Type::i64() });
+        self.val_types.insert(r.0, Type::Bool);
+        Ok(Val::Local(r))
+    }
+
+    /// `s.split(sep)` / `s.rsplit(sep)` (sic.md §"Built-in string") → a
+    /// `tuple(before, after)` split at the first (last) occurrence of `sep`; when
+    /// `sep` is absent the whole string is the first element and the second is empty.
+    /// The two parts are borrowed VIEWS into `s` (valid while `s` is), like a slice.
+    pub(crate) fn lower_string_split(&mut self, base: &Expr, sub: &Expr, reverse: bool, sp: &crate::lexer::Span) -> Result<Val> {
+        let (idx, hd, hs, ns) = self.lower_string_find(base, sub, reverse)?;
+        // found = idx >= 0
+        let found = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: found, op: CmpOp::ISGe, lhs: idx.clone(), rhs: Constant::int(0), ty: Type::i64() });
+        // before_len = found ? idx : hs
+        let before_len = self.alloc_val();
+        self.push_instr(Instr::Select { dest: before_len, cond: Val::Local(found), on_true: idx.clone(), on_false: hs.clone(), ty: Type::i64() });
+        // after_start = found ? idx + ns : hs   (skip the separator)
+        let ipn = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: ipn, op: BinOp::Add, lhs: idx, rhs: ns, ty: Type::i64() });
+        let after_start = self.alloc_val();
+        self.push_instr(Instr::Select { dest: after_start, cond: Val::Local(found), on_true: Val::Local(ipn), on_false: hs.clone(), ty: Type::i64() });
+        // after_len = hs - after_start
+        let after_len = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: after_len, op: BinOp::Sub, lhs: hs, rhs: Val::Local(after_start), ty: Type::i64() });
+        // before = view(hd, before_len); after = view(hd + after_start, after_len).
+        // rc = 0 → borrowed (no own/free), so the parts alias `s`'s bytes.
+        let before = self.make_string_val(hd.clone(), Val::Local(before_len), Constant::int(0))?;
+        let ap = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: ap, base: hd, index: Val::Local(after_start), elem_size: 1, result_ty: Type::char_ptr() });
+        let after = self.make_string_val(Val::Local(ap), Val::Local(after_len), Constant::int(0))?;
+        self.build_string_pair(before, after, sp)
+    }
+
+    /// Build a `tuple(string, string)` from two already-lowered string descriptor
+    /// values (each an aggregate-by-pointer). Used by `.split`/`.rsplit`.
+    fn build_string_pair(&mut self, a: Val, b: Val, sp: &crate::lexer::Span) -> Result<Val> {
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let layout = super::types::tuple_layout(vec![sty.clone(), sty.clone()]);
+        let data = self.emit_rc_alloc(&layout)?;
+        let size = sty.size_of(self.ptr_size());
+        let align = sty.align_of(self.ptr_size());
+        for (i, v) in [a, b].into_iter().enumerate() {
+            let fld = self.field_ptr_from(LValue::plain(data.clone(), layout.clone()), &i.to_string(), false, sp)?;
+            self.push_instr(Instr::MemCopy { dst: fld.ptr, src: v, size, align });
+        }
+        self.register_tuple_release(data.clone())?;
+        Ok(data)
+    }
+
     /// sic `s.length`: number of UTF-8 code points in the slice (sic.md
     /// §"Built-in string"). Delegates to a synthesized once-per-module helper
     /// `__sic_str_length(data, size)` — keeping the counting loop in its own
@@ -5845,6 +5916,26 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic `string` methods (sic.md §"Built-in string"): `s.contains(sub)` (a
+        // substring test — a single-char `sub` is a character search), and
+        // `s.split(sep)` / `s.rsplit(sep)` → a `tuple(before, after)`.
+        if self.is_sic() {
+            if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                if matches!(name.as_str(), "contains" | "split" | "rsplit")
+                    && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_sic_string(&t))
+                {
+                    let arg = args.first().ok_or_else(|| CompileError::at(
+                        format!("`.{}` takes one string argument", name),
+                        sp.file.clone(), sp.line, sp.col))?;
+                    return match name.as_str() {
+                        "contains" => self.lower_string_contains(base, arg),
+                        "split"    => self.lower_string_split(base, arg, false, sp),
+                        _          => self.lower_string_split(base, arg, true, sp),
+                    };
+                }
+            }
+        }
+
         // sic `set` methods (sic.md §"Set"): `s.add(x)`, `s.contains(x)` / `s.has(x)`,
         // `s.remove(x)` — thin sugar over the underlying `dict<T, bool>`.
         if self.is_sic() {
@@ -7762,6 +7853,19 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
             }
             ExprKind::Call { func, args } => {
+                // sic `string` methods (sic.md §"Built-in string"): `.contains` →
+                // bool; `.split`/`.rsplit` → `tuple(string, string)`.
+                if self.is_sic() {
+                    if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
+                        if matches!(name.as_str(), "contains" | "split" | "rsplit")
+                            && matches!(self.infer_expr_type(base), Ok(t) if super::types::is_sic_string(&t))
+                        {
+                            if name == "contains" { return Ok(Type::Bool); }
+                            let s = super::types::sic_string_type(self.ptr_size());
+                            return Ok(super::types::tuple_type(vec![s.clone(), s]));
+                        }
+                    }
+                }
                 // sic tagged-enum constructor / unwrap.
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
                     let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();

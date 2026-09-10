@@ -1079,6 +1079,126 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// Synthesize `i64 __sic_str_find / __sic_str_rfind(char* h, i64 hlen, char* n,
+    /// i64 nlen)` (sic.md §"Built-in string"): the byte index of the first (or, for
+    /// `reverse`, last) occurrence of needle `n` in haystack `h`, or `-1`. Both are
+    /// length-counted (no NUL); the match test is `memcmp(h+i, n, nlen) == 0` over a
+    /// window `0 ..= hlen-nlen`. Powers `.contains` / `.split` / `.rsplit`.
+    pub(crate) fn ensure_str_find_fn(&mut self, reverse: bool) -> FuncRef {
+        let fname = if reverse { "__sic_str_rfind" } else { "__sic_str_find" };
+        if let Some(f) = self.module.func_ref_by_name(fname) { return f; }
+        let i8p = Type::char_ptr();
+        let i64t = Type::i64();
+        let memcmp = self.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "memcmp".to_string(),
+                sig: FunctionType { ret: Type::i32(),
+                    params: vec![Type::void_ptr(), Type::void_ptr(), Type::Int { bits: self.ptr_size * 8, signed: false }],
+                    variadic: false },
+            })
+        });
+        let sig = FunctionType { ret: i64t.clone(),
+            params: vec![i8p.clone(), i64t.clone(), i8p.clone(), i64t.clone()], variadic: false };
+        let params = vec![
+            sic_ir::Param { name: "h".into(), ty: i8p.clone() },
+            sic_ir::Param { name: "hlen".into(), ty: i64t.clone() },
+            sic_ir::Param { name: "n".into(), ty: i8p.clone() },
+            sic_ir::Param { name: "nlen".into(), ty: i64t.clone() },
+        ];
+        let usize_bits = self.ptr_size * 8;
+        let mut func = Function::new(fname.to_string(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            // Spill params to slots (raw entry values across a back-edge miscompile).
+            let hslot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: hslot, ty: i8p.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10000)), ptr: Val::Local(hslot) });
+            let nslot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: nslot, ty: i8p.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10002)), ptr: Val::Local(nslot) });
+            let nlen_slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: nlen_slot, ty: i64t.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(ValId(0x10003)), ptr: Val::Local(nlen_slot) });
+            // last = hlen - nlen
+            let last = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: last, op: BinOp::Sub, lhs: Val::Local(ValId(0x10001)), rhs: Val::Local(ValId(0x10003)), ty: i64t.clone() });
+            let last_slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: last_slot, ty: i64t.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(last), ptr: Val::Local(last_slot) });
+            // i = reverse ? last : 0
+            let i_slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: i_slot, ty: i64t.clone(), align: None });
+            let init = if reverse { Val::Local(last) } else { fc.coerce(Constant::int(0), &i64t).unwrap() };
+            fc.push_instr(Instr::Store { val: init, ptr: Val::Local(i_slot) });
+
+            let cond_bb = fc.new_block_after_current();
+            let body_bb = fc.new_block_after_current();
+            let found_bb = fc.new_block_after_current();
+            let next_bb = fc.new_block_after_current();
+            let notfound_bb = fc.new_block_after_current();
+            fc.set_terminator(Terminator::Jump(cond_bb));
+
+            // cond: reverse ? i >= 0 : i <= last
+            fc.switch_to_block(cond_bb);
+            let iv = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv, ptr: Val::Local(i_slot), ty: i64t.clone() });
+            let go = fc.alloc_val();
+            if reverse {
+                fc.push_instr(Instr::Cmp { dest: go, op: CmpOp::ISGe, lhs: Val::Local(iv), rhs: Constant::int(0), ty: i64t.clone() });
+            } else {
+                let lastv = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: lastv, ptr: Val::Local(last_slot), ty: i64t.clone() });
+                fc.push_instr(Instr::Cmp { dest: go, op: CmpOp::ISLe, lhs: Val::Local(iv), rhs: Val::Local(lastv), ty: i64t.clone() });
+            }
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(go), then_bb: body_bb, else_bb: notfound_bb });
+
+            // body: if memcmp(h+i, n, nlen) == 0 -> found
+            fc.switch_to_block(body_bb);
+            let iv2 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv2, ptr: Val::Local(i_slot), ty: i64t.clone() });
+            let hp = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: hp, ptr: Val::Local(hslot), ty: i8p.clone() });
+            let hip = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: hip, base: Val::Local(hp), index: Val::Local(iv2), elem_size: 1, result_ty: i8p.clone() });
+            let np = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: np, ptr: Val::Local(nslot), ty: i8p.clone() });
+            let nl = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: nl, ptr: Val::Local(nlen_slot), ty: i64t.clone() });
+            let nlu = fc.coerce(Val::Local(nl), &Type::Int { bits: usize_bits, signed: false }).unwrap();
+            let hipv = fc.coerce(Val::Local(hip), &Type::void_ptr()).unwrap();
+            let npv = fc.coerce(Val::Local(np), &Type::void_ptr()).unwrap();
+            let cmp = fc.alloc_val();
+            fc.push_instr(Instr::Call { dest: Some(cmp), func: memcmp, args: vec![hipv, npv, nlu], ret_ty: Type::i32() });
+            let eq = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: Val::Local(cmp), rhs: Constant::int(0), ty: Type::i32() });
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb: found_bb, else_bb: next_bb });
+
+            // found: return i
+            fc.switch_to_block(found_bb);
+            let ir = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: ir, ptr: Val::Local(i_slot), ty: i64t.clone() });
+            fc.set_terminator(Terminator::Ret(Some(Val::Local(ir))));
+
+            // next: i += reverse ? -1 : 1
+            fc.switch_to_block(next_bb);
+            let iv3 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: iv3, ptr: Val::Local(i_slot), ty: i64t.clone() });
+            let step = if reverse { -1 } else { 1 };
+            let ni = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: ni, op: BinOp::Add, lhs: Val::Local(iv3), rhs: Constant::int(step), ty: i64t.clone() });
+            fc.push_instr(Instr::Store { val: Val::Local(ni), ptr: Val::Local(i_slot) });
+            fc.set_terminator(Terminator::Jump(cond_bb));
+
+            // notfound: return -1
+            fc.switch_to_block(notfound_bb);
+            let neg1 = fc.coerce(Constant::int(-1), &i64t).unwrap();
+            fc.set_terminator(Terminator::Ret(Some(neg1)));
+        }
+        self.module.add_function(func)
+    }
+
     /// Synthesize `void __sic_str_retain(usize* rc)` — `if (rc) (*rc)++;`
     /// (sic.md §"Built-in string" refcounting). NULL rc is a no-op.
     pub(crate) fn ensure_str_retain_fn(&mut self) -> FuncRef {
