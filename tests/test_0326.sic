@@ -1,0 +1,38 @@
+// sic managed-struct assignment (sic.md §"Memory safety"): assigning one struct
+// value with a `~S()` destructor to another (`v = other`) runs v's destructor
+// (releasing its old resources), then shares `other`'s — retaining the owned,
+// refcounted fields so the block is freed exactly once when the last holder is
+// destroyed. No leak of v's original, no double free.
+struct Box {
+    int *p;
+    Box() { p = new int(1); p[0] = 0; }
+    ~Box() { del p; }
+};
+
+int main() {
+    Box a;
+    Box b;
+    a.p[0] = 1;
+    b.p[0] = 2;
+
+    a = b;                      // a's old block freed; a shares b's (refcount 2)
+    if (a.p[0] != 2) return 1;
+    if (b.p[0] != 2) return 2;
+    a.p[0] = 9;                 // a and b share storage now
+    if (b.p[0] != 9) return 3;
+
+    // chained reassignment: a drops its share of b, takes c's.
+    Box c;
+    c.p[0] = 3;
+    a = c;
+    if (a.p[0] != 3 || c.p[0] != 3) return 4;
+    if (b.p[0] != 9) return 5;  // b is unaffected
+
+    // self-assign is a no-op (must not destroy the live block).
+    Box d;
+    d.p[0] = 7;
+    d = d;
+    if (d.p[0] != 7) return 6;
+
+    return 42;                  // all blocks freed once at scope exit (valgrind-clean)
+}

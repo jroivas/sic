@@ -3465,6 +3465,29 @@ impl<'m> FuncCtx<'m> {
 
     /// Increment the fat-pointer header refcount at `p - ptr_size`. NULL is a
     /// no-op. Used when a `@` reference retains its referent.
+    /// Retain the owned, refcounted resources a managed struct value holds
+    /// (sic.md §"Memory safety"), so a shared copy (`v = other`) balances the two
+    /// destructors. For each field: a fat-pointer (owned) field increments its
+    /// block's refcount; a `string` field retains its buffer; a nested managed
+    /// struct recurses. A managed struct owns its pointer fields by convention (its
+    /// `~S()` `del`s them), so retaining them mirrors that release.
+    pub(crate) fn retain_struct_owned_fields(&mut self, ptr: Val, struct_ty: &Type) -> Result<()> {
+        let resolved = super::types::resolve_aggregate(struct_ty, &self.lowerer.struct_types);
+        let fields = match &resolved { Type::Struct(st) => st.fields.clone(), _ => return Ok(()) };
+        for (fname, fty) in fields {
+            let flv = self.field_ptr_from(LValue::plain(ptr.clone(), resolved.clone()), &fname, false, &crate::lexer::Span::default())?;
+            if super::types::is_sic_string(&fty) {
+                self.retain_string_at(&flv.ptr)?;
+            } else if matches!(&fty, Type::Pointer(_)) {
+                let v = self.load_lvalue(&flv)?;
+                self.emit_rc_retain(v)?;
+            } else if matches!(super::types::resolve_aggregate(&fty, &self.lowerer.struct_types), Type::Struct(_)) {
+                self.retain_struct_owned_fields(flv.ptr, &fty)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn emit_rc_retain(&mut self, p: Val) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
@@ -4243,6 +4266,29 @@ impl<'m> FuncCtx<'m> {
             if self.is_sic() && super::types::is_sic_string(&lv.ty) {
                 self.retain_string_at(&src)?;
                 self.release_string_at(&lv.ptr)?;
+            }
+            // sic managed-struct reassignment `v = other` (sic.md §"Memory safety"):
+            // a struct with a `~S()` shares by refcount. Run v's destructor (release
+            // its old resources), copy other's bytes, then retain the copied owned
+            // resources so both v and other are valid and the block is freed once
+            // (when the last of them is destroyed). Self-assign stays balanced
+            // (retain-after-destroy on the same resource nets zero only if distinct;
+            // a self-assign `v = v` first destroys then retains the same block — see
+            // the guard).
+            let managed_dtor = if self.is_sic() {
+                match &lv.ty { Type::Struct(st) => st.name.as_ref()
+                    .and_then(|n| self.lowerer.struct_dtor.get(n).cloned()), _ => None }
+            } else { None };
+            if let Some(dtor) = managed_dtor {
+                // Skip a genuine self-assign (`v = v`): destroying then re-retaining
+                // the same live block would run the user dtor on it prematurely.
+                let same = matches!(&src, s if *s == lv.ptr);
+                if !same {
+                    self.emit_cleanup_call(lv.ptr.clone(), &dtor);
+                    self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
+                    self.retain_struct_owned_fields(lv.ptr.clone(), &lv.ty)?;
+                }
+                return Ok(lv.ptr);
             }
             self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
             return Ok(lv.ptr);
