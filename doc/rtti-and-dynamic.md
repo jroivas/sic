@@ -56,7 +56,9 @@ You rarely compare `.kind` by number — use [`match (type(x))`](#match-typex--d
 
 `any` is a 16-byte box `{ type, value }` holding a value of any type together with
 its runtime type. Box implicitly or with a cast; read the dynamic type with
-`type()`; recover the value by casting back:
+`type()`; recover the value by casting *or* by assigning into a typed slot — an
+`any` **converts implicitly** to the target type (no cast needed) at
+initialization, assignment, argument passing, and `return`:
 
 ```sic
 any a = 42;                    // implicit box
@@ -64,10 +66,19 @@ any b = (any)3.5;              // explicit box
 string s = "hi"; any c = s;
 
 type(a);                       // dynamic: i32
-(int)a;                        // 42     (downcast)
-(double)b;                     // 3.5
-(string)c;                     // borrows the boxed string
+int    x = a;                  // 42     — implicit unbox
+double d = b;                  // 3.5
+string t = c;                  // borrows the boxed string
+(int)a;                        // the explicit cast form still works
+
+f(a);                          // an `any` argument unboxes to the parameter type
 ```
+
+Numeric unboxing is **type-directed**: it converts by the boxed value's runtime
+kind, so `any n = 3; double d = n;` yields `3.0` and `any r = 3.5; int i = r;`
+yields `3` — not a bit reinterpretation. Read an `any` back as a type compatible
+with what it holds (a non-numeric mismatch, e.g. reading a boxed string as an
+`int`, still just reinterprets the slot).
 
 `type(x)` on an `any` is **dynamic** — it reads the boxed type, not `any` itself.
 

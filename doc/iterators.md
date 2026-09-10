@@ -65,7 +65,7 @@ int total = 0;
 for (auto x : xs) { total += x; }     // 60
 ```
 
-It works over four kinds of iterable:
+It works over several kinds of iterable:
 
 ### Arrays and slices
 
@@ -73,6 +73,21 @@ Yields each element by value, in order.
 
 ```sic
 for (auto x : xs) { use(x); }
+```
+
+### Containers
+
+`list`, `set`, and `dict` iterate too (see [containers](containers.md)): a `list`
+yields `tuple(index, value)`, a `set` yields each element, and a `dict` yields
+`tuple(key, value)`. Use `.keys` / `.values` to iterate one side:
+
+```sic
+dict<string, int> ages;
+for (tuple kv : ages) { string k = kv[0]; int v = kv[1]; }
+for (int v : ages.values) { … }
+
+list<int> xs;
+for (int v : xs.values) { … }
 ```
 
 ### Strings → code points

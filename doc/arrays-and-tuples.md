@@ -76,8 +76,29 @@ double d = h[1];               // 3.5
 int    n = h[0];               // 7
 ```
 
-Tuples are immutable after creation. A deferred declaration is allowed
-(`tuple tmp;` then `tmp = tuple(…)`).
+Tuples are immutable after creation.
+
+### Length
+
+`.length` (alias `.size`) is a tuple's element count, read at run time:
+
+```sic
+tuple t = tuple(88, 66, 42);
+t.length;                      // 3
+```
+
+A bare `tuple t;` is the **empty** tuple — `t.length` is `0` and it has no valid
+element (any `t[i]` is an out-of-range error). It's a real binding you can assign
+later; a reassignment adopts the new tuple (releasing the old one) and refines the
+element types, so `t[i]` after `t = tuple(…)` is typed:
+
+```sic
+tuple t;                       // empty: t.length == 0
+t = tuple("a", "b");           // now length 2; t[0] is a string
+```
+
+This is what lets a `string`'s [`split`](strings.md#search--split) report arity
+`1` (separator absent) vs `2` (found) through `.length`.
 
 ## Swap
 
@@ -89,4 +110,4 @@ int arr[3] = { 10, 20, 30 };
 arr[0] <> arr[2];              // { 30, 20, 10 }
 ```
 
-Next: [modules](modules.md).
+Next: [containers](containers.md).

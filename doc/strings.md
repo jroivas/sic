@@ -100,6 +100,45 @@ string h = s[6:10];
 if (h != "world") return 1;
 ```
 
+## Search & split
+
+`contains` tests for a substring; a single-character argument is the
+character-search case, so there's no separate `strchr`:
+
+```sic
+string path = "path/to/file.txt";
+path.contains("/");           // true
+path.contains("file");        // true
+path.contains("zzz");         // false
+```
+
+`split(sep)` / `rsplit(sep)` divide the string at the **first** / **last**
+occurrence of `sep`, returning a `tuple(before, after)`:
+
+```sic
+tuple head_tail = path.split("/");    // ("path", "to/file.txt")   — first "/"
+tuple name_ext  = path.rsplit(".");   // ("path/to/file", "txt")   — last "."
+string dir  = head_tail[0];
+string rest = head_tail[1];
+```
+
+When the separator is **absent**, the result is a **one-element** tuple holding
+the whole string, so a tuple's `.length` (see
+[arrays & tuples](arrays-and-tuples.md#tuples)) distinguishes a real split — it is
+`2` when the separator was found, `1` when not. That makes a peel loop natural:
+
+```sic
+tuple res;
+string tail = path;
+do {
+    res  = tail.split("/");
+    tail = res[0];
+} while (res.length > 1);      // stop when no "/" remains → tail == "path"
+```
+
+The two parts are **views** into the original string (plain byte offsets, no
+copy), valid while it is — the same non-owning slice semantics as `s[lo:hi]`.
+
 ## Accessors
 
 | accessor | meaning |

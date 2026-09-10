@@ -122,6 +122,37 @@ A failed bounds check aborts the program (or is a compile error when provable).
 `del` frees only when the last reference is dropped, so it's safe even if a
 reference was handed to another owner (e.g. a thread) that outlives this scope.
 
+## Managed structs — assignment shares
+
+A struct with a destructor `~S()` (see
+[constructors & destructors](iterators.md#constructors--destructors)) is a
+*managed* value: assigning one to another (`v = other`) is not a blind byte copy.
+It runs `v`'s destructor first (releasing `v`'s old resources), copies `other`,
+then **retains the resources the destructor owns** — so `v` and `other` share
+them and the shared block is freed exactly once, when the last of them is
+destroyed:
+
+```sic
+struct Box {
+    int *p;
+    Box()  { p = new int(1); }
+    ~Box() { del p; }             // owns `p`
+};
+
+Box a;
+Box b;
+a = b;            // a's old block freed; a shares b's (refcount 2)
+// scope exit: ~a and ~b both run `del p`, freeing the shared block once
+```
+
+"The resources the destructor owns" is derived from the destructor itself — the
+fields it `del`s. A **borrowed** pointer field (one `~S()` leaves alone — an
+iterator's cursor, a parent back-pointer, a borrowed C string) is copied as-is
+and never touched, so it isn't corrupted. A self-assign (`v = v`) is a no-op.
+
+For a field you want *shared* this way, allocate it with `new`/`del` (a `free()`-d
+malloc pointer has no reference count to share).
+
 ## `@` references
 
 A reference, written `@T`, is a **scoped, reference-counted borrow** of a

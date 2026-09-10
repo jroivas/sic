@@ -151,22 +151,39 @@ out for them too.
 
 ### `.str` — the variant name
 
-A payload-less enum value renders as a native `string` naming its variant,
-`"EnumName::Variant"` — handy for logging and debugging:
+Any enum value — payload-less **or** tagged — renders as a native `string` naming
+its variant, `"EnumName::Variant"`, handy for logging and debugging:
 
 ```sic
 enum Color { RED, GREEN, BLUE };
+enum Status { Ok, Bad(int), Gone };
 
 enum Color c = BLUE;
 c.str;                        // "Color::BLUE"   (from the runtime value)
 RED.str;                      // "Color::RED"    (a bare constant)
-std::Println("{}", c.str);     // Color::BLUE
+std::Println("{}", c.str);    // Color::BLUE
+
+Status s = Status::Bad(7);
+s.str;                        // "Status::Bad"   (tagged enum → just the name)
 
 if (c.str == "Color::BLUE") … // it's an ordinary string
 ```
 
 An out-of-range value (e.g. `(enum Color)99`) yields `"Color::?"`. This applies to
-enum-typed variables and parameters and to bare enum constants.
+variables, parameters, function results, and bare constants alike.
+
+### Equality
+
+`==` / `!=` on tagged enums compare the **variant** (the discriminant tag), so
+testing a value against a variant works — the two are not compared by address:
+
+```sic
+Status s = Status::Ok;
+if (s == Status::Ok) …        // true
+if (s != Status::Gone) …      // true
+```
+
+Payload equality is not implied — use `match` when you need to inspect a payload.
 
 ## Ergonomics — no `.unwrap()`
 

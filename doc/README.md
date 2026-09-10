@@ -29,14 +29,16 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 7. [RTTI & dynamic values](rtti-and-dynamic.md) — `type(x)`/`typeid`, the `any`
    box, `va_array` varargs, and `match (type(x))`.
 8. [Arrays & tuples](arrays-and-tuples.md) — `.length`/`.size`, array/tuple
-   concatenation, tuple packing/unpacking.
-9. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
-   `Iterator<T>`, and the range-`for`.
-10. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
+   concatenation, tuple packing/unpacking, the empty tuple.
+9. [Containers](containers.md) — the built-in `dict`, `list`, and `set`: subscript,
+   methods, iteration, `.keys`/`.values`, and `new`.
+10. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
+    `Iterator<T>`, and the range-`for`.
+11. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
     `.swap`/`.cas`, and atomic pointers.
-11. [Modules](modules.md) — `module`/`import`, building a module, the `.smod`
-    manifest, and static vs. dynamic linking.
-12. [Standard library](standard-library.md) — `import std;` and
+12. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
+    building a module, chain-loaded dependencies, and the `.smod` manifest.
+13. [Standard library](standard-library.md) — `import std;` and
     `Fmt`/`Print`/`Println`.
 
 ## Design goals

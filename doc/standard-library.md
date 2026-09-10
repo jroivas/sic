@@ -40,6 +40,25 @@ use `"{}"`:
 std::Println("{}", value);
 ```
 
+### Named placeholders
+
+A `{name}` placeholder is filled from a `name = value` argument (a keyword
+argument, collected into a `va_dict`), so order doesn't matter and positional and
+named arguments can mix:
+
+```sic
+std::Print("{name}={val}\n", val = 42, name = "answer");   // answer=42
+std::Println("mix {} and {k}", 7, k = "named");            // mix 7 and named
+```
+
+## File I/O
+
+`std` also provides a small file API built on the same module system — `std::Open`
+returns a `std::File` with SIC-style `FileStatus` results, `std::Read`/`std::Write`
+move bytes through a `std::Buffer`, and both `File` and `Buffer` are managed
+structs that release themselves (`del`/scope exit) across the module boundary. This
+surface is still settling; read `siccomp/lib/std/file.sic` for the current shape.
+
 ## What it can format
 
 Any type carries enough runtime type information for `std` to render it:
