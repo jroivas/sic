@@ -294,6 +294,22 @@ Support easy comparison without strcmp:
         return 1;
     return 0;
 
+Basic search and split operations are built in. `contains` tests for a substring
+(a single-character argument is the character-search case, so there is no separate
+`strchr`); `split`/`rsplit` divide the string at the first/last occurrence of a
+separator into a `tuple(before, after)`, returning the whole string plus an empty
+tail when the separator is absent:
+
+    string path = "path/to/file.txt";
+    if (path.contains("/")) { /* … */ }
+
+    tuple head_tail = path.split("/");        // ("path", "to/file.txt")
+    tuple name_ext  = path.rsplit(".");       // ("path/to/file", "txt")
+    string dir  = head_tail[0];
+    string rest = head_tail[1];
+
+The two parts are views into the original string (plain offsets, no copy), valid
+while it is.
 
 ## Empty brackets pointer
 
