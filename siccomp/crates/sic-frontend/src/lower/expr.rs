@@ -3473,15 +3473,27 @@ impl<'m> FuncCtx<'m> {
     /// `~S()` `del`s them), so retaining them mirrors that release.
     pub(crate) fn retain_struct_owned_fields(&mut self, ptr: Val, struct_ty: &Type) -> Result<()> {
         let resolved = super::types::resolve_aggregate(struct_ty, &self.lowerer.struct_types);
-        let fields = match &resolved { Type::Struct(st) => st.fields.clone(), _ => return Ok(()) };
-        for (fname, fty) in fields {
+        let sname = match &resolved { Type::Struct(st) => st.name.clone(), _ => return Ok(()) };
+        let fieldtys = match &resolved { Type::Struct(st) => st.fields.clone(), _ => return Ok(()) };
+        // Retain exactly the fields this struct's destructor `del`s — its owned,
+        // refcounted resources. A borrowed pointer field (one the dtor leaves alone)
+        // is never touched, so its (non-refcount) memory is not corrupted.
+        let owned: Vec<String> = sname.as_ref()
+            .and_then(|n| self.lowerer.struct_owned_fields.get(n).cloned())
+            .unwrap_or_default();
+        for (fname, fty) in fieldtys {
+            let is_owned = owned.iter().any(|o| o == &fname);
+            let nested = matches!(super::types::resolve_aggregate(&fty, &self.lowerer.struct_types), Type::Struct(_))
+                && self.lowerer.struct_dtor.contains_key(match &super::types::resolve_aggregate(&fty, &self.lowerer.struct_types) { Type::Struct(st) => st.name.as_deref().unwrap_or(""), _ => "" });
+            if !is_owned && !nested { continue; }
             let flv = self.field_ptr_from(LValue::plain(ptr.clone(), resolved.clone()), &fname, false, &crate::lexer::Span::default())?;
             if super::types::is_sic_string(&fty) {
                 self.retain_string_at(&flv.ptr)?;
             } else if matches!(&fty, Type::Pointer(_)) {
                 let v = self.load_lvalue(&flv)?;
                 self.emit_rc_retain(v)?;
-            } else if matches!(super::types::resolve_aggregate(&fty, &self.lowerer.struct_types), Type::Struct(_)) {
+            } else if nested {
+                // A nested managed struct held by value: retain its own owned fields.
                 self.retain_struct_owned_fields(flv.ptr, &fty)?;
             }
         }

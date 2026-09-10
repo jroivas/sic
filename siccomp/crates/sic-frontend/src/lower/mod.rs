@@ -130,6 +130,10 @@ pub struct Lowerer {
     /// sic: struct name → its destructor's mangled free function
     /// `__sic_dtor_<S>(S* self)`, called at scope exit. Present only for `~S()`.
     pub struct_dtor: HashMap<String, String>,
+    /// sic (sic.md §"Memory safety"): struct name → the field names its destructor
+    /// `del`s (its OWNED, refcounted fields). A managed-struct copy (`v = other`)
+    /// retains exactly these — never a borrowed pointer field the dtor leaves alone.
+    pub struct_owned_fields: HashMap<String, Vec<String>>,
     /// sic strict enum typing: a typedef alias for a payload-less enum → the
     /// canonical enum name (a key in `c_enum_defs`). Lets `typedef enum {…} E;` be
     /// type-checked as strictly as `enum E`. An anonymous enum's typedef name is its
@@ -225,6 +229,7 @@ impl Lowerer {
             private_types: std::collections::HashSet::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
+            struct_owned_fields: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -1812,6 +1817,13 @@ impl Lowerer {
                                 self.struct_ctor.insert(sname.clone(), n);
                             } else {
                                 self.struct_dtor.insert(sname.clone(), n);
+                                // Record the fields the destructor `del`s — the
+                                // struct's OWNED, refcounted fields — so a copy
+                                // (`v = other`) retains exactly those and never a
+                                // borrowed pointer field the dtor leaves alone.
+                                let mut owned = Vec::new();
+                                collect_deleted_fields(&m.body, &fields, &mut owned);
+                                self.struct_owned_fields.insert(sname.clone(), owned);
                             }
                             // Prepend the implicit `self`, then rewrite bare field
                             // references in the body to go through it.
@@ -3329,6 +3341,46 @@ fn rewrite_implicit_self(body: &mut [Stmt], fields: &HashSet<String>) {
     let targets: HashSet<String> = fields.difference(&local_set).cloned().collect();
     if targets.is_empty() { return; }
     for s in body.iter_mut() { rw_self_stmt(s, &targets); }
+}
+
+/// Collect the struct fields a destructor `del`s (sic.md §"Memory safety"): the
+/// struct's OWNED, refcounted fields. Scans for `del <field>` / `del self->field` /
+/// `del self.field` (before implicit-`self` rewriting). Used so a managed-struct
+/// copy retains exactly the owned fields, never a borrowed pointer.
+fn collect_deleted_fields(body: &[Stmt], fields: &HashSet<String>, out: &mut Vec<String>) {
+    fn field_of(e: &Expr, fields: &HashSet<String>) -> Option<String> {
+        match &e.kind {
+            ExprKind::Ident(n) if fields.contains(n) => Some(n.clone()),
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name }
+                if matches!(&base.kind, ExprKind::Ident(b) if b == "self") && fields.contains(name)
+                => Some(name.clone()),
+            _ => None,
+        }
+    }
+    fn walk(s: &Stmt, fields: &HashSet<String>, out: &mut Vec<String>) {
+        match s {
+            Stmt::Delete(e, _) => {
+                if let Some(f) = field_of(e, fields) {
+                    if !out.contains(&f) { out.push(f); }
+                }
+            }
+            Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => for s in ss { walk(s, fields, out); },
+            Stmt::If { then, else_, .. } => {
+                walk(then, fields, out);
+                if let Some(e) = else_ { walk(e, fields, out); }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. }
+            | Stmt::Default(body, _) | Stmt::Label(_, body, _) | Stmt::Defer(body, _)
+            | Stmt::For { body, .. } => walk(body, fields, out),
+            Stmt::ForEach { body, .. } => walk(body, fields, out),
+            Stmt::Switch { body, .. } => walk(body, fields, out),
+            Stmt::Match { arms, .. } => for a in arms { walk(&a.body, fields, out); },
+            Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) => walk(body, fields, out),
+            Stmt::Guard { else_body, .. } => walk(else_body, fields, out),
+            _ => {}
+        }
+    }
+    for s in body { walk(s, fields, out); }
 }
 
 /// Names of variables *declared* (not merely used) anywhere within a statement —

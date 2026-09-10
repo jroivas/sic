@@ -9,6 +9,13 @@ struct Box {
     ~Box() { del p; }
 };
 
+struct Ref {
+    int *own;                   // owned (from new)
+    int *borrow;                // borrowed — the dtor does not touch it
+    Ref() { own = new int(1); own[0] = 0; }
+    ~Ref() { del own; }
+};
+
 int main() {
     Box a;
     Box b;
@@ -34,5 +41,17 @@ int main() {
     d = d;
     if (d.p[0] != 7) return 6;
 
-    return 42;                  // all blocks freed once at scope exit (valgrind-clean)
+    // a BORROWED pointer field (not `del`'d by the dtor) must NOT be retained on
+    // assignment — only the owned field is refcounted.
+    Ref r1;
+    Ref r2;
+    int x = 100;
+    int y = 200;
+    r1.borrow = &x;             // borrowed — dtor leaves it alone
+    r2.borrow = &y;
+    r1 = r2;                    // retains only `own`, never `borrow`
+    if (r1.borrow[0] != 200) return 7;
+    if (x != 100 || y != 200) return 8;   // no corruption of the borrowed targets
+
+    return 42;                  // all owned blocks freed once at scope exit (valgrind-clean)
 }
