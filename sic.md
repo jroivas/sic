@@ -297,8 +297,7 @@ Support easy comparison without strcmp:
 Basic search and split operations are built in. `contains` tests for a substring
 (a single-character argument is the character-search case, so there is no separate
 `strchr`); `split`/`rsplit` divide the string at the first/last occurrence of a
-separator into a `tuple(before, after)`, returning the whole string plus an empty
-tail when the separator is absent:
+separator into a `tuple(before, after)`:
 
     string path = "path/to/file.txt";
     if (path.contains("/")) { /* … */ }
@@ -307,6 +306,18 @@ tail when the separator is absent:
     tuple name_ext  = path.rsplit(".");       // ("path/to/file", "txt")
     string dir  = head_tail[0];
     string rest = head_tail[1];
+
+When the separator is absent the result is a **one-element** tuple holding the whole
+string, so `res.length` distinguishes a real split (its `.length` is `2` when the
+separator was found, `1` when not). A `tuple t;` on its own is the empty tuple —
+`t.length` is `0` and it has no valid element. This makes a peel-loop natural:
+
+    tuple res;
+    string tail = path;
+    do {
+        res = tail.split("/");
+        tail = res[0];
+    } while (res.length > 1);
 
 The two parts are views into the original string (plain offsets, no copy), valid
 while it is.
