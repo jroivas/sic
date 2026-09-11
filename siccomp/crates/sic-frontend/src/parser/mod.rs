@@ -419,7 +419,7 @@ impl Parser {
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
-            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
+            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
@@ -433,7 +433,7 @@ impl Parser {
         if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
             && self.peek().text == "private"
             && self.tokens.get(self.pos + 1).map_or(false, |t|
-                matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum)) {
+                matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield)) {
             return false;
         }
         // sic `@T` / `@mut T` reference type at the head of a declaration (e.g. a
@@ -618,13 +618,15 @@ impl Parser {
                 // the following aggregate type from the module manifest.
                 TokenKind::Ident if self.lang == Lang::Sic && self.peek().text == "private"
                     && self.tokens.get(self.pos + 1).map_or(false, |t|
-                        matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum)) => {
+                        matches!(t.kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield)) => {
                     self.advance();
                     self.pending_private = true;
                 }
                 TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
                 TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
                 TokenKind::Enum     => { base = Some(self.parse_enum()?); }
+                // sic bitfield type (sic.md §"Bitfields").
+                TokenKind::Bitfield if base.is_none() => { base = Some(self.parse_bitfield()?); }
                 // sic `tuple` type (sic.md §"Tuples"). `tuple(` is instead the
                 // pack/unpack expression, handled in primary-expression parsing.
                 TokenKind::Tuple if base.is_none()
@@ -1137,6 +1139,36 @@ impl Parser {
         Ok(AstType::Enum(EnumDef { name, variants, packed: self.pending_packed, type_params, private, span: sp }))
     }
 
+    /// sic bitfield (sic.md §"Bitfields"): `bitfield Name { A, B, _, C }`. Each
+    /// listed member `i` implicitly has value `1 << i`; a `_` placeholder skips
+    /// that bit position (leaving `1 << i` undefined) but still advances the
+    /// index, so a later member keeps its higher power of two.
+    fn parse_bitfield(&mut self) -> Result<AstType> {
+        let sp = self.span();
+        self.advance(); // 'bitfield'
+        self.skip_attributes();
+        let name = self.expect_name()?;
+        self.skip_attributes();
+        self.expect(TokenKind::LBrace)?;
+        let mut members = Vec::new();
+        while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
+            // `_` is a hole: it occupies a bit position without naming a flag.
+            let m = if self.at(TokenKind::Ident) && self.peek().text == "_" {
+                self.advance();
+                "_".to_string()
+            } else {
+                self.expect_name()?
+            };
+            members.push(m);
+            if !self.eat(TokenKind::Comma) { break; }
+        }
+        self.expect(TokenKind::RBrace)?;
+        // Register the name as a type so `Data a;` parses (like a tagged enum).
+        self.typedefs.insert(name.clone());
+        let private = std::mem::take(&mut self.pending_private);
+        Ok(AstType::Bitfield(BitfieldDef { name, members, private, span: sp }))
+    }
+
     // ─── Declarators ──────────────────────────────────────────────────────────
 
     /// With the current token at `(`, decide whether it opens a *grouped
@@ -1351,7 +1383,7 @@ impl Parser {
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
-            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
+            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal)
@@ -1572,7 +1604,7 @@ impl Parser {
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
-            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Typedef
+            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
             | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
@@ -2293,7 +2325,7 @@ impl Parser {
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
-            | TokenKind::Enum | TokenKind::Const | TokenKind::Volatile
+            | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Const | TokenKind::Volatile
             | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Attribute)
         {
             return true;

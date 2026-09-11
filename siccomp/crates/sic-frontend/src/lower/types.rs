@@ -659,6 +659,11 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         }
         AstType::Struct(s) => lower_struct(s, named, ptr_size)?,
         AstType::Union(u)  => lower_union(u, named, ptr_size)?,
+        // sic bitfield (sic.md §"Bitfields"): its storage is an unsigned integer
+        // wide enough for every flag — `u32` for ≤32 bit positions, `u64` for
+        // ≤64. The set identity (for strict `& | ^ ~`-only typing) is tracked
+        // separately in the lowerer's `bitfield_defs`.
+        AstType::Bitfield(b) => bitfield_storage_type(b.members.len())?,
         // An enum's underlying type is unsigned when every enumerator is
         // non-negative (GCC/Clang behaviour), signed otherwise. This matters for
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a
@@ -774,6 +779,19 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "generic enum `{}` used before instantiation (monomorphization pending)", name)))?
         }
     })
+}
+
+/// The unsigned storage type for a bitfield with `nbits` declared positions
+/// (sic.md §"Bitfields"): `u32` for ≤32, `u64` for ≤64, otherwise an error.
+pub fn bitfield_storage_type(nbits: usize) -> crate::Result<Type> {
+    if nbits <= 32 {
+        Ok(Type::Int { bits: 32, signed: false })
+    } else if nbits <= 64 {
+        Ok(Type::Int { bits: 64, signed: false })
+    } else {
+        Err(CompileError::new(format!(
+            "bitfield has {} members; a bitfield supports at most 64", nbits)))
+    }
 }
 
 /// The internal mangled name of a concrete generic-enum monomorph, e.g.

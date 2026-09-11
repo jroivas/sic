@@ -48,6 +48,17 @@ enum EnumClass {
     Unknown,
 }
 
+/// sic bitfield typing (sic.md §"Bitfields"): the nominal classification of an
+/// expression — a specific `bitfield`, a plain integer, or unknown. Mirrors
+/// `EnumClass`; used to restrict operators to `& | ^ ~` and enforce strict
+/// init/assign / width-checked casts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BitfieldClass {
+    Bitfield(String),
+    Int,
+    Unknown,
+}
+
 /// sic type safety (sic.md §"Memory safety"): if `dest` and `src` mismatch across a
 /// plain-aggregate pointer/value boundary — a `File` value fed a `File*`, or a
 /// `File*` slot fed a `File` value — return a fix-it message. sic's own aggregates
@@ -144,6 +155,11 @@ pub struct FuncCtx<'m> {
     /// (`enum vals v`) → the enum name, so `v.str` → `"vals::ONE"` can find the
     /// variant table (the enum itself lowers to a plain int, losing its identity).
     pub enum_locals: HashMap<String, String>,
+    /// sic bitfields (sic.md §"Bitfields"): locals/params declared with a
+    /// `bitfield` type → the bitfield name, so `& | ^ ~` restrictions,
+    /// width-checked casts, and `.as_uN` accessors can recover its identity (it
+    /// lowers to a plain unsigned int).
+    pub bitfield_locals: HashMap<String, String>,
     /// Function-scope `static` locals: name → (type, internal global). These
     /// have static storage duration, so they resolve to a module global rather
     /// than a stack slot.
@@ -252,6 +268,7 @@ impl<'m> FuncCtx<'m> {
             func: func as *mut Function,
             locals: vec![HashMap::new()],
             enum_locals: HashMap::new(),
+            bitfield_locals: HashMap::new(),
             static_locals: HashMap::new(),
             val_types: HashMap::new(),
             current_bb: entry_id,
@@ -666,6 +683,134 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// If AST type `ty` names a `bitfield`, its name.
+    pub(crate) fn bitfield_name_of(&self, ty: &crate::ast::AstType) -> Option<String> {
+        use crate::ast::AstType;
+        match ty {
+            AstType::Bitfield(b) => Some(b.name.clone()),
+            AstType::Named(n) | AstType::Builtin(n)
+                if self.lowerer.bitfield_defs.contains_key(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// sic bitfield typing (sic.md §"Bitfields"): classify an expression as a
+    /// specific bitfield, a plain integer, or unknown — recovering the nominal
+    /// identity (the storage is a plain unsigned int) from the AST and side tables.
+    pub(crate) fn bitfield_class(&self, e: &Expr) -> BitfieldClass {
+        use crate::ast::{ExprKind, BinOpKind, UnOpKind};
+        match &e.kind {
+            ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::CharLit(..)
+            | ExprKind::BoolLit(..) => BitfieldClass::Int,
+            ExprKind::Ident(id) => {
+                if let Some(bf) = self.bitfield_locals.get(id) { return BitfieldClass::Bitfield(bf.clone()); }
+                if let Some(bf) = self.lowerer.bitfield_variant.get(id) { return BitfieldClass::Bitfield(bf.clone()); }
+                match self.lookup(id) {
+                    Some(LookupResult::Local(ty, _))
+                        if matches!(ty, Type::Int { .. } | Type::Bool) => BitfieldClass::Int,
+                    _ => BitfieldClass::Unknown,
+                }
+            }
+            // `Bits::Member`.
+            ExprKind::EnumVariant { enum_name, .. }
+                if self.lowerer.bitfield_defs.contains_key(enum_name) =>
+                BitfieldClass::Bitfield(enum_name.clone()),
+            // A cast to a bitfield type re-enters the flag domain; any other cast
+            // (e.g. `(u32)a`) leaves it as a plain integer.
+            ExprKind::Cast { ty, .. } => match self.bitfield_name_of(&ty.ty) {
+                Some(bf) => BitfieldClass::Bitfield(bf),
+                None => BitfieldClass::Int,
+            },
+            // `& | ^` of bitfield operands stays that bitfield.
+            ExprKind::BinOp { op: BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor, lhs, rhs } => {
+                match (self.bitfield_class(lhs), self.bitfield_class(rhs)) {
+                    (BitfieldClass::Bitfield(a), _) => BitfieldClass::Bitfield(a),
+                    (_, BitfieldClass::Bitfield(b)) => BitfieldClass::Bitfield(b),
+                    _ => BitfieldClass::Int,
+                }
+            }
+            ExprKind::BinOp { .. } => BitfieldClass::Int,
+            // `~x` of a bitfield stays that bitfield (masked to the defined bits).
+            ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.bitfield_class(expr),
+            ExprKind::Unary { .. } => BitfieldClass::Int,
+            ExprKind::Ternary { then, else_, .. } => {
+                match (self.bitfield_class(then), self.bitfield_class(else_)) {
+                    (BitfieldClass::Bitfield(a), BitfieldClass::Bitfield(b)) if a == b => BitfieldClass::Bitfield(a),
+                    _ => BitfieldClass::Unknown,
+                }
+            }
+            _ => BitfieldClass::Unknown,
+        }
+    }
+
+    /// Number of value bits a bitfield needs = (highest defined bit position) + 1
+    /// (`_` holes past the last flag don't count). A `(uN)`/`.as_uN` cast is legal
+    /// only when `N ≥` this.
+    pub(crate) fn bitfield_required_bits(&self, bf: &str) -> u32 {
+        let members = match self.lowerer.bitfield_defs.get(bf) { Some(m) => m, None => return 0 };
+        members.iter().enumerate()
+            .filter(|(_, m)| *m != "_")
+            .map(|(i, _)| i as u32 + 1)
+            .max().unwrap_or(0)
+    }
+
+    /// Mask of the bitfield's *defined* bits (holes excluded) — used to keep `~x`
+    /// within the valid flag set.
+    pub(crate) fn bitfield_defined_mask(&self, bf: &str) -> u64 {
+        let members = match self.lowerer.bitfield_defs.get(bf) { Some(m) => m, None => return 0 };
+        let mut mask = 0u64;
+        for (i, m) in members.iter().enumerate() {
+            if m != "_" { mask |= 1u64 << i; }
+        }
+        mask
+    }
+
+    /// sic bitfield typing (sic.md §"Bitfields"): reject an operator other than
+    /// `& | ^` (and `== !=`) on a bitfield operand — no arithmetic, shifts, or
+    /// ordering. `~` is handled separately (unary).
+    pub(crate) fn check_bitfield_arith(&self, op: crate::ast::BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<()> {
+        use crate::ast::BinOpKind::*;
+        if !self.is_sic() { return Ok(()); }
+        // `& | ^` are the only binary flag ops; equality is allowed to compare sets.
+        if matches!(op, BitAnd | BitOr | BitXor | Eq | Ne) { return Ok(()); }
+        for e in [lhs, rhs] {
+            if let BitfieldClass::Bitfield(bf) = self.bitfield_class(e) {
+                return Err(CompileError::at(
+                    format!("bitfield `{}` supports only `& | ^ ~` (and `== !=`), not `{}` — cast to an integer first",
+                        bf, op_symbol(op)),
+                    e.span.file.clone(), e.span.line, e.span.col));
+            }
+        }
+        Ok(())
+    }
+
+    /// sic bitfield typing (sic.md §"Bitfields"): reject a value flowing into a
+    /// `bitfield <dest>` slot that is a plain `int` or a *different* bitfield. A
+    /// literal `0` (the empty set) and an unknown source are allowed.
+    pub(crate) fn check_bitfield_dest(&self, dest: &str, src: &Expr, site: &str) -> Result<()> {
+        use crate::ast::ExprKind;
+        if !self.is_sic() { return Ok(()); }
+        // `Data a = 0;` — the empty flag set.
+        if matches!(&src.kind, ExprKind::IntLit(0, _)) { return Ok(()); }
+        // A disallowed operator directly on flag operands (`a + Two`) gets the
+        // clearer "no arithmetic" diagnostic rather than the generic int mismatch.
+        if let ExprKind::BinOp { op, lhs, rhs } = &src.kind {
+            self.check_bitfield_arith(*op, lhs, rhs)?;
+        }
+        let sp = &src.span;
+        match self.bitfield_class(src) {
+            BitfieldClass::Bitfield(b) if b == dest => Ok(()),
+            BitfieldClass::Bitfield(other) => Err(CompileError::at(
+                format!("bitfield type mismatch: `{}` {} `{}` — use an explicit cast", other, site, dest),
+                sp.file.clone(), sp.line, sp.col)),
+            BitfieldClass::Int => Err(CompileError::at(
+                format!("`int` {} bitfield `{}` without a cast — combine its flags (e.g. `{}::A | {}::B`)",
+                    site, dest, dest, dest),
+                sp.file.clone(), sp.line, sp.col)),
+            BitfieldClass::Unknown => Ok(()),
+        }
+    }
+
     pub fn lookup(&self, name: &str) -> Option<LookupResult<'_>> {
         for scope in self.locals.iter().rev() {
             if let Some((ty, vid)) = scope.get(name) {
@@ -974,6 +1119,9 @@ impl<'m> Lowerer {
                 fc.define_local(pname.clone(), pty, ptr_vid);
                 if let Some(en) = fc.c_enum_name_of(&p.ty.ty) {
                     fc.enum_locals.insert(pname.clone(), en);
+                }
+                if let Some(bf) = fc.bitfield_name_of(&p.ty.ty) {
+                    fc.bitfield_locals.insert(pname.clone(), bf);
                 }
             }
         }
@@ -1377,6 +1525,9 @@ impl<'m> FuncCtx<'m> {
                     AstType::Enum(e) => {
                         self.lowerer.register_enum(e)?;
                     }
+                    AstType::Bitfield(b) => {
+                        self.lowerer.register_bitfield(b)?;
+                    }
                     _ => {}
                 }
                 let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
@@ -1552,6 +1703,14 @@ impl<'m> FuncCtx<'m> {
                             self.check_enum_dest(&en, e, "assigned to")?;
                         }
                         self.enum_locals.insert(d.name.clone(), en);
+                    }
+                    // sic bitfield-typed local (sic.md §"Bitfields"): remember it and
+                    // enforce strict typing on its initializer.
+                    if let Some(bf) = self.bitfield_name_of(&d.ty.ty) {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            self.check_bitfield_dest(&bf, e, "assigned to")?;
+                        }
+                        self.bitfield_locals.insert(d.name.clone(), bf);
                     }
 
                     if let Some(Initializer::Expr(e)) = &d.init {
@@ -3531,5 +3690,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Tuple => "tuple".to_string(),
         AstType::Fixed { integral, fraction } => format!("fixed<{},{}>", integral, fraction),
         AstType::Generic { name, .. } => name.clone(),
+        AstType::Bitfield(b) => b.name.clone(),
     }
 }

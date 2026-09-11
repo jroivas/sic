@@ -1378,6 +1378,65 @@ of c in not CUSTOM. Better is to use:
         printf("Val of c: %d\n", cv);
     }
 
+## Bitfields
+
+Bit flags are common — permission masks, feature sets, hardware registers — and
+in C they are usually an `enum` (or `#define`s) stuffed into a `uint32_t`, with
+nothing stopping you from adding, shifting, or mixing them with plain integers.
+SIC has a dedicated `bitfield` type for this:
+
+    bitfield Data { One, Two, Three };
+
+Each member is a distinct power of two by position: `One = 1 << 0`, `Two = 1 << 1`,
+`Three = 1 << 2`. You combine them with `|` and refer to a member bare or as
+`Data::Two`:
+
+    Data a = Two | Three;              // 0b110
+    Data b = Data::One | Data::Three;  // 0b101
+
+A `_` placeholder skips a bit position without naming a flag — the next member
+keeps its higher power of two:
+
+    bitfield Tst { a, b, _, d };       // a=1<<0, b=1<<1, (1<<2 undefined), d=1<<3
+
+You may skip several:
+
+    bitfield Tst { _, b, _, d, _, e }; // b=1<<1, d=1<<3, e=1<<5
+
+Only the bit operators `& | ^ ~` (and `== !=`) are allowed. Arithmetic, shifts,
+and ordering are rejected at compile time — a `bitfield` is a *set of flags*, not
+a number:
+
+    Data c = a + Two;   // error: bitfield `Data` supports only `& | ^ ~`
+
+`~` is the set complement — every *other* defined flag (holes are excluded, so the
+result stays a valid combination):
+
+    Data d = ~Two;      // One | Three
+
+### Reading the integer value
+
+A `bitfield` never implicitly becomes an integer. To get the underlying value you
+must ask explicitly, with a cast or an `.as_uN` accessor:
+
+    u32 v = (u32)a;
+    u32 w = a.as_u32;
+    u64 x = a.as_u64;
+
+The width is checked at compile time against the *type's* capacity — its widest
+flag — not the runtime value. A set that could ever hold `1 << 8` cannot be read
+as a `u8` even if the value currently fits:
+
+    bitfield All { a, b, c, d, e, f, g, h, i };   // widest flag is 1 << 8
+    All p = All::d;
+    u8  q = (u8)p;      // error: needs at least 9 bits
+    u32 r = (u32)p;     // ok
+
+Storage is an unsigned integer: `u32` for up to 32 flag positions, `u64` for up to
+64 (more than 64 is an error). Assigning anything but the same `bitfield` (or a
+literal `0`, the empty set) requires an explicit cast, and the flag compound
+assignments `&= |= ^=` are the only ones permitted.
+
 ## Switch - case
 
 One problematic construction is `switch` and it's `case`.

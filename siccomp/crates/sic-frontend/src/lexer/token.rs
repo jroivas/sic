@@ -55,6 +55,7 @@ pub enum TokenKind {
     Module, Import, // sic-only: module system (sic.md §"Imports")
     Match,          // sic-only: `match` on a tagged enum (sic.md §"Match")
     Tuple,          // sic-only: `tuple` type / pack / unpack (sic.md §"Tuples")
+    Bitfield,       // sic-only: `bitfield` flag-set type (sic.md §"Bitfields")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)

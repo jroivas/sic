@@ -24,8 +24,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 5. [Memory & ownership](memory-and-ownership.md) — the move/borrow model,
    reference counting, copy-on-escape, `defer`, `new`/`del`, and `@` references.
 6. [Enums & pattern matching](enums-and-matching.md) — tagged enums, generics,
-   `Option`/`Result`, `match`, the tightened `switch`, and `?:` / `?.` / `else`
-   guards.
+   `Option`/`Result`, `match`, `bitfield` flag sets, the tightened `switch`, and
+   `?:` / `?.` / `else` guards.
 7. [RTTI & dynamic values](rtti-and-dynamic.md) — `type(x)`/`typeid`, the `any`
    box, `va_array` varargs, and `match (type(x))`.
 8. [Arrays & tuples](arrays-and-tuples.md) — `.length`/`.size`, array/tuple

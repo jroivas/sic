@@ -1,0 +1,48 @@
+// sic bitfield (sic.md §"Bitfields"): a flag set whose members are powers of
+// two (`One = 1<<0`, …), supporting only `& | ^ ~`, an `_` hole that skips a bit
+// position, and integer extraction via a width-checked `(uN)` cast / `.as_uN`.
+bitfield Data { One, Two, Three };          // 1, 2, 4
+bitfield Holed { W, X, _, Z };              // 1, 2, (skip 4), 8
+
+// A bitfield-typed parameter keeps its identity across the call boundary.
+u32 raw(Data d) { return d.as_u32; }
+
+int main() {
+    // Combine flags with `|`; both bare and `Bits::Flag` member forms.
+    Data a = Two | Three;                   // 6
+    if (a.as_u32 != 6) return 1;
+    Data b = Data::One | Data::Three;       // 5
+    if ((u32)b != 5) return 2;
+
+    // `~` is every OTHER defined flag (masked to the set, holes excluded).
+    Data c = ~Two;                          // One|Three = 5
+    if (c.as_u32 != 5) return 3;
+
+    // `&` and `^`.
+    if ((a & Three).as_u32 != 4) return 4;  // 6 & 4
+    if ((a ^ Two).as_u32   != 4) return 5;  // 6 ^ 2
+
+    // Flag compound assignment.
+    Data f = One;
+    f |= Two;                               // 3
+    f ^= One;                               // 2
+    if (f.as_u32 != 2) return 6;
+
+    // Comparison of two sets.
+    Data g = One | Two;
+    Data h = Two | One;
+    if (!(g == h)) return 7;
+
+    // `_` hole: `Z` keeps its higher power of two; `~W` excludes the hole bit.
+    Holed hd = Holed::Z;                    // 1<<3 == 8 (bit 2 is skipped)
+    if (hd.as_u32 != 8) return 8;
+    Holed hv = Holed::W | Holed::Z;         // 9
+    if (hv.as_u32 != 9) return 9;
+    Holed hn = ~Holed::W;                   // X|Z = 10 (bit 2 is a hole, excluded)
+    if (hn.as_u32 != 10) return 10;
+
+    // Parameter round-trip.
+    if (raw(One | Three) != 5) return 11;
+
+    return 42;
+}

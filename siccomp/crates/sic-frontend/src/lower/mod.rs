@@ -163,6 +163,13 @@ pub struct Lowerer {
     /// arguments to positions. An empty name marks a parameter whose name is unknown
     /// (e.g. an imported prototype), which only positional/variadic use can fill.
     pub fn_param_names: HashMap<String, (Vec<String>, bool)>,
+    /// sic bitfields (sic.md §"Bitfields"): bitfield name → its member list, in
+    /// declaration order, including `_` placeholders (a member's value is `1 <<
+    /// index_in_this_list`). The list length is the flag capacity (bit count).
+    pub bitfield_defs: HashMap<String, Vec<String>>,
+    /// Reverse index: a bitfield member name → its owning bitfield, so a bare
+    /// `Member` (not just `Bits::Member`) resolves. `_` holes are not recorded.
+    pub bitfield_variant: HashMap<String, String>,
 }
 
 /// One variant of a sic tagged enum.
@@ -233,6 +240,8 @@ impl Lowerer {
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
+            bitfield_defs: HashMap::new(),
+            bitfield_variant: HashMap::new(),
             generic_enum_defs: HashMap::new(),
             generic_fn_defs: HashMap::new(),
             fn_param_names: HashMap::new(),
@@ -604,6 +613,10 @@ impl Lowerer {
                 Decl::EnumDecl(e)
                 | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => {
                     self.register_enum(e)?;
+                }
+                // sic bitfield (sic.md §"Bitfields"): `bitfield B {…};`.
+                Decl::Var { base_ty: QualType { ty: AstType::Bitfield(b), .. }, .. } => {
+                    self.register_bitfield(b)?;
                 }
                 // sic `module x;` — this unit's exports get mangled `x_sym`.
                 Decl::Module(name, _) => { self.current_module = Some(name.clone()); }
@@ -1877,6 +1890,28 @@ impl Lowerer {
                 }
             }
         }
+    }
+
+    /// sic bitfield (sic.md §"Bitfields"): record the flag set and each member's
+    /// implicit constant (`1 << index`), register the type name so `Bits b;`
+    /// resolves to the unsigned storage type, and index members for bare use.
+    fn register_bitfield(&mut self, b: &crate::ast::BitfieldDef) -> Result<()> {
+        if !self.sic { return Ok(()); }
+        // Validate capacity up front (≤64 positions) — surfaces a clear error.
+        let storage = types::bitfield_storage_type(b.members.len())?;
+        self.bitfield_defs.insert(b.name.clone(), b.members.clone());
+        for (i, m) in b.members.iter().enumerate() {
+            if m == "_" { continue; } // a hole: not a named flag
+            // The member's value is `1 << i`; publish it like an enum constant so
+            // it folds in constant contexts, and index it for bare resolution.
+            self.enum_consts.insert(m.clone(), 1i64 << i);
+            self.bitfield_variant.insert(m.clone(), b.name.clone());
+        }
+        types::set_enum_consts(&self.enum_consts);
+        // `Bits b;` (an `AstType::Named`) resolves to the storage integer.
+        self.struct_types.insert(b.name.clone(), storage);
+        if b.private { self.private_types.insert(b.name.clone()); }
+        Ok(())
     }
 
     fn register_enum(&mut self, e: &EnumDef) -> Result<()> {

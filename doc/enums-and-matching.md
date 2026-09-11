@@ -185,6 +185,62 @@ if (s != Status::Gone) …      // true
 
 Payload equality is not implied — use `match` when you need to inspect a payload.
 
+## Bitfields — flag sets
+
+A `bitfield` is a dedicated type for bit flags — permission masks, feature sets,
+hardware registers — where an `enum` in a `uint32_t` would otherwise be used. Each
+member is a distinct power of two, by position:
+
+```sic
+bitfield Perm { Read, Write, Exec };   // 1<<0, 1<<1, 1<<2
+```
+
+Combine flags with `|`; a member is named bare or as `Perm::Write`:
+
+```sic
+Perm p = Read | Write;                 // 0b011
+Perm q = Perm::Read | Perm::Exec;      // 0b101
+```
+
+A `_` placeholder skips a bit position without naming a flag, so the next member
+keeps its higher power of two (you can skip several):
+
+```sic
+bitfield Reg { En, _, _, Mode };       // En=1<<0, Mode=1<<3
+```
+
+Only `& | ^ ~` (and `== !=`) are allowed — a flag set is not a number, so
+arithmetic, shifts, and ordering are compile-time errors. `~` is the set
+complement (every *other* defined flag; holes are excluded):
+
+```sic
+Perm rw   = Read | Write;
+Perm just = rw & Read;                 // 0b001
+Perm flip = rw ^ Read;                 // 0b010
+Perm rest = ~Read;                     // Write | Exec
+Perm bad  = Read + Write;              // ERROR: no arithmetic
+```
+
+### Reading the value
+
+A `bitfield` never becomes an integer implicitly. Ask explicitly with a cast or an
+`.as_uN` accessor, and the width is checked at compile time against the *type's*
+widest flag — not the current value:
+
+```sic
+u32 v = (u32)p;
+u32 w = p.as_u32;
+
+bitfield All { a, b, c, d, e, f, g, h, i };   // widest flag 1<<8 → needs 9 bits
+All x = All::d;
+u8  n = (u8)x;      // ERROR: needs at least 9 bits
+u32 m = (u32)x;     // ok
+```
+
+Storage is `u32` for up to 32 flags, `u64` for up to 64 (more is an error).
+Assigning anything but the same `bitfield` (or a literal `0`) needs a cast, and
+`&= |= ^=` are the only compound assignments allowed.
+
 ## Ergonomics — no `.unwrap()`
 
 SIC deliberately has no bare `.unwrap()`. Instead:

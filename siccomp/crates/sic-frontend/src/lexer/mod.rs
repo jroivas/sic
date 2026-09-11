@@ -612,6 +612,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `atomic` — atomic type qualifier (sic.md §"Atomics"), the sic
             // spelling of C11 `_Atomic`; an ordinary identifier in C.
             "atomic" => return TokenKind::Atomic,
+            // `bitfield` — a flag-set type (sic.md §"Bitfields"); ordinary
+            // identifier in C.
+            "bitfield" => return TokenKind::Bitfield,
             _ => {}
         }
     }

@@ -672,6 +672,18 @@ impl<'m> FuncCtx<'m> {
                         return self.lower_expr(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() });
                     }
                 }
+                // sic bitfield member `Bits::Flag` (sic.md §"Bitfields") → `1 <<
+                // index`, its power-of-two value.
+                if self.is_sic() {
+                    if let Some(members) = self.lowerer.bitfield_defs.get(enum_name) {
+                        match members.iter().position(|m| m == variant && m != "_") {
+                            Some(idx) => return Ok(Constant::int(1i64 << idx)),
+                            None => return Err(CompileError::at(
+                                format!("no flag `{}` in bitfield `{}`", variant, enum_name),
+                                expr.span.file.clone(), expr.span.line, expr.span.col)),
+                        }
+                    }
+                }
                 self.construct_enum(enum_name, variant, &[], &expr.span)
             }
 
@@ -729,6 +741,28 @@ impl<'m> FuncCtx<'m> {
                     let lv = self.lower_lvalue_field(base, name)?;
                     if matches!(lv.ty, Type::Array { .. }) { return Ok(lv.ptr); }
                     return self.load_lvalue(&lv);
+                }
+                // sic bitfield → integer accessors (sic.md §"Bitfields"):
+                // `flags.as_u32` / `flags.as_u64` yield the underlying value, legal
+                // only when the target width covers the whole set (its widest flag).
+                if self.is_sic() && matches!(name.as_str(), "as_u32" | "as_u64") {
+                    if let super::func::BitfieldClass::Bitfield(bf) = self.bitfield_class(base) {
+                        let (bits, to) = if name == "as_u32" {
+                            (32u32, Type::Int { bits: 32, signed: false })
+                        } else {
+                            (64, Type::Int { bits: 64, signed: false })
+                        };
+                        let required = self.bitfield_required_bits(&bf);
+                        if bits < required {
+                            return Err(CompileError::at(format!(
+                                "cannot read bitfield `{}` as u{}: it needs at least {} bits \
+                                 (its widest flag is `1 << {}`)",
+                                bf, bits, required, required - 1),
+                                expr.span.file.clone(), expr.span.line, expr.span.col));
+                        }
+                        let v = self.lower_expr(base)?;
+                        return self.coerce(v, &to);
+                    }
                 }
                 // sic RTTI accessors (sic.md §"RTTI"): on a `type` value, `.str` /
                 // `.name` give the canonical spelling, `.id` the stable hash, `.size`
@@ -921,6 +955,26 @@ impl<'m> FuncCtx<'m> {
                     let cp = self.u8char_cp(inner)?;
                     return self.coerce(cp, &target);
                 }
+                // sic bitfield → integer (sic.md §"Bitfields"): `(uN)flags`. Legal
+                // only when the target is wide enough for the whole set (its
+                // highest flag), regardless of the runtime value — a set that could
+                // hold `1 << 8` cannot be cast to `u8`.
+                if self.is_sic() {
+                    if let (Type::Int { bits, .. }, super::func::BitfieldClass::Bitfield(bf)) =
+                        (&target, self.bitfield_class(inner))
+                    {
+                        let required = self.bitfield_required_bits(&bf);
+                        if *bits < required {
+                            return Err(CompileError::at(format!(
+                                "cannot cast bitfield `{}` to a {}-bit integer: it needs at least {} bits \
+                                 (its widest flag is `1 << {}`)",
+                                bf, bits, required, required - 1),
+                                expr.span.file.clone(), expr.span.line, expr.span.col));
+                        }
+                        let v = self.lower_expr(inner)?;
+                        return self.coerce(v, &target);
+                    }
+                }
                 // sic: `(int)enum_value` yields the discriminant (sic.md §"Match").
                 if self.is_sic() && matches!(target, Type::Int { .. } | Type::Bool) {
                     if let Ok(src_ty) = self.infer_expr_type(inner) {
@@ -1102,6 +1156,10 @@ impl<'m> FuncCtx<'m> {
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum has no
         // arithmetic — `e + 1` must be `(int)e + 1`. Comparisons are allowed.
         self.check_enum_arith(op, lhs, rhs)?;
+
+        // sic bitfield typing (sic.md §"Bitfields"): only `& | ^` (+ `== !=`)
+        // are allowed on a flag set — no arithmetic, shifts, or ordering.
+        self.check_bitfield_arith(op, lhs, rhs)?;
 
         // sic array concatenation `a + b` (sic.md §"Arrays and lists"): two array
         // operands joined into a fresh array of the combined length. Checked
@@ -4069,6 +4127,23 @@ impl<'m> FuncCtx<'m> {
                 }
             }
         }
+        // sic bitfield typing (sic.md §"Bitfields"): a write to a bitfield-typed
+        // local must carry the same set (or an explicit cast); only the flag
+        // compound ops `&= |= ^=` are allowed — arithmetic/shift ones are rejected.
+        if self.is_sic() {
+            if let ExprKind::Ident(name) = &lhs.kind {
+                if let Some(dest) = self.bitfield_locals.get(name).cloned() {
+                    match op {
+                        None | Some(BinOpKind::BitAnd) | Some(BinOpKind::BitOr) | Some(BinOpKind::BitXor) =>
+                            self.check_bitfield_dest(&dest, rhs, "assigned to")?,
+                        Some(bad) => return Err(CompileError::at(
+                            format!("bitfield `{}` supports only `& | ^ ~` (and `&= |= ^=`), not `{}=`",
+                                dest, super::func::op_symbol(bad)),
+                            lhs.span.file.clone(), lhs.span.line, lhs.span.col)),
+                    }
+                }
+            }
+        }
         // sic `base?.field = value` (sic.md §"Match"): a null-guarded store — assign
         // only when `base` is present (a non-null pointer / a Some/Ok payload);
         // otherwise the write is a no-op. `.` and `?.` both auto-deref a pointer.
@@ -4421,6 +4496,23 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && self.is_bigint_operand(inner) {
                     let a = self.to_bigint(inner)?;
                     return self.call_bigint_new("__sic_bi_not", vec![a]);
+                }
+                // sic bitfield complement `~flags` (sic.md §"Bitfields"): every
+                // OTHER defined flag — mask the raw complement to the defined bits
+                // so the result stays a valid flag set (holes never appear).
+                if self.is_sic() {
+                    if let super::func::BitfieldClass::Bitfield(bf) = self.bitfield_class(inner) {
+                        let mask = self.bitfield_defined_mask(&bf);
+                        let members = self.lowerer.bitfield_defs.get(&bf).map(|m| m.len()).unwrap_or(0);
+                        let ty = super::types::bitfield_storage_type(members)?;
+                        let v = self.lower_expr(inner)?;
+                        let notted = self.alloc_val();
+                        self.push_instr(Instr::UnaryOp { dest: notted, op: UnOp::Not, val: v, ty: ty.clone() });
+                        let masked = self.alloc_val();
+                        self.push_instr(Instr::BinOp { dest: masked, op: BinOp::And,
+                            lhs: Val::Local(notted), rhs: Constant::int(mask as i64), ty });
+                        return Ok(Val::Local(masked));
+                    }
                 }
                 let v = self.lower_expr(inner)?;
                 let ty = self.val_type(&v);

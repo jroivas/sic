@@ -1,0 +1,9 @@
+// sic bitfield (sic.md §"Bitfields"): a flag set forbids arithmetic — only
+// `& | ^ ~` are allowed. `a + Two` must be rejected at compile time (this test
+// is an `.xfail`: it PASSES iff sic refuses to compile it).
+bitfield Data { One, Two, Three };
+int main() {
+    Data a = One;
+    Data b = a + Two;      // ERROR: bitfields have no arithmetic
+    return (u32)b;
+}

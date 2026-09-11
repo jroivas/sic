@@ -54,6 +54,10 @@ pub enum AstType {
     Struct(StructDef),
     Union(UnionDef),
     Enum(EnumDef),
+    /// sic-only (sic.md §"Bitfields"): a `bitfield B { A, B, C }` flag set. Member
+    /// `i` has value `1 << i`; only `& | ^ ~` are allowed, and it converts to an
+    /// integer only via an explicit width-checked cast / `.as_uN`.
+    Bitfield(BitfieldDef),
     Named(String),    // typedef name
     Builtin(String),  // __builtin_va_list etc.
     Typeof(BoxExpr),  // typeof(expr) — resolved to the operand's type
@@ -167,6 +171,18 @@ pub struct EnumDef {
     /// enum is a monomorphization *template*, instantiated per concrete `<...>`.
     pub type_params: Vec<String>,
     /// sic (sic.md §"Namespace"): `private enum` — withhold from the manifest.
+    pub private: bool,
+    pub span: Span,
+}
+
+/// sic-only (sic.md §"Bitfields"): a `bitfield B { A, B, C }` declaration. Each
+/// member `i` implicitly has value `1 << i`; the set's storage is `u32` (≤32
+/// members) or `u64` (≤64). Only `& | ^ ~` are permitted on values.
+#[derive(Debug, Clone)]
+pub struct BitfieldDef {
+    pub name: String,
+    pub members: Vec<String>,
+    /// sic (sic.md §"Namespace"): `private bitfield` — withhold from the manifest.
     pub private: bool,
     pub span: Span,
 }
