@@ -135,15 +135,40 @@ int n = (int)c + 1;  // ok
 c += 1;              // ERROR — write c = (enum Color)((int)c + 1)
 ```
 
-Going the other way is free: an enum **widens to `int`** implicitly, and you may
-compare it to an integer. So indexing, `printf`, and loops read naturally:
+Going the other way is free: an enum *value* **widens to `int`** implicitly, and
+you may compare it to an integer. So indexing, `printf`, and loops read naturally:
 
 ```sic
-int i = BLUE;              // ok (enum → int)
+enum Color c = BLUE;
+int i = c;                 // ok — an enum value widens to int
 if (c == 2) { … }          // ok (compare by value)
 arr[c];                    // ok
-for (enum Color e = RED; (int)e <= (int)BLUE; e = (enum Color)((int)e + 1)) { … }
+for (enum Color e = RED; (int)e <= (int)Color::BLUE; e = (enum Color)((int)e + 1)) { … }
 ```
+
+### The bare constant shorthand
+
+A bare constant name (`BLUE`) is allowed only where the enum type is unambiguous
+from context — an initializer/assignment/return of that enum, a matching call
+argument, or a comparison against a value of that enum. Otherwise it is a compile
+error and the qualified `Color::BLUE` is required (which works anywhere, including
+into a plain `int`):
+
+```sic
+enum Color c = BLUE;       // ok — target is `Color`
+if (c == GREEN) { … }      // ok — `c` fixes the type
+paint(RED);                // ok — the parameter is `Color`
+if (ev.kind == BLUE) { … } // ok — the enum-typed field fixes the type
+
+int n = GREEN;             // ERROR: ambiguous — write `Color::GREEN`
+int n = Color::GREEN;      // ok — qualified; n == 5
+```
+
+This keeps a constant's meaning unambiguous — you never have to guess *which*
+enum a bare `RED` came from. Anonymous enums used purely as integer constants
+(`enum { MAX = 100 };`) are exempt: `MAX` has no enum to qualify against, so it
+stays freely usable. The **same rule applies to [`bitfield`](#bitfields--flag-sets)
+flags.**
 
 Typedef enums (`typedef enum { LO, HI } Level;`, named or anonymous) are checked
 exactly the same way. Tagged enums are already distinct types, so this all falls
@@ -201,6 +226,11 @@ Combine flags with `|`; a member is named bare or as `Perm::Write`:
 Perm p = Read | Write;                 // 0b011
 Perm q = Perm::Read | Perm::Exec;      // 0b101
 ```
+
+As with enum constants, the bare form is allowed only where the bitfield type is
+determinable (init/assign/return/matching argument, or against a `Perm`-typed
+value); elsewhere write `Perm::Read`. So `int x = Read;` is an error — use
+`(int)Perm::Read` if you want its integer value.
 
 A `_` placeholder skips a bit position without naming a flag, so the next member
 keeps its higher power of two (you can skip several):

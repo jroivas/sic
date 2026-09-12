@@ -467,6 +467,12 @@ impl<'m> FuncCtx<'m> {
 
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
+        // sic bitfield/enum shorthand (sic.md §"Bitfields", §"Enums"): the expected
+        // strict type for a bare member reaches here through the determining sites
+        // and the flag/comparison operators only. Take it now so every OTHER
+        // expression kind starts with no context — a bare member never resolves by
+        // leaking through an unrelated parent (a call arg, an index, …).
+        let bf_ctx = std::mem::take(&mut self.bf_ctx);
         match &expr.kind {
             ExprKind::Generic { controlling, assocs } => {
                 let idx = self.select_generic(controlling, assocs)?;
@@ -589,7 +595,33 @@ impl<'m> FuncCtx<'m> {
                     // an int→enum-struct `coerce` builds the value when the target
                     // is the enum (e.g. `Test x = BLACK;`), and enum→int reads the
                     // tag (`(int)x`). See `coerce`.
-                    Some(LookupResult::EnumConst(v)) => Ok(Constant::int(v)),
+                    Some(LookupResult::EnumConst(v)) => {
+                        // sic shorthand gating (sic.md §"Bitfields", §"Enums"): a bare
+                        // member of a *named* enum or a bitfield resolves only when the
+                        // surrounding type is that same type. Otherwise its type is
+                        // ambiguous — require the explicit `Type::Member` form. (Loose
+                        // / anonymous-enum constants have no owner and stay free.)
+                        if self.is_sic() {
+                            if let Some(owner) = self.strict_const_owner(name) {
+                                use super::func::BfCtx;
+                                // Resolve when the surrounding type is this owner, or
+                                // when the context is neutral (`Any`); reject when it
+                                // is a plain-integer context (`Forbid`) or a different
+                                // enum/bitfield (`Expect(other)`).
+                                let ok = matches!(&bf_ctx, BfCtx::Any)
+                                    || matches!(&bf_ctx, BfCtx::Expect(b) if *b == owner);
+                                if !ok {
+                                    let kind = if self.lowerer.bitfield_defs.contains_key(&owner)
+                                        { "bitfield" } else { "enum" };
+                                    return Err(CompileError::at(format!(
+                                        "bare {} member `{}` — its type can't be determined here; \
+                                         write `{}::{}`", kind, name, owner, name),
+                                        expr.span.file.clone(), expr.span.line, expr.span.col));
+                                }
+                            }
+                        }
+                        Ok(Constant::int(v))
+                    }
                     Some(LookupResult::Func(fref)) => Ok(Val::Func(fref)),
                     None => {
                         // Compiler-provided predefined identifiers that expand to a
@@ -615,7 +647,12 @@ impl<'m> FuncCtx<'m> {
                 }
             }
 
-            ExprKind::BinOp { op, lhs, rhs } => self.lower_binop(*op, lhs, rhs),
+            ExprKind::BinOp { op, lhs, rhs } => {
+                // Re-establish the shorthand context so `lower_binop` can decide how
+                // it flows to the operands (`& | ^` and comparisons propagate it).
+                self.bf_ctx = bf_ctx;
+                self.lower_binop(*op, lhs, rhs)
+            }
 
             ExprKind::Assign { op, lhs, rhs } => self.lower_assign(*op, lhs, rhs),
 
@@ -627,7 +664,12 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Ref { expr, .. } => self.lower_ref(expr),
 
-            ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
+            ExprKind::Unary { op, expr: inner } => {
+                // `~flags` stays in the flag domain — propagate the shorthand context
+                // to the operand so `~Two` resolves under an expected bitfield type.
+                if matches!(op, UnOpKind::BitNot) { self.bf_ctx = bf_ctx; }
+                self.lower_unary(*op, inner)
+            }
 
             ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
             ExprKind::PostInc { inc, expr: inner } => self.lower_post_inc(*inc, inner),
@@ -933,6 +975,14 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Cast { ty, expr: inner } => {
                 let target = self.lower_type(ty)?;
+                // sic shorthand context (sic.md §"Bitfields", §"Enums"): a cast TO a
+                // bitfield/enum anchors that type for a bare member operand
+                // (`(Perm)x` / `(enum Color)y`); a cast to anything else clears it,
+                // so `(int)Two` is rejected while `(int)Perm::Two` is fine.
+                if self.is_sic() {
+                    let owner = self.bitfield_name_of(&ty.ty).or_else(|| self.c_enum_name_of(&ty.ty));
+                    self.bf_ctx = self.dest_ctx(owner, &target);
+                }
                 // sic `any` (sic.md std): `(any)x` boxes; `(T)anyval` downcasts
                 // (reads the slot back out as T).
                 if self.is_sic() && super::types::is_any(&target) {
@@ -1148,6 +1198,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // sic shorthand context (sic.md §"Bitfields", §"Enums"): a bare member on
+        // one side of `& | ^` or a comparison takes its type from the strict type
+        // on the other side, or from the type the surrounding expression expects.
+        // Taken here so the special operand paths below (string/bigint/…) start
+        // clean; re-established just before the generic integer operands lower.
+        let bf_incoming = std::mem::take(&mut self.bf_ctx);
+        let bf_operand_ctx = self.binop_operand_ctx(op, lhs, rhs, bf_incoming);
         // Short-circuit for logical ops
         if op == BinOpKind::LogAnd || op == BinOpKind::LogOr {
             return self.lower_logical(op == BinOpKind::LogAnd, lhs, rhs);
@@ -1309,7 +1366,9 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        self.bf_ctx = bf_operand_ctx.clone();
         let l = self.lower_expr(lhs)?;
+        self.bf_ctx = bf_operand_ctx;
         let r = self.lower_expr(rhs)?;
         self.emit_binop(op, l, r)
     }
@@ -4381,6 +4440,16 @@ impl<'m> FuncCtx<'m> {
             return Ok(lv.ptr);
         }
 
+        // sic shorthand context (sic.md §"Bitfields", §"Enums"): assigning to an
+        // enum/bitfield-typed lvalue lets a bare member on the right resolve
+        // (`val = Two;`, `flags |= Two;`); a *definitely* plain-scalar lvalue forbids
+        // one. An lvalue whose nominal type we can't see (e.g. an enum-typed struct
+        // field, which lowers to a plain int) stays neutral so `field = Blue` works.
+        self.bf_ctx = match self.definite_nominal(lhs) {
+            Some(b) => super::func::BfCtx::Expect(b),
+            None if self.is_definite_plain_scalar(lhs) => super::func::BfCtx::Forbid,
+            None => super::func::BfCtx::Any,
+        };
         let rhs_val = self.lower_expr(rhs)?;
 
         let store_val = if let Some(bin_op) = op {
@@ -6651,10 +6720,18 @@ impl<'m> FuncCtx<'m> {
             if let Some(fixed) = va_fixed {
                 if i >= fixed { break; } // trailing args handled below
             }
+            let mut arg_owner: Option<String> = None;
             if self.is_sic() {
                 if let Some(fname) = &callee_name {
                     if let Some(dest) = self.lowerer.c_enum_param.get(&(fname.clone(), i)).cloned() {
                         self.check_enum_dest(&dest, a, "passed as")?;
+                        arg_owner = Some(dest);
+                    }
+                    // sic bitfield param (sic.md §"Bitfields"): a bare flag argument
+                    // resolves against the parameter's bitfield type.
+                    if let Some(bf) = self.lowerer.bitfield_param.get(&(fname.clone(), i)).cloned() {
+                        self.check_bitfield_dest(&bf, a, "passed as")?;
+                        arg_owner = Some(bf);
                     }
                 }
                 // Reject a pointer/value aggregate mismatch on an argument, e.g.
@@ -6666,6 +6743,13 @@ impl<'m> FuncCtx<'m> {
             }
             let prev = self.expected_ty.take();
             if let Some(pt) = param_types.get(i) { self.expected_ty = Some(pt.clone()); }
+            // sic shorthand context: a matching enum/bitfield param resolves a bare
+            // member; a plain-integer param forbids one; a variadic slot is neutral.
+            self.bf_ctx = match param_types.get(i) {
+                _ if arg_owner.is_some() => super::func::BfCtx::Expect(arg_owner.unwrap()),
+                Some(pt) => self.dest_ctx(None, pt),
+                None => super::func::BfCtx::Any,
+            };
             let mut v = self.lower_arg(a)?;
             self.expected_ty = prev;
             // sic (sic.md §"Strings"): a `string` reaching a C variadic (`printf("%s",

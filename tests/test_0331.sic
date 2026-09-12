@@ -1,0 +1,40 @@
+// sic shorthand — the *determinable* contexts (sic.md §"Bitfields", §"Enums"): a
+// bare member/constant resolves when the surrounding type fixes it (init, assign,
+// return, matching call arg, comparison against a typed operand), and the
+// qualified `Type::Member` form works anywhere. Returns 42.
+enum Color { Red, Green, Blue };
+bitfield Perm { Read, Write, Exec };
+
+struct Ev { Color kind; };
+
+Color pick()        { return Green; }        // return context
+int   want(Color c) { return (int)c; }       // param context
+
+int main() {
+    Color c = Green;                 // init context
+    if (c == Blue) return 1;         // c fixes the type of the bare `Blue`
+    if (!(c == Green)) return 2;
+    c = Blue;                        // assign context
+    if ((int)c != 2) return 3;
+
+    if (want(Red) != 0) return 4;    // call-arg context
+    if ((int)pick() != 1) return 5;  // return context
+
+    // A struct field of enum type fixes the compared constant's type.
+    struct Ev e;
+    e.kind = Blue;
+    if (e.kind == Green) return 6;
+    if (!(e.kind == Blue)) return 7;
+
+    // Qualified form is always allowed, even into a plain int.
+    int n = (int)Color::Green;
+    if (n != 1) return 8;
+
+    // Bitfields: the same determinable contexts.
+    Perm p = Read | Write;           // init context (flag combine)
+    if ((p & Write).as_u32 != 2) return 9;
+    p = Exec;                        // assign context
+    if (p.as_u32 != 4) return 10;
+
+    return 42;
+}

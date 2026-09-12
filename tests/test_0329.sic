@@ -1,0 +1,8 @@
+// sic bitfield shorthand (sic.md §"Bitfields"): a bare flag resolves only where
+// the bitfield type is determinable. `int a = Two;` has no bitfield context, so
+// the flag is ambiguous — this must be rejected (`.xfail`). Write `Some::Two`.
+bitfield Some { One, Two, Three };
+int main() {
+    int a = Two;       // ERROR: bare flag in a plain-int context
+    return a;
+}

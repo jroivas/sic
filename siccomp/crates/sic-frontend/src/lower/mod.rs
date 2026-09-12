@@ -94,6 +94,10 @@ pub struct Lowerer {
     /// different enum passed without an explicit cast. Populated order-independently
     /// in a pre-pass over all function declarations.
     pub c_enum_param: HashMap<(String, usize), String>,
+    /// sic bitfield params (sic.md §"Bitfields"): `(function, param index)` → the
+    /// param's bitfield type, so a bare flag argument resolves against it (the IR
+    /// type is a plain unsigned int, losing the nominal identity).
+    pub bitfield_param: HashMap<(String, usize), String>,
     /// sic strict enum typing: function name → its payload-less enum return type, so
     /// `return <wrong>;` is rejected and a call's result classifies as that enum.
     pub c_enum_ret: HashMap<String, String>,
@@ -225,6 +229,7 @@ impl Lowerer {
             c_enum_defs: HashMap::new(),
             c_enum_variant: HashMap::new(),
             c_enum_param: HashMap::new(),
+            bitfield_param: HashMap::new(),
             c_enum_ret: HashMap::new(),
             c_enum_alias: HashMap::new(),
             struct_methods: HashMap::new(),
@@ -1887,8 +1892,22 @@ impl Lowerer {
                     if let Some(en) = self.c_enum_name_of_ast(&p.ty.ty) {
                         self.c_enum_param.insert((name.clone(), i), en);
                     }
+                    if let Some(bf) = self.bitfield_name_of_ast(&p.ty.ty) {
+                        self.bitfield_param.insert((name.clone(), i), bf);
+                    }
                 }
             }
+        }
+    }
+
+    /// sic bitfield (sic.md §"Bitfields"): if AST type `ty` names a bitfield, its name.
+    pub(crate) fn bitfield_name_of_ast(&self, ty: &crate::ast::AstType) -> Option<String> {
+        use crate::ast::AstType;
+        match ty {
+            AstType::Bitfield(b) => Some(b.name.clone()),
+            AstType::Named(n) | AstType::Builtin(n)
+                if self.bitfield_defs.contains_key(n) => Some(n.clone()),
+            _ => None,
         }
     }
 

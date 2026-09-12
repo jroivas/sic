@@ -1,0 +1,8 @@
+// sic enum shorthand (sic.md §"Enums"): a bare constant resolves only where the
+// enum type is determinable. `int a = Green;` has no enum context, so the
+// constant is ambiguous — this must be rejected (`.xfail`). Write `Color::Green`.
+enum Color { Red, Green, Blue };
+int main() {
+    int a = Green;     // ERROR: bare constant in a plain-int context
+    return a;
+}

@@ -59,6 +59,21 @@ pub(crate) enum BitfieldClass {
     Unknown,
 }
 
+/// sic shorthand context (sic.md §"Bitfields", §"Enums"): whether a bare
+/// member/constant name (`Two`, `BLUE`) may resolve at the point being lowered.
+/// `Any` (the default, and what every unhandled expression kind resets to) keeps
+/// the old permissive behavior; the determining sites narrow it to `Expect` (a
+/// specific enum/bitfield is wanted — only its members resolve bare) or `Forbid`
+/// (a determinable plain-integer context — the type is ambiguous, so require the
+/// explicit `Type::Member` form).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) enum BfCtx {
+    #[default]
+    Any,
+    Expect(String),
+    Forbid,
+}
+
 /// sic type safety (sic.md §"Memory safety"): if `dest` and `src` mismatch across a
 /// plain-aggregate pointer/value boundary — a `File` value fed a `File*`, or a
 /// `File*` slot fed a `File` value — return a fix-it message. sic's own aggregates
@@ -160,6 +175,15 @@ pub struct FuncCtx<'m> {
     /// width-checked casts, and `.as_uN` accessors can recover its identity (it
     /// lowers to a plain unsigned int).
     pub bitfield_locals: HashMap<String, String>,
+    /// sic bitfield/enum shorthand context (sic.md §"Bitfields", §"Enums"): the
+    /// strict enum-or-bitfield type currently *expected* by the surrounding
+    /// expression. A bare member/constant name (`Two`, `BLUE`) resolves ONLY when
+    /// it belongs to this type — otherwise its type is ambiguous and the qualified
+    /// `Type::Member` form is required. Set at determining sites (init, assign,
+    /// return, matching call arg, and comparison/`&|^`/`~` against a typed
+    /// operand), propagated through those operators, and reset to `Any` everywhere
+    /// else (taken at the top of `lower_expr`).
+    pub bf_ctx: BfCtx,
     /// Function-scope `static` locals: name → (type, internal global). These
     /// have static storage duration, so they resolve to a module global rather
     /// than a stack slot.
@@ -249,6 +273,9 @@ pub struct FuncCtx<'m> {
     /// enum return type, so `return <wrong>;` is rejected. `None` if it returns a
     /// non-enum type.
     pub ret_enum: Option<String>,
+    /// sic bitfield return type (sic.md §"Bitfields"): the bitfield a function
+    /// returns, so a bare flag in `return Two;` resolves against it.
+    pub ret_bitfield: Option<String>,
     /// Monotonic counter for synthesized names (e.g. range-`for` temporaries).
     pub gensym: u32,
 }
@@ -269,6 +296,7 @@ impl<'m> FuncCtx<'m> {
             locals: vec![HashMap::new()],
             enum_locals: HashMap::new(),
             bitfield_locals: HashMap::new(),
+            bf_ctx: BfCtx::Any,
             static_locals: HashMap::new(),
             val_types: HashMap::new(),
             current_bb: entry_id,
@@ -297,6 +325,7 @@ impl<'m> FuncCtx<'m> {
             guard_stack: Vec::new(),
             expected_ty: None,
             ret_enum: None,
+            ret_bitfield: None,
             gensym: 0,
         }
     }
@@ -694,6 +723,103 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// sic shorthand gating (sic.md §"Bitfields", §"Enums"): if `name` is a bare
+    /// member/constant of a *named* strict enum or a bitfield, the owning type's
+    /// name. Anonymous-enum constants (`enum { MAX }`) and loose constants return
+    /// `None` — they stay freely usable, only named-type members are gated.
+    pub(crate) fn strict_const_owner(&self, name: &str) -> Option<String> {
+        if let Some(bf) = self.lowerer.bitfield_variant.get(name) { return Some(bf.clone()); }
+        if let Some(en) = self.lowerer.c_enum_variant.get(name) { return Some(en.clone()); }
+        None
+    }
+
+    /// sic shorthand gating: the strict enum/bitfield type an expression *definitely*
+    /// has — enough to determine the type of a bare member on the other side of an
+    /// operator. A bare member name itself is deliberately NOT definite (it is the
+    /// very thing whose type must be resolved), so it returns `None`.
+    pub(crate) fn definite_nominal(&self, e: &Expr) -> Option<String> {
+        use crate::ast::{ExprKind, BinOpKind, UnOpKind};
+        match &e.kind {
+            ExprKind::Ident(id) => {
+                if let Some(bf) = self.bitfield_locals.get(id) { return Some(bf.clone()); }
+                if let Some(en) = self.enum_locals.get(id) { return Some(en.clone()); }
+                None
+            }
+            // `Type::Member` is an explicit, unambiguous type anchor.
+            ExprKind::EnumVariant { enum_name, .. }
+                if self.lowerer.bitfield_defs.contains_key(enum_name)
+                    || self.lowerer.c_enum_defs.contains_key(enum_name) => Some(enum_name.clone()),
+            // A cast to an enum/bitfield type anchors that type.
+            ExprKind::Cast { ty, .. } =>
+                self.bitfield_name_of(&ty.ty).or_else(|| self.c_enum_name_of(&ty.ty)),
+            // Flag combinators preserve the bitfield type.
+            ExprKind::BinOp { op: BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor, lhs, rhs } =>
+                self.definite_nominal(lhs).or_else(|| self.definite_nominal(rhs)),
+            ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.definite_nominal(expr),
+            _ => None,
+        }
+    }
+
+    /// The shorthand context a value flowing into a slot establishes: an
+    /// enum/bitfield `owner` expects that type; otherwise a plain-integer IR type
+    /// forbids bare members (their type would be ambiguous) and anything else is
+    /// neutral.
+    pub(crate) fn dest_ctx(&self, owner: Option<String>, ir: &Type) -> BfCtx {
+        match owner {
+            Some(b) => BfCtx::Expect(b),
+            None if matches!(ir, Type::Int { .. } | Type::Bool
+                | Type::Float32 | Type::Float64 | Type::Float80) => BfCtx::Forbid,
+            None => BfCtx::Any,
+        }
+    }
+
+    /// True if `e` is a determinable *plain* scalar (literal, plain-typed local/
+    /// global, arithmetic, or a scalar cast) — NOT a strict enum/bitfield. A bare
+    /// member compared against such a value is ambiguous and rejected.
+    pub(crate) fn is_definite_plain_scalar(&self, e: &Expr) -> bool {
+        use crate::ast::{ExprKind, AstType, BinOpKind::*};
+        match &e.kind {
+            ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::CharLit(..)
+            | ExprKind::BoolLit(..) | ExprKind::FloatLit(..) | ExprKind::DecimalLit(..) => true,
+            ExprKind::Ident(id) => {
+                if self.strict_const_owner(id).is_some() { return false; }
+                if self.enum_locals.contains_key(id) || self.bitfield_locals.contains_key(id) { return false; }
+                matches!(self.lookup(id),
+                    Some(LookupResult::Local(t, _)) | Some(LookupResult::Global(t, _))
+                        if matches!(t, Type::Int { .. } | Type::Bool
+                            | Type::Float32 | Type::Float64 | Type::Float80))
+            }
+            ExprKind::BinOp { op, .. } =>
+                matches!(op, Add | Sub | Mul | Div | Rem | Shl | Shr | RotL | RotR),
+            ExprKind::Cast { ty, .. } =>
+                self.bitfield_name_of(&ty.ty).is_none() && self.c_enum_name_of(&ty.ty).is_none()
+                && matches!(&ty.ty, AstType::Int { .. } | AstType::Char { .. } | AstType::Short { .. }
+                    | AstType::Long { .. } | AstType::LongLong { .. } | AstType::Bool
+                    | AstType::Float | AstType::Double | AstType::Named(_) | AstType::Builtin(_)),
+            _ => false,
+        }
+    }
+
+    /// The shorthand context to lower a binary operator's operands under: a
+    /// definite enum/bitfield operand pins a bare member on the other side; a flag
+    /// combinator lets the surrounding expectation flow; a comparison against a
+    /// plain scalar forbids a bare member; otherwise neutral.
+    pub(crate) fn binop_operand_ctx(&self, op: crate::ast::BinOpKind,
+        lhs: &Expr, rhs: &Expr, incoming: BfCtx) -> BfCtx {
+        use crate::ast::BinOpKind::*;
+        if let Some(b) = self.definite_nominal(lhs).or_else(|| self.definite_nominal(rhs)) {
+            return BfCtx::Expect(b);
+        }
+        match op {
+            BitAnd | BitOr | BitXor => incoming,
+            Eq | Ne | Lt | Le | Gt | Ge =>
+                if self.is_definite_plain_scalar(lhs) || self.is_definite_plain_scalar(rhs) {
+                    BfCtx::Forbid
+                } else { BfCtx::Any },
+            _ => BfCtx::Any,
+        }
+    }
+
     /// sic bitfield typing (sic.md §"Bitfields"): classify an expression as a
     /// specific bitfield, a plain integer, or unknown — recovering the nominal
     /// identity (the storage is a plain unsigned int) from the AST and side tables.
@@ -1067,6 +1193,8 @@ impl<'m> Lowerer {
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
         // makes `return <int/other-enum>;` an error without an explicit cast.
         fc.ret_enum = fc.lowerer.c_enum_name_of_ast(&ret_ty.ty);
+        // sic bitfield return type (sic.md §"Bitfields"): lets `return Two;` resolve.
+        fc.ret_bitfield = fc.bitfield_name_of(&ret_ty.ty);
 
         // Alloca for each parameter and store the param sentinel value.
         // The backend maps ValId(0x10000 + i) → the i-th function parameter.
@@ -1291,6 +1419,12 @@ impl<'m> FuncCtx<'m> {
                     self.set_terminator(Terminator::Ret(ret));
                 } else {
                     let ret = if let Some(e) = val {
+                        // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
+                        // enum/bitfield return type lets a bare member resolve; a
+                        // plain-integer return type forbids one.
+                        let owner = self.ret_enum.clone().or_else(|| self.ret_bitfield.clone());
+                        let rt = self.ret_ty.clone();
+                        self.bf_ctx = self.dest_ctx(owner, &rt);
                         let v = self.lower_expr(e)?;
                         let expected = self.ret_ty.clone();
                         let c = self.coerce(v, &expected)?;
@@ -1729,6 +1863,13 @@ impl<'m> FuncCtx<'m> {
                             self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
                         }
                     } else if let Some(init) = &d.init {
+                        // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
+                        // enum/bitfield-typed target lets a bare member in the
+                        // initializer resolve (`Some val = Two;`); a plain-integer
+                        // target forbids one (`int a = Two;` is ambiguous).
+                        let owner = self.c_enum_name_of(&d.ty.ty)
+                            .or_else(|| self.bitfield_name_of(&d.ty.ty));
+                        self.bf_ctx = self.dest_ctx(owner, &ty);
                         self.lower_initializer(init, Val::Local(vid), &ty)?;
                     } else {
                         // Zero-initialize

@@ -11,9 +11,12 @@ int main() {
     enum Color a = pick(BLUE);
     if (a != BLUE) return 1;
 
-    // enum → int is an implicit widening.
-    int n = GREEN;
+    // An enum *value* widens to int implicitly; a bare constant in a non-enum
+    // context is ambiguous, so name it `Color::GREEN` (sic.md §"Enums").
+    int n = Color::GREEN;
     if (n != 5) return 2;
+    int m = a;                         // enum value → int is still implicit
+    if (m != 6) return 2;
 
     // Compare against an int literal and against a constant.
     if (a == 5) return 3;             // BLUE is 6, so this must NOT hit
@@ -25,7 +28,7 @@ int main() {
 
     // Iterate with an explicit cast on the arithmetic.
     int count = 0;
-    for (enum Color e = RED; (int)e <= (int)BLUE; e = (enum Color)((int)e + 1)) {
+    for (enum Color e = RED; (int)e <= (int)Color::BLUE; e = (enum Color)((int)e + 1)) {
         count++;
     }
     if (count != 7) return 6;          // 0..6 inclusive

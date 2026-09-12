@@ -1394,6 +1394,18 @@ Each member is a distinct power of two by position: `One = 1 << 0`, `Two = 1 << 
     Data a = Two | Three;              // 0b110
     Data b = Data::One | Data::Three;  // 0b101
 
+The bare form (`Two`) is allowed only where the bitfield type is unambiguous from
+context — an initializer/assignment/return of that bitfield type, a matching call
+argument, or a comparison/`&|^`/`~` against a value of that type. Where the type
+can't be determined the bare form is a compile error and the qualified `Data::Two`
+is required (which works anywhere):
+
+    Data a = Two;            // ok — target is `Data`
+    if (a == Three) …        // ok — `a` fixes the type
+    int x = Two;             // ERROR: ambiguous — write `Data::Two`
+    int y = (int)Two;        // ERROR: cast target is `int`, not `Data`
+    int z = (int)Data::Two;  // ok — qualified; z == 2
+
 A `_` placeholder skips a bit position without naming a flag — the next member
 keeps its higher power of two:
 
