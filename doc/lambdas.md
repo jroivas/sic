@@ -39,20 +39,38 @@ qsort(a, 5, sizeof(int),
 Because the value is a function pointer, `auto fn = […]` gives `fn` the type
 `ret(*)(params)`, and calling `fn(args)` works like any function pointer.
 
-## Captures & currying (planned)
+## Captures
 
-A non-empty capture list will bind names from the enclosing scope, reusing SIC's
-[reference model](memory-and-ownership.md): `[x]` by value (a copy), `[@y]` by
-shared borrow, `[@mut y]` by mutable borrow. A capturing lambda is a closure —
-code plus a reference-counted environment — so it can be returned and stored,
-which is what makes currying fall out naturally:
+A non-empty capture list binds names from the enclosing scope. `[x]` captures by
+value — a copy taken when the closure is created:
 
 ```sic
-auto add = [](int a) { return [a](int b) { return a + b; }; };
-add(2)(3);                               // 5   (planned)
+int n = 100;
+auto addn = [n](int x) { return x + n; };
+addn(5);                                 // 105
+
+int k = 1;
+auto getk = [k]() { return k; };
+k = 999;
+getk();                                  // 1  (captured the value, not the variable)
 ```
 
-Capturing closures are not implemented yet. Today only captureless `[]` lambdas
-are accepted; a non-empty capture list is a compile error.
+A capturing lambda is a **closure**: code plus a reference-counted environment
+holding the captured values, allocated on the heap and released automatically.
+Because a closure can be returned and stored, **currying** works — a lambda that
+returns a lambda capturing the outer parameter:
+
+```sic
+auto add   = [](int a) { return [a](int b) { return a + b; }; };
+auto add10 = add(10);
+add10(32);                               // 42
+```
+
+Current limits (planned to lift): captures are **by value** and limited to scalar
+and pointer types; by-reference captures (`[@y]` shared, `[@mut y]` mutable),
+capturing owned aggregates like `string`, and a nameable closure type
+(`Fn<int(int)>`) are not implemented yet. Bind an intermediate closure to a
+variable rather than chaining calls in one expression — `auto g = add(10); g(32)`,
+not `add(10)(32)` — so its environment is released at scope exit.
 
 Next: [atomics](atomics.md).

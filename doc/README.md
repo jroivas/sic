@@ -35,7 +35,7 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 10. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
     `Iterator<T>`, and the range-`for`.
 11. [Lambdas](lambdas.md) — C++-style `[](params){…}` / `=> expr`, captureless
-    function-pointer decay and C-callback interop (captures & currying planned).
+    function-pointer decay, by-value captures, closures, and currying.
 12. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
     `.swap`/`.cas`, and atomic pointers.
 13. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),

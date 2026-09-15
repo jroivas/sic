@@ -1217,25 +1217,142 @@ impl<'m> FuncCtx<'m> {
         Ok(super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size))
     }
 
-    /// Lower a captureless lambda (sic.md §"Lambdas"): lift its body to a synthetic
-    /// top-level function and yield that function's pointer. Captures are a later
-    /// phase — a non-empty capture list is rejected for now.
+    /// The shape of a capturing closure (sic.md §"Lambdas"): its captured
+    /// `(name, type)` fields (inferred in the *current* scope), the user-visible
+    /// callable signature, the environment struct name/type, and the generated
+    /// function's signature (whose first parameter is the environment pointer).
+    /// Only by-value scalar/pointer captures are supported for now.
+    fn closure_shape(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
+        ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span)
+        -> Result<(Vec<(String, Type)>, FunctionType, String, FunctionType, Type)> {
+        let mut caps: Vec<(String, Type)> = Vec::new();
+        for c in captures {
+            if c.by_ref {
+                return Err(CompileError::at(format!(
+                    "by-reference capture `@{}` is not supported yet — capture by value (`[{}]`)",
+                    c.name, c.name), span.file.clone(), span.line, span.col));
+            }
+            let id = Expr::new(ExprKind::Ident(c.name.clone()), span.clone());
+            let ty = self.infer_expr_type(&id).map_err(|_| CompileError::at(
+                format!("cannot capture `{}` — not visible in this scope", c.name),
+                span.file.clone(), span.line, span.col))?;
+            if !matches!(ty, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64
+                | Type::Float80 | Type::Pointer(_)) {
+                return Err(CompileError::at(format!(
+                    "capture `{}` has type `{}` — only scalar and pointer captures are supported yet",
+                    c.name, super::func::type_desc(&ty)), span.file.clone(), span.line, span.col));
+            }
+            caps.push((c.name.clone(), ty));
+        }
+        // The user-visible signature, with captures in scope for return inference.
+        let mut ir_params = Vec::new();
+        for p in params {
+            ir_params.push(super::types::lower_param_type(&p.ty, &self.lowerer.struct_types, self.lowerer.ptr_size)?);
+        }
+        let ir_ret = match ret {
+            Some(r) => self.lower_type(r)?,
+            None => self.lowerer.infer_body_return_type_ext(body, params, &ir_params, &caps),
+        };
+        let user_sig = super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size);
+        let env_name = super::types::closure_env_name(&user_sig, &caps);
+        // The generated function takes the environment pointer as a hidden first
+        // parameter; an opaque pointer to the named struct avoids a self-cycle.
+        let env_opaque = Type::Pointer(Box::new(Type::Struct(
+            sic_ir::StructType::plain(Some(env_name.clone()), vec![], false))));
+        let mut code_params = vec![env_opaque];
+        code_params.extend(user_sig.params.clone());
+        let code_fn_ty = FunctionType { ret: user_sig.ret.clone(), params: code_params, variadic: false };
+        let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &caps);
+        Ok((caps, user_sig, env_name, code_fn_ty, env_ty))
+    }
+
+    /// The value type of a lambda expression: a plain function pointer when
+    /// captureless, or a closure (environment pointer) when it captures.
+    pub(crate) fn lambda_value_type(&mut self, captures: &[ast::LambdaCapture],
+        params: &[ast::Param], ret: &Option<ast::QualType>, body: &[ast::Stmt],
+        span: &crate::lexer::Span) -> Result<Type> {
+        if captures.is_empty() {
+            let sig = self.lambda_fn_type(params, ret, body)?;
+            return Ok(Type::Pointer(Box::new(Type::Function(Box::new(sig)))));
+        }
+        let (_, _, _, _, env_ty) = self.closure_shape(captures, params, ret, body, span)?;
+        Ok(Type::Pointer(Box::new(env_ty)))
+    }
+
+    /// Lower a lambda (sic.md §"Lambdas"): lift its body to a synthetic top-level
+    /// function. Captureless → the function's pointer; capturing → a heap
+    /// environment holding the code pointer plus the captured values (a closure).
     fn lower_lambda(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
         ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span) -> Result<Val> {
-        if !captures.is_empty() {
-            return Err(CompileError::at(
-                "lambda captures are not supported yet — only captureless `[]` lambdas".to_string(),
-                span.file.clone(), span.line, span.col));
+        let ret_qt = ret.clone().unwrap_or_else(|| ast::QualType::new(ast::AstType::Auto));
+        // Captureless: a plain function, yielding its pointer (zero runtime).
+        if captures.is_empty() {
+            let n = self.lowerer.lambda_counter;
+            self.lowerer.lambda_counter += 1;
+            let name = format!("__sic_lambda_{}", n);
+            self.lowerer.lower_function(&name, &ret_qt, params, false, body,
+                &Some(ast::StorageClass::Static), false, None, false)?;
+            let fref = self.lowerer.module.func_ref_by_name(&name).ok_or_else(||
+                CompileError::new("internal: lambda function was not registered".to_string()))?;
+            return Ok(Val::Func(fref));
         }
+
+        // Capturing: build the environment struct + a function taking the env as a
+        // hidden first parameter (`__self`), with the captures loaded from it.
+        let (caps, _user_sig, env_name, _code_fn_ty, env_ty) =
+            self.closure_shape(captures, params, ret, body, span)?;
+        self.lowerer.struct_types.insert(env_name.clone(), env_ty.clone());
+
         let n = self.lowerer.lambda_counter;
         self.lowerer.lambda_counter += 1;
-        let name = format!("__sic_lambda_{}", n);
-        let ret_qt = ret.clone().unwrap_or_else(|| ast::QualType::new(ast::AstType::Auto));
-        self.lowerer.lower_function(&name, &ret_qt, params, false, body,
+        let fn_name = format!("__sic_lambda_{}", n);
+        let self_param = ast::Param {
+            name: Some("__self".to_string()),
+            ty: ast::QualType::new(ast::AstType::Pointer {
+                base: Box::new(ast::QualType::new(ast::AstType::Named(env_name.clone()))),
+                quals: vec![],
+            }),
+            span: span.clone(),
+        };
+        let mut fn_params = vec![self_param];
+        fn_params.extend(params.iter().cloned());
+        // Prepend `auto <cap> = __self-><cap>;` so the body's references resolve.
+        let mut fn_body: Vec<ast::Stmt> = Vec::with_capacity(caps.len() + body.len());
+        for (cn, _) in &caps {
+            let init = ast::Initializer::Expr(Expr::new(ExprKind::Arrow {
+                base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), span.clone())),
+                name: cn.clone(),
+            }, span.clone()));
+            let auto_qt = ast::QualType {
+                ty: ast::AstType::Int { signed: true }, qualifiers: vec![],
+                storage: Some(ast::StorageClass::Auto),
+            };
+            fn_body.push(ast::Stmt::Decl(ast::Decl::Var {
+                base_ty: auto_qt.clone(),
+                declarators: vec![ast::Declarator {
+                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, span: span.clone(),
+                }],
+                weak: false, thread_local: false, span: span.clone(),
+            }));
+        }
+        fn_body.extend(body.iter().cloned());
+        self.lowerer.lower_function(&fn_name, &ret_qt, &fn_params, false, &fn_body,
             &Some(ast::StorageClass::Static), false, None, false)?;
-        let fref = self.lowerer.module.func_ref_by_name(&name).ok_or_else(||
-            CompileError::new("internal: lambda function was not registered".to_string()))?;
-        Ok(Val::Func(fref))
+        let code_fref = self.lowerer.module.func_ref_by_name(&fn_name).ok_or_else(||
+            CompileError::new("internal: closure function was not registered".to_string()))?;
+
+        // Allocate the refcounted environment, store the code pointer and captures.
+        let env_ptr = self.emit_rc_alloc(&env_ty)?;
+        let code_lv = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), "__code", false, span)?;
+        self.store_lvalue(&code_lv, Val::Func(code_fref))?;
+        for (cn, _) in &caps {
+            let v = self.lower_expr(&Expr::new(ExprKind::Ident(cn.clone()), span.clone()))?;
+            let fld = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), cn, false, span)?;
+            self.store_lvalue(&fld, v)?;
+        }
+        // Freed at scope exit unless a binding/return takes ownership (refcounted).
+        self.register_tuple_release(env_ptr.clone())?;
+        Ok(env_ptr)
     }
 
     fn lower_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -6860,6 +6977,16 @@ impl<'m> FuncCtx<'m> {
             _ => None,
         };
 
+        // sic closure call (sic.md §"Lambdas"): if the callee is a closure value
+        // (an environment pointer), route it specially — checked before the
+        // function-reference dispatch so an `Ident` closure variable doesn't take
+        // the plain function-pointer path.
+        if self.is_sic() && module_fref.is_none() {
+            if matches!(self.infer_expr_type(func_expr), Ok(t) if super::types::is_closure(&t)) {
+                return self.lower_closure_call(func_expr, arg_vals, sp);
+            }
+        }
+
         // Resolve function reference
         let fref = if let Some(fr) = module_fref { fr } else {
         match &func_expr.kind {
@@ -7186,6 +7313,52 @@ impl<'m> FuncCtx<'m> {
             return Some((vec![String::new(); ft.params.len()], ft.variadic));
         }
         None
+    }
+
+    /// sic closure call (sic.md §"Lambdas"): invoke a capturing closure. The callee
+    /// value is the environment pointer; load its `__code` field and call it,
+    /// passing the environment as the hidden first argument. `arg_vals` are the
+    /// already-lowered user arguments.
+    fn lower_closure_call(&mut self, func_expr: &Expr, arg_vals: Vec<Val>, sp: &crate::lexer::Span) -> Result<Val> {
+        let clo = self.lower_expr(func_expr)?;
+        let env_ty = match self.val_type(&clo) {
+            Type::Pointer(inner) => (*inner).clone(),
+            _ => return Err(CompileError::at("internal: closure callee is not an environment pointer".to_string(),
+                sp.file.clone(), sp.line, sp.col)),
+        };
+        // Load the code pointer (`__code`), whose type carries the full signature
+        // (environment pointer first, then the user parameters).
+        let code_lv = self.field_ptr_from(LValue::plain(clo.clone(), env_ty.clone()), "__code", false, sp)?;
+        let code = self.load_lvalue(&code_lv)?;
+        let func_ty = match self.val_type(&code) {
+            Type::Pointer(inner) => match *inner {
+                Type::Function(ft) => *ft,
+                _ => return Err(CompileError::at("internal: closure `__code` is not a function pointer".to_string(),
+                    sp.file.clone(), sp.line, sp.col)),
+            },
+            _ => return Err(CompileError::at("internal: closure `__code` is not a pointer".to_string(),
+                sp.file.clone(), sp.line, sp.col)),
+        };
+        // The environment pointer is argument 0; coerce user args to params 1…N.
+        let mut all_args = Vec::with_capacity(arg_vals.len() + 1);
+        let env_pty = func_ty.params.get(0).cloned().unwrap_or_else(|| self.val_type(&clo));
+        all_args.push(self.coerce(clo, &env_pty)?);
+        for (i, a) in arg_vals.into_iter().enumerate() {
+            match func_ty.params.get(i + 1) {
+                Some(pty) if !matches!(pty, Type::Struct(_) | Type::Union(_)) => {
+                    let c = self.coerce(a, pty)?; all_args.push(c);
+                }
+                _ => all_args.push(a),
+            }
+        }
+        let ret_ty = func_ty.ret.clone();
+        if super::ret_is_sret(&ret_ty, self.ptr_size()) {
+            return self.lower_indirect_sret(code, func_ty, all_args);
+        }
+        let is_void = ret_ty == Type::Void;
+        let dest = if !is_void { Some(self.alloc_val()) } else { None };
+        self.push_instr(Instr::CallIndirect { dest, fptr: code, args: all_args, ret_ty: ret_ty.clone(), func_ty: Box::new(func_ty) });
+        if let Some(d) = dest { self.val_types.insert(d.0, ret_ty); Ok(Val::Local(d)) } else { Ok(Constant::zero()) }
     }
 
     /// sic generic functions (sic.md §"Generics"): infer the type arguments of a
@@ -8208,6 +8381,22 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
             }
             ExprKind::Call { func, args } => {
+                // sic closure call (sic.md §"Lambdas"): the result is the callable's
+                // return type — the `__code` field's function return (dropping the
+                // hidden environment parameter).
+                if self.is_sic() {
+                    if let Ok(Type::Pointer(inner)) = self.infer_expr_type(func) {
+                        if let Type::Struct(st) = inner.as_ref() {
+                            if st.name.as_deref().map_or(false, |n| n.starts_with(super::types::CLOSURE_ENV_PREFIX)) {
+                                if let Some((_, Type::Pointer(code))) = st.fields.get(0) {
+                                    if let Type::Function(ft) = code.as_ref() {
+                                        return Ok(ft.ret.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 // sic `string` methods (sic.md §"Built-in string"): `.contains` →
                 // bool; `.split`/`.rsplit` → `tuple(string, string)`.
                 if self.is_sic() {

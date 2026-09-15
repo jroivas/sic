@@ -124,7 +124,7 @@ fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
 }
 
 /// A short human-readable name for a type, for type-mismatch diagnostics.
-fn type_desc(t: &Type) -> String {
+pub(crate) fn type_desc(t: &Type) -> String {
     match t {
         Type::Void => "void".into(),
         Type::Bool => "bool".into(),
@@ -1094,6 +1094,15 @@ impl<'m> Lowerer {
     /// the type of the first `return <expr>;`, evaluated with the params in scope.
     /// A body with no value-return is a `void` lambda.
     pub(crate) fn infer_body_return_type(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Type {
+        self.infer_body_return_type_ext(body, params, ir_params, &[])
+    }
+
+    /// As `infer_body_return_type`, but with `extra` names also in scope (a nested
+    /// lambda's captures, so `return a + b;` infers when `a` is captured). A lambda
+    /// return expression is typed via `lambda_value_type` so a function that returns
+    /// a closure (currying) infers the closure type rather than failing.
+    pub(crate) fn infer_body_return_type_ext(&mut self, body: &[Stmt], params: &[AstParam],
+        ir_params: &[Type], extra: &[(String, Type)]) -> Type {
         let ret_expr = match first_return_expr(body) { Some(e) => e, None => return Type::Void };
         let mut dummy = Function::new("__lambda_infer".to_string(),
             FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
@@ -1103,7 +1112,12 @@ impl<'m> Lowerer {
         for (p, ty) in params.iter().zip(ir_params) {
             if let Some(n) = &p.name { fc.define_local(n.clone(), ty.clone(), ValId(0)); }
         }
-        fc.infer_expr_type(&ret_expr).unwrap_or(Type::Void)
+        for (n, ty) in extra { fc.define_local(n.clone(), ty.clone(), ValId(0)); }
+        if let crate::ast::ExprKind::Lambda { captures, params, ret, body } = &ret_expr.kind {
+            fc.lambda_value_type(captures, params, ret, body, &ret_expr.span).unwrap_or(Type::Void)
+        } else {
+            fc.infer_expr_type(&ret_expr).unwrap_or(Type::Void)
+        }
     }
 
     pub fn lower_function(
@@ -1447,10 +1461,12 @@ impl<'m> FuncCtx<'m> {
                         let v = self.lower_expr(e)?;
                         let expected = self.ret_ty.clone();
                         let c = self.coerce(v, &expected)?;
-                        // sic tuple return (sic.md §"Tuples"): retain the shared
-                        // block before scope-exit releases run, so the returned
-                        // pointer outlives this frame (the caller releases it).
-                        if self.is_sic() && super::types::is_tuple(&expected) {
+                        // sic tuple / closure return (sic.md §"Tuples"/§"Lambdas"):
+                        // retain the shared block before scope-exit releases run, so
+                        // the returned pointer outlives this frame (the caller
+                        // releases it). Closures are the same refcounted heap value,
+                        // which is what lets a returned closure (currying) survive.
+                        if self.is_sic() && (super::types::is_tuple(&expected) || super::types::is_closure(&expected)) {
                             let pc = self.coerce(c.clone(), &Type::char_ptr())?;
                             self.emit_rc_retain(pc)?;
                         }
@@ -1726,12 +1742,13 @@ impl<'m> FuncCtx<'m> {
                     // real (marker) type so its members/indexing resolve.
                     if self.is_sic() && matches!(base_ty.storage, Some(StorageClass::Auto)) {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            // sic lambda (sic.md §"Lambdas"): infer the precise
-                            // function-pointer type (return type needs the params in
-                            // scope, so it can't go through the `&self` inferer).
-                            if let ExprKind::Lambda { params, ret, body, .. } = &e.kind {
-                                let sig = self.lambda_fn_type(params, ret, body)?;
-                                ty = Type::Pointer(Box::new(Type::Function(Box::new(sig))));
+                            // sic lambda (sic.md §"Lambdas"): infer the precise value
+                            // type — a function pointer (captureless) or a closure
+                            // environment pointer (capturing). The return/capture
+                            // types need the params in scope, so this can't go through
+                            // the `&self` inferer.
+                            if let ExprKind::Lambda { captures, params, ret, body } = &e.kind {
+                                ty = self.lambda_value_type(captures, params, ret, body, &e.span)?;
                             } else if let Ok(it) = self.infer_expr_type(e) {
                                 ty = it;
                             }
@@ -1903,6 +1920,19 @@ impl<'m> FuncCtx<'m> {
                             self.push_instr(Instr::MemSet {
                                 dst: Val::Local(vid), val: Constant::zero(), size, align: ty.align_of(self.ptr_size()),
                             });
+                        }
+                    }
+                    // sic capturing closure local (sic.md §"Lambdas"): a closure is a
+                    // refcounted heap environment. One created inline by a lambda
+                    // literal is already covered by its own temp release; one bound
+                    // from another source (a call returning a closure — e.g. a curried
+                    // `auto add2 = add(2);`) owns a reference that must be released at
+                    // scope exit.
+                    if self.is_sic() && super::types::is_closure(&ty) {
+                        let from_literal = matches!(&d.init,
+                            Some(Initializer::Expr(e)) if matches!(e.kind, ExprKind::Lambda { .. }));
+                        if d.init.is_some() && !from_literal {
+                            self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
                         }
                     }
                     // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh

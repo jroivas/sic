@@ -1,0 +1,32 @@
+// sic capturing closures (sic.md §"Lambdas"): a lambda with a non-empty capture
+// list captures by value into a refcounted heap environment; calling it passes
+// that environment implicitly. Bound currying (a function returning a closure)
+// works too. Captures are scalar/pointer by value for now. Returns 42.
+int main() {
+    // Single capture.
+    int n = 100;
+    auto addn = [n](int x) { return x + n; };
+    if (addn(5) != 105) return 1;
+
+    // Multiple captures + `=> expr` body.
+    int a = 3;
+    int b = 7;
+    auto f = [a, b](int x) => a * x + b;
+    if (f(10) != 37) return 2;
+
+    // The captured value is a copy taken when the closure is made — later
+    // mutation of the original does not change it.
+    int k = 1;
+    auto getk = [k]() { return k; };
+    k = 999;
+    if (getk() != 1) return 3;
+
+    // Bound currying: a function that returns a closure capturing its parameter.
+    auto add = [](int p) { return [p](int q) { return p + q; }; };
+    auto add10 = add(10);
+    if (add10(32) != 42) return 4;
+    auto add20 = add(20);
+    if (add20(1) != 21) return 5;
+
+    return 42;
+}

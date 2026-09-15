@@ -1472,19 +1472,30 @@ function-pointer variable, with no runtime cost:
     qsort(a, n, sizeof(int),
           [](const void *x, const void *y) { return *(const int*)x - *(const int*)y; });
 
-### Captures (planned)
+### Captures
 
-A non-empty capture list binds names from the enclosing scope, reusing SIC's
-reference model: `[x]` captures by value (a copy), `[@y]` by shared borrow, and
-`[@mut y]` by mutable borrow. A capturing lambda is a closure — code plus a
-reference-counted environment — so it can be returned and stored, which is what
-makes **currying** fall out naturally:
+A non-empty capture list binds names from the enclosing scope. `[x]` captures by
+value — a copy taken when the closure is created:
 
-    auto add = [](int a) { return [a](int b) { return a + b; }; };
-    add(2)(3);                           // 5
+    int n = 100;
+    auto addn = [n](int x) { return x + n; };
+    addn(5);                             // 105
 
-Capturing closures are not implemented yet; today only captureless `[]` lambdas
-are accepted (a capture list is a compile error).
+A capturing lambda is a **closure**: code plus a reference-counted environment
+holding the captured values, allocated on the heap and freed automatically. That
+is what lets a closure be returned and stored — so **currying** works by returning
+a lambda that captures the outer parameter:
+
+    auto add   = [](int a) { return [a](int b) { return a + b; }; };
+    auto add10 = add(10);
+    add10(32);                           // 42
+
+Currently captures are **by value** and limited to scalar and pointer types;
+by-reference captures (`[@y]` shared, `[@mut y]` mutable), capturing owned
+aggregates (`string`/structs), and a nameable closure type (`Fn<int(int)>`) are
+planned. Bind an intermediate closure to a variable rather than chaining calls
+directly (`auto g = add(10); g(32)` rather than `add(10)(32)`), so its environment
+is released at scope exit.
 
 ## Switch - case
 

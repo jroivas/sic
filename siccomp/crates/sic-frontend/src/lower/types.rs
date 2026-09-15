@@ -572,6 +572,42 @@ pub fn type_id_hash(name: &str) -> u64 {
     h
 }
 
+/// sic capturing closures (sic.md §"Lambdas"): the name prefix of a closure's
+/// environment struct. A closure VALUE is a pointer to such a heap struct whose
+/// first field `__code` is the generated function pointer, followed by the
+/// captured values.
+pub const CLOSURE_ENV_PREFIX: &str = "__sic_closure_env_";
+
+/// True if `t` is a closure value — a pointer to a `__sic_closure_env_*` struct.
+pub fn is_closure(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st)
+            if st.name.as_deref().map_or(false, |n| n.starts_with(CLOSURE_ENV_PREFIX))))
+}
+
+/// The (structural) environment-struct name for a closure with the given callable
+/// signature and capture fields. Derived from the types alone so a lambda's type
+/// is stable across inference and lowering (two lambdas with the same shape share
+/// the env *type*; their differing code pointers are stored per instance).
+pub fn closure_env_name(sig: &FunctionType, caps: &[(String, Type)]) -> String {
+    let mut s = String::from(CLOSURE_ENV_PREFIX);
+    s.push_str(&mangle_type_name(&sig.ret));
+    for p in &sig.params { s.push('_'); s.push_str(&mangle_type_name(p)); }
+    for (cn, ct) in caps { s.push_str("__"); s.push_str(cn); s.push('_'); s.push_str(&mangle_type_name(ct)); }
+    s
+}
+
+/// Build a closure's environment struct type: `{ __code: fnptr, <captures…> }`.
+/// `code_fn_ty` is the generated function's signature (its first parameter is the
+/// environment pointer). `env_name` comes from [`closure_env_name`].
+pub fn closure_env_type(env_name: &str, code_fn_ty: &FunctionType, caps: &[(String, Type)]) -> Type {
+    let mut fields = vec![
+        ("__code".to_string(), Type::Pointer(Box::new(Type::Function(Box::new(code_fn_ty.clone()))))),
+    ];
+    for (cn, ct) in caps { fields.push((cn.clone(), ct.clone())); }
+    Type::Struct(StructType::plain(Some(env_name.to_string()), fields, false))
+}
+
 /// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
