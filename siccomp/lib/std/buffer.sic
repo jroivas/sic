@@ -10,13 +10,9 @@ namespace Buffer
         }
     };
 
-
     Buffer *Create(u64 size)
     {
-        Buffer *buf = new Buffer();
-
-        if (!buf)
-            return NULL;
+        Buffer *buf = new Buffer() else return NULL;
 
         buf->data = new u8(size);
         if (!buf->data)

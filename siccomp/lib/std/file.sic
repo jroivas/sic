@@ -29,12 +29,13 @@ enum FileStatus {
     InvalidFileHandle,
     ReadError,
     WriteError,
+    OutOfMemory,
 };
 
 
 FileStatus Open(string name, OpenMode mode)
 {
-    File *tmp = new File();
+    File *tmp = new File() else return FileStatus::OutOfMemory;
     int flags = 0;
 
     match (mode)
