@@ -734,6 +734,11 @@ impl<'m> FuncCtx<'m> {
             // `lower_assign`, so reaching here as a value is always a pack.
             ExprKind::TupleExpr(elems) => self.construct_tuple(elems, &expr.span),
 
+            // sic lambda (sic.md §"Lambdas"): a captureless lambda is lifted to a
+            // synthetic top-level function and evaluates to its function pointer.
+            ExprKind::Lambda { captures, params, ret, body } =>
+                self.lower_lambda(captures, params, ret, body, &expr.span),
+
             // sic oversized decimal literal → a fresh `bigint` (sic.md §"Integer
             // sizes"). Reaches here when used as a value directly.
             ExprKind::BigIntLit(_) => self.to_bigint(expr),
@@ -1195,6 +1200,42 @@ impl<'m> FuncCtx<'m> {
                 Ok(Constant::zero())
             }
         }
+    }
+
+    /// The function-pointer type of a lambda (sic.md §"Lambdas"): its parameter
+    /// types plus a return type that is explicit (`-> T`) or inferred from the body.
+    pub(crate) fn lambda_fn_type(&mut self, params: &[ast::Param],
+        ret: &Option<ast::QualType>, body: &[ast::Stmt]) -> Result<FunctionType> {
+        let mut ir_params = Vec::new();
+        for p in params {
+            ir_params.push(super::types::lower_param_type(&p.ty, &self.lowerer.struct_types, self.lowerer.ptr_size)?);
+        }
+        let ir_ret = match ret {
+            Some(r) => self.lower_type(r)?,
+            None => self.lowerer.infer_body_return_type(body, params, &ir_params),
+        };
+        Ok(super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size))
+    }
+
+    /// Lower a captureless lambda (sic.md §"Lambdas"): lift its body to a synthetic
+    /// top-level function and yield that function's pointer. Captures are a later
+    /// phase — a non-empty capture list is rejected for now.
+    fn lower_lambda(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
+        ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span) -> Result<Val> {
+        if !captures.is_empty() {
+            return Err(CompileError::at(
+                "lambda captures are not supported yet — only captureless `[]` lambdas".to_string(),
+                span.file.clone(), span.line, span.col));
+        }
+        let n = self.lowerer.lambda_counter;
+        self.lowerer.lambda_counter += 1;
+        let name = format!("__sic_lambda_{}", n);
+        let ret_qt = ret.clone().unwrap_or_else(|| ast::QualType::new(ast::AstType::Auto));
+        self.lowerer.lower_function(&name, &ret_qt, params, false, body,
+            &Some(ast::StorageClass::Static), false, None, false)?;
+        let fref = self.lowerer.module.func_ref_by_name(&name).ok_or_else(||
+            CompileError::new("internal: lambda function was not registered".to_string()))?;
+        Ok(Val::Func(fref))
     }
 
     fn lower_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Val> {
@@ -7874,6 +7915,25 @@ impl<'m> FuncCtx<'m> {
             ExprKind::TypeId(_) | ExprKind::TypeIdOf(_) => Ok(super::types::type_info_type()),
             // A guard block yields an `int` status (0 clean / 1 caught).
             ExprKind::Guard { .. } => Ok(Type::i32()),
+            // sic lambda (sic.md §"Lambdas"): a function-pointer value. Return-type
+            // inference needs the params in scope (a `&mut` scratch context), which
+            // this `&self` inferer can't build — so an unannotated lambda reports a
+            // `void` return here. That is enough for the always-target-typed inline
+            // positions this is used in; `auto x = <lambda>` infers precisely in the
+            // declaration path instead.
+            ExprKind::Lambda { params, ret, .. } => {
+                let mut ir_params = Vec::new();
+                for p in params {
+                    ir_params.push(super::types::lower_param_type(
+                        &p.ty, &self.lowerer.struct_types, self.lowerer.ptr_size)?);
+                }
+                let ir_ret = match ret {
+                    Some(r) => super::types::lower_type(r, &self.lowerer.struct_types, self.lowerer.ptr_size)?,
+                    None => Type::Void,
+                };
+                let sig = super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size);
+                Ok(Type::Pointer(Box::new(Type::Function(Box::new(sig)))))
+            }
             ExprKind::FloatLit(_) => Ok(Type::Float64),
             // sic (sic.md §"Strings"): a string literal is a native `string` (a view
             // over the static bytes) by default; it decays to `char*` only where a

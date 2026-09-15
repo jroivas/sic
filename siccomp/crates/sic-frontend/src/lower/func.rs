@@ -1090,6 +1090,22 @@ impl<'m> Lowerer {
         super::types::tuple_type(tys)
     }
 
+    /// Infer a body's scalar return type (for a lambda with no explicit `-> T`):
+    /// the type of the first `return <expr>;`, evaluated with the params in scope.
+    /// A body with no value-return is a `void` lambda.
+    pub(crate) fn infer_body_return_type(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Type {
+        let ret_expr = match first_return_expr(body) { Some(e) => e, None => return Type::Void };
+        let mut dummy = Function::new("__lambda_infer".to_string(),
+            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+        let blk = dummy.alloc_block();
+        dummy.blocks.push(BasicBlock::new(blk));
+        let mut fc = FuncCtx::new_with_func(self, &mut dummy);
+        for (p, ty) in params.iter().zip(ir_params) {
+            if let Some(n) = &p.name { fc.define_local(n.clone(), ty.clone(), ValId(0)); }
+        }
+        fc.infer_expr_type(&ret_expr).unwrap_or(Type::Void)
+    }
+
     pub fn lower_function(
         &mut self,
         name: &str,
@@ -1124,6 +1140,9 @@ impl<'m> Lowerer {
                 Some(elems) => self.infer_tuple_return_type(&elems, params, &ir_params),
                 None => lower_type(ret_ty, &self.struct_types, self.ptr_size)?,
             }
+        } else if self.sic && matches!(ret_ty.ty, AstType::Auto) {
+            // sic lambda (sic.md §"Lambdas"): infer the return type from the body.
+            self.infer_body_return_type(body, params, &ir_params)
         } else {
             lower_type(ret_ty, &self.struct_types, self.ptr_size)?
         };
@@ -1707,7 +1726,13 @@ impl<'m> FuncCtx<'m> {
                     // real (marker) type so its members/indexing resolve.
                     if self.is_sic() && matches!(base_ty.storage, Some(StorageClass::Auto)) {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            if let Ok(it) = self.infer_expr_type(e) {
+                            // sic lambda (sic.md §"Lambdas"): infer the precise
+                            // function-pointer type (return type needs the params in
+                            // scope, so it can't go through the `&self` inferer).
+                            if let ExprKind::Lambda { params, ret, body, .. } = &e.kind {
+                                let sig = self.lambda_fn_type(params, ret, body)?;
+                                ty = Type::Pointer(Box::new(Type::Function(Box::new(sig))));
+                            } else if let Ok(it) = self.infer_expr_type(e) {
                                 ty = it;
                             }
                         }
@@ -3678,6 +3703,27 @@ fn first_return_tuple(stmts: &[Stmt]) -> Option<Vec<Expr>> {
     stmts.iter().find_map(in_stmt)
 }
 
+/// The first `return <expr>;` expression in a body (used to infer a lambda's
+/// return type when it has no explicit `-> T`). `return;` and a body with no
+/// return yield `None` (a void lambda).
+fn first_return_expr(stmts: &[Stmt]) -> Option<Expr> {
+    fn in_stmt(s: &Stmt) -> Option<Expr> {
+        match s {
+            Stmt::Return(Some(e), _) => Some(e.clone()),
+            Stmt::Block(ss, _) => first_return_expr(ss),
+            Stmt::If { then, else_, .. } =>
+                in_stmt(then).or_else(|| else_.as_ref().and_then(|e| in_stmt(e))),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
+            | Stmt::Label(_, body, _) | Stmt::Default(body, _) | Stmt::Defer(body, _)
+            | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _)
+            | Stmt::Switch { body, .. } => in_stmt(body),
+            Stmt::Match { arms, .. } => arms.iter().find_map(|a| in_stmt(&a.body)),
+            _ => None,
+        }
+    }
+    stmts.iter().find_map(in_stmt)
+}
+
 /// Walk statements for the tuple-param inference pre-pass: bind locals as we go
 /// (so a call `f(localtuple)` can infer the local's type) and record the tuple
 /// types of arguments passed to any function in `targets`.
@@ -3832,5 +3878,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Fixed { integral, fraction } => format!("fixed<{},{}>", integral, fraction),
         AstType::Generic { name, .. } => name.clone(),
         AstType::Bitfield(b) => b.name.clone(),
+        AstType::Auto => "auto".to_string(),
     }
 }

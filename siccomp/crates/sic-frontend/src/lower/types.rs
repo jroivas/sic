@@ -664,6 +664,10 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // ≤64. The set identity (for strict `& | ^ ~`-only typing) is tracked
         // separately in the lowerer's `bitfield_defs`.
         AstType::Bitfield(b) => bitfield_storage_type(b.members.len())?,
+        // sic lambda inferred return (sic.md §"Lambdas"): resolved by the function
+        // lowerer from the body, never here — reaching this path is a bug.
+        AstType::Auto => return Err(CompileError::new(
+            "internal: `auto` type reached lower_type (should be inferred)".to_string())),
         // An enum's underlying type is unsigned when every enumerator is
         // non-negative (GCC/Clang behaviour), signed otherwise. This matters for
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a

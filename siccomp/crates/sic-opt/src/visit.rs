@@ -163,7 +163,8 @@ pub fn walk_expr<V: MutVisitor>(v: &mut V, e: &mut Expr) {
                 if let OffsetDesignator::Index(e) = d { v.visit_expr(e); }
             }
         }
-        ExprKind::StmtExpr(stmts) | ExprKind::Guard { body: stmts, .. } => {
+        ExprKind::StmtExpr(stmts) | ExprKind::Guard { body: stmts, .. }
+        | ExprKind::Lambda { body: stmts, .. } => {
             for s in stmts { v.visit_stmt(s); }
         }
         ExprKind::CompoundLiteral { init, .. } => {

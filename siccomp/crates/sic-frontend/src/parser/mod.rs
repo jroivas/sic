@@ -2614,6 +2614,40 @@ impl Parser {
         Ok(e)
     }
 
+    /// sic lambda (sic.md §"Lambdas"): `[captures](params) [-> ret] { body }` or the
+    /// `=> expr` expression-body sugar (normalized to a single `return`). Captures
+    /// are `x` (by value), `@x` (shared borrow) or `@mut x` (mutable borrow).
+    fn parse_lambda(&mut self) -> Result<Expr> {
+        let sp = self.span();
+        self.expect(TokenKind::LBracket)?;
+        let mut captures = Vec::new();
+        while !self.at(TokenKind::RBracket) && !self.at(TokenKind::Eof) {
+            let csp = self.span();
+            let mut by_ref = false;
+            let mut mutable = false;
+            if self.at(TokenKind::At) {
+                self.advance();
+                by_ref = true;
+                if self.at(TokenKind::Ident) && self.peek().text == "mut" { self.advance(); mutable = true; }
+            }
+            let name = self.expect_name()?;
+            captures.push(LambdaCapture { name, by_ref, mutable, span: csp });
+            if !self.eat(TokenKind::Comma) { break; }
+        }
+        self.expect(TokenKind::RBracket)?;
+        let (params, _variadic) = self.parse_params()?;
+        let ret = if self.eat(TokenKind::Arrow) { Some(self.parse_type_name()?) } else { None };
+        let body = if self.eat(TokenKind::FatArrow) {
+            // `=> expr` — the value is the returned result.
+            let e = self.parse_assign_expr()?;
+            let esp = e.span.clone();
+            vec![Stmt::Return(Some(e), esp)]
+        } else {
+            self.parse_compound_stmt_as_stmts()?
+        };
+        Ok(Expr::new(ExprKind::Lambda { captures, params, ret, body }, sp))
+    }
+
     fn parse_primary(&mut self) -> Result<Expr> {
         let sp = self.span();
         // sic RTTI (sic.md §"RTTI"): a bare type name in value position is its
@@ -2627,6 +2661,9 @@ impl Parser {
             return Ok(Expr::new(ExprKind::TypeIdOf(ty), sp));
         }
         match self.peek_kind() {
+            // sic lambda `[captures](params) { … }` / `=> expr` (sic.md §"Lambdas").
+            // `[` never starts a C primary expression, so this is unambiguous.
+            TokenKind::LBracket if self.lang == Lang::Sic => self.parse_lambda(),
             TokenKind::Nullptr => {
                 self.advance();
                 Ok(Expr::new(ExprKind::Nullptr, sp))

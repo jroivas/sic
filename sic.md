@@ -1449,6 +1449,43 @@ Storage is an unsigned integer: `u32` for up to 32 flag positions, `u64` for up 
 literal `0`, the empty set) requires an explicit cast, and the flag compound
 assignments `&= |= ^=` are the only ones permitted.
 
+## Lambdas
+
+SIC has C++-style lambda expressions for inline, anonymous functions — handy for
+callbacks and small local helpers:
+
+    auto sq = [](int x) { return x * x; };
+    return sq(10);                       // 100
+
+The form is `[captures](params) -> ret { body }`. The `-> ret` is optional (the
+return type is inferred from the body), and there is a concise expression-body
+sugar `=> expr` (equivalent to `{ return expr; }`):
+
+    auto add = [](int a, int b) => a + b;
+
+A **captureless** lambda (empty `[]`) is exactly a function — it lifts to an
+ordinary top-level function and the expression evaluates to a plain function
+pointer. So it drops straight into any C API that takes a callback, and into a
+function-pointer variable, with no runtime cost:
+
+    int (*fp)(int) = [](int x) { return x - 1; };
+    qsort(a, n, sizeof(int),
+          [](const void *x, const void *y) { return *(const int*)x - *(const int*)y; });
+
+### Captures (planned)
+
+A non-empty capture list binds names from the enclosing scope, reusing SIC's
+reference model: `[x]` captures by value (a copy), `[@y]` by shared borrow, and
+`[@mut y]` by mutable borrow. A capturing lambda is a closure — code plus a
+reference-counted environment — so it can be returned and stored, which is what
+makes **currying** fall out naturally:
+
+    auto add = [](int a) { return [a](int b) { return a + b; }; };
+    add(2)(3);                           // 5
+
+Capturing closures are not implemented yet; today only captureless `[]` lambdas
+are accepted (a capture list is a compile error).
+
 ## Switch - case
 
 One problematic construction is `switch` and it's `case`.

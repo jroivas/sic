@@ -174,6 +174,9 @@ pub struct Lowerer {
     /// Reverse index: a bitfield member name → its owning bitfield, so a bare
     /// `Member` (not just `Bits::Member`) resolves. `_` holes are not recorded.
     pub bitfield_variant: HashMap<String, String>,
+    /// sic lambdas (sic.md §"Lambdas"): monotonic counter for the synthetic name of
+    /// each lifted captureless lambda (`__sic_lambda_<n>`).
+    pub lambda_counter: u32,
 }
 
 /// One variant of a sic tagged enum.
@@ -247,6 +250,7 @@ impl Lowerer {
             type_info_globals: HashMap::new(),
             bitfield_defs: HashMap::new(),
             bitfield_variant: HashMap::new(),
+            lambda_counter: 0,
             generic_enum_defs: HashMap::new(),
             generic_fn_defs: HashMap::new(),
             fn_param_names: HashMap::new(),
@@ -3900,6 +3904,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
             }
         }
         TupleExpr(elems) => { for e in elems { collect_expr_names(e, out); } }
+        Lambda { body, .. } => { for s in body { collect_stmt_names(s, out); } }
         Guard { body, .. } => { for s in body { collect_stmt_names(s, out); } }
         OptField { base, .. } => collect_expr_names(base, out),
         // `typeid(e)` inspects only the type — `e` is never evaluated.

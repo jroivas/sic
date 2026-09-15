@@ -72,6 +72,10 @@ pub enum AstType {
     /// e.g. `Option<int>` / `Result<string,int>`. Monomorphized to a concrete
     /// tagged enum when resolved.
     Generic { name: String, args: Vec<QualType> },
+    /// sic-only (sic.md §"Lambdas"): an inferred type — the return type of a lambda
+    /// with no explicit `-> T`, resolved from its body. Only produced internally;
+    /// never resolved by `lower_type` directly (the function lowerer infers it).
+    Auto,
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────
@@ -184,6 +188,17 @@ pub struct BitfieldDef {
     pub members: Vec<String>,
     /// sic (sic.md §"Namespace"): `private bitfield` — withhold from the manifest.
     pub private: bool,
+    pub span: Span,
+}
+
+/// sic-only (sic.md §"Lambdas"): one entry of a lambda capture list — `x` (by
+/// value / copy), `@x` (shared borrow), or `@mut x` (mutable borrow). Empty
+/// capture list `[]` means the lambda is captureless (a plain function).
+#[derive(Debug, Clone)]
+pub struct LambdaCapture {
+    pub name: String,
+    pub by_ref: bool,
+    pub mutable: bool,
     pub span: Span,
 }
 
@@ -453,6 +468,17 @@ pub enum ExprKind {
     /// sic tuple pack `tuple(e0, e1, …)` (sic.md §"Tuples"). Used as a value it
     /// builds a tuple; on the left of `=` it is an unpack pattern of lvalues.
     TupleExpr(Vec<Expr>),
+
+    /// sic-only (sic.md §"Lambdas"): a C++-style lambda
+    /// `[captures](params) -> ret { body }` (or the `=> expr` sugar, normalized to
+    /// a single `return`). A captureless lambda lowers to a plain function and
+    /// yields a function pointer. `ret` is `None` when it is inferred from `body`.
+    Lambda {
+        captures: Vec<LambdaCapture>,
+        params: Vec<Param>,
+        ret: Option<QualType>,
+        body: Vec<Stmt>,
+    },
 
     /// SIC tagged-enum path `Enum::Variant` (sic.md §"Match"). As a call target
     /// it constructs (`Option::Some(5)`) or, when the argument is an instance of

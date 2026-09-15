@@ -34,11 +34,13 @@ unchanged; the improvements are opt-in and live in `.sic` files.
    methods, iteration, `.keys`/`.values`, and `new`.
 10. [Methods & iterators](iterators.md) — struct methods, constructors/destructors,
     `Iterator<T>`, and the range-`for`.
-11. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
+11. [Lambdas](lambdas.md) — C++-style `[](params){…}` / `=> expr`, captureless
+    function-pointer decay and C-callback interop (captures & currying planned).
+12. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
     `.swap`/`.cas`, and atomic pointers.
-12. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
+13. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
     building a module, chain-loaded dependencies, and the `.smod` manifest.
-13. [Standard library](standard-library.md) — `import std;` and
+14. [Standard library](standard-library.md) — `import std;` and
     `Fmt`/`Print`/`Println`.
 
 ## Design goals

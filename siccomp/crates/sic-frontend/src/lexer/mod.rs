@@ -499,6 +499,8 @@ impl Lexer {
             ('|', '|', _)   => { self.advance();                 (TokenKind::PipePipe,  "||"   ) }
             ('-', '>', _)   => { self.advance();                 (TokenKind::Arrow,     "->"   ) }
             ('=', '=', _)   => { self.advance();                 (TokenKind::EqEq,      "=="   ) }
+            // sic lambda expression-body arrow `[](x) => expr` (sic.md §"Lambdas").
+            ('=', '>', _)   => { self.advance();                 (TokenKind::FatArrow,  "=>"   ) }
             ('!', '=', _)   => { self.advance();                 (TokenKind::BangEq,    "!="   ) }
             ('<', '=', _)   => { self.advance();                 (TokenKind::LtEq,      "<="   ) }
             ('>', '=', _)   => { self.advance();                 (TokenKind::GtEq,      ">="   ) }

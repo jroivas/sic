@@ -56,6 +56,7 @@ pub enum TokenKind {
     Match,          // sic-only: `match` on a tagged enum (sic.md §"Match")
     Tuple,          // sic-only: `tuple` type / pack / unpack (sic.md §"Tuples")
     Bitfield,       // sic-only: `bitfield` flag-set type (sic.md §"Bitfields")
+    FatArrow,       // sic-only: `=>` lambda expression body (sic.md §"Lambdas")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)
