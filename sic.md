@@ -1474,11 +1474,12 @@ function-pointer variable, with no runtime cost:
 
 ### Captures
 
-A non-empty capture list binds names from the enclosing scope, in one of three
-ways:
+A non-empty capture list binds names from the enclosing scope:
 
-- `[x]` — **by value**: a copy taken when the closure is created.
-- `[@x]` — **shared borrow**: the closure reads `x`'s live value.
+- `[x]` — captures `x`. A **scalar/pointer** is captured **by value** (a cheap
+  copy); a larger value (**struct, `string`, `tuple`, container, …**) is captured
+  **by reference** — no copy — so the closure sees its live value.
+- `[@x]` — **shared borrow** (explicit): the closure reads `x`'s live value.
 - `[@mut x]` — **mutable borrow**: the closure reads and writes the original `x`.
 
 ```sic
@@ -1509,14 +1510,19 @@ parameter, a return type, or a variable — use `Fn<ret(params)>`:
     int          apply(Fn<int(int)> f, int x) { return f(x); }
     Fn<int(int)> adder(int n)                 { return [n](int x) { return x + n; }; }
 
-    apply([n](int x) { return x + n; }, 2);   // pass a closure
+    apply([n](int x) { return x + n; }, 2);   // pass a stateful closure
+    apply([](int x) { return x + 1; }, 9);    // a captureless lambda works too
     Fn<int(int)> a = adder(40);               // store one
     a(2);
 
-Current limits (planned to lift): captures are limited to scalar and pointer
-types — capturing owned aggregates (`string`/structs) is not implemented yet. A
-`@`/`@mut` borrow points at the original variable, so such a closure must not
-outlive it (as with a C++ `[&]` capture).
+Lambdas cross the [module](#imports) boundary: a module can take a closure
+parameter, return a closure, and export a module-level lambda (a captureless
+lambda bound to a function pointer at file scope).
+
+A capture that is a reference — an aggregate `[x]`, or an explicit `@`/`@mut`
+borrow — points at the original variable, so such a closure must not outlive it
+(as with a C++ `[&]` capture); a closure that captures only scalars by value is
+free of this caveat.
 
 ## Switch - case
 

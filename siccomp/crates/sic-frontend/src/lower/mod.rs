@@ -2198,6 +2198,26 @@ impl Lowerer {
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        // sic module-level lambda (sic.md §"Lambdas"): a captureless lambda at file
+        // scope initializes a function pointer with the lifted function's address.
+        // A capturing closure needs a runtime environment, so it can't const-init a
+        // global — define it inside a function (or export a function) instead.
+        if self.sic {
+            if let Some(Initializer::Expr(e)) = &d.init {
+                if let crate::ast::ExprKind::Lambda { captures, params, ret, body } = &e.kind {
+                    if !captures.is_empty() {
+                        return Err(CompileError::at(
+                            "a capturing closure cannot initialize a module-level global — \
+                             define it inside a function, or export a function instead".to_string(),
+                            d.span.file.clone(), d.span.line, d.span.col));
+                    }
+                    // Infer the function-pointer type for an inferred (`auto`) global.
+                    if matches!(d.ty.ty, AstType::Auto) || matches!(base_ty.storage, Some(StorageClass::Auto)) {
+                        ir_ty = self.lambda_type_global(captures, params, ret, body, &d.span)?;
+                    }
+                }
+            }
+        }
         // sic `atomic` global (sic.md §"Atomics"): record it so accesses lower to
         // atomic ops (top-level qualifier only — see lower_local_decl).
         if self.sic && d.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) {
@@ -2437,6 +2457,24 @@ impl Lowerer {
                         Some(Constant::GlobalAddr(gref))
                     }
                 }
+            }
+            // sic module-level captureless lambda (sic.md §"Lambdas"): lift it to a
+            // function and initialize the (function-pointer) global with its address.
+            Some(Initializer::Expr(e))
+                if matches!(&e.kind, ExprKind::Lambda { captures, .. } if captures.is_empty()) =>
+            {
+                let ExprKind::Lambda { params, ret, body, .. } = &e.kind else { unreachable!() };
+                let n = self.lambda_counter;
+                self.lambda_counter += 1;
+                let name = format!("__sic_lambda_{}", n);
+                let ret_qt = ret.clone().unwrap_or_else(|| QualType::new(AstType::Auto));
+                if self.lower_function(&name, &ret_qt, params, false, body,
+                    &Some(StorageClass::Static), false, None, false).is_err() {
+                    return None;
+                }
+                let fref = self.module.func_ref_by_name(&name)?;
+                let ps = self.ptr_size as usize;
+                Some(Constant::Aggregate { bytes: vec![0u8; ps], relocs: vec![(0, RelocTarget::Func(fref))] })
             }
             Some(Initializer::Expr(e)) => {
                 // Use the fuller integer evaluator (it also folds `sizeof(expr)` /

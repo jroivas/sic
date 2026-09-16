@@ -1,0 +1,12 @@
+// Lambdas across the module boundary (sic.md §"Lambdas", §"Imports"): a module-
+// level lambda global, a closure parameter, and a closure return all work.
+import fx;
+int main() {
+    if (fx::dbl(16) != 32) return 1;                        // module-level lambda
+    if (fx::apply([](int x) { return x + 1; }, 9) != 10) return 2;  // closure arg
+    int base = 100;
+    if (fx::apply([base](int x) { return x + base; }, 5) != 105) return 3; // stateful arg
+    Fn<int(int)> add10 = fx::adder(10);
+    if (add10(32) != 42) return 4;                          // returned closure
+    return 0;
+}

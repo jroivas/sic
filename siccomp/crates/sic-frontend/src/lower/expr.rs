@@ -1243,13 +1243,13 @@ impl<'m> FuncCtx<'m> {
             let ty = self.infer_expr_type(&id).map_err(|_| CompileError::at(
                 format!("cannot capture `{}` — not visible in this scope", c.name),
                 span.file.clone(), span.line, span.col))?;
-            if !matches!(ty, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64
-                | Type::Float80 | Type::Pointer(_)) {
-                return Err(CompileError::at(format!(
-                    "capture `{}` has type `{}` — only scalar and pointer captures are supported yet",
-                    c.name, super::func::type_desc(&ty)), span.file.clone(), span.line, span.col));
-            }
-            caps.push((c.name.clone(), ty, c.by_ref));
+            // A scalar/pointer captures by value (a cheap copy); a larger value
+            // (struct, `string`, `any`, `u8char`, …) captures by reference to avoid
+            // copying it. An explicit `@`/`@mut` always captures by reference.
+            let scalar = matches!(ty, Type::Int { .. } | Type::Bool
+                | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_));
+            let by_ref = c.by_ref || !scalar;
+            caps.push((c.name.clone(), ty, by_ref));
         }
         // Environment field types: a by-reference capture is stored as a pointer.
         let cap_fields: Vec<(String, Type)> = caps.iter().map(|(n, t, by_ref)|
@@ -1297,8 +1297,11 @@ impl<'m> FuncCtx<'m> {
     fn lower_lambda(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
         ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span) -> Result<Val> {
         let ret_qt = ret.clone().unwrap_or_else(|| ast::QualType::new(ast::AstType::Auto));
-        // Captureless: a plain function, yielding its pointer (zero runtime).
-        if captures.is_empty() {
+        // Captureless: normally a plain function pointer (zero runtime). But when the
+        // context wants a closure (`Fn<…>`), box it into a closure environment (with
+        // no captures) so it is uniform with capturing closures at that boundary.
+        let want_closure = matches!(&self.expected_ty, Some(t) if super::types::is_closure(t));
+        if captures.is_empty() && !want_closure {
             let n = self.lowerer.lambda_counter;
             self.lowerer.lambda_counter += 1;
             let name = format!("__sic_lambda_{}", n);
@@ -6993,7 +6996,12 @@ impl<'m> FuncCtx<'m> {
         // module's mangled extern; feeds the shared direct-call emission below.
         let module_fref: Option<FuncRef> = match &func_expr.kind {
             ExprKind::Field { base, name } => match &base.kind {
-                ExprKind::Ident(module) if self.lowerer.imported_modules.contains_key(module) => {
+                // An exported NON-function global (e.g. a function-pointer or closure
+                // global) is called indirectly — read it as a value and fall through
+                // to the indirect/closure path, not a direct module call.
+                ExprKind::Ident(module) if self.lowerer.imported_modules.contains_key(module)
+                    && !self.is_module_global(base, name) =>
+                {
                     Some(self.resolve_module_call(module, name, sp)?)
                 }
                 _ => None,

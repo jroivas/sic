@@ -1,0 +1,11 @@
+module fx;
+
+// A module-level (global) captureless lambda — exported like any global,
+// callable as `fx::dbl(x)`.
+int (*dbl)(int) = [](int x) { return x * 2; };
+
+// A closure parameter: the module invokes a closure supplied by the consumer.
+int apply(Fn<int(int)> f, int x) { return f(x); }
+
+// A closure return: the module builds and returns a stateful closure (curry).
+Fn<int(int)> adder(int n) { return [n](int x) { return x + n; }; }

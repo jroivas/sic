@@ -1097,6 +1097,19 @@ impl<'m> Lowerer {
         self.infer_body_return_type_ext(body, params, ir_params, &[])
     }
 
+    /// The value type of a lambda at file scope (sic.md §"Lambdas"): builds a
+    /// throwaway function context so the (`&mut Lowerer`-only) global-init path can
+    /// reuse the same lambda typing as inside a function.
+    pub(crate) fn lambda_type_global(&mut self, captures: &[crate::ast::LambdaCapture],
+        params: &[AstParam], ret: &Option<QualType>, body: &[Stmt], span: &crate::lexer::Span) -> Result<Type> {
+        let mut dummy = Function::new("__lambda_ty".to_string(),
+            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+        let blk = dummy.alloc_block();
+        dummy.blocks.push(BasicBlock::new(blk));
+        let mut fc = FuncCtx::new_with_func(self, &mut dummy);
+        fc.lambda_value_type(captures, params, ret, body, span)
+    }
+
     /// As `infer_body_return_type`, but with `extra` names also in scope (a nested
     /// lambda's captures, so `return a + b;` infers when `a` is captured). A lambda
     /// return expression is typed via `lambda_value_type` so a function that returns
@@ -1458,7 +1471,12 @@ impl<'m> FuncCtx<'m> {
                         let owner = self.ret_enum.clone().or_else(|| self.ret_bitfield.clone());
                         let rt = self.ret_ty.clone();
                         self.bf_ctx = self.dest_ctx(owner, &rt);
-                        let v = self.lower_expr(e)?;
+                        // Expected-type context (sic.md §"Lambdas"): returning a
+                        // captureless lambda as `Fn<…>` boxes it into a closure.
+                        let prev_exp = self.expected_ty.replace(rt.clone());
+                        let v = self.lower_expr(e);
+                        self.expected_ty = prev_exp;
+                        let v = v?;
                         let expected = self.ret_ty.clone();
                         let c = self.coerce(v, &expected)?;
                         // sic tuple / closure return (sic.md §"Tuples"/§"Lambdas"):
@@ -1912,7 +1930,12 @@ impl<'m> FuncCtx<'m> {
                         let owner = self.c_enum_name_of(&d.ty.ty)
                             .or_else(|| self.bitfield_name_of(&d.ty.ty));
                         self.bf_ctx = self.dest_ctx(owner, &ty);
-                        self.lower_initializer(init, Val::Local(vid), &ty)?;
+                        // Expected-type context (sic.md §"Lambdas"): a `Fn<…>`-typed
+                        // target boxes a captureless lambda into a closure.
+                        let prev_exp = self.expected_ty.replace(ty.clone());
+                        let r = self.lower_initializer(init, Val::Local(vid), &ty);
+                        self.expected_ty = prev_exp;
+                        r?;
                     } else {
                         // Zero-initialize
                         let size = ty.size_of(self.ptr_size());

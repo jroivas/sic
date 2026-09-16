@@ -41,11 +41,13 @@ Because the value is a function pointer, `auto fn = […]` gives `fn` the type
 
 ## Captures
 
-A non-empty capture list binds names from the enclosing scope, in one of three
-ways, reusing SIC's [reference model](memory-and-ownership.md):
+A non-empty capture list binds names from the enclosing scope, reusing SIC's
+[reference model](memory-and-ownership.md):
 
-- `[x]` — **by value**: a copy taken when the closure is created.
-- `[@x]` — **shared borrow**: the closure reads `x`'s live value.
+- `[x]` — captures `x`. A **scalar/pointer** is captured **by value** (a cheap
+  copy); a larger value (**struct, `string`, `tuple`, container, …**) is captured
+  **by reference**, avoiding a copy, so the closure sees its live value.
+- `[@x]` — **shared borrow** (explicit): the closure reads `x`'s live value.
 - `[@mut x]` — **mutable borrow**: the closure reads and writes the original `x`.
 
 ```sic
@@ -89,12 +91,32 @@ Fn<int(int)> a = adder(40);                       // store one
 a(2);                                             // 42
 ```
 
-A plain `int(*)(int)` function pointer still works for captureless lambdas; use
-`Fn<…>` when the value may capture.
+A captureless lambda passed where an `Fn<…>` is expected is boxed into a closure
+automatically, so an `Fn<int(int)>` parameter accepts both stateful closures and
+plain `[](int x){…}` lambdas. (A plain `int(*)(int)` function-pointer type also
+still works for captureless lambdas.)
 
-Current limits (planned to lift): captures are limited to scalar and pointer
-types — capturing owned aggregates like `string` is not implemented yet — and a
-`@`/`@mut` borrow points at the original variable, so such a closure must not
-outlive it (like a C++ `[&]` capture).
+## Across modules
+
+Lambdas cross the [module](modules.md) boundary: a module can take a closure
+parameter (`Fn<…>`), return a closure, and export a module-level lambda — a
+captureless lambda bound to a function pointer at file scope:
+
+```sic
+module fx;
+int (*dbl)(int)          = [](int x) { return x * 2; };   // module-level lambda
+int apply(Fn<int(int)> f, int x) { return f(x); }         // closure parameter
+Fn<int(int)> adder(int n) { return [n](int x) { return x + n; }; }  // closure return
+```
+
+A consumer calls `fx::dbl(x)`, passes closures to `fx::apply`, and stores what
+`fx::adder` returns.
+
+**Caveat.** A capture that is a reference — an aggregate `[x]`, or an explicit
+`@`/`@mut` borrow — points at the original variable, so such a closure must not
+outlive it (like a C++ `[&]` capture); a closure that captures only scalars by
+value is free of this caveat. A capturing closure cannot initialize a
+module-level global (it needs a runtime environment) — define it inside a
+function, or export a function.
 
 Next: [atomics](atomics.md).

@@ -1,0 +1,35 @@
+// sic lambda captures & Fn<> uniformity (sic.md §"Lambdas"): aggregate values
+// (struct, string, tuple, list) are captured BY REFERENCE (no copy), and a
+// captureless lambda boxes into an `Fn<…>` where one is expected. Returns 42.
+struct Point { int x; int y; };
+
+int apply(Fn<int(int)> f, int x) { return f(x); }
+
+int main() {
+    // Struct captured by reference — no copy, sees the live value.
+    struct Point p;
+    p.x = 30; p.y = 2;
+    auto psum = [p]() { return p.x + p.y; };
+    if (psum() != 32) return 1;
+    p.y = 12;
+    if (psum() != 42) return 2;            // by-ref: reflects the mutation
+
+    // String captured by reference.
+    string s = "hello";
+    auto slen = [s]() { return (int)s.length; };
+    if (slen() != 5) return 3;
+
+    // Tuple / list captured (shared handle).
+    tuple t = tuple(40, 2);
+    auto tsum = [t]() { return (int)t[0] + (int)t[1]; };
+    if (tsum() != 42) return 4;
+    list<int> xs;
+    xs.add(1); xs.add(2); xs.add(3);
+    auto xcount = [xs]() { return (int)xs.size; };
+    if (xcount() != 3) return 5;
+
+    // A captureless lambda satisfies an `Fn<…>` parameter (boxed into a closure).
+    if (apply([](int x) { return x + 40; }, 2) != 42) return 6;
+
+    return 42;
+}
