@@ -3896,5 +3896,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Generic { name, .. } => name.clone(),
         AstType::Bitfield(b) => b.name.clone(),
         AstType::Auto => "auto".to_string(),
+        AstType::Closure { ret, .. } => format!("Fn<{}(...)>", c_type_string(ret)),
     }
 }

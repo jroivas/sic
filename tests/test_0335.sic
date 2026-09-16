@@ -1,0 +1,31 @@
+// sic nameable closure type `Fn<ret(params)>` (sic.md §"Lambdas"): a capturing
+// closure can be spelled explicitly — as a variable, a parameter, or a return
+// type — so functions can take and return closures that carry state (unlike a
+// plain function pointer). Returns 42.
+int apply(Fn<int(int)> f, int x) { return f(x); }
+
+Fn<int(int)> adder(int n) { return [n](int x) { return x + n; }; }
+
+int main() {
+    // As a variable type.
+    int n = 40;
+    Fn<int(int)> f = [n](int x) { return x + n; };
+    if (f(2) != 42) return 1;
+
+    // Passed as a parameter (a closure with captured state).
+    int base = 30;
+    if (apply([base](int x) { return x + base; }, 12) != 42) return 2;
+
+    // Returned by explicit type, then bound and called.
+    Fn<int(int)> a = adder(10);
+    if (a(32) != 42) return 3;
+
+    // A `@mut` closure stored behind the type still writes back.
+    int hits = 0;
+    Fn<int(int)> tally = [@mut hits](int x) { hits += 1; return x; };
+    tally(1);
+    tally(2);
+    if (hits != 2) return 4;
+
+    return 42;
+}

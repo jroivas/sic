@@ -71,17 +71,30 @@ returned and stored, **currying** works — a lambda that returns a lambda
 capturing the outer parameter:
 
 ```sic
-auto add   = [](int a) { return [a](int b) { return a + b; }; };
-auto add10 = add(10);
-add10(32);                               // 42
+auto add = [](int a) { return [a](int b) { return a + b; }; };
+add(10)(32);                             // 42
 ```
 
+## Naming a closure type — `Fn<ret(params)>`
+
+A closure carries captured state, so it is not a plain function pointer. To name
+one — as a parameter, a return type, or a variable — use `Fn<ret(params)>`:
+
+```sic
+int          apply(Fn<int(int)> f, int x) { return f(x); }
+Fn<int(int)> adder(int n)                 { return [n](int x) { return x + n; }; }
+
+apply([base](int x) { return x + base; }, 12);   // pass a closure with state
+Fn<int(int)> a = adder(40);                       // store one
+a(2);                                             // 42
+```
+
+A plain `int(*)(int)` function pointer still works for captureless lambdas; use
+`Fn<…>` when the value may capture.
+
 Current limits (planned to lift): captures are limited to scalar and pointer
-types; capturing owned aggregates like `string`, and a nameable closure type
-(`Fn<int(int)>`), are not implemented yet. A `@`/`@mut` borrow points at the
-original variable, so such a closure must not outlive it (like a C++ `[&]`
-capture). And bind an intermediate closure to a variable rather than chaining
-calls in one expression — `auto g = add(10); g(32)`, not `add(10)(32)` — so its
-environment is released at scope exit.
+types — capturing owned aggregates like `string` is not implemented yet — and a
+`@`/`@mut` borrow points at the original variable, so such a closure must not
+outlive it (like a C++ `[&]` capture).
 
 Next: [atomics](atomics.md).

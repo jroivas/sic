@@ -608,6 +608,23 @@ pub fn closure_env_type(env_name: &str, code_fn_ty: &FunctionType, caps: &[(Stri
     Type::Struct(StructType::plain(Some(env_name.to_string()), fields, false))
 }
 
+/// The type of a nameable `Fn<ret(params)>` closure (sic.md §"Lambdas"): a pointer
+/// to a minimal environment "header" `{ __code }`. Every concrete closure's
+/// environment begins with the same `__code` field, so a concrete closure is
+/// layout-compatible and assigns to an `Fn<…>` slot by a pointer cast; calling
+/// one loads `__code` (which knows its own full environment) and invokes it.
+pub fn closure_fn_type(ret: Type, params: Vec<Type>, ptr_size: u32) -> Type {
+    let mut code_params = vec![Type::void_ptr()];
+    code_params.extend(params);
+    let code_sig = super::build_fn_sig(ret, code_params, false, ptr_size);
+    let mut name = format!("{}fn", CLOSURE_ENV_PREFIX);
+    name.push('_'); name.push_str(&mangle_type_name(&code_sig.ret));
+    for p in &code_sig.params { name.push('_'); name.push_str(&mangle_type_name(p)); }
+    let hdr = StructType::plain(Some(name),
+        vec![("__code".to_string(), Type::Pointer(Box::new(Type::Function(Box::new(code_sig)))))], false);
+    Type::Pointer(Box::new(Type::Struct(hdr)))
+}
+
 /// True if `t` is a tuple value — a pointer to the `(tuple)` layout struct.
 pub fn is_tuple(t: &Type) -> bool {
     matches!(t, Type::Pointer(inner)
@@ -704,6 +721,13 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // lowerer from the body, never here — reaching this path is a bug.
         AstType::Auto => return Err(CompileError::new(
             "internal: `auto` type reached lower_type (should be inferred)".to_string())),
+        // sic nameable closure type `Fn<ret(params)>` (sic.md §"Lambdas").
+        AstType::Closure { ret, params } => {
+            let r = lower_type(ret, named, ptr_size)?;
+            let ps: crate::Result<Vec<_>> = params.iter()
+                .map(|p| lower_param_type(p, named, ptr_size)).collect();
+            closure_fn_type(r, ps?, ptr_size)
+        }
         // An enum's underlying type is unsigned when every enumerator is
         // non-negative (GCC/Clang behaviour), signed otherwise. This matters for
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a

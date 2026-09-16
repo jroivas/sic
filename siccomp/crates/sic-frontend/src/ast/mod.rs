@@ -76,6 +76,11 @@ pub enum AstType {
     /// with no explicit `-> T`, resolved from its body. Only produced internally;
     /// never resolved by `lower_type` directly (the function lowerer infers it).
     Auto,
+    /// sic-only (sic.md §"Lambdas"): a nameable closure type `Fn<ret(params)>` — the
+    /// type of a capturing closure with the given callable signature, usable as a
+    /// parameter, return, or variable type (unlike a plain function pointer, it
+    /// accepts closures that carry captured state).
+    Closure { ret: Box<QualType>, params: Vec<QualType> },
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────

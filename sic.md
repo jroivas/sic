@@ -1498,17 +1498,25 @@ allocated on the heap and freed automatically. That is what lets a closure be
 returned and stored — so **currying** works by returning a lambda that captures
 the outer parameter:
 
-    auto add   = [](int a) { return [a](int b) { return a + b; }; };
-    auto add10 = add(10);
-    add10(32);                           // 42
+    auto add = [](int a) { return [a](int b) { return a + b; }; };
+    add(10)(32);                         // 42
+
+### Naming a closure type — `Fn<ret(params)>`
+
+A closure carries state, so it is not a plain function pointer. To name one — as a
+parameter, a return type, or a variable — use `Fn<ret(params)>`:
+
+    int          apply(Fn<int(int)> f, int x) { return f(x); }
+    Fn<int(int)> adder(int n)                 { return [n](int x) { return x + n; }; }
+
+    apply([n](int x) { return x + n; }, 2);   // pass a closure
+    Fn<int(int)> a = adder(40);               // store one
+    a(2);
 
 Current limits (planned to lift): captures are limited to scalar and pointer
-types; capturing owned aggregates (`string`/structs) and a nameable closure type
-(`Fn<int(int)>`) are not implemented yet. A `@`/`@mut` borrow points at the
-original variable, so such a closure must not outlive it (as with a C++ `[&]`
-capture). And bind an intermediate closure to a variable rather than chaining
-calls directly (`auto g = add(10); g(32)` rather than `add(10)(32)`), so its
-environment is released at scope exit.
+types — capturing owned aggregates (`string`/structs) is not implemented yet. A
+`@`/`@mut` borrow points at the original variable, so such a closure must not
+outlive it (as with a C++ `[&]` capture).
 
 ## Switch - case
 

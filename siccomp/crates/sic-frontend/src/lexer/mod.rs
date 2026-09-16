@@ -251,6 +251,14 @@ impl Lexer {
                 kind = TokenKind::Ident;
             }
         }
+        // `Fn` is the closure type only in `Fn<…>`; a bare `Fn` stays an identifier.
+        if kind == TokenKind::TypeName && text == "Fn" {
+            let mut i = self.pos;
+            while i < self.src.len() && (self.src[i] == ' ' || self.src[i] == '\t') { i += 1; }
+            if self.src.get(i).copied() != Some('<') {
+                kind = TokenKind::Ident;
+            }
+        }
         Token::new(kind, text, sp)
     }
 
@@ -582,6 +590,10 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // `Task<T>` is an async result handle (sic.md §"Async"); ordinary
             // identifier in C.
             "Task" => return TokenKind::TypeName,
+            // `Fn<ret(params)>` is a nameable closure type (sic.md §"Lambdas");
+            // only a type when followed by `<` (see below), else an ordinary
+            // identifier — a `Fn` variable keeps working.
+            "Fn" => return TokenKind::TypeName,
             // `set<T>` is a built-in hash set (sic.md §"Set"); ordinary identifier in C.
             "set" => return TokenKind::TypeName,
             // `list<T>` is a built-in growable array (sic.md §"List"); ordinary in C.

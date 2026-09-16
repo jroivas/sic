@@ -667,6 +667,33 @@ impl Parser {
                     };
                     base = Some(AstType::Fixed { integral, fraction });
                 }
+                // sic closure type `Fn<ret(params)>` (sic.md §"Lambdas"): a nameable
+                // type for a capturing closure with the given callable signature.
+                TokenKind::TypeName if base.is_none() && self.lang == Lang::Sic
+                    && self.peek().text == "Fn" =>
+                {
+                    self.advance(); // Fn
+                    self.expect(TokenKind::Lt)?;
+                    // Return type: base specifiers + any pointer stars (stops at `(`).
+                    let (mut ret, _) = self.parse_decl_specifiers()?;
+                    while self.eat(TokenKind::Star) {
+                        ret = QualType::new(AstType::Pointer { base: Box::new(ret), quals: vec![] });
+                    }
+                    self.expect(TokenKind::LParen)?;
+                    let mut params = Vec::new();
+                    if !self.at(TokenKind::RParen) {
+                        loop {
+                            if self.at(TokenKind::Void)
+                                && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::RParen)
+                            { self.advance(); break; }
+                            params.push(self.parse_type_name()?);
+                            if !self.eat(TokenKind::Comma) { break; }
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    self.expect(TokenKind::Gt)?;
+                    base = Some(AstType::Closure { ret: Box::new(ret), params });
+                }
                 // A type-name (typedef or sic alias like `u32`) is only a type
                 // specifier when no other type info has been seen yet. Otherwise
                 // it is the declarator name — e.g. `uint32_t u32;` where the
