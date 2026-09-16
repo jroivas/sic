@@ -39,6 +39,10 @@ pub enum Cleanup {
     /// `slot` at scope exit — decrement its refcount, run its `__dtor` (freeing
     /// retained captures) at zero, then free the block.
     ClosureRelease { slot: Val },
+    /// sic weak reference (sic.md §"Weak"): drop the weak reference held in `slot`
+    /// at scope exit (`is_dict` picks the dict vs list runtime). Frees the handle
+    /// struct only if it was the last weak ref and the container is already dead.
+    WeakRelease { slot: Val, is_dict: bool },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -179,6 +183,10 @@ pub struct FuncCtx<'m> {
     /// width-checked casts, and `.as_uN` accessors can recover its identity (it
     /// lowers to a plain unsigned int).
     pub bitfield_locals: HashMap<String, String>,
+    /// sic weak references (sic.md §"Weak"): locals declared `weak<T>` → the strong
+    /// container type `T`, so `.get` upgrades them and the right weak-release runs
+    /// at scope exit. A weak local does not keep its container alive.
+    pub weak_locals: HashMap<String, Type>,
     /// sic bitfield/enum shorthand context (sic.md §"Bitfields", §"Enums"): the
     /// strict enum-or-bitfield type currently *expected* by the surrounding
     /// expression. A bare member/constant name (`Two`, `BLUE`) resolves ONLY when
@@ -300,6 +308,7 @@ impl<'m> FuncCtx<'m> {
             locals: vec![HashMap::new()],
             enum_locals: HashMap::new(),
             bitfield_locals: HashMap::new(),
+            weak_locals: HashMap::new(),
             bf_ctx: BfCtx::Any,
             static_locals: HashMap::new(),
             val_types: HashMap::new(),
@@ -496,6 +505,13 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
                 let _ = self.emit_closure_release(Val::Local(p));
+            }
+            Cleanup::WeakRelease { slot, is_dict } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
+                let name = if is_dict { "__sic_dict_weak_release" } else { "__sic_list_weak_release" };
+                let f = if is_dict { self.dict_runtime_fn(name) } else { self.list_runtime_fn(name) };
+                self.push_instr(Instr::Call { dest: None, func: f, args: vec![Val::Local(p)], ret_ty: Type::Void });
             }
         }
     }
@@ -1983,20 +1999,40 @@ impl<'m> FuncCtx<'m> {
                     // the slot is declared `dict d` or `dict *p` (the handle bits are
                     // stored either way). Aliasing an EXISTING handle (`dict d =
                     // other;`) is not a `new`, so it is left un-freed (no double free).
-                    if self.is_sic() {
+                    if self.is_sic() && !matches!(d.ty.ty, AstType::Weak(_)) {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            // A fresh container handle — from `new` or a call that
-                            // returns one (which retained it on return) — is owned by
+                            // A fresh container handle — from `new`, a call that
+                            // returns one (which retained it on return), or a weak
+                            // `.get` upgrade (a fresh strong reference) — is owned by
                             // this local: release it at scope exit. Aliasing an
                             // existing handle (`list b = a;`) is neither, so it is not
                             // released here (no double free).
-                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) {
+                            let weak_get = matches!(&e.kind,
+                                ExprKind::Field { base, name } | ExprKind::Arrow { base, name }
+                                    if name == "get" && matches!(&base.kind,
+                                        ExprKind::Ident(id) if self.weak_locals.contains_key(id)));
+                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) || weak_get {
                                 if super::types::is_list(&ty) {
                                     self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
                                 } else if super::types::is_dict(&ty) || super::types::is_set(&ty) {
                                     self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
                                 }
                             }
+                        }
+                    }
+                    // sic weak reference local (sic.md §"Weak"): `weak<T> w = c;` takes
+                    // a NON-owning reference — weak-retain the handle and weak-release
+                    // it at scope exit (it never keeps the container alive).
+                    if self.is_sic() {
+                        if let AstType::Weak(_) = &d.ty.ty {
+                            let is_dict = super::types::is_dict(&ty) || super::types::is_set(&ty);
+                            self.weak_locals.insert(d.name.clone(), ty.clone());
+                            let h = self.alloc_val();
+                            self.push_instr(Instr::Load { dest: h, ptr: Val::Local(vid), ty: Type::void_ptr() });
+                            let name = if is_dict { "__sic_dict_weak_retain" } else { "__sic_list_weak_retain" };
+                            let rf = if is_dict { self.dict_runtime_fn(name) } else { self.list_runtime_fn(name) };
+                            self.push_instr(Instr::Call { dest: None, func: rf, args: vec![Val::Local(h)], ret_ty: Type::Void });
+                            self.register_scope_exit(Cleanup::WeakRelease { slot: Val::Local(vid), is_dict });
                         }
                     }
                     // sic struct constructor/destructor (sic.md §"Memory safety"):
@@ -3939,5 +3975,6 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Bitfield(b) => b.name.clone(),
         AstType::Auto => "auto".to_string(),
         AstType::Closure { ret, .. } => format!("Fn<{}(...)>", c_type_string(ret)),
+        AstType::Weak(inner) => format!("weak<{}>", c_type_string(inner)),
     }
 }

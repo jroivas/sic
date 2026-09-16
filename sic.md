@@ -1536,6 +1536,29 @@ The exceptions are borrows that alias non-refcounted storage — a plain (C) str
 outlive it (as with a C++ `[&]` capture). A closure capturing only scalars and
 refcounted values (strings, tuples, containers, closures) is always safe.
 
+## Weak references
+
+Reference counting keeps shared values alive but cannot reclaim a *cycle* — two
+containers that (transitively) hold each other never reach zero. A `weak<T>`
+reference breaks the cycle: it points at a reference-counted container without
+keeping it alive.
+
+    list<int> a;
+    a.add(42);
+    weak<list<int>> w = a;      // does NOT keep `a` alive
+
+`.get` upgrades a weak reference back to a strong handle — the live container if
+it still exists, or a null (empty) handle once its last strong owner is gone, so
+you always find out rather than dangling:
+
+    list<int> s = w.get;        // the live list while `a` is alive
+    // … after the container is dropped, `w.get` yields an empty handle
+
+Use a weak reference for a back-pointer (a child that refers to its parent, an
+observer that refers to its subject) so the strong ownership forms a tree and the
+weak links close the loops. Currently `weak<T>` covers the reference-counted
+containers (`list`/`dict`/`set`).
+
 ## Switch - case
 
 One problematic construction is `switch` and it's `case`.

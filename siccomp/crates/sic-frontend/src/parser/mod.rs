@@ -694,6 +694,16 @@ impl Parser {
                     self.expect(TokenKind::Gt)?;
                     base = Some(AstType::Closure { ret: Box::new(ret), params });
                 }
+                // sic weak reference `weak<T>` (sic.md §"Weak").
+                TokenKind::TypeName if base.is_none() && self.lang == Lang::Sic
+                    && self.peek().text == "weak" =>
+                {
+                    self.advance(); // weak
+                    self.expect(TokenKind::Lt)?;
+                    let inner = self.parse_type_name()?;
+                    self.expect(TokenKind::Gt)?;
+                    base = Some(AstType::Weak(Box::new(inner)));
+                }
                 // A type-name (typedef or sic alias like `u32`) is only a type
                 // specifier when no other type info has been seen yet. Otherwise
                 // it is the declarator name — e.g. `uint32_t u32;` where the

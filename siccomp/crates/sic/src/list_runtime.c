@@ -44,7 +44,8 @@ typedef struct __sic_list {
     int *vowned;
     unsigned long len;
     unsigned long cap;
-    unsigned long rc;
+    unsigned long rc;    /* strong references (owners) */
+    unsigned long wrc;   /* weak references (sic.md §"Weak"): don't keep it alive */
 } __sic_list;
 
 __attribute__((weak)) __sic_list *__sic_list_new(void) {
@@ -52,6 +53,7 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
     l->cap = 8;
     l->len = 0;
     l->rc = 1;
+    l->wrc = 0;
     l->vty = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vslot = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vowned = (int *)malloc(sizeof(int) * l->cap);
@@ -61,6 +63,21 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
 /* Share the handle: another owner (a binding, a return, a closure capture). */
 __attribute__((weak)) void __sic_list_retain(__sic_list *l) {
     if (l) l->rc++;
+}
+
+/* sic weak references (sic.md §"Weak"): a weak ref does not keep the list alive.
+   `weak_retain`/`weak_release` count weak owners; `upgrade` returns the handle
+   with a fresh STRONG reference if it is still live, else NULL — so a weak ref
+   detects a freed container and breaks reference cycles. */
+__attribute__((weak)) void __sic_list_weak_retain(__sic_list *l) {
+    if (l) l->wrc++;
+}
+__attribute__((weak)) void __sic_list_weak_release(__sic_list *l) {
+    if (l && --l->wrc == 0 && l->rc == 0) free(l);   /* contents already freed at rc==0 */
+}
+__attribute__((weak)) __sic_list *__sic_list_upgrade(__sic_list *l) {
+    if (l && l->rc > 0) { l->rc++; return l; }
+    return 0;
 }
 
 __attribute__((weak)) void __sic_list_push(__sic_list *l, unsigned long vty, unsigned long vslot, int vowned) {
@@ -111,7 +128,9 @@ __attribute__((weak)) __sic_list *__sic_list_keys(__sic_list *l) {
     return r;
 }
 
-/* Release one reference; free the list (and its owned elements) at zero. */
+/* Release one strong reference; at zero free the owned elements and the arrays.
+   The handle struct itself is kept while weak references remain (so they can see
+   it is dead), and freed by the last weak release. */
 __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     if (!l || l->rc == 0 || --l->rc != 0) return;
     for (unsigned long i = 0; i < l->len; i++)
@@ -119,5 +138,6 @@ __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     free(l->vty);
     free(l->vslot);
     free(l->vowned);
-    free(l);
+    l->vty = 0; l->vslot = 0; l->vowned = 0; l->len = 0; l->cap = 0;
+    if (l->wrc == 0) free(l);
 }

@@ -81,6 +81,11 @@ pub enum AstType {
     /// parameter, return, or variable type (unlike a plain function pointer, it
     /// accepts closures that carry captured state).
     Closure { ret: Box<QualType>, params: Vec<QualType> },
+    /// sic-only (sic.md §"Weak"): `weak<T>` — a non-owning reference to a
+    /// reference-counted container (`list`/`dict`/`set`). It does not keep the
+    /// container alive; `.get` upgrades it to a strong handle if still live (else
+    /// null), which is how reference cycles are broken.
+    Weak(Box<QualType>),
 }
 
 // ─── Struct / Union / Enum ─────────────────────────────────────────────────────

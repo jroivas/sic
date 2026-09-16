@@ -740,6 +740,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 .map(|p| lower_param_type(p, named, ptr_size)).collect();
             closure_fn_type(r, ps?, ptr_size)
         }
+        // sic `weak<T>` (sic.md §"Weak"): a weak reference is the same handle bits
+        // as the strong container; its non-owning behavior is tracked by the lowerer.
+        AstType::Weak(inner) => lower_type(inner, named, ptr_size)?,
         // An enum's underlying type is unsigned when every enumerator is
         // non-negative (GCC/Clang behaviour), signed otherwise. This matters for
         // enum-typed bit-fields: QEMU's TCGTemp has `TCGTempKind kind:3`, and a

@@ -1,0 +1,30 @@
+// sic weak references (sic.md §"Weak"): `weak<T>` is a non-owning reference to a
+// refcounted container. It never keeps the container alive; `.get` upgrades it to
+// a strong handle if still live, or a null (empty) handle once the container is
+// gone — which is how reference cycles are broken. Returns 42.
+int main() {
+    // A weak reference to a live container upgrades to a usable handle.
+    list<int> a;
+    a.add(20);
+    a.add(22);
+    weak<list<int>> w = a;
+    list<int> s = w.get;
+    int t = 0;
+    for (tuple iv : s) t += (int)iv[1];
+    if (t != 42) return 1;
+
+    // Mutating through the container is visible via the weak upgrade (same object).
+    a.add(100);
+    list<int> s2 = w.get;
+    if ((int)s2.size != 3) return 2;
+
+    // After the container is dropped, the weak observes it as dead.
+    dict<int,int> *p = new dict<int,int>;
+    p[1] = 7;
+    weak<dict<int,int>> wd = p;
+    del p;                          // last strong owner gone
+    dict<int,int> live = wd.get;    // dead -> null handle
+    if ((int)live.size != 0) return 3;
+
+    return 42;
+}

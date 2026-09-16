@@ -792,6 +792,24 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Field { base, name } => {
+                // sic weak `.get` (sic.md §"Weak"): upgrade a weak reference to a
+                // strong container handle — a fresh strong reference if the container
+                // is still live, else a null handle.
+                if self.is_sic() && name == "get" {
+                    if let ExprKind::Ident(id) = &base.kind {
+                        if let Some(cty) = self.weak_locals.get(id).cloned() {
+                            let is_dict = super::types::is_dict(&cty) || super::types::is_set(&cty);
+                            let w = self.lower_expr(base)?;
+                            let wv = self.coerce(w, &Type::void_ptr())?;
+                            let up = if is_dict { self.dict_runtime_fn("__sic_dict_upgrade") }
+                                     else { self.list_runtime_fn("__sic_list_upgrade") };
+                            let dest = self.alloc_val();
+                            self.push_instr(Instr::Call { dest: Some(dest), func: up, args: vec![wv], ret_ty: cty.clone() });
+                            self.val_types.insert(dest.0, cty);
+                            return Ok(Val::Local(dest));
+                        }
+                    }
+                }
                 // sic `module.var` (sic.md §"Imports"): read an imported module's
                 // exported global. Checked before base-type inference (the base is a
                 // module name, not a value).
@@ -1683,7 +1701,7 @@ impl<'m> FuncCtx<'m> {
     /// not already present. The definition comes from the prepended dict runtime (when
     /// this unit uses `dict`) or from an imported module's object (e.g. `libstd`,
     /// which now uses `va_dict`) — the weak copies dedupe at link.
-    fn dict_runtime_fn(&mut self, name: &str) -> FuncRef {
+    pub(crate) fn dict_runtime_fn(&mut self, name: &str) -> FuncRef {
         if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
         let u64t = Type::u64();
         let ptr = Type::void_ptr();
@@ -1694,7 +1712,9 @@ impl<'m> FuncCtx<'m> {
             "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), i32t.clone()], Type::Void),
             "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
             "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone()], i32t.clone()),
-            "__sic_dict_free" | "__sic_dict_retain" => (vec![ptr.clone()], Type::Void),
+            "__sic_dict_free" | "__sic_dict_retain"
+            | "__sic_dict_weak_retain" | "__sic_dict_weak_release" => (vec![ptr.clone()], Type::Void),
+            "__sic_dict_upgrade" => (vec![ptr.clone()], ptr.clone()),
             "__sic_dict_len" => (vec![ptr.clone()], u64t),
             // `.keys`/`.values` (sic.md §"Iterators"): dict → fresh `list` handle.
             "__sic_dict_values" | "__sic_dict_keys_scalar" | "__sic_dict_keys_string"
@@ -1780,7 +1800,7 @@ impl<'m> FuncCtx<'m> {
     // ─── sic `list` (sic.md §"List") ─────────────────────────────────────────
 
     /// Resolve a `__sic_list_*` runtime function, declaring it as an extern if absent.
-    fn list_runtime_fn(&mut self, name: &str) -> FuncRef {
+    pub(crate) fn list_runtime_fn(&mut self, name: &str) -> FuncRef {
         if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
         let u64t = Type::u64();
         let ptr = Type::void_ptr();
@@ -1792,7 +1812,9 @@ impl<'m> FuncCtx<'m> {
             "__sic_list_get" => (vec![ptr, u64t, u64p.clone(), u64p], i32t.clone()),
             "__sic_list_set" => (vec![ptr, u64t.clone(), u64t.clone(), u64t, i32t], Type::Void),
             "__sic_list_len" => (vec![ptr], u64t),
-            "__sic_list_free" | "__sic_list_retain" => (vec![ptr], Type::Void),
+            "__sic_list_free" | "__sic_list_retain"
+            | "__sic_list_weak_retain" | "__sic_list_weak_release" => (vec![ptr.clone()], Type::Void),
+            "__sic_list_upgrade" => (vec![ptr.clone()], ptr),
             // `.keys`/`.values` (sic.md §"Iterators"): list → fresh `list` handle.
             "__sic_list_values" | "__sic_list_keys" => (vec![ptr.clone()], ptr),
             _ => (vec![], Type::Void),
@@ -3801,6 +3823,23 @@ impl<'m> FuncCtx<'m> {
             let align = sty.align_of(self.ptr_size());
             self.push_instr(Instr::MemSet { dst: ptr, val: Constant::zero(), size, align });
             return Ok(());
+        }
+        // sic `del list/dict/set`: release one reference to the container handle
+        // (freeing its contents at zero) and invalidate the variable, so its
+        // scope-exit release is a no-op. A weak reference then observes it as dead.
+        if self.is_sic() {
+            if matches!(self.infer_expr_type(e), Ok(t)
+                if super::types::is_list(&t) || super::types::is_dict(&t) || super::types::is_set(&t))
+            {
+                let ty = self.infer_expr_type(e)?;
+                let h = self.lower_expr(e)?;
+                self.container_release(h, &ty)?;
+                if let Ok(lv) = self.lower_lvalue(e) {
+                    let z = self.coerce(Constant::zero(), &Type::void_ptr())?;
+                    self.store_lvalue(&lv, z)?;
+                }
+                return Ok(());
+            }
         }
         // sic `del p` on a pointer to a struct with a destructor (sic.md §"Memory
         // safety"): run `~S()` when the block is actually freed (refcount hits 0).
@@ -8352,6 +8391,12 @@ impl<'m> FuncCtx<'m> {
                 })
             }
             ExprKind::Field { base, name } => {
+                // sic weak `.get` (sic.md §"Weak"): upgrades to the strong container type.
+                if self.is_sic() && name == "get" {
+                    if let ExprKind::Ident(id) = &base.kind {
+                        if let Some(cty) = self.weak_locals.get(id) { return Ok(cty.clone()); }
+                    }
+                }
                 // sic `module.var` (sic.md §"Imports"): an imported module global has
                 // its exported value type (checked before base inference — the base
                 // is a module name).

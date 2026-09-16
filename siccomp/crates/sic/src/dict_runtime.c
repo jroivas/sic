@@ -25,7 +25,8 @@ typedef struct __sic_dict {
     unsigned long nents; /* entries used (incl. tombstones) */
     unsigned long ecap;  /* entries capacity */
     unsigned long live;  /* live entry count */
-    unsigned long rc;    /* reference count (sic.md "Dict"): shared by retain, freed at 0 */
+    unsigned long rc;    /* strong references (owners), freed at 0 */
+    unsigned long wrc;   /* weak references (sic.md "Weak"): don't keep it alive */
 } __sic_dict;
 
 __attribute__((weak)) unsigned long __sic_dict_hash(int kind, unsigned long a, unsigned long b) {
@@ -57,12 +58,26 @@ __attribute__((weak)) __sic_dict *__sic_dict_new(void) {
     d->nents = 0;
     d->live = 0;
     d->rc = 1;
+    d->wrc = 0;
     return d;
 }
 
 /* Share the handle: another owner (a binding, a return, a closure capture). */
 __attribute__((weak)) void __sic_dict_retain(__sic_dict *d) {
     if (d) d->rc++;
+}
+
+/* sic weak references (sic.md §"Weak"): weak counts don't keep the dict alive;
+   `upgrade` returns a fresh strong reference if still live, else NULL. */
+__attribute__((weak)) void __sic_dict_weak_retain(__sic_dict *d) {
+    if (d) d->wrc++;
+}
+__attribute__((weak)) void __sic_dict_weak_release(__sic_dict *d) {
+    if (d && --d->wrc == 0 && d->rc == 0) free(d);
+}
+__attribute__((weak)) __sic_dict *__sic_dict_upgrade(__sic_dict *d) {
+    if (d && d->rc > 0) { d->rc++; return d; }
+    return 0;
 }
 
 /* Probe the index for a key; returns the index slot. On a match, *ent is the entry
@@ -164,7 +179,9 @@ __attribute__((weak)) int __sic_dict_del(__sic_dict *d, int kind, unsigned long 
 
 __attribute__((weak)) unsigned long __sic_dict_len(__sic_dict *d) { return d ? d->live : 0; }
 
-/* Release one reference; free the dict (and its owned keys/values) at zero. */
+/* Release one strong reference; at zero free the owned keys/values and arrays.
+   The handle struct is kept while weak references remain, freed by the last weak
+   release. */
 __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     if (!d || d->rc == 0 || --d->rc != 0) return;
     for (unsigned long e = 0; e < d->nents; e++) {
@@ -174,7 +191,8 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     }
     free(d->ents);
     free(d->index);
-    free(d);
+    d->ents = 0; d->index = 0; d->nents = 0; d->live = 0; d->cap = 0;
+    if (d->wrc == 0) free(d);
 }
 
 /* ── Enumeration → `list` (sic.md §"Iterators", `.keys`/`.values`) ────────────

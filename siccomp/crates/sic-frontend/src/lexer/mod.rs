@@ -251,8 +251,9 @@ impl Lexer {
                 kind = TokenKind::Ident;
             }
         }
-        // `Fn` is the closure type only in `Fn<…>`; a bare `Fn` stays an identifier.
-        if kind == TokenKind::TypeName && text == "Fn" {
+        // `Fn`/`weak` are types only in `Fn<…>`/`weak<…>`; bare, they stay
+        // ordinary identifiers.
+        if kind == TokenKind::TypeName && (text == "Fn" || text == "weak") {
             let mut i = self.pos;
             while i < self.src.len() && (self.src[i] == ' ' || self.src[i] == '\t') { i += 1; }
             if self.src.get(i).copied() != Some('<') {
@@ -594,6 +595,9 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
             // only a type when followed by `<` (see below), else an ordinary
             // identifier — a `Fn` variable keeps working.
             "Fn" => return TokenKind::TypeName,
+            // `weak<T>` is a non-owning container reference (sic.md §"Weak"); a
+            // type only before `<`, else an ordinary identifier.
+            "weak" => return TokenKind::TypeName,
             // `set<T>` is a built-in hash set (sic.md §"Set"); ordinary identifier in C.
             "set" => return TokenKind::TypeName,
             // `list<T>` is a built-in growable array (sic.md §"List"); ordinary in C.

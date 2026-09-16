@@ -16,7 +16,9 @@ list<int> build() { list<int> xs; xs.add(1); xs.add(2); return xs; }   // safe t
 ```
 
 (Reference cycles — a container that transitively contains itself — are not
-reclaimed; that's the usual refcounting trade-off.)
+reclaimed; that's the usual refcounting trade-off. Break a cycle with a
+[`weak<T>`](../sic.md#weak-references) reference, which points at a container
+without keeping it alive.)
 
 ## `dict` — hash map
 
