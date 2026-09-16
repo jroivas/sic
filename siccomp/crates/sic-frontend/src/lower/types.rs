@@ -597,12 +597,22 @@ pub fn closure_env_name(sig: &FunctionType, caps: &[(String, Type)]) -> String {
     s
 }
 
-/// Build a closure's environment struct type: `{ __code: fnptr, <captures…> }`.
+/// The type of a closure's destructor pointer (`__dtor`): `void (*)(void*)`. It
+/// releases the closure's retained (refcounted) captures when the environment is
+/// freed; NULL when there are none. Stored so a release through `Fn<…>` or across
+/// a module — which cannot see the concrete captures — still frees them.
+pub fn closure_dtor_ptr_ty(ptr_size: u32) -> Type {
+    let sig = super::build_fn_sig(Type::Void, vec![Type::void_ptr()], false, ptr_size);
+    Type::Pointer(Box::new(Type::Function(Box::new(sig))))
+}
+
+/// Build a closure's environment struct type: `{ __code, __dtor, <captures…> }`.
 /// `code_fn_ty` is the generated function's signature (its first parameter is the
 /// environment pointer). `env_name` comes from [`closure_env_name`].
-pub fn closure_env_type(env_name: &str, code_fn_ty: &FunctionType, caps: &[(String, Type)]) -> Type {
+pub fn closure_env_type(env_name: &str, code_fn_ty: &FunctionType, caps: &[(String, Type)], ptr_size: u32) -> Type {
     let mut fields = vec![
         ("__code".to_string(), Type::Pointer(Box::new(Type::Function(Box::new(code_fn_ty.clone()))))),
+        ("__dtor".to_string(), closure_dtor_ptr_ty(ptr_size)),
     ];
     for (cn, ct) in caps { fields.push((cn.clone(), ct.clone())); }
     Type::Struct(StructType::plain(Some(env_name.to_string()), fields, false))
@@ -620,8 +630,10 @@ pub fn closure_fn_type(ret: Type, params: Vec<Type>, ptr_size: u32) -> Type {
     let mut name = format!("{}fn", CLOSURE_ENV_PREFIX);
     name.push('_'); name.push_str(&mangle_type_name(&code_sig.ret));
     for p in &code_sig.params { name.push('_'); name.push_str(&mangle_type_name(p)); }
-    let hdr = StructType::plain(Some(name),
-        vec![("__code".to_string(), Type::Pointer(Box::new(Type::Function(Box::new(code_sig)))))], false);
+    let hdr = StructType::plain(Some(name), vec![
+        ("__code".to_string(), Type::Pointer(Box::new(Type::Function(Box::new(code_sig))))),
+        ("__dtor".to_string(), closure_dtor_ptr_ty(ptr_size)),
+    ], false);
     Type::Pointer(Box::new(Type::Struct(hdr)))
 }
 

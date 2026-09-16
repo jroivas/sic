@@ -35,6 +35,10 @@ pub enum Cleanup {
     /// read from a container), release that string's `rc` at scope exit
     /// (`__sic_any_release`). A no-op for any other wrapped type.
     AnyRelease { addr: Val },
+    /// sic closure (sic.md §"Lambdas"): release the closure environment held in
+    /// `slot` at scope exit — decrement its refcount, run its `__dtor` (freeing
+    /// retained captures) at zero, then free the block.
+    ClosureRelease { slot: Val },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -488,6 +492,11 @@ impl<'m> FuncCtx<'m> {
                 let _ = self.emit_bigint_call("__sic_list_free", vec![Val::Local(p)], Type::Void);
             }
             Cleanup::AnyRelease { addr } => { let _ = self.any_refcount_at(addr, false); }
+            Cleanup::ClosureRelease { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
+                let _ = self.emit_closure_release(Val::Local(p));
+            }
         }
     }
 
@@ -501,7 +510,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Release a refcounted `string` local at scope exit: decref its `rc`,
     /// freeing the owned block at 0 (sic.md §"Built-in string").
-    fn emit_string_release_at(&mut self, addr: Val) {
+    pub(crate) fn emit_string_release_at(&mut self, addr: Val) {
         let _ = self.release_string_at(&addr);
     }
 

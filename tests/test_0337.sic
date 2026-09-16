@@ -1,0 +1,33 @@
+// sic closure capture lifetime (sic.md §"Lambdas"): a captured refcounted value
+// (string, tuple, or another closure) is kept alive as long as the closure —
+// retained on capture, released when the closure is destroyed. So a closure that
+// captures a local and is RETURNED stays valid after that local's scope ends.
+// Returns 42.
+
+Fn<int()> tuple_sum() {
+    tuple t = tuple(40, 2);
+    return [t]() { return (int)t[0] + (int)t[1]; };   // t outlives this frame
+}
+
+Fn<int()> str_len() {
+    string s = "hello";
+    return [s]() { return (int)s.length; };
+}
+
+// A closure capturing another closure — the inner is retained by the outer.
+Fn<int()> nested() {
+    Fn<int()> inner = tuple_sum();
+    return [inner]() { return inner() - 5; };          // 42 - 5 = 37
+}
+
+int main() {
+    Fn<int()> a = tuple_sum();
+    if (a() != 42) return 1;
+    Fn<int()> b = str_len();
+    if (b() != 5) return 2;
+    Fn<int()> c = nested();
+    if (c() != 37) return 3;
+    // Call more than once — the capture is still alive.
+    if (a() != 42) return 4;
+    return 42;
+}

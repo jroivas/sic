@@ -112,11 +112,28 @@ Fn<int(int)> adder(int n) { return [n](int x) { return x + n; }; }  // closure r
 A consumer calls `fx::dbl(x)`, passes closures to `fx::apply`, and stores what
 `fx::adder` returns.
 
-**Caveat.** A capture that is a reference — an aggregate `[x]`, or an explicit
-`@`/`@mut` borrow — points at the original variable, so such a closure must not
-outlive it (like a C++ `[&]` capture); a closure that captures only scalars by
-value is free of this caveat. A capturing closure cannot initialize a
-module-level global (it needs a runtime environment) — define it inside a
-function, or export a function.
+## Capture lifetimes
+
+A captured **refcounted** value — a `string`, `tuple`, or another closure — is
+retained for the closure's lifetime: kept alive as long as the closure lives, and
+released when the closure is destroyed. So a closure that captures such a value
+can be returned and outlive the scope that created it:
+
+```sic
+Fn<int()> make() {
+    tuple t = tuple(40, 2);
+    return [t]() { return (int)t[0] + (int)t[1]; };   // `t` stays alive
+}
+make()();                                // 42
+```
+
+The exceptions are borrows that alias non-refcounted storage — a plain (C) struct
+`[x]`, a single-owner container (`list`/`dict`/`set`), or an explicit `@`/`@mut`
+capture — which point at the original and so must not outlive it (like a C++
+`[&]` capture). A closure that captures only scalars, strings, tuples, and
+closures is always safe.
+
+A capturing closure cannot initialize a module-level global (it needs a runtime
+environment) — define it inside a function, or export a function.
 
 Next: [atomics](atomics.md).

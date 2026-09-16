@@ -1403,6 +1403,45 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// sic closure destructor (sic.md §"Lambdas"): synthesize (once per env type)
+    /// `void __sic_closure_dtor_<env>(void* self)` that releases the closure's
+    /// retained (refcounted) captures. Its address is stored in the env's `__dtor`
+    /// field and run when the environment is freed. `None` if nothing is retained.
+    pub(crate) fn ensure_closure_dtor(&mut self, env_ty: &Type, retained: &[(String, Type)]) -> Option<FuncRef> {
+        if retained.is_empty() { return None; }
+        let env_name = match env_ty { Type::Struct(st) => st.name.clone()?, _ => return None };
+        let dname = format!("__sic_closure_dtor_{}", env_name);
+        if let Some(f) = self.module.func_ref_by_name(&dname) { return Some(f); }
+        let voidp = Type::void_ptr();
+        let sig = build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
+        let params = vec![sic_ir::Param { name: "self".to_string(), ty: voidp.clone() }];
+        let mut func = Function::new(dname.clone(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        let sp = crate::lexer::Span::default();
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let self_arg = Val::Local(ValId(0x10000));
+            let env_ptr_ty = Type::Pointer(Box::new(env_ty.clone()));
+            let envp = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: envp, op: CastOp::BitCast, val: self_arg, to_ty: env_ptr_ty.clone() });
+            fc.val_types.insert(envp.0, env_ptr_ty);
+            for (fname, fty) in retained {
+                if let Ok(flv) = fc.field_ptr_from(crate::lower::expr::LValue::plain(Val::Local(envp), env_ty.clone()), fname, false, &sp) {
+                    if types::is_sic_string(fty) {
+                        fc.emit_string_release_at(flv.ptr);
+                    } else if types::is_closure(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_closure_release(h); }
+                    } else if let Ok(h) = fc.load_lvalue(&flv) {
+                        let _ = fc.emit_rc_release(h);
+                    }
+                }
+            }
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        Some(self.module.add_function(func))
+    }
+
     /// Synthesize `i64 __sic_any_to_i64(void* ty, u64 slot)` — convert the value an
     /// `any` wraps to a 64-bit integer using its RTTI kind (sic.md std): a boxed
     /// FLOAT (kind 4/5/6, whose slot is its f64 bits) is truncated toward zero; any

@@ -4,8 +4,8 @@ use sic_ir::*;
 use super::func::{FuncCtx, LookupResult};
 
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
-struct LValue {
-    ptr: Val,
+pub(crate) struct LValue {
+    pub(crate) ptr: Val,
     ty: Type,    // type of the pointee
     /// Set when the location is a bit-field: (bit offset within the storage unit
     /// pointed to by `ptr`, width in bits, whether the field is signed). Reads
@@ -74,7 +74,7 @@ static AES_INV_SBOX: [u8; 256] = [
 ];
 
 impl LValue {
-    fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None, atomic: false } }
+    pub(crate) fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None, atomic: false } }
 }
 
 impl<'m> FuncCtx<'m> {
@@ -686,7 +686,7 @@ impl<'m> FuncCtx<'m> {
                 // (`add(10)(32)`) and one bound to a local (`auto g = add(2)`); a
                 // `return` retains it first so it escapes to the caller.
                 if self.is_sic() && super::types::is_closure(&self.val_type(&v)) {
-                    self.register_tuple_release(v.clone())?;
+                    self.register_closure_release(v.clone())?;
                 }
                 Ok(v)
             }
@@ -1243,12 +1243,16 @@ impl<'m> FuncCtx<'m> {
             let ty = self.infer_expr_type(&id).map_err(|_| CompileError::at(
                 format!("cannot capture `{}` — not visible in this scope", c.name),
                 span.file.clone(), span.line, span.col))?;
-            // A scalar/pointer captures by value (a cheap copy); a larger value
-            // (struct, `string`, `any`, `u8char`, …) captures by reference to avoid
-            // copying it. An explicit `@`/`@mut` always captures by reference.
+            // A scalar/pointer captures by value (a cheap copy). A refcounted value
+            // (`string`, `tuple`, closure) is captured by value too but *retained*,
+            // so its lifetime is bound to the closure (see `lower_lambda`). Any other
+            // larger value (plain struct, …) captures by reference to avoid a copy.
+            // An explicit `@`/`@mut` always captures by reference.
             let scalar = matches!(ty, Type::Int { .. } | Type::Bool
                 | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_));
-            let by_ref = c.by_ref || !scalar;
+            let retained = super::types::is_sic_string(&ty) || super::types::is_tuple(&ty)
+                || super::types::is_closure(&ty);
+            let by_ref = c.by_ref || (!scalar && !retained);
             caps.push((c.name.clone(), ty, by_ref));
         }
         // Environment field types: a by-reference capture is stored as a pointer.
@@ -1274,7 +1278,7 @@ impl<'m> FuncCtx<'m> {
         let mut code_params = vec![env_opaque];
         code_params.extend(user_sig.params.clone());
         let code_fn_ty = FunctionType { ret: user_sig.ret.clone(), params: code_params, variadic: false };
-        let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &cap_fields);
+        let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &cap_fields, self.lowerer.ptr_size);
         Ok((caps, user_sig, env_name, code_fn_ty, env_ty))
     }
 
@@ -1331,19 +1335,25 @@ impl<'m> FuncCtx<'m> {
         };
         let mut fn_params = vec![self_param];
         fn_params.extend(params.iter().cloned());
-        // Build the generated body. A by-reference capture rewrites every use of the
-        // name in the body to `*(__self->name)` (so reads see the live value and
-        // `@mut` writes propagate). A by-value capture prepends `auto name =
-        // __self->name;` (a private copy).
+
+        // Per-capture mode. `retained` (string/tuple/closure) is stored by value and
+        // reference-counted so its lifetime is bound to the closure.
+        let cap_retained = |ty: &Type| super::types::is_sic_string(ty) || super::types::is_tuple(ty)
+            || super::types::is_closure(ty);
+
+        // Build the generated body: a by-reference capture rewrites uses of the name
+        // to `*(__self->name)`; a retained capture to `__self->name` (the value lives
+        // in the env, no local copy that would double-release); a plain by-value
+        // scalar prepends `auto name = __self->name;` (a private copy).
         let mut user_body: Vec<ast::Stmt> = body.to_vec();
-        for (cn, _, by_ref) in &caps {
-            if *by_ref {
-                for s in &mut user_body { rewrite_capture_ref(s, cn); }
+        for (cn, ty, by_ref) in &caps {
+            if *by_ref || cap_retained(ty) {
+                for s in &mut user_body { rewrite_capture_ref(s, cn, *by_ref); }
             }
         }
         let mut fn_body: Vec<ast::Stmt> = Vec::with_capacity(caps.len() + user_body.len());
-        for (cn, _, by_ref) in &caps {
-            if *by_ref { continue; }
+        for (cn, ty, by_ref) in &caps {
+            if *by_ref || cap_retained(ty) { continue; }
             let init = ast::Initializer::Expr(Expr::new(ExprKind::Arrow {
                 base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), span.clone())),
                 name: cn.clone(),
@@ -1366,19 +1376,47 @@ impl<'m> FuncCtx<'m> {
         let code_fref = self.lowerer.module.func_ref_by_name(&fn_name).ok_or_else(||
             CompileError::new("internal: closure function was not registered".to_string()))?;
 
-        // Allocate the refcounted environment, store the code pointer and captures:
-        // a by-value capture stores the value, a by-reference capture the address.
+        // The retained captures (with their env-field types) get released by the
+        // environment's destructor.
+        let retained: Vec<(String, Type)> = caps.iter()
+            .filter(|(_, ty, by_ref)| !*by_ref && cap_retained(ty))
+            .map(|(cn, ty, _)| (cn.clone(), ty.clone())).collect();
+        let dtor = self.lowerer.ensure_closure_dtor(&env_ty, &retained);
+
+        // Allocate the environment; store the code pointer, the destructor pointer,
+        // and the captures. A by-reference capture stores the address; any other
+        // stores the value, and a retained one is additionally reference-counted.
         let env_ptr = self.emit_rc_alloc(&env_ty)?;
         let code_lv = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), "__code", false, span)?;
         self.store_lvalue(&code_lv, Val::Func(code_fref))?;
-        for (cn, _, by_ref) in &caps {
+        let dtor_lv = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), "__dtor", false, span)?;
+        let dtor_val = match dtor { Some(fr) => Val::Func(fr), None => self.coerce(Constant::zero(), &Type::void_ptr())? };
+        self.store_lvalue(&dtor_lv, dtor_val)?;
+        for (cn, ty, by_ref) in &caps {
             let id = Expr::new(ExprKind::Ident(cn.clone()), span.clone());
-            let v = if *by_ref { self.lower_lvalue(&id)?.ptr } else { self.lower_expr(&id)? };
             let fld = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), cn, false, span)?;
-            self.store_lvalue(&fld, v)?;
+            if !*by_ref && matches!(ty, Type::Struct(_) | Type::Union(_)) {
+                // A by-value aggregate (e.g. `string`) is copied field-for-field.
+                let src = self.lower_aggregate_ptr(&id)?;
+                let size = ty.size_of(self.ptr_size());
+                let align = ty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: fld.ptr.clone(), src, size, align });
+            } else {
+                let v = if *by_ref { self.lower_lvalue(&id)?.ptr } else { self.lower_expr(&id)? };
+                self.store_lvalue(&fld, v)?;
+            }
+            if !*by_ref && cap_retained(ty) {
+                // Retain the referent so it lives as long as the closure.
+                if super::types::is_sic_string(ty) {
+                    self.retain_string_at(&fld.ptr)?;
+                } else {
+                    let h = self.load_lvalue(&fld)?;
+                    self.emit_rc_retain(h)?;
+                }
+            }
         }
-        // Freed at scope exit unless a binding/return takes ownership (refcounted).
-        self.register_tuple_release(env_ptr.clone())?;
+        // Released at scope exit (or when the last owner drops it) via its dtor.
+        self.register_closure_release(env_ptr.clone())?;
         Ok(env_ptr)
     }
 
@@ -2656,6 +2694,18 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// Register a scope-exit release for a closure environment (spills it to a
+    /// slot so the cleanup can reach it). Unlike a tuple, this runs the closure's
+    /// `__dtor` (releasing retained captures) when its refcount reaches zero.
+    fn register_closure_release(&mut self, ptr: Val) -> Result<()> {
+        let pc = self.coerce(ptr, &Type::char_ptr())?;
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
+        self.push_instr(Instr::Store { val: pc, ptr: Val::Local(slot) });
+        self.register_scope_exit(super::func::Cleanup::ClosureRelease { slot: Val::Local(slot) });
+        Ok(())
+    }
+
     /// Register a scope-exit release for a tuple pointer value (spills it to a
     /// slot so the cleanup can reach it).
     fn register_tuple_release(&mut self, ptr: Val) -> Result<()> {
@@ -3724,6 +3774,66 @@ impl<'m> FuncCtx<'m> {
 
     /// As `emit_rc_release`, but if `dtor` is set, call it on the object right
     /// before the block is freed (only when the refcount reaches 0).
+    /// Release a closure environment (sic.md §"Lambdas"): decrement its refcount
+    /// and, at zero, run its stored `__dtor` (field 1 — which releases the retained
+    /// captures) before freeing the block. Reading the destructor from the object
+    /// keeps this correct even when the static type is only `Fn<…>` or the closure
+    /// crossed a module boundary.
+    pub(crate) fn emit_closure_release(&mut self, env: Val) -> Result<()> {
+        let pc = self.coerce(env, &Type::char_ptr())?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let ps = self.ptr_size() as i64;
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        let zero = self.coerce(Constant::int(0), &usize_ty)?;
+
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: pc.clone(), rhs: Constant::zero(), ty: Type::char_ptr() });
+        let body_bb = self.new_block_after_current();
+        let free_bb = self.new_block_after_current();
+        let call_bb = self.new_block_after_current();
+        let freeblk_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: body_bb });
+
+        // body: rc (at p - ptr_size) -= 1; if != 0 goto done.
+        self.switch_to_block(body_bb);
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-ps), elem_size: 1, result_ty: Type::char_ptr() });
+        let rc = self.alloc_val();
+        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
+        let newrc = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
+        let is_zero = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
+
+        // free: dtor = *(void**)(p + ptr_size) (field 1); if non-null, call dtor(p).
+        self.switch_to_block(free_bb);
+        let voidpp = Type::Pointer(Box::new(Type::void_ptr()));
+        let dtor_pp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: dtor_pp, base: pc.clone(), index: Constant::int(ps), elem_size: 1, result_ty: voidpp });
+        let dtor = self.alloc_val();
+        self.push_instr(Instr::Load { dest: dtor, ptr: Val::Local(dtor_pp), ty: Type::void_ptr() });
+        let dtor_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: dtor_null, op: CmpOp::IEq, lhs: Val::Local(dtor), rhs: Constant::zero(), ty: Type::void_ptr() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(dtor_null), then_bb: freeblk_bb, else_bb: call_bb });
+        self.switch_to_block(call_bb);
+        let dsig = super::build_fn_sig(Type::Void, vec![Type::void_ptr()], false, self.ptr_size());
+        self.push_instr(Instr::CallIndirect { dest: None, fptr: Val::Local(dtor), args: vec![pc.clone()], ret_ty: Type::Void, func_ty: Box::new(dsig) });
+        self.set_terminator(Terminator::Jump(freeblk_bb));
+
+        // freeblk: free the block at p - 2*ptr_size.
+        self.switch_to_block(freeblk_bb);
+        let block = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-2 * ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_free(Val::Local(block))?;
+        self.set_terminator(Terminator::Jump(done_bb));
+
+        self.switch_to_block(done_bb);
+        Ok(())
+    }
+
     pub(crate) fn emit_rc_release_dtor(&mut self, p: Val, dtor: Option<String>) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
@@ -4778,7 +4888,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Read an lvalue's value, extracting a bit-field with shifts/masking.
-    fn load_lvalue(&mut self, lv: &LValue) -> Result<Val> {
+    pub(crate) fn load_lvalue(&mut self, lv: &LValue) -> Result<Val> {
         if let Some(bf) = lv.bitfield {
             let ty = lv.ty.clone();
             // The extraction shifts operate on the loaded STORAGE unit's width,
@@ -7975,7 +8085,7 @@ impl<'m> FuncCtx<'m> {
         self.field_ptr_from(lv, name, true, &base.span)
     }
 
-    fn field_ptr_from(&mut self, lv: LValue, field_name: &str, via_ptr: bool, sp: &crate::lexer::Span) -> Result<LValue> {
+    pub(crate) fn field_ptr_from(&mut self, lv: LValue, field_name: &str, via_ptr: bool, sp: &crate::lexer::Span) -> Result<LValue> {
         let struct_ty = if via_ptr {
             match &lv.ty {
                 Type::Pointer(t) => *t.clone(),
@@ -8847,78 +8957,81 @@ fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
 /// `name` in a lifted closure body to `*(__self->name)`, so reads see the live
 /// value and `@mut` writes propagate to the captured variable. Does not descend
 /// into a nested lambda's body (it has its own scope and captures).
-fn rewrite_capture_ref(s: &mut ast::Stmt, name: &str) {
+fn rewrite_capture_ref(s: &mut ast::Stmt, name: &str, deref: bool) {
     use ast::Stmt::*;
     match s {
-        Decl(d) => rewrite_capture_decl(d, name),
-        Expr(e, _) => rewrite_capture_expr(e, name),
-        Block(ss, _) | Unsafe(ss, _) => { for x in ss { rewrite_capture_ref(x, name); } }
+        Decl(d) => rewrite_capture_decl(d, name, deref),
+        Expr(e, _) => rewrite_capture_expr(e, name, deref),
+        Block(ss, _) | Unsafe(ss, _) => { for x in ss { rewrite_capture_ref(x, name, deref); } }
         If { cond, then, else_, .. } => {
-            rewrite_capture_expr(cond, name);
-            rewrite_capture_ref(then, name);
-            if let Some(e) = else_ { rewrite_capture_ref(e, name); }
+            rewrite_capture_expr(cond, name, deref);
+            rewrite_capture_ref(then, name, deref);
+            if let Some(e) = else_ { rewrite_capture_ref(e, name, deref); }
         }
         While { cond, body, .. } | DoWhile { body, cond, .. } => {
-            rewrite_capture_expr(cond, name);
-            rewrite_capture_ref(body, name);
+            rewrite_capture_expr(cond, name, deref);
+            rewrite_capture_ref(body, name, deref);
         }
         For { init, cond, post, body, .. } => {
             if let Some(fi) = init {
                 match fi {
-                    ast::ForInit::Decl(d) => rewrite_capture_decl(d, name),
-                    ast::ForInit::Expr(e) => rewrite_capture_expr(e, name),
+                    ast::ForInit::Decl(d) => rewrite_capture_decl(d, name, deref),
+                    ast::ForInit::Expr(e) => rewrite_capture_expr(e, name, deref),
                 }
             }
-            if let Some(c) = cond { rewrite_capture_expr(c, name); }
-            if let Some(p) = post { rewrite_capture_expr(p, name); }
-            rewrite_capture_ref(body, name);
+            if let Some(c) = cond { rewrite_capture_expr(c, name, deref); }
+            if let Some(p) = post { rewrite_capture_expr(p, name, deref); }
+            rewrite_capture_ref(body, name, deref);
         }
         ForEach { iterable, body, .. } => {
-            rewrite_capture_expr(iterable, name);
-            rewrite_capture_ref(body, name);
+            rewrite_capture_expr(iterable, name, deref);
+            rewrite_capture_ref(body, name, deref);
         }
-        Return(Some(e), _) | Delete(e, _) => rewrite_capture_expr(e, name),
-        Defer(b, _) | Label(_, b, _) | Default(b, _) => rewrite_capture_ref(b, name),
-        Case(e, b, _) => { rewrite_capture_expr(e, name); rewrite_capture_ref(b, name); }
+        Return(Some(e), _) | Delete(e, _) => rewrite_capture_expr(e, name, deref),
+        Defer(b, _) | Label(_, b, _) | Default(b, _) => rewrite_capture_ref(b, name, deref),
+        Case(e, b, _) => { rewrite_capture_expr(e, name, deref); rewrite_capture_ref(b, name, deref); }
         CaseRange(a, z, b, _) => {
-            rewrite_capture_expr(a, name); rewrite_capture_expr(z, name); rewrite_capture_ref(b, name);
+            rewrite_capture_expr(a, name, deref); rewrite_capture_expr(z, name, deref); rewrite_capture_ref(b, name, deref);
         }
-        Switch { val, body, .. } => { rewrite_capture_expr(val, name); rewrite_capture_ref(body, name); }
+        Switch { val, body, .. } => { rewrite_capture_expr(val, name, deref); rewrite_capture_ref(body, name, deref); }
         Match { scrutinee, arms, .. } => {
-            rewrite_capture_expr(scrutinee, name);
-            for a in arms { rewrite_capture_ref(&mut a.body, name); }
+            rewrite_capture_expr(scrutinee, name, deref);
+            for a in arms { rewrite_capture_ref(&mut a.body, name, deref); }
         }
-        Guard { cond, else_body, .. } => { rewrite_capture_expr(cond, name); rewrite_capture_ref(else_body, name); }
+        Guard { cond, else_body, .. } => { rewrite_capture_expr(cond, name, deref); rewrite_capture_ref(else_body, name, deref); }
         Return(None, _) | Break(_) | Continue(_) | Fallthrough(_) | Goto(_, _) | Null(_) => {}
     }
 }
 
-fn rewrite_capture_decl(d: &mut ast::Decl, name: &str) {
+fn rewrite_capture_decl(d: &mut ast::Decl, name: &str, deref: bool) {
     if let ast::Decl::Var { declarators, .. } = d {
         for decl in declarators {
-            if let Some(init) = &mut decl.init { rewrite_capture_init(init, name); }
+            if let Some(init) = &mut decl.init { rewrite_capture_init(init, name, deref); }
         }
     }
 }
 
-fn rewrite_capture_init(init: &mut ast::Initializer, name: &str) {
+fn rewrite_capture_init(init: &mut ast::Initializer, name: &str, deref: bool) {
     match init {
-        ast::Initializer::Expr(e) => rewrite_capture_expr(e, name),
-        ast::Initializer::List(items) => { for it in items { rewrite_capture_init(&mut it.init, name); } }
+        ast::Initializer::Expr(e) => rewrite_capture_expr(e, name, deref),
+        ast::Initializer::List(items) => { for it in items { rewrite_capture_init(&mut it.init, name, deref); } }
     }
 }
 
-fn rewrite_capture_expr(e: &mut Expr, name: &str) {
+fn rewrite_capture_expr(e: &mut Expr, name: &str, deref: bool) {
     if let ExprKind::Ident(id) = &e.kind {
         if id == name {
             let sp = e.span.clone();
-            *e = Expr::new(ExprKind::Unary {
-                op: UnOpKind::Deref,
-                expr: Box::new(Expr::new(ExprKind::Arrow {
-                    base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), sp.clone())),
-                    name: name.to_string(),
-                }, sp.clone())),
-            }, sp);
+            // `__self->name`; for a by-reference (pointer) capture, dereference it.
+            let field = Expr::new(ExprKind::Arrow {
+                base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), sp.clone())),
+                name: name.to_string(),
+            }, sp.clone());
+            *e = if deref {
+                Expr::new(ExprKind::Unary { op: UnOpKind::Deref, expr: Box::new(field) }, sp)
+            } else {
+                field
+            };
         }
         return;
     }
@@ -8927,43 +9040,43 @@ fn rewrite_capture_expr(e: &mut Expr, name: &str) {
         ExprKind::Lambda { .. } => {}
         ExprKind::BinOp { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. }
         | ExprKind::Swap { lhs, rhs } | ExprKind::Comma(lhs, rhs) => {
-            rewrite_capture_expr(lhs, name); rewrite_capture_expr(rhs, name);
+            rewrite_capture_expr(lhs, name, deref); rewrite_capture_expr(rhs, name, deref);
         }
         ExprKind::Unary { expr, .. } | ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. }
         | ExprKind::Cast { expr, .. } | ExprKind::SizeofExpr(expr) | ExprKind::AlignofExpr(expr)
-        | ExprKind::Ref { expr, .. } | ExprKind::Await(expr) | ExprKind::TypeId(expr) => rewrite_capture_expr(expr, name),
+        | ExprKind::Ref { expr, .. } | ExprKind::Await(expr) | ExprKind::TypeId(expr) => rewrite_capture_expr(expr, name, deref),
         ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } | ExprKind::OptField { base, .. } =>
-            rewrite_capture_expr(base, name),
-        ExprKind::Index { base, index } => { rewrite_capture_expr(base, name); rewrite_capture_expr(index, name); }
+            rewrite_capture_expr(base, name, deref),
+        ExprKind::Index { base, index } => { rewrite_capture_expr(base, name, deref); rewrite_capture_expr(index, name, deref); }
         ExprKind::Slice { base, lo, hi } => {
-            rewrite_capture_expr(base, name);
-            if let Some(x) = lo { rewrite_capture_expr(x, name); }
-            if let Some(x) = hi { rewrite_capture_expr(x, name); }
+            rewrite_capture_expr(base, name, deref);
+            if let Some(x) = lo { rewrite_capture_expr(x, name, deref); }
+            if let Some(x) = hi { rewrite_capture_expr(x, name, deref); }
         }
-        ExprKind::New { args, .. } | ExprKind::TupleExpr(args) => { for a in args { rewrite_capture_expr(a, name); } }
+        ExprKind::New { args, .. } | ExprKind::TupleExpr(args) => { for a in args { rewrite_capture_expr(a, name, deref); } }
         ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } => {
-            rewrite_capture_expr(cond, name); rewrite_capture_expr(then, name); rewrite_capture_expr(else_, name);
+            rewrite_capture_expr(cond, name, deref); rewrite_capture_expr(then, name, deref); rewrite_capture_expr(else_, name, deref);
         }
-        ExprKind::Elvis { cond, else_ } => { rewrite_capture_expr(cond, name); rewrite_capture_expr(else_, name); }
+        ExprKind::Elvis { cond, else_ } => { rewrite_capture_expr(cond, name, deref); rewrite_capture_expr(else_, name, deref); }
         ExprKind::Call { func, args } => {
-            rewrite_capture_expr(func, name);
-            for a in args { rewrite_capture_expr(a, name); }
+            rewrite_capture_expr(func, name, deref);
+            for a in args { rewrite_capture_expr(a, name, deref); }
         }
-        ExprKind::NamedArg { value, .. } => rewrite_capture_expr(value, name),
+        ExprKind::NamedArg { value, .. } => rewrite_capture_expr(value, name, deref),
         ExprKind::Match { scrutinee, arms } => {
-            rewrite_capture_expr(scrutinee, name);
-            for a in arms { rewrite_capture_ref(&mut a.body, name); }
+            rewrite_capture_expr(scrutinee, name, deref);
+            for a in arms { rewrite_capture_ref(&mut a.body, name, deref); }
         }
         ExprKind::Generic { controlling, assocs } => {
-            rewrite_capture_expr(controlling, name);
-            for (_, x) in assocs { rewrite_capture_expr(x, name); }
+            rewrite_capture_expr(controlling, name, deref);
+            for (_, x) in assocs { rewrite_capture_expr(x, name, deref); }
         }
-        ExprKind::StmtExpr(ss) | ExprKind::Guard { body: ss, .. } => { for s in ss { rewrite_capture_ref(s, name); } }
-        ExprKind::CompoundLiteral { init, .. } => { for it in init { rewrite_capture_init(&mut it.init, name); } }
-        ExprKind::VaStart { list, last } => { rewrite_capture_expr(list, name); rewrite_capture_expr(last, name); }
-        ExprKind::VaArg { list, .. } => rewrite_capture_expr(list, name),
-        ExprKind::VaEnd { list } => rewrite_capture_expr(list, name),
-        ExprKind::VaCopy { dst, src } => { rewrite_capture_expr(dst, name); rewrite_capture_expr(src, name); }
+        ExprKind::StmtExpr(ss) | ExprKind::Guard { body: ss, .. } => { for s in ss { rewrite_capture_ref(s, name, deref); } }
+        ExprKind::CompoundLiteral { init, .. } => { for it in init { rewrite_capture_init(&mut it.init, name, deref); } }
+        ExprKind::VaStart { list, last } => { rewrite_capture_expr(list, name, deref); rewrite_capture_expr(last, name, deref); }
+        ExprKind::VaArg { list, .. } => rewrite_capture_expr(list, name, deref),
+        ExprKind::VaEnd { list } => rewrite_capture_expr(list, name, deref),
+        ExprKind::VaCopy { dst, src } => { rewrite_capture_expr(dst, name, deref); rewrite_capture_expr(src, name, deref); }
         _ => {}
     }
 }
