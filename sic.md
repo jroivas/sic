@@ -1519,10 +1519,11 @@ Lambdas cross the [module](#imports) boundary: a module can take a closure
 parameter, return a closure, and export a module-level lambda (a captureless
 lambda bound to a function pointer at file scope).
 
-A captured refcounted value — a `string`, `tuple`, or another closure — is
-**retained for the closure's lifetime**: it is kept alive as long as the closure
-lives and released when the closure is destroyed. So a closure that captures such
-a value can safely be returned and outlive the scope it was created in:
+A captured refcounted value — a `string`, `tuple`, `list`/`dict`/`set`, or another
+closure — is **retained for the closure's lifetime**: it is kept alive as long as
+the closure lives and released when the closure is destroyed. So a closure that
+captures such a value can safely be returned and outlive the scope it was created
+in:
 
     Fn<int()> make() {
         tuple t = tuple(40, 2);
@@ -1531,10 +1532,9 @@ a value can safely be returned and outlive the scope it was created in:
     make()();                            // 42
 
 The exceptions are borrows that alias non-refcounted storage — a plain (C) struct
-`[x]`, a single-owner container (`list`/`dict`/`set`), or an explicit `@`/`@mut` —
-which point at the original and so must not outlive it (as with a C++ `[&]`
-capture). A closure capturing only scalars, strings, tuples, and closures is
-always safe.
+`[x]`, or an explicit `@`/`@mut` — which point at the original and so must not
+outlive it (as with a C++ `[&]` capture). A closure capturing only scalars and
+refcounted values (strings, tuples, containers, closures) is always safe.
 
 ## Switch - case
 

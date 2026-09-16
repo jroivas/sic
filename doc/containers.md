@@ -6,6 +6,18 @@ automatically at scope exit** — you never `free` one. String and struct elemen
 they hold are owned (deep-copied and reclaimed with the container); reading one
 out shares it safely.
 
+The handle is **reference-counted**, so a container can be returned from a
+function, shared through several bindings, stored inside another container, or
+captured by a closure — it stays alive as long as any owner holds it and is freed
+once, when the last one is dropped:
+
+```sic
+list<int> build() { list<int> xs; xs.add(1); xs.add(2); return xs; }   // safe to return
+```
+
+(Reference cycles — a container that transitively contains itself — are not
+reclaimed; that's the usual refcounting trade-off.)
+
 ## `dict` — hash map
 
 `dict<K, V>` maps keys to values; bare `dict` is `dict<any, any>`. Subscript to

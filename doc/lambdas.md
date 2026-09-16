@@ -114,10 +114,10 @@ A consumer calls `fx::dbl(x)`, passes closures to `fx::apply`, and stores what
 
 ## Capture lifetimes
 
-A captured **refcounted** value — a `string`, `tuple`, or another closure — is
-retained for the closure's lifetime: kept alive as long as the closure lives, and
-released when the closure is destroyed. So a closure that captures such a value
-can be returned and outlive the scope that created it:
+A captured **refcounted** value — a `string`, `tuple`, `list`/`dict`/`set`, or
+another closure — is retained for the closure's lifetime: kept alive as long as
+the closure lives, and released when the closure is destroyed. So a closure that
+captures such a value can be returned and outlive the scope that created it:
 
 ```sic
 Fn<int()> make() {
@@ -128,10 +128,9 @@ make()();                                // 42
 ```
 
 The exceptions are borrows that alias non-refcounted storage — a plain (C) struct
-`[x]`, a single-owner container (`list`/`dict`/`set`), or an explicit `@`/`@mut`
-capture — which point at the original and so must not outlive it (like a C++
-`[&]` capture). A closure that captures only scalars, strings, tuples, and
-closures is always safe.
+`[x]`, or an explicit `@`/`@mut` capture — which point at the original and so must
+not outlive it (like a C++ `[&]` capture). A closure that captures only scalars
+and refcounted values (strings, tuples, containers, closures) is always safe.
 
 A capturing closure cannot initialize a module-level global (it needs a runtime
 environment) — define it inside a function, or export a function.
