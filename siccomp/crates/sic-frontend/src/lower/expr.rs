@@ -1689,7 +1689,7 @@ impl<'m> FuncCtx<'m> {
             "__sic_dict_set" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), u64t.clone(), i32t.clone()], Type::Void),
             "__sic_dict_get" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone(), u64p.clone(), u64p], i32t.clone()),
             "__sic_dict_del" => (vec![ptr.clone(), i32t.clone(), u64t.clone(), u64t.clone()], i32t.clone()),
-            "__sic_dict_free" => (vec![ptr.clone()], Type::Void),
+            "__sic_dict_free" | "__sic_dict_retain" => (vec![ptr.clone()], Type::Void),
             "__sic_dict_len" => (vec![ptr.clone()], u64t),
             // `.keys`/`.values` (sic.md §"Iterators"): dict → fresh `list` handle.
             "__sic_dict_values" | "__sic_dict_keys_scalar" | "__sic_dict_keys_string"
@@ -1787,7 +1787,7 @@ impl<'m> FuncCtx<'m> {
             "__sic_list_get" => (vec![ptr, u64t, u64p.clone(), u64p], i32t.clone()),
             "__sic_list_set" => (vec![ptr, u64t.clone(), u64t.clone(), u64t, i32t], Type::Void),
             "__sic_list_len" => (vec![ptr], u64t),
-            "__sic_list_free" => (vec![ptr], Type::Void),
+            "__sic_list_free" | "__sic_list_retain" => (vec![ptr], Type::Void),
             // `.keys`/`.values` (sic.md §"Iterators"): list → fresh `list` handle.
             "__sic_list_values" | "__sic_list_keys" => (vec![ptr.clone()], ptr),
             _ => (vec![], Type::Void),
@@ -2691,6 +2691,22 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: hp, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
         let c = self.coerce(count, &usize_ty)?;
         self.push_instr(Instr::Store { val: c, ptr: Val::Local(hp) });
+        Ok(())
+    }
+
+    /// Retain a `list`/`dict`/`set` handle (sic.md §"List"/§"Dict"): share the
+    /// container so it outlives the scope that created it (a return, a binding, a
+    /// closure capture). A no-op for a non-container type.
+    pub(crate) fn container_retain(&mut self, handle: Val, ty: &Type) -> Result<()> {
+        let f = if super::types::is_dict(ty) || super::types::is_set(ty) {
+            self.dict_runtime_fn("__sic_dict_retain")
+        } else if super::types::is_list(ty) {
+            self.list_runtime_fn("__sic_list_retain")
+        } else {
+            return Ok(());
+        };
+        let h = self.coerce(handle, &Type::void_ptr())?;
+        self.push_instr(Instr::Call { dest: None, func: f, args: vec![h], ret_ty: Type::Void });
         Ok(())
     }
 

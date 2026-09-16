@@ -1,0 +1,38 @@
+// sic container reference counting (sic.md §"List"/§"Dict"): `list`/`dict`/`set`
+// handles are refcounted, so a container RETURNED from a function stays alive for
+// the caller (previously a use-after-free) and aliases share one container freed
+// once. Returns 42.
+list<int> build(int a, int b) {
+    list<int> xs;
+    xs.add(a);
+    xs.add(b);
+    return xs;                 // returned — must outlive this frame
+}
+
+dict<int,int> table() {
+    dict<int,int> d;
+    d[1] = 40;
+    d[2] = 2;
+    return d;
+}
+
+int main() {
+    // Returned list.
+    list<int> a = build(40, 2);
+    int t = 0;
+    for (tuple iv : a) t += (int)iv[1];
+    if (t != 42) return 1;
+
+    // Returned dict.
+    dict<int,int> d = table();
+    if (d[1] + d[2] != 42) return 2;
+
+    // Alias: one container, both handles see the mutation, freed once.
+    list<int> p;
+    p.add(1);
+    list<int> q = p;
+    q.add(2);
+    if ((int)p.size != 2) return 3;
+
+    return 42;
+}

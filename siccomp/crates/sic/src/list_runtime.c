@@ -20,23 +20,33 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
 }
 
 /* A growable list: parallel arrays of the same (type-info, slot, owned) element box
-   the dict runtime uses, so strings/structs are owned and freed identically. */
+   the dict runtime uses, so strings/structs are owned and freed identically. `rc`
+   is the reference count (sic.md §"List"): the handle is shared by retain and
+   released by `__sic_list_free`, freed only when the last owner drops it, so a
+   returned/captured list outlives the scope that created it. */
 typedef struct __sic_list {
     unsigned long *vty;
     unsigned long *vslot;
     int *vowned;
     unsigned long len;
     unsigned long cap;
+    unsigned long rc;
 } __sic_list;
 
 __attribute__((weak)) __sic_list *__sic_list_new(void) {
     __sic_list *l = (__sic_list *)malloc(sizeof(__sic_list));
     l->cap = 8;
     l->len = 0;
+    l->rc = 1;
     l->vty = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vslot = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vowned = (int *)malloc(sizeof(int) * l->cap);
     return l;
+}
+
+/* Share the handle: another owner (a binding, a return, a closure capture). */
+__attribute__((weak)) void __sic_list_retain(__sic_list *l) {
+    if (l) l->rc++;
 }
 
 __attribute__((weak)) void __sic_list_push(__sic_list *l, unsigned long vty, unsigned long vslot, int vowned) {
@@ -87,8 +97,9 @@ __attribute__((weak)) __sic_list *__sic_list_keys(__sic_list *l) {
     return r;
 }
 
+/* Release one reference; free the list (and its owned elements) at zero. */
 __attribute__((weak)) void __sic_list_free(__sic_list *l) {
-    if (!l) return;
+    if (!l || l->rc == 0 || --l->rc != 0) return;
     for (unsigned long i = 0; i < l->len; i++)
         __sic_box_free(l->vslot[i], l->vowned[i]);
     free(l->vty);

@@ -25,6 +25,7 @@ typedef struct __sic_dict {
     unsigned long nents; /* entries used (incl. tombstones) */
     unsigned long ecap;  /* entries capacity */
     unsigned long live;  /* live entry count */
+    unsigned long rc;    /* reference count (sic.md "Dict"): shared by retain, freed at 0 */
 } __sic_dict;
 
 __attribute__((weak)) unsigned long __sic_dict_hash(int kind, unsigned long a, unsigned long b) {
@@ -55,7 +56,13 @@ __attribute__((weak)) __sic_dict *__sic_dict_new(void) {
     d->ents = (__sic_dent *)malloc(sizeof(__sic_dent) * d->ecap);
     d->nents = 0;
     d->live = 0;
+    d->rc = 1;
     return d;
+}
+
+/* Share the handle: another owner (a binding, a return, a closure capture). */
+__attribute__((weak)) void __sic_dict_retain(__sic_dict *d) {
+    if (d) d->rc++;
 }
 
 /* Probe the index for a key; returns the index slot. On a match, *ent is the entry
@@ -157,8 +164,9 @@ __attribute__((weak)) int __sic_dict_del(__sic_dict *d, int kind, unsigned long 
 
 __attribute__((weak)) unsigned long __sic_dict_len(__sic_dict *d) { return d ? d->live : 0; }
 
+/* Release one reference; free the dict (and its owned keys/values) at zero. */
 __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
-    if (!d) return;
+    if (!d || d->rc == 0 || --d->rc != 0) return;
     for (unsigned long e = 0; e < d->nents; e++) {
         if (!d->ents[e].live) continue;
         if (d->ents[e].kind == 2) free((void *)d->ents[e].a);   /* string key bytes */

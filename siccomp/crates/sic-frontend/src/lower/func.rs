@@ -1497,6 +1497,13 @@ impl<'m> FuncCtx<'m> {
                             let pc = self.coerce(c.clone(), &Type::char_ptr())?;
                             self.emit_rc_retain(pc)?;
                         }
+                        // sic container return (sic.md §"List"/§"Dict"): a returned
+                        // `list`/`dict`/`set` is retained so it survives this frame's
+                        // scope-exit release; the caller owns the reference.
+                        if self.is_sic() && (super::types::is_list(&expected)
+                            || super::types::is_dict(&expected) || super::types::is_set(&expected)) {
+                            self.container_retain(c.clone(), &expected)?;
+                        }
                         // sic bigint/fixed return: these have value semantics (each
                         // owner frees its own block), so a returned local would be
                         // freed by scope cleanup before the caller reads it. Return
@@ -1978,13 +1985,16 @@ impl<'m> FuncCtx<'m> {
                     // other;`) is not a `new`, so it is left un-freed (no double free).
                     if self.is_sic() {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            if matches!(&e.kind, ExprKind::New { .. }) {
-                                match self.infer_expr_type(e) {
-                                    Ok(nt) if super::types::is_list(&nt) =>
-                                        self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) }),
-                                    Ok(nt) if super::types::is_dict(&nt) =>
-                                        self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) }),
-                                    _ => {}
+                            // A fresh container handle — from `new` or a call that
+                            // returns one (which retained it on return) — is owned by
+                            // this local: release it at scope exit. Aliasing an
+                            // existing handle (`list b = a;`) is neither, so it is not
+                            // released here (no double free).
+                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) {
+                                if super::types::is_list(&ty) {
+                                    self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                                } else if super::types::is_dict(&ty) || super::types::is_set(&ty) {
+                                    self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
                                 }
                             }
                         }
