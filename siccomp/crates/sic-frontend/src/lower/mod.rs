@@ -138,6 +138,11 @@ pub struct Lowerer {
     /// `del`s (its OWNED, refcounted fields). A managed-struct copy (`v = other`)
     /// retains exactly these — never a borrowed pointer field the dtor leaves alone.
     pub struct_owned_fields: HashMap<String, Vec<String>>,
+    /// sic weak references (sic.md §"Weak"): struct name → its `weak<T>` fields as
+    /// `(field name, container IR type)`. Such a field is a non-owning reference —
+    /// not auto-initialized or owned; weak-retained on assignment and weak-released
+    /// when the struct is destroyed.
+    pub struct_weak_fields: HashMap<String, Vec<(String, Type)>>,
     /// sic strict enum typing: a typedef alias for a payload-less enum → the
     /// canonical enum name (a key in `c_enum_defs`). Lets `typedef enum {…} E;` be
     /// type-checked as strictly as `enum E`. An anonymous enum's typedef name is its
@@ -245,6 +250,7 @@ impl Lowerer {
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             struct_owned_fields: HashMap::new(),
+            struct_weak_fields: HashMap::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -912,16 +918,25 @@ impl Lowerer {
             let mut field_aligns = Vec::new();
             let mut any_bitfield = false;
             let mut any_align = false;
+            let mut weak_fields: Vec<(String, Type)> = Vec::new();
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
+                // sic `weak<T>` field (sic.md §"Weak"): record it so it is treated as
+                // a non-owning reference (not auto-initialized/owned).
+                if let AstType::Weak(_) = &f.ty.ty {
+                    weak_fields.push((fname.clone(), fty.clone()));
+                }
                 let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
                 if bw.is_some() { any_bitfield = true; }
                 if f.align.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 bitfields.push(bw);
                 field_aligns.push(f.align);
+            }
+            if !weak_fields.is_empty() {
+                self.struct_weak_fields.insert(name.clone(), weak_fields);
             }
             // sic struct reordering (sic.md §"Struct reordering"): choose the
             // physical field order per the struct's mode (its `order_*` attribute,

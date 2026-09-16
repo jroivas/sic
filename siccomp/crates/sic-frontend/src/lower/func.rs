@@ -2001,17 +2001,13 @@ impl<'m> FuncCtx<'m> {
                     // other;`) is not a `new`, so it is left un-freed (no double free).
                     if self.is_sic() && !matches!(d.ty.ty, AstType::Weak(_)) {
                         if let Some(Initializer::Expr(e)) = &d.init {
-                            // A fresh container handle — from `new`, a call that
-                            // returns one (which retained it on return), or a weak
-                            // `.get` upgrade (a fresh strong reference) — is owned by
+                            // A fresh container handle — from `new` or a call that
+                            // returns one (which retained it on return) — is owned by
                             // this local: release it at scope exit. Aliasing an
-                            // existing handle (`list b = a;`) is neither, so it is not
-                            // released here (no double free).
-                            let weak_get = matches!(&e.kind,
-                                ExprKind::Field { base, name } | ExprKind::Arrow { base, name }
-                                    if name == "get" && matches!(&base.kind,
-                                        ExprKind::Ident(id) if self.weak_locals.contains_key(id)));
-                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) || weak_get {
+                            // existing handle (`list b = a;`) is not, so it is left
+                            // un-freed. (A weak `.get` upgrade registers its own
+                            // release in `lower_expr`, so it is excluded here.)
+                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) {
                                 if super::types::is_list(&ty) {
                                     self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
                                 } else if super::types::is_dict(&ty) || super::types::is_set(&ty) {
@@ -2392,8 +2388,21 @@ impl<'m> FuncCtx<'m> {
         let resolved = super::types::resolve_aggregate(sty, &self.lowerer.struct_types);
         let Type::Struct(st) = &resolved else { return Ok(()); };
         let st = st.clone();
-        for (i, (_name, fty)) in st.fields.iter().enumerate() {
+        let weak = st.name.as_ref()
+            .and_then(|n| self.lowerer.struct_weak_fields.get(n).cloned())
+            .unwrap_or_default();
+        for (i, (name, fty)) in st.fields.iter().enumerate() {
             let off = st.field_offset(i, self.ptr_size());
+            // sic `weak<T>` field (sic.md §"Weak"): a non-owning reference — null it
+            // (not a fresh container), and weak-release it at scope exit.
+            if weak.iter().any(|(wn, _)| wn == name) {
+                let is_dict = super::types::is_dict(fty) || super::types::is_set(fty);
+                let fp = self.gep_offset(base, off, fty);
+                let z = self.coerce(Constant::zero(), &Type::void_ptr())?;
+                self.push_instr(Instr::Store { ptr: fp.clone(), val: z });
+                self.register_scope_exit(Cleanup::WeakRelease { slot: fp, is_dict });
+                continue;
+            }
             if super::types::is_list(fty) {
                 let fp = self.gep_offset(base, off, fty);
                 let handle = self.lower_list_new(fty)?;

@@ -701,7 +701,7 @@ impl Parser {
                     self.advance(); // weak
                     self.expect(TokenKind::Lt)?;
                     let inner = self.parse_type_name()?;
-                    self.expect(TokenKind::Gt)?;
+                    self.eat_generic_gt()?;   // handles a nested `>>` (`weak<list<int>>`)
                     base = Some(AstType::Weak(Box::new(inner)));
                 }
                 // A type-name (typedef or sic alias like `u32`) is only a type
@@ -903,6 +903,11 @@ impl Parser {
             return Ok(Some(StructMethod { kind: MethodKind::Dtor, name, ret_ty: QualType::new(AstType::Void), params, variadic, body, span: sp }));
         }
         let start = self.pos;
+        // Speculatively parsing a ctor/method rewinds `pos` on failure, but parsing a
+        // type can *mutate* tokens in place (`eat_generic_gt` splits `>>`→`>`), which
+        // a `pos`-only rewind wouldn't undo — corrupting a later re-parse of a nested
+        // generic field type (`weak<list<int>>`). Snapshot the tokens too.
+        let toks_save = self.tokens.clone();
         // Constructor: `S( … ) { … }` — a bare struct-name followed by `(`.
         if let Some(sname) = struct_name {
             if (self.at(TokenKind::Ident) || self.at(TokenKind::TypeName)) && self.peek().text == sname {
@@ -918,6 +923,7 @@ impl Parser {
                     }
                 }
                 self.pos = save; // not a constructor — rewind
+                self.tokens = toks_save.clone();
             }
         }
         // Method: `Ret name( … ) { … }`. Parse a full declarator; if it is a
@@ -937,7 +943,7 @@ impl Parser {
         })();
         match parsed {
             Ok(Some(m)) => Ok(Some(m)),
-            _ => { self.pos = start; Ok(None) }  // field: rewind for parse_struct_field
+            _ => { self.pos = start; self.tokens = toks_save; Ok(None) }  // field: rewind for parse_struct_field
         }
     }
 

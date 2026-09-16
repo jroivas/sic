@@ -126,4 +126,30 @@ dict<int,int> m;
 fill(m);                      // m now has {1: 10}
 ```
 
+## `weak<T>` — non-owning references
+
+A `weak<T>` (where `T` is a `list`/`dict`/`set`) refers to a container *without*
+keeping it alive. Read it back with `.get`, which upgrades to a normal handle while
+the container is still live, or reads as an empty/zero container once it is gone:
+
+```sic
+list<int> data; data.add(1); data.add(2);
+weak<list<int>> w = data;      // observes `data`, does not own it
+list<int> live = w.get;        // usable while `data` is alive
+```
+
+Its usual home is a **struct field** — the back-pointer that breaks an ownership
+cycle, so the strong links form a tree and the weak links close the loops (an
+observer that refers to its subject, a child that refers to its parent):
+
+```sic
+struct Observer { weak<list<int>> subject; };
+struct Observer o;
+o.subject = data;              // weak — `data`'s lifetime is unaffected
+o.subject.get;                 // the live list, or empty once `data` is dropped
+```
+
+Reassigning a `weak` binding or field drops its old observation; when the observed
+container is freed, every `weak` to it reads back dead.
+
 Next: [modules](modules.md).

@@ -796,18 +796,19 @@ impl<'m> FuncCtx<'m> {
                 // strong container handle — a fresh strong reference if the container
                 // is still live, else a null handle.
                 if self.is_sic() && name == "get" {
-                    if let ExprKind::Ident(id) = &base.kind {
-                        if let Some(cty) = self.weak_locals.get(id).cloned() {
-                            let is_dict = super::types::is_dict(&cty) || super::types::is_set(&cty);
-                            let w = self.lower_expr(base)?;
-                            let wv = self.coerce(w, &Type::void_ptr())?;
-                            let up = if is_dict { self.dict_runtime_fn("__sic_dict_upgrade") }
-                                     else { self.list_runtime_fn("__sic_list_upgrade") };
-                            let dest = self.alloc_val();
-                            self.push_instr(Instr::Call { dest: Some(dest), func: up, args: vec![wv], ret_ty: cty.clone() });
-                            self.val_types.insert(dest.0, cty);
-                            return Ok(Val::Local(dest));
-                        }
+                    if let Some(cty) = self.weak_ref_container_type(base) {
+                        let is_dict = super::types::is_dict(&cty) || super::types::is_set(&cty);
+                        let w = self.lower_expr(base)?;
+                        let wv = self.coerce(w, &Type::void_ptr())?;
+                        let up = if is_dict { self.dict_runtime_fn("__sic_dict_upgrade") }
+                                 else { self.list_runtime_fn("__sic_list_upgrade") };
+                        let dest = self.alloc_val();
+                        self.push_instr(Instr::Call { dest: Some(dest), func: up, args: vec![wv], ret_ty: cty.clone() });
+                        self.val_types.insert(dest.0, cty.clone());
+                        // The upgrade is a fresh strong reference; free it at scope
+                        // exit whether it is bound to a local or used inline.
+                        self.register_container_release(Val::Local(dest), &cty)?;
+                        return Ok(Val::Local(dest));
                     }
                 }
                 // sic `module.var` (sic.md §"Imports"): read an imported module's
@@ -2768,6 +2769,62 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// Register a scope-exit strong release for a freshly-produced container handle
+    /// (e.g. a weak `.get` upgrade): spill it to a slot and free it at scope exit.
+    pub(crate) fn register_container_release(&mut self, handle: Val, ty: &Type) -> Result<()> {
+        let is_dict = super::types::is_dict(ty) || super::types::is_set(ty);
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: Type::void_ptr(), align: None });
+        let h = self.coerce(handle, &Type::void_ptr())?;
+        self.push_instr(Instr::Store { val: h, ptr: Val::Local(slot) });
+        if is_dict {
+            self.register_scope_exit(super::func::Cleanup::DictFree { slot: Val::Local(slot) });
+        } else {
+            self.register_scope_exit(super::func::Cleanup::ListFree { slot: Val::Local(slot) });
+        }
+        Ok(())
+    }
+
+    /// Weak-retain or weak-release a `list`/`dict`/`set` handle (sic.md §"Weak"): a
+    /// weak reference does not keep the container alive.
+    pub(crate) fn container_weak_op(&mut self, handle: Val, ty: &Type, retain: bool) -> Result<()> {
+        let is_dict = super::types::is_dict(ty) || super::types::is_set(ty);
+        let name = match (is_dict, retain) {
+            (true, true) => "__sic_dict_weak_retain",
+            (true, false) => "__sic_dict_weak_release",
+            (false, true) => "__sic_list_weak_retain",
+            (false, false) => "__sic_list_weak_release",
+        };
+        let f = if is_dict { self.dict_runtime_fn(name) } else { self.list_runtime_fn(name) };
+        let h = self.coerce(handle, &Type::void_ptr())?;
+        self.push_instr(Instr::Call { dest: None, func: f, args: vec![h], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// If `e` denotes a weak reference (a `weak<T>` local or a `weak<T>` struct
+    /// field), its strong container type (sic.md §"Weak").
+    pub(crate) fn weak_ref_container_type(&self, e: &Expr) -> Option<Type> {
+        match &e.kind {
+            ExprKind::Ident(id) => self.weak_locals.get(id).cloned(),
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                let bt = self.infer_expr_type(base).ok()?;
+                let sname = match super::types::resolve_aggregate(&bt, &self.lowerer.struct_types) {
+                    Type::Struct(st) => st.name?,
+                    _ => match &bt {
+                        Type::Pointer(inner) => match super::types::resolve_aggregate(inner, &self.lowerer.struct_types) {
+                            Type::Struct(st) => st.name?,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    },
+                };
+                self.lowerer.struct_weak_fields.get(&sname)?
+                    .iter().find(|(fname, _)| fname == name).map(|(_, t)| t.clone())
+            }
+            _ => None,
+        }
+    }
+
     /// Register a scope-exit release for a closure environment (spills it to a
     /// slot so the cleanup can reach it). Unlike a tuple, this runs the closure's
     /// `__dtor` (releasing retained captures) when its refcount reaches zero.
@@ -4549,6 +4606,21 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // sic weak reference assignment (sic.md §"Weak"): writing a `weak<T>` local
+        // or struct field takes a NON-owning reference — weak-release the old target
+        // and weak-retain the new one, without keeping the container alive.
+        if self.is_sic() && op.is_none() {
+            if let Some(cty) = self.weak_ref_container_type(lhs) {
+                let lv = self.lower_lvalue(lhs)?;
+                let old = self.alloc_val();
+                self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: Type::void_ptr() });
+                self.container_weak_op(Val::Local(old), &cty, false)?;
+                let newh = self.lower_expr(rhs)?;
+                self.container_weak_op(newh.clone(), &cty, true)?;
+                self.store_lvalue(&lv, newh.clone())?;
+                return Ok(newh);
+            }
+        }
         // sic type safety (sic.md §"Memory safety"): reject a pointer/value aggregate
         // mismatch on a plain assignment, e.g. `f = new File()` into a `File` value.
         if self.is_sic() && op.is_none() {
@@ -8393,9 +8465,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Field { base, name } => {
                 // sic weak `.get` (sic.md §"Weak"): upgrades to the strong container type.
                 if self.is_sic() && name == "get" {
-                    if let ExprKind::Ident(id) = &base.kind {
-                        if let Some(cty) = self.weak_locals.get(id) { return Ok(cty.clone()); }
-                    }
+                    if let Some(cty) = self.weak_ref_container_type(base) { return Ok(cty); }
                 }
                 // sic `module.var` (sic.md §"Imports"): an imported module global has
                 // its exported value type (checked before base inference — the base

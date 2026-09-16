@@ -1,0 +1,42 @@
+// sic weak struct fields (sic.md §"Weak"): a `weak<T>` struct field is a
+// non-owning back-reference — it never keeps its container alive and observes it
+// as dead once dropped. This is what breaks ownership cycles (an observer holds a
+// weak field to its subject). Also exercises a nested-generic field type. Returns 42.
+struct Observer { weak<list<int>> subject; };
+struct Nested   { list<list<int>> rows; };   // nested generic field (parse regression)
+
+int main() {
+    // A weak field observing a live container upgrades to a usable handle.
+    list<int> data;
+    data.add(20);
+    data.add(22);
+    struct Observer o;
+    o.subject = data;                 // weak — does not own `data`
+    list<int> s = o.subject.get;
+    int t = 0;
+    for (tuple iv : s) t += (int)iv[1];
+    if (t != 42) return 1;
+
+    // Reassigning the weak field is fine (releases the old weak ref).
+    list<int> other;
+    other.add(9);
+    o.subject = other;
+    if ((int)(o.subject.get).size != 1) return 2;
+
+    // After the observed container is dropped, the weak field reads as dead (null).
+    struct DObs { weak<dict<int,int>> subject; };
+    struct DObs d;
+    dict<int,int> *p = new dict<int,int>;
+    p[1] = 7;
+    d.subject = p;
+    del p;                            // container dropped
+    dict<int,int> dead = d.subject.get;
+    if ((int)dead.size != 0) return 3;
+
+    // A nested-generic field type compiles and cleans up.
+    struct Nested n;
+    n.rows.add(other);
+    if ((int)n.rows.size != 1) return 4;
+
+    return 42;
+}

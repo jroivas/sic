@@ -1554,10 +1554,17 @@ you always find out rather than dangling:
     list<int> s = w.get;        // the live list while `a` is alive
     // … after the container is dropped, `w.get` yields an empty handle
 
-Use a weak reference for a back-pointer (a child that refers to its parent, an
-observer that refers to its subject) so the strong ownership forms a tree and the
-weak links close the loops. Currently `weak<T>` covers the reference-counted
-containers (`list`/`dict`/`set`).
+A `weak<T>` **struct field** is the usual home for such a back-pointer — an
+observer that refers to its subject, a child that refers to its parent — so the
+strong ownership forms a tree and the weak links close the loops:
+
+    struct Observer { weak<list<int>> subject; };
+    struct Observer o;
+    o.subject = data;            // does not own `data`
+    o.subject.get;               // the live list, or null once `data` is gone
+
+Currently `weak<T>` covers the reference-counted containers (`list`/`dict`/`set`),
+as a local or a struct field.
 
 ## Switch - case
 
