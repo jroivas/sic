@@ -2,6 +2,14 @@ extern void *malloc(unsigned long);
 extern void *realloc(void *, unsigned long);
 extern void free(void *);
 
+/* Forward references for container-element release (a `list`/`dict`/`set` stored
+   inside a container is refcounted). `__sic_dict_free` lives in the dict runtime,
+   which is co-prepended whenever a dict is used; the weak reference resolves to 0
+   in a list-only program (which never stores a dict, so it is never called). */
+struct __sic_list;
+void __sic_list_free(struct __sic_list *);
+extern __attribute__((weak)) void __sic_dict_free(void *);
+
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the
    list and dict runtimes; sic.md §"Dict"/§"List"):
      1 = a plain owned heap block (a deep-copied struct) — raw free;
@@ -16,6 +24,12 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
         unsigned long *desc = (unsigned long *)vslot;
         unsigned long *rc = (unsigned long *)desc[2];
         if (rc && --(*rc) == 0) free((void *)rc);
+    } else if (vowned == 3) {
+        /* a nested `list`/`set-of-list` handle — release one reference */
+        __sic_list_free((struct __sic_list *)vslot);
+    } else if (vowned == 4) {
+        /* a nested `dict`/`set` handle — release one reference */
+        if (__sic_dict_free) __sic_dict_free((void *)vslot);
     }
 }
 

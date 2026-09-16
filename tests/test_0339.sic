@@ -1,0 +1,47 @@
+// sic nested-container ownership + container capture (sic.md §"List"/§"Dict"/
+// §"Lambdas"): a container stored inside another container is retained and freed
+// with it, and a closure that captures a container keeps it alive — so both can
+// outlive the scope that created the inner value. Returns 42.
+
+// A nested container whose inner is owned only by the outer, then returned.
+list<list<int>> grid() {
+    list<list<int>> m;
+    list<int> row;
+    row.add(40);
+    row.add(2);
+    m.add(row);                // row retained by m
+    return m;                  // m (and row) survive
+}
+
+// A closure capturing a list, returned past the list's scope.
+Fn<int()> summer() {
+    list<int> xs;
+    xs.add(30);
+    xs.add(12);
+    return [xs]() { int t = 0; for (tuple iv : xs) t += (int)iv[1]; return t; };
+}
+
+// A closure capturing a dict.
+Fn<int(int)> lookup() {
+    dict<int,int> d;
+    d[7] = 42;
+    return [d](int k) { return d[k]; };
+}
+
+int main() {
+    list<list<int>> m = grid();
+    int t = 0;
+    for (tuple iv : m) {
+        list<int> r = iv[1];
+        for (tuple jv : r) t += (int)jv[1];
+    }
+    if (t != 42) return 1;
+
+    Fn<int()> s = summer();
+    if (s() != 42) return 2;
+
+    Fn<int(int)> f = lookup();
+    if (f(7) != 42) return 3;
+
+    return 42;
+}

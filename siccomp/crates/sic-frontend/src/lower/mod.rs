@@ -1432,6 +1432,8 @@ impl Lowerer {
                         fc.emit_string_release_at(flv.ptr);
                     } else if types::is_closure(fty) {
                         if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_closure_release(h); }
+                    } else if types::is_list(fty) || types::is_dict(fty) || types::is_set(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_release(h, fty); }
                     } else if let Ok(h) = fc.load_lvalue(&flv) {
                         let _ = fc.emit_rc_release(h);
                     }

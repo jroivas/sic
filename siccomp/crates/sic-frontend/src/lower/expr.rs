@@ -1336,10 +1336,12 @@ impl<'m> FuncCtx<'m> {
         let mut fn_params = vec![self_param];
         fn_params.extend(params.iter().cloned());
 
-        // Per-capture mode. `retained` (string/tuple/closure) is stored by value and
-        // reference-counted so its lifetime is bound to the closure.
+        // Per-capture mode. A `retained` capture (string/tuple/closure/container) is
+        // stored by value and reference-counted so its lifetime is bound to the
+        // closure — it stays alive as long as the closure and is released with it.
         let cap_retained = |ty: &Type| super::types::is_sic_string(ty) || super::types::is_tuple(ty)
-            || super::types::is_closure(ty);
+            || super::types::is_closure(ty) || super::types::is_list(ty)
+            || super::types::is_dict(ty) || super::types::is_set(ty);
 
         // Build the generated body: a by-reference capture rewrites uses of the name
         // to `*(__self->name)`; a retained capture to `__self->name` (the value lives
@@ -1409,6 +1411,9 @@ impl<'m> FuncCtx<'m> {
                 // Retain the referent so it lives as long as the closure.
                 if super::types::is_sic_string(ty) {
                     self.retain_string_at(&fld.ptr)?;
+                } else if super::types::is_list(ty) || super::types::is_dict(ty) || super::types::is_set(ty) {
+                    let h = self.load_lvalue(&fld)?;
+                    self.container_retain(h, ty)?;
                 } else {
                     let h = self.load_lvalue(&fld)?;
                     self.emit_rc_retain(h)?;
@@ -1988,6 +1993,21 @@ impl<'m> FuncCtx<'m> {
     /// overwrite/remove/free); the type word is stored only for an `any` element.
     pub(crate) fn container_box_value(&mut self, val: &Expr, v: &Type) -> Result<(Val, Val, Val)> {
         let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
+        // A nested container element (`list<list>`, `dict<K,list>`, …) is a shared
+        // handle: retain it so the outer container owns a reference, and mark it for
+        // release when the outer is freed/overwritten (`vowned` 3 = list, 4 = dict/
+        // set). This keeps a nested container alive independent of its origin scope.
+        let (is_list_elem, is_dict_elem) = (super::types::is_list(v),
+            super::types::is_dict(v) || super::types::is_set(v));
+        if is_list_elem || is_dict_elem {
+            let handle = self.lower_expr(val)?;
+            self.container_retain(handle.clone(), v)?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: handle, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            let vowned = Constant::int(if is_list_elem { 3 } else { 4 });
+            return Ok((Constant::uint(0), Val::Local(w), vowned));
+        }
         let is_owned_string = super::types::is_sic_string(v) || super::types::is_sic_string(&ety);
         let is_owned_struct = !is_owned_string && !super::types::is_any(v)
             && matches!(v, Type::Struct(_) | Type::Union(_));
@@ -2702,6 +2722,22 @@ impl<'m> FuncCtx<'m> {
             self.dict_runtime_fn("__sic_dict_retain")
         } else if super::types::is_list(ty) {
             self.list_runtime_fn("__sic_list_retain")
+        } else {
+            return Ok(());
+        };
+        let h = self.coerce(handle, &Type::void_ptr())?;
+        self.push_instr(Instr::Call { dest: None, func: f, args: vec![h], ret_ty: Type::Void });
+        Ok(())
+    }
+
+    /// Release one reference to a `list`/`dict`/`set` handle (sic.md §"List"/
+    /// §"Dict"): decrement its refcount, freeing at zero. A no-op for a
+    /// non-container type.
+    pub(crate) fn container_release(&mut self, handle: Val, ty: &Type) -> Result<()> {
+        let f = if super::types::is_dict(ty) || super::types::is_set(ty) {
+            self.dict_runtime_fn("__sic_dict_free")
+        } else if super::types::is_list(ty) {
+            self.list_runtime_fn("__sic_list_free")
         } else {
             return Ok(());
         };
