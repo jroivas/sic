@@ -1,0 +1,37 @@
+// sic by-reference lambda captures (sic.md §"Lambdas"): `[@x]` captures a shared
+// borrow and `[@mut x]` a mutable borrow of a variable in scope — the closure
+// reads the live value and (`@mut`) writes back to the original. `[x]` still
+// captures a private copy. Returns 42.
+int main() {
+    // `@mut` — a mutable borrow: the closure mutates the original.
+    int sum = 0;
+    auto add = [@mut sum](int x) { sum += x; };
+    add(10);
+    add(20);
+    add(12);
+    if (sum != 42) return 1;
+
+    // `@` — a shared borrow: the closure reads the variable's live value.
+    int n = 1;
+    auto get = [@n]() { return n; };
+    n = 41;
+    if (get() != 41) return 2;
+    n = 100;
+    if (get() != 100) return 3;
+
+    // `[x]` — by value: a copy taken at creation, unaffected by later writes.
+    int k = 7;
+    auto kcopy = [k]() { return k; };
+    k = 999;
+    if (kcopy() != 7) return 4;
+
+    // Mixing a by-value and a by-reference capture in one closure.
+    int base = 100;
+    int hits = 0;
+    auto tally = [base, @mut hits](int x) { hits += 1; return base + x; };
+    if (tally(1) != 101) return 5;
+    if (tally(2) != 102) return 6;
+    if (hits != 2) return 7;
+
+    return 42;
+}

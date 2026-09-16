@@ -1217,21 +1217,17 @@ impl<'m> FuncCtx<'m> {
         Ok(super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size))
     }
 
-    /// The shape of a capturing closure (sic.md §"Lambdas"): its captured
-    /// `(name, type)` fields (inferred in the *current* scope), the user-visible
-    /// callable signature, the environment struct name/type, and the generated
-    /// function's signature (whose first parameter is the environment pointer).
-    /// Only by-value scalar/pointer captures are supported for now.
+    /// The shape of a capturing closure (sic.md §"Lambdas"): each capture as
+    /// `(name, value-type, by_ref)` (inferred in the *current* scope), the
+    /// user-visible callable signature, the environment struct name/type, and the
+    /// generated function's signature (its first parameter is the environment
+    /// pointer). A by-value capture stores a copy; a by-reference (`@`/`@mut`)
+    /// capture stores a pointer to the original. Scalar/pointer captures only.
     fn closure_shape(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
         ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span)
-        -> Result<(Vec<(String, Type)>, FunctionType, String, FunctionType, Type)> {
-        let mut caps: Vec<(String, Type)> = Vec::new();
+        -> Result<(Vec<(String, Type, bool)>, FunctionType, String, FunctionType, Type)> {
+        let mut caps: Vec<(String, Type, bool)> = Vec::new();
         for c in captures {
-            if c.by_ref {
-                return Err(CompileError::at(format!(
-                    "by-reference capture `@{}` is not supported yet — capture by value (`[{}]`)",
-                    c.name, c.name), span.file.clone(), span.line, span.col));
-            }
             let id = Expr::new(ExprKind::Ident(c.name.clone()), span.clone());
             let ty = self.infer_expr_type(&id).map_err(|_| CompileError::at(
                 format!("cannot capture `{}` — not visible in this scope", c.name),
@@ -1242,19 +1238,24 @@ impl<'m> FuncCtx<'m> {
                     "capture `{}` has type `{}` — only scalar and pointer captures are supported yet",
                     c.name, super::func::type_desc(&ty)), span.file.clone(), span.line, span.col));
             }
-            caps.push((c.name.clone(), ty));
+            caps.push((c.name.clone(), ty, c.by_ref));
         }
-        // The user-visible signature, with captures in scope for return inference.
+        // Environment field types: a by-reference capture is stored as a pointer.
+        let cap_fields: Vec<(String, Type)> = caps.iter().map(|(n, t, by_ref)|
+            (n.clone(), if *by_ref { Type::Pointer(Box::new(t.clone())) } else { t.clone() })).collect();
+        // The user-visible signature, with captures (as their value type) in scope
+        // for return-type inference.
+        let extra: Vec<(String, Type)> = caps.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
         let mut ir_params = Vec::new();
         for p in params {
             ir_params.push(super::types::lower_param_type(&p.ty, &self.lowerer.struct_types, self.lowerer.ptr_size)?);
         }
         let ir_ret = match ret {
             Some(r) => self.lower_type(r)?,
-            None => self.lowerer.infer_body_return_type_ext(body, params, &ir_params, &caps),
+            None => self.lowerer.infer_body_return_type_ext(body, params, &ir_params, &extra),
         };
         let user_sig = super::build_fn_sig(ir_ret, ir_params, false, self.lowerer.ptr_size);
-        let env_name = super::types::closure_env_name(&user_sig, &caps);
+        let env_name = super::types::closure_env_name(&user_sig, &cap_fields);
         // The generated function takes the environment pointer as a hidden first
         // parameter; an opaque pointer to the named struct avoids a self-cycle.
         let env_opaque = Type::Pointer(Box::new(Type::Struct(
@@ -1262,7 +1263,7 @@ impl<'m> FuncCtx<'m> {
         let mut code_params = vec![env_opaque];
         code_params.extend(user_sig.params.clone());
         let code_fn_ty = FunctionType { ret: user_sig.ret.clone(), params: code_params, variadic: false };
-        let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &caps);
+        let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &cap_fields);
         Ok((caps, user_sig, env_name, code_fn_ty, env_ty))
     }
 
@@ -1316,9 +1317,19 @@ impl<'m> FuncCtx<'m> {
         };
         let mut fn_params = vec![self_param];
         fn_params.extend(params.iter().cloned());
-        // Prepend `auto <cap> = __self-><cap>;` so the body's references resolve.
-        let mut fn_body: Vec<ast::Stmt> = Vec::with_capacity(caps.len() + body.len());
-        for (cn, _) in &caps {
+        // Build the generated body. A by-reference capture rewrites every use of the
+        // name in the body to `*(__self->name)` (so reads see the live value and
+        // `@mut` writes propagate). A by-value capture prepends `auto name =
+        // __self->name;` (a private copy).
+        let mut user_body: Vec<ast::Stmt> = body.to_vec();
+        for (cn, _, by_ref) in &caps {
+            if *by_ref {
+                for s in &mut user_body { rewrite_capture_ref(s, cn); }
+            }
+        }
+        let mut fn_body: Vec<ast::Stmt> = Vec::with_capacity(caps.len() + user_body.len());
+        for (cn, _, by_ref) in &caps {
+            if *by_ref { continue; }
             let init = ast::Initializer::Expr(Expr::new(ExprKind::Arrow {
                 base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), span.clone())),
                 name: cn.clone(),
@@ -1335,18 +1346,20 @@ impl<'m> FuncCtx<'m> {
                 weak: false, thread_local: false, span: span.clone(),
             }));
         }
-        fn_body.extend(body.iter().cloned());
+        fn_body.extend(user_body);
         self.lowerer.lower_function(&fn_name, &ret_qt, &fn_params, false, &fn_body,
             &Some(ast::StorageClass::Static), false, None, false)?;
         let code_fref = self.lowerer.module.func_ref_by_name(&fn_name).ok_or_else(||
             CompileError::new("internal: closure function was not registered".to_string()))?;
 
-        // Allocate the refcounted environment, store the code pointer and captures.
+        // Allocate the refcounted environment, store the code pointer and captures:
+        // a by-value capture stores the value, a by-reference capture the address.
         let env_ptr = self.emit_rc_alloc(&env_ty)?;
         let code_lv = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), "__code", false, span)?;
         self.store_lvalue(&code_lv, Val::Func(code_fref))?;
-        for (cn, _) in &caps {
-            let v = self.lower_expr(&Expr::new(ExprKind::Ident(cn.clone()), span.clone()))?;
+        for (cn, _, by_ref) in &caps {
+            let id = Expr::new(ExprKind::Ident(cn.clone()), span.clone());
+            let v = if *by_ref { self.lower_lvalue(&id)?.ptr } else { self.lower_expr(&id)? };
             let fld = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), cn, false, span)?;
             self.store_lvalue(&fld, v)?;
         }
@@ -8810,3 +8823,128 @@ fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
     Some((op, ret_new))
 }
 
+
+/// sic by-reference captures (sic.md §"Lambdas"): rewrite every bare use of
+/// `name` in a lifted closure body to `*(__self->name)`, so reads see the live
+/// value and `@mut` writes propagate to the captured variable. Does not descend
+/// into a nested lambda's body (it has its own scope and captures).
+fn rewrite_capture_ref(s: &mut ast::Stmt, name: &str) {
+    use ast::Stmt::*;
+    match s {
+        Decl(d) => rewrite_capture_decl(d, name),
+        Expr(e, _) => rewrite_capture_expr(e, name),
+        Block(ss, _) | Unsafe(ss, _) => { for x in ss { rewrite_capture_ref(x, name); } }
+        If { cond, then, else_, .. } => {
+            rewrite_capture_expr(cond, name);
+            rewrite_capture_ref(then, name);
+            if let Some(e) = else_ { rewrite_capture_ref(e, name); }
+        }
+        While { cond, body, .. } | DoWhile { body, cond, .. } => {
+            rewrite_capture_expr(cond, name);
+            rewrite_capture_ref(body, name);
+        }
+        For { init, cond, post, body, .. } => {
+            if let Some(fi) = init {
+                match fi {
+                    ast::ForInit::Decl(d) => rewrite_capture_decl(d, name),
+                    ast::ForInit::Expr(e) => rewrite_capture_expr(e, name),
+                }
+            }
+            if let Some(c) = cond { rewrite_capture_expr(c, name); }
+            if let Some(p) = post { rewrite_capture_expr(p, name); }
+            rewrite_capture_ref(body, name);
+        }
+        ForEach { iterable, body, .. } => {
+            rewrite_capture_expr(iterable, name);
+            rewrite_capture_ref(body, name);
+        }
+        Return(Some(e), _) | Delete(e, _) => rewrite_capture_expr(e, name),
+        Defer(b, _) | Label(_, b, _) | Default(b, _) => rewrite_capture_ref(b, name),
+        Case(e, b, _) => { rewrite_capture_expr(e, name); rewrite_capture_ref(b, name); }
+        CaseRange(a, z, b, _) => {
+            rewrite_capture_expr(a, name); rewrite_capture_expr(z, name); rewrite_capture_ref(b, name);
+        }
+        Switch { val, body, .. } => { rewrite_capture_expr(val, name); rewrite_capture_ref(body, name); }
+        Match { scrutinee, arms, .. } => {
+            rewrite_capture_expr(scrutinee, name);
+            for a in arms { rewrite_capture_ref(&mut a.body, name); }
+        }
+        Guard { cond, else_body, .. } => { rewrite_capture_expr(cond, name); rewrite_capture_ref(else_body, name); }
+        Return(None, _) | Break(_) | Continue(_) | Fallthrough(_) | Goto(_, _) | Null(_) => {}
+    }
+}
+
+fn rewrite_capture_decl(d: &mut ast::Decl, name: &str) {
+    if let ast::Decl::Var { declarators, .. } = d {
+        for decl in declarators {
+            if let Some(init) = &mut decl.init { rewrite_capture_init(init, name); }
+        }
+    }
+}
+
+fn rewrite_capture_init(init: &mut ast::Initializer, name: &str) {
+    match init {
+        ast::Initializer::Expr(e) => rewrite_capture_expr(e, name),
+        ast::Initializer::List(items) => { for it in items { rewrite_capture_init(&mut it.init, name); } }
+    }
+}
+
+fn rewrite_capture_expr(e: &mut Expr, name: &str) {
+    if let ExprKind::Ident(id) = &e.kind {
+        if id == name {
+            let sp = e.span.clone();
+            *e = Expr::new(ExprKind::Unary {
+                op: UnOpKind::Deref,
+                expr: Box::new(Expr::new(ExprKind::Arrow {
+                    base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), sp.clone())),
+                    name: name.to_string(),
+                }, sp.clone())),
+            }, sp);
+        }
+        return;
+    }
+    match &mut e.kind {
+        // A nested lambda has its own scope/captures — do not rewrite into it.
+        ExprKind::Lambda { .. } => {}
+        ExprKind::BinOp { lhs, rhs, .. } | ExprKind::Assign { lhs, rhs, .. }
+        | ExprKind::Swap { lhs, rhs } | ExprKind::Comma(lhs, rhs) => {
+            rewrite_capture_expr(lhs, name); rewrite_capture_expr(rhs, name);
+        }
+        ExprKind::Unary { expr, .. } | ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. }
+        | ExprKind::Cast { expr, .. } | ExprKind::SizeofExpr(expr) | ExprKind::AlignofExpr(expr)
+        | ExprKind::Ref { expr, .. } | ExprKind::Await(expr) | ExprKind::TypeId(expr) => rewrite_capture_expr(expr, name),
+        ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } | ExprKind::OptField { base, .. } =>
+            rewrite_capture_expr(base, name),
+        ExprKind::Index { base, index } => { rewrite_capture_expr(base, name); rewrite_capture_expr(index, name); }
+        ExprKind::Slice { base, lo, hi } => {
+            rewrite_capture_expr(base, name);
+            if let Some(x) = lo { rewrite_capture_expr(x, name); }
+            if let Some(x) = hi { rewrite_capture_expr(x, name); }
+        }
+        ExprKind::New { args, .. } | ExprKind::TupleExpr(args) => { for a in args { rewrite_capture_expr(a, name); } }
+        ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } => {
+            rewrite_capture_expr(cond, name); rewrite_capture_expr(then, name); rewrite_capture_expr(else_, name);
+        }
+        ExprKind::Elvis { cond, else_ } => { rewrite_capture_expr(cond, name); rewrite_capture_expr(else_, name); }
+        ExprKind::Call { func, args } => {
+            rewrite_capture_expr(func, name);
+            for a in args { rewrite_capture_expr(a, name); }
+        }
+        ExprKind::NamedArg { value, .. } => rewrite_capture_expr(value, name),
+        ExprKind::Match { scrutinee, arms } => {
+            rewrite_capture_expr(scrutinee, name);
+            for a in arms { rewrite_capture_ref(&mut a.body, name); }
+        }
+        ExprKind::Generic { controlling, assocs } => {
+            rewrite_capture_expr(controlling, name);
+            for (_, x) in assocs { rewrite_capture_expr(x, name); }
+        }
+        ExprKind::StmtExpr(ss) | ExprKind::Guard { body: ss, .. } => { for s in ss { rewrite_capture_ref(s, name); } }
+        ExprKind::CompoundLiteral { init, .. } => { for it in init { rewrite_capture_init(&mut it.init, name); } }
+        ExprKind::VaStart { list, last } => { rewrite_capture_expr(list, name); rewrite_capture_expr(last, name); }
+        ExprKind::VaArg { list, .. } => rewrite_capture_expr(list, name),
+        ExprKind::VaEnd { list } => rewrite_capture_expr(list, name),
+        ExprKind::VaCopy { dst, src } => { rewrite_capture_expr(dst, name); rewrite_capture_expr(src, name); }
+        _ => {}
+    }
+}

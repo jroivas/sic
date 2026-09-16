@@ -41,24 +41,34 @@ Because the value is a function pointer, `auto fn = […]` gives `fn` the type
 
 ## Captures
 
-A non-empty capture list binds names from the enclosing scope. `[x]` captures by
-value — a copy taken when the closure is created:
+A non-empty capture list binds names from the enclosing scope, in one of three
+ways, reusing SIC's [reference model](memory-and-ownership.md):
+
+- `[x]` — **by value**: a copy taken when the closure is created.
+- `[@x]` — **shared borrow**: the closure reads `x`'s live value.
+- `[@mut x]` — **mutable borrow**: the closure reads and writes the original `x`.
 
 ```sic
 int n = 100;
-auto addn = [n](int x) { return x + n; };
-addn(5);                                 // 105
+auto addn = [n](int x) { return x + n; };   // by value
+addn(5);                                     // 105
 
 int k = 1;
-auto getk = [k]() { return k; };
+auto getk = [k]() { return k; };             // by value — a snapshot
 k = 999;
-getk();                                  // 1  (captured the value, not the variable)
+getk();                                      // 1
+
+int sum = 0;
+auto add = [@mut sum](int x) { sum += x; };  // mutable borrow — writes propagate
+add(10); add(32);
+sum;                                         // 42
 ```
 
 A capturing lambda is a **closure**: code plus a reference-counted environment
-holding the captured values, allocated on the heap and released automatically.
-Because a closure can be returned and stored, **currying** works — a lambda that
-returns a lambda capturing the outer parameter:
+holding the captured values (or, for a borrow, a pointer to the original),
+allocated on the heap and released automatically. Because a closure can be
+returned and stored, **currying** works — a lambda that returns a lambda
+capturing the outer parameter:
 
 ```sic
 auto add   = [](int a) { return [a](int b) { return a + b; }; };
@@ -66,11 +76,12 @@ auto add10 = add(10);
 add10(32);                               // 42
 ```
 
-Current limits (planned to lift): captures are **by value** and limited to scalar
-and pointer types; by-reference captures (`[@y]` shared, `[@mut y]` mutable),
-capturing owned aggregates like `string`, and a nameable closure type
-(`Fn<int(int)>`) are not implemented yet. Bind an intermediate closure to a
-variable rather than chaining calls in one expression — `auto g = add(10); g(32)`,
-not `add(10)(32)` — so its environment is released at scope exit.
+Current limits (planned to lift): captures are limited to scalar and pointer
+types; capturing owned aggregates like `string`, and a nameable closure type
+(`Fn<int(int)>`), are not implemented yet. A `@`/`@mut` borrow points at the
+original variable, so such a closure must not outlive it (like a C++ `[&]`
+capture). And bind an intermediate closure to a variable rather than chaining
+calls in one expression — `auto g = add(10); g(32)`, not `add(10)(32)` — so its
+environment is released at scope exit.
 
 Next: [atomics](atomics.md).
