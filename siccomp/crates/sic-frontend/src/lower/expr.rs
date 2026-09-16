@@ -678,7 +678,18 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Elvis { cond, else_ } => self.lower_elvis(cond, else_),
             ExprKind::Match { scrutinee, arms } => self.lower_match_expr(scrutinee, arms, &expr.span),
 
-            ExprKind::Call { func, args } => self.lower_call(func, args, &expr.span),
+            ExprKind::Call { func, args } => {
+                let v = self.lower_call(func, args, &expr.span)?;
+                // sic closure (sic.md §"Lambdas"): a call that RETURNS a closure
+                // yields a fresh refcounted environment. Register it as a temporary
+                // freed at scope exit — covering both an unbound result
+                // (`add(10)(32)`) and one bound to a local (`auto g = add(2)`); a
+                // `return` retains it first so it escapes to the caller.
+                if self.is_sic() && super::types::is_closure(&self.val_type(&v)) {
+                    self.register_tuple_release(v.clone())?;
+                }
+                Ok(v)
+            }
 
             // sic `await expr` (sic.md §"Async").
             ExprKind::Await(inner) => self.lower_await(inner),

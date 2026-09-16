@@ -1922,19 +1922,6 @@ impl<'m> FuncCtx<'m> {
                             });
                         }
                     }
-                    // sic capturing closure local (sic.md §"Lambdas"): a closure is a
-                    // refcounted heap environment. One created inline by a lambda
-                    // literal is already covered by its own temp release; one bound
-                    // from another source (a call returning a closure — e.g. a curried
-                    // `auto add2 = add(2);`) owns a reference that must be released at
-                    // scope exit.
-                    if self.is_sic() && super::types::is_closure(&ty) {
-                        let from_literal = matches!(&d.init,
-                            Some(Initializer::Expr(e)) if matches!(e.kind, ExprKind::Lambda { .. }));
-                        if d.init.is_some() && !from_literal {
-                            self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
-                        }
-                    }
                     // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh
                     // empty map, so auto-initialize the handle to `__sic_dict_new()`
                     // (an uninitialized NULL handle would crash on first use).
