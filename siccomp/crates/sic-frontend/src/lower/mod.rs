@@ -1422,8 +1422,9 @@ impl Lowerer {
     /// `void __sic_closure_dtor_<env>(void* self)` that releases the closure's
     /// retained (refcounted) captures. Its address is stored in the env's `__dtor`
     /// field and run when the environment is freed. `None` if nothing is retained.
-    pub(crate) fn ensure_closure_dtor(&mut self, env_ty: &Type, retained: &[(String, Type)]) -> Option<FuncRef> {
-        if retained.is_empty() { return None; }
+    pub(crate) fn ensure_closure_dtor(&mut self, env_ty: &Type, retained: &[(String, Type)],
+        weak: &[(String, Type)]) -> Option<FuncRef> {
+        if retained.is_empty() && weak.is_empty() { return None; }
         let env_name = match env_ty { Type::Struct(st) => st.name.clone()?, _ => return None };
         let dname = format!("__sic_closure_dtor_{}", env_name);
         if let Some(f) = self.module.func_ref_by_name(&dname) { return Some(f); }
@@ -1452,6 +1453,12 @@ impl Lowerer {
                     } else if let Ok(h) = fc.load_lvalue(&flv) {
                         let _ = fc.emit_rc_release(h);
                     }
+                }
+            }
+            // Weak captures: drop the weak count (never touches the strong count).
+            for (fname, fty) in weak {
+                if let Ok(flv) = fc.field_ptr_from(crate::lower::expr::LValue::plain(Val::Local(envp), env_ty.clone()), fname, false, &sp) {
+                    if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_weak_op(h, fty, false); }
                 }
             }
             fc.set_terminator(Terminator::Ret(None));

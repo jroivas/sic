@@ -149,6 +149,14 @@ o.subject = data;              // weak — `data`'s lifetime is unaffected
 o.subject.get;                 // the live list, or empty once `data` is dropped
 ```
 
+A closure captures a container weakly with `[weak x]`, for the same reason — so a
+closure kept inside the container it observes does not keep that container alive.
+Inside the body the captured name is a weak reference, upgraded with `.get`:
+
+```sic
+auto observe = [weak data]() -> int { return (int)(data.get).size; };
+```
+
 Reassigning a `weak` binding or field drops its old observation; when the observed
 container is freed, every `weak` to it reads back dead.
 

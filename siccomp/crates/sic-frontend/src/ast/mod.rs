@@ -209,6 +209,10 @@ pub struct LambdaCapture {
     pub name: String,
     pub by_ref: bool,
     pub mutable: bool,
+    /// sic (sic.md §"Weak"): `[weak x]` — capture a container without keeping it
+    /// alive, so a closure stored inside the container it captures does not form an
+    /// ownership cycle. Upgraded in the body via `x.get`.
+    pub weak: bool,
     pub span: Span,
 }
 

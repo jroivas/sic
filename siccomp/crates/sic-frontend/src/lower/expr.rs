@@ -1255,13 +1255,23 @@ impl<'m> FuncCtx<'m> {
     /// capture stores a pointer to the original. Scalar/pointer captures only.
     fn closure_shape(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
         ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span)
-        -> Result<(Vec<(String, Type, bool)>, FunctionType, String, FunctionType, Type)> {
-        let mut caps: Vec<(String, Type, bool)> = Vec::new();
+        -> Result<(Vec<(String, Type, bool, bool)>, FunctionType, String, FunctionType, Type)> {
+        let mut caps: Vec<(String, Type, bool, bool)> = Vec::new();
         for c in captures {
             let id = Expr::new(ExprKind::Ident(c.name.clone()), span.clone());
             let ty = self.infer_expr_type(&id).map_err(|_| CompileError::at(
                 format!("cannot capture `{}` — not visible in this scope", c.name),
                 span.file.clone(), span.line, span.col))?;
+            // A `weak` capture (sic.md §"Weak") holds a container without owning it —
+            // stored by value (the handle) but weak-counted, so a closure kept inside
+            // the very container it captures does not form an ownership cycle. Only
+            // the reference-counted containers can be captured weakly.
+            if c.weak && !(super::types::is_list(&ty) || super::types::is_dict(&ty)
+                || super::types::is_set(&ty)) {
+                return Err(CompileError::at(
+                    format!("`weak` capture of `{}` requires a list/dict/set", c.name),
+                    span.file.clone(), span.line, span.col));
+            }
             // A scalar/pointer captures by value (a cheap copy). A refcounted value
             // (`string`, `tuple`, closure) is captured by value too but *retained*,
             // so its lifetime is bound to the closure (see `lower_lambda`). Any other
@@ -1271,15 +1281,17 @@ impl<'m> FuncCtx<'m> {
                 | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_));
             let retained = super::types::is_sic_string(&ty) || super::types::is_tuple(&ty)
                 || super::types::is_closure(&ty);
-            let by_ref = c.by_ref || (!scalar && !retained);
-            caps.push((c.name.clone(), ty, by_ref));
+            let by_ref = !c.weak && (c.by_ref || (!scalar && !retained));
+            caps.push((c.name.clone(), ty, by_ref, c.weak));
         }
-        // Environment field types: a by-reference capture is stored as a pointer.
-        let cap_fields: Vec<(String, Type)> = caps.iter().map(|(n, t, by_ref)|
+        // Environment field types: a by-reference capture is stored as a pointer; a
+        // weak or by-value capture stores its value type (a container handle for a
+        // weak one).
+        let cap_fields: Vec<(String, Type)> = caps.iter().map(|(n, t, by_ref, _)|
             (n.clone(), if *by_ref { Type::Pointer(Box::new(t.clone())) } else { t.clone() })).collect();
         // The user-visible signature, with captures (as their value type) in scope
         // for return-type inference.
-        let extra: Vec<(String, Type)> = caps.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
+        let extra: Vec<(String, Type)> = caps.iter().map(|(n, t, _, _)| (n.clone(), t.clone())).collect();
         let mut ir_params = Vec::new();
         for p in params {
             ir_params.push(super::types::lower_param_type(&p.ty, &self.lowerer.struct_types, self.lowerer.ptr_size)?);
@@ -1340,6 +1352,13 @@ impl<'m> FuncCtx<'m> {
         let (caps, _user_sig, env_name, _code_fn_ty, env_ty) =
             self.closure_shape(captures, params, ret, body, span)?;
         self.lowerer.struct_types.insert(env_name.clone(), env_ty.clone());
+        // A `weak` capture becomes a weak field of the environment struct, so that
+        // `name.get` inside the body upgrades it through the ordinary weak-field path.
+        let weak_caps: Vec<(String, Type)> = caps.iter()
+            .filter(|(_, _, _, weak)| *weak).map(|(cn, ty, _, _)| (cn.clone(), ty.clone())).collect();
+        if !weak_caps.is_empty() {
+            self.lowerer.struct_weak_fields.insert(env_name.clone(), weak_caps);
+        }
 
         let n = self.lowerer.lambda_counter;
         self.lowerer.lambda_counter += 1;
@@ -1367,14 +1386,14 @@ impl<'m> FuncCtx<'m> {
         // in the env, no local copy that would double-release); a plain by-value
         // scalar prepends `auto name = __self->name;` (a private copy).
         let mut user_body: Vec<ast::Stmt> = body.to_vec();
-        for (cn, ty, by_ref) in &caps {
-            if *by_ref || cap_retained(ty) {
+        for (cn, ty, by_ref, weak) in &caps {
+            if *by_ref || *weak || cap_retained(ty) {
                 for s in &mut user_body { rewrite_capture_ref(s, cn, *by_ref); }
             }
         }
         let mut fn_body: Vec<ast::Stmt> = Vec::with_capacity(caps.len() + user_body.len());
-        for (cn, ty, by_ref) in &caps {
-            if *by_ref || cap_retained(ty) { continue; }
+        for (cn, ty, by_ref, weak) in &caps {
+            if *by_ref || *weak || cap_retained(ty) { continue; }
             let init = ast::Initializer::Expr(Expr::new(ExprKind::Arrow {
                 base: Box::new(Expr::new(ExprKind::Ident("__self".to_string()), span.clone())),
                 name: cn.clone(),
@@ -1398,11 +1417,14 @@ impl<'m> FuncCtx<'m> {
             CompileError::new("internal: closure function was not registered".to_string()))?;
 
         // The retained captures (with their env-field types) get released by the
-        // environment's destructor.
+        // environment's destructor; the weak ones get weak-released there.
         let retained: Vec<(String, Type)> = caps.iter()
-            .filter(|(_, ty, by_ref)| !*by_ref && cap_retained(ty))
-            .map(|(cn, ty, _)| (cn.clone(), ty.clone())).collect();
-        let dtor = self.lowerer.ensure_closure_dtor(&env_ty, &retained);
+            .filter(|(_, ty, by_ref, weak)| !*by_ref && !*weak && cap_retained(ty))
+            .map(|(cn, ty, _, _)| (cn.clone(), ty.clone())).collect();
+        let weak_release: Vec<(String, Type)> = caps.iter()
+            .filter(|(_, _, _, weak)| *weak)
+            .map(|(cn, ty, _, _)| (cn.clone(), ty.clone())).collect();
+        let dtor = self.lowerer.ensure_closure_dtor(&env_ty, &retained, &weak_release);
 
         // Allocate the environment; store the code pointer, the destructor pointer,
         // and the captures. A by-reference capture stores the address; any other
@@ -1413,7 +1435,7 @@ impl<'m> FuncCtx<'m> {
         let dtor_lv = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), "__dtor", false, span)?;
         let dtor_val = match dtor { Some(fr) => Val::Func(fr), None => self.coerce(Constant::zero(), &Type::void_ptr())? };
         self.store_lvalue(&dtor_lv, dtor_val)?;
-        for (cn, ty, by_ref) in &caps {
+        for (cn, ty, by_ref, weak) in &caps {
             let id = Expr::new(ExprKind::Ident(cn.clone()), span.clone());
             let fld = self.field_ptr_from(LValue::plain(env_ptr.clone(), env_ty.clone()), cn, false, span)?;
             if !*by_ref && matches!(ty, Type::Struct(_) | Type::Union(_)) {
@@ -1426,7 +1448,12 @@ impl<'m> FuncCtx<'m> {
                 let v = if *by_ref { self.lower_lvalue(&id)?.ptr } else { self.lower_expr(&id)? };
                 self.store_lvalue(&fld, v)?;
             }
-            if !*by_ref && cap_retained(ty) {
+            if *weak {
+                // A weak capture takes a weak count only — it never keeps the
+                // container alive (released via the env dtor's weak_release).
+                let h = self.load_lvalue(&fld)?;
+                self.container_weak_op(h, ty, true)?;
+            } else if !*by_ref && cap_retained(ty) {
                 // Retain the referent so it lives as long as the closure.
                 if super::types::is_sic_string(ty) {
                     self.retain_string_at(&fld.ptr)?;

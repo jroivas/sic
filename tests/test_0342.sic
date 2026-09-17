@@ -1,0 +1,31 @@
+// sic weak captures (sic.md §"Weak" / §"Lambdas"): `[weak x]` captures a container
+// without owning it, so a closure kept inside the very container it observes does not
+// form an ownership cycle. The captured name is a weak reference — upgrade it in the
+// body with `x.get` (a live handle, or an empty/dead one once the container is gone).
+// Returns 42.
+int main() {
+    // A weak-captured live container upgrades to a usable handle inside the closure.
+    list<int> data;
+    data.add(20);
+    data.add(22);
+    auto sum = [weak data]() -> int {
+        list<int> s = data.get;        // upgrade — live here
+        int t = 0;
+        for (tuple iv : s) t += (int)iv[1];
+        return t;
+    };
+    if (sum() != 42) return 1;
+
+    // The weak capture never kept its container alive: after the only strong owner is
+    // dropped, the closure upgrades to a dead (empty) handle rather than a dangling one.
+    dict<int,int> *p = new dict<int,int>;
+    p[1] = 7;
+    auto peek = [weak p]() -> int {
+        dict<int,int> d = p.get;       // dead (null) once `p` is gone
+        return (int)d.size;
+    };
+    del p;                             // drop the only strong owner
+    if (peek() != 0) return 2;
+
+    return 42;
+}

@@ -1481,6 +1481,10 @@ A non-empty capture list binds names from the enclosing scope:
   **by reference** — no copy — so the closure sees its live value.
 - `[@x]` — **shared borrow** (explicit): the closure reads `x`'s live value.
 - `[@mut x]` — **mutable borrow**: the closure reads and writes the original `x`.
+- `[weak x]` — **weak capture** of a container: the closure observes `x` without
+  keeping it alive, so a closure stored inside the very container it captures does
+  not form an ownership cycle. Inside the body `x` is a [`weak`](#weak-references)
+  reference — upgrade it with `x.get` (see below).
 
 ```sic
 int n = 100;
@@ -1563,8 +1567,13 @@ strong ownership forms a tree and the weak links close the loops:
     o.subject = data;            // does not own `data`
     o.subject.get;               // the live list, or null once `data` is gone
 
+A **closure** can capture a container weakly with `[weak x]`, for the same reason —
+so a closure held inside the container it captures does not keep it alive:
+
+    auto observe = [weak data]() -> int { return (int)(data.get).size; };
+
 Currently `weak<T>` covers the reference-counted containers (`list`/`dict`/`set`),
-as a local or a struct field.
+as a local, a struct field, or a closure capture.
 
 ## Switch - case
 

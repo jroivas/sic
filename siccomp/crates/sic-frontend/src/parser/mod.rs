@@ -2668,13 +2668,19 @@ impl Parser {
             let csp = self.span();
             let mut by_ref = false;
             let mut mutable = false;
+            let mut weak = false;
             if self.at(TokenKind::At) {
                 self.advance();
                 by_ref = true;
                 if self.at(TokenKind::Ident) && self.peek().text == "mut" { self.advance(); mutable = true; }
+            } else if (self.at(TokenKind::Ident) || self.at(TokenKind::TypeName))
+                && self.peek().text == "weak" {
+                // `[weak x]` — a non-owning capture (sic.md §"Weak").
+                self.advance();
+                weak = true;
             }
             let name = self.expect_name()?;
-            captures.push(LambdaCapture { name, by_ref, mutable, span: csp });
+            captures.push(LambdaCapture { name, by_ref, mutable, weak, span: csp });
             if !self.eat(TokenKind::Comma) { break; }
         }
         self.expect(TokenKind::RBracket)?;
