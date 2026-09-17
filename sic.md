@@ -1743,6 +1743,32 @@ All elements in tuple may have different type.
 Types are checked when unpacking.
 Tuples are always immutable after creation.
 
+### Ownership of tuple elements
+
+A tuple **owns** the reference-counted values it holds (a `string`, a
+`list`/`dict`/`set`, a nested tuple, a closure). Only the thin handle or descriptor
+is copied into the tuple; the shared payload is reference-counted, never deep-copied.
+So an element outlives the binding it was built from — a tuple may be returned from
+the function that created its contents — and every element is released when the
+tuple's last reference is dropped:
+
+    tuple make() {
+        list<int> xs; xs.add(1); xs.add(2);
+        return tuple(xs, "tag");   // the list and string outlive this frame
+    }
+
+Extracting a refcounted element — `x = t[i]`, `T x = t[i]`, or an unpack
+`tuple(a, b) = t` — takes its **own** reference on the receiver, so the extracted
+value's lifetime is independent of the tuple's.
+
+Because a container stored in a tuple is *shared* (the tuple keeps it alive, and
+mutations through either handle are visible to both), a reference **cycle** through
+a tuple is not reclaimed — the usual reference-counting trade-off. The compiler
+emits a low-severity note where a raw `list`/`dict`/`set` is put into a tuple.
+Keep the tuple as the strong owner and hold any back-reference to the same container
+weakly (a [`weak<T>`](#weak-references) local, struct field, or closure capture)
+so the strong references stay acyclic.
+
 ## Swap
 
 Support built-in swap operation, which can be compiled to assembly instruction

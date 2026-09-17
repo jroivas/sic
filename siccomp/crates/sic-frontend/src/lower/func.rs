@@ -21,6 +21,10 @@ pub enum Cleanup {
     /// sic `@` reference: release (decrement + free at 0) the referent pointer
     /// held in `slot` at scope exit (sic.md §"References").
     RefRelease { slot: Val },
+    /// sic `tuple` (sic.md §"Tuples"): release the tuple held in `slot` at scope
+    /// exit — decrement its refcount, run its element destructor (releasing the
+    /// refcounted elements it owns) at zero, then free the block.
+    TupleRelease { slot: Val },
     /// sic `bigint`: `__sic_bi_free` the pointer held in `slot` at scope exit
     /// (value semantics — every bigint local/temp owns its heap block).
     BigintFree { slot: Val },
@@ -479,6 +483,11 @@ impl<'m> FuncCtx<'m> {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });
                 let _ = self.emit_rc_release(Val::Local(p));
+            }
+            Cleanup::TupleRelease { slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });
+                let _ = self.emit_tuple_release(Val::Local(p));
             }
             Cleanup::BigintFree { slot } => {
                 let p = self.alloc_val();
@@ -1097,22 +1106,41 @@ impl<'m> Lowerer {
         }
     }
 
-    /// Infer the concrete tuple type of a `tuple`-returning function from the
-    /// element expressions of its first `return tuple(...)`. Uses a throwaway
-    /// FuncCtx with the parameters bound, so full expression inference applies.
-    fn infer_tuple_return_type(&mut self, elems: &[Expr], params: &[AstParam], ir_params: &[Type]) -> Type {
+    /// Infer the concrete tuple type of a `tuple`-returning function from its first
+    /// `return <expr>` — a tuple literal (`return tuple(a, b)`) or a tuple-typed
+    /// local (`tuple c = tuple(a, b); return c;`). Uses a throwaway FuncCtx with the
+    /// parameters AND the preceding local declarations bound, so an element that
+    /// references a local (e.g. a `list<int>`) infers its real type rather than the
+    /// `i32` fallback — otherwise the return layout is mis-sized and `f()[i]` reads
+    /// at the wrong offset. Returns `None` if no return yields a tuple.
+    fn infer_tuple_return_type(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Option<Type> {
+        let ret_expr = first_return_expr(body)?;
         let mut dummy = Function::new("__tuple_infer".to_string(),
             FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
         let blk = dummy.alloc_block();
         dummy.blocks.push(BasicBlock::new(blk));
-        let tys: Vec<Type> = {
+        let ty = {
             let mut fc = FuncCtx::new_with_func(self, &mut dummy);
             for (p, ty) in params.iter().zip(ir_params) {
                 if let Some(n) = &p.name { fc.define_local(n.clone(), ty.clone(), ValId(0)); }
             }
-            elems.iter().map(|e| fc.infer_expr_type(e).unwrap_or_else(|_| Type::i32())).collect()
+            // Bind local declaration types (a tuple/auto local from its initializer,
+            // so `tuple c = tuple(ll, a)` carries the concrete layout). `ValId(0)` is
+            // a placeholder slot — never read; only the type binding matters.
+            for stmt in body {
+                if let Stmt::Decl(Decl::Var { declarators, .. }) = stmt {
+                    for d in declarators {
+                        let ty = match (&d.ty.ty, &d.init) {
+                            (AstType::Auto | AstType::Tuple, Some(Initializer::Expr(e))) => fc.infer_expr_type(e).ok(),
+                            _ => fc.lower_type(&d.ty).ok(),
+                        };
+                        if let Some(ty) = ty { fc.define_local(d.name.clone(), ty, ValId(0)); }
+                    }
+                }
+            }
+            fc.infer_expr_type(&ret_expr).ok()
         };
-        super::types::tuple_type(tys)
+        match ty { Some(t) if super::types::is_tuple(&t) => Some(t), _ => None }
     }
 
     /// Infer a body's scalar return type (for a lambda with no explicit `-> T`):
@@ -1188,8 +1216,8 @@ impl<'m> Lowerer {
         // sic `tuple`-returning function (sic.md §"Tuples"): the concrete return
         // type is inferred from the first `return tuple(...)` in the body.
         let ir_ret = if self.sic && matches!(ret_ty.ty, AstType::Tuple) {
-            match first_return_tuple(body) {
-                Some(elems) => self.infer_tuple_return_type(&elems, params, &ir_params),
+            match self.infer_tuple_return_type(body, params, &ir_params) {
+                Some(t) => t,
                 None => lower_type(ret_ty, &self.struct_types, self.ptr_size)?,
             }
         } else if self.sic && matches!(ret_ty.ty, AstType::Auto) {
@@ -1819,7 +1847,7 @@ impl<'m> FuncCtx<'m> {
                                 let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
                                 self.emit_rc_retain(pc)?;
                                 self.push_instr(Instr::Store { val: ptr, ptr: Val::Local(vid) });
-                                self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
+                                self.register_scope_exit(Cleanup::TupleRelease { slot: Val::Local(vid) });
                                 if !d.name.is_empty() {
                                     self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: pty, slot: vid, is_param: false });
                                 }
@@ -1837,7 +1865,7 @@ impl<'m> FuncCtx<'m> {
                                 self.define_local(d.name.clone(), empty.clone(), vid);
                                 let t = self.build_empty_tuple()?;
                                 self.push_instr(Instr::Store { val: t, ptr: Val::Local(vid) });
-                                self.register_scope_exit(Cleanup::RefRelease { slot: Val::Local(vid) });
+                                self.register_scope_exit(Cleanup::TupleRelease { slot: Val::Local(vid) });
                                 if !d.name.is_empty() {
                                     self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: empty, slot: vid, is_param: false });
                                 }
@@ -2012,6 +2040,25 @@ impl<'m> FuncCtx<'m> {
                                     self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
                                 } else if super::types::is_dict(&ty) || super::types::is_set(&ty) {
                                     self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
+                                }
+                            } else if matches!(&e.kind, ExprKind::Index { base, .. }
+                                if matches!(self.infer_expr_type(base), Ok(bt) if super::types::is_tuple(&bt)))
+                            {
+                                // sic tuple extraction (`list c = t[i]`): the tuple owns
+                                // the element, so the receiver takes its OWN reference
+                                // (retain) and releases it at scope exit — otherwise it
+                                // would dangle once the tuple is dropped.
+                                let is_container = super::types::is_list(&ty)
+                                    || super::types::is_dict(&ty) || super::types::is_set(&ty);
+                                if is_container {
+                                    let h = self.alloc_val();
+                                    self.push_instr(Instr::Load { dest: h, ptr: Val::Local(vid), ty: Type::void_ptr() });
+                                    let _ = self.container_retain(Val::Local(h), &ty);
+                                    if super::types::is_list(&ty) {
+                                        self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                                    } else {
+                                        self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
+                                    }
                                 }
                             }
                         }
@@ -3782,29 +3829,6 @@ fn c_type_string(qt: &QualType) -> String {
     }
     s.push_str(&ast_type_string(&qt.ty));
     s
-}
-
-/// Find the element expressions of the first `return tuple(...)` reachable in a
-/// function body (used to infer a `tuple`-returning function's concrete type).
-fn first_return_tuple(stmts: &[Stmt]) -> Option<Vec<Expr>> {
-    fn in_stmt(s: &Stmt) -> Option<Vec<Expr>> {
-        match s {
-            Stmt::Return(Some(e), _) => match &e.kind {
-                ExprKind::TupleExpr(elems) => Some(elems.clone()),
-                _ => None,
-            },
-            Stmt::Block(ss, _) => first_return_tuple(ss),
-            Stmt::If { then, else_, .. } =>
-                in_stmt(then).or_else(|| else_.as_ref().and_then(|e| in_stmt(e))),
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
-            | Stmt::Label(_, body, _) | Stmt::Default(body, _) | Stmt::Defer(body, _)
-            | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _)
-            | Stmt::Switch { body, .. } => in_stmt(body),
-            Stmt::Match { arms, .. } => arms.iter().find_map(|a| in_stmt(&a.body)),
-            _ => None,
-        }
-    }
-    stmts.iter().find_map(in_stmt)
 }
 
 /// The first `return <expr>;` expression in a body (used to infer a lambda's

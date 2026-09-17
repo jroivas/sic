@@ -1,0 +1,47 @@
+// sic tuple element ownership (sic.md §"Tuples"): a tuple OWNS its refcounted
+// elements — the thin handle/descriptor is copied by value and the shared payload
+// is reference-counted, so an element outlives the binding it was built from and is
+// released when the tuple's refcount reaches zero. Extraction (`t[i]`, unpack) takes
+// its own reference on the receiver. Exercises return, decl-init, escaping
+// assignment, unpack, and a string element. Returns 42.
+
+// A tuple built over a local container, returned — the container must survive the
+// function's frame because the tuple retained it.
+tuple make() {
+    list<int> ll; ll.add(2); ll.add(3);
+    tuple c = tuple(ll, 40);
+    return c;
+}
+
+int main() {
+    int acc = 0;
+
+    // (1) decl-init extraction from a RETURNED tuple (element typing + receiver-retain).
+    tuple r = make();
+    list<int> a = r[0];
+    acc += (int)a[0] + (int)a[1];      // 2 + 3 = 5
+
+    // (2) assignment extraction that ESCAPES the tuple's scope: `esc` must stay valid
+    // after `p` (the tuple that owned the list) is dropped.
+    list<int> esc; esc.add(100);
+    {
+        list<int> b; b.add(7);
+        tuple p = tuple(b);
+        esc = p[0];                    // release esc's old list, retain p's element
+    }
+    acc += (int)esc[0];                // 7
+
+    // (3) unpack extraction — each container/scalar target takes its own reference.
+    list<int> u0; int u1 = 0;
+    tuple(u0, u1) = tuple(a, 30);      // u0 shares a, u1 = 30
+    acc += (int)u0.size + u1;          // 2 + 30 = 32
+
+    // (4) a string element is owned + extracted safely.
+    string s = "hello";
+    tuple t = tuple(s, 1);
+    string s2 = t[0];
+    acc -= (int)s2.length;             // 5 -> acc 44 - 5 = 39
+
+    // acc = 5 + 7 + 32 - 5 = 39; +3 = 42.
+    return acc + 3;
+}

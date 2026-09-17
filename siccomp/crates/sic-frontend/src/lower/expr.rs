@@ -2677,6 +2677,19 @@ impl<'m> FuncCtx<'m> {
         let mut vals: Vec<(Val, Type)> = Vec::with_capacity(elems.len());
         for e in elems {
             let ety = self.infer_expr_type(e).unwrap_or_else(|_| Type::i32());
+            // Low-severity suggestion (below a warning): a raw container stored in a
+            // tuple is shared by reference (the tuple retains it), so it can take part
+            // in an ownership cycle. Point the user at `weak<T>` as the cycle breaker.
+            let kind = if super::types::is_list(&ety) { Some("list") }
+                else if super::types::is_dict(&ety) { Some("dict") }
+                else if super::types::is_set(&ety) { Some("set") } else { None };
+            if let Some(kind) = kind {
+                let s = &e.span;
+                let note = format!("{}:{}:{}: note: a `{}` stored in a tuple is shared by reference \
+                    (the tuple keeps it alive); if this closes an ownership cycle, break it with `weak<T>`",
+                    s.file.as_deref().unwrap_or("<input>"), s.line, s.col, kind);
+                if !self.lowerer.notes.contains(&note) { self.lowerer.notes.push(note); }
+            }
             if matches!(ety, Type::Struct(_) | Type::Union(_)) {
                 let p = self.lower_aggregate_ptr(e)?;
                 vals.push((p, ety));
@@ -2687,18 +2700,30 @@ impl<'m> FuncCtx<'m> {
             }
         }
         let layout = super::types::tuple_layout(vals.iter().map(|(_, t)| t.clone()).collect());
-        // Heap-allocate the block with a refcount header (rc = 1); `data` points
-        // at the fields.
-        let data = self.emit_rc_alloc(&layout)?;
+        // Heap-allocate the block with a 3-word header (rc = 1 + a per-layout
+        // element destructor); `data` points at the fields. The tuple *owns* its
+        // refcounted elements — the thin handle/descriptor is copied by value and
+        // its shared payload is retained, so the element outlives the source binding
+        // and is released when the tuple's refcount reaches zero (sic.md §"Tuples").
+        let dtor = self.lowerer.ensure_tuple_dtor(&layout);
+        let data = self.emit_tuple_alloc(&layout, dtor)?;
 
         for (i, (v, vt)) in vals.into_iter().enumerate() {
             let fld = self.field_ptr_from(LValue::plain(data.clone(), layout.clone()), &i.to_string(), false, sp)?;
             if matches!(vt, Type::Struct(_) | Type::Union(_)) {
                 let size = vt.size_of(self.ptr_size());
                 let align = vt.align_of(self.ptr_size());
-                self.push_instr(Instr::MemCopy { dst: fld.ptr, src: v, size, align });
+                self.push_instr(Instr::MemCopy { dst: fld.ptr.clone(), src: v, size, align });
+                // A by-value refcounted aggregate (`string`) shares a payload — retain it.
+                if super::types::is_sic_string(&vt) { self.retain_string_at(&fld.ptr)?; }
             } else {
-                self.store_lvalue(&fld, v)?;
+                self.store_lvalue(&fld, v.clone())?;
+                // A refcounted handle element is retained so the tuple owns it.
+                if super::types::is_list(&vt) || super::types::is_dict(&vt) || super::types::is_set(&vt) {
+                    self.container_retain(v, &vt)?;
+                } else if super::types::is_tuple(&vt) || super::types::is_closure(&vt) {
+                    self.emit_rc_retain(v)?;
+                }
             }
         }
         // Register a scope-exit release for the freshly-created temporary.
@@ -2732,11 +2757,47 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(data))
     }
 
+    /// Allocate a tuple heap block with a 3-word header `[__dtor | count | rc=1]`
+    /// (sic.md §"Tuples"). The data pointer is past the header, so `rc` sits at
+    /// `data - ptr_size` (the generic `emit_rc_retain` still applies) and `count`
+    /// at `data - 2*ptr_size` (`tuple_len_val` still applies); the per-layout
+    /// element destructor sits at `data - 3*ptr_size` and runs at refcount zero
+    /// (`emit_tuple_release`), releasing the tuple's refcounted elements. A tuple
+    /// with no refcounted element stores a null destructor.
+    fn emit_tuple_alloc(&mut self, layout: &Type, dtor: Option<FuncRef>) -> Result<Val> {
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let ps = self.ptr_size() as i64;
+        let header = 3 * ps;
+        let size = layout.size_of(self.ptr_size());
+        let total = self.coerce(Constant::uint(size + header as u64), &usize_ty)?;
+        let block = self.emit_malloc(total)?; // char*
+        // block[0] = __dtor (element destructor pointer, or null).
+        let dtor_val = match dtor { Some(fr) => Val::Func(fr), None => Constant::zero() };
+        let dtor_val = self.coerce(dtor_val, &Type::void_ptr())?;
+        self.push_instr(Instr::Store { val: dtor_val, ptr: block.clone() });
+        // block[1] (at +ptr_size) = element COUNT (a tuple's runtime `.length`).
+        let nelem = match layout { Type::Struct(st) => st.fields.len(), _ => 0 };
+        let cnt_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: cnt_ptr, base: block.clone(), index: Constant::int(ps), elem_size: 1, result_ty: Type::char_ptr() });
+        let cnt = self.coerce(Constant::uint(nelem as u64), &usize_ty)?;
+        self.push_instr(Instr::Store { val: cnt, ptr: Val::Local(cnt_ptr) });
+        // block[2] (at +2*ptr_size) = rc = 1.
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(2 * ps), elem_size: 1, result_ty: Type::char_ptr() });
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rc_ptr) });
+        let ptr_ty = Type::Pointer(Box::new(layout.clone()));
+        let data = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
+        self.val_types.insert(data.0, ptr_ty);
+        Ok(Val::Local(data))
+    }
+
     /// Build an empty tuple value (`tuple t;`): a refcounted block with element
     /// count 0 and no payload. `.length` reads 0; there are no valid indices.
     pub(crate) fn build_empty_tuple(&mut self) -> Result<Val> {
         let layout = super::types::tuple_layout(vec![]);
-        self.emit_rc_alloc(&layout)
+        self.emit_tuple_alloc(&layout, None)
     }
 
     /// Load a tuple's runtime element count from its header (`data - 2*ptr_size`);
@@ -2871,7 +2932,7 @@ impl<'m> FuncCtx<'m> {
         let slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: slot, ty: Type::char_ptr(), align: None });
         self.push_instr(Instr::Store { val: pc, ptr: Val::Local(slot) });
-        self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(slot) });
+        self.register_scope_exit(super::func::Cleanup::TupleRelease { slot: Val::Local(slot) });
         Ok(())
     }
 
@@ -2928,9 +2989,27 @@ impl<'m> FuncCtx<'m> {
                 }
                 let size = fty.size_of(self.ptr_size());
                 let align = fty.align_of(self.ptr_size());
-                self.push_instr(Instr::MemCopy { dst: dst_lv.ptr, src: fld.ptr, size, align });
+                // Receiver-retain a `string` element (the tuple owns it): drop the
+                // target's previous value, copy the descriptor, then retain the shared
+                // payload so it outlives the tuple. A borrowed split view (rc 0) is a
+                // no-op either way.
+                if super::types::is_sic_string(fty) { self.release_string_at(&dst_lv.ptr)?; }
+                self.push_instr(Instr::MemCopy { dst: dst_lv.ptr.clone(), src: fld.ptr, size, align });
+                if super::types::is_sic_string(fty) { self.retain_string_at(&dst_lv.ptr)?; }
             } else {
                 let v = self.load_lvalue(&fld)?;
+                // Receiver-retain a container element: the target takes its own
+                // reference and releases its previous handle (so neither the tuple's
+                // drop nor the target's leaves the other dangling).
+                if super::types::is_list(fty) || super::types::is_dict(fty) || super::types::is_set(fty) {
+                    self.container_retain(v.clone(), fty)?;
+                    let old = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: old, ptr: dst_lv.ptr.clone(), ty: Type::void_ptr() });
+                    self.container_release(Val::Local(old), fty)?;
+                } else if super::types::is_tuple(fty) || super::types::is_closure(fty) {
+                    let npc = self.coerce(v.clone(), &Type::char_ptr())?;
+                    self.emit_rc_retain(npc)?;
+                }
                 self.store_lvalue(&dst_lv, v)?;
             }
         }
@@ -2955,7 +3034,7 @@ impl<'m> FuncCtx<'m> {
         let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
         self.emit_rc_retain(pc)?;
         self.push_instr(Instr::Store { val: ptr, ptr: Val::Local(vid) });
-        self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(vid) });
+        self.register_scope_exit(super::func::Cleanup::TupleRelease { slot: Val::Local(vid) });
         Ok(Val::Local(vid))
     }
 
@@ -4009,6 +4088,66 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
+    /// Release a tuple (sic.md §"Tuples"): decrement its refcount and, at zero, run
+    /// its element destructor (the header word at `data - 3*ptr_size`, which
+    /// releases the tuple's refcounted elements) before freeing the block. Reading
+    /// the destructor from the object keeps this correct for an opaque `(tuple)`
+    /// binding whose element types are not known at the release site.
+    pub(crate) fn emit_tuple_release(&mut self, tup: Val) -> Result<()> {
+        let pc = self.coerce(tup, &Type::char_ptr())?;
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let ps = self.ptr_size() as i64;
+        let one = self.coerce(Constant::int(1), &usize_ty)?;
+        let zero = self.coerce(Constant::int(0), &usize_ty)?;
+
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: pc.clone(), rhs: Constant::zero(), ty: Type::char_ptr() });
+        let body_bb = self.new_block_after_current();
+        let free_bb = self.new_block_after_current();
+        let call_bb = self.new_block_after_current();
+        let freeblk_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done_bb, else_bb: body_bb });
+
+        // body: rc (at data - ptr_size) -= 1; if != 0 goto done.
+        self.switch_to_block(body_bb);
+        let rc_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-ps), elem_size: 1, result_ty: Type::char_ptr() });
+        let rc = self.alloc_val();
+        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
+        let newrc = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
+        let is_zero = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
+
+        // free: dtor = *(void**)(data - 3*ptr_size); if non-null, call dtor(data).
+        self.switch_to_block(free_bb);
+        let voidpp = Type::Pointer(Box::new(Type::void_ptr()));
+        let dtor_pp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: dtor_pp, base: pc.clone(), index: Constant::int(-3 * ps), elem_size: 1, result_ty: voidpp });
+        let dtor = self.alloc_val();
+        self.push_instr(Instr::Load { dest: dtor, ptr: Val::Local(dtor_pp), ty: Type::void_ptr() });
+        let dtor_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: dtor_null, op: CmpOp::IEq, lhs: Val::Local(dtor), rhs: Constant::zero(), ty: Type::void_ptr() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(dtor_null), then_bb: freeblk_bb, else_bb: call_bb });
+        self.switch_to_block(call_bb);
+        let dsig = super::build_fn_sig(Type::Void, vec![Type::void_ptr()], false, self.ptr_size());
+        self.push_instr(Instr::CallIndirect { dest: None, fptr: Val::Local(dtor), args: vec![pc.clone()], ret_ty: Type::Void, func_ty: Box::new(dsig) });
+        self.set_terminator(Terminator::Jump(freeblk_bb));
+
+        // freeblk: free the block at data - 3*ptr_size.
+        self.switch_to_block(freeblk_bb);
+        let block = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-3 * ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.emit_free(Val::Local(block))?;
+        self.set_terminator(Terminator::Jump(done_bb));
+
+        self.switch_to_block(done_bb);
+        Ok(())
+    }
+
     pub(crate) fn emit_rc_release_dtor(&mut self, p: Val, dtor: Option<String>) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
@@ -4493,7 +4632,9 @@ impl<'m> FuncCtx<'m> {
     fn build_string_pair(&mut self, a: Val, b: Val, sp: &crate::lexer::Span) -> Result<Val> {
         let sty = super::types::sic_string_type(self.ptr_size());
         let layout = super::types::tuple_layout(vec![sty.clone(), sty.clone()]);
-        let data = self.emit_rc_alloc(&layout)?;
+        // The two parts are borrowed *views* into the source string (rc 0), not
+        // owned — so this tuple gets a null element destructor (no retain/release).
+        let data = self.emit_tuple_alloc(&layout, None)?;
         let size = sty.size_of(self.ptr_size());
         let align = sty.align_of(self.ptr_size());
         for (i, v) in [a, b].into_iter().enumerate() {
@@ -4782,7 +4923,7 @@ impl<'m> FuncCtx<'m> {
             self.emit_rc_retain(npc)?;
             let old = self.alloc_val();
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
-            self.emit_rc_release(Val::Local(old))?;
+            self.emit_tuple_release(Val::Local(old))?;
             self.push_instr(Instr::Store { val: newp, ptr: lv.ptr.clone() });
             // Refine an empty/looser `tuple t;` to the assigned tuple's element types
             // (sic.md §"Tuples"), so a later `t[i]` in the same scope is typed. The
@@ -4873,6 +5014,26 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
                 return Ok(lv.ptr);
             }
+        }
+
+        // sic refcounted container reassignment (`c = <expr>`, sic.md §"List"/
+        // §"Dict"/§"Weak"): release the old handle and install the new one. The new
+        // handle is RETAINED when the RHS shares an existing container — an alias
+        // (`c = b`), a tuple extraction (`c = t[i]`), or a weak `.get` upgrade (which
+        // self-registers a release, so retaining keeps it balanced) — and transferred
+        // as-is when the RHS is a fresh producer (`new`, or a call that already
+        // return-retained). Retain-before-release keeps a self-assign balanced.
+        if self.is_sic() && op.is_none()
+            && (super::types::is_list(&lv.ty) || super::types::is_dict(&lv.ty) || super::types::is_set(&lv.ty)) {
+            let transfers = matches!(&rhs.kind, ExprKind::New { .. } | ExprKind::Call { .. });
+            let newv = self.lower_expr(rhs)?;
+            if !transfers { self.container_retain(newv.clone(), &lv.ty)?; }
+            let old = self.alloc_val();
+            self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: Type::void_ptr() });
+            self.container_release(Val::Local(old), &lv.ty)?;
+            let stored = self.coerce(newv, &Type::void_ptr())?;
+            self.push_instr(Instr::Store { val: stored, ptr: lv.ptr.clone() });
+            return Ok(lv.ptr);
         }
 
         // pointer whose element type sic surfaces as the array), a scalar store.

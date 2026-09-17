@@ -152,6 +152,10 @@ pub struct Lowerer {
     /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
     /// param is passed by pointer, so its shape must be known to unpack/index it.
     pub tuple_param_types: HashMap<(String, usize), Type>,
+    /// sic low-severity suggestions (below a warning): collected during lowering and
+    /// printed once, deduplicated. Used to hint that a raw `list`/`dict`/`set` stored
+    /// in a tuple shares it by reference, so a cycle should be broken with `weak<T>`.
+    pub notes: Vec<String>,
     /// Variadic extern functions called with a float argument — the backend
     /// routes these through an `AL`-setting trampoline on x86-64 (Cranelift never
     /// sets `AL` for variadic calls). Surfaced on the IR module for the backend.
@@ -251,6 +255,7 @@ impl Lowerer {
             struct_dtor: HashMap::new(),
             struct_owned_fields: HashMap::new(),
             struct_weak_fields: HashMap::new(),
+            notes: Vec::new(),
             tuple_param_types: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
@@ -438,6 +443,12 @@ impl Lowerer {
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
+
+        // sic low-severity suggestions (below a warning): e.g. a raw container stored
+        // in a tuple, which shares it by reference and could form an ownership cycle.
+        for note in &self.notes {
+            eprintln!("sic: {}", note);
+        }
 
         Ok(self.module)
     }
@@ -1448,6 +1459,8 @@ impl Lowerer {
                         fc.emit_string_release_at(flv.ptr);
                     } else if types::is_closure(fty) {
                         if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_closure_release(h); }
+                    } else if types::is_tuple(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_tuple_release(h); }
                     } else if types::is_list(fty) || types::is_dict(fty) || types::is_set(fty) {
                         if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_release(h, fty); }
                     } else if let Ok(h) = fc.load_lvalue(&flv) {
@@ -1459,6 +1472,57 @@ impl Lowerer {
             for (fname, fty) in weak {
                 if let Ok(flv) = fc.field_ptr_from(crate::lower::expr::LValue::plain(Val::Local(envp), env_ty.clone()), fname, false, &sp) {
                     if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_weak_op(h, fty, false); }
+                }
+            }
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        Some(self.module.add_function(func))
+    }
+
+    /// Synthesize a tuple's per-layout element destructor (sic.md §"Tuples"): a
+    /// `void __sic_tuple_dtor_<layout>(void* data)` that releases each refcounted
+    /// element (string/tuple/closure/container) the tuple owns. Its pointer is
+    /// stored in the tuple header and run by `emit_tuple_release` at refcount zero.
+    /// Returns `None` when the tuple owns no refcounted element (a null destructor).
+    pub(crate) fn ensure_tuple_dtor(&mut self, layout: &Type) -> Option<FuncRef> {
+        let fields = match layout { Type::Struct(st) => st.fields.clone(), _ => return None };
+        let refcounted: Vec<(String, Type)> = fields.into_iter()
+            .filter(|(_, t)| types::is_sic_string(t) || types::is_tuple(t) || types::is_closure(t)
+                || types::is_list(t) || types::is_dict(t) || types::is_set(t))
+            .collect();
+        if refcounted.is_empty() { return None; }
+        // Key the destructor by the layout's field types so identical tuple shapes
+        // share one dtor.
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", layout).hash(&mut h);
+        let dname = format!("__sic_tuple_dtor_{:016x}", h.finish());
+        if let Some(f) = self.module.func_ref_by_name(&dname) { return Some(f); }
+        let voidp = Type::void_ptr();
+        let sig = build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
+        let params = vec![sic_ir::Param { name: "self".to_string(), ty: voidp.clone() }];
+        let mut func = Function::new(dname.clone(), sig, params, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        let sp = crate::lexer::Span::default();
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let self_arg = Val::Local(ValId(0x10000));
+            let data_ty = Type::Pointer(Box::new(layout.clone()));
+            let datap = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: datap, op: CastOp::BitCast, val: self_arg, to_ty: data_ty.clone() });
+            fc.val_types.insert(datap.0, data_ty);
+            for (fname, fty) in &refcounted {
+                if let Ok(flv) = fc.field_ptr_from(crate::lower::expr::LValue::plain(Val::Local(datap), layout.clone()), fname, false, &sp) {
+                    if types::is_sic_string(fty) {
+                        fc.emit_string_release_at(flv.ptr);
+                    } else if types::is_closure(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_closure_release(h); }
+                    } else if types::is_tuple(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.emit_tuple_release(h); }
+                    } else if types::is_list(fty) || types::is_dict(fty) || types::is_set(fty) {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_release(h, fty); }
+                    }
                 }
             }
             fc.set_terminator(Terminator::Ret(None));
