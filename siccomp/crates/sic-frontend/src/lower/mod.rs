@@ -3827,6 +3827,7 @@ fn unify_type(
     concrete: &Type,
     params: &std::collections::HashSet<String>,
     out: &mut HashMap<String, Type>,
+    ptr_size: u32,
 ) -> Result<()> {
     use AstType::*;
     match pattern {
@@ -3844,12 +3845,33 @@ fn unify_type(
         // A `T*` parameter also matches an array argument (it decays to a pointer).
         Pointer { base, .. } => match concrete {
             Type::Pointer(inner) | Type::Array { elem: inner, .. } =>
-                unify_type(&base.ty, inner, params, out)?,
+                unify_type(&base.ty, inner, params, out, ptr_size)?,
             _ => {}
         },
         Array { base, .. } => match concrete {
             Type::Pointer(inner) | Type::Array { elem: inner, .. } =>
-                unify_type(&base.ty, inner, params, out)?,
+                unify_type(&base.ty, inner, params, out, ptr_size)?,
+            _ => {}
+        },
+        // A container parameter (`list<T>`, `set<T>`, `dict<K,V>`) binds its element
+        // type parameter(s) from the concrete container argument (sic.md §"Generics").
+        Generic { name, args } => match name.as_str() {
+            "list" if types::is_list(concrete) => {
+                if let Some(a) = args.get(0) {
+                    unify_type(&a.ty, &types::list_elem(concrete, ptr_size), params, out, ptr_size)?;
+                }
+            }
+            "set" if types::is_set(concrete) => {
+                if let Some(a) = args.get(0) {
+                    unify_type(&a.ty, &types::set_elem(concrete, ptr_size), params, out, ptr_size)?;
+                }
+            }
+            "dict" if types::is_dict(concrete) => {
+                if let Some((k, v)) = types::dict_kv(concrete, ptr_size) {
+                    if let Some(a) = args.get(0) { unify_type(&a.ty, &k, params, out, ptr_size)?; }
+                    if let Some(a) = args.get(1) { unify_type(&a.ty, &v, params, out, ptr_size)?; }
+                }
+            }
             _ => {}
         },
         _ => {}

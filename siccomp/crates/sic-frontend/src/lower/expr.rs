@@ -7943,7 +7943,7 @@ impl<'m> FuncCtx<'m> {
         for (i, pat) in param_tys.iter().enumerate() {
             if let Some(arg) = args.get(i) {
                 let at = self.infer_expr_type(arg)?;
-                super::unify_type(pat, &at, &params_set, &mut subst)
+                super::unify_type(pat, &at, &params_set, &mut subst, self.ptr_size())
                     .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
             }
         }

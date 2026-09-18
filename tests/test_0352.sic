@@ -1,0 +1,44 @@
+// A broad SIC program exercising many features together (sic.md): generics, `list`
+// and `dict`, range-for, `string` slicing + concat, tuples, `defer` (observed via a
+// helper), and defined integer semantics. Returns 42.
+#include <stdio.h>
+
+T clamp<T>(T v, T lo, T hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// `defer` runs at scope exit — here it adds 9 to the caller's box AFTER the body,
+// observable once `contribute` returns.
+void contribute(list<int> box) {
+    defer box[0] = box[0] + 9;
+    int z = 7 / 0;               // sic: division by zero is defined as 0
+    box[0] = box[0] + z;         // + 0
+}
+
+int main() {
+    int acc = 0;
+
+    // generic clamp feeding a dict histogram keyed by parity
+    list<int> nums;
+    nums.add(3); nums.add(99); nums.add(-5); nums.add(8);
+    dict<int, int> byparity;
+    for (tuple iv : nums) {
+        int v = clamp((int)iv[1], 0, 10);   // -5->0, 99->10
+        int p = v % 2;
+        byparity[p] = byparity[p] + v;
+    }
+    acc += byparity[0] + byparity[1];        // evens 18 + odds 3 = 21
+
+    // string slicing + concat + length
+    string s = "hello, world";
+    string greet = s[0:5] + "!";             // "hello!"
+    acc += (int)greet.length;                // 6
+
+    // tuple bundling + unpack
+    usize a = 0; usize b = 0;
+    tuple(a, b) = tuple(nums.size, byparity.size);
+    acc += (int)a + (int)b;                  // 4 + 2 = 6
+
+    // observe a deferred contribution from a helper
+    list<int> box; box.add(acc);             // 33
+    contribute(box);                         // defer adds 9 -> 42
+    return box[0];
+}

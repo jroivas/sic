@@ -1,0 +1,40 @@
+// sic tagged enums + match + guarded unwrap (sic.md §"Match"): a tiny expression tree
+// evaluated with match, plus an Option-style lookup and an `if (T v = E::Var(x))`
+// unwrap that binds only on that variant. Returns 42.
+enum Expr { Lit<int>, Neg<int>, Dbl<int> };
+enum Option { Some<int>, None };
+
+int eval(Expr e) {
+    match (e) {
+        Lit(v): return v;
+        Neg(v): return -v;
+        Dbl(v): return v * 2;
+    }
+    return 0;
+}
+
+Option half(int x) {
+    if (x % 2 == 0) return Some(x / 2);
+    return None;
+}
+
+int main() {
+    int acc = 0;
+
+    acc += eval(Lit(20));           // 20
+    acc += eval(Dbl(9));            // 18
+    acc += eval(Neg(-3));           // 3
+
+    // match on an Option with a wildcard
+    match (half(2)) {
+        Some(v): acc += v;          // 1
+        _: acc += 100;
+    }
+
+    // guarded unwrap: binds `v` only when the value is `Some`
+    if (int v = Option::Some(half(0))) { acc += v; }     // Some(0) -> v = 0
+    if (int v = Option::Some(half(3))) { acc += 100; }   // None -> not taken
+
+    // acc = 20 + 18 + 3 + 1 + 0 = 42
+    return acc;
+}
