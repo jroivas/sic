@@ -1,19 +1,17 @@
-// Sieve of Eratosthenes in idiomatic SIC: a heap `bool` buffer released with
-// `defer` (freed automatically on scope exit, no matter how the function returns),
-// native-width loop counters, and no C-style casts (SIC converts `void*`
-// implicitly). A megabyte-scale flat buffer is idiomatically a heap array here —
-// SIC's boxed containers target dynamic/heterogeneous data, not a 100M-entry bitmap.
-// Prints the number of primes found.
+// Sieve of Eratosthenes in idiomatic SIC: a heap `bool` array from `new T[count]`,
+// released with `defer del` (freed on scope exit, no matter how the function
+// returns), and native-width loop counters. A megabyte-scale flat buffer is
+// idiomatically a heap array here — SIC's boxed containers target dynamic /
+// heterogeneous data, not a 100M-entry bitmap. Prints the number of primes found.
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #define N 100000000
 
 int main() {
-    bool *sieve = malloc(N + 1);
+    bool *sieve = new bool[N + 1];
     memset(sieve, 1, N + 1);
-    defer free(sieve);
+    defer del sieve;
 
     i64 count = 0;
     for (i64 i = 2; i <= N; i++) {

@@ -6,15 +6,14 @@ mainstream LLVM-backed toolchains.
 
 Each benchmark lives in its own directory with `main.c`, `main.rs`, and `main.sic`.
 The `.sic` files are **idiomatic SIC**, not copies of the C: native fixed-width types
-(`i32`/`i64`/`usize`/`bool`), `defer` for resource cleanup (the buffer is freed on
-every scope exit, no explicit `free` at each return), and no C-style casts (SIC
-converts `void*` implicitly). These are numeric kernels, so the large flat buffers are
-heap arrays — SIC's boxed containers (`list`/`dict`/`set`) target dynamic or
-heterogeneous data and would be pathological here (a `list<bool>` for a 100 M-entry
-sieve is ~2.4 GB, and boxed element access in matmul's ~1e9-iteration inner loop would
-dwarf the arithmetic). Every program prints a single integer **checksum**; the runner
-requires all three to agree before it trusts any timing, so a miscompile shows up as a
-checksum mismatch rather than a wrong speed.
+(`i32`/`i64`/`usize`/`bool`), heap arrays via `new T[count]` released with `defer del`
+(freed on every scope exit, no explicit free at each return). These are numeric
+kernels, so the large flat buffers are heap arrays — SIC's boxed containers
+(`list`/`dict`/`set`) target dynamic or heterogeneous data and would be pathological
+here (a `list<bool>` for a 100 M-entry sieve is ~2.4 GB, and boxed element access in
+matmul's ~1e9-iteration inner loop would dwarf the arithmetic). Every program prints a
+single integer **checksum**; the runner requires all three to agree before it trusts
+any timing, so a miscompile shows up as a checksum mismatch rather than a wrong speed.
 
 | benchmark | what it stresses                                   | checksum        |
 |-----------|----------------------------------------------------|-----------------|
