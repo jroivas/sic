@@ -2043,6 +2043,21 @@ impl<'m> FuncCtx<'m> {
     /// overwrite/remove/free); the type word is stored only for an `any` element.
     pub(crate) fn container_box_value(&mut self, val: &Expr, v: &Type) -> Result<(Val, Val, Val)> {
         let ety = self.infer_expr_type(val).unwrap_or_else(|_| Type::i32());
+        // A weak container element (`list<weak<T>>`, `dict<K,weak<V>>`, …): store the
+        // handle but take only a WEAK count (it never keeps the container alive), and
+        // mark it for weak-release when the outer container frees/overwrites it
+        // (`vowned` 5 = weak list, 6 = weak dict/set). `elem.get` upgrades it.
+        if super::types::is_weak_ref(v) {
+            let inner = super::types::weak_ref_inner(v, self.ptr_size());
+            let handle = self.lower_expr(val)?;
+            self.container_weak_op(handle.clone(), &inner, true)?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: handle, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            let is_dict = super::types::is_dict(&inner) || super::types::is_set(&inner);
+            let vowned = Constant::int(if is_dict { 6 } else { 5 });
+            return Ok((Constant::uint(0), Val::Local(w), vowned));
+        }
         // A nested container element (`list<list>`, `dict<K,list>`, …) is a shared
         // handle: retain it so the outer container owns a reference, and mark it for
         // release when the outer is freed/overwritten (`vowned` 3 = list, 4 = dict/
@@ -2892,6 +2907,13 @@ impl<'m> FuncCtx<'m> {
     /// If `e` denotes a weak reference (a `weak<T>` local or a `weak<T>` struct
     /// field), its strong container type (sic.md §"Weak").
     pub(crate) fn weak_ref_container_type(&self, e: &Expr) -> Option<Type> {
+        // A container element/value declared `weak<T>` reads back as a weak-reference
+        // type (`list<weak<T>>[i]`, `dict<K,weak<V>>[k]`); `.get` upgrades it.
+        if let Ok(t) = self.infer_expr_type(e) {
+            if super::types::is_weak_ref(&t) {
+                return Some(super::types::weak_ref_inner(&t, self.ptr_size()));
+            }
+        }
         match &e.kind {
             ExprKind::Ident(id) => self.weak_locals.get(id).cloned(),
             ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
@@ -4776,8 +4798,10 @@ impl<'m> FuncCtx<'m> {
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         // sic weak reference assignment (sic.md §"Weak"): writing a `weak<T>` local
         // or struct field takes a NON-owning reference — weak-release the old target
-        // and weak-retain the new one, without keeping the container alive.
-        if self.is_sic() && op.is_none() {
+        // and weak-retain the new one, without keeping the container alive. A weak
+        // *container element* (`l[i] = c`, `d[k] = c`) is NOT this case: it routes
+        // through list/dict set, which boxes the element as weak — so exclude `Index`.
+        if self.is_sic() && op.is_none() && !matches!(&lhs.kind, ExprKind::Index { .. }) {
             if let Some(cty) = self.weak_ref_container_type(lhs) {
                 let lv = self.lower_lvalue(lhs)?;
                 let old = self.alloc_val();

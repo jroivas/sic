@@ -308,6 +308,45 @@ pub fn set_elem(t: &Type, ptr_size: u32) -> Type {
     dict_kv(t, ptr_size).map(|(k, _)| k).unwrap_or_else(any_type)
 }
 
+// ─── `weak<T>` container element (sic.md §"Weak") ─────────────────────────────
+//
+// A `list`/`set` element or `dict` value declared `weak<T>` is a NON-owning
+// reference to a container — the element type is a distinct marker so boxing/reads
+// know to weak-retain rather than own it, and `elem.get` upgrades it. ABI-identical
+// to the inner handle (both pointers).
+
+/// Build a weak container-element type wrapping the strong container type `inner`.
+pub fn weak_ref_type(inner: &Type) -> Type {
+    let name = format!("(weak|{})", mangle_type_name(inner));
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+}
+
+/// Build a weak container-element type directly from an already-mangled inner name.
+fn weak_ref_type_raw(inner_mangle: &str) -> Type {
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(format!("(weak|{})", inner_mangle)), vec![], false))))
+}
+
+/// True if `t` is a weak container-element reference.
+pub fn is_weak_ref(t: &Type) -> bool {
+    matches!(t, Type::Pointer(inner)
+        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(weak|"))))
+}
+
+/// The strong container type `T` a `weak<T>` element refers to.
+pub fn weak_ref_inner(t: &Type, ptr_size: u32) -> Type {
+    match t {
+        Type::Pointer(inner) => match inner.as_ref() {
+            Type::Struct(st) => match st.name.as_deref().and_then(|n| n.strip_prefix("(weak|")).and_then(|n| n.strip_suffix(')')) {
+                Some(e) => demangle_type(e, ptr_size),
+                None => any_type(),
+            },
+            _ => any_type(),
+        },
+        _ => any_type(),
+    }
+}
+
 // ─── `va_dict`: named-varargs capture (sic.md §"Named parameters"/§"Dict") ─────
 
 pub const VA_DICT_MARKER: &str = "__sic_va_dict";
@@ -338,6 +377,10 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
         "bigint" => bigint_type(),
         "s___sic_any" => any_type(),
         _ => {
+            // A weak container-element reference is `w_<inner>` (sic.md §"Weak").
+            if let Some(inner) = s.strip_prefix("w_") {
+                return weak_ref_type_raw(inner);
+            }
             // A pointer is `p_<inner>` — peel it outermost-first (before the
             // `s_`/`u_` aggregate prefixes) so `p_s_<name>` round-trips to a real
             // pointer-to-aggregate instead of a struct whose name ends in `p`.
@@ -651,6 +694,17 @@ pub fn tuple_layout_of(t: &Type) -> Option<Type> {
     }
 }
 
+/// Lower a container element/value type argument, wrapping a `weak<T>` argument in
+/// the weak-element marker (sic.md §"Weak") — a non-owning reference that
+/// `elem.get` upgrades. A missing argument defaults to `any`.
+fn container_arg_type(arg: Option<&AstType>, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
+    match arg {
+        Some(AstType::Weak(inner)) => Ok(weak_ref_type(&lower_ast_type(&inner.ty, named, ptr_size)?)),
+        Some(other) => lower_ast_type(other, named, ptr_size),
+        None => Ok(any_type()),
+    }
+}
+
 pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     Ok(match ty {
         // A bare `tuple` type with no element info yet — resolved from context at
@@ -826,14 +880,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // instantiation pass.
         // sic `list<T>` growable array (sic.md §"List").
         AstType::Generic { name, args } if name == "list" => {
-            let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
-                .transpose()?.unwrap_or_else(any_type);
+            let e = container_arg_type(args.get(0).map(|a| &a.ty), named, ptr_size)?;
             list_type(&e)
         }
         // sic `set<T>` hash set (sic.md §"Set").
         AstType::Generic { name, args } if name == "set" => {
-            let e = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
-                .transpose()?.unwrap_or_else(any_type);
+            let e = container_arg_type(args.get(0).map(|a| &a.ty), named, ptr_size)?;
             set_type(&e)
         }
         // sic `Task<T>` async handle (sic.md §"Async").
@@ -846,8 +898,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Generic { name, args } if name == "dict" => {
             let k = args.get(0).map(|a| lower_ast_type(&a.ty, named, ptr_size))
                 .transpose()?.unwrap_or_else(any_type);
-            let v = args.get(1).map(|a| lower_ast_type(&a.ty, named, ptr_size))
-                .transpose()?.unwrap_or_else(any_type);
+            // A `weak<V>` value is a non-owning reference (sic.md §"Weak"); a weak key
+            // is meaningless (keys are matched by value) so only the value is wrapped.
+            let v = container_arg_type(args.get(1).map(|a| &a.ty), named, ptr_size)?;
             dict_type(&k, &v)
         }
         AstType::Generic { name, args } => {
@@ -902,6 +955,15 @@ fn mangle_type_name(t: &Type) -> String {
     if let Some((i, f)) = fixed_dims(t) { return format!("fixed<{},{}>", i, f); }
     if is_sic_string(t) { return "string".to_string(); }
     if is_bigint(t) { return "bigint".to_string(); }
+    // A weak container-element reference `(weak|<inner>)` mangles as `w_<inner>`.
+    if let Type::Pointer(inner) = t {
+        if let Type::Struct(st) = inner.as_ref() {
+            if let Some(body) = st.name.as_deref()
+                .and_then(|n| n.strip_prefix("(weak|")).and_then(|b| b.strip_suffix(')')) {
+                return format!("w_{}", body);
+            }
+        }
+    }
     match t {
         Type::Void => "void".to_string(),
         Type::Bool => "bool".to_string(),

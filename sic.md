@@ -1572,8 +1572,21 @@ so a closure held inside the container it captures does not keep it alive:
 
     auto observe = [weak data]() -> int { return (int)(data.get).size; };
 
-Currently `weak<T>` covers the reference-counted containers (`list`/`dict`/`set`),
-as a local, a struct field, or a closure capture.
+A container **element** can also be weak — a `list`/`set` element or a `dict` value
+declared `weak<T>` is a non-owning reference. This is what lets one container refer
+to another *without* forming a strong cycle (a graph of nodes, an observer list):
+
+    list<weak<list<int>>> observers;   // each element observes a list, owns none
+    observers.add(data);
+    observers[0].get;                  // the live list, or empty once `data` is gone
+
+    dict<int, weak<list<int>>> by_id;  // weak values (a weak key is meaningless)
+    by_id[1] = data;
+
+Reassigning or removing a weak element, or freeing the container, drops only the weak
+reference. Currently `weak<T>` covers the reference-counted containers
+(`list`/`dict`/`set`) as a local, a struct field, a closure capture, or a container
+element/value.
 
 ## Switch - case
 

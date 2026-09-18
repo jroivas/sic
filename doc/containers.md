@@ -157,6 +157,19 @@ Inside the body the captured name is a weak reference, upgraded with `.get`:
 auto observe = [weak data]() -> int { return (int)(data.get).size; };
 ```
 
+A container **element** can be weak too — a `list`/`set` element or a `dict` value
+written `weak<T>` is a non-owning reference, so one container can point at another
+without forming a strong cycle (a node graph, an observer list):
+
+```sic
+list<weak<list<int>>> observers;   // observes lists, owns none
+observers.add(data);
+observers[0].get;                  // the live list, or empty once `data` is gone
+
+dict<int, weak<list<int>>> by_id;  // weak values
+by_id[1] = data;
+```
+
 Reassigning a `weak` binding or field drops its old observation; when the observed
 container is freed, every `weak` to it reads back dead.
 

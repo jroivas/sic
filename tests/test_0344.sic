@@ -1,0 +1,32 @@
+// sic weak container elements (sic.md §"Weak"): a `list`/`set` element or `dict`
+// value declared `weak<T>` is a NON-owning reference to a container — it never keeps
+// the container alive, and `elem.get` upgrades it (a live handle, or an empty/dead
+// one once the container is gone). This lets a container break a reference cycle
+// through another container. Returns 42.
+int main() {
+    list<int> a; a.add(20); a.add(22);
+
+    // (1) list<weak<T>>: an element observes `a` without owning it; upgrade to use it.
+    list<weak<list<int>>> obs;
+    obs.add(a);
+    list<int> up = obs[0].get;
+    int t = 0;
+    for (tuple iv : up) t += (int)iv[1];
+    if (t != 42) return 1;
+
+    // (2) dict<K, weak<V>>: a weak value upgrades the same way.
+    dict<int, weak<list<int>>> m;
+    m[1] = a;
+    if ((int)(m[1].get).size != 2) return 2;
+
+    // (3) the weak element never kept its container alive: once the only strong owner
+    // is dropped, the weak element upgrades to a dead (empty) handle, not a dangling one.
+    list<int> *p = new list<int>; p.add(9);
+    list<weak<list<int>>> obs2;
+    obs2.add(p);
+    del p;                              // drop the only strong owner
+    list<int> dead = obs2[0].get;
+    if ((int)dead.size != 0) return 3;
+
+    return 42;
+}

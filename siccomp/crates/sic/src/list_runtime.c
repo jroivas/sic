@@ -8,7 +8,9 @@ extern void free(void *);
    in a list-only program (which never stores a dict, so it is never called). */
 struct __sic_list;
 void __sic_list_free(struct __sic_list *);
+void __sic_list_weak_release(struct __sic_list *);
 extern __attribute__((weak)) void __sic_dict_free(void *);
+extern __attribute__((weak)) void __sic_dict_weak_release(void *);
 
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the
    list and dict runtimes; sic.md §"Dict"/§"List"):
@@ -30,6 +32,12 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     } else if (vowned == 4) {
         /* a nested `dict`/`set` handle — release one reference */
         if (__sic_dict_free) __sic_dict_free((void *)vslot);
+    } else if (vowned == 5) {
+        /* a weak `list` element (`list<weak<list>>`) — drop the weak count only */
+        __sic_list_weak_release((struct __sic_list *)vslot);
+    } else if (vowned == 6) {
+        /* a weak `dict`/`set` element — drop the weak count only */
+        if (__sic_dict_weak_release) __sic_dict_weak_release((void *)vslot);
     }
 }
 
