@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 #
-# run.sh — build each benchmark with C (gcc), Rust (rustc) and SIC (sic), verify the
-# three produce the SAME checksum, then time each and print a comparison table.
+# run.sh — build each benchmark four ways, verify they all produce the SAME
+# checksum, then time each and print a comparison table:
 #
-# Each benchmark lives in its own subdirectory with main.c / main.rs / main.sic that
-# implement the identical algorithm and print one integer checksum. Wall-clock time
-# is the minimum of several runs (min = least noise).
+#   gcc      cc -O2       main.c      reference C toolchain (LLVM-class, gcc)
+#   rustc    rustc -O     main.rs     reference Rust toolchain
+#   sic·C    sic -O2      main.c      the sic compiler, C frontend
+#   sic·SIC  sic -O2      main.sic    the sic compiler, SIC frontend
 #
-# Flags used (each compiler's straightforward "optimized" setting):
-#   C    : cc -O2
-#   Rust : rustc -O           (opt-level 2)
-#   SIC  : sic -O2  (+ cc to link)   — sic's backend is Cranelift, not LLVM
+# The last two go through the same Cranelift back end, so comparing sic·C with
+# sic·SIC isolates any difference between sic's C and SIC frontends for the same
+# algorithm. Wall-clock time is the minimum of several runs (least noise).
 #
 # Usage: ./run.sh [benchmark ...]   (default: all subdirectories)
 set -uo pipefail
@@ -43,40 +43,53 @@ min_time() {
     echo "$best"
 }
 
+# ratio <time> <baseline> — "<t>s  (N.NNx <label>)"
+ratio() { awk -v t="$1" -v c="$2" -v l="$3" 'BEGIN{printf "%7ss  (%.2fx %s)", t, t/c, l}'; }
+
 printf "sic benchmarks — RUNS=%s, sic=%s\n\n" "$RUNS" "$SIC"
 
 for name in "${benches[@]}"; do
     dir="$ROOT/$name"
     echo "== $name =="
 
-    # --- build ---
-    if ! "$CC" -O2 "$dir/main.c" -o "$BUILD/$name.c.bin" 2>"$BUILD/$name.c.err"; then
-        echo "  C: BUILD FAILED"; sed 's/^/    /' "$BUILD/$name.c.err"; echo; continue
-    fi
-    if ! "$RUSTC" -O "$dir/main.rs" -o "$BUILD/$name.rs.bin" 2>"$BUILD/$name.rs.err"; then
-        echo "  Rust: BUILD FAILED"; sed 's/^/    /' "$BUILD/$name.rs.err"; echo; continue
-    fi
-    if ! "$SIC" -c "$dir/main.sic" -o "$BUILD/$name.sic.o" -O2 2>"$BUILD/$name.sic.err" \
-         || ! "$CC" "$BUILD/$name.sic.o" -o "$BUILD/$name.sic.bin" -lm 2>>"$BUILD/$name.sic.err"; then
-        echo "  SIC: BUILD FAILED"; grep -iv note "$BUILD/$name.sic.err" | sed 's/^/    /'; echo; continue
-    fi
+    # --- build all four ---
+    fail=0
+    "$CC" -O2 "$dir/main.c" -o "$BUILD/$name.gcc" 2>"$BUILD/e" \
+        || { echo "  gcc: BUILD FAILED"; sed 's/^/    /' "$BUILD/e"; fail=1; }
+    "$RUSTC" -O "$dir/main.rs" -o "$BUILD/$name.rustc" 2>"$BUILD/e" \
+        || { echo "  rustc: BUILD FAILED"; sed 's/^/    /' "$BUILD/e"; fail=1; }
+    { "$SIC" -c "$dir/main.c" -o "$BUILD/$name.sicc.o" -O2 2>"$BUILD/e" \
+        && "$CC" "$BUILD/$name.sicc.o" -o "$BUILD/$name.sicc" -lm 2>>"$BUILD/e"; } \
+        || { echo "  sic·C: BUILD FAILED"; grep -iv note "$BUILD/e" | sed 's/^/    /'; fail=1; }
+    { "$SIC" -c "$dir/main.sic" -o "$BUILD/$name.sicsic.o" -O2 2>"$BUILD/e" \
+        && "$CC" "$BUILD/$name.sicsic.o" -o "$BUILD/$name.sicsic" -lm 2>>"$BUILD/e"; } \
+        || { echo "  sic·SIC: BUILD FAILED"; grep -iv note "$BUILD/e" | sed 's/^/    /'; fail=1; }
+    [ "$fail" = 0 ] || { echo; continue; }
 
-    # --- correctness: all three checksums must match ---
-    ck_c=$("$BUILD/$name.c.bin")
-    ck_rs=$("$BUILD/$name.rs.bin")
-    ck_sic=$("$BUILD/$name.sic.bin")
-    if [ "$ck_c" != "$ck_rs" ] || [ "$ck_c" != "$ck_sic" ]; then
-        echo "  CHECKSUM MISMATCH — C=$ck_c Rust=$ck_rs SIC=$ck_sic"; echo; continue
+    # --- correctness: all four checksums must match ---
+    ck_gcc=$("$BUILD/$name.gcc")
+    ck_rs=$("$BUILD/$name.rustc")
+    ck_sc=$("$BUILD/$name.sicc")
+    ck_ss=$("$BUILD/$name.sicsic")
+    if [ "$ck_gcc" != "$ck_rs" ] || [ "$ck_gcc" != "$ck_sc" ] || [ "$ck_gcc" != "$ck_ss" ]; then
+        echo "  CHECKSUM MISMATCH — gcc=$ck_gcc rustc=$ck_rs sic·C=$ck_sc sic·SIC=$ck_ss"; echo; continue
     fi
 
     # --- time ---
-    t_c=$(min_time "$BUILD/$name.c.bin")
-    t_rs=$(min_time "$BUILD/$name.rs.bin")
-    t_sic=$(min_time "$BUILD/$name.sic.bin")
+    t_gcc=$(min_time "$BUILD/$name.gcc")
+    t_rs=$(min_time "$BUILD/$name.rustc")
+    t_sc=$(min_time "$BUILD/$name.sicc")
+    t_ss=$(min_time "$BUILD/$name.sicsic")
 
-    printf "  checksum=%s  (all three agree)\n" "$ck_c"
-    printf "  %-5s %8ss  %s\n" "C"    "$t_c"  "$(awk -v s="$t_sic" -v c="$t_c"  'BEGIN{printf "(baseline)"}')"
-    printf "  %-5s %8ss  %s\n" "Rust" "$t_rs" "$(awk -v x="$t_rs"  -v c="$t_c"  'BEGIN{printf "(%.2fx C)", x/c}')"
-    printf "  %-5s %8ss  %s\n" "SIC"  "$t_sic" "$(awk -v x="$t_sic" -v c="$t_c"  'BEGIN{printf "(%.2fx C)", x/c}')"
-    echo
+    printf "  checksum=%s  (all four agree)\n" "$ck_gcc"
+    printf "  %-8s %8ss  (baseline)\n" "gcc"     "$t_gcc"
+    printf "  %-8s %s\n" "rustc"   "$(ratio "$t_rs" "$t_gcc" "gcc")"
+    printf "  %-8s %s\n" "sic·C"   "$(ratio "$t_sc" "$t_gcc" "gcc")"
+    printf "  %-8s %s\n" "sic·SIC" "$(ratio "$t_ss" "$t_gcc" "gcc")"
+    # sic·SIC vs sic·C: same compiler, same back end, so this is the delta between
+    # sic's C and SIC frontends *for the code each was given*. Note the SIC versions
+    # use bounds-checked `new T[]` arrays while the C versions use raw malloc, so a
+    # gap here reflects that safety feature, not frontend codegen quality (see README).
+    printf "  sic·SIC vs sic·C: %s\n\n" \
+        "$(awk -v s="$t_ss" -v c="$t_sc" 'BEGIN{ r=s/c; printf "%.2fx (%s)", r, (r>1.02)?"slower":((r<0.98)?"faster":"on par") }')"
 done

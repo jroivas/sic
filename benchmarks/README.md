@@ -71,3 +71,34 @@ The gap is expected: `sic` uses [Cranelift](https://cranelift.dev/) (built for f
 compilation, not peak runtime) rather than LLVM, and does not auto-vectorize. These
 benchmarks exist to track that gap over time and catch regressions, not to claim
 parity.
+
+## Frontend comparison: `sic` on C vs on SIC
+
+`run.sh` also compiles each benchmark's `main.c` and `main.sic` with **the same `sic`
+compiler** (`sic·C` and `sic·SIC`). Both go through the same Cranelift back end, so
+the difference between them is down to the frontends and the memory model each source
+uses. Representative result:
+
+```
+          gcc     sic·C    sic·SIC
+fib      0.24s    5.75x     5.75x    (on par)
+sieve    0.81s    1.20x     1.26x    (sic·SIC 1.05x sic·C)
+matmul   0.13s    9.00x    15.15x    (sic·SIC 1.68x sic·C)
+```
+
+The frontends themselves emit **equivalent code**: an experiment compiling a `malloc`
+-based `main.sic` (SIC frontend, unchecked pointers) matches `sic·C` exactly (matmul
+1.18s vs 1.17s). The `sic·SIC` gap comes entirely from the **idiomatic SIC memory
+model**: `new T[]` arrays are bounds-checked on every access (a safety feature the C
+`malloc` versions don't have). So the check cost tracks how array-access-bound the
+kernel is:
+
+- **`fib`** — no arrays, so nothing to check: identical to `sic·C`.
+- **`sieve`** — array-heavy but memory-bandwidth-bound, so the checks hide behind
+  memory latency: only ~1.05×.
+- **`matmul`** — compute-bound with ~1e9 array accesses in the inner loop, so the
+  per-access bounds check dominates: ~1.68×.
+
+In other words, sic's C and SIC frontends are on par for equivalent code; the visible
+difference is the price of SIC's memory safety, paid in proportion to how tight the
+array-indexing loop is.
