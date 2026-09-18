@@ -6,6 +6,9 @@ TESTDIR="$MYDIR/tests"
 SIC="${SIC:-$MYDIR/siccomp/target/debug/sic}"
 CC="${CC:-cc}"
 CFLAGS=${CFLAGS:-}
+# FAILFAST=1: stop at the first failing test and exit non-zero immediately (used by
+# check.sh). Either way, the script exits non-zero at the end if any test failed.
+FAILFAST="${FAILFAST:-}"
 
 outfolder="${1:-/tmp/sic_rust_tests}"
 mkdir -p "$outfolder"
@@ -66,6 +69,14 @@ for test in "$TESTDIR"/test_*.sic "$TESTDIR"/test_*.c; do
         success=$((success + 1))
     else
         failed_list+=("$(basename "$test")")
+        # FAILFAST: stop and report at the first failure (default behavior is
+        # unchanged — run everything, then print the summary below).
+        if [ -n "$FAILFAST" ]; then
+            echo ""
+            echo "Passed ${success}/${tests} before failure"
+            echo "Failed: ${failed_list[*]}"
+            exit 1
+        fi
     fi
 done
 

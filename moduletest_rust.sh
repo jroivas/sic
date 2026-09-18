@@ -108,6 +108,14 @@ for dir in "$TESTDIR"/*/; do
         success=$((success + 1))
     else
         failed_list+=("$(basename "$dir")")
+        # FAILFAST=1: stop and report at the first failure (default behavior is
+        # unchanged — run everything, then the summary/exit below still apply).
+        if [ -n "${FAILFAST:-}" ]; then
+            echo ""
+            echo "Passed ${success}/${tests} before failure"
+            echo "Failed: ${failed_list[*]}"
+            exit 1
+        fi
     fi
 done
 
