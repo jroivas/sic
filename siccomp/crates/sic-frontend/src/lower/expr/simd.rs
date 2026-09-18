@@ -1,7 +1,7 @@
-use crate::ast::{self, Expr, ExprKind, BinOpKind, UnOpKind};
+use crate::ast::{Expr, BinOpKind};
 use crate::{Result, CompileError};
 use sic_ir::*;
-use super::super::func::{FuncCtx, LookupResult};
+use super::super::func::FuncCtx;
 #[allow(unused_imports)]
 use super::*;
 

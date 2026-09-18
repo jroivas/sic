@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::ast::{self, Decl, Stmt, Expr, ExprKind, ForInit, StorageClass, AstType, QualType, Initializer};
+use crate::ast::{Decl, Stmt, Expr, ExprKind, ForInit, StorageClass, AstType, QualType, Initializer};
 use crate::ast::Param as AstParam;
 use crate::{Result, CompileError};
 use sic_ir::*;
@@ -1030,27 +1030,6 @@ impl<'m> FuncCtx<'m> {
             }
             _ => lower_type(&QualType::new(ty.clone()), &self.lowerer.struct_types, self.lowerer.ptr_size),
         }
-    }
-
-    // ─── Top-level expression lowering (for fake_main) ─────────────────────
-
-    /// Lower a list of expression statements and return the last value.
-    pub fn lower_expr_stmts<'a>(
-        &mut self, stmts: &[&'a Expr], entry: &mut BasicBlock,
-    ) -> Result<Option<Val>> {
-        let mut last = None;
-        for expr in stmts {
-            // We'll generate instructions but for fake_main we need a single block.
-            // This is called during synthesis — we'll just generate into the provided block.
-            last = Some(self.lower_expr_into_block(expr, entry)?);
-        }
-        Ok(last)
-    }
-
-    fn lower_expr_into_block(&mut self, expr: &Expr, _bb: &mut BasicBlock) -> Result<Val> {
-        // In fake_main context, all expressions go into 'entry' block.
-        // The entry block is current_bb.
-        self.lower_expr(expr)
     }
 }
 

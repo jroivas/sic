@@ -463,16 +463,6 @@ impl<'m> FuncCtx<'m> {
         self.coerce(slot, target)
     }
 
-    /// Lower `e` with `ty` as the expected/target type (sic.md §"Match") — lets a
-    /// generic constructor `Option::Some(5)` / `None` resolve to its monomorph.
-    /// Saves/restores the previous hint so nesting is safe.
-    pub(crate) fn lower_expr_expecting(&mut self, e: &Expr, ty: &Type) -> Result<Val> {
-        let prev = self.expected_ty.replace(ty.clone());
-        let r = self.lower_expr(e);
-        self.expected_ty = prev;
-        r
-    }
-
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
         // sic bitfield/enum shorthand (sic.md §"Bitfields", §"Enums"): the expected
@@ -5642,14 +5632,6 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-}
-
-fn inc_op(ty: &Type, inc: bool) -> BinOp {
-    if ty.is_float() {
-        if inc { BinOp::FAdd } else { BinOp::FSub }
-    } else {
-        if inc { BinOp::Add } else { BinOp::Sub }
-    }
 }
 
 /// A resolved member access: cumulative byte offset from the start of the

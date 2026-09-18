@@ -873,7 +873,7 @@ fn emit_const(c: &Constant, hint: cir::Type, builder: &mut FunctionBuilder<'_>, 
     }
 }
 
-pub fn coerce(v: cir::Value, target: cir::Type, builder: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
+pub fn coerce(v: cir::Value, target: cir::Type, builder: &mut FunctionBuilder<'_>, _ptr_ty: cir::Type) -> cir::Value {
     let src = builder.func.dfg.value_type(v);
     if src == target || target == ct::INVALID || src == ct::INVALID { return v; }
     if target.is_float() {

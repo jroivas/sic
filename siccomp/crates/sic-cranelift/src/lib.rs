@@ -5,12 +5,11 @@ pub mod abi;
 
 use std::collections::HashMap;
 use cranelift_codegen::ir as cir;
-use cranelift_codegen::ir::types as ct;
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_module::{DataDescription, FuncId, Linkage as CLinkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use sic_ir::{Backend, FuncRef, GlobalRef, Linkage, Type};
+use sic_ir::{Backend, FuncRef, Linkage};
 
 pub use types::cl_type;
 

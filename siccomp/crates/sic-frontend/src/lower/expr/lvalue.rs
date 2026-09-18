@@ -1,4 +1,4 @@
-use crate::ast::{self, Expr, ExprKind, BinOpKind, UnOpKind};
+use crate::ast::{Expr, ExprKind, UnOpKind};
 use crate::{Result, CompileError};
 use sic_ir::*;
 use super::super::func::{FuncCtx, LookupResult};
