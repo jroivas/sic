@@ -1782,6 +1782,15 @@ Keep the tuple as the strong owner and hold any back-reference to the same conta
 weakly (a [`weak<T>`](#weak-references) local, struct field, or closure capture)
 so the strong references stay acyclic.
 
+The reverse also works: a tuple can be stored **in** a container. A `list<tuple>`
+or `dict<K, tuple>` owns its tuple elements, and the element's field layout is taken
+from the first insertion, so indexing, iteration and unpack are all typed:
+
+    list<tuple> rows;
+    rows.add(tuple(1, "a"));
+    tuple r = rows[0];        // r[0] == 1, r[1] == "a"
+    for (tuple e : rows) { … }
+
 ## Swap
 
 Support built-in swap operation, which can be compiled to assembly instruction

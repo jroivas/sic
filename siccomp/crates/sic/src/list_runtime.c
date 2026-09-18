@@ -12,6 +12,20 @@ void __sic_list_weak_release(struct __sic_list *);
 extern __attribute__((weak)) void __sic_dict_free(void *);
 extern __attribute__((weak)) void __sic_dict_weak_release(void *);
 
+/* Release a tuple stored as a container element (sic.md §"Tuples"): mirrors the
+   compiler's `emit_tuple_release` — a 3-word header `[__dtor | count | rc]` with the
+   data pointer past it. Decrement rc; at zero run the per-layout element destructor
+   (releasing the tuple's own refcounted elements) and free the block. */
+__attribute__((weak)) void __sic_tuple_release(void *data) {
+    if (!data) return;
+    unsigned long *p = (unsigned long *)data;
+    unsigned long *rc = p - 1;                 /* rc at data - 1 word */
+    if (--(*rc) != 0) return;
+    void (*dtor)(void *) = *(void (**)(void *))(p - 3);  /* __dtor at data - 3 words */
+    if (dtor) dtor(data);
+    free((void *)(p - 3));                      /* block base = data - 3 words */
+}
+
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the
    list and dict runtimes; sic.md §"Dict"/§"List"):
      1 = a plain owned heap block (a deep-copied struct) — raw free;
@@ -38,6 +52,9 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     } else if (vowned == 6) {
         /* a weak `dict`/`set` element — drop the weak count only */
         if (__sic_dict_weak_release) __sic_dict_weak_release((void *)vslot);
+    } else if (vowned == 7) {
+        /* a `tuple` element — release one reference (runs its element dtor at 0) */
+        __sic_tuple_release((void *)vslot);
     }
 }
 

@@ -364,6 +364,25 @@ pub fn is_va_dict(t: &Type) -> bool {
         if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(VA_DICT_MARKER)))
 }
 
+/// Split a mangled type-list on `|` at the top level (paren depth 0), so a field
+/// whose own mangle contains `|` inside balanced `(...)` (a nested list/dict/tuple)
+/// is not split apart. Used to decode a tuple's `(tuple|f0|f1|…)` field list.
+fn split_top_level(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '|' if depth == 0 => { out.push(s[start..i].to_string()); start = i + 1; }
+            _ => {}
+        }
+    }
+    out.push(s[start..].to_string());
+    out
+}
+
 /// Reconstruct a `Type` from a [`mangle_type_name`] string, for the subset used as
 /// dict key/value types. Unknown forms fall back to `any`.
 fn demangle_type(s: &str, ptr_size: u32) -> Type {
@@ -377,6 +396,16 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
         "bigint" => bigint_type(),
         "s___sic_any" => any_type(),
         _ => {
+            // A tuple element carries its layout as `(tuple|f0|f1|…)` (or `(tuple)`
+            // when empty/opaque) — reconstruct the positional fields so `l[i][j]`
+            // is typed. Fields are split at top-level `|` (nested markers keep their
+            // own `|` inside balanced parens).
+            if s == "(tuple)" { return tuple_type(vec![]); }
+            if let Some(inner) = s.strip_prefix("(tuple|").and_then(|b| b.strip_suffix(')')) {
+                let fields = split_top_level(inner).into_iter()
+                    .map(|f| demangle_type(&f, ptr_size)).collect();
+                return tuple_type(fields);
+            }
             // A weak container-element reference is `w_<inner>` (sic.md §"Weak").
             if let Some(inner) = s.strip_prefix("w_") {
                 return weak_ref_type_raw(inner);
@@ -961,6 +990,18 @@ fn mangle_type_name(t: &Type) -> String {
             if let Some(body) = st.name.as_deref()
                 .and_then(|n| n.strip_prefix("(weak|")).and_then(|b| b.strip_suffix(')')) {
                 return format!("w_{}", body);
+            }
+        }
+    }
+    // A tuple carries its element layout in the mangle (`(tuple|f0|f1|…)`), so a tuple
+    // stored inside a container (`list<tuple>`, `dict<K,tuple>`) keeps its element
+    // types — otherwise `l[i][j]` sees an opaque `(tuple)` with no fields.
+    if is_tuple(t) {
+        if let Type::Pointer(inner) = t {
+            if let Type::Struct(st) = inner.as_ref() {
+                if st.fields.is_empty() { return "(tuple)".to_string(); }
+                let parts: Vec<String> = st.fields.iter().map(|(_, ft)| mangle_type_name(ft)).collect();
+                return format!("(tuple|{})", parts.join("|"));
             }
         }
     }

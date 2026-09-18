@@ -1,0 +1,35 @@
+// Tuples stored inside containers (sic.md §"Tuples"/§"List"/§"Dict"): a `list<tuple>`
+// or `dict<K,tuple>` owns its tuple elements (retained/released), and the element's
+// field layout is recovered from the first insertion so `c[i][j]`, iteration and
+// unpack are all typed. A tuple element may itself hold a container. Returns 42.
+int main() {
+    int acc = 0;
+
+    // list<tuple>: index into the element, iterate, and unpack.
+    list<tuple> lt;
+    lt.add(tuple(20, 22));
+    lt.add(tuple(1, 2));
+    tuple g = lt[0];
+    acc += (int)g[0] + (int)g[1];        // 42
+    int ia = 0; int ib = 0;
+    tuple(ia, ib) = lt[1];               // unpack from a list element
+    acc += ia + ib;                      // 3
+    for (tuple e : lt) { tuple v = e[1]; acc += (int)v.length; }  // 2 tuples * len 2 = 4
+
+    // dict<K,tuple>: value layout recovered from the store.
+    dict<int, tuple> dt;
+    dt[7] = tuple(5, 6);
+    tuple d = dt[7];
+    acc += (int)d[0] + (int)d[1];        // 11
+
+    // a tuple element that itself owns a container.
+    list<tuple> deep;
+    list<int> inner; inner.add(9);
+    deep.add(tuple(inner, 100));
+    tuple dg = deep[0];
+    list<int> got = dg[0];
+    acc += (int)got[0];                  // 9
+
+    // acc = 42 + 3 + 4 + 11 + 9 = 69; -27 = 42
+    return acc - 27;
+}

@@ -1878,6 +1878,22 @@ impl<'m> FuncCtx<'m> {
 
     /// `l.add(x)` / `l.push(x)` — append `x`.
     pub(crate) fn lower_list_push(&mut self, base: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
+        // Refine an opaque `list<tuple>` element type from the tuple being added, so a
+        // later `l[i]` (and `l[i][j]`) sees the tuple's fields. `list<tuple>` declares
+        // no element layout; the first `l.add(tuple(...))` supplies it.
+        if let ExprKind::Ident(name) = &base.kind {
+            let elem = self.list_elem_of(base);
+            let tuple_arity = |t: &Type| super::types::tuple_layout_of(t)
+                .and_then(|l| match l { Type::Struct(st) => Some(st.fields.len()), _ => None }).unwrap_or(0);
+            if super::types::is_tuple(&elem) && tuple_arity(&elem) == 0 {
+                if let Ok(vt) = self.infer_expr_type(val) {
+                    if super::types::is_tuple(&vt) && tuple_arity(&vt) > 0 {
+                        let refined = super::types::list_type(&vt);
+                        self.refine_local_type(name, refined);
+                    }
+                }
+            }
+        }
         let elem = self.list_elem_of(base);
         let l = self.list_handle(base)?;
         let (vty, vslot, vowned) = self.container_box_value(val, &elem)?;
@@ -2028,6 +2044,21 @@ impl<'m> FuncCtx<'m> {
     /// handles every value type); the `type-info` word is stored only for an
     /// `any`-valued dict (a concrete V reconstructs from its static type).
     pub(crate) fn lower_dict_set(&mut self, base: &Expr, key: &Expr, val: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        // Refine an opaque `dict<K,tuple>` value type from the tuple being stored, so a
+        // later `d[k]` (and `d[k][j]`) sees the tuple's fields (mirrors list add).
+        if let ExprKind::Ident(name) = &base.kind {
+            let (k, v) = self.dict_kv_of(base);
+            let tuple_arity = |t: &Type| super::types::tuple_layout_of(t)
+                .and_then(|l| match l { Type::Struct(st) => Some(st.fields.len()), _ => None }).unwrap_or(0);
+            if super::types::is_tuple(&v) && tuple_arity(&v) == 0 {
+                if let Ok(vt) = self.infer_expr_type(val) {
+                    if super::types::is_tuple(&vt) && tuple_arity(&vt) > 0 {
+                        let refined = super::types::dict_type(&k, &vt);
+                        self.refine_local_type(name, refined);
+                    }
+                }
+            }
+        }
         let (_k, v) = self.dict_kv_of(base);
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
@@ -2057,6 +2088,18 @@ impl<'m> FuncCtx<'m> {
             let is_dict = super::types::is_dict(&inner) || super::types::is_set(&inner);
             let vowned = Constant::int(if is_dict { 6 } else { 5 });
             return Ok((Constant::uint(0), Val::Local(w), vowned));
+        }
+        // A tuple element (`list<tuple>`, `dict<K,tuple>`): the outer container owns a
+        // reference to the shared tuple block — retain it and mark it for release
+        // (`vowned` 7) when the outer is freed/overwritten, so the tuple (and the
+        // refcounted values it owns) outlives its origin scope.
+        if super::types::is_tuple(v) {
+            let handle = self.lower_expr(val)?;
+            self.emit_rc_retain(handle.clone())?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: handle, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            return Ok((Constant::uint(0), Val::Local(w), Constant::int(7)));
         }
         // A nested container element (`list<list>`, `dict<K,list>`, …) is a shared
         // handle: retain it so the outer container owns a reference, and mark it for
