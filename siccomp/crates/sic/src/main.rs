@@ -53,8 +53,9 @@ struct Args {
     emit_module: Option<String>,
 
     /// Optimization level: 0 = none, 1 = const fold, 2/3 = + Cranelift optimizer
-    /// (speed), s/z = optimize for size (Cranelift speed_and_size)
-    #[arg(short = 'O', long = "opt", default_value = "0", value_name = "LEVEL")]
+    /// (speed), s/z = optimize for size (Cranelift speed_and_size). A repeated `-O`
+    /// takes the last value (as in gcc/clang), so `-O2 -O0` means `-O0`.
+    #[arg(short = 'O', long = "opt", default_value = "0", value_name = "LEVEL", overrides_with = "opt")]
     opt: String,
 
     /// Preprocessor defines
