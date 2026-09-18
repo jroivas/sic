@@ -104,8 +104,12 @@ fn fold_int(op: BinOpKind, l: i64, r: i64, w: bool) -> Option<ExprKind> {
         Add => arith(l.wrapping_add(r)),
         Sub => arith(l.wrapping_sub(r)),
         Mul => arith(l.wrapping_mul(r)),
-        Div if r != 0 => arith(l.wrapping_div(r)),
-        Rem if r != 0 => arith(l.wrapping_rem(r)),
+        // `/` and `%` are NOT folded on the untyped AST: their result is
+        // type-sensitive — `1/3` is `0` as an integer but `0.333…` once a
+        // float/`fixed` context promotes the literals (sic.md §"Built-in fixed
+        // point"). Folding here would bake in the integer value before lowering
+        // resolves the type, so it is left to the typed `ir-fold` pass, which folds
+        // it correctly at the operands' resolved type.
         BitAnd => arith(l & r),
         BitOr => arith(l | r),
         BitXor => arith(l ^ r),
@@ -134,8 +138,8 @@ fn fold_uint(op: BinOpKind, l: u64, r: u64, w: bool) -> Option<ExprKind> {
         Add => arith(l.wrapping_add(r)),
         Sub => arith(l.wrapping_sub(r)),
         Mul => arith(l.wrapping_mul(r)),
-        Div if r != 0 => arith(l / r),
-        Rem if r != 0 => arith(l % r),
+        // `/` and `%` are left to the typed `ir-fold` pass — their value is
+        // type-sensitive under float/`fixed` promotion (see `fold_int`).
         BitAnd => arith(l & r),
         BitOr => arith(l | r),
         BitXor => arith(l ^ r),
