@@ -22,8 +22,12 @@ cd "$ROOT"
 LOGDIR="$(mktemp -d /tmp/sic_check.XXXXXX)"
 DBG="$ROOT/siccomp/target/debug/sic"
 REL="$ROOT/siccomp/target/release/sic"
+# Append one timing record per successful run here (git-ignored) — a history to
+# watch for build/compile-time regressions.
+TIMES_FILE="$ROOT/.check_times.log"
 START=$(date +%s)
 STEP=0
+RECORD=""   # accumulates "key=seconds" pairs, one per step
 
 fail() {   # fail <description> [logfile]
     echo ""
@@ -38,15 +42,21 @@ fail() {   # fail <description> [logfile]
     exit 1
 }
 
-# step <description> <command...> — run a command, bail on non-zero exit.
+# step <description> <command...> — run a command (timed), bail on non-zero exit.
 step() {
     local desc="$1"; shift
     STEP=$((STEP + 1))
     local log="$LOGDIR/step$(printf '%02d' "$STEP").log"
     printf ">> [%02d] %s\n" "$STEP" "$desc"
+    local t0 t1 dt
+    t0=$(date +%s)
     if ! "$@" >"$log" 2>&1; then
         fail "$desc" "$log"
     fi
+    t1=$(date +%s); dt=$((t1 - t0))
+    # Record this step's duration under a sanitized key (spaces/punctuation → _).
+    local key; key="$(printf '%s' "$desc" | tr -c 'A-Za-z0-9' '_' | sed -E 's/_+/_/g; s/^_|_$//g')"
+    RECORD="$RECORD ${key}=${dt}"
     # For test suites, also sanity-check the "Passed N/N" summary (belt and
     # suspenders — the suites already exit non-zero under FAILFAST=1).
     local line
@@ -87,8 +97,34 @@ step "moduletest (debug)" \
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 ELAPSED=$(( $(date +%s) - START ))
+
+# Compare against the previous run's total (last record) before appending, so a
+# creeping build/compile-time regression is visible run over run.
+PREV=""
+if [ -f "$TIMES_FILE" ]; then
+    PREV="$(grep -oE 'total=[0-9]+' "$TIMES_FILE" | tail -1 | cut -d= -f2)"
+fi
+
+TSTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+printf '%s commit=%s total=%d%s\n' "$TSTAMP" "$COMMIT" "$ELAPSED" "$RECORD" >> "$TIMES_FILE"
+
 echo ""
 echo "================================================================"
 echo "✅ ALL CHECKS PASSED  (${STEP} steps, ${ELAPSED}s)"
+if [ -n "$PREV" ]; then
+    DELTA=$(( ELAPSED - PREV ))
+    SIGN="+"; [ "$DELTA" -lt 0 ] && SIGN=""
+    # Percent change (integer), guarding divide-by-zero.
+    PCT=0; [ "$PREV" -gt 0 ] && PCT=$(( DELTA * 100 / PREV ))
+    printf "   previous: %ss   now: %ss   delta: %s%ss (%s%d%%)\n" \
+        "$PREV" "$ELAPSED" "$SIGN" "$DELTA" "$SIGN" "$PCT"
+    if [ "$PCT" -ge 20 ]; then
+        echo "   ⚠️  possible compile-time regression (>=20% slower than last run)"
+    fi
+else
+    echo "   (first recorded run — baseline saved to .check_times.log)"
+fi
+echo "   timings appended to $TIMES_FILE"
 echo "================================================================"
 rm -rf "$LOGDIR"
