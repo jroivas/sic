@@ -1,22 +1,27 @@
-/* Sieve of Eratosthenes up to N — an array / tight-loop / memory benchmark.
-   Prints the number of primes found so all language versions can be compared. */
+// Sieve of Eratosthenes in idiomatic SIC: a heap `bool` buffer released with
+// `defer` (freed automatically on scope exit, no matter how the function returns),
+// native-width loop counters, and no C-style casts (SIC converts `void*`
+// implicitly). A megabyte-scale flat buffer is idiomatically a heap array here —
+// SIC's boxed containers target dynamic/heterogeneous data, not a 100M-entry bitmap.
+// Prints the number of primes found.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define N 100000000
 
-int main(void) {
-    char *sieve = (char *)malloc(N + 1);
+int main() {
+    bool *sieve = malloc(N + 1);
     memset(sieve, 1, N + 1);
-    long count = 0;
-    for (long i = 2; i <= N; i++) {
+    defer free(sieve);
+
+    i64 count = 0;
+    for (i64 i = 2; i <= N; i++) {
         if (sieve[i]) {
             count++;
-            for (long j = i * i; j <= N; j += i) sieve[j] = 0;
+            for (i64 j = i * i; j <= N; j += i) sieve[j] = 0;
         }
     }
     printf("%ld\n", count);
-    free(sieve);
     return 0;
 }

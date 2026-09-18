@@ -1,29 +1,34 @@
-/* Dense integer matrix multiply (N x N), i-k-j order — a nested-loop / array
-   indexing / arithmetic benchmark. Prints a checksum (sum of the product matrix)
-   so all language versions can be compared. */
+// Integer matrix multiply (N x N), i-k-j order, in idiomatic SIC: heap buffers
+// released with `defer`, native fixed-width element (i32) and accumulator (i64)
+// types, and no C-style casts. The flat matrices are heap arrays — the idiomatic
+// SIC choice for dense numeric data (boxed containers would cost per-element
+// overhead in the ~1e9-iteration inner loop). Prints a checksum (sum of the product).
 #include <stdio.h>
 #include <stdlib.h>
 
 #define N 1024
 
-int main(void) {
-    int *a = (int *)malloc((long)N * N * sizeof(int));
-    int *b = (int *)malloc((long)N * N * sizeof(int));
-    int *c = (int *)malloc((long)N * N * sizeof(int));
-    for (int i = 0; i < N * N; i++) {
+int main() {
+    i32 *a = malloc((i64)N * N * sizeof(i32));
+    i32 *b = malloc((i64)N * N * sizeof(i32));
+    i32 *c = malloc((i64)N * N * sizeof(i32));
+    defer free(a);
+    defer free(b);
+    defer free(c);
+
+    for (i32 i = 0; i < N * N; i++) {
         a[i] = (i * 7 + 1) % 100;
         b[i] = (i * 3 + 2) % 100;
         c[i] = 0;
     }
-    for (int i = 0; i < N; i++)
-        for (int k = 0; k < N; k++) {
-            int aik = a[i * N + k];
-            for (int j = 0; j < N; j++)
+    for (i32 i = 0; i < N; i++)
+        for (i32 k = 0; k < N; k++) {
+            i32 aik = a[i * N + k];
+            for (i32 j = 0; j < N; j++)
                 c[i * N + j] += aik * b[k * N + j];
         }
-    long sum = 0;
-    for (int i = 0; i < N * N; i++) sum += c[i];
+    i64 sum = 0;
+    for (i32 i = 0; i < N * N; i++) sum += c[i];
     printf("%ld\n", sum);
-    free(a); free(b); free(c);
     return 0;
 }
