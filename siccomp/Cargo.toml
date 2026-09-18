@@ -11,3 +11,11 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+# Build DEPENDENCIES optimized even in dev/debug builds. The `"*"` spec matches
+# only non-workspace packages, so the workspace crates stay at opt-level 0 (fast
+# incremental rebuilds) while heavy dependencies — notably cranelift-codegen, the
+# code generator that dominates a debug compile — run at full speed. This makes the
+# debug `sic` compiler far faster with a one-time cost the first time deps rebuild.
+[profile.dev.package."*"]
+opt-level = 3
