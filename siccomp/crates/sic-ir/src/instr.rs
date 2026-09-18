@@ -71,6 +71,14 @@ pub enum Instr {
     /// Load a value from a pointer.
     Load { dest: ValId, ptr: Val, ty: Type },
 
+    /// Load from a pointer into memory that never changes after it is written and
+    /// never traps (e.g. a `new[]` allocation's immutable size/refcount header). The
+    /// back end marks it `readonly` + `notrap` so the mid-end can freely hoist and
+    /// CSE it — in particular, lift a loop-invariant bounds-check size load out of a
+    /// hot loop. It is genuinely pure (safe for DCE), unlike a plain `Load` which is
+    /// conservatively kept (it might be a volatile MMIO access).
+    LoadReadonly { dest: ValId, ptr: Val, ty: Type },
+
     /// Store a value to a pointer.
     Store { val: Val, ptr: Val },
 
@@ -157,7 +165,7 @@ impl Instr {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
             | Instr::ReturnAddress { .. } => {}
-            Instr::Load { ptr, .. } => f(ptr),
+            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. } => f(val),
@@ -184,7 +192,7 @@ impl Instr {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
             | Instr::ReturnAddress { .. } => {}
-            Instr::Load { ptr, .. } => f(ptr),
+            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. } => f(val),
@@ -209,6 +217,7 @@ impl Instr {
     pub fn dest(&self) -> Option<ValId> {
         match self {
             Instr::Alloca { dest, .. } | Instr::Load { dest, .. }
+            | Instr::LoadReadonly { dest, .. }
             | Instr::BinOp { dest, .. } | Instr::UnaryOp { dest, .. }
             | Instr::Cast { dest, .. } | Instr::Cmp { dest, .. }
             | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
@@ -232,7 +241,8 @@ impl Instr {
         matches!(self,
             Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. }
             | Instr::Cast { .. } | Instr::BSwap { .. } | Instr::GetFieldPtr { .. }
-            | Instr::GetElemPtr { .. } | Instr::PtrOffset { .. } | Instr::Select { .. })
+            | Instr::GetElemPtr { .. } | Instr::PtrOffset { .. } | Instr::Select { .. }
+            | Instr::LoadReadonly { .. })
     }
 }
 

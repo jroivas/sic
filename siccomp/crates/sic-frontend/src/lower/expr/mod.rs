@@ -3862,12 +3862,15 @@ impl<'m> FuncCtx<'m> {
         let off = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: off, op: BinOp::Mul, lhs: idx_u, rhs: esz, ty: usize_ty.clone() });
 
-        // size = *(usize*)(base - 2*ptr_size)
+        // size = *(usize*)(base - 2*ptr_size). The fat-pointer size header is written
+        // once at allocation and never changes, so read it with a `readonly` load —
+        // the mid-end can then hoist this loop-invariant load out of a hot loop
+        // (e.g. `for j: a[i*N+j]`), leaving only the compare+branch per access.
         let bc = self.coerce(base, &Type::char_ptr())?;
         let szp = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: szp, base: bc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
         let size = self.alloc_val();
-        self.push_instr(Instr::Load { dest: size, ptr: Val::Local(szp), ty: usize_ty.clone() });
+        self.push_instr(Instr::LoadReadonly { dest: size, ptr: Val::Local(szp), ty: usize_ty.clone() });
 
         // if off >= size → __sic_bounds_fail()
         let oob = self.alloc_val();

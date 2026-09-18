@@ -275,6 +275,17 @@ fn emit_instr(
             val_map.insert(dest.0, v);
         }
 
+        // Load from immutable, always-mapped memory (a `new[]` size/rc header):
+        // `readonly` lets the mid-end hoist/CSE it (e.g. a loop-invariant bounds
+        // size out of a hot loop); `notrap` says it can never fault.
+        Instr::LoadReadonly { dest, ptr, ty } => {
+            let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            let flags = MemFlags::new().with_readonly().with_notrap();
+            let v = builder.ins().load(cl_ty, flags, pv, 0);
+            val_map.insert(dest.0, v);
+        }
+
         Instr::Store { val, ptr } => {
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             // Infer hint from existing value if available
