@@ -1,0 +1,43 @@
+// Container ownership + aliasing + reassignment across list/dict/set, valgrind-clean.
+int main() {
+    int acc = 0;
+
+    // alias + reassign (must release old, retain new; no double-free)
+    list<int> a; a.add(1);
+    list<int> b; b.add(10); b.add(10);
+    list<int> c = a;              // share a
+    c = b;                        // release a-ref, retain b
+    for (tuple iv : c) acc += (int)iv[1];   // 20
+
+    // alias chain: d and e both share b
+    list<int> d = b;
+    list<int> e = d;
+    acc += (int)d.size + (int)e.size;        // 2 + 2 = 4
+
+    // self-assign is balanced
+    b = b;
+    acc += (int)b[0];                        // 10
+
+    // dict alias + reassign
+    dict<int,int> m; m[1] = 5;
+    dict<int,int> n; n[1] = 8;
+    dict<int,int> mm = m;
+    mm = n;
+    acc += (int)mm[1];                       // 8
+
+    // set alias
+    set<int> s; s.add(7);
+    set<int> s2 = s;
+    if (s2.has(7)) acc += 1;                 // +1
+
+    // nested container element extraction shares the element
+    list<list<int>> ll;
+    list<int> inner; inner.add(3);
+    ll.add(inner);
+    list<int> got = ll[0];
+    got.add(4);                              // mutation visible through ll
+    acc += (int)(ll[0]).size;                // 2
+
+    // acc = 20 + 4 + 10 + 8 + 1 + 2 = 45; -3 = 42
+    return acc - 3;
+}

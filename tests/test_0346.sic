@@ -1,0 +1,29 @@
+// Tuple holding several refcounted kinds at once, returned + extracted + reassigned.
+tuple pack() {
+    list<int> xs; xs.add(10); xs.add(10);
+    dict<int,int> d; d[1] = 5;
+    string s = "hi";
+    tuple inner = tuple(7, 8);
+    return tuple(xs, d, s, inner);       // owns list+dict+string+tuple
+}
+int main() {
+    int acc = 0;
+
+    tuple t = pack();
+    list<int> xs = t[0];                 // extract list (receiver-retain)
+    for (tuple iv : xs) acc += (int)iv[1];   // 20
+    dict<int,int> d = t[1];
+    acc += (int)d[1];                    // 5
+    string s = t[2];
+    acc += (int)s.length;               // 2
+    tuple inner = t[3];
+    acc += (int)inner[0] + (int)inner[1];    // 15
+
+    // reassign the tuple variable: the old tuple (and its owned elements) is released
+    list<int> ys; ys.add(1);
+    t = tuple(ys, 0);
+    acc += (int)(t[0]).size;            // 1
+
+    // acc = 20 + 5 + 2 + 15 + 1 = 43; -1 = 42
+    return acc - 1;
+}

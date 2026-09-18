@@ -691,7 +691,7 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RParen)?;
-                    self.expect(TokenKind::Gt)?;
+                    self.eat_generic_gt()?;   // splits a trailing `>>` (`list<Fn<int()>>`)
                     base = Some(AstType::Closure { ret: Box::new(ret), params });
                 }
                 // sic weak reference `weak<T>` (sic.md §"Weak").

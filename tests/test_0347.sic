@@ -1,0 +1,38 @@
+// Combinatory weak: struct field + container element + closure capture together.
+struct Hub { weak<list<int>> current; };
+
+int main() {
+    int acc = 0;
+
+    list<int> a; a.add(20); a.add(22);
+
+    // weak struct field observes a
+    struct Hub h;
+    h.current = a;
+    list<int> up = h.current.get;
+    for (tuple iv : up) acc += (int)iv[1];        // 42
+
+    // a list of weak elements, some alive, some dead
+    list<int> *p = new list<int>; p.add(9);
+    list<weak<list<int>>> obs;
+    obs.add(a);                                    // alive
+    obs.add(p);                                    // will die
+    del p;
+    list<int> live = obs[0].get;
+    list<int> dead = obs[1].get;
+    acc += (int)live.size - (int)dead.size;        // 2 - 0 = 2
+
+    // a closure weakly capturing a, stored and called
+    auto peek = [weak a]() -> int { return (int)(a.get).size; };
+    acc += peek();                                 // 2
+
+    // dict with a weak value, reassigned (weak-release old, weak-retain new)
+    list<int> b; b.add(1);
+    dict<int, weak<list<int>>> m;
+    m[1] = a;
+    m[1] = b;                                       // overwrite weak value
+    acc += (int)(m[1].get).size;                    // 1
+
+    // acc = 42 + 2 + 2 + 1 = 47; -5 = 42
+    return acc - 5;
+}

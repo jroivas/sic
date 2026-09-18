@@ -1,0 +1,27 @@
+// A real container<->container reference cycle, broken with a weak element: no leak.
+int main() {
+    int acc = 0;
+
+    // node_a strongly holds node_b's data; node_b weakly points back at node_a.
+    list<list<int>> node_a;               // strong: a -> (its children)
+    list<int> shared; shared.add(21); shared.add(21);
+    node_a.add(shared);                    // a strongly owns `shared`
+
+    list<weak<list<list<int>>>> node_b;    // weak back-edge: b -> a (does not own)
+    node_b.add(node_a);
+    // a -> shared (strong), b -> a (weak): no strong cycle, so both reclaim cleanly.
+    list<list<int>> back = node_b[0].get;  // upgrade the weak back-edge
+    for (tuple iv : back[0]) acc += (int)iv[1];   // 42
+
+    // a list of closures, each capturing a shared counter by value.
+    list<Fn<int()>> fns;
+    int base = 10;
+    fns.add([base]() -> int { return base; });
+    fns.add([base]() -> int { return base + 5; });
+    Fn<int()> f0 = fns[0];
+    Fn<int()> f1 = fns[1];
+    acc += f0() + f1();                    // 10 + 15 = 25
+
+    // acc = 42 + 25 = 67; -25 = 42
+    return acc - 25;
+}

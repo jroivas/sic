@@ -2027,33 +2027,34 @@ impl<'m> FuncCtx<'m> {
                     // the slot is declared `dict d` or `dict *p` (the handle bits are
                     // stored either way). Aliasing an EXISTING handle (`dict d =
                     // other;`) is not a `new`, so it is left un-freed (no double free).
+                    // sic container local ownership (sic.md §"List"/§"Dict"): a
+                    // container local owns exactly ONE reference to its handle, released
+                    // at scope exit. A fresh producer (`new`, or a call that already
+                    // return-retained) transfers its +1; a SHARE — an alias (`c = a`), a
+                    // struct-field read (`c = obj.items`), or a tuple/container element
+                    // (`c = t[i]`) — is retained so the local's lifetime is independent
+                    // of the source (else a later reassignment would release a handle it
+                    // never owned). A weak `.get` upgrade and a `.keys`/`.values`
+                    // projection register their own release, so they are skipped here.
                     if self.is_sic() && !matches!(d.ty.ty, AstType::Weak(_)) {
-                        if let Some(Initializer::Expr(e)) = &d.init {
-                            // A fresh container handle — from `new` or a call that
-                            // returns one (which retained it on return) — is owned by
-                            // this local: release it at scope exit. Aliasing an
-                            // existing handle (`list b = a;`) is not, so it is left
-                            // un-freed. (A weak `.get` upgrade registers its own
-                            // release in `lower_expr`, so it is excluded here.)
-                            if matches!(&e.kind, ExprKind::New { .. } | ExprKind::Call { .. }) {
-                                if super::types::is_list(&ty) {
-                                    self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
-                                } else if super::types::is_dict(&ty) || super::types::is_set(&ty) {
-                                    self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
-                                }
-                            } else if matches!(&e.kind, ExprKind::Index { base, .. }
-                                if matches!(self.infer_expr_type(base), Ok(bt) if super::types::is_tuple(&bt)))
-                            {
-                                // sic tuple extraction (`list c = t[i]`): the tuple owns
-                                // the element, so the receiver takes its OWN reference
-                                // (retain) and releases it at scope exit — otherwise it
-                                // would dangle once the tuple is dropped.
-                                let is_container = super::types::is_list(&ty)
-                                    || super::types::is_dict(&ty) || super::types::is_set(&ty);
-                                if is_container {
+                        let is_container = super::types::is_list(&ty)
+                            || super::types::is_dict(&ty) || super::types::is_set(&ty);
+                        if is_container {
+                            if let Some(Initializer::Expr(e)) = &d.init {
+                                let (needs_retain, needs_release) = match &e.kind {
+                                    ExprKind::New { .. } | ExprKind::Call { .. } => (false, true),
+                                    ExprKind::Field { name, .. } | ExprKind::Arrow { name, .. }
+                                        if matches!(name.as_str(), "get" | "keys" | "values") => (false, false),
+                                    ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
+                                    | ExprKind::Index { .. } => (true, true),
+                                    _ => (false, false),
+                                };
+                                if needs_retain {
                                     let h = self.alloc_val();
                                     self.push_instr(Instr::Load { dest: h, ptr: Val::Local(vid), ty: Type::void_ptr() });
                                     let _ = self.container_retain(Val::Local(h), &ty);
+                                }
+                                if needs_release {
                                     if super::types::is_list(&ty) {
                                         self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
                                     } else {
