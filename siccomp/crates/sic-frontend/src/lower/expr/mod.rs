@@ -658,7 +658,7 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Slice { base, lo, hi } => self.lower_slice(base, lo.as_deref(), hi.as_deref()),
 
-            ExprKind::New { ty, args } => self.lower_new(ty, args),
+            ExprKind::New { ty, args, array } => self.lower_new(ty, args, *array),
 
             ExprKind::Ref { expr, .. } => self.lower_ref(expr),
 
@@ -3488,7 +3488,7 @@ impl<'m> FuncCtx<'m> {
     /// allocate a block with a `{ usize size; usize refcount }` header before the
     /// data, `refcount = 1`, and return the data pointer typed `T*`. `del` frees
     /// via the header; the header also carries the size for future bounds checks.
-    pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, args: &[Expr]) -> Result<Val> {
+    pub(crate) fn lower_new(&mut self, ty: &crate::ast::QualType, args: &[Expr], array: bool) -> Result<Val> {
         let elem_ty = self.lower_type(ty)?;
         // sic `new dict<K,V>` / `new set<T>` (sic.md §"Dict"/§"Set"): allocate a
         // fresh hash map, returning the handle directly (it is itself a heap pointer).
@@ -3506,8 +3506,9 @@ impl<'m> FuncCtx<'m> {
 
         // sic constructor via `new` (sic.md §"Memory safety"): if `T` is a struct
         // with a constructor, `new T(args)` allocates ONE object and runs the
-        // constructor on it; otherwise the parens hold an element count.
-        let ctor = if self.is_sic() {
+        // constructor on it; otherwise the parens hold an element count. The array
+        // form `new T[count]` is always a count, so it never runs a constructor.
+        let ctor = if self.is_sic() && !array {
             match &elem_ty {
                 Type::Struct(st) => st.name.as_ref().and_then(|n| self.lowerer.struct_ctor.get(n).cloned()),
                 _ => None,

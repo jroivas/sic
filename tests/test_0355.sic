@@ -1,0 +1,21 @@
+// sic array `new` (sic.md §"Scopes and automatic release"): `new T[count]`
+// heap-allocates an array of `count` elements and returns a `T*`; `del` frees it.
+// The count is any expression (literal or computed), and — unlike `new S(n)` on a
+// struct with a constructor — the array form is always a count, never a ctor call.
+// Returns 42.
+int main() {
+    int n = 6;
+    i32 *a = new i32[n * n];        // computed count (36 elements)
+    for (i32 i = 0; i < n * n; i++) a[i] = i;
+    i64 sum = 0;
+    for (i32 i = 0; i < n * n; i++) sum += a[i];   // 0+1+...+35 = 630
+    del a;
+
+    i32 *b = new i32[10];           // literal count
+    b[0] = 12; b[9] = 30;
+    i32 edge = b[0] + b[9];         // 42
+    del b;
+
+    if (sum != 630) return 1;
+    return edge;                    // 42
+}

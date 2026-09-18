@@ -520,7 +520,10 @@ pub enum ExprKind {
     /// parenthesized list is: empty for `new T`/`new T()` (one object); a single
     /// count for a scalar/no-ctor `new T(n)` (array of n); or the constructor
     /// arguments when `T` is a struct with a constructor.
-    New { ty: QualType, args: Vec<Expr> },
+    /// sic `new T` / `new T(args)` / `new T[count]` (sic.md §"Scopes and automatic
+    /// release"). `array` marks the `[count]` form — a heap array of `count`
+    /// elements — which always means an element count, never a constructor call.
+    New { ty: QualType, args: Vec<Expr>, array: bool },
 
     /// SIC `@expr` / `@mut expr` (sic.md §"References"): form a scoped
     /// reference-counted borrow of `expr` — retains the referent's allocation for

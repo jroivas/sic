@@ -699,6 +699,15 @@ This would either cause compile error or runtime exception.
 First `new int(10)` allocates memory for 10 ints so it's same as `sizeof(int) * 10`.
 In order to allocate just one integer `new int` is enough.
 
+An array may also be allocated with the bracket form `new T[count]`, where `count`
+is any expression:
+
+    i32 *a = new i32[n * n];    // n*n elements
+    defer del a;                // released on scope exit
+
+`new T[count]` is always an element count — unlike `new S(n)` on a struct with a
+constructor, which allocates one object and passes `n` to the constructor.
+
 Returned pointer is so called fat pointer. It will include information about the size of the allocation:
 
 - start_of_allocation

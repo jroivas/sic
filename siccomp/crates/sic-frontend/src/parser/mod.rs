@@ -2489,6 +2489,14 @@ impl Parser {
                     }
                     ty = QualType::new(AstType::Pointer { base: Box::new(ty), quals: vec![] });
                 }
+                // `new T[count]`: a heap array of `count` elements (always a count,
+                // never a constructor call — the C++/idiomatic array-allocation form).
+                if self.at(TokenKind::LBracket) {
+                    self.advance();
+                    let count = self.parse_expr()?;
+                    self.expect(TokenKind::RBracket)?;
+                    return Ok(Expr::new(ExprKind::New { ty, args: vec![count], array: true }, sp));
+                }
                 // Optional `(…)`: an element count `(n)`, constructor arguments, or
                 // empty `()`. Parsed as a comma-separated list; the meaning is
                 // resolved at lowering from whether `T` has a constructor.
@@ -2503,7 +2511,7 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                Ok(Expr::new(ExprKind::New { ty, args }, sp))
+                Ok(Expr::new(ExprKind::New { ty, args, array: false }, sp))
             }
             TokenKind::Sizeof => {
                 self.advance();
