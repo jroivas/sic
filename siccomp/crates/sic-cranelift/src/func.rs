@@ -25,6 +25,10 @@ struct VaInfo {
 
 /// A source variable's debug info collected during codegen: its name, IR type,
 /// the Cranelift stack slot it lives in, and whether it is a formal parameter.
+// Fields are currently unread: Cranelift 0.132 dropped the `CompiledCode` frame-size
+// / stack-slot-offset accessors used to emit per-variable DWARF locations. Kept for
+// the planned rewiring through `value_labels_ranges`.
+#[allow(dead_code)]
 pub struct VarDbg {
     pub name: String,
     pub ty: sic_ir::Type,
@@ -231,8 +235,7 @@ pub fn compile_function(
                     }
                 }
                 if !consistent { continue; }
-                let var = Variable::from_u32(dest.0);
-                builder.declare_var(var, ct);
+                let var = builder.declare_var(ct);
                 promoted.insert(dest.0, (var, ct));
             }
         }

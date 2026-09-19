@@ -165,15 +165,16 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
             let tramp_fid = obj_module.declare_function(&format!("__sic_fva_{}", name), CLinkage::Local, &sig)?;
             // `movb $8, %al` (B0 08) then `jmp <name>` (E9 + PC-relative rel32).
             let bytes = [0xB0u8, 0x08, 0xE9, 0x00, 0x00, 0x00, 0x00];
-            let mut tf = cir::Function::new();
-            let uref = tf.declare_imported_user_function(cir::UserExternalName::new(0, import_fid.as_u32()));
-            let reloc = cranelift_codegen::FinalizedMachReloc {
+            // `define_function_bytes` (cranelift-module 0.132) takes module-level
+            // relocations directly — the `jmp` target is the imported extern by its
+            // user name (namespace 0, the extern's FuncId), resolved at link time.
+            let reloc = cranelift_module::ModuleReloc {
                 offset: 3,
                 kind: cranelift_codegen::binemit::Reloc::X86CallPLTRel4,
-                target: cranelift_codegen::FinalizedRelocTarget::ExternalName(cir::ExternalName::User(uref)),
+                name: cranelift_module::ModuleRelocTarget::user(0, import_fid.as_u32()),
                 addend: -4,
             };
-            obj_module.define_function_bytes(tramp_fid, &tf, 1, &bytes, &[reloc])?;
+            obj_module.define_function_bytes(tramp_fid, 1, &bytes, &[reloc])?;
             // Route all calls to the extern through the trampoline.
             func_ids.insert(ext_ref, tramp_fid);
         }
@@ -298,7 +299,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         } else {
             format!(".init_array.{:05}", prio)
         };
-        desc.set_segment_section("", &section);
+        desc.set_segment_section("", &section, 0); // 0 = macho section flags (ELF: unused)
         obj_module.define_data(did, &desc)?;
     }
 
@@ -367,17 +368,18 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
                     }
                 }
                 // Resolve each variable's stack slot to a frame-pointer-relative
-                // offset. Slots are laid out from the post-prologue SP, and RBP
-                // sits `frame_size` bytes above it, so the RBP-relative offset is
-                // `slot_offset - frame_size`.
-                let frame = cc.frame_size as i64;
+                // offset. Cranelift 0.132 exposes the frame layout on the finalized
+                // buffer: `frame_to_fp_offset` is the FP position measured from the
+                // bottom of the frame, and each slot's `offset` is measured the same
+                // way, so the RBP-relative offset is `slot.offset - frame_to_fp_offset`.
                 let mut vars: Vec<dwarf::VarInfo> = Vec::new();
-                for v in &var_dbg {
-                    if let Some(slot_off) = cc.sized_stackslot_offsets.get(v.slot) {
+                if let Some(fl) = cc.buffer.frame_layout() {
+                    let fp = fl.frame_to_fp_offset as i64;
+                    for v in &var_dbg {
                         vars.push(dwarf::VarInfo {
                             name: v.name.clone(),
                             ty: v.ty.clone(),
-                            fp_offset: *slot_off as i64 - frame,
+                            fp_offset: fl.stackslots[v.slot].offset as i64 - fp,
                             is_param: v.is_param,
                         });
                     }
