@@ -210,15 +210,30 @@ pub fn compile_function(
         }
         bb.terminator.for_each_val(|v| if let Val::Local(id) = v { escaped.insert(id.0); });
     }
-    let mut promoted: HashMap<u32, Variable> = HashMap::new();
+    // Cranelift type of a slot: a pointer is `ptr_ty`, any other scalar is its
+    // `cl_type` (aggregates return None → not promotable).
+    let slot_clty = |t: &Type| if matches!(t, Type::Pointer(_)) { Some(ptr_ty) } else { cl_type(t, ptr_size) };
+    let mut promoted: HashMap<u32, (Variable, cir::Type)> = HashMap::new();
     for bb in &f.blocks {
         for instr in &bb.instrs {
             if let Instr::Alloca { dest, ty, .. } = instr {
-                if matches!(ty, Type::Pointer(_)) && !escaped.contains(&dest.0) {
-                    let var = Variable::from_u32(dest.0);
-                    builder.declare_var(var, ptr_ty);
-                    promoted.insert(dest.0, var);
+                if escaped.contains(&dest.0) { continue; }
+                let ct = match slot_clty(ty) { Some(t) => t, None => continue };
+                // Require every load of this slot to read exactly the slot type — a
+                // load of a different width/category is a type-pun that relies on the
+                // memory layout, so leave such a slot in memory (sound).
+                let mut consistent = true;
+                'scan: for b2 in &f.blocks {
+                    for i2 in &b2.instrs {
+                        if let Instr::Load { ptr: Val::Local(p), ty: lty, .. } = i2 {
+                            if p.0 == dest.0 && slot_clty(lty) != Some(ct) { consistent = false; break 'scan; }
+                        }
+                    }
                 }
+                if !consistent { continue; }
+                let var = Variable::from_u32(dest.0);
+                builder.declare_var(var, ct);
+                promoted.insert(dest.0, (var, ct));
             }
         }
     }
@@ -283,11 +298,11 @@ fn emit_instr(
     slot_map: &mut HashMap<u32, cir::StackSlot>,
     var_dbg: &mut Vec<VarDbg>,
     module_ir: &sic_ir::Module,
-    promoted: &HashMap<u32, Variable>,
+    promoted: &HashMap<u32, (Variable, cir::Type)>,
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
-            // A register-promoted pointer local has no stack slot (it is a Variable).
+            // A register-promoted scalar local has no stack slot (it is a Variable).
             if promoted.contains_key(&dest.0) { return; }
             // Already materialized in the entry block by the up-front pre-pass.
             if slot_map.contains_key(&dest.0) { return; }
@@ -311,10 +326,11 @@ fn emit_instr(
         }
 
         Instr::Load { dest, ptr, ty } => {
-            // Reading a register-promoted pointer local: use the SSA value directly
-            // (no memory load), so the pointer stays in a register.
+            // Reading a register-promoted scalar local: use the SSA value directly
+            // (no memory load), so it stays in a register. Every load of a promoted
+            // slot matches the slot type by construction, so no coercion is needed.
             if let Val::Local(id) = ptr {
-                if let Some(&var) = promoted.get(&id.0) {
+                if let Some(&(var, _)) = promoted.get(&id.0) {
                     let v = builder.use_var(var);
                     val_map.insert(dest.0, v);
                     return;
@@ -338,17 +354,14 @@ fn emit_instr(
         }
 
         Instr::Store { val, ptr } => {
-            // Writing a register-promoted pointer local: define the SSA variable (no
-            // memory store). The value is a pointer, so it is `ptr_ty`; a defensive
-            // int-resize guards the rare width mismatch so `def_var` never panics.
+            // Writing a register-promoted scalar local: define the SSA variable (no
+            // memory store), coercing the value to the variable's type — an
+            // int/float resize matches what a narrower/wider memory store would have
+            // done, so `def_var` never sees a type mismatch.
             if let Val::Local(id) = ptr {
-                if let Some(&var) = promoted.get(&id.0) {
-                    let mut sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-                    let svt = builder.func.dfg.value_type(sv);
-                    if svt != ptr_ty && svt.is_int() && ptr_ty.is_int() {
-                        sv = if svt.bits() < ptr_ty.bits() { builder.ins().uextend(ptr_ty, sv) }
-                             else { builder.ins().ireduce(ptr_ty, sv) };
-                    }
+                if let Some(&(var, vt)) = promoted.get(&id.0) {
+                    let sv0 = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+                    let sv = coerce_scalar(builder, sv0, vt);
                     builder.def_var(var, sv);
                     return;
                 }
@@ -846,6 +859,23 @@ fn emit_terminator(
 }
 
 // ── Low-level helpers ─────────────────────────────────────────────────────────
+
+/// Coerce a scalar Cranelift value to `to` for a promoted-variable `def_var`:
+/// int↔int resize (matching a narrower/wider memory store), float↔float resize, or
+/// a same-width bitcast across categories. A no-op when already `to`.
+fn coerce_scalar(builder: &mut FunctionBuilder<'_>, v: cir::Value, to: cir::Type) -> cir::Value {
+    let from = builder.func.dfg.value_type(v);
+    if from == to { return v; }
+    if from.is_int() && to.is_int() {
+        if from.bits() < to.bits() { builder.ins().uextend(to, v) } else { builder.ins().ireduce(to, v) }
+    } else if from.is_float() && to.is_float() {
+        if from.bits() < to.bits() { builder.ins().fpromote(to, v) } else { builder.ins().fdemote(to, v) }
+    } else if from.bits() == to.bits() {
+        builder.ins().bitcast(to, MemFlags::new(), v)
+    } else {
+        v // width+category mismatch — not produced for a promoted scalar local
+    }
+}
 
 fn rval(
     val: &Val,
