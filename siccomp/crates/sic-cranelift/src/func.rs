@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use cranelift_codegen::ir::{self as cir, InstBuilder, MemFlags};
 use cranelift_codegen::ir::types as ct;
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, DataId, Module};
 use cranelift_object::ObjectModule;
 use sic_ir::*;
@@ -185,8 +185,46 @@ pub fn compile_function(
     // storage to a Cranelift stack slot for the DWARF location.
     let mut slot_map: HashMap<u32, cir::StackSlot> = HashMap::new();
 
-    // Materialize every `Alloca`'s address in the entry block up front. A stack
-    // slot is function-global, but its `stack_addr` value must dominate all
+    // mem2reg for pointer locals (register promotion). An `Alloca` of pointer type
+    // whose address never escapes — its ValId is used ONLY as the `ptr` of a
+    // Load/Store (never stored elsewhere, GEP'd, passed to a call, memset, …) —
+    // becomes a Cranelift `Variable` instead of a stack slot. Cranelift's SSA
+    // builder then keeps it in a register with automatic phi insertion, so the
+    // pointer isn't reloaded from the stack on every use — which in turn lets the
+    // mid-end hoist loop-invariant pointer loads and the `readonly` bounds-size
+    // loads that depend on them out of hot loops. Pointer type is required so
+    // `def_var` always sees a `ptr_ty`-typed value (sound without tracking every
+    // stored value's type). A local with no initializer is zero-set with `MemSet`,
+    // which uses the slot address → it escapes and stays a stack slot.
+    let mut escaped: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for bb in &f.blocks {
+        for instr in &bb.instrs {
+            match instr {
+                // The `ptr` of a load/store is a legitimate slot use, not an escape.
+                Instr::Load { .. } | Instr::LoadReadonly { .. } => {}
+                Instr::Store { val, ptr: _ } => {
+                    if let Val::Local(id) = val { escaped.insert(id.0); }
+                }
+                other => other.for_each_val(|v| if let Val::Local(id) = v { escaped.insert(id.0); }),
+            }
+        }
+        bb.terminator.for_each_val(|v| if let Val::Local(id) = v { escaped.insert(id.0); });
+    }
+    let mut promoted: HashMap<u32, Variable> = HashMap::new();
+    for bb in &f.blocks {
+        for instr in &bb.instrs {
+            if let Instr::Alloca { dest, ty, .. } = instr {
+                if matches!(ty, Type::Pointer(_)) && !escaped.contains(&dest.0) {
+                    let var = Variable::from_u32(dest.0);
+                    builder.declare_var(var, ptr_ty);
+                    promoted.insert(dest.0, var);
+                }
+            }
+        }
+    }
+
+    // Materialize every non-promoted `Alloca`'s address in the entry block up front.
+    // A stack slot is function-global, but its `stack_addr` value must dominate all
     // uses — and an `Alloca` can appear inside a non-entry block (e.g. a local
     // declared in a `switch` case), whose address would otherwise be referenced
     // from sibling blocks it does not dominate. The current fill block here is
@@ -194,6 +232,7 @@ pub fn compile_function(
     for bb in &f.blocks {
         for instr in &bb.instrs {
             if let Instr::Alloca { dest, ty, align } = instr {
+                if promoted.contains_key(&dest.0) { continue; }
                 let size = ty.size_of(ptr_size).max(1) as u32;
                 let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
                 if let Some(req) = align { align_bytes = align_bytes.max(*req); }
@@ -218,7 +257,7 @@ pub fn compile_function(
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
                 ptr_ty, target_config, ptr_size, va_info,
-                &mut slot_map, var_dbg, module_ir,
+                &mut slot_map, var_dbg, module_ir, &promoted,
             );
         }
         emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref());
@@ -244,9 +283,12 @@ fn emit_instr(
     slot_map: &mut HashMap<u32, cir::StackSlot>,
     var_dbg: &mut Vec<VarDbg>,
     module_ir: &sic_ir::Module,
+    promoted: &HashMap<u32, Variable>,
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
+            // A register-promoted pointer local has no stack slot (it is a Variable).
+            if promoted.contains_key(&dest.0) { return; }
             // Already materialized in the entry block by the up-front pre-pass.
             if slot_map.contains_key(&dest.0) { return; }
             let size = ty.size_of(ptr_size).max(1) as u32;
@@ -269,6 +311,15 @@ fn emit_instr(
         }
 
         Instr::Load { dest, ptr, ty } => {
+            // Reading a register-promoted pointer local: use the SSA value directly
+            // (no memory load), so the pointer stays in a register.
+            if let Val::Local(id) = ptr {
+                if let Some(&var) = promoted.get(&id.0) {
+                    let v = builder.use_var(var);
+                    val_map.insert(dest.0, v);
+                    return;
+                }
+            }
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let v = builder.ins().load(cl_ty, MemFlags::new(), pv, 0);
@@ -287,6 +338,21 @@ fn emit_instr(
         }
 
         Instr::Store { val, ptr } => {
+            // Writing a register-promoted pointer local: define the SSA variable (no
+            // memory store). The value is a pointer, so it is `ptr_ty`; a defensive
+            // int-resize guards the rare width mismatch so `def_var` never panics.
+            if let Val::Local(id) = ptr {
+                if let Some(&var) = promoted.get(&id.0) {
+                    let mut sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                    let svt = builder.func.dfg.value_type(sv);
+                    if svt != ptr_ty && svt.is_int() && ptr_ty.is_int() {
+                        sv = if svt.bits() < ptr_ty.bits() { builder.ins().uextend(ptr_ty, sv) }
+                             else { builder.ins().ireduce(ptr_ty, sv) };
+                    }
+                    builder.def_var(var, sv);
+                    return;
+                }
+            }
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             // Infer hint from existing value if available
             let hint = if let Val::Local(id) = val {
