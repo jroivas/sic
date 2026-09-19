@@ -52,28 +52,33 @@ Measured with `RUNS=5` (gcc 15, rustc 1.93, release `sic`; one machine — treat
 ratios, not the absolute times, as the signal):
 
 ```
-== fib ==        C 0.25s   Rust 0.45s (1.80x)   SIC 1.39s (5.56x C)
-== matmul ==     C 0.12s   Rust 0.12s (1.00x)   SIC 1.06s (8.83x C)
-== sieve ==      C 0.55s   Rust 0.54s (0.98x)   SIC 0.75s (1.36x C)
-== quicksort ==  C 0.14s   Rust 0.15s (1.07x)   SIC 0.27s (1.93x C)
-== mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.38s (2.92x C)
+== fib ==        C 0.25s   Rust 0.45s (1.80x)   SIC 1.34s (5.36x C)
+== matmul ==     C 0.13s   Rust 0.12s (0.92x)   SIC 0.89s (6.85x C)
+== sieve ==      C 0.58s   Rust 0.58s (1.00x)   SIC 0.72s (1.24x C)
+== quicksort ==  C 0.14s   Rust 0.15s (1.07x)   SIC 0.19s (1.36x C)
+== mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.16s (1.23x C)
 ```
 
 (These `SIC` figures are `sic·SIC` — the safe, bounds-checked build. Its overhead
-over unchecked code is tiny; see the frontend comparison below.)
+over unchecked code is small; see the frontend comparison below.)
 
 ### Reading the numbers
 
-`sic` produces **correct** code (every checksum matches C and Rust) and lands between
-~1.4× and ~9× slower than the LLVM toolchains, depending on the workload:
+`sic` produces **correct** code (every checksum matches C and Rust). On three of the
+five it is within ~1.2–1.4× of the LLVM toolchains; the two large gaps are each a
+single advanced LLVM transform that Cranelift does not do:
 
-- **`sieve` (1.36×)** — memory-bandwidth-bound, so back-end code quality barely
-  matters; `sic` is nearly on par.
-- **`fib` (5.6×)** — dominated by function-call overhead; `sic`/Cranelift does less
-  aggressive inlining and call optimization than LLVM.
-- **`matmul` (~8.8×)** — the LLVM toolchains auto-vectorize the inner loop into SIMD;
-  `sic`'s Cranelift back end emits scalar code, so it pays the full ~1 B scalar
-  multiplies.
+- **`mandelbrot` (1.23×)**, **`sieve` (1.24×)**, **`quicksort` (1.36×)** — scalar/
+  memory-bound work with no vectorization opportunity; after register promotion
+  (mem2reg) `sic` is close to gcc/rustc.
+- **`fib` (5.4×)** — LLVM turns the recursion into an iteration (a recurrence
+  transform); `sic` still makes the ~866 M real calls. This needs a
+  recursion-elimination pass, not better register allocation.
+- **`matmul` (~6.9×)** — LLVM auto-vectorizes the inner loop into SIMD; `sic`'s
+  Cranelift back end emits scalar code, paying the full ~1 B scalar multiplies.
+
+So the remaining distance to C/Rust is two specific missing optimizations
+(recursion→iteration and auto-vectorization), not a broad codegen deficit.
 
 Almost all of that gap is the **back end (Cranelift vs LLVM)**, not memory safety:
 the bounds-checked `sic·SIC` build runs within ~0–13% of `sic`'s own *unchecked* C
@@ -93,11 +98,11 @@ uses. Representative result:
 
 ```
              gcc     sic·C    sic·SIC   safety overhead (sic·SIC / sic·C)
-fib         0.25s    5.56x     5.56x    1.00x
-sieve       0.55s    1.33x     1.36x    1.03x
-matmul      0.12s    7.83x     8.83x    1.13x
-quicksort   0.14s    1.50x     1.93x    1.29x
-mandelbrot  0.13s    2.92x     2.92x    1.00x   (no arrays → no checks)
+fib         0.25s    5.36x     5.36x    1.00x
+sieve       0.58s    1.09x     1.24x    1.14x
+matmul      0.13s    5.08x     6.85x    1.35x
+quicksort   0.14s    1.29x     1.36x    1.06x
+mandelbrot  0.13s    1.23x     1.23x    1.00x   (no arrays → no checks)
 ```
 
 `mandelbrot` has no arrays, so there is nothing to bounds-check; it is a pure `f64`
@@ -115,28 +120,32 @@ can't be auto-vectorized, shrinking the Cranelift-vs-LLVM gap.)
 The frontends emit **equivalent code** (an experiment compiling a `malloc`-based
 `main.sic` matches `sic·C`), so the `sic·SIC` vs `sic·C` column isolates the cost of
 the **idiomatic SIC memory model**: `new T[]` arrays are bounds-checked, which the C
-`malloc` versions are not. That safety overhead is **1.00×–1.13×** on the
-regular-loop kernels (fib/sieve/matmul), and **1.29×** on quicksort's irregular,
-data-dependent indexing — comparable to what Rust's own bounds checks cost (rustc is
-~1.07× gcc on quicksort). So a UB-free, bounds-checked program runs within ~0–13% of
-the same code with raw unchecked pointers wherever the accesses are loop-regular, and
-pays a Rust-like per-access cost where they are not.
+`malloc` versions are not. That safety overhead is **1.00×–1.35×**: near-free where
+the accesses are loop-regular (`fib`/`mandelbrot` 1.00×, `quicksort` 1.06×, `sieve`
+1.14×) and a per-access cost on irregular indexing (`matmul` 1.35×) comparable to what
+Rust's own bounds checks cost. A UB-free, bounds-checked program stays close to the
+same code with raw unchecked pointers.
 
-Getting there took four back-end/front-end optimizations, each safe (a real
+Getting there took five back-end/front-end optimizations, each safe (a real
 out-of-bounds access still aborts):
 
 1. **`readonly` size load** — the immutable fat-pointer size header is read with a
    hoistable, CSE-able load.
 2. **index-vs-count compare** — the check compares the index against the element
    count (derived from that hoistable load), off the per-access multiply path.
-3. **register promotion (mem2reg)** of address-not-escaping pointer locals — the base
-   pointer stays in a register instead of being reloaded each iteration (this also
-   sped the *unchecked* `sic·C` matmul ~18%).
+3. **register promotion (mem2reg)** of address-not-escaping locals — pointers *and*
+   scalars (int/float/bool) stay in registers instead of being reloaded each use, and
+   two-branch store→load result merges become real SSA phis. This alone cut
+   `mandelbrot` ~2.4× and `matmul` ~1.4× on the unchecked build.
 4. **loop bounds-check elimination** — a counting loop whose accesses are provably
-   in-bounds gets one hoisted check on the index extremes, and the per-iteration
-   checks vanish. This is what took matmul's safety overhead from 1.88× to 1.13×.
+   in-bounds gets one hoisted check on the index extremes; the per-iteration checks
+   vanish. Took matmul's safety overhead from 1.88× to ~1.35×.
+5. **fat-pointer parameter propagation** — a `new[]` array passed to a `static`
+   function stays bounds-checked in the callee (closing a real safety gap in
+   quicksort), soundly (only where every call passes a fat base).
 
-The remaining gap to gcc/rustc (matmul ~7.8×, fib ~5.6×) is **not** about safety — it
-is the back end: `sic` uses Cranelift (fast compile, scalar output) rather than LLVM,
-so it does not auto-vectorize matmul's inner loop or inline as aggressively. That is a
+The remaining gap to gcc/rustc (matmul ~5–7×, fib ~5.4×) is **not** about safety — it
+is the back end plus two missing high-level transforms: `sic` uses Cranelift (fast
+compile, scalar output) rather than LLVM, so it does not auto-vectorize matmul's inner
+loop, and it has no recursion→iteration pass to collapse fib's calls. Both are a
 separate axis from memory safety, which these numbers show is nearly free.
