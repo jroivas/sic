@@ -3855,26 +3855,61 @@ impl<'m> FuncCtx<'m> {
     /// sic fat-pointer bounds check: abort if `idx * elem_size >= header.size`,
     /// where the header `size` sits at `base - 2*ptr_size` (sic.md §"Scopes and
     /// automatic release"). `base` must point at the allocation start.
+    // TODO (loop bounds-check elimination): when an index access sits in a counting
+    // loop whose maximum index is statically known and safe, hoist a SINGLE max-index
+    // check before the loop and skip the per-iteration checks entirely. This is the
+    // real win for hot loops (the per-iteration size load + compare is what makes
+    // `new[]` code ~1.7x slower than raw pointers on a bounds-bound kernel like
+    // matmul; see benchmarks/). It applies when ALL hold:
+    //   - the loop is a counting `for`/safe iterator over `i` with a fixed bound
+    //     (`i < a.length`, or `i < n` where `n <= a.length`), step +1;
+    //   - the index expression is monotonic in `i` and bounded by the array length;
+    //   - `i` is not reassigned in the body, and the array is not mutated in a way
+    //     that could shrink it (no re-`new`, no removal, no reassignment of the base);
+    //   - the base pointer does not escape / alias in a size-changing way.
+    // Then one check `max_index < a.length` before the loop proves every access safe,
+    // so `emit_bounds_check` is suppressed inside. Needs loop-shape recognition +
+    // a small monotonicity/no-mutation analysis in the frontend; complements the
+    // register-promotion (mem2reg) work that would hoist the invariant size load.
     fn emit_bounds_check(&mut self, base: Val, idx: Val, elem_size: u64) -> Result<()> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let idx_u = self.coerce(idx, &usize_ty)?;
-        let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
-        let off = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: off, op: BinOp::Mul, lhs: idx_u, rhs: esz, ty: usize_ty.clone() });
 
-        // size = *(usize*)(base - 2*ptr_size). The fat-pointer size header is written
-        // once at allocation and never changes, so read it with a `readonly` load —
-        // the mid-end can then hoist this loop-invariant load out of a hot loop
-        // (e.g. `for j: a[i*N+j]`), leaving only the compare+branch per access.
+        // size = *(usize*)(base - 2*ptr_size). The fat-pointer size header (in bytes)
+        // is written once at allocation and never changes, so read it with a
+        // `readonly` load — the mid-end can then hoist this loop-invariant load (and
+        // the `count` derived from it) out of a hot loop, leaving only the
+        // compare+branch per access.
         let bc = self.coerce(base, &Type::char_ptr())?;
         let szp = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: szp, base: bc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
         let size = self.alloc_val();
         self.push_instr(Instr::LoadReadonly { dest: size, ptr: Val::Local(szp), ty: usize_ty.clone() });
 
-        // if off >= size → __sic_bounds_fail()
+        // Compare the INDEX against the element COUNT (`size / elem_size`), not the
+        // byte offset against the byte size. `count` depends only on the loop-
+        // invariant size, so it hoists/CSEs, whereas `idx * elem_size` is per-access
+        // (and could overflow for a huge index); the per-access work is just the
+        // compare + branch. `elem_size` is a compile-time constant, so the divide is
+        // a shift for the common power-of-two sizes (and a no-op when it is 1).
+        let count = if elem_size <= 1 {
+            Val::Local(size)
+        } else if elem_size.is_power_of_two() {
+            let sh = self.coerce(Constant::uint(elem_size.trailing_zeros() as u64), &usize_ty)?;
+            let c = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: c, op: BinOp::LShr, lhs: Val::Local(size), rhs: sh, ty: usize_ty.clone() });
+            Val::Local(c)
+        } else {
+            let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
+            let c = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: c, op: BinOp::UDiv, lhs: Val::Local(size), rhs: esz, ty: usize_ty.clone() });
+            Val::Local(c)
+        };
+
+        // if idx >= count → __sic_bounds_fail()  (a negative index wraps to a huge
+        // unsigned value, so the single unsigned compare catches it too).
         let oob = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: oob, op: CmpOp::IUGe, lhs: Val::Local(off), rhs: Val::Local(size), ty: usize_ty });
+        self.push_instr(Instr::Cmp { dest: oob, op: CmpOp::IUGe, lhs: idx_u, rhs: count, ty: usize_ty });
         let fail_bb = self.new_block_after_current();
         let ok_bb = self.new_block_after_current();
         self.set_terminator(Terminator::CondJump { cond: Val::Local(oob), then_bb: fail_bb, else_bb: ok_bb });
