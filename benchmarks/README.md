@@ -49,23 +49,24 @@ Measured with `RUNS=5` (gcc 15, rustc 1.93, release `sic`; one machine — treat
 ratios, not the absolute times, as the signal):
 
 ```
-== fib ==     C 0.24s   Rust 0.45s (1.88x)   SIC 1.39s (5.79x C)
-== matmul ==  C 0.13s   Rust 0.12s (0.92x)   SIC 1.17s (9.00x C)
-== sieve ==   C 0.58s   Rust 0.58s (1.00x)   SIC 0.73s (1.26x C)
+== fib ==     C 0.24s   Rust 0.45s (1.88x)   SIC 1.40s (5.83x C)
+== matmul ==  C 0.13s   Rust 0.12s (0.92x)   SIC 1.80s (13.9x C)
+== sieve ==   C 0.53s   Rust 0.52s (0.98x)   SIC 0.73s (1.38x C)
 ```
 
 ### Reading the numbers
 
 `sic` produces **correct** code (every checksum matches C and Rust) and lands between
-**1.3× and 9× slower** than the LLVM toolchains, depending on the workload:
+~1.4× and ~14× slower than the LLVM toolchains, depending on the workload:
 
-- **`sieve` (1.26×)** — memory-bandwidth-bound, so back-end code quality barely
+- **`sieve` (1.38×)** — memory-bandwidth-bound, so back-end code quality barely
   matters; `sic` is nearly on par.
 - **`fib` (5.8×)** — dominated by function-call overhead; `sic`/Cranelift does less
   aggressive inlining and call optimization than LLVM.
-- **`matmul` (9×)** — the LLVM toolchains auto-vectorize the inner loop into SIMD;
+- **`matmul` (~14×)** — the LLVM toolchains auto-vectorize the inner loop into SIMD;
   `sic`'s Cranelift back end emits scalar code, so it pays the full ~1 B scalar
-  multiplies.
+  multiplies. (`sic`'s own scalar C version — see below — is ~7×; the rest of the gap
+  vs C is the SIC memory model's bounds checks.)
 
 The gap is expected: `sic` uses [Cranelift](https://cranelift.dev/) (built for fast
 compilation, not peak runtime) rather than LLVM, and does not auto-vectorize. These
@@ -81,24 +82,33 @@ uses. Representative result:
 
 ```
           gcc     sic·C    sic·SIC
-fib      0.24s    5.75x     5.75x    (on par)
-sieve    0.81s    1.20x     1.26x    (sic·SIC 1.05x sic·C)
-matmul   0.13s    9.00x    15.15x    (sic·SIC 1.68x sic·C)
+fib      0.24s    5.79x     5.83x    (on par)
+sieve    0.53s    1.32x     1.38x    (sic·SIC 1.04x sic·C)
+matmul   0.13s    7.38x    13.85x    (sic·SIC 1.88x sic·C)
 ```
 
 The frontends themselves emit **equivalent code**: an experiment compiling a `malloc`
--based `main.sic` (SIC frontend, unchecked pointers) matches `sic·C` exactly (matmul
-1.18s vs 1.17s). The `sic·SIC` gap comes entirely from the **idiomatic SIC memory
-model**: `new T[]` arrays are bounds-checked on every access (a safety feature the C
-`malloc` versions don't have). So the check cost tracks how array-access-bound the
-kernel is:
+-based `main.sic` (SIC frontend, unchecked pointers) matches `sic·C`. The `sic·SIC`
+gap comes entirely from the **idiomatic SIC memory model**: `new T[]` arrays are
+bounds-checked on every access (a safety feature the C `malloc` versions don't have).
+So the check cost tracks how array-access-bound the kernel is:
 
 - **`fib`** — no arrays, so nothing to check: identical to `sic·C`.
 - **`sieve`** — array-heavy but memory-bandwidth-bound, so the checks hide behind
-  memory latency: only ~1.05×.
+  memory latency: only ~1.04×.
 - **`matmul`** — compute-bound with ~1e9 array accesses in the inner loop, so the
-  per-access bounds check dominates: ~1.68×.
+  per-access bounds check dominates: ~1.88×.
 
 In other words, sic's C and SIC frontends are on par for equivalent code; the visible
 difference is the price of SIC's memory safety, paid in proportion to how tight the
 array-indexing loop is.
+
+Two back-end optimizations have already been applied to the check: the immutable
+size header is read with a `readonly` load, and the check compares the index against
+the element count (so the count derives from that hoistable load). Combined with
+**register promotion (mem2reg)** of pointer locals — which also sped up the unchecked
+`sic·C` matmul ~18% (1.17→0.96s) — the mid-end now hoists the size *load* out of the
+inner loop, but the per-access compare+branch itself remains. Removing it entirely is
+the job of the planned **loop bounds-check elimination** (one max-index check before a
+provably-safe counting loop; see the TODO at `emit_bounds_check`), which is what would
+actually close the matmul gap.
