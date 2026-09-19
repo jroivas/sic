@@ -251,6 +251,12 @@ pub struct FuncCtx<'m> {
     /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
     /// ARE reassigned / incremented (and so cannot be safely checked).
     pub fat_locals: std::collections::HashSet<String>,
+    /// sic loop bounds-check elimination (sic.md §"Scopes"): `(array-name,
+    /// index-key)` pairs proven in-bounds for the currently-open counting loops, so
+    /// `emit_bounds_check` is suppressed for them. A single check on the loop's index
+    /// extremes is hoisted before the loop instead. Entries are pushed on loop entry
+    /// and truncated back on loop exit (nesting-aware via a saved length).
+    pub bce_proven: Vec<(String, String)>,
     /// sic `atomic` locals (sic.md §"Atomics"): names whose declared type is
     /// atomic-qualified at top level, so loads/stores/RMW use the atomic IR ops.
     pub atomic_locals: std::collections::HashSet<String>,
@@ -331,6 +337,7 @@ impl<'m> FuncCtx<'m> {
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
+            bce_proven: Vec::new(),
             atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
@@ -2701,6 +2708,19 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic loop bounds-check elimination: prove the fat-pointer accesses in this
+        // counting loop safe with one check on the index extremes before the loop,
+        // then suppress the per-iteration checks. Runs after `init` (so the induction
+        // variable and arrays are lowered) and before the loop blocks (the guards go
+        // in the pre-header). `bce_mark` is the point to truncate `bce_proven` back to
+        // on loop exit, so proofs don't leak to sibling loops.
+        let bce_mark = self.bce_proven.len();
+        if self.is_sic() {
+            if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
+                self.try_loop_bce(fi, c, p, body)?;
+            }
+        }
+
         let cond_bb = self.new_block_after_current();
         let body_bb = self.new_block_after_current();
         let post_bb = self.new_block_after_current();
@@ -2736,8 +2756,234 @@ impl<'m> FuncCtx<'m> {
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
 
         self.switch_to_block(end_bb);
+        self.bce_proven.truncate(bce_mark);
         self.exit_scope();
         Ok(())
+    }
+
+    /// sic loop bounds-check elimination (see the TODO at `emit_bounds_check`).
+    /// Recognizes a `+step` counting loop `for (i = LO; i <|<= HI; i++/i+=C)` and,
+    /// for each fat-pointer access `arr[X + i]` (X invariant in the loop), hoists a
+    /// single check on the index extremes (`X+LO` and `X+maxi`) — guarded by the
+    /// loop-entry condition so an empty loop never aborts — then records the access
+    /// so the per-iteration check is suppressed. CONSERVATIVE: any construct it does
+    /// not understand, or any sign that `i`/`HI`/`X`/`arr` could change in the body,
+    /// makes it give up (the per-iteration checks stay). It never removes a check
+    /// without a hoisted one that covers the same or a wider range.
+    fn try_loop_bce(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<()> {
+        use crate::ast::{ExprKind as E, BinOpKind as B};
+        // -- induction variable + init value LO --
+        let (ivar, lo) = match init {
+            ForInit::Decl(Decl::Var { declarators, .. }) if declarators.len() == 1 => {
+                let d = &declarators[0];
+                match &d.init { Some(Initializer::Expr(e)) => (d.name.clone(), e.clone()), _ => return Ok(()) }
+            }
+            ForInit::Expr(e) => match &e.kind {
+                E::Assign { op: None, lhs, rhs } => match &lhs.kind {
+                    E::Ident(n) => (n.clone(), (**rhs).clone()), _ => return Ok(()),
+                },
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        // -- bound HI and comparison kind from `i < HI` / `i <= HI` --
+        let (hi, inclusive) = match &cond.kind {
+            E::BinOp { op, lhs, rhs } => match (&lhs.kind, op) {
+                (E::Ident(n), B::Lt) if *n == ivar => ((**rhs).clone(), false),
+                (E::Ident(n), B::Le) if *n == ivar => ((**rhs).clone(), true),
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        // -- step must be a POSITIVE increment of `i` (so `i` is non-decreasing and
+        //    every used value is <= maxi); the exact stride does not matter for
+        //    safety, only that it is positive. --
+        let pos_step = match &post.kind {
+            E::PostInc { inc: true, expr } | E::PreInc { inc: true, expr } =>
+                matches!(&expr.kind, E::Ident(n) if *n == ivar),
+            E::Assign { op: Some(B::Add), lhs, rhs } =>
+                matches!(&lhs.kind, E::Ident(n) if *n == ivar) && positive_int_lit(rhs),
+            E::Assign { op: None, lhs, rhs } => matches!(&lhs.kind, E::Ident(n) if *n == ivar)
+                && matches!(&rhs.kind, E::BinOp { op: B::Add, lhs: a, rhs: b }
+                    if matches!(&a.kind, E::Ident(n) if *n == ivar) && positive_int_lit(b)),
+            _ => false,
+        };
+        if !pos_step { return Ok(()); }
+        // LO and HI must be *simple* (pure, side-effect-free, no calls) so they can
+        // be re-evaluated for the guard and cannot change under a body call.
+        let lo_ids = match simple_expr_idents(&lo) { Some(s) => s, None => return Ok(()) };
+        let hi_ids = match simple_expr_idents(&hi) { Some(s) => s, None => return Ok(()) };
+
+        // -- scan the body: collect every name that could be modified/declared, and
+        //    every fat-pointer affine access `arr[X + i]`. Bail on any unhandled or
+        //    unsafe construct (e.g. a call, which could mutate HI/X globals). --
+        let mut mods: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut accesses: Vec<(String, Expr, Option<Expr>)> = Vec::new(); // (arr, index-expr, X)
+        if !self.bce_scan(body, &ivar, &mut mods, &mut accesses) { return Ok(()); }
+        if accesses.is_empty() { return Ok(()); }
+
+        // -- invariance: the induction var, the bound's vars, and each candidate's X
+        //    vars must NOT be modified in the body; the array must not be modified. --
+        if mods.contains(&ivar) { return Ok(()); }
+        if hi_ids.iter().any(|n| mods.contains(n)) { return Ok(()); }
+        let _ = lo_ids; // LO is only evaluated once (init); its vars need not be invariant.
+        let mut safe: Vec<(String, Expr, Option<Expr>)> = Vec::new();
+        for (arr, idx, x) in accesses {
+            if mods.contains(&arr) { continue; }
+            let x_ok = match &x {
+                None => true,
+                Some(xe) => match simple_expr_idents(xe) {
+                    Some(xi) => !xi.contains(&ivar) && !xi.iter().any(|n| mods.contains(n)),
+                    None => false,
+                },
+            };
+            if x_ok { safe.push((arr, idx, x)); }
+        }
+        if safe.is_empty() { return Ok(()); }
+
+        // -- emit the hoisted checks, guarded by the loop-entry condition so an
+        //    empty loop (LO past HI) never triggers a spurious abort. `i == LO` here
+        //    (init just ran), so lowering `cond` computes "will iterate at least
+        //    once". `cond` is a simple `i <|<= HI` comparison (side-effect-free). --
+        let will = self.lower_expr(cond)?;
+        let willb = self.to_bool(will)?;
+        let chk_bb = self.new_block_after_current();
+        let cont_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: willb, then_bb: chk_bb, else_bb: cont_bb });
+        self.switch_to_block(chk_bb);
+        let one = Expr::new(E::IntLit(1, false), cond.span.clone());
+        let maxi = if inclusive { hi.clone() }
+                   else { Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(hi.clone()), rhs: Box::new(one) }, cond.span.clone()) };
+        for (arr, idx, x) in &safe {
+            // idx extremes: lo_idx = X + LO (or LO), hi_idx = X + maxi (or maxi).
+            let (lo_idx, hi_idx) = match x {
+                None => (lo.clone(), maxi.clone()),
+                Some(xe) => (
+                    Expr::new(E::BinOp { op: B::Add, lhs: Box::new(xe.clone()), rhs: Box::new(lo.clone()) }, idx.span.clone()),
+                    Expr::new(E::BinOp { op: B::Add, lhs: Box::new(xe.clone()), rhs: Box::new(maxi.clone()) }, idx.span.clone()),
+                ),
+            };
+            self.emit_hoisted_bounds_check(arr, &lo_idx)?;
+            self.emit_hoisted_bounds_check(arr, &hi_idx)?;
+            self.bce_proven.push((arr.clone(), bce_index_key(idx)));
+        }
+        if !self.is_terminated() { self.set_terminator(Terminator::Jump(cont_bb)); }
+        self.switch_to_block(cont_bb);
+        Ok(())
+    }
+
+    /// Emit one hoisted fat-pointer bounds check `arr[idx]` (used by loop-BCE).
+    fn emit_hoisted_bounds_check(&mut self, arr: &str, idx: &Expr) -> Result<()> {
+        let base = self.lower_expr(&Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), idx.span.clone()))?;
+        let bt = self.val_type(&base);
+        let elem = match &bt {
+            Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
+            _ => Type::i32(),
+        };
+        let esz = elem.size_of(self.ptr_size()).max(1);
+        let iv = self.lower_expr(idx)?;
+        let iv = self.coerce(iv, &Type::i64())?;
+        self.emit_bounds_check(base, iv, esz)
+    }
+
+    /// Recursive body scan for loop-BCE. Collects modified/declared names into
+    /// `mods` and fat-pointer affine accesses `arr[X + i]` (or `arr[i]`, X = None)
+    /// into `out`. Returns `false` (bail) on any construct not explicitly handled or
+    /// known-safe — notably any function call, which could mutate a global the bound
+    /// or index depends on. Conservative by construction: an unrecognized form fails
+    /// closed (keeps the per-iteration checks).
+    fn bce_scan(&self, stmt: &Stmt, ivar: &str,
+        mods: &mut std::collections::HashSet<String>,
+        out: &mut Vec<(String, Expr, Option<Expr>)>) -> bool {
+        match stmt {
+            Stmt::Expr(e, _) => self.bce_scan_expr(e, ivar, mods, out),
+            Stmt::Block(ss, _) => ss.iter().all(|s| self.bce_scan(s, ivar, mods, out)),
+            Stmt::Decl(Decl::Var { declarators, .. }) => {
+                for d in declarators {
+                    mods.insert(d.name.clone());
+                    if let Some(Initializer::Expr(e)) = &d.init {
+                        if !self.bce_scan_expr(e, ivar, mods, out) { return false; }
+                    } else if d.init.is_some() { return false; } // aggregate init — bail
+                }
+                true
+            }
+            Stmt::If { cond, then, else_, .. } => {
+                self.bce_scan_expr(cond, ivar, mods, out)
+                    && self.bce_scan(then, ivar, mods, out)
+                    && else_.as_ref().map_or(true, |e| self.bce_scan(e, ivar, mods, out))
+            }
+            Stmt::For { init, cond, post, body, .. } => {
+                if let Some(fi) = init {
+                    match fi {
+                        ForInit::Decl(Decl::Var { declarators, .. }) => for d in declarators {
+                            mods.insert(d.name.clone());
+                            if let Some(Initializer::Expr(e)) = &d.init {
+                                if !self.bce_scan_expr(e, ivar, mods, out) { return false; }
+                            }
+                        },
+                        ForInit::Expr(e) => if !self.bce_scan_expr(e, ivar, mods, out) { return false; },
+                        _ => return false,
+                    }
+                }
+                cond.as_ref().map_or(true, |c| self.bce_scan_expr(c, ivar, mods, out))
+                    && post.as_ref().map_or(true, |p| self.bce_scan_expr(p, ivar, mods, out))
+                    && self.bce_scan(body, ivar, mods, out)
+            }
+            Stmt::While { cond, body, .. } | Stmt::DoWhile { cond, body, .. } =>
+                self.bce_scan_expr(cond, ivar, mods, out) && self.bce_scan(body, ivar, mods, out),
+            Stmt::Break(_) | Stmt::Continue(_) => true,
+            _ => false, // return/switch/match/goto/defer/... — bail (conservative)
+        }
+    }
+
+    /// Expr half of [`bce_scan`]: records assignment/address-of targets in `mods`
+    /// and affine fat-pointer accesses in `out`. Returns false (bail) on a call or
+    /// any unhandled expression form.
+    fn bce_scan_expr(&self, e: &Expr, ivar: &str,
+        mods: &mut std::collections::HashSet<String>,
+        out: &mut Vec<(String, Expr, Option<Expr>)>) -> bool {
+        use crate::ast::{ExprKind as E, UnOpKind};
+        match &e.kind {
+            E::IntLit(..) | E::UIntLit(..) | E::Ident(_) | E::StringLit(..)
+            | E::CharLit(_) | E::FloatLit(..) => true,
+            E::BinOp { lhs, rhs, .. } =>
+                self.bce_scan_expr(lhs, ivar, mods, out) && self.bce_scan_expr(rhs, ivar, mods, out),
+            E::Assign { lhs, rhs, .. } => {
+                // record the assigned name; nested lvalues (a[i]=, *p=) don't name a
+                // scalar we track, but be safe: collect any ident at the lhs root.
+                if let E::Ident(n) = &lhs.kind { mods.insert(n.clone()); }
+                self.bce_scan_expr(lhs, ivar, mods, out) && self.bce_scan_expr(rhs, ivar, mods, out)
+            }
+            E::PreInc { expr, .. } | E::PostInc { expr, .. } => {
+                if let E::Ident(n) = &expr.kind { mods.insert(n.clone()); }
+                self.bce_scan_expr(expr, ivar, mods, out)
+            }
+            E::Unary { op, expr } => {
+                if *op == UnOpKind::Addr { if let E::Ident(n) = &expr.kind { mods.insert(n.clone()); } }
+                self.bce_scan_expr(expr, ivar, mods, out)
+            }
+            E::Index { base, index } => {
+                // Record a fat-pointer affine access; always recurse to catch nested
+                // accesses / assignments inside the index or base.
+                if let E::Ident(arr) = &base.kind {
+                    if self.fat_locals.contains(arr) {
+                        if let Some(x) = affine_x(index, ivar) {
+                            out.push((arr.clone(), (**index).clone(), x));
+                        }
+                    }
+                }
+                self.bce_scan_expr(base, ivar, mods, out) && self.bce_scan_expr(index, ivar, mods, out)
+            }
+            E::Cast { expr, .. } => self.bce_scan_expr(expr, ivar, mods, out),
+            E::Ternary { cond, then, else_ } =>
+                self.bce_scan_expr(cond, ivar, mods, out)
+                    && self.bce_scan_expr(then, ivar, mods, out)
+                    && self.bce_scan_expr(else_, ivar, mods, out),
+            E::Field { base, .. } | E::Arrow { base, .. } => self.bce_scan_expr(base, ivar, mods, out),
+            E::Comma(lhs, rhs) =>
+                self.bce_scan_expr(lhs, ivar, mods, out) && self.bce_scan_expr(rhs, ivar, mods, out),
+            _ => false, // Call, New, Lambda, … — bail (conservative)
+        }
     }
 
     /// sic range-`for` (sic.md §"Iterators"): `for (item : iterable) body`. Desugars
@@ -3528,6 +3774,73 @@ impl<'m> FuncCtx<'m> {
 /// three float kinds); a concrete type maps to its single kind (all signed-int
 /// widths share INT, so `int`/`i64`/`char` all catch any signed int). Mirrors the
 /// compiler's `type_kind` numbering, kept in ONE place so nothing hand-copies it.
+// ── Loop bounds-check elimination helpers (see FuncCtx::try_loop_bce) ──────────
+
+/// True if `e` is a positive integer literal (validating a loop's `+C` step).
+fn positive_int_lit(e: &Expr) -> bool {
+    use crate::ast::ExprKind as E;
+    matches!(&e.kind, E::IntLit(n, _) if *n > 0) || matches!(&e.kind, E::UIntLit(n, _) if *n > 0)
+}
+
+/// Collect the identifiers of a *simple* expression — literals, idents, and
+/// arithmetic/bitwise/shift/neg over them. Returns `None` if `e` contains anything
+/// else (a call, index, field, …); the caller then bails, so an un-analyzable loop
+/// bound or index offset is never mistaken for a loop-invariant value.
+fn simple_expr_idents(e: &Expr) -> Option<std::collections::HashSet<String>> {
+    use crate::ast::{ExprKind as E, UnOpKind as U, BinOpKind as B};
+    fn go(e: &Expr, out: &mut std::collections::HashSet<String>) -> bool {
+        match &e.kind {
+            E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) => true,
+            E::Ident(n) => { out.insert(n.clone()); true }
+            E::BinOp { op, lhs, rhs } => matches!(op,
+                    B::Add|B::Sub|B::Mul|B::Div|B::Rem|B::BitAnd|B::BitOr|B::BitXor|B::Shl|B::Shr)
+                && go(lhs, out) && go(rhs, out),
+            E::Unary { op: U::Neg, expr } | E::Unary { op: U::BitNot, expr } => go(expr, out),
+            _ => false,
+        }
+    }
+    let mut s = std::collections::HashSet::new();
+    if go(e, &mut s) { Some(s) } else { None }
+}
+
+/// Classify `idx` as affine in the induction variable `ivar`:
+///   `Some(None)`     — exactly `ivar`;
+///   `Some(Some(X))`  — `X + ivar` or `ivar + X`, where `X` does not mention `ivar`;
+///   `None`           — any other shape (not eligible for hoisting).
+fn affine_x(idx: &Expr, ivar: &str) -> Option<Option<Expr>> {
+    use crate::ast::{ExprKind as E, BinOpKind as B};
+    // "e is invariant in ivar": simple AND does not name ivar. A non-simple e is
+    // treated as mentioning it (conservative → not used as the invariant part).
+    let invariant = |e: &Expr| simple_expr_idents(e).map_or(false, |s| !s.contains(ivar));
+    match &idx.kind {
+        E::Ident(n) if n == ivar => Some(None),
+        E::BinOp { op: B::Add, lhs, rhs } => {
+            let l_i = matches!(&lhs.kind, E::Ident(n) if n == ivar);
+            let r_i = matches!(&rhs.kind, E::Ident(n) if n == ivar);
+            if r_i && invariant(lhs) { Some(Some((**lhs).clone())) }
+            else if l_i && invariant(rhs) { Some(Some((**rhs).clone())) }
+            else { None }
+        }
+        _ => None,
+    }
+}
+
+/// A stable structural key for an index expression, used to match a
+/// loop-BCE-proven access against the same access when the body is lowered.
+pub(crate) fn bce_index_key(e: &Expr) -> String {
+    use crate::ast::ExprKind as E;
+    match &e.kind {
+        E::Ident(n) => format!("v:{}", n),
+        E::IntLit(n, _) => format!("i:{}", n),
+        E::UIntLit(n, _) => format!("u:{}", n),
+        E::CharLit(c) => format!("c:{}", c),
+        E::BinOp { op, lhs, rhs } => format!("({:?} {} {})", op, bce_index_key(lhs), bce_index_key(rhs)),
+        E::Unary { op, expr } => format!("({:?} {})", op, bce_index_key(expr)),
+        E::Cast { expr, .. } => format!("cast({})", bce_index_key(expr)),
+        other => format!("?{:p}", other as *const _),
+    }
+}
+
 fn match_type_kinds(name: &str) -> Option<Vec<u32>> {
     Some(match name {
         "void" => vec![0],

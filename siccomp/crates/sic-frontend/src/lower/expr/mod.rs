@@ -3871,7 +3871,7 @@ impl<'m> FuncCtx<'m> {
     // so `emit_bounds_check` is suppressed inside. Needs loop-shape recognition +
     // a small monotonicity/no-mutation analysis in the frontend; complements the
     // register-promotion (mem2reg) work that would hoist the invariant size load.
-    fn emit_bounds_check(&mut self, base: Val, idx: Val, elem_size: u64) -> Result<()> {
+    pub(crate) fn emit_bounds_check(&mut self, base: Val, idx: Val, elem_size: u64) -> Result<()> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let idx_u = self.coerce(idx, &usize_ty)?;
 

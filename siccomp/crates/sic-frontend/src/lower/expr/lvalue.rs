@@ -124,7 +124,12 @@ impl<'m> FuncCtx<'m> {
         // never-moved `new`/`@` pointer, verify `i*elem_size < header.size`.
         if self.is_sic() {
             if let ExprKind::Ident(name) = &base.kind {
-                if self.fat_locals.contains(name) {
+                // sic loop bounds-check elimination: skip the per-access check when
+                // an enclosing counting loop already proved this exact `arr[index]`
+                // in-bounds via a hoisted check on the loop's index extremes.
+                let proven = { let key = super::super::func::bce_index_key(index);
+                    self.bce_proven.iter().any(|(a, k)| a == name && *k == key) };
+                if self.fat_locals.contains(name) && !proven {
                     let elem = match &base_ty {
                         Type::Pointer(t) => super::super::types::resolve_aggregate(t, &self.lowerer.struct_types),
                         _ => Type::i32(),

@@ -1,0 +1,41 @@
+// sic loop bounds-check elimination (sic.md §"Scopes"): a counting loop whose
+// fat-pointer accesses are provably in-bounds has its per-iteration checks replaced
+// by one hoisted check on the index extremes. This test pins CORRECTNESS — the
+// results must be identical to the checked version (OOB is still caught at runtime;
+// verified separately). Covers the bare `a[i]` form, the affine `a[k*M+j]` form (the
+// matmul shape), a `+step` other than 1, and an empty loop (which must not abort on
+// its unreachable access). Returns 42.
+int main() {
+    int acc = 0;
+
+    // bare index a[i] over a fresh array
+    int *a = new int[16];
+    for (int i = 0; i < 16; i++) a[i] = i;
+    for (int i = 0; i < 16; i++) acc += a[i];        // 0+..+15 = 120
+    del a;
+
+    // affine index k*M + j (inner loop over j) — the matmul access shape
+    int *b = new int[100];
+    for (int i = 0; i < 100; i++) b[i] = 1;
+    int rows = 0;
+    for (int k = 0; k < 10; k++)
+        for (int j = 0; j < 10; j++)
+            rows += b[k*10 + j];                     // 100
+    del b;
+
+    // a step other than +1 (indices are a subset, still bounded)
+    int *c = new int[20];
+    for (int i = 0; i < 20; i++) c[i] = 2;
+    int evens = 0;
+    for (int i = 0; i < 20; i += 2) evens += c[i];   // 10 * 2 = 20
+    del c;
+
+    // an empty loop must NOT abort on its (unreachable) indexed access
+    int *d = new int[4];
+    for (int i = 0; i < 0; i++) acc += d[i];         // never runs
+    del d;
+
+    acc += rows + evens;                             // 120 + 100 + 20 = 240
+    // acc = 240; reduce to 42
+    return acc - 198;
+}
