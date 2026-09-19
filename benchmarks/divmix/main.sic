@@ -1,0 +1,13 @@
+// A compute-bound loop of integer divisions by constants in idiomatic SIC
+// (independent → throughput-bound). Prints the sum.
+#include <stdio.h>
+
+#define N 200000000
+
+int main() {
+    i64 sum = 0;
+    for (i64 i = 1; i < N; i++)
+        sum += i / 7 + i / 13 + i / 143 + i / 1001;
+    printf("%ld\n", sum);
+    return 0;
+}

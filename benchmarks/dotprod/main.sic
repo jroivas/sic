@@ -1,0 +1,18 @@
+// Integer dot product of two large arrays in idiomatic SIC — a pure vectorizable
+// reduction (sum += a[i]*b[i]) over `new i32[N]` arrays freed with `defer del`.
+// Prints the dot product.
+#include <stdio.h>
+
+#define N 50000000
+
+int main() {
+    i32 *a = new i32[N];
+    i32 *b = new i32[N];
+    defer del a;
+    defer del b;
+    for (i64 i = 0; i < N; i++) { a[i] = (i32)(i % 1000); b[i] = (i32)((i * 3 + 1) % 1000); }
+    i64 sum = 0;
+    for (i64 i = 0; i < N; i++) sum += (i64)a[i] * b[i];
+    printf("%ld\n", sum);
+    return 0;
+}

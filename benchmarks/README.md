@@ -22,6 +22,8 @@ any timing, so a miscompile shows up as a checksum mismatch rather than a wrong 
 | `matmul`     | nested loops + array indexing (1024×1024 int matmul)    | `2630909442048`   |
 | `quicksort`  | recursion + data-dependent swaps / irregular access (3 M ints) | `187506306455265` |
 | `mandelbrot` | floating-point compute, no arrays (1000×1000, 256 iters)| `253815`          |
+| `divmix`     | compute-bound integer division by constants (200 M iters)| `4555444155444655`|
+| `dotprod`    | vectorizable integer reduction, memory-bound (50 M pairs)| `13869450000000`  |
 
 `fib` reads its argument through a `volatile` / `black_box` so no compiler can fold
 the recursion to a constant; `sieve`, `matmul` and `quicksort` are data-dependent on
@@ -65,6 +67,8 @@ ratios, not the absolute times, as the signal):
 == sieve ==      C 0.58s   Rust 0.58s (1.00x)   SIC 0.72s (1.24x C)
 == quicksort ==  C 0.14s   Rust 0.15s (1.07x)   SIC 0.19s (1.36x C)
 == mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.16s (1.23x C)
+== divmix ==     C 0.29s   Rust 0.30s (1.03x)   SIC 1.10s (3.79x C)
+== dotprod ==    C 0.22s   Rust 0.19s (0.86x)   SIC 0.31s (1.41x C)
 ```
 
 (These `SIC` figures are `sic·SIC` — the safe, bounds-checked build. Its overhead
@@ -79,14 +83,22 @@ single advanced LLVM transform that Cranelift does not do:
 - **`mandelbrot` (1.23×)**, **`sieve` (1.24×)**, **`quicksort` (1.36×)** — scalar/
   memory-bound work with no vectorization opportunity; after register promotion
   (mem2reg) `sic` is close to gcc/rustc.
+- **`dotprod` (1.41×)** — vectorizable, but memory-bandwidth-bound (400 MB streamed),
+  so gcc's SIMD can't pull far ahead; `sic` is close.
 - **`fib` (5.4×)** — LLVM turns the recursion into an iteration (a recurrence
-  transform); `sic` still makes the ~866 M real calls. This needs a
-  recursion-elimination pass, not better register allocation.
+  transform); `sic` still makes the ~866 M real calls. Needs a recursion-elimination
+  pass, not better register allocation.
 - **`matmul` (~6.9×)** — LLVM auto-vectorizes the inner loop into SIMD; `sic`'s
   Cranelift back end emits scalar code, paying the full ~1 B scalar multiplies.
+- **`divmix` (3.79×)** — LLVM strength-reduces division by a constant to a magic
+  multiply + shift; `sic` emits a hardware `idiv` (~20-40 cycles each, un-pipelined).
+  Unlike the other two big gaps, this is a **fixable** missing optimization (a
+  div-by-constant rewrite), not a fundamental back-end limitation.
 
-So the remaining distance to C/Rust is two specific missing optimizations
-(recursion→iteration and auto-vectorization), not a broad codegen deficit.
+So the distance to C/Rust concentrates in three specific missing optimizations —
+recursion→iteration (`fib`), auto-vectorization (`matmul`), and division-by-constant
+strength reduction (`divmix`) — not a broad codegen deficit. Everywhere else `sic` is
+within ~1.1–1.4×.
 
 Almost all of that gap is the **back end (Cranelift vs LLVM)**, not memory safety:
 the bounds-checked `sic·SIC` build runs within ~0–13% of `sic`'s own *unchecked* C
@@ -111,6 +123,8 @@ sieve       0.58s    1.09x     1.24x    1.14x
 matmul      0.13s    5.08x     6.85x    1.35x
 quicksort   0.14s    1.29x     1.36x    1.06x
 mandelbrot  0.13s    1.23x     1.23x    1.00x   (no arrays → no checks)
+divmix      0.29s    3.79x     3.79x    1.00x   (no arrays → no checks)
+dotprod     0.22s    1.41x     1.41x    1.00x   (loop-BCE hoists the checks)
 ```
 
 `mandelbrot` has no arrays, so there is nothing to bounds-check; it is a pure `f64`
