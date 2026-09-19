@@ -152,6 +152,14 @@ pub struct Lowerer {
     /// concrete tuple value type, inferred from call sites in a pre-pass. A tuple
     /// param is passed by pointer, so its shape must be known to unpack/index it.
     pub tuple_param_types: HashMap<(String, usize), Type>,
+    /// sic bounds checking across calls (sic.md §"Scopes"): `function → set of
+    /// pointer-parameter indices that are provably always a fat-pointer *base*` (a
+    /// `new`/`@`/fat value, pointing at the allocation start so its size header is at
+    /// `p - 2*ptr`). Computed by a whole-unit greatest-fixpoint over `static`
+    /// functions (all call sites visible), so the callee can bounds-check `p[i]`.
+    /// Only `static` functions qualify — an externally-visible function could be
+    /// called from another unit with a raw pointer.
+    pub fat_params: HashMap<String, std::collections::HashSet<usize>>,
     /// sic low-severity suggestions (below a warning): collected during lowering and
     /// printed once, deduplicated. Used to hint that a raw `list`/`dict`/`set` stored
     /// in a tuple shares it by reference, so a cycle should be broken with `weak<T>`.
@@ -257,6 +265,7 @@ impl Lowerer {
             struct_weak_fields: HashMap::new(),
             notes: Vec::new(),
             tuple_param_types: HashMap::new(),
+            fat_params: HashMap::new(),
             float_vararg_externs: HashSet::new(),
             type_info_globals: HashMap::new(),
             bitfield_defs: HashMap::new(),
@@ -360,6 +369,9 @@ impl Lowerer {
             // Infer the concrete shape of every `tuple` parameter from its call
             // sites, so tuple params can be unpacked/indexed (sic.md §"Tuples").
             self.infer_tuple_params(tu);
+            // Propagate fat-pointer-ness to `static` functions' pointer params, so a
+            // `new[]`/`@` array passed to a helper stays bounds-checked (sic.md §"Scopes").
+            self.infer_fat_params(tu);
             // Record which function params/returns are payload-less enums, so call
             // sites and `return` can enforce strict enum typing (sic.md §"Enums").
             self.collect_enum_signatures(tu);

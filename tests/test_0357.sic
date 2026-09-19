@@ -1,0 +1,38 @@
+// sic fat-pointer parameter propagation (sic.md §"Scopes"): a `new[]`/`@` array
+// passed to a `static` function stays a checkable fat pointer in the callee, so its
+// accesses are bounds-checked (a real OOB there aborts — verified separately). The
+// analysis is sound: a static function that ALSO receives a raw pointer somewhere is
+// left unchecked (no false abort), and this test pins that in-bounds behavior is
+// correct. Returns 42.
+
+// receives the new[] base at every call → its accesses are bounds-checked
+static int suml(int *a, int n) {
+    int s = 0;
+    for (int i = 0; i < n; i++) s += a[i];
+    return s;
+}
+
+// recursive: passes its own (fat) param through → stays fat
+static int rsum(int *a, int lo, int hi) {
+    if (lo > hi) return 0;
+    return a[lo] + rsum(a, lo + 1, hi);
+}
+
+// called with BOTH a fat array and a raw &local → analysis leaves it unchecked;
+// must still compute correctly with no spurious abort
+static int firstv(int *a) { return a[0]; }
+
+int main() {
+    int *p = new int[8];
+    for (int i = 0; i < 8; i++) p[i] = i + 1;      // 1..8
+
+    int a = suml(p, 8);                             // 36
+    int b = rsum(p, 0, 7);                          // 36
+
+    int local = 5;
+    int c = firstv(p) + firstv(&local);             // p[0]=1, local=5 → 6
+
+    del p;
+    // 36 + 36 + 6 = 78; reduce to 42
+    return a + b + c - 36;
+}

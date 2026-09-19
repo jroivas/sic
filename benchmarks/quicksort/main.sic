@@ -7,7 +7,9 @@
 
 #define N 3000000
 
-void qsort_ints(i32 *a, i64 lo, i64 hi) {
+// `static` so the whole-unit fat-parameter pass can prove `a` always receives the
+// `new i32[N]` base — then `a[...]` inside is bounds-checked, safely.
+static void qsort_ints(i32 *a, i64 lo, i64 hi) {
     while (lo < hi) {
         i32 pivot = a[hi];
         i64 i = lo;

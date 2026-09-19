@@ -1092,6 +1092,88 @@ impl<'m> Lowerer {
         }
     }
 
+    /// Propagate fat-pointer-ness to the pointer parameters of `static` functions,
+    /// so a `new[]`/`@` array passed to a helper stays bounds-checked in the callee
+    /// (sic.md §"Scopes"). Only `static` functions qualify (all their call sites are
+    /// visible in this unit — an externally-visible function could be called from
+    /// elsewhere with a raw pointer). Greatest fixpoint: assume every pointer param
+    /// is fat, then REMOVE the assumption for `(fn, i)` whenever some call passes an
+    /// argument that is not a fat-pointer *base* — so a self-recursive call that
+    /// passes the param through keeps it fat, while a call passing `&x`, a raw
+    /// pointer, or `p + k` clears it. Sound: a param is left fat only if every call
+    /// definitely passes a fat base.
+    pub(crate) fn infer_fat_params(&mut self, tu: &crate::ast::TranslationUnit) {
+        use crate::ast::{Decl, StorageClass, AstType};
+        let mut fat: HashMap<String, std::collections::HashSet<usize>> = HashMap::new();
+        let mut pnames: HashMap<String, Vec<Option<String>>> = HashMap::new();
+        for d in &tu.decls {
+            if let Decl::Func { name, params, body: Some(_), storage, variadic, .. } = d {
+                let is_static = matches!(storage, Some(StorageClass::Static))
+                    || self.static_funcs.contains(name);
+                if !is_static || *variadic { continue; }
+                let idxs: std::collections::HashSet<usize> = params.iter().enumerate()
+                    .filter(|(_, p)| matches!(&p.ty.ty, AstType::Pointer { .. }))
+                    .map(|(i, _)| i).collect();
+                if !idxs.is_empty() {
+                    fat.insert(name.clone(), idxs);
+                    pnames.insert(name.clone(), params.iter().map(|p| p.name.clone()).collect());
+                }
+            }
+        }
+        if fat.is_empty() { return; }
+        let cand: std::collections::HashSet<String> = fat.keys().cloned().collect();
+
+        // Per-function scans (bodies are fixed; only `fat` changes in the fixpoint).
+        struct Info { moved: std::collections::HashSet<String>, newloc: std::collections::HashSet<String>,
+                      calls: Vec<(String, Vec<Expr>)> }
+        let mut infos: Vec<(String, Info)> = Vec::new();
+        for d in &tu.decls {
+            if let Decl::Func { name, body: Some(body), .. } = d {
+                let mut info = Info { moved: Default::default(), newloc: Default::default(), calls: Vec::new() };
+                let mut escaped: std::collections::HashSet<String> = Default::default();
+                for s in body {
+                    scan_mutated_stmt(s, &mut info.moved);
+                    fat_prepass_stmt(s, &cand, &mut info.newloc, &mut info.calls, &mut escaped);
+                }
+                // A candidate whose name is used other than as a direct call target
+                // (address taken / stored / indirect) may have unseen callers → drop.
+                for e in &escaped { fat.remove(e); }
+                infos.push((name.clone(), info));
+            }
+        }
+
+        // Greatest fixpoint: shrink `fat` until stable.
+        loop {
+            let mut remove: Vec<(String, usize)> = Vec::new();
+            for (caller, info) in &infos {
+                // The caller's fat-base names: its own fat params + `new`-init locals,
+                // minus anything mutated (a reassigned pointer no longer points at the base).
+                let mut fat_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                if let (Some(idxs), Some(ps)) = (fat.get(caller), pnames.get(caller)) {
+                    for &i in idxs {
+                        if let Some(Some(pn)) = ps.get(i) {
+                            if !info.moved.contains(pn) { fat_names.insert(pn.clone()); }
+                        }
+                    }
+                }
+                for n in &info.newloc { if !info.moved.contains(n) { fat_names.insert(n.clone()); } }
+                for (callee, args) in &info.calls {
+                    if let Some(idxs) = fat.get(callee) {
+                        for &i in idxs {
+                            let ok = args.get(i).map_or(false, |a| is_fat_base_arg(a, &fat_names));
+                            if !ok { remove.push((callee.clone(), i)); }
+                        }
+                    }
+                }
+            }
+            if remove.is_empty() { break; }
+            for (f, i) in remove {
+                if let Some(set) = fat.get_mut(&f) { set.remove(&i); }
+            }
+        }
+        for (k, v) in fat { if !v.is_empty() { self.fat_params.insert(k, v); } }
+    }
+
     /// Infer the concrete tuple type of a `tuple`-returning function from its first
     /// `return <expr>` — a tuple literal (`return tuple(a, b)`) or a tuple-typed
     /// local (`tuple c = tuple(a, b); return c;`). Uses a throwaway FuncCtx with the
@@ -1304,6 +1386,13 @@ impl<'m> Lowerer {
                 {
                     fc.fat_locals.insert(pname.clone());
                 }
+                // A pointer param proven to always receive a fat-pointer base (from
+                // the whole-unit `infer_fat_params` pass over static functions) is a
+                // checkable fat pointer too — so `p[i]` in the callee is bounds-checked
+                // (sic.md §"Scopes"). Excluded if the param is reassigned in the body.
+                let is_fat_param = fc.is_sic() && !fc.moved_names.contains(pname)
+                    && fc.lowerer.fat_params.get(name).map_or(false, |s| s.contains(&i));
+                if is_fat_param { fc.fat_locals.insert(pname.clone()); }
                 let pty = ir_params[i].clone();
                 let sentinel = ValId((i + param_base) as u32 + 0x10000);
                 let ptr_vid = fc.alloc_val();
@@ -3968,6 +4057,117 @@ fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
         Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
         | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => scan_mutated_stmt(body, out),
         Stmt::Delete(e, _) => scan_mutated_expr(e, out),
+        _ => {}
+    }
+}
+
+// ── Fat-parameter propagation helpers (see Lowerer::infer_fat_params) ──────────
+use std::collections::HashSet as FpSet;
+
+/// Is `arg` a fat-pointer *base* (allocation start, so its size header sits at
+/// `p - 2*ptr`)? True for a `new` expression or an identifier holding a fat base
+/// (`fat_names`); casts are transparent. `p + k` / `&x` / a raw pointer → false.
+fn is_fat_base_arg(arg: &Expr, fat_names: &FpSet<String>) -> bool {
+    use crate::ast::ExprKind as E;
+    match &arg.kind {
+        E::Cast { expr, .. } => is_fat_base_arg(expr, fat_names),
+        E::New { .. } => true,
+        E::Ident(n) => fat_names.contains(n),
+        _ => false,
+    }
+}
+
+/// Statement half of the fat-parameter pre-pass: records `new`-initialized local
+/// names, direct calls `f(args)`, and candidate function names that escape as a
+/// value (used anywhere but as a direct call target → unseen callers possible).
+fn fat_prepass_stmt(s: &Stmt, cand: &FpSet<String>, newloc: &mut FpSet<String>,
+    calls: &mut Vec<(String, Vec<Expr>)>, esc: &mut FpSet<String>) {
+    let decl_var = |declarators: &Vec<crate::ast::Declarator>, newloc: &mut FpSet<String>,
+                    calls: &mut Vec<(String, Vec<Expr>)>, esc: &mut FpSet<String>| {
+        for d in declarators {
+            if let Some(Initializer::Expr(e)) = &d.init {
+                if matches!(&e.kind, ExprKind::New { .. }) { newloc.insert(d.name.clone()); }
+                fat_prepass_expr(e, cand, newloc, calls, esc);
+            }
+        }
+    };
+    match s {
+        Stmt::Decl(Decl::Var { declarators, .. }) => decl_var(declarators, newloc, calls, esc),
+        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) => fat_prepass_expr(e, cand, newloc, calls, esc),
+        Stmt::Block(ss, _) => for s in ss { fat_prepass_stmt(s, cand, newloc, calls, esc); },
+        Stmt::If { cond, then, else_, .. } => {
+            fat_prepass_expr(cond, cand, newloc, calls, esc);
+            fat_prepass_stmt(then, cand, newloc, calls, esc);
+            if let Some(e) = else_ { fat_prepass_stmt(e, cand, newloc, calls, esc); }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            fat_prepass_expr(cond, cand, newloc, calls, esc);
+            fat_prepass_stmt(body, cand, newloc, calls, esc);
+        }
+        Stmt::For { init, cond, post, body, .. } => {
+            match init {
+                Some(ForInit::Expr(e)) => fat_prepass_expr(e, cand, newloc, calls, esc),
+                Some(ForInit::Decl(Decl::Var { declarators, .. })) => decl_var(declarators, newloc, calls, esc),
+                _ => {}
+            }
+            if let Some(e) = cond { fat_prepass_expr(e, cand, newloc, calls, esc); }
+            if let Some(e) = post { fat_prepass_expr(e, cand, newloc, calls, esc); }
+            fat_prepass_stmt(body, cand, newloc, calls, esc);
+        }
+        Stmt::Switch { val, body, .. } => { fat_prepass_expr(val, cand, newloc, calls, esc); fat_prepass_stmt(body, cand, newloc, calls, esc); }
+        Stmt::Match { scrutinee, arms, .. } => {
+            fat_prepass_expr(scrutinee, cand, newloc, calls, esc);
+            for a in arms { fat_prepass_stmt(&a.body, cand, newloc, calls, esc); }
+        }
+        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
+        | Stmt::Label(_, body, _) | Stmt::Defer(body, _) => fat_prepass_stmt(body, cand, newloc, calls, esc),
+        Stmt::Delete(e, _) => fat_prepass_expr(e, cand, newloc, calls, esc),
+        _ => {}
+    }
+}
+
+/// Expression half of the fat-parameter pre-pass (traversal mirrors
+/// [`scan_mutated_expr`], so every child is visited).
+fn fat_prepass_expr(e: &Expr, cand: &FpSet<String>, newloc: &mut FpSet<String>,
+    calls: &mut Vec<(String, Vec<Expr>)>, esc: &mut FpSet<String>) {
+    use ExprKind::*;
+    match &e.kind {
+        Ident(n) => { if cand.contains(n) { esc.insert(n.clone()); } }
+        Call { func, args } => {
+            match &func.kind {
+                Ident(n) => calls.push((n.clone(), args.clone())),
+                _ => fat_prepass_expr(func, cand, newloc, calls, esc),
+            }
+            for a in args { fat_prepass_expr(a, cand, newloc, calls, esc); }
+        }
+        BinOp { lhs, rhs, .. } | Comma(lhs, rhs) | Assign { lhs, rhs, .. } | Swap { lhs, rhs } => {
+            fat_prepass_expr(lhs, cand, newloc, calls, esc); fat_prepass_expr(rhs, cand, newloc, calls, esc);
+        }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
+        | SizeofExpr(expr) | AlignofExpr(expr) | Cast { expr, .. } | Ref { expr, .. } =>
+            fat_prepass_expr(expr, cand, newloc, calls, esc),
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+            fat_prepass_expr(cond, cand, newloc, calls, esc);
+            fat_prepass_expr(then, cand, newloc, calls, esc);
+            fat_prepass_expr(else_, cand, newloc, calls, esc);
+        }
+        Elvis { cond, else_ } => { fat_prepass_expr(cond, cand, newloc, calls, esc); fat_prepass_expr(else_, cand, newloc, calls, esc); }
+        Index { base, index } => { fat_prepass_expr(base, cand, newloc, calls, esc); fat_prepass_expr(index, cand, newloc, calls, esc); }
+        Slice { base, lo, hi } => {
+            fat_prepass_expr(base, cand, newloc, calls, esc);
+            if let Some(x) = lo { fat_prepass_expr(x, cand, newloc, calls, esc); }
+            if let Some(x) = hi { fat_prepass_expr(x, cand, newloc, calls, esc); }
+        }
+        New { args, .. } => for x in args { fat_prepass_expr(x, cand, newloc, calls, esc); },
+        Field { base, .. } | Arrow { base, .. } => fat_prepass_expr(base, cand, newloc, calls, esc),
+        Generic { controlling, assocs } => {
+            fat_prepass_expr(controlling, cand, newloc, calls, esc);
+            for (_, x) in assocs { fat_prepass_expr(x, cand, newloc, calls, esc); }
+        }
+        StmtExpr(stmts) => for s in stmts { fat_prepass_stmt(s, cand, newloc, calls, esc); },
+        VaStart { list, last } => { fat_prepass_expr(list, cand, newloc, calls, esc); fat_prepass_expr(last, cand, newloc, calls, esc); }
+        VaArg { list, .. } | VaEnd { list } => fat_prepass_expr(list, cand, newloc, calls, esc),
+        VaCopy { dst, src } => { fat_prepass_expr(dst, cand, newloc, calls, esc); fat_prepass_expr(src, cand, newloc, calls, esc); }
         _ => {}
     }
 }
