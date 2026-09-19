@@ -55,7 +55,7 @@ ratios, not the absolute times, as the signal):
 == fib ==        C 0.25s   Rust 0.45s (1.80x)   SIC 1.39s (5.56x C)
 == matmul ==     C 0.12s   Rust 0.12s (1.00x)   SIC 1.06s (8.83x C)
 == sieve ==      C 0.55s   Rust 0.54s (0.98x)   SIC 0.75s (1.36x C)
-== quicksort ==  C 0.14s   Rust 0.16s (1.14x)   SIC 0.21s (1.50x C)
+== quicksort ==  C 0.14s   Rust 0.15s (1.07x)   SIC 0.27s (1.93x C)
 == mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.38s (2.92x C)
 ```
 
@@ -96,26 +96,31 @@ uses. Representative result:
 fib         0.25s    5.56x     5.56x    1.00x
 sieve       0.55s    1.33x     1.36x    1.03x
 matmul      0.12s    7.83x     8.83x    1.13x
-quicksort   0.14s    1.50x     1.50x    1.00x   (see note)
+quicksort   0.14s    1.50x     1.93x    1.29x
 mandelbrot  0.13s    2.92x     2.92x    1.00x   (no arrays → no checks)
 ```
 
 `mandelbrot` has no arrays, so there is nothing to bounds-check; it is a pure `f64`
-test and `sic·SIC` == `sic·C` trivially. `quicksort` shows 1.00× for a subtler
-reason: its hot partition loop indexes a pointer **parameter** (`int *a`), and SIC
-currently bounds-checks only `new[]`/`@` **locals** — a fat pointer passed to a
-function loses its size header, so the callee runs unchecked (like C). Only the
-`new i32[N]` fill loop in `main` is checked (and loop-BCE hoists that). So quicksort's
-hot path isn't actually protected today; propagating the fat header through pointer
-parameters is future work. (`quicksort` is also only ~1.5× gcc because its branchy
-partition can't be auto-vectorized, shrinking the Cranelift-vs-LLVM gap.)
+test and `sic·SIC` == `sic·C` trivially. `quicksort` is the one workload with a
+larger safety overhead (1.29×): its partition does irregular, data-dependent accesses
+(`a[i]`, `a[j]`, `a[hi]` where `i`/`hi` don't march in lockstep with a counting loop),
+so most of its checks can't be hoisted by loop-BCE and are paid per access — the same
+kind of cost Rust's bounds-checked slice indexing pays (rustc is ~1.07× gcc here).
+Its array is a pointer **parameter** to a `static` helper, and SIC now propagates
+fat-pointer-ness to static functions' parameters (`infer_fat_params`), so those
+accesses are genuinely bounds-checked — earlier this benchmark ran that hot loop
+*unchecked*. (`quicksort` is also only ~1.5–1.9× gcc because its branchy partition
+can't be auto-vectorized, shrinking the Cranelift-vs-LLVM gap.)
 
 The frontends emit **equivalent code** (an experiment compiling a `malloc`-based
 `main.sic` matches `sic·C`), so the `sic·SIC` vs `sic·C` column isolates the cost of
 the **idiomatic SIC memory model**: `new T[]` arrays are bounds-checked, which the C
-`malloc` versions are not. That safety overhead is now **1.00×–1.13×** — a UB-free,
-bounds-checked program runs within ~0–13% of the same code with raw unchecked
-pointers, even on a compute-bound kernel that hammers array indices ~1e9 times.
+`malloc` versions are not. That safety overhead is **1.00×–1.13×** on the
+regular-loop kernels (fib/sieve/matmul), and **1.29×** on quicksort's irregular,
+data-dependent indexing — comparable to what Rust's own bounds checks cost (rustc is
+~1.07× gcc on quicksort). So a UB-free, bounds-checked program runs within ~0–13% of
+the same code with raw unchecked pointers wherever the accesses are loop-regular, and
+pays a Rust-like per-access cost where they are not.
 
 Getting there took four back-end/front-end optimizations, each safe (a real
 out-of-bounds access still aborts):
