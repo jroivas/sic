@@ -1,2 +1,3 @@
 .*.swp
 .check_times.log
+*.times.log

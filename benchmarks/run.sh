@@ -22,6 +22,10 @@ RUSTC="${RUSTC:-rustc}"
 RUNS="${RUNS:-5}"
 BUILD="$(mktemp -d /tmp/sic_bench.XXXXXX)"
 trap 'rm -rf "$BUILD"' EXIT
+# Per-benchmark timing history: one line per run appended to
+# benchmarks/.<name>.times.log (git-ignored), for tracking speed regressions.
+TSTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 if [ ! -x "$SIC" ]; then
     echo "error: sic not found at $SIC (build it: ./build.sh release)" >&2
@@ -90,6 +94,20 @@ for name in "${benches[@]}"; do
     # sic's C and SIC frontends *for the code each was given*. Note the SIC versions
     # use bounds-checked `new T[]` arrays while the C versions use raw malloc, so a
     # gap here reflects that safety feature, not frontend codegen quality (see README).
-    printf "  sic·SIC vs sic·C: %s\n\n" \
+    printf "  sic·SIC vs sic·C: %s\n" \
         "$(awk -v s="$t_ss" -v c="$t_sc" 'BEGIN{ r=s/c; printf "%.2fx (%s)", r, (r>1.02)?"slower":((r<0.98)?"faster":"on par") }')"
+
+    # Append this run's times to benchmarks/.<name>.times.log, and (if there is a
+    # prior run) report the sic·SIC delta so a speed regression is visible run over run.
+    local_log="$ROOT/.$name.times.log"
+    prev_ss=""
+    [ -f "$local_log" ] && prev_ss="$(grep -oE 'sicsic=[0-9.]+' "$local_log" | tail -1 | cut -d= -f2)"
+    printf '%s commit=%s gcc=%s rustc=%s sicc=%s sicsic=%s\n' \
+        "$TSTAMP" "$COMMIT" "$t_gcc" "$t_rs" "$t_sc" "$t_ss" >> "$local_log"
+    if [ -n "$prev_ss" ]; then
+        printf "  sic·SIC vs previous run: %s\n\n" \
+            "$(awk -v n="$t_ss" -v p="$prev_ss" 'BEGIN{ d=n-p; r=(p>0)?d/p*100:0; printf "%+.2fs (%+.0f%%)%s", d, r, (r>=10)?"  ⚠ slower":"" }')"
+    else
+        printf "  (first recorded run for %s)\n\n" "$name"
+    fi
 done

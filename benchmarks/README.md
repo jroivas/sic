@@ -46,6 +46,14 @@ The runner builds into a temp dir (nothing is written into the repo), verifies t
 checksums, then reports the minimum wall-clock time over `RUNS` runs and the ratio to
 C. It uses the release `sic` (`../siccomp/target/release/sic`); override with `SIC=…`.
 
+Each run also appends one line per benchmark to `benchmarks/.<name>.times.log`
+(git-ignored) for tracking speed regressions over time, and prints the `sic·SIC`
+delta versus the previous run:
+
+```
+2026-09-19T20:30:48Z commit=10de755 gcc=0.24 rustc=0.45 sicc=1.34 sicsic=1.34
+```
+
 ## A representative result
 
 Measured with `RUNS=5` (gcc 15, rustc 1.93, release `sic`; one machine — treat the
