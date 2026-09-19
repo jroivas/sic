@@ -1,0 +1,35 @@
+// In-place quicksort of N pseudo-random ints in idiomatic SIC — recursion,
+// data-dependent swaps, irregular array access. The buffer is a `new i32[N]` array
+// released with `defer del`; native fixed-width types throughout. Recurses into the
+// smaller partition and loops on the larger, bounding stack depth to O(log N).
+// Prints an order-dependent checksum.
+#include <stdio.h>
+
+#define N 3000000
+
+void qsort_ints(i32 *a, i64 lo, i64 hi) {
+    while (lo < hi) {
+        i32 pivot = a[hi];
+        i64 i = lo;
+        for (i64 j = lo; j < hi; j++)
+            if (a[j] < pivot) { i32 t = a[i]; a[i] = a[j]; a[j] = t; i++; }
+        i32 t = a[i]; a[i] = a[hi]; a[hi] = t;
+        if (i - lo < hi - i) { qsort_ints(a, lo, i - 1); lo = i + 1; }
+        else                 { qsort_ints(a, i + 1, hi); hi = i - 1; }
+    }
+}
+
+int main() {
+    i32 *a = new i32[N];
+    defer del a;
+    u64 s = 123456789;
+    for (i64 i = 0; i < N; i++) {
+        s = s * 6364136223846793005 + 1442695040888963407;
+        a[i] = (i32)((s >> 33) % 1000000);
+    }
+    qsort_ints(a, 0, N - 1);
+    i64 sum = 0;
+    for (i64 i = 0; i < N; i++) sum += (i64)a[i] * (i % 251);
+    printf("%ld\n", sum);
+    return 0;
+}

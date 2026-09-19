@@ -1,0 +1,30 @@
+// Mandelbrot set point count over a W x H grid in idiomatic SIC — a floating-point
+// compute benchmark (f64 add/mul/compare in a tight iteration loop), no arrays.
+// Prints the number of grid points still bounded after MAXIT iterations (in the set).
+#include <stdio.h>
+
+#define W 1000
+#define H 1000
+#define MAXIT 256
+
+int main() {
+    i64 count = 0;
+    for (i32 py = 0; py < H; py++) {
+        f64 y0 = (f64)py / H * 2.0 - 1.0;      // -1 .. 1
+        for (i32 px = 0; px < W; px++) {
+            f64 x0 = (f64)px / W * 3.0 - 2.0;  // -2 .. 1
+            f64 x = 0.0;
+            f64 y = 0.0;
+            i32 it = 0;
+            while (x * x + y * y <= 4.0 && it < MAXIT) {
+                f64 xt = x * x - y * y + x0;
+                y = 2.0 * x * y + y0;
+                x = xt;
+                it++;
+            }
+            if (it == MAXIT) count++;
+        }
+    }
+    printf("%ld\n", count);
+    return 0;
+}

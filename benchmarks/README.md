@@ -15,15 +15,18 @@ matmul's ~1e9-iteration inner loop would dwarf the arithmetic). Every program pr
 single integer **checksum**; the runner requires all three to agree before it trusts
 any timing, so a miscompile shows up as a checksum mismatch rather than a wrong speed.
 
-| benchmark | what it stresses                                   | checksum        |
-|-----------|----------------------------------------------------|-----------------|
-| `fib`     | recursion / function-call overhead (`fib(42)`)     | `267914296`     |
-| `sieve`   | tight loops + memory bandwidth (sieve to 100 M)    | `5761455`       |
-| `matmul`  | nested loops + array indexing (1024×1024 int matmul)| `2630909442048`|
+| benchmark    | what it stresses                                        | checksum          |
+|--------------|---------------------------------------------------------|-------------------|
+| `fib`        | recursion / function-call overhead (`fib(42)`)          | `267914296`       |
+| `sieve`      | tight loops + memory bandwidth (sieve to 100 M)         | `5761455`         |
+| `matmul`     | nested loops + array indexing (1024×1024 int matmul)    | `2630909442048`   |
+| `quicksort`  | recursion + data-dependent swaps / irregular access (3 M ints) | `187506306455265` |
+| `mandelbrot` | floating-point compute, no arrays (1000×1000, 256 iters)| `253815`          |
 
 `fib` reads its argument through a `volatile` / `black_box` so no compiler can fold
-the recursion to a constant; `sieve` and `matmul` are data-dependent on heap arrays,
-so the work cannot be optimized away.
+the recursion to a constant; `sieve`, `matmul` and `quicksort` are data-dependent on
+heap arrays, so the work cannot be optimized away; `mandelbrot` exercises pure `f64`
+arithmetic (add/mul/compare) with no arrays.
 
 ## Running
 
@@ -49,9 +52,11 @@ Measured with `RUNS=5` (gcc 15, rustc 1.93, release `sic`; one machine — treat
 ratios, not the absolute times, as the signal):
 
 ```
-== fib ==     C 0.25s   Rust 0.45s (1.80x)   SIC 1.39s (5.56x C)
-== matmul ==  C 0.12s   Rust 0.12s (1.00x)   SIC 1.06s (8.83x C)
-== sieve ==   C 0.55s   Rust 0.54s (0.98x)   SIC 0.75s (1.36x C)
+== fib ==        C 0.25s   Rust 0.45s (1.80x)   SIC 1.39s (5.56x C)
+== matmul ==     C 0.12s   Rust 0.12s (1.00x)   SIC 1.06s (8.83x C)
+== sieve ==      C 0.55s   Rust 0.54s (0.98x)   SIC 0.75s (1.36x C)
+== quicksort ==  C 0.14s   Rust 0.16s (1.14x)   SIC 0.21s (1.50x C)
+== mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.38s (2.92x C)
 ```
 
 (These `SIC` figures are `sic·SIC` — the safe, bounds-checked build. Its overhead
@@ -87,11 +92,23 @@ the difference between them is down to the frontends and the memory model each s
 uses. Representative result:
 
 ```
-          gcc     sic·C    sic·SIC   safety overhead (sic·SIC / sic·C)
-fib      0.25s    5.56x     5.56x    1.00x
-sieve    0.55s    1.33x     1.36x    1.03x
-matmul   0.12s    7.83x     8.83x    1.13x
+             gcc     sic·C    sic·SIC   safety overhead (sic·SIC / sic·C)
+fib         0.25s    5.56x     5.56x    1.00x
+sieve       0.55s    1.33x     1.36x    1.03x
+matmul      0.12s    7.83x     8.83x    1.13x
+quicksort   0.14s    1.50x     1.50x    1.00x   (see note)
+mandelbrot  0.13s    2.92x     2.92x    1.00x   (no arrays → no checks)
 ```
+
+`mandelbrot` has no arrays, so there is nothing to bounds-check; it is a pure `f64`
+test and `sic·SIC` == `sic·C` trivially. `quicksort` shows 1.00× for a subtler
+reason: its hot partition loop indexes a pointer **parameter** (`int *a`), and SIC
+currently bounds-checks only `new[]`/`@` **locals** — a fat pointer passed to a
+function loses its size header, so the callee runs unchecked (like C). Only the
+`new i32[N]` fill loop in `main` is checked (and loop-BCE hoists that). So quicksort's
+hot path isn't actually protected today; propagating the fat header through pointer
+parameters is future work. (`quicksort` is also only ~1.5× gcc because its branchy
+partition can't be auto-vectorized, shrinking the Cranelift-vs-LLVM gap.)
 
 The frontends emit **equivalent code** (an experiment compiling a `malloc`-based
 `main.sic` matches `sic·C`), so the `sic·SIC` vs `sic·C` column isolates the cost of
