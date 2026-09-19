@@ -49,24 +49,30 @@ Measured with `RUNS=5` (gcc 15, rustc 1.93, release `sic`; one machine — treat
 ratios, not the absolute times, as the signal):
 
 ```
-== fib ==     C 0.24s   Rust 0.45s (1.88x)   SIC 1.40s (5.83x C)
-== matmul ==  C 0.13s   Rust 0.12s (0.92x)   SIC 1.80s (13.9x C)
-== sieve ==   C 0.53s   Rust 0.52s (0.98x)   SIC 0.73s (1.38x C)
+== fib ==     C 0.25s   Rust 0.45s (1.80x)   SIC 1.39s (5.56x C)
+== matmul ==  C 0.12s   Rust 0.12s (1.00x)   SIC 1.06s (8.83x C)
+== sieve ==   C 0.55s   Rust 0.54s (0.98x)   SIC 0.75s (1.36x C)
 ```
+
+(These `SIC` figures are `sic·SIC` — the safe, bounds-checked build. Its overhead
+over unchecked code is tiny; see the frontend comparison below.)
 
 ### Reading the numbers
 
 `sic` produces **correct** code (every checksum matches C and Rust) and lands between
-~1.4× and ~14× slower than the LLVM toolchains, depending on the workload:
+~1.4× and ~9× slower than the LLVM toolchains, depending on the workload:
 
-- **`sieve` (1.38×)** — memory-bandwidth-bound, so back-end code quality barely
+- **`sieve` (1.36×)** — memory-bandwidth-bound, so back-end code quality barely
   matters; `sic` is nearly on par.
-- **`fib` (5.8×)** — dominated by function-call overhead; `sic`/Cranelift does less
+- **`fib` (5.6×)** — dominated by function-call overhead; `sic`/Cranelift does less
   aggressive inlining and call optimization than LLVM.
-- **`matmul` (~14×)** — the LLVM toolchains auto-vectorize the inner loop into SIMD;
+- **`matmul` (~8.8×)** — the LLVM toolchains auto-vectorize the inner loop into SIMD;
   `sic`'s Cranelift back end emits scalar code, so it pays the full ~1 B scalar
-  multiplies. (`sic`'s own scalar C version — see below — is ~7×; the rest of the gap
-  vs C is the SIC memory model's bounds checks.)
+  multiplies.
+
+Almost all of that gap is the **back end (Cranelift vs LLVM)**, not memory safety:
+the bounds-checked `sic·SIC` build runs within ~0–13% of `sic`'s own *unchecked* C
+build (see the frontend comparison below).
 
 The gap is expected: `sic` uses [Cranelift](https://cranelift.dev/) (built for fast
 compilation, not peak runtime) rather than LLVM, and does not auto-vectorize. These
@@ -81,34 +87,34 @@ the difference between them is down to the frontends and the memory model each s
 uses. Representative result:
 
 ```
-          gcc     sic·C    sic·SIC
-fib      0.24s    5.79x     5.83x    (on par)
-sieve    0.53s    1.32x     1.38x    (sic·SIC 1.04x sic·C)
-matmul   0.13s    7.38x    13.85x    (sic·SIC 1.88x sic·C)
+          gcc     sic·C    sic·SIC   safety overhead (sic·SIC / sic·C)
+fib      0.25s    5.56x     5.56x    1.00x
+sieve    0.55s    1.33x     1.36x    1.03x
+matmul   0.12s    7.83x     8.83x    1.13x
 ```
 
-The frontends themselves emit **equivalent code**: an experiment compiling a `malloc`
--based `main.sic` (SIC frontend, unchecked pointers) matches `sic·C`. The `sic·SIC`
-gap comes entirely from the **idiomatic SIC memory model**: `new T[]` arrays are
-bounds-checked on every access (a safety feature the C `malloc` versions don't have).
-So the check cost tracks how array-access-bound the kernel is:
+The frontends emit **equivalent code** (an experiment compiling a `malloc`-based
+`main.sic` matches `sic·C`), so the `sic·SIC` vs `sic·C` column isolates the cost of
+the **idiomatic SIC memory model**: `new T[]` arrays are bounds-checked, which the C
+`malloc` versions are not. That safety overhead is now **1.00×–1.13×** — a UB-free,
+bounds-checked program runs within ~0–13% of the same code with raw unchecked
+pointers, even on a compute-bound kernel that hammers array indices ~1e9 times.
 
-- **`fib`** — no arrays, so nothing to check: identical to `sic·C`.
-- **`sieve`** — array-heavy but memory-bandwidth-bound, so the checks hide behind
-  memory latency: only ~1.04×.
-- **`matmul`** — compute-bound with ~1e9 array accesses in the inner loop, so the
-  per-access bounds check dominates: ~1.88×.
+Getting there took four back-end/front-end optimizations, each safe (a real
+out-of-bounds access still aborts):
 
-In other words, sic's C and SIC frontends are on par for equivalent code; the visible
-difference is the price of SIC's memory safety, paid in proportion to how tight the
-array-indexing loop is.
+1. **`readonly` size load** — the immutable fat-pointer size header is read with a
+   hoistable, CSE-able load.
+2. **index-vs-count compare** — the check compares the index against the element
+   count (derived from that hoistable load), off the per-access multiply path.
+3. **register promotion (mem2reg)** of address-not-escaping pointer locals — the base
+   pointer stays in a register instead of being reloaded each iteration (this also
+   sped the *unchecked* `sic·C` matmul ~18%).
+4. **loop bounds-check elimination** — a counting loop whose accesses are provably
+   in-bounds gets one hoisted check on the index extremes, and the per-iteration
+   checks vanish. This is what took matmul's safety overhead from 1.88× to 1.13×.
 
-Two back-end optimizations have already been applied to the check: the immutable
-size header is read with a `readonly` load, and the check compares the index against
-the element count (so the count derives from that hoistable load). Combined with
-**register promotion (mem2reg)** of pointer locals — which also sped up the unchecked
-`sic·C` matmul ~18% (1.17→0.96s) — the mid-end now hoists the size *load* out of the
-inner loop, but the per-access compare+branch itself remains. Removing it entirely is
-the job of the planned **loop bounds-check elimination** (one max-index check before a
-provably-safe counting loop; see the TODO at `emit_bounds_check`), which is what would
-actually close the matmul gap.
+The remaining gap to gcc/rustc (matmul ~7.8×, fib ~5.6×) is **not** about safety — it
+is the back end: `sic` uses Cranelift (fast compile, scalar output) rather than LLVM,
+so it does not auto-vectorize matmul's inner loop or inline as aggressively. That is a
+separate axis from memory safety, which these numbers show is nearly free.
