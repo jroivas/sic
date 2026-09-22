@@ -67,18 +67,21 @@ ratios, not the absolute times, as the signal):
 == sieve ==      C 0.58s   Rust 0.58s (1.00x)   SIC 0.72s (1.24x C)
 == quicksort ==  C 0.14s   Rust 0.15s (1.07x)   SIC 0.19s (1.36x C)
 == mandelbrot == C 0.13s   Rust 0.13s (1.00x)   SIC 0.16s (1.23x C)
-== divmix ==     C 0.29s   Rust 0.30s (1.03x)   SIC 1.10s (3.79x C)
-== dotprod ==    C 0.22s   Rust 0.19s (0.86x)   SIC 0.31s (1.41x C)
+== divmix ==     C 0.29s   Rust 0.30s (1.03x)   SIC 0.32s (1.10x C)
+== dotprod ==    C 0.24s   Rust 0.20s (0.83x)   SIC 0.26s (1.08x C)
 ```
+
+(sic runs on Cranelift 0.132; the 0.113→0.132 upgrade added division-by-constant
+strength reduction, which took `divmix` from 3.79× to 1.10×.)
 
 (These `SIC` figures are `sic·SIC` — the safe, bounds-checked build. Its overhead
 over unchecked code is small; see the frontend comparison below.)
 
 ### Reading the numbers
 
-`sic` produces **correct** code (every checksum matches C and Rust). On three of the
-five it is within ~1.2–1.4× of the LLVM toolchains; the two large gaps are each a
-single advanced LLVM transform that Cranelift does not do:
+`sic` produces **correct** code (every checksum matches C and Rust). On five of the
+seven it is within ~1.1–1.4× of the LLVM toolchains; the two remaining large gaps are
+each a single advanced LLVM transform that Cranelift does not do:
 
 - **`mandelbrot` (1.23×)**, **`sieve` (1.24×)**, **`quicksort` (1.36×)** — scalar/
   memory-bound work with no vectorization opportunity; after register promotion
@@ -90,15 +93,14 @@ single advanced LLVM transform that Cranelift does not do:
   pass, not better register allocation.
 - **`matmul` (~6.9×)** — LLVM auto-vectorizes the inner loop into SIMD; `sic`'s
   Cranelift back end emits scalar code, paying the full ~1 B scalar multiplies.
-- **`divmix` (3.79×)** — LLVM strength-reduces division by a constant to a magic
-  multiply + shift; `sic` emits a hardware `idiv` (~20-40 cycles each, un-pipelined).
-  Unlike the other two big gaps, this is a **fixable** missing optimization (a
-  div-by-constant rewrite), not a fundamental back-end limitation.
+- **`divmix` (1.10×)** — was 3.79× on Cranelift 0.113 (a hardware `idiv` per element);
+  the 0.132 upgrade brought division-by-constant strength reduction (magic multiply +
+  shift), closing it. A good example of a gap that riding the back end forward fixed
+  for free.
 
-So the distance to C/Rust concentrates in three specific missing optimizations —
-recursion→iteration (`fib`), auto-vectorization (`matmul`), and division-by-constant
-strength reduction (`divmix`) — not a broad codegen deficit. Everywhere else `sic` is
-within ~1.1–1.4×.
+So the distance to C/Rust concentrates in just two specific missing optimizations —
+recursion→iteration (`fib`) and auto-vectorization (`matmul`) — not a broad codegen
+deficit. Everywhere else `sic` is now within ~1.1–1.4×.
 
 Almost all of that gap is the **back end (Cranelift vs LLVM)**, not memory safety:
 the bounds-checked `sic·SIC` build runs within ~0–13% of `sic`'s own *unchecked* C
@@ -123,8 +125,8 @@ sieve       0.58s    1.09x     1.24x    1.14x
 matmul      0.13s    5.08x     6.85x    1.35x
 quicksort   0.14s    1.29x     1.36x    1.06x
 mandelbrot  0.13s    1.23x     1.23x    1.00x   (no arrays → no checks)
-divmix      0.29s    3.79x     3.79x    1.00x   (no arrays → no checks)
-dotprod     0.22s    1.41x     1.41x    1.00x   (loop-BCE hoists the checks)
+divmix      0.29s    1.10x     1.10x    1.00x   (no arrays → no checks)
+dotprod     0.24s    1.08x     1.08x    1.00x   (loop-BCE hoists the checks)
 ```
 
 `mandelbrot` has no arrays, so there is nothing to bounds-check; it is a pure `f64`
@@ -165,6 +167,9 @@ out-of-bounds access still aborts):
 5. **fat-pointer parameter propagation** — a `new[]` array passed to a `static`
    function stays bounds-checked in the callee (closing a real safety gap in
    quicksort), soundly (only where every call passes a fat base).
+6. **Cranelift 0.113 → 0.132 upgrade** — brought division-by-constant strength
+   reduction (fixing `divmix`, 3.79× → 1.10×) plus general codegen gains
+   (`dotprod` 1.41× → 1.08×).
 
 The remaining gap to gcc/rustc (matmul ~5–7×, fib ~5.4×) is **not** about safety — it
 is the back end plus two missing high-level transforms: `sic` uses Cranelift (fast
