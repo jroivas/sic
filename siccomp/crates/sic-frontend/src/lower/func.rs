@@ -1266,6 +1266,19 @@ impl<'m> Lowerer {
         constructor: Option<i32>,
         is_async: bool,
     ) -> Result<()> {
+        // sic tail-call optimization (sic.md §"Scopes"): rewrite a self-recursive
+        // function's tail calls into a jump back to the entry with the parameters
+        // reassigned, so deep tail recursion runs as a loop (O(1) stack, no overflow)
+        // instead of ~N stack frames. Conservative and sic-only (leaves C-mode
+        // codegen — and the SQLite/QEMU bringups — untouched).
+        let tco_body;
+        let body: &[Stmt] = if self.sic {
+            match tco_rewrite(name, params, variadic, body, &crate::lexer::Span::default()) {
+                Some(nb) => { tco_body = nb; &tco_body }
+                None => body,
+            }
+        } else { body };
+
         // sic `@` reference borrow-checking (sic.md §"References").
         if self.sic {
             super::borrowck::check(body)?;
@@ -3083,7 +3096,7 @@ impl<'m> FuncCtx<'m> {
     ///   - a `string` → its code points (`.utf8`, yielding `u8char`);
     ///   - a struct with a `next()` method → the `Iterator<T>` protocol loop.
     fn lower_foreach(&mut self, ty: &QualType, name: &str, iterable: &Expr, body: &Stmt, sp: &crate::lexer::Span) -> Result<()> {
-        use crate::ast::{BinOpKind, Declarator};
+        use crate::ast::BinOpKind;
         let sp = sp.clone();
         let mk = |k: ExprKind| Expr { kind: k, span: sp.clone() };
         let ident = |n: &str| Expr { kind: ExprKind::Ident(n.to_string()), span: sp.clone() };
@@ -3094,14 +3107,14 @@ impl<'m> FuncCtx<'m> {
             let zero = Expr { kind: ExprKind::IntLit(0, false), span: sp.clone() };
             let idx = Decl::Var {
                 base_ty: ulong(),
-                declarators: vec![Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             };
             let cond = Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, lhs: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }), rhs: Box::new(len) }, span: sp.clone() };
             let post = Expr { kind: ExprKind::PreInc { inc: true, expr: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }) }, span: sp.clone() };
             let item = Stmt::Decl(Decl::Var {
                 base_ty: item_ty.clone(),
-                declarators: vec![Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::Block(vec![item, body], sp.clone());
@@ -3114,7 +3127,7 @@ impl<'m> FuncCtx<'m> {
             let at = QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) };
             Stmt::Decl(Decl::Var {
                 base_ty: at.clone(),
-                declarators: vec![Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             })
         };
@@ -3141,7 +3154,7 @@ impl<'m> FuncCtx<'m> {
                 let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))) }, qualifiers: vec![], storage: None };
                 let arr_decl = Stmt::Decl(Decl::Var {
                     base_ty: QualType::new(AstType::Int { signed: true }),
-                    declarators: vec![Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, span: sp.clone() }],
+                    declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, span: sp.clone() }],
                     weak: false, thread_local: false, span: sp.clone(),
                 });
                 // item = (enum Canon) __fe_vals_N[i]
@@ -3215,7 +3228,7 @@ impl<'m> FuncCtx<'m> {
             let sname = format!("__fe_src_{}", uid);
             let src_decl = Stmt::Decl(Decl::Var {
                 base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                declarators: vec![Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::ForEach { ty: ty.clone(), name: name.to_string(), iterable: ident(&sname), body: Box::new(body.clone()), span: sp.clone() };
@@ -3231,14 +3244,14 @@ impl<'m> FuncCtx<'m> {
                     // auto __fe_it = <iterable>;   (a mutable copy the loop advances)
                     let it_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // auto __fe_step = __fe_it.next();
                     let call = mk(ExprKind::Call { func: Box::new(mk(ExprKind::Field { base: Box::new(ident(&itname)), name: "next".to_string() })), args: vec![] });
                     let step_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // match (__fe_step) { Next(name): { body }  Stop: break; }
@@ -3863,6 +3876,186 @@ impl<'m> FuncCtx<'m> {
 /// three float kinds); a concrete type maps to its single kind (all signed-int
 /// widths share INT, so `int`/`i64`/`char` all catch any signed int). Mirrors the
 /// compiler's `type_kind` numbering, kept in ONE place so nothing hand-copies it.
+// ── Tail-call optimization (self-recursion → loop) ────────────────────────────
+//
+// Rewrite a SELF-recursive function's tail calls `return f(args)` into a jump back
+// to the function entry with the parameters reassigned, so deep tail recursion runs
+// in O(1) stack as a loop (no stack-overflow crash) and avoids the call overhead.
+// Gated to sic and conservative — see `tco_rewrite`.
+
+/// A local of this type can be re-initialized on each loop iteration with no cleanup
+/// obligation (so jumping back to the entry never skips a destructor). Scalars and
+/// raw pointers only; aggregates / strings / containers / bigint / fixed / weak are
+/// excluded (they may own resources).
+fn tco_trivial_ty(t: &crate::ast::AstType) -> bool {
+    use crate::ast::AstType::*;
+    matches!(t, Void | Char { .. } | Short { .. } | Int { .. } | Long { .. }
+        | LongLong { .. } | Float | Double | LongDouble | Bool | Pointer { .. })
+}
+
+/// True if `e` is exactly `name(args...)` with `arity` arguments — a self-call that,
+/// as a whole `return` expression, sits in tail position.
+fn is_self_tail_call(e: &Expr, name: &str, arity: usize) -> bool {
+    matches!(&e.kind, ExprKind::Call { func, args }
+        if args.len() == arity && matches!(&func.kind, ExprKind::Ident(n) if n == name))
+}
+
+/// Expression eligibility for TCO: bail (set `ok=false`) on any address-of (`&x` /
+/// `@x`) or `new`, which would make the reused param/local storage observably
+/// different from fresh per-call storage. Full traversal (mirrors scan_mutated_expr).
+fn tco_scan_expr(e: &Expr, ok: &mut bool) {
+    use ExprKind::*;
+    if !*ok { return; }
+    match &e.kind {
+        Unary { op: crate::ast::UnOpKind::Addr, .. } | Ref { .. } | New { .. } => { *ok = false; return; }
+        _ => {}
+    }
+    match &e.kind {
+        BinOp { lhs, rhs, .. } | Comma(lhs, rhs) | Assign { lhs, rhs, .. } | Swap { lhs, rhs } => {
+            tco_scan_expr(lhs, ok); tco_scan_expr(rhs, ok);
+        }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. }
+        | SizeofExpr(expr) | AlignofExpr(expr) | Cast { expr, .. } => tco_scan_expr(expr, ok),
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+            tco_scan_expr(cond, ok); tco_scan_expr(then, ok); tco_scan_expr(else_, ok);
+        }
+        Elvis { cond, else_ } => { tco_scan_expr(cond, ok); tco_scan_expr(else_, ok); }
+        Call { func, args } => { tco_scan_expr(func, ok); for a in args { tco_scan_expr(a, ok); } }
+        Index { base, index } => { tco_scan_expr(base, ok); tco_scan_expr(index, ok); }
+        Slice { base, lo, hi } => {
+            tco_scan_expr(base, ok);
+            if let Some(x) = lo { tco_scan_expr(x, ok); }
+            if let Some(x) = hi { tco_scan_expr(x, ok); }
+        }
+        Field { base, .. } | Arrow { base, .. } => tco_scan_expr(base, ok),
+        Generic { controlling, assocs } => { tco_scan_expr(controlling, ok); for (_, x) in assocs { tco_scan_expr(x, ok); } }
+        StmtExpr(stmts) => for s in stmts { tco_scan_stmt(s, "", usize::MAX, ok, &mut false); },
+        VaStart { list, last } => { tco_scan_expr(list, ok); tco_scan_expr(last, ok); }
+        VaArg { list, .. } | VaEnd { list } => tco_scan_expr(list, ok),
+        VaCopy { dst, src } => { tco_scan_expr(dst, ok); tco_scan_expr(src, ok); }
+        _ => {}
+    }
+}
+
+/// Statement eligibility scan for TCO: bail on `defer` / `del` / a non-trivial local
+/// declaration (would need cleanup the entry-jump skips), and on any address-of/new
+/// (via `tco_scan_expr`). Records `has_tail` when a `return self(args)` is found.
+fn tco_scan_stmt(s: &Stmt, name: &str, arity: usize, ok: &mut bool, has_tail: &mut bool) {
+    if !*ok { return; }
+    match s {
+        Stmt::Defer(..) | Stmt::Delete(..) => *ok = false,
+        Stmt::Decl(Decl::Var { declarators, .. }) => for d in declarators {
+            // A local shadowing the function name would make `name(args)` an indirect
+            // call, not self-recursion — don't optimize such a function.
+            if d.name == name { *ok = false; return; }
+            if !tco_trivial_ty(&d.ty.ty) { *ok = false; return; }
+            if let Some(Initializer::Expr(e)) = &d.init { tco_scan_expr(e, ok); }
+            else if d.init.is_some() { *ok = false; return; }
+        },
+        Stmt::Return(Some(e), _) => {
+            if is_self_tail_call(e, name, arity) { *has_tail = true; }
+            else { tco_scan_expr(e, ok); }
+        }
+        Stmt::Expr(e, _) => tco_scan_expr(e, ok),
+        Stmt::Block(ss, _) => for x in ss { tco_scan_stmt(x, name, arity, ok, has_tail); },
+        Stmt::If { cond, then, else_, .. } => {
+            tco_scan_expr(cond, ok);
+            tco_scan_stmt(then, name, arity, ok, has_tail);
+            if let Some(e) = else_ { tco_scan_stmt(e, name, arity, ok, has_tail); }
+        }
+        Stmt::While { cond, body, .. } | Stmt::DoWhile { body, cond, .. } => {
+            tco_scan_expr(cond, ok); tco_scan_stmt(body, name, arity, ok, has_tail);
+        }
+        Stmt::For { init, cond, post, body, .. } => {
+            match init {
+                Some(ForInit::Expr(e)) => tco_scan_expr(e, ok),
+                Some(ForInit::Decl(Decl::Var { declarators, .. })) => for d in declarators {
+                    if !tco_trivial_ty(&d.ty.ty) { *ok = false; return; }
+                    if let Some(Initializer::Expr(e)) = &d.init { tco_scan_expr(e, ok); }
+                },
+                _ => {}
+            }
+            if let Some(e) = cond { tco_scan_expr(e, ok); }
+            if let Some(e) = post { tco_scan_expr(e, ok); }
+            tco_scan_stmt(body, name, arity, ok, has_tail);
+        }
+        Stmt::Switch { val, body, .. } => { tco_scan_expr(val, ok); tco_scan_stmt(body, name, arity, ok, has_tail); }
+        Stmt::Match { scrutinee, arms, .. } => {
+            tco_scan_expr(scrutinee, ok);
+            for a in arms { tco_scan_stmt(&a.body, name, arity, ok, has_tail); }
+        }
+        Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _) | Stmt::Default(body, _)
+        | Stmt::Label(_, body, _) => tco_scan_stmt(body, name, arity, ok, has_tail),
+        _ => {}
+    }
+}
+
+/// Replace each `return self(args)` in `s` with `{ Ti __sic_tco_i = args_i; …;
+/// p_i = __sic_tco_i; …; goto <label>; }` — evaluate every argument into a fresh
+/// temp of the parameter's type first (so an argument reading an as-yet-unreassigned
+/// parameter still sees the old value), then reassign the parameters and jump back.
+fn tco_replace(s: &mut Stmt, name: &str, params: &[AstParam], label: &str) {
+    match s {
+        Stmt::Return(opt, sp) => {
+            let is_tc = opt.as_ref().map_or(false, |e| is_self_tail_call(e, name, params.len()));
+            if is_tc {
+                let sp = sp.clone();
+                let args = match opt.take() { Some(Expr { kind: ExprKind::Call { args, .. }, .. }) => args, _ => unreachable!() };
+                let mut stmts: Vec<Stmt> = Vec::new();
+                // temps
+                for (i, a) in args.iter().enumerate() {
+                    let tn = format!("__sic_tco_{}", i);
+                    stmts.push(Stmt::Decl(Decl::Var {
+                        base_ty: params[i].ty.clone(),
+                        declarators: vec![crate::ast::Declarator {
+                            name: tn, ty: params[i].ty.clone(),
+                            init: Some(Initializer::Expr(a.clone())), cleanup: None, span: sp.clone(),
+                        }],
+                        weak: false, thread_local: false, span: sp.clone(),
+                    }));
+                }
+                // reassign params from temps
+                for (i, p) in params.iter().enumerate() {
+                    let pn = p.name.clone().unwrap();
+                    let lhs = Box::new(Expr::new(ExprKind::Ident(pn), sp.clone()));
+                    let rhs = Box::new(Expr::new(ExprKind::Ident(format!("__sic_tco_{}", i)), sp.clone()));
+                    stmts.push(Stmt::Expr(Expr::new(ExprKind::Assign { op: None, lhs, rhs }, sp.clone()), sp.clone()));
+                }
+                stmts.push(Stmt::Goto(label.to_string(), sp.clone()));
+                *s = Stmt::Block(stmts, sp);
+            }
+        }
+        Stmt::Block(ss, _) => for x in ss { tco_replace(x, name, params, label); },
+        Stmt::If { then, else_, .. } => {
+            tco_replace(then, name, params, label);
+            if let Some(e) = else_ { tco_replace(e, name, params, label); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
+        | Stmt::Switch { body, .. } | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _)
+        | Stmt::Default(body, _) | Stmt::Label(_, body, _) => tco_replace(body, name, params, label),
+        Stmt::Match { arms, .. } => for a in arms { tco_replace(&mut a.body, name, params, label); },
+        _ => {}
+    }
+}
+
+/// Tail-call optimization entry point (see the section comment). Returns a rewritten
+/// body when the function is a self-recursive tail-call candidate, else None.
+/// Conservative eligibility (fails closed): non-variadic, all params named, at least
+/// one `return self(args)` with matching arity, and — via the scans — no address-of,
+/// no `new`/`del`/`defer`, and only trivial (scalar/pointer) locals.
+fn tco_rewrite(name: &str, params: &[AstParam], variadic: bool, body: &[Stmt], sp: &crate::lexer::Span) -> Option<Vec<Stmt>> {
+    if variadic || params.is_empty() { return None; }
+    if params.iter().any(|p| p.name.is_none()) { return None; }
+    let mut ok = true;
+    let mut has_tail = false;
+    for s in body { tco_scan_stmt(s, name, params.len(), &mut ok, &mut has_tail); }
+    if !ok || !has_tail { return None; }
+    let label = "__sic_tco_start";
+    let mut nb = body.to_vec();
+    for s in &mut nb { tco_replace(s, name, params, label); }
+    Some(vec![Stmt::Label(label.to_string(), Box::new(Stmt::Block(nb, sp.clone())), sp.clone())])
+}
+
 // ── Loop bounds-check elimination helpers (see FuncCtx::try_loop_bce) ──────────
 
 /// True if `e` is a positive integer literal (validating a loop's `+C` step).

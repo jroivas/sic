@@ -728,6 +728,24 @@ It will free the memory in case reference_cnt is decremented to 0.
 It's also possible that reference to the allocation has been passed forward to a thread.
 On that case reference_cnt is still not 0, and memory will be freed when the reference gets out of scope.
 
+### Tail-call optimization
+
+A self-recursive function whose recursive call is in tail position — `return f(...)` —
+is compiled as a **loop** rather than as recursion: the arguments are evaluated, the
+parameters are reassigned, and control jumps back to the function's entry, reusing the
+one stack frame. This means accumulator-style recursion runs in O(1) stack and does
+not overflow, however deep:
+
+    long sum(long n, long acc) {
+        if (n == 0) return acc;
+        return sum(n - 1, acc + n);   // tail call → becomes a loop, no stack growth
+    }
+
+The rewrite is applied conservatively (only when it is provably transparent — no
+address of a parameter or local is taken, no `new`/`del`/`defer`, and only scalar
+locals), so it never changes a program's result. A recursive call that is *not* in
+tail position (e.g. `return f(n-1) + f(n-2)`) is left as a real call.
+
 ## Defer keyword
 
 Borror `defer` syntax from Go to allow automatic action on every return.
