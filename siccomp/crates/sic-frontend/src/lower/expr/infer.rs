@@ -162,16 +162,22 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() {
                     // A container value is `Pointer(marker)`; a `dict*`/`list*` is
                     // `Pointer(Pointer(marker))` — recognize the direct form first.
-                    let cty = if super::super::types::is_dict(&base_ty) || super::super::types::is_list(&base_ty) {
+                    let is_container = |t: &Type| super::super::types::is_dict(t)
+                        || super::super::types::is_list(t) || super::super::types::is_set(t);
+                    let cty = if is_container(&base_ty) {
                         Some(base_ty.clone())
                     } else if let Type::Pointer(i) = &base_ty {
-                        if super::super::types::is_dict(i) || super::super::types::is_list(i) { Some((**i).clone()) } else { None }
+                        if is_container(i) { Some((**i).clone()) } else { None }
                     } else { None };
                     if let Some(cty) = cty {
                         if name == "size" || name == "length" {
                             return Ok(Type::Int { bits: self.ptr_size() * 8, signed: false });
                         }
-                        if name == "keys" {
+                        let is_set = super::super::types::is_set(&cty);
+                        // A set has only elements: both `.keys` and `.values` yield
+                        // them (the element is reported as the dict key). For a dict,
+                        // `.keys`/`.values` split; for a list, `.keys` are indices.
+                        if name == "keys" || (is_set && name == "values") {
                             let elem = if super::super::types::is_list(&cty) {
                                 Type::Int { bits: self.ptr_size() * 8, signed: false }
                             } else {

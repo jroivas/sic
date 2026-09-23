@@ -1933,11 +1933,21 @@ impl<'m> FuncCtx<'m> {
     /// sic strings); a list's keys are the indices `0..len`.
     pub(crate) fn lower_container_projection(&mut self, base: &Expr, want_values: bool) -> Result<Val> {
         let bt = self.infer_expr_type(base)?;
-        let is_dict = super::types::is_dict(&bt)
-            || matches!(&bt, Type::Pointer(i) if super::types::is_dict(i));
+        let is_set = super::types::is_set(&bt)
+            || matches!(&bt, Type::Pointer(i) if super::types::is_set(i));
+        let is_dict = !is_set && (super::types::is_dict(&bt)
+            || matches!(&bt, Type::Pointer(i) if super::types::is_dict(i)));
         let is_list = super::types::is_list(&bt)
             || matches!(&bt, Type::Pointer(i) if super::types::is_list(i));
-        let (fname, elem): (&'static str, Type) = if is_dict {
+        let (fname, elem): (&'static str, Type) = if is_set {
+            // A `set` stores only elements — there are no separate values, so both
+            // `.keys` and `.values` project the ELEMENTS (`dict_kv_of` reports the
+            // element type as the key). Without this a set matched the dict branch
+            // and `set.values` returned the internal presence-values (garbage).
+            let (k, _v) = self.dict_kv_of(base);
+            if super::types::is_sic_string(&k) { ("__sic_dict_keys_string", k) }
+            else { ("__sic_dict_keys_scalar", k) }
+        } else if is_dict {
             let (k, v) = self.dict_kv_of(base);
             if want_values { ("__sic_dict_values", v) }
             else if super::types::is_sic_string(&k) { ("__sic_dict_keys_string", k) }
@@ -1950,9 +1960,11 @@ impl<'m> FuncCtx<'m> {
                 format!("`.{}` needs a dict, set, or list", if want_values { "values" } else { "keys" }),
                 base.span.file.clone(), base.span.line, base.span.col));
         };
-        let handle = if is_dict { self.dict_handle(base)? } else { self.list_handle(base)? };
+        // A set is dict-backed, so it uses the dict handle and the `__sic_dict_*`
+        // runtime family (same as the dict branch above).
+        let handle = if is_dict || is_set { self.dict_handle(base)? } else { self.list_handle(base)? };
         let lty = super::types::list_type(&elem);
-        let f = if is_dict { self.dict_runtime_fn(fname) } else { self.list_runtime_fn(fname) };
+        let f = if is_dict || is_set { self.dict_runtime_fn(fname) } else { self.list_runtime_fn(fname) };
         let r = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(r), func: f, args: vec![handle], ret_ty: lty.clone() });
         self.val_types.insert(r.0, lty.clone());
@@ -1966,8 +1978,8 @@ impl<'m> FuncCtx<'m> {
         if let ExprKind::Field { base, name } = &e.kind {
             if name == "keys" || name == "values" {
                 if let Ok(t) = self.infer_expr_type(base) {
-                    return super::types::is_dict(&t) || super::types::is_list(&t)
-                        || matches!(&t, Type::Pointer(i) if super::types::is_dict(i) || super::types::is_list(i));
+                    return super::types::is_dict(&t) || super::types::is_list(&t) || super::types::is_set(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_dict(i) || super::types::is_list(i) || super::types::is_set(i));
                 }
             }
         }

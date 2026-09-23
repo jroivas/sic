@@ -1,0 +1,39 @@
+// A `set` stores only elements, so `.keys` and `.values` both project the
+// ELEMENTS (sic.md §"Set"/§"Iterators"). sic had no set branch in the container
+// projection, so a set matched the dict path and `set.values` returned the
+// internal presence-values (slot data) rather than the elements — silently wrong.
+// Both the materialization and the range-`for` over `set.values` are pinned here.
+// Returns 42.
+int main() {
+    set<int> st;
+    st.add(5); st.add(10); st.add(15); st.add(5);   // 5 counted once
+
+    // direct iteration = elements
+    int sd = 0; for (int x : st) sd += x;
+    if (sd != 30) return 1;
+
+    // range-for over .values and .keys = elements
+    int sv = 0; for (int v : st.values) sv += v;
+    if (sv != 30) return 2;
+    int sk = 0; for (int k : st.keys) sk += k;
+    if (sk != 30) return 3;
+
+    // materialize .values / .keys to a list (owns it)
+    list<int> lv = st.values;
+    if (lv.length != 3) return 4;
+    int lvs = 0; for (int i = 0; i < lv.length; i++) lvs += lv[i];
+    if (lvs != 30) return 5;
+
+    list<int> lk = st.keys;
+    if (lk.length != 3) return 6;
+
+    // string-element set
+    set<string> ss;
+    ss.add("aa"); ss.add("bbb"); ss.add("aa");        // "aa" once
+    int tot = 0; for (string s : ss.values) tot += (int)s.length;
+    if (tot != 5) return 7;                            // 2 + 3
+    int totk = 0; for (string s : ss.keys) totk += (int)s.length;
+    if (totk != 5) return 8;
+
+    return 42;
+}
