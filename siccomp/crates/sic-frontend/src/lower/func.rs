@@ -2759,7 +2759,14 @@ impl<'m> FuncCtx<'m> {
         self.break_scope_depth.push(d);
         self.continue_scope_depth.push(d);
         self.switch_to_block(body_bb);
-        self.lower_stmt(body)?;
+        // A bare body still needs a per-iteration scope (see `lower_for`).
+        if matches!(body, Stmt::Block(..)) {
+            self.lower_stmt(body)?;
+        } else {
+            self.enter_scope();
+            self.lower_stmt(body)?;
+            self.exit_scope();
+        }
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
         self.continue_scope_depth.pop();
         self.break_scope_depth.pop();
@@ -2782,7 +2789,14 @@ impl<'m> FuncCtx<'m> {
         self.break_scope_depth.push(d);
         self.continue_scope_depth.push(d);
         self.switch_to_block(body_bb);
-        self.lower_stmt(body)?;
+        // A bare body still needs a per-iteration scope (see `lower_for`).
+        if matches!(body, Stmt::Block(..)) {
+            self.lower_stmt(body)?;
+        } else {
+            self.enter_scope();
+            self.lower_stmt(body)?;
+            self.exit_scope();
+        }
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
         self.continue_scope_depth.pop();
         self.break_scope_depth.pop();
@@ -2846,7 +2860,19 @@ impl<'m> FuncCtx<'m> {
         self.break_scope_depth.push(self.cleanups.len() - 1);
         self.continue_scope_depth.push(self.cleanups.len());
         self.switch_to_block(body_bb);
-        self.lower_stmt(body)?;
+        // A bare (non-block) body must still get its own per-iteration scope so
+        // that temporaries it creates — a `string` concat, a `.keys`/`.values`
+        // projection, etc. — are released each iteration, not accumulated in the
+        // loop scope and freed once at loop exit (which leaked every iteration but
+        // the last). A `{}` body already scopes itself via `lower_stmt`, and the
+        // break/continue depths above are set to bracket exactly this scope.
+        if matches!(body, Stmt::Block(..)) {
+            self.lower_stmt(body)?;
+        } else {
+            self.enter_scope();
+            self.lower_stmt(body)?;
+            self.exit_scope();
+        }
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(post_bb)); }
         self.continue_scope_depth.pop();
         self.break_scope_depth.pop();
