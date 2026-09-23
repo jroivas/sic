@@ -518,6 +518,20 @@ impl<'m> FuncCtx<'m> {
                 // each child roughly four times.
                 let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
                 let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+                // GCC vector extension: an arithmetic/bitwise/comparison operator on
+                // two vector (array) operands is element-wise and yields a vector of
+                // the same shape (a comparison yields a same-width integer mask
+                // vector). This mirrors the dispatch to `lower_vector_binop` and must
+                // run before `arith_result_type`/the relational arm below, which would
+                // otherwise decay the arrays to a pointer or report `int`. Excludes
+                // the `is_sic && Add` case, which `lower_binop` routes to array
+                // concatenation (handled by the `Add` arm below) rather than an
+                // element-wise vector add.
+                if !matches!(op, LogAnd | LogOr) && !(self.is_sic() && matches!(op, Add)) {
+                    if let (Type::Array { .. }, Type::Array { .. }) = (&lt, &rt) {
+                        return Ok(lt);
+                    }
+                }
                 // sic `bigint` arithmetic yields a bigint; comparisons yield int.
                 if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr)
                     && (super::super::types::is_bigint(&lt) || super::super::types::is_bigint(&rt))

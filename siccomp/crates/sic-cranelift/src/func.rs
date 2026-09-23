@@ -6,7 +6,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, DataId, Module};
 use cranelift_object::ObjectModule;
 use sic_ir::*;
-use super::types::{cl_type, ptr_cl};
+use super::types::{cl_type, ptr_cl, vector_clty};
 use super::{build_cl_sig, va_named_reg_counts, VA_GP_REGS, VA_FP_REGS, VA_OVERFLOW_SLOTS};
 
 /// Runtime handles for a variadic function's System V register save area, used
@@ -222,6 +222,12 @@ pub fn compile_function(
         for instr in &bb.instrs {
             if let Instr::Alloca { dest, ty, .. } = instr {
                 if escaped.contains(&dest.0) { continue; }
+                // Aggregates (arrays/structs/unions) are memory objects, never a
+                // scalar register — and a SIMD-vector array slot is used directly
+                // as a Load/Store pointer, so it would slip past the escape check.
+                // `slot_clty` maps an array to a pointer type, which would wrongly
+                // look promotable, so exclude aggregates explicitly.
+                if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) { continue; }
                 let ct = match slot_clty(ty) { Some(t) => t, None => continue };
                 // Require every load of this slot to read exactly the slot type — a
                 // load of a different width/category is a type-pun that relies on the
@@ -340,7 +346,9 @@ fn emit_instr(
                 }
             }
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
+            // A vector-typed load reads a whole XMM register in one unaligned move
+            // (the `new[]`/stack arrays these come from are only element-aligned).
+            let cl_ty = vector_clty(ty).unwrap_or_else(|| cl_type(ty, ptr_size).unwrap_or(ct::I32));
             let v = builder.ins().load(cl_ty, MemFlags::new(), pv, 0);
             val_map.insert(dest.0, v);
         }
@@ -423,6 +431,17 @@ fn emit_instr(
         }
 
         Instr::BinOp { dest, op, lhs, rhs, ty } => {
+            // A vector-typed binop takes two whole XMM values (from vector loads)
+            // and lowers to one real SIMD instruction; feed them straight to
+            // `emit_binop` (the scalar `coerce`/`cl_type` path would treat the
+            // array type as a pointer and corrupt the operands).
+            if let Some(vt) = vector_clty(ty) {
+                let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+                let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+                let v = emit_binop(op, l, r, builder);
+                val_map.insert(dest.0, v);
+                return;
+            }
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);

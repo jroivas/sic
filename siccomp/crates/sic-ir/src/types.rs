@@ -170,6 +170,28 @@ impl Type {
     pub fn ptr(inner: Type) -> Type { Type::Pointer(Box::new(inner)) }
     pub fn char_ptr() -> Type { Type::ptr(Type::i8()) }
     pub fn void_ptr() -> Type { Type::ptr(Type::Void) }
+
+    /// If this type is a fixed 128-bit SIMD vector — an array of a supported
+    /// scalar lane (8/16/32/64-bit integer, `f32`, or `f64`) whose lanes total
+    /// exactly 128 bits — return `(lane element, lane count)`. Both the frontend
+    /// (deciding whether to emit one hardware vector op) and the Cranelift back
+    /// end (mapping to `I32X4`/`F64X2`/…) gate on this so they always agree; any
+    /// other array falls back to lane-by-lane scalar emulation. Only the six
+    /// 128-bit (one XMM) layouts are recognized for now.
+    pub fn simd128(&self) -> Option<(&Type, usize)> {
+        if let Type::Array { elem, len } = self {
+            let lane_bits = match &**elem {
+                Type::Int { bits, .. } => match *bits { 8 | 16 | 32 | 64 => *bits, _ => return None },
+                Type::Float32 => 32,
+                Type::Float64 => 64,
+                _ => return None,
+            };
+            if lane_bits as usize * *len == 128 {
+                return Some((elem, *len));
+            }
+        }
+        None
+    }
 }
 
 impl StructType {

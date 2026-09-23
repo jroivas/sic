@@ -30,3 +30,21 @@ pub fn cl_type(ty: &Type, ptr_size: u32) -> Option<ClType> {
 pub fn ptr_cl(ptr_size: u32) -> ClType {
     if ptr_size >= 8 { ct::I64 } else { ct::I32 }
 }
+
+/// If `ty` is a 128-bit SIMD vector (see `Type::simd128`), return the Cranelift
+/// vector type for one XMM register (`I8X16`/`I16X8`/`I32X4`/`I64X2`/`F32X4`/
+/// `F64X2`). Vector `Load`/`Store`/`BinOp` on such a type lower to real SIMD; any
+/// other array is `None` and stays lane-by-lane scalar. The frontend only emits a
+/// vector-typed op when this is `Some`, so the two sides never disagree.
+pub fn vector_clty(ty: &Type) -> Option<ClType> {
+    let (elem, _lanes) = ty.simd128()?;
+    Some(match elem {
+        Type::Float32 => ct::F32X4,
+        Type::Float64 => ct::F64X2,
+        Type::Int { bits: 8, .. } => ct::I8X16,
+        Type::Int { bits: 16, .. } => ct::I16X8,
+        Type::Int { bits: 32, .. } => ct::I32X4,
+        Type::Int { bits: 64, .. } => ct::I64X2,
+        _ => return None,
+    })
+}

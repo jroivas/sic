@@ -50,16 +50,57 @@ impl<'m> FuncCtx<'m> {
             _ => return Err(CompileError::new("vector binop on non-array type")),
         };
         let signed = matches!(&elem, Type::Int { signed: true, .. });
-        // Either an arithmetic/bitwise op, or a comparison predicate.
+        let is_float = elem.is_float();
+
+        // Fast path: when the vector maps to a hardware SIMD register (128-bit,
+        // `Type::simd128`) and the operator is one Cranelift lowers to a single
+        // packed instruction, emit ONE whole-vector load/op/store instead of the
+        // lane-by-lane loop below. The back end (`vector_clty`) recognizes the same
+        // (element, lane) layouts, so this never emits an op it can't lower.
+        //   - add/sub/and/or/xor: all integer lanes; add/sub/mul/div: float lanes.
+        //   - mul: 16/32/64-bit integer lanes (x86 has no packed byte multiply).
+        //   - int div/rem, shifts (per-lane amount), and comparisons (mask
+        //     semantics) have no single packed form here → fall through to scalar.
+        let fast_op = if vty.simd128().is_some() {
+            match op {
+                BinOpKind::Add => Some(if is_float { BinOp::FAdd } else { BinOp::Add }),
+                BinOpKind::Sub => Some(if is_float { BinOp::FSub } else { BinOp::Sub }),
+                BinOpKind::Mul if is_float => Some(BinOp::FMul),
+                BinOpKind::Mul => match &elem {
+                    Type::Int { bits, .. } if *bits >= 16 => Some(BinOp::Mul),
+                    _ => None,
+                },
+                BinOpKind::Div if is_float => Some(BinOp::FDiv),
+                BinOpKind::BitAnd if !is_float => Some(BinOp::And),
+                BinOpKind::BitOr if !is_float => Some(BinOp::Or),
+                BinOpKind::BitXor if !is_float => Some(BinOp::Xor),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(vop) = fast_op {
+            let lp = self.lower_aggregate_ptr(lhs)?;
+            let rp = self.lower_aggregate_ptr(rhs)?;
+            let lv = self.vec_load(&lp, 0, vty.clone());
+            let rv = self.vec_load(&rp, 0, vty.clone());
+            let res = self.vec_bin(vop, lv, rv, vty.clone());
+            let rp_out = self.vec_alloca(vty.clone());
+            self.vec_store(&rp_out, 0, res);
+            return Ok(rp_out);
+        }
+
+        // Scalar fallback (lane-by-lane): either an arithmetic/bitwise op, or a
+        // comparison predicate.
         let arith = match op {
             BinOpKind::BitOr => Some(BinOp::Or),
             BinOpKind::BitAnd => Some(BinOp::And),
             BinOpKind::BitXor => Some(BinOp::Xor),
-            BinOpKind::Add => Some(BinOp::Add),
-            BinOpKind::Sub => Some(BinOp::Sub),
-            BinOpKind::Mul => Some(BinOp::Mul),
-            BinOpKind::Div => Some(if signed { BinOp::SDiv } else { BinOp::UDiv }),
-            BinOpKind::Rem => Some(if signed { BinOp::SRem } else { BinOp::URem }),
+            BinOpKind::Add => Some(if is_float { BinOp::FAdd } else { BinOp::Add }),
+            BinOpKind::Sub => Some(if is_float { BinOp::FSub } else { BinOp::Sub }),
+            BinOpKind::Mul => Some(if is_float { BinOp::FMul } else { BinOp::Mul }),
+            BinOpKind::Div => Some(if is_float { BinOp::FDiv } else if signed { BinOp::SDiv } else { BinOp::UDiv }),
+            BinOpKind::Rem => Some(if is_float { BinOp::FRem } else if signed { BinOp::SRem } else { BinOp::URem }),
             BinOpKind::Shl => Some(BinOp::Shl),
             BinOpKind::Shr => Some(if signed { BinOp::AShr } else { BinOp::LShr }),
             _ => None,
