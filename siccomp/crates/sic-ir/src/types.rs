@@ -452,6 +452,13 @@ impl UnionType {
 
 /// Usual arithmetic conversion: pick common type for binary ops.
 pub fn usual_arith_conv(a: &Type, b: &Type) -> Type {
+    // C integer promotions run FIRST: an operand of a type narrower than `int`
+    // (char/short/bool, signed or unsigned) is promoted to `int` before the usual
+    // arithmetic conversions, so e.g. `(unsigned char)200 + (unsigned char)100`
+    // evaluates in `int` (== 300), not wrapped in 8 bits. Floats and pointers are
+    // unaffected (`integer_promote` is the identity on them).
+    let a = &a.integer_promote();
+    let b = &b.integer_promote();
     if a == b {
         return a.clone();
     }
