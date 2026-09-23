@@ -73,6 +73,17 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_lvalue_index(&mut self, base: &Expr, index: &Expr) -> Result<LValue> {
+        // C subscript is commutative: `a[b]` == `*(a + b)` == `b[a]`. When the
+        // "base" is a plain integer and the "index" is the pointer/array (`3[arr]`,
+        // `i[p]`), swap them so the pointer is the base — otherwise the address
+        // arithmetic uses the integer as the base and dereferences garbage. Guarded
+        // so the ordinary `arr[i]` / `p[i]` forms are untouched.
+        let (base, index) = if self.index_operands_reversed(base, index) {
+            (index, base)
+        } else {
+            (base, index)
+        };
+
         // sic tuple element access `t[const]` (sic.md §"Tuples").
         if self.is_sic() {
             if matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_tuple(&t)) {
@@ -164,6 +175,15 @@ impl<'m> FuncCtx<'m> {
         let result_ty = Type::Pointer(Box::new(elem_ty.clone()));
         self.push_instr(Instr::GetElemPtr { dest, base: base_val, index: idx_i64, elem_size, result_ty });
         Ok(LValue::plain(Val::Local(dest), elem_ty))
+    }
+
+    /// True for the commutative subscript form `int[ptr]` (e.g. `3[arr]`): the
+    /// base is an integer/bool and the index is a pointer/array, so the two must be
+    /// swapped. The ordinary `arr[i]`/`p[i]` forms (pointer/array base) return false.
+    fn index_operands_reversed(&mut self, base: &Expr, index: &Expr) -> bool {
+        let base_is_int = matches!(self.infer_expr_type(base), Ok(Type::Int { .. } | Type::Bool));
+        let index_is_ptr = matches!(self.infer_expr_type(index), Ok(Type::Pointer(_) | Type::Array { .. }));
+        base_is_int && index_is_ptr
     }
 
     /// sic (sic.md §"Match"): true if `ty` is a pointer to a *plain* aggregate — a
