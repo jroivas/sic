@@ -3773,7 +3773,24 @@ impl<'m> FuncCtx<'m> {
 
     pub fn coerce(&mut self, val: Val, target: &Type) -> Result<Val> {
         let src_ty = self.val_type(&val);
-        if src_ty == *target { return Ok(val); }
+        if src_ty == *target {
+            // A same-type coercion is normally a no-op, but a bare integer
+            // `Val::Const` carries only a heuristic width, so its value can be out
+            // of range for that width (e.g. 0x80000000 is called `i32` though it
+            // does not fit). Re-fold it into range so a LATER widen sign-extends
+            // correctly — `(long long)(int)0x80000000` must be -2^31, not +2^31.
+            // The width is unchanged, so the store width is unaffected (unlike
+            // narrowing, which must keep flowing through the Cast path below to
+            // produce a correctly-typed narrow value).
+            if let (Some(iv), Type::Int { .. }) = (const_int_value(&val), target) {
+                let folded = super::apply_int_cast(iv, target);
+                if folded != iv {
+                    let signed = matches!(target, Type::Int { signed: true, .. });
+                    return Ok(if signed { Constant::int(folded) } else { Constant::uint(folded as u64) });
+                }
+            }
+            return Ok(val);
+        }
 
         match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
@@ -4362,6 +4379,16 @@ fn fat_prepass_expr(e: &Expr, cand: &FpSet<String>, newloc: &mut FpSet<String>,
         VaArg { list, .. } | VaEnd { list } => fat_prepass_expr(list, cand, newloc, calls, esc),
         VaCopy { dst, src } => { fat_prepass_expr(dst, cand, newloc, calls, esc); fat_prepass_expr(src, cand, newloc, calls, esc); }
         _ => {}
+    }
+}
+
+/// The i64 payload of an integer/bool constant, or None for a non-integer value.
+fn const_int_value(val: &Val) -> Option<i64> {
+    match val {
+        Val::Const(Constant::Int(v)) => Some(*v),
+        Val::Const(Constant::UInt(v)) => Some(*v as i64),
+        Val::Const(Constant::Bool(b)) => Some(*b as i64),
+        _ => None,
     }
 }
 

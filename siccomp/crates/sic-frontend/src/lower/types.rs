@@ -1185,7 +1185,16 @@ pub fn eval_const_size(
                 eval_const_size(else_, named, ptr_size, enum_consts)
             }
         }
-        ExprKind::Cast { expr, .. } => eval_const_size(expr, named, ptr_size, enum_consts),
+        ExprKind::Cast { ty, expr } => {
+            let inner = eval_const_size(expr, named, ptr_size, enum_consts)?;
+            // A cast to a primitive integer truncates and re-signs to that width;
+            // a type-blind pass-through leaves an out-of-range value that a later
+            // widen sign-extends wrongly (e.g. `(int)0x80000000` folding as +2^31).
+            Some(match lower_type(ty, named, ptr_size) {
+                Ok(t @ (Type::Int { .. } | Type::Bool)) => super::apply_int_cast(inner, &t),
+                _ => inner,
+            })
+        }
         // Fall back to the plain integer evaluator for anything else.
         _ => super::eval_const_expr(e, enum_consts).ok(),
     }

@@ -3442,12 +3442,39 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
                 eval_const_expr(else_, enum_consts)
             }
         }
-        ExprKind::Cast { expr, .. } => eval_const_expr(expr, enum_consts),
+        ExprKind::Cast { ty, expr } => {
+            let inner = eval_const_expr(expr, enum_consts)?;
+            // A cast to a primitive integer type truncates to that width and
+            // re-signs; a type-blind pass-through leaves an out-of-range value
+            // (e.g. `(int)0x80000000` == +2^31) that a later widen sign-extends
+            // wrongly. Non-primitive / typedef targets keep the value unchanged
+            // (no type context here to resolve them — matches the old behavior).
+            Ok(match ast_prim_int_type(&ty.ty) {
+                Some(t) => apply_int_cast(inner, &t),
+                None => inner,
+            })
+        }
         _ => {
             let sp = &e.span;
             Err(CompileError::at("non-constant expression", sp.file.clone(), sp.line, sp.col))
         }
     }
+}
+
+/// The `sic_ir::Type` for a primitive integer/bool AST type (x86-64 LP64 widths),
+/// or None for anything else (typedefs, pointers, floats, aggregates). Used to
+/// apply an integer cast during type-blind constant folding.
+fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
+    use crate::ast::AstType;
+    Some(match ty {
+        AstType::Bool => Type::Bool,
+        // Plain `char` is signed on x86-64.
+        AstType::Char { signed } => Type::Int { bits: 8, signed: signed.unwrap_or(true) },
+        AstType::Short { signed } => Type::Int { bits: 16, signed: *signed },
+        AstType::Int { signed } => Type::Int { bits: 32, signed: *signed },
+        AstType::Long { signed } | AstType::LongLong { signed } => Type::Int { bits: 64, signed: *signed },
+        _ => return None,
+    })
 }
 
 /// Evaluate a `__builtin_choose_expr` condition at compile time, where
