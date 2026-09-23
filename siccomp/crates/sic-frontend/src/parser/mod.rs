@@ -316,6 +316,22 @@ impl Parser {
             return Ok(Decl::Var { base_ty, declarators: vec![], weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp });
         }
 
+        // sic (sic.md §"Structs"): a struct/union/enum DEFINITION may omit the
+        // trailing `;` (the form used throughout the guide, e.g. `struct test {
+        // ... }` with no semicolon). If the body is followed by something that
+        // begins a NEW declaration — another type specifier, EOF, or a closing
+        // `}` — rather than a declarator naming a variable of this type, the
+        // definition stands on its own. (A following identifier / `*` / `(` is
+        // still a declarator, so `struct S {..} v;` and `struct S {..} f(){..}`
+        // are unaffected, as is C mode.)
+        if self.lang == Lang::Sic
+            && !matches!(storage, Some(StorageClass::Typedef))
+            && is_aggregate_definition(&base_ty.ty)
+            && (self.at(TokenKind::Eof) || self.at(TokenKind::RBrace) || self.starts_decl_specifier())
+        {
+            return Ok(Decl::Var { base_ty, declarators: vec![], weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp });
+        }
+
         // typedef with declarators
         if let Some(StorageClass::Typedef) = storage {
             return self.parse_typedef(base_ty, sp);
@@ -622,9 +638,14 @@ impl Parser {
                     self.advance();
                     self.pending_private = true;
                 }
-                TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); }
-                TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?); }
-                TokenKind::Enum     => { base = Some(self.parse_enum()?); }
+                // A struct/union/enum is a COMPLETE base type — it can never
+                // combine with a following base-type keyword. If one follows (e.g.
+                // `struct T { ... } int main()`, a SIC definition with no trailing
+                // `;`), stop here so it is parsed as the next declaration rather
+                // than swallowed. (Qualifiers like `const` may still follow.)
+                TokenKind::Struct   => { base = Some(self.parse_struct_or_union(false)?); if self.at_base_type_kw() { break; } }
+                TokenKind::Union    => { base = Some(self.parse_struct_or_union(true)?);  if self.at_base_type_kw() { break; } }
+                TokenKind::Enum     => { base = Some(self.parse_enum()?); if self.at_base_type_kw() { break; } }
                 // sic bitfield type (sic.md §"Bitfields").
                 TokenKind::Bitfield if base.is_none() => { base = Some(self.parse_bitfield()?); }
                 // sic `tuple` type (sic.md §"Tuples"). `tuple(` is instead the
@@ -1408,6 +1429,17 @@ impl Parser {
             TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::TypeName)
+    }
+
+    /// True if the next token is a base-type keyword (one that establishes the
+    /// fundamental type). Such a token can never follow an already-complete base
+    /// type, so it must begin a new declaration.
+    fn at_base_type_kw(&self) -> bool {
+        matches!(self.peek_kind(),
+            TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+            | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+            | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex
+            | TokenKind::Struct | TokenKind::Union | TokenKind::Enum)
     }
 
     fn starts_decl_specifier(&self) -> bool {
@@ -3248,6 +3280,18 @@ impl Parser {
 /// in C) stays 32-bit.
 /// Natural alignment (bytes) of a type, for `_Alignas(type)`. Covers scalars
 /// and pointers exactly; aggregates/typedefs fall back to a conservative value.
+/// True if `ty` is a struct/union/enum *definition* (carries a body), as opposed
+/// to a bare reference like `struct P`. Used to allow a trailing-`;`-less
+/// definition in SIC mode.
+fn is_aggregate_definition(ty: &AstType) -> bool {
+    match ty {
+        AstType::Struct(sd) => sd.fields.is_some(),
+        AstType::Union(ud) => ud.fields.is_some(),
+        AstType::Enum(ed) => ed.variants.is_some(),
+        _ => false,
+    }
+}
+
 fn ast_type_alignment(ty: &AstType) -> u32 {
     match ty {
         AstType::Char { .. } | AstType::Bool => 1,

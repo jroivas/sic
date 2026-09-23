@@ -1,0 +1,44 @@
+// A SIC struct/union/enum DEFINITION may omit the trailing `;` (the form used
+// throughout sic.md, e.g. `struct test { ... }` with no semicolon). The parser
+// used to require it: without it, `struct T { ... } int main()` swallowed the
+// following function's `int` return type and mis-parsed `main` as returning the
+// struct. The `;`-terminated form and `struct S {..} var;` / `struct S {..}
+// f(){..}` must all still work. Returns 42.
+struct P { int x; int y; }              // no trailing ;
+enum Color { Red, Green, Blue }         // no trailing ;
+union U { int i; float f; }             // no trailing ;
+
+struct Q { int *data; ~Q() { del data; } }   // no trailing ; + destructor
+
+// A struct definition immediately followed by a variable of it (needs no `;`
+// between the type and the declarator only when a declarator follows).
+struct R { int v; } global_r;
+
+struct P mkp(int a, int b) { struct P r; r.x = a; r.y = b; return r; }
+
+int main() {
+    P p = {3, 4};
+    if (p.x + p.y != 7) return 1;
+
+    Color c = Green;
+    if ((int)c != 1) return 2;
+
+    U u; u.i = 42;
+    if (u.i != 42) return 3;
+
+    // struct with a destructor + no `;`
+    {
+        Q q;
+        q.data = new int[4];
+        q.data[0] = 9;
+        if (q.data[0] != 9) return 4;
+    }   // ~Q frees data
+
+    global_r.v = 5;
+    if (global_r.v != 5) return 5;
+
+    struct P q = mkp(10, 20);   // struct-returning function defined after a no-`;` type
+    if (q.x + q.y != 30) return 6;
+
+    return 42;
+}
