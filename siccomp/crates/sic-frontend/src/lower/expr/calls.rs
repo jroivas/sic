@@ -1408,12 +1408,27 @@ impl<'m> FuncCtx<'m> {
                 let a_nz = self.alloc_val();
                 self.push_instr(Instr::Cmp { dest: a_nz, op: CmpOp::INe, lhs: a.clone(), rhs: zero, ty: ty.clone() });
                 let div = if signed { BinOp::SDiv } else { BinOp::UDiv };
+                // The divisor must never be zero: integer division by zero traps
+                // (Cranelift emits `ud2`; a 128-bit libcall is UB), and that trap
+                // fires unconditionally before the `a_nz` select below can mask the
+                // result — so `i*i` at `i==0` in an `unsafe` block, or
+                // `__builtin_mul_overflow(0, b, &r)`, would crash. Divide by
+                // `a_nz ? a : 1` instead; when `a==0` the quotient is unused.
+                let safe_div = self.alloc_val();
+                self.push_instr(Instr::Select {
+                    dest: safe_div,
+                    cond: Val::Local(a_nz),
+                    on_true: a.clone(),
+                    on_false: Constant::int(1),
+                    ty: ty.clone(),
+                });
+                let safe_div = Val::Local(safe_div);
                 // 128-bit divide needs a libcall (see emit_div_rem_libcall).
-                let quot_val = if let Some(v) = self.emit_div_rem_libcall(div, result.clone(), a.clone(), ty) {
+                let quot_val = if let Some(v) = self.emit_div_rem_libcall(div, result.clone(), safe_div.clone(), ty) {
                     v
                 } else {
                     let quot = self.alloc_val();
-                    self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: a.clone(), ty: ty.clone() });
+                    self.push_instr(Instr::BinOp { dest: quot, op: div, lhs: result.clone(), rhs: safe_div, ty: ty.clone() });
                     Val::Local(quot)
                 };
                 let mism = self.alloc_val();

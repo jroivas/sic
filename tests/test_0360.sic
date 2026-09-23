@@ -1,0 +1,34 @@
+// Regression: an `unsafe` block traps on integer overflow (sic.md §"Integer
+// overflow"), and the multiply-overflow check verifies via `result / a`. That
+// division must be guarded against `a == 0`: integer division by zero traps
+// (`ud2`), and the trap fired unconditionally — before the `a != 0` mask could
+// discard the quotient — so `i*i` at `i == 0`, or any `0 * x` / `x * 0`, crashed
+// with SIGILL inside an `unsafe` block instead of computing 0. Returns 42.
+int main() {
+    int total = 0;
+
+    // i*i with i starting at 0 — the original crash (a==0 on the first iteration).
+    unsafe {
+        int a[5];
+        for (int i = 0; i < 5; i++) a[i] = i * i;      // 0 1 4 9 16
+        for (int i = 0; i < 5; i++) total += a[i];     // 30
+    }
+    if (total != 30) return 1;
+
+    // Explicit zero operands on both sides must be 0, not a trap.
+    unsafe {
+        int z1 = 0 * 12345;
+        int z2 = 67890 * 0;
+        int p  = 6 * 7;                                 // still 42, no false trap
+        if (z1 != 0 || z2 != 0 || p != 42) return 2;
+    }
+
+    // Zero divisor case for unsigned multiply too.
+    unsafe {
+        unsigned u = 0u;
+        unsigned r = u * 4000000000u;                   // 0, no overflow, no trap
+        if (r != 0u) return 3;
+    }
+
+    return 42;
+}
