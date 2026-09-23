@@ -4885,7 +4885,11 @@ impl<'m> FuncCtx<'m> {
                     return self.call_bigint_new("__sic_bi_neg", vec![a]);
                 }
                 let v = self.lower_expr(inner)?;
-                let ty = self.val_type(&v);
+                // C integer promotions apply to unary `-`: `-(unsigned char)1` is
+                // computed in `int` (== -1), not wrapped in 8 bits (== 255).
+                let ty0 = self.val_type(&v);
+                let ty = ty0.integer_promote();
+                let v = if ty != ty0 { self.coerce(v, &ty)? } else { v };
                 let dest = self.alloc_val();
                 let un_op = if ty.is_float() { UnOp::FNeg } else { UnOp::Neg };
                 self.push_instr(Instr::UnaryOp { dest, op: un_op, val: v, ty: ty.clone() });
@@ -4926,7 +4930,11 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
                 let v = self.lower_expr(inner)?;
-                let ty = self.val_type(&v);
+                // C integer promotions apply to `~`: `~(unsigned char)0` is `int`
+                // -1 (== ~0), not an 8-bit 0xFF.
+                let ty0 = self.val_type(&v);
+                let ty = ty0.integer_promote();
+                let v = if ty != ty0 { self.coerce(v, &ty)? } else { v };
                 let dest = self.alloc_val();
                 self.push_instr(Instr::UnaryOp { dest, op: UnOp::Not, val: v, ty: ty.clone() });
                 Ok(Val::Local(dest))
