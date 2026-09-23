@@ -3054,16 +3054,24 @@ impl<'m> FuncCtx<'m> {
             // In `unsafe` / a `divide_by_zero` guard, `÷0` is an exception instead
             // (sic.md §"Errors and exceptions"): trap or jump to the guard.
             if self.divzero_active() {
-                let is_zero = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: rc.clone(), rhs: Constant::zero(), ty: result_ty.clone() });
+                let (safe_rhs, is_zero, is_ovf) = self.div_fault_guards(ir_op, &lc, &rc, &result_ty);
                 let tgt = self.divzero_target();
-                self.branch_on_exception(Val::Local(is_zero), tgt);
-                // On the fall-through path the divisor is nonzero — divide directly.
-                if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), rc.clone(), &result_ty) {
+                self.branch_on_exception(is_zero, tgt);
+                // Signed division overflow (`INT_MIN / -1`) also faults the hardware
+                // divide (#DE). When an overflow guard is active (`unsafe` /
+                // `overflow{}`) trap it like any other overflow; otherwise it wraps
+                // on the fall-through (the fault-safe divisor keeps it from crashing).
+                if self.overflow_active() {
+                    let otgt = self.overflow_target();
+                    self.branch_on_exception(is_ovf, otgt);
+                }
+                // Fall-through: divide by the fault-safe divisor (== the real
+                // divisor once the fault cases above are excluded).
+                if let Some(v) = self.emit_div_rem_libcall(ir_op, lc.clone(), safe_rhs.clone(), &result_ty) {
                     return Ok(v);
                 }
                 let dest = self.alloc_val();
-                self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: rc, ty: result_ty });
+                self.push_instr(Instr::BinOp { dest, op: ir_op, lhs: lc, rhs: safe_rhs, ty: result_ty });
                 return Ok(Val::Local(dest));
             }
             return Ok(self.guarded_div_rem(ir_op, lc, rc, result_ty));
@@ -3096,32 +3104,76 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
-    /// SIC integer `÷0`/`%0` → 0. Force the divisor to a nonzero value so the
-    /// trapping div/rem never sees 0, then select 0 when the real divisor was 0.
-    fn guarded_div_rem(&mut self, op: BinOp, lc: Val, rc: Val, ty: Type) -> Val {
+    /// Compute the `÷0` flag, the signed-overflow (`INT_MIN / -1`) flag, and a
+    /// divisor that never faults the hardware divide (`1` in either bad case, else
+    /// the real divisor). On x86 `idiv`/`div` raises `#DE` (→ SIGFPE) on BOTH a
+    /// zero divisor and the signed `INT_MIN / -1` overflow, so a bare divide of
+    /// those crashes uncontrolledly. Dividing by `1` instead yields exactly SIC's
+    /// defined results — `x/1 == x` (so `INT_MIN / -1` wraps to `INT_MIN`) and
+    /// `x%1 == 0` — leaving the caller to override only the `÷0` case (→ 0) when it
+    /// wants `÷0 → 0`. The overflow flag is set only for 8/16/32/64-bit signed
+    /// types (the hardware divide widths — narrower/odd widths can't reach the
+    /// register minimum, and the 128-bit path is a non-faulting software libcall).
+    fn div_fault_guards(&mut self, op: BinOp, lc: &Val, rc: &Val, ty: &Type) -> (Val, Val, Val) {
         let is_zero = self.alloc_val();
         self.push_instr(Instr::Cmp {
             dest: is_zero, op: CmpOp::IEq, lhs: rc.clone(), rhs: Constant::int(0), ty: ty.clone(),
         });
-        let safe_rhs = self.alloc_val();
+        let mut bad = Val::Local(is_zero);
+        let mut is_ovf = Val::Const(Constant::Bool(false));
+        if matches!(op, BinOp::SDiv | BinOp::SRem) {
+            if let Some(bits) = ty.int_bits() {
+                if matches!(bits, 8 | 16 | 32 | 64) {
+                    let min = i64::MIN >> (64 - bits); // sign-extended INT_MIN for `bits`
+                    let is_min = self.alloc_val();
+                    self.push_instr(Instr::Cmp {
+                        dest: is_min, op: CmpOp::IEq, lhs: lc.clone(), rhs: Constant::int(min), ty: ty.clone(),
+                    });
+                    let is_neg1 = self.alloc_val();
+                    self.push_instr(Instr::Cmp {
+                        dest: is_neg1, op: CmpOp::IEq, lhs: rc.clone(), rhs: Constant::int(-1), ty: ty.clone(),
+                    });
+                    let ovf = self.alloc_val();
+                    self.push_instr(Instr::BinOp {
+                        dest: ovf, op: BinOp::And, lhs: Val::Local(is_min), rhs: Val::Local(is_neg1), ty: Type::Bool,
+                    });
+                    is_ovf = Val::Local(ovf);
+                    let both = self.alloc_val();
+                    self.push_instr(Instr::BinOp {
+                        dest: both, op: BinOp::Or, lhs: Val::Local(is_zero), rhs: is_ovf.clone(), ty: Type::Bool,
+                    });
+                    bad = Val::Local(both);
+                }
+            }
+        }
+        let safe = self.alloc_val();
         self.push_instr(Instr::Select {
-            dest: safe_rhs, cond: Val::Local(is_zero),
-            on_true: Constant::int(1), on_false: rc, ty: ty.clone(),
+            dest: safe, cond: bad, on_true: Constant::int(1), on_false: rc.clone(), ty: ty.clone(),
         });
+        (Val::Local(safe), Val::Local(is_zero), is_ovf)
+    }
+
+    /// SIC integer `÷0`/`%0` → 0, and the signed `INT_MIN / -1` overflow → the
+    /// wrapping result (`INT_MIN` for `/`, `0` for `%`). Divide by a fault-safe
+    /// divisor so the hardware divide never `#DE`s, then select 0 for `÷0`.
+    fn guarded_div_rem(&mut self, op: BinOp, lc: Val, rc: Val, ty: Type) -> Val {
+        let (safe_rhs, is_zero, _is_ovf) = self.div_fault_guards(op, &lc, &rc, &ty);
         let q = if let Some(v) =
-            self.emit_div_rem_libcall(op, lc.clone(), Val::Local(safe_rhs), &ty)
+            self.emit_div_rem_libcall(op, lc.clone(), safe_rhs.clone(), &ty)
         {
             v
         } else {
             let d = self.alloc_val();
             self.push_instr(Instr::BinOp {
-                dest: d, op, lhs: lc, rhs: Val::Local(safe_rhs), ty: ty.clone(),
+                dest: d, op, lhs: lc, rhs: safe_rhs, ty: ty.clone(),
             });
             Val::Local(d)
         };
+        // ÷0 → 0 (both div and rem). The signed-overflow case already produced the
+        // correct wrap via `x/1`/`x%1`, so it is not overridden here.
         let result = self.alloc_val();
         self.push_instr(Instr::Select {
-            dest: result, cond: Val::Local(is_zero),
+            dest: result, cond: is_zero,
             on_true: Constant::int(0), on_false: q, ty,
         });
         Val::Local(result)

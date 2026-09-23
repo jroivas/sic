@@ -1,0 +1,38 @@
+// SIC defines every integer division (sic.md §"Integer overflow"): `÷0`/`%0` → 0,
+// and the signed `INT_MIN / -1` overflow → the wrapping result (`INT_MIN` for `/`,
+// `0` for `%`) rather than the x86 `#DE` (SIGFPE) a bare `idiv` would raise. This
+// pins all of those, plus ordinary division, at every width. Returns 42.
+int main() {
+    // Ordinary division/remainder, signed and unsigned.
+    if (100 / 7 != 14 || 100 % 7 != 2) return 1;
+    if (-100 / 7 != -14 || -100 % 7 != -2) return 2;
+    unsigned u = 4000000007u;
+    if (u / 13u != 307692308u || u % 13u != 3u) return 3;
+
+    // Division/remainder by -1: x/-1 == -x (no fault except at INT_MIN), x%-1 == 0.
+    int x = 42, neg = -1;
+    if (x / neg != -42 || x % neg != 0) return 4;
+
+    // ÷0 / %0 → 0 (defined, not a trap in normal code).
+    if (7 / 0 != 0 || 7 % 0 != 0) return 5;
+    if (x / 0 != 0 || x % 0 != 0) return 6;
+
+    // Signed overflow INT_MIN / -1 → INT_MIN (wrap), INT_MIN % -1 → 0. Must not
+    // crash with SIGFPE.
+    int i_min = -2147483648;
+    if (i_min / neg != i_min) return 7;
+    if (i_min % neg != 0) return 8;
+
+    long l_min = -9223372036854775807L - 1;
+    long lneg = -1;
+    if (l_min / lneg != l_min) return 9;
+    if (l_min % lneg != 0) return 10;
+
+    // A `divide_by_zero` guard catches only a genuine `÷0`; `INT_MIN / -1` is an
+    // overflow, so it is NOT caught here — it wraps.
+    int c_div0 = divide_by_zero { int q = 5 / 0; };       // caught → 1
+    int c_ovf  = divide_by_zero { int q = i_min / neg; }; // not ÷0 → wraps → 0
+    if (c_div0 != 1 || c_ovf != 0) return 11;
+
+    return 42;
+}

@@ -1,0 +1,13 @@
+// In an `unsafe` block the signed division overflow `INT_MIN / -1` is trapped as
+// an arithmetic overflow (sic.md §"Integer overflow") — a CONTROLLED abort via
+// `__sic_trap` (exit 134), not the raw x86 `#DE`/SIGFPE (exit 136) a bare `idiv`
+// would raise. Regression for the earlier uncontrolled crash. Aborts (exit 134).
+int main() {
+    int i_min = -2147483648;
+    int neg = -1;
+    unsafe {
+        int x = i_min / neg;   // overflow → controlled trap
+        return x;              // unreachable
+    }
+    return 0;                  // unreachable
+}
