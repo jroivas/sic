@@ -2817,6 +2817,21 @@ impl<'m> FuncCtx<'m> {
     ) -> Result<()> {
         self.enter_scope();
 
+        // sic auto-vectorization (see `try_vectorize`): a unit-stride counting loop
+        // whose body is one element-wise array assignment is rewritten to process a
+        // SIMD vector of elements per step (with a scalar remainder), emitting the
+        // vector ops that the back end lowers to real SIMD. Runs inside the loop's
+        // scope so it can declare the induction variable there; on success it emits
+        // the whole loop and we exit the scope and return.
+        if self.is_sic() {
+            if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
+                if self.try_vectorize(fi, c, p, body)? {
+                    self.exit_scope();
+                    return Ok(());
+                }
+            }
+        }
+
         if let Some(fi) = init {
             match fi {
                 ForInit::Decl(d) => self.lower_local_decl(d)?,
@@ -2998,6 +3013,428 @@ impl<'m> FuncCtx<'m> {
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cont_bb)); }
         self.switch_to_block(cont_bb);
         Ok(())
+    }
+
+    /// sic auto-vectorization: recognize a unit-stride counting loop whose body is a
+    /// single element-wise array assignment, and rewrite it to process a SIMD vector
+    /// of `W` elements per step plus a scalar remainder. The emitted vector
+    /// load/op/store instructions lower to real SIMD (see `Type::simd128`).
+    ///
+    /// Shape handled (matmul's inner loop and similar):
+    ///   `for (T j = LO; j < HI; j++)  W[a + j] {=|+=|-=|*=|&=|\|=|^=} <expr>;`
+    /// where `W` is a fat-pointer array whose element type is a 128-bit SIMD lane,
+    /// `a` is loop-invariant, and `<expr>` is a tree of loop-invariant scalars
+    /// (broadcast), unit-stride loads `R[b + j]` from same-element-type fat arrays,
+    /// and vectorizable arithmetic. Fails closed (returns `Ok(false)`, keeping the
+    /// scalar loop) on anything it does not fully understand.
+    ///
+    /// Soundness: (1) every array is a fat-pointer local; one hoisted bounds check
+    /// per array covers the whole `[LO, HI)` range (like loop-BCE), so the vector
+    /// and remainder accesses are safe. (2) Each array is accessed at exactly one
+    /// affine offset, so a store never feeds a differently-offset load within a
+    /// vector window; distinct fat locals are distinct allocations and cannot alias.
+    /// (3) The body is pure (no calls / side effects beyond the one store), so the
+    /// bound, offsets and broadcast scalars are loop-invariant.
+    fn try_vectorize(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
+        use crate::ast::{ExprKind as E, BinOpKind as B};
+
+        // -- induction variable + init value LO (must be a fresh `for (T j = LO; …)`) --
+        let (ivar, jdecl, lo) = match init {
+            ForInit::Decl(Decl::Var { declarators, .. }) if declarators.len() == 1 => {
+                let d = &declarators[0];
+                match &d.init {
+                    Some(Initializer::Expr(e)) => (d.name.clone(), d.clone(), e.clone()),
+                    _ => return Ok(false),
+                }
+            }
+            _ => return Ok(false),
+        };
+        // -- bound `j < HI` / `j <= HI` --
+        let (hi, inclusive) = match &cond.kind {
+            E::BinOp { op, lhs, rhs } => match (&lhs.kind, op) {
+                (E::Ident(n), B::Lt) if *n == ivar => ((**rhs).clone(), false),
+                (E::Ident(n), B::Le) if *n == ivar => ((**rhs).clone(), true),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        // -- step must be exactly `j++` / `++j` / `j += 1` (unit stride) --
+        let unit_step = match &post.kind {
+            E::PostInc { inc: true, expr } | E::PreInc { inc: true, expr } =>
+                matches!(&expr.kind, E::Ident(n) if *n == ivar),
+            E::Assign { op: Some(B::Add), lhs, rhs } =>
+                matches!(&lhs.kind, E::Ident(n) if *n == ivar)
+                    && matches!(&rhs.kind, E::IntLit(1, _)),
+            _ => false,
+        };
+        if !unit_step { return Ok(false); }
+        // LO and HI must be pure (re-evaluated for the guard / loop math).
+        if simple_expr_idents(&lo).is_none() || simple_expr_idents(&hi).is_none() { return Ok(false); }
+
+        // -- body must be a single assignment `W[Widx] op= RHS` --
+        let assign: &Expr = match body {
+            Stmt::Block(stmts, _) if stmts.len() == 1 => match &stmts[0] {
+                Stmt::Expr(e, _) => e, _ => return Ok(false),
+            },
+            Stmt::Expr(e, _) => e,
+            _ => return Ok(false),
+        };
+        let (aop, lhs, rhs) = match &assign.kind {
+            E::Assign { op, lhs, rhs } => (*op, lhs, rhs),
+            _ => return Ok(false),
+        };
+        // LHS = W[Widx], W a fat array, Widx unit-stride.
+        let (warr, woff) = match &lhs.kind {
+            E::Index { base, index } => match &base.kind {
+                E::Ident(w) if self.fat_locals.contains(w) => match affine_x(index, &ivar) {
+                    Some(off) => (w.clone(), off),
+                    None => return Ok(false),
+                },
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        // Element type + lane count (must be a 128-bit SIMD lane layout).
+        let et = match self.infer_expr_type(lhs) {
+            Ok(t) if t.is_int() || t.is_float() => t,
+            _ => return Ok(false),
+        };
+        let bits = match &et {
+            Type::Int { bits, .. } => *bits,
+            Type::Float32 => 32, Type::Float64 => 64,
+            _ => return Ok(false),
+        };
+        let lanes = match bits { 8 | 16 | 32 | 64 => (128 / bits) as usize, _ => return Ok(false) };
+        let vty = Type::Array { elem: Box::new(et.clone()), len: lanes };
+        if vty.simd128().is_none() { return Ok(false); }
+
+        // The store op, as a vector IR op (None = plain `=`).
+        let store_op = match aop {
+            None => None,
+            Some(b) => match vec_binop_for(b, &et) { Some(v) => Some(v), None => return Ok(false) },
+        };
+
+        // -- analyze the RHS into a vectorizable plan, collecting every array access --
+        let mut accesses: Vec<(String, Option<Expr>)> = vec![(warr.clone(), woff.clone())];
+        let plan = match self.analyze_vec_expr(rhs, &ivar, &et, &mut accesses) {
+            Some(p) => p,
+            None => return Ok(false),
+        };
+        // Aliasing: each array accessed at a single affine offset (else a store could
+        // feed a differently-offset load within a vector window).
+        let mut by_arr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (arr, off) in &accesses {
+            let key = off.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string());
+            match by_arr.get(arr) {
+                Some(prev) if prev != &key => return Ok(false),
+                _ => { by_arr.insert(arr.clone(), key); }
+            }
+        }
+
+        // ===== EMIT =====
+        // Induction variable (declared type T), initialized to LO — the counter for
+        // both the vector and remainder loops. `lower_local_decl` registers it so the
+        // remainder body resolves `ivar` to this slot.
+        self.lower_local_decl(&Decl::Var {
+            base_ty: jdecl.ty.clone(),
+            declarators: vec![jdecl.clone()],
+            weak: false, thread_local: false, span: cond.span.clone(),
+        })?;
+        let (jty, jslot) = match self.lookup(&ivar) {
+            Some(LookupResult::Local(ty, vid)) => (ty.clone(), Val::Local(vid)),
+            _ => return Ok(false),
+        };
+        let i64t = Type::i64();
+
+        // Hoisted bounds checks over [LO, HI), guarded by the loop-entry condition
+        // (an empty loop must not abort). `j == LO` here, so `cond` = "will iterate".
+        let will = self.lower_expr(cond)?;
+        let willb = self.to_bool(will)?;
+        let chk_bb = self.new_block_after_current();
+        let loops_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: willb, then_bb: chk_bb, else_bb: loops_bb });
+        self.switch_to_block(chk_bb);
+        let one = Expr::new(E::IntLit(1, false), cond.span.clone());
+        let maxi = if inclusive { hi.clone() }
+                   else { Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(hi.clone()), rhs: Box::new(one) }, cond.span.clone()) };
+        for (arr, off) in &accesses {
+            let (lo_idx, hi_idx) = match off {
+                None => (lo.clone(), maxi.clone()),
+                Some(xe) => (
+                    Expr::new(E::BinOp { op: B::Add, lhs: Box::new(xe.clone()), rhs: Box::new(lo.clone()) }, lhs.span.clone()),
+                    Expr::new(E::BinOp { op: B::Add, lhs: Box::new(xe.clone()), rhs: Box::new(maxi.clone()) }, lhs.span.clone()),
+                ),
+            };
+            self.emit_hoisted_bounds_check(arr, &lo_idx)?;
+            self.emit_hoisted_bounds_check(arr, &hi_idx)?;
+        }
+        if !self.is_terminated() { self.set_terminator(Terminator::Jump(loops_bb)); }
+        self.switch_to_block(loops_bb);
+
+        // vend = LO + ((HI - LO) rounded down to a multiple of W), computed in i64.
+        let lo_v = { let v = self.lower_expr(&lo)?; self.coerce(v, &i64t)? };
+        let hi_v = {
+            let v = self.lower_expr(&hi)?; let v = self.coerce(v, &i64t)?;
+            if inclusive {
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Add, lhs: v, rhs: Constant::int(1), ty: i64t.clone() });
+                Val::Local(d)
+            } else { v }
+        };
+        let count = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: count, op: BinOp::Sub, lhs: hi_v.clone(), rhs: lo_v.clone(), ty: i64t.clone() });
+        let vcount = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: vcount, op: BinOp::And, lhs: Val::Local(count), rhs: Constant::int(!((lanes as i64) - 1)), ty: i64t.clone() });
+        let vend = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: vend, op: BinOp::Add, lhs: lo_v.clone(), rhs: Val::Local(vcount), ty: i64t.clone() });
+        let vend = Val::Local(vend);
+
+        // Runtime alias guard: distinct fat locals are distinct allocations, but two
+        // names could alias (`i32* b = c`). If the write region overlaps any read
+        // array's region, skip the vector loop and let the scalar remainder (which
+        // then covers all of `[LO, HI)`, since `j` is still `LO`) run — preserving
+        // the exact scalar semantics. For genuinely distinct arrays this is always
+        // false, so the vector path is taken.
+        let esz = et.size_of(self.ptr_size());
+        let mut read_arrays: Vec<(String, Option<Expr>)> = Vec::new();
+        for (arr, off) in &accesses {
+            if arr != &warr && !read_arrays.iter().any(|(n, _)| n == arr) {
+                read_arrays.push((arr.clone(), off.clone()));
+            }
+        }
+        let no_alias = self.emit_no_alias(&warr, &woff, &read_arrays, &lo_v, &hi_v, &et, esz)?;
+
+        // Pre-build broadcast (splat) vectors once, before the vector loop.
+        let eplan = self.prebuild_splats(plan, &et, lanes)?;
+
+        // ---- vector loop: while (j < vend) { W[woff+j] op= <plan>; j += W } ----
+        let vcond = self.new_block_after_current();
+        let vbody = self.new_block_after_current();
+        let rem = self.new_block_after_current();
+        match no_alias {
+            Some(na) => self.set_terminator(Terminator::CondJump { cond: na, then_bb: vcond, else_bb: rem }),
+            None => self.set_terminator(Terminator::Jump(vcond)),
+        }
+        self.switch_to_block(vcond);
+        let jv = self.emit_load(&jslot, &jty);
+        let jv64 = self.coerce(jv, &i64t)?;
+        let lt = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: jv64.clone(), rhs: vend.clone(), ty: i64t.clone() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: vbody, else_bb: rem });
+        self.switch_to_block(vbody);
+        {
+            let jvb = self.emit_load(&jslot, &jty);
+            let jvb = self.coerce(jvb, &i64t)?;
+            // value of <plan>
+            let rhs_vec = self.emit_vec_node(&eplan, &jvb, &et, &vty, esz)?;
+            // W[woff+j]
+            let waddr = self.vec_elem_addr(&warr, &woff, &jvb, &et, esz)?;
+            let res = match store_op {
+                None => rhs_vec,
+                Some(op) => {
+                    let cur = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: cur, ptr: waddr.clone(), ty: vty.clone() });
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::BinOp { dest: d, op, lhs: Val::Local(cur), rhs: rhs_vec, ty: vty.clone() });
+                    Val::Local(d)
+                }
+            };
+            self.push_instr(Instr::Store { val: res, ptr: waddr });
+            // j += W
+            let jn = self.emit_load(&jslot, &jty);
+            let inc = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(lanes as i64), ty: jty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
+            self.set_terminator(Terminator::Jump(vcond));
+        }
+
+        // ---- scalar remainder: while (j < HI) { <original body>; j++ } ----
+        self.switch_to_block(rem);
+        let rcond = self.new_block_after_current();
+        let rbody = self.new_block_after_current();
+        let done = self.new_block_after_current();
+        self.set_terminator(Terminator::Jump(rcond));
+        self.switch_to_block(rcond);
+        let jr = self.emit_load(&jslot, &jty);
+        let jr64 = self.coerce(jr, &i64t)?;
+        let rlt = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: rlt, op: CmpOp::ISLt, lhs: jr64, rhs: hi_v.clone(), ty: i64t.clone() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(rlt), then_bb: rbody, else_bb: done });
+        self.switch_to_block(rbody);
+        self.lower_stmt(body)?;
+        if !self.is_terminated() {
+            let jn = self.emit_load(&jslot, &jty);
+            let inc = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(1), ty: jty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
+            self.set_terminator(Terminator::Jump(rcond));
+        }
+        self.switch_to_block(done);
+        Ok(true)
+    }
+
+    /// Recognize a vectorizable RHS sub-expression (unit-stride in `ivar`), pushing
+    /// every array access it makes into `accesses`. Returns `None` (→ don't
+    /// vectorize) on anything not handled.
+    fn analyze_vec_expr(&self, e: &Expr, ivar: &str, elem: &Type,
+        accesses: &mut Vec<(String, Option<Expr>)>) -> Option<VecNode> {
+        use crate::ast::ExprKind as E;
+        match &e.kind {
+            // unit-stride load `R[b + j]` from a same-element-type fat array
+            E::Index { base, index } => {
+                let arr = match &base.kind { E::Ident(a) => a.clone(), _ => return None };
+                if !self.fat_locals.contains(&arr) { return None; }
+                let at = self.infer_expr_type(base).ok()?;
+                let ae = match &at {
+                    Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
+                    _ => return None,
+                };
+                if &ae != elem { return None; }
+                let off = affine_x(index, ivar)?;
+                accesses.push((arr.clone(), off.clone()));
+                Some(VecNode::Load { arr, offset: off })
+            }
+            // element-wise binary op
+            E::BinOp { op, lhs, rhs } => {
+                let vop = vec_binop_for(*op, elem)?;
+                let l = self.analyze_vec_expr(lhs, ivar, elem, accesses)?;
+                let r = self.analyze_vec_expr(rhs, ivar, elem, accesses)?;
+                Some(VecNode::Bin { op: vop, l: Box::new(l), r: Box::new(r) })
+            }
+            // otherwise: a loop-invariant scalar, broadcast to every lane
+            _ => {
+                let ids = simple_expr_idents(e)?;      // pure (no calls / side effects)
+                if ids.contains(ivar) { return None; } // depends on j but not a load → bail
+                match self.infer_expr_type(e) {
+                    Ok(t) if t.is_int() || t.is_float() => {}
+                    _ => return None,
+                }
+                Some(VecNode::Splat(e.clone()))
+            }
+        }
+    }
+
+    /// Lower every `Splat` in the plan to a broadcast vector value ONCE (they are
+    /// loop-invariant), returning a plan whose splats are resolved to those values.
+    fn prebuild_splats(&mut self, node: VecNode, elem: &Type, lanes: usize) -> Result<VecEmit> {
+        Ok(match node {
+            VecNode::Splat(e) => {
+                let s = self.lower_expr(&e)?;
+                let s = self.coerce(s, elem)?;
+                VecEmit::Prebuilt(self.emit_splat(s, elem, lanes))
+            }
+            VecNode::Load { arr, offset } => VecEmit::Load { arr, offset },
+            VecNode::Bin { op, l, r } => VecEmit::Bin {
+                op,
+                l: Box::new(self.prebuild_splats(*l, elem, lanes)?),
+                r: Box::new(self.prebuild_splats(*r, elem, lanes)?),
+            },
+        })
+    }
+
+    /// Emit the vector value of a resolved plan node at loop index `j` (i64).
+    fn emit_vec_node(&mut self, node: &VecEmit, j: &Val, elem: &Type, vty: &Type, esz: u64) -> Result<Val> {
+        Ok(match node {
+            VecEmit::Prebuilt(v) => v.clone(),
+            VecEmit::Load { arr, offset } => {
+                let addr = self.vec_elem_addr(arr, offset, j, elem, esz)?;
+                let d = self.alloc_val();
+                self.push_instr(Instr::Load { dest: d, ptr: addr, ty: vty.clone() });
+                Val::Local(d)
+            }
+            VecEmit::Bin { op, l, r } => {
+                let lv = self.emit_vec_node(l, j, elem, vty, esz)?;
+                let rv = self.emit_vec_node(r, j, elem, vty, esz)?;
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: *op, lhs: lv, rhs: rv, ty: vty.clone() });
+                Val::Local(d)
+            }
+        })
+    }
+
+    /// Address of `arr[offset + j]` as a `*elem` pointer (offset invariant, j the i64
+    /// loop index).
+    fn vec_elem_addr(&mut self, arr: &str, offset: &Option<Expr>, j: &Val, elem: &Type, esz: u64) -> Result<Val> {
+        let base = self.lower_expr(&Expr::new(crate::ast::ExprKind::Ident(arr.to_string()), crate::lexer::Span::default()))?;
+        let idx = match offset {
+            None => j.clone(),
+            Some(e) => {
+                let ov = self.lower_expr(e)?;
+                let ov = self.coerce(ov, &Type::i64())?;
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Add, lhs: ov, rhs: j.clone(), ty: Type::i64() });
+                Val::Local(d)
+            }
+        };
+        let d = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: d, base, index: idx, elem_size: esz, result_ty: Type::ptr(elem.clone()) });
+        Ok(Val::Local(d))
+    }
+
+    /// Runtime "no overlap" test for the vectorizer's alias guard: true iff the
+    /// write region `W[woff + LO .. woff + HI)` overlaps NO read array's region.
+    /// Returns `None` when there are no distinct read arrays (always safe → vectorize
+    /// unconditionally). Regions are compared as unsigned addresses.
+    fn emit_no_alias(&mut self, warr: &str, woff: &Option<Expr>,
+        reads: &[(String, Option<Expr>)], lo: &Val, hi: &Val, elem: &Type, esz: u64) -> Result<Option<Val>> {
+        if reads.is_empty() { return Ok(None); }
+        let i64t = Type::i64();
+        let addr = |s: &mut Self, arr: &str, off: &Option<Expr>, j: &Val| -> Result<Val> {
+            let a = s.vec_elem_addr(arr, off, j, elem, esz)?;
+            s.coerce(a, &i64t)
+        };
+        let ws = addr(self, warr, woff, lo)?;
+        let we = addr(self, warr, woff, hi)?;
+        let mut acc: Option<Val> = None;
+        for (r, roff) in reads {
+            let rs = addr(self, r, roff, lo)?;
+            let re = addr(self, r, roff, hi)?;
+            // overlap = (ws < re) && (rs < we)  → no_overlap = !overlap
+            let a = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: a, op: CmpOp::IULt, lhs: ws.clone(), rhs: re, ty: i64t.clone() });
+            let b = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: b, op: CmpOp::IULt, lhs: rs, rhs: we.clone(), ty: i64t.clone() });
+            let ov = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: ov, op: BinOp::And, lhs: Val::Local(a), rhs: Val::Local(b), ty: Type::Bool });
+            let no_ov = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: no_ov, op: CmpOp::IEq, lhs: Val::Local(ov), rhs: Constant::int(0), ty: Type::Bool });
+            acc = Some(match acc {
+                None => Val::Local(no_ov),
+                Some(prev) => {
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::BinOp { dest: d, op: BinOp::And, lhs: prev, rhs: Val::Local(no_ov), ty: Type::Bool });
+                    Val::Local(d)
+                }
+            });
+        }
+        Ok(acc)
+    }
+
+    /// Load a value of type `ty` from `ptr` (a small helper for the vectorizer).
+    fn emit_load(&mut self, ptr: &Val, ty: &Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Load { dest: d, ptr: ptr.clone(), ty: ty.clone() });
+        Val::Local(d)
+    }
+
+    /// Build a vector with every lane equal to `scalar` (a broadcast/splat), via a
+    /// stack slot; the caller hoists this out of the hot loop.
+    fn emit_splat(&mut self, scalar: Val, elem: &Type, lanes: usize) -> Val {
+        let vty = Type::Array { elem: Box::new(elem.clone()), len: lanes };
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: vty.clone(), align: None });
+        let esz = elem.size_of(self.ptr_size()) as i64;
+        for i in 0..lanes {
+            let addr = if i == 0 { Val::Local(slot) } else {
+                let a = self.alloc_val();
+                self.push_instr(Instr::PtrOffset { dest: a, base: Val::Local(slot), offset: Constant::int(i as i64 * esz) });
+                Val::Local(a)
+            };
+            self.push_instr(Instr::Store { val: scalar.clone(), ptr: addr });
+        }
+        let v = self.alloc_val();
+        self.push_instr(Instr::Load { dest: v, ptr: Val::Local(slot), ty: vty });
+        Val::Local(v)
     }
 
     /// Emit one hoisted fat-pointer bounds check `arr[idx]` (used by loop-BCE).
@@ -4132,6 +4569,44 @@ fn simple_expr_idents(e: &Expr) -> Option<std::collections::HashSet<String>> {
 ///   `Some(None)`     — exactly `ivar`;
 ///   `Some(Some(X))`  — `X + ivar` or `ivar + X`, where `X` does not mention `ivar`;
 ///   `None`           — any other shape (not eligible for hoisting).
+/// A recognized element of a vectorizable RHS (see `try_vectorize`).
+enum VecNode {
+    /// A loop-invariant scalar, broadcast to every lane.
+    Splat(Expr),
+    /// `arr[offset + j]` (`offset == None` means `arr[j]`), a unit-stride load.
+    Load { arr: String, offset: Option<Expr> },
+    /// An element-wise binary op over two vectorizable sub-expressions.
+    Bin { op: BinOp, l: Box<VecNode>, r: Box<VecNode> },
+}
+
+/// A `VecNode` whose broadcasts have been lowered to concrete vector values
+/// (hoisted out of the loop).
+enum VecEmit {
+    Prebuilt(Val),
+    Load { arr: String, offset: Option<Expr> },
+    Bin { op: BinOp, l: Box<VecEmit>, r: Box<VecEmit> },
+}
+
+/// Map a source binary operator to the IR vector op the back end lowers to real
+/// SIMD for element type `elem`, or `None` if there is no single packed form (int
+/// div/rem, per-lane shifts, comparisons, packed byte multiply). Mirrors the fast
+/// path in `lower_vector_binop`.
+fn vec_binop_for(op: crate::ast::BinOpKind, elem: &Type) -> Option<BinOp> {
+    use crate::ast::BinOpKind as B;
+    let is_float = elem.is_float();
+    Some(match op {
+        B::Add => if is_float { BinOp::FAdd } else { BinOp::Add },
+        B::Sub => if is_float { BinOp::FSub } else { BinOp::Sub },
+        B::Mul if is_float => BinOp::FMul,
+        B::Mul => match elem { Type::Int { bits, .. } if *bits >= 16 => BinOp::Mul, _ => return None },
+        B::Div if is_float => BinOp::FDiv,
+        B::BitAnd if !is_float => BinOp::And,
+        B::BitOr if !is_float => BinOp::Or,
+        B::BitXor if !is_float => BinOp::Xor,
+        _ => return None,
+    })
+}
+
 fn affine_x(idx: &Expr, ivar: &str) -> Option<Option<Expr>> {
     use crate::ast::{ExprKind as E, BinOpKind as B};
     // "e is invariant in ivar": simple AND does not name ivar. A non-simple e is

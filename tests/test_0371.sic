@@ -1,0 +1,15 @@
+// The auto-vectorizer must PRESERVE bounds safety: an out-of-bounds access in a
+// vectorized loop still aborts (the range's bounds check is hoisted before the
+// vector + remainder loops, like loop-BCE). Here `c` has 100 elements but the loop
+// writes 200, so it must trap — a controlled `__sic_trap` (exit 134), not silent
+// corruption. Aborts (exit 134).
+int main() {
+    i32 *c = new i32[100];
+    i32 *b = new i32[200];
+    defer del c;
+    defer del b;
+    for (i32 j = 0; j < 200; j++) b[j] = 1;
+    i32 s = 2;
+    for (i32 j = 0; j < 200; j++) c[j] += s * b[j];   // c overruns → must abort
+    return 0;                                          // unreachable
+}
