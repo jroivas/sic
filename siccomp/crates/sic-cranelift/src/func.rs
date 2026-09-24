@@ -216,18 +216,23 @@ pub fn compile_function(
     }
     // Cranelift type of a slot: a pointer is `ptr_ty`, any other scalar is its
     // `cl_type` (aggregates return None → not promotable).
-    let slot_clty = |t: &Type| if matches!(t, Type::Pointer(_)) { Some(ptr_ty) } else { cl_type(t, ptr_size) };
+    let slot_clty = |t: &Type| if matches!(t, Type::Pointer(_)) { Some(ptr_ty) }
+        else if let Some(vt) = vector_clty(t) { Some(vt) }
+        else { cl_type(t, ptr_size) };
     let mut promoted: HashMap<u32, (Variable, cir::Type)> = HashMap::new();
     for bb in &f.blocks {
         for instr in &bb.instrs {
             if let Instr::Alloca { dest, ty, .. } = instr {
                 if escaped.contains(&dest.0) { continue; }
                 // Aggregates (arrays/structs/unions) are memory objects, never a
-                // scalar register — and a SIMD-vector array slot is used directly
-                // as a Load/Store pointer, so it would slip past the escape check.
-                // `slot_clty` maps an array to a pointer type, which would wrongly
-                // look promotable, so exclude aggregates explicitly.
-                if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) { continue; }
+                // scalar register — EXCEPT a 128-bit SIMD-vector array, which we
+                // promote to a vector register (Variable) so chained vector ops
+                // (`vc + va*vb`) stay in XMM instead of round-tripping through the
+                // stack slot on every step. A vector slot that escapes (its address
+                // taken, MemCopy'd, or accessed lane-by-lane via PtrOffset) already
+                // failed the escape/consistency checks, so it stays in memory.
+                let is_simd_vec = vector_clty(ty).is_some();
+                if !is_simd_vec && matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) { continue; }
                 let ct = match slot_clty(ty) { Some(t) => t, None => continue };
                 // Require every load of this slot to read exactly the slot type — a
                 // load of a different width/category is a type-pun that relies on the

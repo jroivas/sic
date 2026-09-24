@@ -4754,6 +4754,19 @@ impl<'m> FuncCtx<'m> {
             _ => false,
         };
         if aggregate_assign {
+            // A 128-bit SIMD-vector store (`*(v4si*)p = a + b`): move the whole
+            // vector with one load + store rather than a `memcpy`. The load reads
+            // the operator's result slot and the store writes the destination; both
+            // are full-vector, so mem2reg promotes the intermediates to XMM
+            // registers and the round-trip collapses to a single `movdqu` (a
+            // `memcpy` call per store otherwise wrecks SIMD-loop throughput).
+            if lv.ty.simd128().is_some() {
+                let src = self.lower_aggregate_ptr(rhs)?;
+                let v = self.alloc_val();
+                self.push_instr(Instr::Load { dest: v, ptr: src, ty: lv.ty.clone() });
+                self.push_instr(Instr::Store { val: Val::Local(v), ptr: lv.ptr.clone() });
+                return Ok(lv.ptr);
+            }
             // Copy the whole object, whether the RHS is an lvalue or an aggregate
             // rvalue (e.g. a compound literal `(T){...}`, a struct return, or a
             // vector produced by an element-wise operator/intrinsic).
