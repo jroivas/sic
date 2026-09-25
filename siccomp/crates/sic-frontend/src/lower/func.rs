@@ -2817,18 +2817,18 @@ impl<'m> FuncCtx<'m> {
     ) -> Result<()> {
         self.enter_scope();
 
-        // sic auto-vectorization (see `try_vectorize`): a unit-stride counting loop
-        // whose body is one element-wise array assignment is rewritten to process a
-        // SIMD vector of elements per step (with a scalar remainder), emitting the
-        // vector ops that the back end lowers to real SIMD. Runs inside the loop's
-        // scope so it can declare the induction variable there; on success it emits
-        // the whole loop and we exit the scope and return.
-        if self.is_sic() {
-            if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
-                if self.try_vectorize(fi, c, p, body)? {
-                    self.exit_scope();
-                    return Ok(());
-                }
+        // Auto-vectorization (see `try_vectorize`): a unit-stride counting loop whose
+        // body is one element-wise array assignment is rewritten to process a SIMD
+        // vector of elements per step (with a scalar remainder), emitting the vector
+        // ops that the back end lowers to real SIMD. Runs for BOTH SIC and C sources
+        // (matmul's C build should vectorize too): it is language-neutral and sound
+        // (fat pointers keep their hoisted bounds check; a runtime alias guard falls
+        // back to the scalar path). Runs inside the loop's scope so it can declare
+        // the induction variable there; on success it emits the whole loop.
+        if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
+            if self.try_vectorize(fi, c, p, body)? {
+                self.exit_scope();
+                return Ok(());
             }
         }
 
@@ -3038,6 +3038,19 @@ impl<'m> FuncCtx<'m> {
     fn try_vectorize(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
         use crate::ast::{ExprKind as E, BinOpKind as B};
 
+        // Cheap structural pre-filter (runs on every loop): only a body that is a
+        // single `arr[...] op= …` assignment can vectorize. This bails immediately
+        // for multi-statement bodies and nested loops (e.g. matmul's outer loops)
+        // before the pricier header/invariance analysis below.
+        let single_index_assign = |s: &Stmt| matches!(s,
+            Stmt::Expr(e, _) if matches!(&e.kind,
+                E::Assign { lhs, .. } if matches!(lhs.kind, E::Index { .. })));
+        let body_ok = match body {
+            Stmt::Block(stmts, _) if stmts.len() == 1 => single_index_assign(&stmts[0]),
+            other => single_index_assign(other),
+        };
+        if !body_ok { return Ok(false); }
+
         // -- induction variable + init value LO (must be a fresh `for (T j = LO; …)`) --
         let (ivar, jdecl, lo) = match init {
             ForInit::Decl(Decl::Var { declarators, .. }) if declarators.len() == 1 => {
@@ -3086,7 +3099,7 @@ impl<'m> FuncCtx<'m> {
         // LHS = W[Widx], W a fat array, Widx unit-stride.
         let (warr, woff) = match &lhs.kind {
             E::Index { base, index } => match &base.kind {
-                E::Ident(w) if self.fat_locals.contains(w) => match affine_x(index, &ivar) {
+                E::Ident(w) if self.is_vec_array(w) => match affine_x(index, &ivar) {
                     Some(off) => (w.clone(), off),
                     None => return Ok(false),
                 },
@@ -3158,6 +3171,10 @@ impl<'m> FuncCtx<'m> {
         let maxi = if inclusive { hi.clone() }
                    else { Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(hi.clone()), rhs: Box::new(one) }, cond.span.clone()) };
         for (arr, off) in &accesses {
+            // Only fat pointers (`new[]`/`@`) carry a size header to check; a raw
+            // pointer (a `malloc`'d C array, or a plain pointer local) is unchecked
+            // in the scalar loop too, so vectorizing it adds no bounds obligation.
+            if !self.fat_locals.contains(arr) { continue; }
             let (lo_idx, hi_idx) = match off {
                 None => (lo.clone(), maxi.clone()),
                 Some(xe) => (
@@ -3283,7 +3300,7 @@ impl<'m> FuncCtx<'m> {
             // unit-stride load `R[b + j]` from a same-element-type fat array
             E::Index { base, index } => {
                 let arr = match &base.kind { E::Ident(a) => a.clone(), _ => return None };
-                if !self.fat_locals.contains(&arr) { return None; }
+                if !self.is_vec_array(&arr) { return None; }
                 let at = self.infer_expr_type(base).ok()?;
                 let ae = match &at {
                     Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
@@ -3408,6 +3425,21 @@ impl<'m> FuncCtx<'m> {
             });
         }
         Ok(acc)
+    }
+
+    /// True if `name` is a local array base the vectorizer can index directly: a
+    /// pointer or array whose element is a plain scalar (int/float). This excludes
+    /// SIC's boxed containers (`list`/`dict`/`set`/`string`/…), whose pointee is a
+    /// runtime marker struct, not a scalar — so `l[j]` is never treated as a raw
+    /// array. Works for both fat `new[]` pointers (bounds-checked) and raw pointers
+    /// (`malloc`, C mode — unchecked, like the scalar loop).
+    fn is_vec_array(&self, name: &str) -> bool {
+        let scalar = |t: &Type| t.is_int() || t.is_float();
+        matches!(self.lookup(name), Some(LookupResult::Local(t, _)) if match &t {
+            Type::Pointer(inner) => scalar(inner),
+            Type::Array { elem, .. } => scalar(elem),
+            _ => false,
+        })
     }
 
     /// Load a value of type `ty` from `ptr` (a small helper for the vectorizer).
