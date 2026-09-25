@@ -3135,14 +3135,18 @@ impl<'m> FuncCtx<'m> {
             Some(p) => p,
             None => return Ok(false),
         };
-        // Aliasing: each array accessed at a single affine offset (else a store could
-        // feed a differently-offset load within a vector window).
-        let mut by_arr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        // Aliasing (static): the WRITE array must be accessed at exactly one offset
+        // — a store must never feed a differently-offset load of the SAME array (a
+        // loop-carried dependence like `a[i] = a[i-1] + …`). A READ-ONLY array (never
+        // the write target) may appear at several offsets — a stencil `b[i] =
+        // a[i-1]+a[i]+a[i+1]` reads `a` at three offsets but never writes it, so the
+        // loads are order-independent; the runtime alias guard below still handles
+        // the case where such an array actually aliases the write array.
+        let woff_key = woff.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string());
         for (arr, off) in &accesses {
-            let key = off.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string());
-            match by_arr.get(arr) {
-                Some(prev) if prev != &key => return Ok(false),
-                _ => { by_arr.insert(arr.clone(), key); }
+            if arr == &warr {
+                let key = off.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string());
+                if key != woff_key { return Ok(false); }
             }
         }
 
@@ -3214,10 +3218,17 @@ impl<'m> FuncCtx<'m> {
         // then covers all of `[LO, HI)`, since `j` is still `LO`) run — preserving
         // the exact scalar semantics. For genuinely distinct arrays this is always
         // false, so the vector path is taken.
+        // Every distinct read region (by name AND offset) is checked against the
+        // write region — a multi-offset read array (a stencil's `a`) contributes one
+        // region per offset. The write array is single-offset (== the write region),
+        // so it is excluded.
         let esz = et.size_of(self.ptr_size());
         let mut read_arrays: Vec<(String, Option<Expr>)> = Vec::new();
         for (arr, off) in &accesses {
-            if arr != &warr && !read_arrays.iter().any(|(n, _)| n == arr) {
+            if arr == &warr { continue; }
+            let k = off.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string());
+            if !read_arrays.iter().any(|(n, o)| n == arr
+                && o.as_ref().map(bce_index_key).unwrap_or_else(|| "0".to_string()) == k) {
                 read_arrays.push((arr.clone(), off.clone()));
             }
         }
@@ -3306,6 +3317,7 @@ impl<'m> FuncCtx<'m> {
                 let at = self.infer_expr_type(base).ok()?;
                 let ae = match &at {
                     Type::Pointer(t) => super::types::resolve_aggregate(t, &self.lowerer.struct_types),
+                    Type::Array { elem, .. } => (**elem).clone(),  // a file-scope array base
                     _ => return None,
                 };
                 if &ae != elem { return None; }
@@ -3320,7 +3332,8 @@ impl<'m> FuncCtx<'m> {
                 let r = self.analyze_vec_expr(rhs, ivar, elem, accesses)?;
                 Some(VecNode::Bin { op: vop, l: Box::new(l), r: Box::new(r) })
             }
-            // otherwise: a loop-invariant scalar, broadcast to every lane
+            // otherwise: a loop-invariant scalar, broadcast to every lane. It is
+            // lowered and coerced to the vector's element type in `prebuild_splats`.
             _ => {
                 let ids = simple_expr_idents(e)?;      // pure (no calls / side effects)
                 if ids.contains(ivar) { return None; } // depends on j but not a load → bail
@@ -3437,11 +3450,18 @@ impl<'m> FuncCtx<'m> {
     /// (`malloc`, C mode — unchecked, like the scalar loop).
     fn is_vec_array(&self, name: &str) -> bool {
         let scalar = |t: &Type| t.is_int() || t.is_float();
-        matches!(self.lookup(name), Some(LookupResult::Local(t, _)) if match &t {
+        let ok = |t: &Type| match t {
             Type::Pointer(inner) => scalar(inner),
             Type::Array { elem, .. } => scalar(elem),
             _ => false,
-        })
+        };
+        match self.lookup(name) {
+            Some(LookupResult::Local(t, _)) => ok(&t),
+            // A file-scope array/pointer (`static double a[N]`) is a valid base too;
+            // its element type is one indirection in.
+            Some(LookupResult::Global(t, _)) => ok(&t),
+            _ => false,
+        }
     }
 
     /// Load a value of type `ty` from `ptr` (a small helper for the vectorizer).
@@ -4586,7 +4606,7 @@ fn simple_expr_idents(e: &Expr) -> Option<std::collections::HashSet<String>> {
     use crate::ast::{ExprKind as E, UnOpKind as U, BinOpKind as B};
     fn go(e: &Expr, out: &mut std::collections::HashSet<String>) -> bool {
         match &e.kind {
-            E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) => true,
+            E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) | E::FloatLit(_) | E::DecimalLit(_) => true,
             E::Ident(n) => { out.insert(n.clone()); true }
             E::BinOp { op, lhs, rhs } => matches!(op,
                     B::Add|B::Sub|B::Mul|B::Div|B::Rem|B::BitAnd|B::BitOr|B::BitXor|B::Shl|B::Shr)
@@ -4654,6 +4674,16 @@ fn affine_x(idx: &Expr, ivar: &str) -> Option<Option<Expr>> {
             if r_i && invariant(lhs) { Some(Some((**lhs).clone())) }
             else if l_i && invariant(rhs) { Some(Some((**rhs).clone())) }
             else { None }
+        }
+        // `i - C` (C invariant): a unit-stride access at offset `-C`. Needed for
+        // stencils like `a[i-1]`. (`C - i` is a negative stride, not handled.)
+        E::BinOp { op: B::Sub, lhs, rhs }
+            if matches!(&lhs.kind, E::Ident(n) if n == ivar) && invariant(rhs) =>
+        {
+            Some(Some(Expr::new(
+                crate::ast::ExprKind::Unary { op: crate::ast::UnOpKind::Neg, expr: Box::new((**rhs).clone()) },
+                rhs.span.clone(),
+            )))
         }
         _ => None,
     }
