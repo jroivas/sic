@@ -658,7 +658,15 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Slice { base, lo, hi } => self.lower_slice(base, lo.as_deref(), hi.as_deref()),
 
-            ExprKind::New { ty, args, array } => self.lower_new(ty, args, *array),
+            ExprKind::New { ty, args, array } => {
+                let v = self.lower_new(ty, args, *array)?;
+                // sic container producer (sic.md §"List"/§"Dict"): `new list/dict/set`
+                // owns one reference. Record it so an untaken producer (`new list;`
+                // discarded, or `f(new list)`) is released at statement end; a binding
+                // that keeps it transfers ownership out via `take_container_temp`.
+                self.record_container_producer(&v);
+                Ok(v)
+            }
 
             ExprKind::Ref { expr, .. } => self.lower_ref(expr),
 
@@ -685,6 +693,15 @@ impl<'m> FuncCtx<'m> {
                 // `return` retains it first so it escapes to the caller.
                 if self.is_sic() && super::types::is_closure(&self.val_type(&v)) {
                     self.register_closure_release(v.clone())?;
+                }
+                // sic container producer (sic.md §"List"/§"Dict"): a call to a
+                // container-returning FUNCTION return-retains (func.rs return path), so
+                // its result owns one reference — record it for statement-end release
+                // unless a binding transfers it out. Method-syntax calls (`c.add(x)`,
+                // `d.keys`) are excluded: they return void, an alias for chaining, or
+                // self-register elsewhere (`.keys`/`.values` use `list_temps`).
+                if !matches!(&func.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. }) {
+                    self.record_container_producer(&v);
                 }
                 Ok(v)
             }
@@ -1984,6 +2001,18 @@ impl<'m> FuncCtx<'m> {
             }
         }
         false
+    }
+
+    /// Record a freshly-produced container handle (a `new list/dict/set` or the
+    /// return-retained result of a container-returning call) as a statement temp,
+    /// so its owned reference is released at statement end unless a binding transfers
+    /// it out via `take_container_temp`. A no-op outside sic or for a non-container.
+    pub(crate) fn record_container_producer(&mut self, v: &Val) {
+        if !self.is_sic() { return; }
+        let t = self.val_type(v);
+        if super::types::is_list(&t) || super::types::is_dict(&t) || super::types::is_set(&t) {
+            self.container_temps.push((v.clone(), t));
+        }
     }
 
     /// A binding is taking ownership of a materialized `.keys`/`.values` list: drop
@@ -4735,7 +4764,14 @@ impl<'m> FuncCtx<'m> {
             && (super::types::is_list(&lv.ty) || super::types::is_dict(&lv.ty) || super::types::is_set(&lv.ty)) {
             let transfers = matches!(&rhs.kind, ExprKind::New { .. } | ExprKind::Call { .. });
             let newv = self.lower_expr(rhs)?;
-            if !transfers { self.container_retain(newv.clone(), &lv.ty)?; }
+            if !transfers {
+                self.container_retain(newv.clone(), &lv.ty)?;
+            } else {
+                // A fresh producer transfers its owned reference into this slot: take
+                // it out of the statement temps so it isn't also released at statement
+                // end (a no-op for a method result that was never recorded).
+                self.take_container_temp(&newv);
+            }
             let old = self.alloc_val();
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: Type::void_ptr() });
             self.container_release(Val::Local(old), &lv.ty)?;
@@ -5171,11 +5207,20 @@ impl<'m> FuncCtx<'m> {
         // creates within its own block (unless the result itself is a bigint/fixed
         // — then the arm's value IS the result and must survive to the merge).
         let free_arm_temps = !(super::types::is_bigint(&ty) || super::types::is_fixed(&ty));
+        // sic container result (sic.md §"List"/§"Dict"): each arm's value escapes the
+        // arm as the ternary's value, so RETAIN the selected handle before the arm
+        // flush releases any producer created there — the net is one owned reference
+        // whichever arm ran (a producer keeps its `+1`, an alias gains one). The
+        // merged result is then a producer temp itself: released at statement end
+        // unless a binding takes it (the local-init / reassignment retain paths).
+        let is_container = self.is_sic() && (super::types::is_list(&ty)
+            || super::types::is_dict(&ty) || super::types::is_set(&ty));
 
         self.switch_to_block(then_bb);
         let tmark = self.temp_mark();
         let tv = self.lower_expr(then)?;
         let tv = self.coerce(tv, &ty)?;
+        if is_container { self.container_retain(tv.clone(), &ty)?; }
         if free_arm_temps { self.flush_temps_from(tmark); }
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
@@ -5184,6 +5229,7 @@ impl<'m> FuncCtx<'m> {
         let emark = self.temp_mark();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
+        if is_container { self.container_retain(ev.clone(), &ty)?; }
         if free_arm_temps { self.flush_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
@@ -5191,6 +5237,10 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(merge_bb);
         let dest = self.alloc_val();
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
+        if is_container {
+            self.val_types.insert(dest.0, ty.clone());
+            self.container_temps.push((Val::Local(dest), ty.clone()));
+        }
         Ok(Val::Local(dest))
     }
 
@@ -5229,20 +5279,34 @@ impl<'m> FuncCtx<'m> {
 
         self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
 
+        // sic container result (sic.md §"List"/§"Dict"): as with the ternary, retain
+        // the selected handle so the ternary yields one owned reference, and free any
+        // producer created in the conditionally-evaluated `else` arm where it dominates.
+        let is_container = self.is_sic() && (super::types::is_list(&ty)
+            || super::types::is_dict(&ty) || super::types::is_set(&ty));
+
         self.switch_to_block(then_bb);
         let tv = self.coerce(cond_val, &ty)?;
+        if is_container { self.container_retain(tv.clone(), &ty)?; }
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(else_bb);
+        let emark = self.temp_mark();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
+        if is_container { self.container_retain(ev.clone(), &ty)?; }
+        if is_container { self.flush_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(merge_bb);
         let dest = self.alloc_val();
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: ty.clone() });
+        if is_container {
+            self.val_types.insert(dest.0, ty.clone());
+            self.container_temps.push((Val::Local(dest), ty.clone()));
+        }
         Ok(Val::Local(dest))
     }
 

@@ -39,6 +39,15 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
             }
         }
+        // sic container producers (sic.md §"List"/§"Dict"): release each `new`/call
+        // container whose owned reference no binding took over (`mk();`, `f(mk())`,
+        // `l.add(mk())` — the last retained its own ref, so this frees the producer's).
+        if !self.container_temps.is_empty() {
+            let cs = std::mem::take(&mut self.container_temps);
+            for (h, ty) in cs {
+                let _ = self.container_release(h, &ty);
+            }
+        }
         if self.bigint_temps.is_empty() { return; }
         let temps = std::mem::take(&mut self.bigint_temps);
         for t in temps {
@@ -77,13 +86,14 @@ impl<'m> FuncCtx<'m> {
     /// `.values` list temps, and per-call `va_dict` temps), for freeing a
     /// conditionally-evaluated sub-expression's temps where they were created (they
     /// don't dominate the statement-end flush — e.g. a call in an `if` condition).
-    pub(crate) fn temp_mark(&self) -> (usize, usize, usize) {
-        (self.bigint_temps.len(), self.list_temps.len(), self.va_dict_temps.len())
+    pub(crate) fn temp_mark(&self) -> (usize, usize, usize, usize) {
+        (self.bigint_temps.len(), self.list_temps.len(), self.va_dict_temps.len(),
+         self.container_temps.len())
     }
 
-    /// Free every bigint/fixed, materialized-`list`, and `va_dict` temp recorded
-    /// since `mark`.
-    pub(crate) fn flush_temps_from(&mut self, mark: (usize, usize, usize)) {
+    /// Free every bigint/fixed, materialized-`list`, `va_dict`, and container-producer
+    /// temp recorded since `mark`.
+    pub(crate) fn flush_temps_from(&mut self, mark: (usize, usize, usize, usize)) {
         self.flush_bigint_temps_from(mark.0);
         if self.list_temps.len() > mark.1 {
             let ls: Vec<Val> = self.list_temps.split_off(mark.1);
@@ -98,6 +108,25 @@ impl<'m> FuncCtx<'m> {
             for h in vds {
                 self.push_instr(Instr::Call { dest: None, func: free, args: vec![h], ret_ty: Type::Void });
             }
+        }
+        // sic container producers (sic.md §"List"/§"Dict"): free — with the right
+        // per-type runtime — each producer created in a conditionally-evaluated
+        // sub-expression (a ternary arm, a `&&`/`||` right operand) since `mark`,
+        // where it dominates (the statement-end flush would not).
+        if self.container_temps.len() > mark.3 {
+            let cs: Vec<(Val, Type)> = self.container_temps.split_off(mark.3);
+            for (h, ty) in cs {
+                let _ = self.container_release(h, &ty);
+            }
+        }
+    }
+
+    /// A binding is transferring ownership of a freshly-produced container out of the
+    /// statement temps (into a local or a reassignment slot): drop it from
+    /// `container_temps` so it is not also released at statement end.
+    pub(crate) fn take_container_temp(&mut self, v: &Val) {
+        if let Some(pos) = self.container_temps.iter().position(|(t, _)| t == v) {
+            self.container_temps.remove(pos);
         }
     }
 

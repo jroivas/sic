@@ -280,6 +280,16 @@ pub struct FuncCtx<'m> {
     /// handles, freed (`__sic_list_free`) at the end of the statement unless the
     /// value flows into a binding that takes ownership (`take_list_temp`).
     pub list_temps: Vec<Val>,
+    /// sic freshly-produced `list`/`dict`/`set` handles (sic.md §"List"/§"Dict"):
+    /// a `new` container or a call to a container-returning function owns one
+    /// reference (the call convention return-retains). Recorded here and released
+    /// (`container_release`, type-aware) at the end of the statement — unless a
+    /// binding transfers ownership out via `take_container_temp`. This balances the
+    /// producer's `+1` for a value that is otherwise dropped (`mk();`), borrowed
+    /// (`f(mk())`), or shared into a container (`l.add(mk())` retains its own ref),
+    /// closing the leaks those cases would otherwise cause. Paired with the type so
+    /// a list and a dict each free with the right runtime.
+    pub container_temps: Vec<(Val, Type)>,
     /// sic `unsafe { }` nesting depth (sic.md §"Integer overflow"): when > 0,
     /// integer overflow and `÷0` trap instead of wrapping / `→0`.
     pub unsafe_depth: u32,
@@ -343,6 +353,7 @@ impl<'m> FuncCtx<'m> {
             deferred_tuples: std::collections::HashSet::new(),
             bigint_temps: Vec::new(),
             list_temps: Vec::new(),
+            container_temps: Vec::new(),
             async_elem: None,
             va_dict_temps: Vec::new(),
             unsafe_depth: 0,
@@ -2063,12 +2074,41 @@ impl<'m> FuncCtx<'m> {
                     // of the statement temps, and free it at scope exit.
                     let takes_projection = self.is_sic() && super::types::is_list(&ty)
                         && matches!(&d.init, Some(Initializer::Expr(e)) if self.is_container_projection(e));
+                    // sic container local from a fresh producer (`list x = new list;` /
+                    // `dict d = makeDict();`, sic.md §"List"/§"Dict"): the producer's
+                    // owned reference (recorded in `container_temps` by
+                    // `record_container_producer`) TRANSFERS to the local. Take it out
+                    // of the statement temps so it isn't also released at statement end,
+                    // and free it at scope exit. Mirrors exactly what registered a
+                    // producer: a `new` container, or a call whose callee is a plain
+                    // function (not method syntax — a `c.method()` result may be an
+                    // alias, so it stays on the retain path below).
+                    let takes_producer = self.is_sic()
+                        && (super::types::is_list(&ty) || super::types::is_dict(&ty) || super::types::is_set(&ty))
+                        && !matches!(d.ty.ty, AstType::Weak(_))
+                        && !takes_projection
+                        && matches!(&d.init, Some(Initializer::Expr(e)) if matches!(&e.kind,
+                            ExprKind::New { .. })
+                            || matches!(&e.kind, ExprKind::Call { func, .. }
+                                if !matches!(func.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. })));
                     if takes_projection {
                         if let Some(Initializer::Expr(e)) = &d.init {
                             let h = self.lower_expr(e)?;
                             self.take_list_temp(&h);
                             self.push_instr(Instr::Store { ptr: Val::Local(vid), val: h });
                             self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                        }
+                    } else if takes_producer {
+                        if let Some(Initializer::Expr(e)) = &d.init {
+                            let h = self.lower_expr(e)?;
+                            self.take_container_temp(&h);
+                            let stored = self.coerce(h, &Type::void_ptr())?;
+                            self.push_instr(Instr::Store { ptr: Val::Local(vid), val: stored });
+                            if super::types::is_list(&ty) {
+                                self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(vid) });
+                            } else {
+                                self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(vid) });
+                            }
                         }
                     } else if let Some(init) = &d.init {
                         // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
@@ -2124,7 +2164,7 @@ impl<'m> FuncCtx<'m> {
                     // of the source (else a later reassignment would release a handle it
                     // never owned). A weak `.get` upgrade and a `.keys`/`.values`
                     // projection register their own release, so they are skipped here.
-                    if self.is_sic() && !matches!(d.ty.ty, AstType::Weak(_)) {
+                    if self.is_sic() && !matches!(d.ty.ty, AstType::Weak(_)) && !takes_producer {
                         let is_container = super::types::is_list(&ty)
                             || super::types::is_dict(&ty) || super::types::is_set(&ty);
                         if is_container {
@@ -2135,6 +2175,12 @@ impl<'m> FuncCtx<'m> {
                                         if matches!(name.as_str(), "get" | "keys" | "values") => (false, false),
                                     ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
                                     | ExprKind::Index { .. } => (true, true),
+                                    // A container ternary/elvis yields an owned reference
+                                    // (its arms retain the selected handle) recorded as a
+                                    // producer temp; retain it into the local and free it
+                                    // at scope exit, so the statement-end release of that
+                                    // temp leaves the local its own reference.
+                                    ExprKind::Ternary { .. } | ExprKind::Elvis { .. } => (true, true),
                                     _ => (false, false),
                                 };
                                 if needs_retain {

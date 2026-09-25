@@ -1,0 +1,85 @@
+// Container-producer ownership (sic.md §"List"/§"Dict"): a `new list/dict/set` or a
+// call to a container-returning function owns one reference (the return-retain
+// convention). That reference is released at statement end unless a binding takes it
+// over — so a producer that is DISCARDED (`mk();`), passed as a BORROWED argument
+// (`f(mk())`), stored into a container (`l.add(mk())` retains its own reference), or
+// selected by a container TERNARY is freed exactly once (no leak, no double free /
+// use-after-free). A producer BOUND to a local, REASSIGNED into a slot, or RETURNED
+// still transfers its reference and is freed once at scope exit. This test checks the
+// VALUES stay correct across all those shapes (a double-free/UAF would crash or
+// corrupt); leak-freeness (malloc==free) is verified separately under valgrind.
+// Returns 42.
+#include <stdio.h>
+
+list<int> mk(int n) {
+    list<int> l = new list<int>;
+    for (int i = 0; i < n; i++) l.add(i);   // 0,1,..,n-1
+    return l;                                // return-retained
+}
+
+int sumList(list<int> l) {                   // borrows its argument (does not free it)
+    int s = 0;
+    for (int i = 0; i < l.size; i++) s += l[i];
+    return s;
+}
+
+int main() {
+    int cond = 1;
+
+    // A) producer as a borrowed argument
+    if (sumList(mk(5)) != 10) return 1;      // 0+1+2+3+4
+
+    // B) producer discarded as an expression statement (must not leak, must not crash)
+    mk(3);
+
+    // C) producer bound to a local, then read
+    list<int> x = mk(4);
+    if (sumList(x) != 6) return 2;           // 0+1+2+3
+
+    // D) producer stored into a container — `add` retains its own reference, so the
+    //    producer's reference is released at statement end without freeing the element
+    list<list<int>> ll = new list<list<int>>;
+    ll.add(mk(3));
+    if (sumList(ll[0]) != 3) return 3;        // 0+1+2
+
+    // E) producer reassigned into a slot (releases the old handle, transfers the new)
+    list<int> y = new list<int>;
+    y = mk(2);
+    if (sumList(y) != 1) return 4;            // 0+1
+
+    // F) container ternary bound to a local (both arms are fresh producers)
+    list<int> z = cond ? mk(3) : mk(7);
+    if (sumList(z) != 3) return 5;            // picks mk(3)
+
+    // G) container ternary as a borrowed argument
+    if (sumList(cond ? mk(6) : mk(1)) != 15) return 6;   // picks mk(6): 0+..+5
+
+    // H) container ternary mixing a producer and an ALIAS — the alias must survive
+    //    (its retained reference is balanced, not consumed)
+    list<int> base = mk(4);
+    list<int> m = cond ? base : mk(9);       // picks `base`
+    if (sumList(m) != 6) return 7;           // 0+1+2+3
+    if (sumList(base) != 6) return 8;        // base still valid afterward
+
+    // I) a producer created and dropped every loop iteration must not accumulate
+    int total = 0;
+    for (int i = 0; i < 100; i++) total += sumList(mk(3));   // 3 each
+    if (total != 300) return 9;
+
+    // J) `new dict`/`new set` producers (type-aware release): discarded, bound,
+    //    ternary, and borrowed — exercised inline (a dict/set need not be returned).
+    new dict<int,int>;                       // discarded
+    dict<int,int> d = new dict<int,int>;
+    d[1] = 10; d[2] = 20;
+    if (d.size != 2) return 10;
+    dict<int,int> d2 = cond ? new dict<int,int> : new dict<int,int>;
+    d2[9] = 1;
+    if (d2.size != 1) return 11;
+    set<int> s = new set<int>;
+    s.add(3); s.add(4); s.add(3);            // duplicate ignored
+    if (s.size != 2) return 12;
+    set<int> s2 = cond ? new set<int> : new set<int>;
+    if (s2.size != 0) return 13;
+
+    return 42;
+}
