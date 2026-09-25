@@ -17,6 +17,7 @@ pub mod pass;
 pub mod fold;
 pub mod algebraic;
 pub mod dce;
+pub mod tree_rec;
 
 pub use pass::{IrPass, IrPassManager};
 
@@ -26,6 +27,7 @@ pub fn run_ir_passes(module: &mut Module, cfg: &PassConfig) {
     if cfg.is_enabled("ir-fold") { pm.add(Box::new(fold::IrFold::new())); }
     if cfg.is_enabled("algebraic") { pm.add(Box::new(algebraic::Algebraic::new())); }
     if cfg.is_enabled("dce") { pm.add(Box::new(dce::Dce::new())); }
+    if cfg.is_enabled("tree-rec") { pm.add(Box::new(tree_rec::TreeRec::new())); }
     pm.run(module);
 }
 
