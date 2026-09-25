@@ -189,12 +189,13 @@ fn transform_function(fi: usize, m: &mut Module) -> bool {
                 continue;
             }
 
-            let a = sub_amounts[0];
-            let b_val = sub_amounts[1];
-
-            // Check that one is (k) and the other is (k+1) for some k
-            // For fib, a=1, b=2
-            if !(a + 1 == b_val || b_val + 1 == a) {
+            // The rewrite below hardcodes the Fibonacci recurrence (accumulate
+            // `f(n-1)`, step `n -= 2`), so the two calls must be EXACTLY `f(n-1)`
+            // and `f(n-2)`. A different consecutive pair (e.g. `f(n-2)+f(n-3)`)
+            // has a different telescoping and must NOT be transformed this way.
+            let mut amts = sub_amounts.clone();
+            amts.sort();
+            if amts != [1, 2] {
                 continue;
             }
 
@@ -222,10 +223,21 @@ fn transform_function(fi: usize, m: &mut Module) -> bool {
         _ => return false,
     };
 
-    // We must also verify the base block returns the extended parameter.
-    // For the fib pattern we recognize, the base block loads from the param slot
-    // and returns it (possibly with SExt).
-    if !verify_base_block(&blocks[base_idx], &blocks[ret_idx]) {
+    // The rewrite hardcodes the base as `n < 2 ? n`, so verify EXACTLY that: the
+    // entry branches on `n < 2`, and the base block returns the parameter itself
+    // (`(ret_ty)n`). Without these checks a function with a different threshold
+    // (`n < 5 ? …`) or a different base value (`n < 2 ? 1 : …`) would be
+    // silently miscompiled.
+    let param_slot0 = match find_param_alloca_id(&blocks[entry_idx]) {
+        Some(id) => id, None => return false,
+    };
+    if !entry_cond_is_lt2(&blocks[entry_idx], param_slot0) {
+        return false;
+    }
+    let ret_slot = match ret_block_slot(&blocks[ret_idx]) {
+        Some(s) => s, None => return false,
+    };
+    if !base_returns_param(&blocks[base_idx], &blocks[ret_idx], param_slot0, ret_slot) {
         return false;
     }
 
@@ -496,27 +508,78 @@ fn find_base_block_target(entry: &BasicBlock) -> Option<BlockId> {
     }
 }
 
-/// Verify the base case block returns the parameter (possibly extended).
-/// The base block should: load from param slot, SExt to return type, store to ret slot,
-/// jump to ret block.
-fn verify_base_block(base: &BasicBlock, ret_block: &BasicBlock) -> bool {
-    // We just need to verify the base block returns something derived from the parameter.
-    // Conservatively check that it has a Load from an alloca and a SExt/Ret.
-    let has_param_load = base.instrs.iter().any(|ins| matches!(ins, Instr::Load { .. }));
-    let has_ext_or_ret = base.instrs.iter().any(|ins| matches!(ins, Instr::Cast { op: CastOp::SExt, .. }));
+/// Find the def of `id` within `block`.
+fn def_of(block: &BasicBlock, id: ValId) -> Option<&Instr> {
+    block.instrs.iter().find(|ins| ins.dest() == Some(id))
+}
 
-    // The terminator should jump to the ret block
-    let jumps_to_ret = match &base.terminator {
-        Terminator::Jump(id) => *id == ret_block.id,
-        _ => false,
+/// Verify the entry block branches on exactly `param < 2` (the fib base test),
+/// i.e. its `CondJump` condition traces back — through the usual `ine(zext(_),0)`
+/// wrapping — to `islt(load(param_slot), 2)`.
+fn entry_cond_is_lt2(entry: &BasicBlock, param_slot: ValId) -> bool {
+    let mut id = match &entry.terminator {
+        Terminator::CondJump { cond: Val::Local(id), .. } => *id,
+        _ => return false,
     };
+    // Optional `ine(x, 0)` then optional `zext(x)` wrapping the comparison.
+    if let Some(Instr::Cmp { op: CmpOp::INe, lhs: Val::Local(l), rhs: Val::Const(Constant::Int(0)), .. }) = def_of(entry, id) {
+        id = *l;
+    }
+    if let Some(Instr::Cast { op: CastOp::ZExt, val: Val::Local(l), .. }) = def_of(entry, id) {
+        id = *l;
+    }
+    // Must be `islt(load(param), 2)`.
+    if let Some(Instr::Cmp { op: CmpOp::ISLt, lhs: Val::Local(l), rhs: Val::Const(Constant::Int(2)), .. }) = def_of(entry, id) {
+        if let Some(Instr::Load { ptr: Val::Local(p), .. }) = def_of(entry, *l) {
+            return *p == param_slot;
+        }
+    }
+    false
+}
 
-    // For simplicity: if we have a load and a SExt and jump to ret, it's likely the base case.
-    // The ret block should just load from a ret slot and return.
-    let ret_loads_and_returns = match &ret_block.terminator {
-        Terminator::Ret(Some(_)) => true,
-        _ => false,
+/// The slot the return block loads its value from (`bbN: %v = load %slot; ret %v`).
+fn ret_block_slot(ret_block: &BasicBlock) -> Option<ValId> {
+    let ret_id = match &ret_block.terminator {
+        Terminator::Ret(Some(Val::Local(id))) => *id,
+        _ => return None,
     };
+    match def_of(ret_block, ret_id) {
+        Some(Instr::Load { ptr: Val::Local(slot), .. }) => Some(*slot),
+        _ => None,
+    }
+}
 
-    has_param_load && has_ext_or_ret && jumps_to_ret && ret_loads_and_returns
+/// Verify the base block returns exactly the parameter: its (only) store into the
+/// return slot is `(ret_ty)load(param_slot)` (an `SExt`, or a direct load if the
+/// widths match), it makes no calls, and it jumps to the return block. This is what
+/// makes the hardcoded `return acc + n` base sound.
+fn base_returns_param(base: &BasicBlock, ret_block: &BasicBlock, param_slot: ValId, ret_slot: ValId) -> bool {
+    // No calls in the base case (it must be side-effect free).
+    if base.instrs.iter().any(|ins| matches!(ins, Instr::Call { .. } | Instr::CallIndirect { .. })) {
+        return false;
+    }
+    // Its only store must target the return slot.
+    let mut stored: Option<ValId> = None;
+    for ins in &base.instrs {
+        if let Instr::Store { val, ptr } = ins {
+            let p = match ptr { Val::Local(p) => *p, _ => return false };
+            if p != ret_slot { return false; }        // stores elsewhere → not a plain base
+            stored = match val { Val::Local(v) => Some(*v), _ => return false };
+        }
+    }
+    let stored = match stored { Some(v) => v, None => return false };
+    // stored == SExt(load param)  OR  load param directly (widths equal).
+    let src = match def_of(base, stored) {
+        Some(Instr::Cast { op: CastOp::SExt, val: Val::Local(l), .. }) => *l,
+        Some(Instr::Load { ptr: Val::Local(p), .. }) => {
+            return *p == param_slot && jumps_to_ret(base, ret_block);
+        }
+        _ => return false,
+    };
+    matches!(def_of(base, src), Some(Instr::Load { ptr: Val::Local(p), .. }) if *p == param_slot)
+        && jumps_to_ret(base, ret_block)
+}
+
+fn jumps_to_ret(base: &BasicBlock, ret_block: &BasicBlock) -> bool {
+    matches!(&base.terminator, Terminator::Jump(id) if *id == ret_block.id)
 }
