@@ -3038,6 +3038,8 @@ impl<'m> FuncCtx<'m> {
     fn try_vectorize(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
         use crate::ast::{ExprKind as E, BinOpKind as B};
 
+        if !self.lowerer.vectorize { return Ok(false); }
+
         // Cheap structural pre-filter (runs on every loop): only a body that is a
         // single `arr[...] op= …` assignment can vectorize. This bails immediately
         // for multi-statement bodies and nested loops (e.g. matmul's outer loops)

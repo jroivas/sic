@@ -31,6 +31,10 @@ pub struct Lowerer {
     /// Process-wide seed for `order_random` layouts, shared by every TU in one
     /// build so they agree on field offsets (a `randstruct`-style build seed).
     pub struct_order_seed: u64,
+    /// Auto-vectorization of unit-stride element-wise loops (see
+    /// `FuncCtx::try_vectorize`). On by default; `-fno-vectorize` turns it off
+    /// (e.g. to keep C-mode codegen scalar while validating SQLite/QEMU).
+    pub vectorize: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -231,6 +235,7 @@ impl Lowerer {
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
             struct_order_default: crate::ast::StructOrder::Default,
+            vectorize: true,
             struct_order_seed: 0,
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),

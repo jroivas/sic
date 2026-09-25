@@ -792,6 +792,9 @@ fn lower_tu(
     // sic struct reordering (sic.md §"Struct reordering"): global default mode and
     // the build-wide random seed. Per-struct `order_*` attributes override the mode.
     lowerer.set_struct_order(struct_order_default(args), struct_order_seed(args));
+    // Auto-vectorization is on by default; `-fno-vectorize` disables it (e.g. to
+    // keep C-mode codegen scalar while validating SQLite/QEMU).
+    lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled));
     lowerer.lower(tu).map_err(|e| format!("{}", e).into())
 }
 
