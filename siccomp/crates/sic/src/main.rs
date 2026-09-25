@@ -67,7 +67,7 @@ struct Args {
     includes: Vec<String>,
 
     /// C standard to preprocess against (e.g. c99, c11, c17, c23)
-    #[arg(long = "std", value_name = "STD", default_value = "c23")]
+    #[arg(long = "std", value_name = "STD", default_value = "c2x")]
     std: String,
 
     /// Link against a library (passed to the linker as -l<LIB>)
