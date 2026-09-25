@@ -3151,12 +3151,15 @@ impl<'m> FuncCtx<'m> {
         }
 
         // ===== EMIT =====
-        // Induction variable (declared type T), initialized to LO — the counter for
-        // both the vector and remainder loops. `lower_local_decl` registers it so the
-        // remainder body resolves `ivar` to this slot.
+        // Promote the induction variable to i64 for the vector loop so the
+        // loop counter lives in a 64-bit register, eliminating movslq per
+        // iteration and letting the backend keep it in a GPR.
+        let i64_ty = QualType::new(AstType::LongLong { signed: true });
+        let mut jdecl_i64 = jdecl.clone();
+        jdecl_i64.ty = i64_ty.clone();
         self.lower_local_decl(&Decl::Var {
-            base_ty: jdecl.ty.clone(),
-            declarators: vec![jdecl.clone()],
+            base_ty: i64_ty,
+            declarators: vec![jdecl_i64],
             weak: false, thread_local: false, span: cond.span.clone(),
         })?;
         let (jty, jslot) = match self.lookup(&ivar) {
