@@ -24,11 +24,21 @@ any timing, so a miscompile shows up as a checksum mismatch rather than a wrong 
 | `mandelbrot` | floating-point compute, no arrays (1000×1000, 256 iters)| `253815`          |
 | `divmix`     | compute-bound integer division by constants (200 M iters)| `4555444155444655`|
 | `dotprod`    | vectorizable integer reduction, memory-bound (50 M pairs)| `13869450000000`  |
+| `stencil`    | 1-D 3-point blur, multi-offset same-array reads (3000 passes)| `12442510`     |
+| `bytecount`  | byte predicate count (`>= 128`), packed-compare reduction (20 passes)| `200000000` |
 
 `fib` reads its argument through a `volatile` / `black_box` so no compiler can fold
 the recursion to a constant; `sieve`, `matmul` and `quicksort` are data-dependent on
 heap arrays, so the work cannot be optimized away; `mandelbrot` exercises pure `f64`
-arithmetic (add/mul/compare) with no arrays.
+arithmetic (add/mul/compare) with no arrays. `stencil` and `bytecount` are
+**gap-finders** (added 2026-09-25): they isolate two auto-vectorizations sic's front
+end does NOT do. `stencil`'s `b[i] = (a[i-1] + 2·a[i] + a[i+1])·¼` reads the same
+array at three offsets, which sic's auto-vectorizer bails on (it requires one affine
+offset per array), so it runs scalar (~4.7× gcc; +1.6× more under SIC's bounds
+checks) where LLVM emits shifted packed loads. `bytecount` is a predicate reduction
+(`if (buf[i] >= 128) cnt++`) that LLVM turns into `pcmpgtb`/`pmovmskb` + popcount
+16 bytes at a time; sic branches per byte (~3.1× gcc). Both use integer / truncated
+checksums that are bit-stable across vectorized and scalar builds.
 
 ## Running
 
