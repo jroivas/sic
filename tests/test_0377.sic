@@ -1,0 +1,48 @@
+// A `dict`/`set` returned from a function, populated by a subscript store in a loop
+// whose bound is a PARAMETER (sic.md §"Dict"/§"Set"). A `new list/dict/set` handle
+// is NOT a fat-pointer array — its `d[i]` is a runtime hash/index op with no
+// `name-2*ptr` size header — so it must NOT be marked a fat local, or loop-BCE would
+// hoist a bogus fat-pointer bounds check over `for (i<n) d[i]=…` and abort. A genuine
+// `new T[n]` array in the same shape still IS bounds-checked (checked below). Returns 42.
+#include <stdio.h>
+
+dict<int,int> mkd(int n) {
+    dict<int,int> d = new dict<int,int>;
+    for (int i = 0; i < n; i++) d[i] = i * i;     // subscript store, param-bound loop
+    return d;
+}
+
+set<int> mks(int n) {
+    set<int> s = new set<int>;
+    for (int i = 0; i < n; i++) s.add(i);
+    return s;
+}
+
+int isum(int *a, int n) {                          // genuine fat array — still checked
+    int s = 0;
+    for (int i = 0; i < n; i++) s += a[i];
+    return s;
+}
+
+int main() {
+    // dict returned from a function, then read back
+    dict<int,int> d = mkd(4);
+    if (d.size != 4) return 1;
+    if (d[0] != 0 || d[1] != 1 || d[2] != 4 || d[3] != 9) return 2;
+
+    // borrowed-arg producer of the same shape
+    dict<int,int> e = mkd(3);
+    if (e.size != 3) return 3;
+
+    // set returned from a function
+    set<int> s = mks(5);
+    if (s.size != 5) return 4;
+
+    // a genuine fat-pointer array with the identical loop shape still works in-bounds
+    int n = 6;
+    int *a = new int[n]; defer del a;
+    for (int i = 0; i < n; i++) a[i] = i;
+    if (isum(a, n) != 15) return 5;                // 0+1+2+3+4+5
+
+    return 42;
+}

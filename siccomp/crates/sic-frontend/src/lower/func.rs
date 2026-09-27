@@ -2263,7 +2263,16 @@ impl<'m> FuncCtx<'m> {
                     // sic bounds checking: a never-moved pointer initialized from
                     // `new` (or declared as a `@`-reference) is a checkable fat
                     // pointer — `name[i]` reads the header size at `name-2*ptr`.
-                    if self.is_sic() && !d.name.is_empty() && !self.moved_names.contains(&d.name) {
+                    // A `list`/`dict`/`set` handle is NOT a fat-pointer array (even
+                    // though `new list/dict/set` is also a `New`): its `d[i]` is a
+                    // runtime hash/index op, not a bounds-checked memory access, and
+                    // its handle has no `name-2*ptr` size header — so marking it fat
+                    // makes loop-BCE hoist a bogus bounds check that reads garbage and
+                    // aborts (`for (i<n) d[i]=…` in a dict-returning fn).
+                    let is_container = super::types::is_list(&ty)
+                        || super::types::is_dict(&ty) || super::types::is_set(&ty);
+                    if self.is_sic() && !d.name.is_empty() && !self.moved_names.contains(&d.name)
+                        && !is_container {
                         let is_new_init = matches!(&d.init,
                             Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::New { .. }));
                         let is_ref = d.ty.qualifiers.iter()
