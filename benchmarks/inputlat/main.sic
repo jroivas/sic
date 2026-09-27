@@ -1,0 +1,262 @@
+// Simulated input event pipeline in idiomatic SIC: spatial grid hashing widget
+// tree, event ring buffer, min-heap timer for key repeat, 20 rounds of 1M events
+// each. All local arrays use `new T[N]` with `defer del` for cleanup. Since SIC
+// zero-initializes all variables, calloc'd semantics are automatic. Prints checksum.
+#include <stdio.h>
+
+const i64 EVENTS = 1000000;
+const i32 ROUNDS = 20;
+const i32 FRAME_US = 4000;
+const i32 PROC_US = 25;
+const i32 DBL_US = 12000;
+const i32 REP_DELAY = 400000;
+const i32 REP_IVAL = 100000;
+const i32 NW = 1024;
+
+// Min-heap push (timer event queue)
+u32 il_push(u32 *hd, u32 *hc, u32 *hg, u32 hn,
+            u32 d, u32 c, u32 g) {
+    u32 i = hn;
+    hd[i] = d; hc[i] = c; hg[i] = g;
+    while (i > 0) {
+        u32 p = (i - 1) / 2;
+        if (hd[p] <= hd[i]) break;
+        u32 td = hd[p]; hd[p] = hd[i]; hd[i] = td;
+        u32 tc = hc[p]; hc[p] = hc[i]; hc[i] = tc;
+        u32 tg = hg[p]; hg[p] = hg[i]; hg[i] = tg;
+        i = p;
+    }
+    return hn + 1;
+}
+
+// Spatial grid hit-test
+u32 il_hit(u32 mx, u32 my, const u32 *wx, const u32 *wy,
+           const u32 *ww, const u32 *wh,
+           const u32 *gstart, const u32 *gitems) {
+    u32 c = (my / 80) * 16 + mx / 80;
+    u32 k = gstart[c + 1];
+    while (k > gstart[c]) {
+        k -= 1;
+        u32 i = gitems[k];
+        if (mx >= wx[i] && mx < wx[i] + ww[i] && my >= wy[i] && my < wy[i] + wh[i])
+            return i;
+    }
+    return 1024;
+}
+
+// Bubble flags up the widget tree
+u32 il_bubble(u32 hit, const u32 *wflags, const u32 *wparent) {
+    if (hit >= 1024) return 0;
+    u32 acc = 0;
+    u32 node = hit;
+    for (;;) {
+        acc = acc * 31 + wflags[node];
+        if (node == 0) break;
+        node = wparent[node];
+    }
+    return acc;
+}
+
+int main() {
+    u32 *qts = new u32[256];
+    u32 *qtype = new u32[256];
+    u32 *qcode = new u32[256];
+    u32 *wx = new u32[1024];
+    u32 *wy = new u32[1024];
+    u32 *ww = new u32[1024];
+    u32 *wh = new u32[1024];
+    u32 *wflags = new u32[1024];
+    u32 *wparent = new u32[1024];
+    u32 *gstart = new u32[161];
+    u32 *gcur = new u32[161];
+    u32 *gitems = new u32[10240];
+    u32 *hdue = new u32[8192];
+    u32 *hcode = new u32[8192];
+    u32 *hgen = new u32[8192];
+    u32 *gens = new u32[256];
+    u32 *keybits = new u32[8];
+    defer del qts;
+    defer del qtype;
+    defer del qcode;
+    defer del wx;
+    defer del wy;
+    defer del ww;
+    defer del wh;
+    defer del wflags;
+    defer del wparent;
+    defer del gstart;
+    defer del gcur;
+    defer del gitems;
+    defer del hdue;
+    defer del hcode;
+    defer del hgen;
+    defer del gens;
+    defer del keybits;
+
+    u32 cs = 0;
+    u32 x = 66667;
+
+    for (i32 round = 0; round < ROUNDS; round++) {
+        wparent[0] = 0;
+        for (u32 i = 0; i < NW; i++) {
+            if (i > 0) wparent[i] = (i - 1) / 4;
+            x = x * 1664525 + 1013904223; wx[i] = (x >> 4) % 1216;
+            x = x * 1664525 + 1013904223; wy[i] = (x >> 4) % 736;
+            x = x * 1664525 + 1013904223; ww[i] = 16 + (x >> 4) % 112;
+            x = x * 1664525 + 1013904223; wh[i] = 16 + (x >> 4) % 80;
+            wflags[i] = (x >> 8) & 255;
+        }
+
+        // Build spatial hash grid: count widgets per cell
+        for (u32 c = 0; c < 161; c++) gstart[c] = 0;
+        for (u32 i = 0; i < NW; i++) {
+            u32 cx0 = wx[i] / 80, cy0 = wy[i] / 80;
+            u32 cx1 = (wx[i] + ww[i] - 1) / 80; if (cx1 > 15) cx1 = 15;
+            u32 cy1 = (wy[i] + wh[i] - 1) / 80; if (cy1 > 9) cy1 = 9;
+            for (u32 cy = cy0; cy <= cy1; cy++)
+                for (u32 cx = cx0; cx <= cx1; cx++)
+                    gstart[cy * 16 + cx + 1] += 1;
+        }
+
+        // Prefix sum → gstart[c+1] is end of cell c's range
+        for (u32 c = 0; c < 160; c++) gstart[c + 1] += gstart[c];
+        for (u32 c = 0; c < 161; c++) gcur[c] = gstart[c];
+
+        // Fill gitems with widget IDs per cell
+        for (u32 i = 0; i < NW; i++) {
+            u32 cx0 = wx[i] / 80, cy0 = wy[i] / 80;
+            u32 cx1 = (wx[i] + ww[i] - 1) / 80; if (cx1 > 15) cx1 = 15;
+            u32 cy1 = (wy[i] + wh[i] - 1) / 80; if (cy1 > 9) cy1 = 9;
+            for (u32 cy = cy0; cy <= cy1; cy++)
+                for (u32 cx = cx0; cx <= cx1; cx++) {
+                    gitems[gcur[cy * 16 + cx]] = i;
+                    gcur[cy * 16 + cx] += 1;
+                }
+        }
+
+        // Reset per-round state
+        for (i32 i = 0; i < 8; i++) keybits[i] = 0;
+        for (i32 i = 0; i < 256; i++) gens[i] = 0;
+        u32 hn = 0;
+        u32 head = 0, tail = 0;
+        u32 mods = 0, mx = 640, my = 400, drag = 0;
+        u32 hover = NW;
+        u32 last_click = 0, clicks = 0, dbls = 0, hits = 0, hoverchg = 0;
+        u32 gen = 0, frame = 0, handled = 0;
+
+        // First event
+        x = x * 1664525 + 1013904223;
+        u32 ev_ts = 100 + (x >> 7) % 2900;
+        u32 ev_tb = x & 7;
+        u32 ev_code = (x >> 24) & 255;
+
+        // Main event loop
+        for (;;) {
+            frame += FRAME_US;
+
+            // Generate events until frame boundary
+            while (gen < EVENTS && ev_ts < frame) {
+                qts[tail & 255] = ev_ts;
+                qtype[tail & 255] = ev_tb;
+                qcode[tail & 255] = ev_code;
+                tail += 1;
+                gen += 1;
+                x = x * 1664525 + 1013904223;
+                ev_ts += 100 + (x >> 7) % 2900;
+                ev_tb = x & 7;
+                ev_code = (x >> 24) & 255;
+            }
+
+            if (handled < frame) handled = frame;
+
+            // Process due timer events (min-heap pop + sift-down)
+            while (hn > 0 && hdue[0] < frame) {
+                u32 due = hdue[0], rc = hcode[0], rg = hgen[0];
+                hn -= 1;
+                hdue[0] = hdue[hn]; hcode[0] = hcode[hn]; hgen[0] = hgen[hn];
+                u32 si = 0;
+                for (;;) {
+                    u32 l = si * 2 + 1;
+                    if (l >= hn) break;
+                    u32 sm = l;
+                    if (l + 1 < hn && hdue[l + 1] < hdue[l]) sm = l + 1;
+                    if (hdue[si] <= hdue[sm]) break;
+                    u32 td = hdue[si]; hdue[si] = hdue[sm]; hdue[sm] = td;
+                    u32 tc = hcode[si]; hcode[si] = hcode[sm]; hcode[sm] = tc;
+                    u32 tg = hgen[si]; hgen[si] = hgen[sm]; hgen[sm] = tg;
+                    si = sm;
+                }
+                // If key still held, re-push with REP_IVAL
+                if (gens[rc] == rg && ((keybits[rc >> 5] >> (rc & 31)) & 1) != 0) {
+                    handled += PROC_US;
+                    u32 lat = handled - due;
+                    cs = cs * 1000003 + (lat ^ rc);
+                    hn = il_push(hdue, hcode, hgen, hn, due + REP_IVAL, rc, rg);
+                }
+            }
+
+            // Process queued input events
+            while (head != tail) {
+                u32 ts = qts[head & 255];
+                u32 tb = qtype[head & 255];
+                u32 co = qcode[head & 255];
+                head += 1;
+                handled += PROC_US;
+                u32 lat = handled - ts;
+
+                if (tb < 4) {
+                    // Mouse motion
+                    mx = (mx + (co & 15)) % 1280;
+                    my = (my + (co >> 4)) % 800;
+                    u32 hit = il_hit(mx, my, wx, wy, ww, wh, gstart, gitems);
+                    if (hit != hover) { hoverchg += 1; hover = hit; }
+                    if (drag != 0) hits += 1;
+                    cs = cs * 1000003 + (lat ^ mods);
+                    cs = cs * 1000003 + il_bubble(hit, wflags, wparent);
+                } else if (tb < 6) {
+                    // Key press
+                    keybits[co >> 5] |= 1 << (co & 31);
+                    gens[co] += 1;
+                    if (co < 8) mods |= 1 << co;
+                    if (co < 32) hn = il_push(hdue, hcode, hgen, hn, ts + REP_DELAY, co, gens[co]);
+                    cs = cs * 1000003 + (lat ^ mods);
+                } else if (tb == 6) {
+                    // Key release
+                    keybits[co >> 5] &= ~(1 << (co & 31));
+                    gens[co] += 1;
+                    if (co < 8) mods &= ~(1 << co);
+                    cs = cs * 1000003 + (lat ^ mods);
+                } else {
+                    // Mouse click
+                    if (ts - last_click < DBL_US)
+                        dbls += 1;
+                    else
+                        clicks += 1;
+                    last_click = ts;
+                    drag ^= 1;
+                    u32 hit = il_hit(mx, my, wx, wy, ww, wh, gstart, gitems);
+                    if (hit != NW) hits += 1;
+                    cs = cs * 1000003 + (lat ^ mods);
+                    cs = cs * 1000003 + il_bubble(hit, wflags, wparent);
+                }
+            }
+
+            if (gen >= EVENTS && head == tail) break;
+        }
+
+        // Round checksum mix
+        u32 kb = 0;
+        for (i32 i = 0; i < 8; i++) kb ^= keybits[i];
+        cs = cs * 1000003 + mx;
+        cs = cs * 1000003 + my;
+        cs = cs * 1000003 + clicks;
+        cs = cs * 1000003 + dbls;
+        cs = cs * 1000003 + hits;
+        cs = cs * 1000003 + hoverchg;
+        cs = cs * 1000003 + hn;
+        cs = cs * 1000003 + kb;
+    }
+
+    printf("checksum %u\n", cs);
+    return 0;
+}

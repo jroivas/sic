@@ -1,0 +1,43 @@
+// Base64 encoding in idiomatic SIC: 24M bytes, 4 rounds.
+// Uses `new u8[N]` for heap buffer with `defer del`, static B64[] table.
+#include <stdio.h>
+#include <string.h>
+
+const i64 N = 24000000;
+const i32 R = 4;
+
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+int main() {
+    u8 *buf = new u8[N];
+    defer del buf;
+
+    u32 x = 44444;
+    for (u64 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        buf[i] = (u8)(x & 0xFF);
+    }
+    u32 h = 2166136261;
+    for (i32 r = 0; r < R; r++) {
+        for (u64 i = 0; i + 2 < N; i += 3) {
+            u32 b0 = buf[i];
+            u32 b1 = buf[i + 1];
+            u32 b2 = buf[i + 2];
+            u32 i0 = b0 / 4;
+            u32 i1 = (b0 & 3) * 16 + b1 / 16;
+            u32 i2 = (b1 & 15) * 4 + b2 / 64;
+            u32 i3 = b2 & 63;
+            h ^= (u8)B64[i0];
+            h *= 16777619;
+            h ^= (u8)B64[i1];
+            h *= 16777619;
+            h ^= (u8)B64[i2];
+            h *= 16777619;
+            h ^= (u8)B64[i3];
+            h *= 16777619;
+        }
+    }
+    printf("checksum %u\n", h);
+    return 0;
+}

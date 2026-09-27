@@ -1,0 +1,33 @@
+// Pointer-chasing (random memory latency) in idiomatic SIC: heap arrays from
+// `new u32[count]` released with `defer del`, Fisher-Yates shuffle with LCG,
+// pointer chasing for 4M hops. Prints checksum so all language versions can
+// be compared.
+#include <stdio.h>
+
+const i64 N = 16000000;
+const i64 HOPS = 4000000;
+
+int main() {
+    u32 *order = new u32[N];
+    u32 *next = new u32[N];
+    defer del order;
+    defer del next;
+
+    for (i64 i = 0; i < N; i++) order[i] = (u32)i;
+    u32 x = 1;
+    for (i64 i = N - 1; i >= 1; i--) {
+        x = x * 1664525 + 1013904223;
+        i64 j = (i64)((x & 0x7FFFFFFF) % (u32)(i + 1));
+        u32 t = order[i];
+        order[i] = order[j];
+        order[j] = t;
+    }
+    for (i64 k = 0; k < N; k++) next[order[k]] = order[(k + 1) % N];
+    u32 sum = 0, p = 0;
+    for (u64 h = 0; h < HOPS; h++) {
+        p = next[p];
+        sum += p;
+    }
+    printf("checksum %u\n", sum);
+    return 0;
+}

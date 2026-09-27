@@ -1,0 +1,51 @@
+// Open-addressing hash map (linear probing) in idiomatic SIC — two heap u32
+// arrays (keys + vals) allocated with `new u32[SIZE]` and zero-initialised via
+// memset (keys[idx]==0 means empty). Insert 8M keys, then 16M lookups with
+// cumulative checksum. Native u32 wrapping arithmetic. Prints checksum.
+#include <stdio.h>
+#include <string.h>
+
+const i64 M = 8000000;
+const i64 Q = 16000000;
+const u32 SIZE = (1 << 24);
+const u32 MASK = (SIZE - 1);
+
+int main() {
+    u32 *keys = new u32[SIZE];
+    u32 *vals = new u32[SIZE];
+    memset(keys, 0, SIZE * 4);
+    memset(vals, 0, SIZE * 4);
+    defer del keys;
+    defer del vals;
+
+    u32 x = 33331;
+    for (u64 n = 0; n < M; n++) {
+        x = x * 1664525 + 1013904223;
+        u32 key = (x & 0x7FFFFFFF) | 1;
+        u32 idx = key & MASK;
+        for (;;) {
+            if (keys[idx] == 0) { keys[idx] = key; vals[idx] = x; break; }
+            if (keys[idx] == key) { vals[idx] += x; break; }
+            idx = (idx + 1) & MASK;
+        }
+    }
+
+    u32 y = 99989;
+    u32 acc = 0;
+    for (u64 q = 0; q < Q; q++) {
+        y = y * 1664525 + 1013904223;
+        u32 key = (y & 0x7FFFFFFF) | 1;
+        u32 idx = key & MASK;
+        u32 steps = 0;
+        for (;;) {
+            steps += 1;
+            if (keys[idx] == 0) break;
+            if (keys[idx] == key) { acc += vals[idx]; break; }
+            idx = (idx + 1) & MASK;
+        }
+        acc = acc * 1000003 + steps;
+    }
+
+    printf("checksum %u\n", acc);
+    return 0;
+}

@@ -1,0 +1,35 @@
+// Indirect dispatch in idiomatic SIC: 4M ops, 32 rounds.
+// Uses `new u8[N]` / `new u32[N]` with `defer del`, function pointer array dispatch.
+#include <stdio.h>
+#include <string.h>
+
+const i64 N = 4000000;
+const i32 R = 32;
+
+u32 op_add(u32 a, u32 b) { return a + b; }
+u32 op_xor(u32 a, u32 b) { return a ^ b; }
+u32 op_mul(u32 a, u32 b) { return a * (b | 1); }
+u32 op_sub(u32 a, u32 b) { return a - b; }
+
+int main() {
+    u8 *code = new u8[N];
+    u32 *operand = new u32[N];
+    defer del code;
+    defer del operand;
+
+    u32 x = 55555;
+    for (u64 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        code[i] = (u8)((x & 0x7FFFFFFF) % 4);
+        operand[i] = x;
+    }
+    u32 (*fns[4])(u32, u32) = {op_add, op_xor, op_mul, op_sub};
+    u32 acc = 2166136261;
+    for (i32 r = 0; r < R; r++) {
+        for (u64 i = 0; i < N; i++) {
+            acc = fns[code[i]](acc, operand[i]);
+        }
+    }
+    printf("checksum %u\n", acc);
+    return 0;
+}

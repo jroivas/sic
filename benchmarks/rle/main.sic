@@ -1,0 +1,50 @@
+// Run-length encoding in idiomatic SIC: 40M byte buffer, 4 rounds.
+// Uses `new u8[N]` for heap arrays with `defer del`, FNV hash per round.
+#include <stdio.h>
+#include <string.h>
+
+const i64 N = 40000000;
+const i32 R = 4;
+
+int main() {
+    u8 *buf = new u8[N];
+    u8 *out = new u8[2 * N];
+    defer del buf;
+    defer del out;
+
+    u32 x = 33333;
+    u64 i = 0;
+    while (i < N) {
+        x = x * 1664525 + 1013904223;
+        u8 v = (u8)(x & 0xFF);
+        u32 rl = ((x & 0x7FFFFFFF) % 16) + 1;
+        for (u32 c = 0; c < rl && i < N; c++) buf[i++] = v;
+    }
+    u32 h = 2166136261;
+    for (i32 r = 0; r < R; r++) {
+        u64 o = 0;
+        u64 p = 0;
+        while (p < N) {
+            u8 v = buf[p];
+            u64 run = 1;
+            while (p + run < N && buf[p + run] == v && run < 255) run++;
+            out[o++] = (u8)run;
+            out[o++] = v;
+            p += run;
+        }
+        for (u64 k = 0; k < o; k++) {
+            h ^= out[k];
+            h *= 16777619;
+        }
+        h ^= (u8)(o % 256);
+        h *= 16777619;
+        h ^= (u8)((o / 256) % 256);
+        h *= 16777619;
+        h ^= (u8)((o / 65536) % 256);
+        h *= 16777619;
+        h ^= (u8)((o / 16777216) % 256);
+        h *= 16777619;
+    }
+    printf("checksum %u\n", h);
+    return 0;
+}

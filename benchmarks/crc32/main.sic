@@ -1,0 +1,39 @@
+// CRC32 table-driven hashing in idiomatic SIC: heap `u8` buffer via `new u8[N]`
+// released with `defer del`, fixed-width `u32` types, table-driven CRC32 with
+// polynomial 0xEDB88320. Generates 16 MiB of synthetic data, 8 rounds. Prints
+// checksum.
+#include <stdio.h>
+
+const i64 N = 16000000;
+const i32 R = 8;
+
+int main() {
+    // Build CRC32 table
+    u32 table[256];
+    for (u32 i = 0; i < 256; i++) {
+        u32 c = i;
+        for (i32 k = 0; k < 8; k++)
+            c = (c & 1) ? (0xEDB88320 ^ (c >> 1)) : (c >> 1);
+        table[i] = c;
+    }
+
+    u8 *buf = new u8[N];
+    defer del buf;
+
+    u32 x = 88881;
+    for (i32 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        buf[i] = (u8)((x / 65536) & 0xFF);
+    }
+
+    u32 cs = 0;
+    for (i32 r = 0; r < R; r++) {
+        u32 crc = 0xFFFFFFFF;
+        for (i32 i = 0; i < N; i++)
+            crc = table[(crc ^ (u32)buf[i]) & 0xFF] ^ (crc >> 8);
+        crc ^= 0xFFFFFFFF;
+        cs = cs * 1000003 + crc;
+    }
+    printf("checksum %u\n", cs);
+    return 0;
+}

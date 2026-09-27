@@ -1,0 +1,26 @@
+// N-queens backtracking solver (bitmask) in idiomatic SIC: u32 bit operations for
+// column/diagonal masks, u64 for the solution count. Recursive nq_solve uses
+// the classic x & (-x) trick to find the lowest set bit.
+// Prints the total number of solutions for NQ=14.
+#include <stdio.h>
+
+const i32 NQ = 14;
+
+static u64 nq_solve(u32 cols, u32 d1, u32 d2, u32 full) {
+    if (cols == full) return 1;
+    u64 count = 0;
+    u32 avail = (~(cols | d1 | d2)) & full;
+    while (avail != 0) {
+        u32 bit = avail & (0 - avail);
+        avail -= bit;
+        count += nq_solve(cols | bit, ((d1 | bit) * 2) & full, (d2 | bit) / 2, full);
+    }
+    return count;
+}
+
+int main() {
+    u32 full = (1 << NQ) - 1;
+    u64 total = nq_solve(0, 0, 0, full);
+    printf("checksum %lu\n", total);
+    return 0;
+}

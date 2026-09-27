@@ -1,0 +1,47 @@
+// LZ77 greedy compressor (sliding window) in idiomatic SIC: heap `u8` array via
+// `new u8[N]` released with `defer del`, fixed-width `u32`/`usize` types, FNV-1a
+// hash for compressed output. Generates 4 MiB of synthetic data, compresses with
+// a 512-byte sliding window, 64-byte max match length. Prints checksum.
+#include <stdio.h>
+
+const i64 N = 4000000;
+const i32 WIN = 512;
+const i32 MAXLEN = 64;
+
+int main() {
+    u8 *buf = new u8[N];
+    defer del buf;
+
+    u32 x = 77771;
+    for (i32 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        buf[i] = (u8)((x / 65536) % 8);
+    }
+
+    u32 h = 2166136261;
+    u32 p = 0;
+    while (p < N) {
+        u32 lo = (p > WIN) ? (p - WIN) : 0;
+        u32 bestlen = 0, bestoff = 0;
+        for (u32 sidx = lo; sidx < p; sidx++) {
+            u32 len = 0;
+            while (p + len < N && len < MAXLEN && buf[sidx + len] == buf[p + len])
+                len++;
+            if (len > bestlen) {
+                bestlen = len;
+                bestoff = p - sidx;
+            }
+        }
+        if (bestlen >= 3) {
+            h ^= (u32)(bestoff & 0xFF); h *= 16777619;
+            h ^= (u32)((bestoff / 256) & 0xFF); h *= 16777619;
+            h ^= (u32)(bestlen & 0xFF); h *= 16777619;
+            p += bestlen;
+        } else {
+            h ^= (u32)buf[p]; h *= 16777619;
+            p += 1;
+        }
+    }
+    printf("checksum %u\n", h);
+    return 0;
+}

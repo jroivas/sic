@@ -1,0 +1,20 @@
+// Collatz conjecture step-count sum in idiomatic SIC: plain loop with i64
+// counters, arithmetic branch on parity. Sums the number of Collatz steps for
+// 1..N and prints the checksum so all language versions can be compared.
+#include <stdio.h>
+
+const i64 N = 3000000;
+
+int main() {
+    i64 total = 0;
+    for (i64 i = 1; i <= N; i++) {
+        i64 n = i, steps = 0;
+        while (n != 1) {
+            n = n % 2 == 0 ? n / 2 : 3 * n + 1;
+            steps++;
+        }
+        total += steps;
+    }
+    printf("checksum %ld\n", total);
+    return 0;
+}

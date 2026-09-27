@@ -1,0 +1,52 @@
+// Binary search tree in idiomatic SIC: 1M inserts then 1M lookups.
+// Uses `new struct bst_node` for heap allocation and `->` for pointer field access.
+// Insertion is iterative, comparing key < cur->key -> left else right.
+#include <stdio.h>
+
+struct bst_node {
+    u32 key;
+    bst_node *left;
+    bst_node *right;
+};
+
+int main() {
+    const u64 M = 1000000;
+    const u64 Q = 1000000;
+    bst_node *root = NULL;
+    u32 x = 22222;
+    for (u64 n = 0; n < M; n++) {
+        x = x * 1664525 + 1013904223;
+        u32 key = x & 0x7FFFFFFF;
+        bst_node *nn = new struct bst_node;
+        nn->key = key;
+        nn->left = NULL;
+        nn->right = NULL;
+        if (root == NULL) { root = nn; continue; }
+        bst_node *cur = root;
+        for (;;) {
+            if (key < cur->key) {
+                if (cur->left == NULL) { cur->left = nn; break; }
+                cur = cur->left;
+            } else {
+                if (cur->right == NULL) { cur->right = nn; break; }
+                cur = cur->right;
+            }
+        }
+    }
+    u32 y = 99991;
+    u32 cs = 0;
+    for (u64 q = 0; q < Q; q++) {
+        y = y * 1664525 + 1013904223;
+        u32 key = y & 0x7FFFFFFF;
+        u32 steps = 0;
+        bst_node *cur = root;
+        while (cur != NULL) {
+            steps += 1;
+            if (key == cur->key) break;
+            cur = key < cur->key ? cur->left : cur->right;
+        }
+        cs = cs * 1000003 + steps;
+    }
+    printf("checksum %u\n", cs);
+    return 0;
+}

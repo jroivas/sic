@@ -6,14 +6,16 @@ mainstream LLVM-backed toolchains.
 
 Each benchmark lives in its own directory with `main.c`, `main.rs`, and `main.sic`.
 The `.sic` files are **idiomatic SIC**, not copies of the C: native fixed-width types
-(`i32`/`i64`/`usize`/`bool`), heap arrays via `new T[count]` released with `defer del`
-(freed on every scope exit, no explicit free at each return). These are numeric
-kernels, so the large flat buffers are heap arrays — SIC's boxed containers
+(`i32`/`i64`/`u8`/`u32`/`u64`/`bool`/`f64`), heap arrays via `new T[count]` released
+with `defer del` (freed on every scope exit, no explicit free at each return). These
+are numeric kernels, so the large flat buffers are heap arrays — SIC's boxed containers
 (`list`/`dict`/`set`) target dynamic or heterogeneous data and would be pathological
 here (a `list<bool>` for a 100 M-entry sieve is ~2.4 GB, and boxed element access in
 matmul's ~1e9-iteration inner loop would dwarf the arithmetic). Every program prints a
 single integer **checksum**; the runner requires all three to agree before it trusts
 any timing, so a miscompile shows up as a checksum mismatch rather than a wrong speed.
+
+## Benchmarks
 
 | benchmark    | what it stresses                                        | checksum          |
 |--------------|---------------------------------------------------------|-------------------|
@@ -26,19 +28,70 @@ any timing, so a miscompile shows up as a checksum mismatch rather than a wrong 
 | `dotprod`    | vectorizable integer reduction, memory-bound (50 M pairs)| `13869450000000`  |
 | `stencil`    | 1-D 3-point blur, multi-offset same-array reads (3000 passes)| `12442510`     |
 | `bytecount`  | byte predicate count (`>= 128`), packed-compare reduction (20 passes)| `200000000` |
+| `collatz`    | unpredictable branches + integer divide/modulo (3 M)    | `428343467`      |
+| `ptrchase`   | memory latency: random pointer cycle through 64 MB      | `201066277`      |
+| `hash`       | integer ALU: FNV-1a hashing (32 M bytes ×4)             | `1492286917`     |
+| `bst`        | heap allocation + pointer chasing: 1M-node BST          | `1550171856`     |
+| `rle`        | branchy byte processing: run-length encoding (40 M ×4)  | `1175180821`     |
+| `base64`     | bit manipulation + table lookup (24 M ×4)               | `3021960101`     |
+| `dispatch`   | indirect-branch prediction: 4 function pointers (4 M ×32)| `2148621765`    |
+| `nbody`      | FP latency: all-pairs gravity, Newton sqrt (2048 ×8)    | `1738354361`     |
+| `stream`     | memory write bandwidth: STREAM triad (16 M ×40)         | `473966592`      |
+| `nqueens`    | backtracking recursion: 14-queens bitmask solver        | `365596`          |
+| `life`       | 2D stencil: Conway's Game of Life (1024×1024, 300 gen)  | `2926690816`     |
+| `hashmap`    | open-addressing hash map: 8M inserts + 16M lookups      | `731508049`      |
+| `sha256`     | crypto mixing: full SHA-256 compression (4 MB ×16)      | `2967872896`     |
+| `transpose`  | cache stride / TLB: naive matrix transpose (4096² ×6)   | `2575302656`     |
+| `editdist`   | dynamic programming: Levenshtein distance (16K ×16K)    | `8296`            |
+| `lz`         | branchy match search: LZ77 (4 MB, 512-byte window)      | `2977252358`     |
+| `crc32`      | table-driven hashing: CRC32 (16 MB ×8)                  | `3210205936`     |
+| `raster`     | software 3D renderer: Gouraud-shaded sphere (240 frames) | `2791669399382346646` |
+| `inputlat`   | input latency simulation: event pipeline (20× 1M events)| `1524205649`     |
 
 `fib` reads its argument through a `volatile` / `black_box` so no compiler can fold
-the recursion to a constant; `sieve`, `matmul` and `quicksort` are data-dependent on
-heap arrays, so the work cannot be optimized away; `mandelbrot` exercises pure `f64`
-arithmetic (add/mul/compare) with no arrays. `stencil` and `bytecount` are
-**gap-finders** (added 2026-09-25): they isolate two auto-vectorizations sic's front
+the recursion to a constant; `sieve`, `matmul`, `quicksort`, `bst`, `hashmap`,
+`transpose` and `editdist` are data-dependent on heap arrays, so the work cannot be
+optimized away; `mandelbrot`, `nbody` and `nqueens` exercise pure compute (FP
+arithmetic, recursion, bitmask operations) with minimal memory. `stencil` and
+`bytecount` are **gap-finders**: they isolate two auto-vectorizations sic's front
 end does NOT do. `stencil`'s `b[i] = (a[i-1] + 2·a[i] + a[i+1])·¼` reads the same
 array at three offsets, which sic's auto-vectorizer bails on (it requires one affine
-offset per array), so it runs scalar (~4.7× gcc; +1.6× more under SIC's bounds
-checks) where LLVM emits shifted packed loads. `bytecount` is a predicate reduction
-(`if (buf[i] >= 128) cnt++`) that LLVM turns into `pcmpgtb`/`pmovmskb` + popcount
-16 bytes at a time; sic branches per byte (~3.1× gcc). Both use integer / truncated
-checksums that are bit-stable across vectorized and scalar builds.
+offset per array), so it runs scalar where LLVM emits shifted packed loads.
+`bytecount` is a predicate reduction (`if (buf[i] >= 128) cnt++`) that LLVM turns
+into `pcmpgtb`/`pmovmskb` + popcount 16 bytes at a time; sic branches per byte.
+
+The newer benchmarks (`collatz` through `inputlat`) use only 32-bit wrapping integer
+arithmetic (an LCG built from multiply + add) so all language builds stay bit-identical
+without BigInt. `nbody` uses only `+ - * /` and a hand-rolled Newton-iteration `sqrt`
+(no `libm`), so its doubles round identically across all backends — the same trick
+`raster` uses for its polynomial sin/cos.
+
+`raster` is a real (if tiny) software 3D renderer with no external dependencies — it
+transforms and projects a UV-sphere mesh, rasterizes triangles with a z-buffer, and
+Gouraud-shades them into an in-memory framebuffer, then folds the framebuffer into the
+per-frame checksum. To stay bit-identical across all languages it uses **only**
+`+ - * /` and comparisons: it ships its own polynomial `sin`/`cos` (each language's
+`libm`/`Math.sin` differs in the last bits) and avoids `sqrt` entirely (the unit-sphere
+vertex _is_ its own normal).
+
+`inputlat` simulates an interactive UI event pipeline — 20M key/mouse events arrive on
+a ring-buffer queue and drain through a fixed-timestep 250 Hz frame loop with a serial
+per-event handler cost; each event's latency feeds the checksum. Every pointer event
+hit-tests a 1024-widget tree through a 16×10 spatial grid and bubbles up the parent
+chain. Hover enter/leave, double-click and drag state are tracked, and held keys fire
+synthetic key-repeat events through a timer min-heap with their own latency accounting.
+
+## Source
+
+The 19 benchmarks added after `bytecount` (`collatz` through `inputlat`) are ported
+from [MariuzM/bench](https://github.com/MariuzM/bench) (commit
+`9f4eb7f1ae1f8407687588ac546b70274c896867`), a multi-language benchmark suite
+comparing C, C++, Jai, JavaScript (Node.js), Odin, and Rust on 24 workloads. The
+existing benchmarks (`fib`, `sieve`, `matmul`, `quicksort`, `mandelbrot`, `divmix`,
+`dotprod`, `stencil`, `bytecount`) pre-date this import and use a different parameter
+set. C and Rust implementations (`main.c` / `main.rs`) are extracted from the upstream
+combined-source files; the SIC ports (`main.sic`) follow the idiomatic SIC patterns
+established by the original suite.
 
 ## Running
 

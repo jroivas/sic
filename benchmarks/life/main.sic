@@ -1,0 +1,45 @@
+// Conway's Game of Life (1024x1024, 300 generations) in idiomatic SIC: u8 heap
+// arrays from `new T[W*H]` released with `defer del`. Toroidal boundaries,
+// 8-neighbor sum, deterministic PRNG for initial state.
+// Prints a checksum over the final grid.
+#include <stdio.h>
+#include <string.h>
+
+const i32 W = 1024;
+const i32 H = 1024;
+const i32 T = 300;
+
+int main() {
+    u8 *cur = new u8[W * H];
+    u8 *nxt = new u8[W * H];
+    defer del cur;
+    defer del nxt;
+
+    u32 x = 22221;
+    for (i32 i = 0; i < W * H; i++) {
+        x = x * 1664525 + 1013904223;
+        cur[i] = (u8)((x / 65536) & 1);
+    }
+
+    for (i32 gen = 0; gen < T; gen++) {
+        for (i32 y = 0; y < H; y++) {
+            i32 ym = y == 0 ? H - 1 : y - 1;
+            i32 yp = y == H - 1 ? 0 : y + 1;
+            for (i32 xx = 0; xx < W; xx++) {
+                i32 xm = xx == 0 ? W - 1 : xx - 1;
+                i32 xp = xx == W - 1 ? 0 : xx + 1;
+                i32 n = (i32)cur[ym * W + xm] + (i32)cur[ym * W + xx] + (i32)cur[ym * W + xp]
+                      + (i32)cur[y * W + xm]                          + (i32)cur[y * W + xp]
+                      + (i32)cur[yp * W + xm] + (i32)cur[yp * W + xx] + (i32)cur[yp * W + xp];
+                u8 alive = cur[y * W + xx];
+                nxt[y * W + xx] = (n == 3 || (alive && n == 2)) ? (u8)1 : (u8)0;
+            }
+        }
+        u8 *tmp = cur; cur = nxt; nxt = tmp;
+    }
+
+    u32 cs = 0;
+    for (i32 i = 0; i < W * H; i++) cs = cs * 1000003 + (u32)cur[i];
+    printf("checksum %u\n", cs);
+    return 0;
+}

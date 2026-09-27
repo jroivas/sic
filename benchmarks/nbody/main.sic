@@ -1,0 +1,69 @@
+// N-body gravity simulation (all-pairs) in idiomatic SIC: f64 heap arrays for
+// positions, velocities, and masses, released with `defer del`. Newton sqrt with
+// 8 iterations. Prints a position-based checksum.
+#include <stdio.h>
+
+const i32 N = 2048;
+const i32 STEPS = 8;
+const f64 DT = 0.01;
+const f64 EPS = 0.05;
+
+int main() {
+    f64 *px = new f64[N];
+    f64 *py = new f64[N];
+    f64 *pz = new f64[N];
+    f64 *vx = new f64[N];
+    f64 *vy = new f64[N];
+    f64 *vz = new f64[N];
+    f64 *m = new f64[N];
+    defer del px;
+    defer del py;
+    defer del pz;
+    defer del vx;
+    defer del vy;
+    defer del vz;
+    defer del m;
+
+    u32 s = 7777;
+    for (i32 i = 0; i < N; i++) {
+        s = s * 1664525 + 1013904223;
+        px[i] = ((f64)(s & 0xFFFF) / 65536.0) * 2.0 - 1.0;
+        s = s * 1664525 + 1013904223;
+        py[i] = ((f64)(s & 0xFFFF) / 65536.0) * 2.0 - 1.0;
+        s = s * 1664525 + 1013904223;
+        pz[i] = ((f64)(s & 0xFFFF) / 65536.0) * 2.0 - 1.0;
+        s = s * 1664525 + 1013904223;
+        m[i] = (f64)(s & 0xFFFF) / 65536.0 + 0.1;
+        vx[i] = 0.0; vy[i] = 0.0; vz[i] = 0.0;
+    }
+
+    for (i32 step = 0; step < STEPS; step++) {
+        for (i32 i = 0; i < N; i++) {
+            f64 ax = 0.0, ay = 0.0, az = 0.0;
+            f64 xi = px[i], yi = py[i], zi = pz[i];
+            for (i32 j = 0; j < N; j++) {
+                if (j == i) continue;
+                f64 dx = px[j] - xi, dy = py[j] - yi, dz = pz[j] - zi;
+                f64 d2 = dx * dx + dy * dy + dz * dz + EPS;
+                f64 g = (d2 + 1.0) * 0.5;
+                for (i32 k = 0; k < 8; k++) g = (g + d2 / g) * 0.5;
+                f64 inv3 = 1.0 / (d2 * g);
+                f64 f = m[j] * inv3;
+                ax += dx * f; ay += dy * f; az += dz * f;
+            }
+            vx[i] += ax * DT; vy[i] += ay * DT; vz[i] += az * DT;
+        }
+        for (i32 i = 0; i < N; i++) {
+            px[i] += vx[i] * DT; py[i] += vy[i] * DT; pz[i] += vz[i] * DT;
+        }
+    }
+
+    u32 cs = 0;
+    for (i32 i = 0; i < N; i++) {
+        cs = cs * 1000003 + (u32)(i64)(px[i] * 1024.0);
+        cs = cs * 1000003 + (u32)(i64)(py[i] * 1024.0);
+        cs = cs * 1000003 + (u32)(i64)(pz[i] * 1024.0);
+    }
+    printf("checksum %u\n", cs);
+    return 0;
+}

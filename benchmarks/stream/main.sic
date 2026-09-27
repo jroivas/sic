@@ -1,0 +1,35 @@
+// STREAM triad (memory write bandwidth) in idiomatic SIC: u32 heap arrays from
+// `new T[count]` released with `defer del`, and native fixed-width element types.
+// Measures throughput of a[i] = b[i] + K * c[i] with 40 rounds over 16M entries.
+// Prints a checksum over the result array.
+#include <stdio.h>
+
+const i64 N = 16000000;
+const i32 R = 40;
+const u32 K = 3;
+
+int main() {
+    u32 *a = new u32[N];
+    u32 *b = new u32[N];
+    u32 *c = new u32[N];
+    defer del a;
+    defer del b;
+    defer del c;
+
+    u32 x = 11111;
+    for (i64 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        b[i] = x;
+        x = x * 1664525 + 1013904223;
+        c[i] = x;
+        a[i] = 0;
+    }
+    for (i32 r = 0; r < R; r++)
+        for (i64 i = 0; i < N; i++)
+            a[i] = b[i] + K * c[i];
+
+    u32 cs = 0;
+    for (i64 i = 0; i < N; i++) cs = cs * 1000003 + a[i];
+    printf("checksum %u\n", cs);
+    return 0;
+}

@@ -1,0 +1,27 @@
+// FNV-1a hash in idiomatic SIC: heap byte buffer from `new u8[count]` released
+// with `defer del`, LCG fill, FNV-1a hash with u32 arithmetic. Prints checksum
+// so all language versions can be compared.
+#include <stdio.h>
+
+const i64 N = 32000000;
+const i32 R = 4;
+
+int main() {
+    u8 *buf = new u8[N];
+    defer del buf;
+
+    u32 x = 12345;
+    for (i64 i = 0; i < N; i++) {
+        x = x * 1664525 + 1013904223;
+        buf[i] = (u8)(x & 0xFF);
+    }
+    u32 h = 2166136261;
+    for (i32 r = 0; r < R; r++) {
+        for (i64 i = 0; i < N; i++) {
+            h ^= buf[i];
+            h *= 16777619;
+        }
+    }
+    printf("checksum %u\n", h);
+    return 0;
+}

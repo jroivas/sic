@@ -1,0 +1,173 @@
+// Software 3D rasterizer in idiomatic SIC: renders a spinning, Gouraud-shaded UV
+// sphere into an in-memory framebuffer with a z-buffer, for a fixed number of
+// frames. Uses only +,-,*,/ and a hand-rolled polynomial sin/cos so every language
+// produces a bit-identical checksum. Heap arrays via `new T[count]` released with
+// `defer del`. Prints checksum so all language versions can be compared.
+#include <stdio.h>
+
+const i32 W = 640;
+const i32 H = 480;
+const i32 RINGS = 24;
+const i32 SECTORS = 24;
+const i32 FRAMES = 240;
+const i32 NV = ((RINGS + 1) * (SECTORS + 1));
+
+f64 r_floor(f64 y) {
+    f64 f = (f64)(i64)y;
+    return f > y ? f - 1.0 : f;
+}
+
+f64 r_sin(f64 x) {
+    const f64 TWO_PI = 6.283185307179586;
+    f64 k = r_floor(x / TWO_PI + 0.5);
+    x = x - k * TWO_PI;
+    f64 x2 = x * x;
+    f64 p = -1.0 / 1307674368000.0;
+    p = 1.0 / 6227020800.0 + x2 * p;
+    p = -1.0 / 39916800.0 + x2 * p;
+    p = 1.0 / 362880.0 + x2 * p;
+    p = -1.0 / 5040.0 + x2 * p;
+    p = 1.0 / 120.0 + x2 * p;
+    p = -1.0 / 6.0 + x2 * p;
+    p = 1.0 + x2 * p;
+    return x * p;
+}
+
+f64 r_cos(f64 x) {
+    const f64 HALF_PI = 1.5707963267948966;
+    return r_sin(x + HALF_PI);
+}
+
+f64 edge(f64 ax, f64 ay, f64 bx, f64 by, f64 cx, f64 cy) {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+}
+
+int main() {
+    const f64 FOCAL = 500.0;
+    const f64 CAM_DIST = 3.0;
+
+    f64 *bx = new f64[NV];
+    f64 *by = new f64[NV];
+    f64 *bz = new f64[NV];
+    defer del bx;
+    defer del by;
+    defer del bz;
+
+    i32 nv = 0;
+    for (i32 i = 0; i <= RINGS; i++) {
+        f64 theta = 3.141592653589793 * ((f64)i / (f64)RINGS);
+        f64 st = r_sin(theta);
+        f64 ct = r_cos(theta);
+        for (i32 j = 0; j <= SECTORS; j++) {
+            f64 phi = 6.283185307179586 * ((f64)j / (f64)SECTORS);
+            f64 sp = r_sin(phi);
+            f64 cp = r_cos(phi);
+            bx[nv] = st * cp;
+            by[nv] = ct;
+            bz[nv] = st * sp;
+            nv++;
+        }
+    }
+
+    f64 *sx = new f64[NV];
+    f64 *sy = new f64[NV];
+    f64 *sz = new f64[NV];
+    f64 *si = new f64[NV];
+    defer del sx;
+    defer del sy;
+    defer del sz;
+    defer del si;
+
+    u8 *color = new u8[W * H];
+    f64 *zbuf = new f64[W * H];
+    defer del color;
+    defer del zbuf;
+
+    u64 checksum = 0;
+
+    for (i32 f = 0; f < FRAMES; f++) {
+        f64 ang = (f64)f * 0.0125;
+        f64 cy = r_cos(ang);
+        f64 syr = r_sin(ang);
+        f64 ax = ang * 0.5;
+        f64 cx = r_cos(ax);
+        f64 sxr = r_sin(ax);
+
+        for (i32 v = 0; v < nv; v++) {
+            f64 px0 = bx[v], py0 = by[v], pz0 = bz[v];
+            f64 rx = px0 * cy + pz0 * syr;
+            f64 rz = -px0 * syr + pz0 * cy;
+            f64 ry = py0;
+            f64 ry2 = ry * cx - rz * sxr;
+            f64 rz2 = ry * sxr + rz * cx;
+            f64 inten = -rz2;
+            if (inten < 0.0) inten = 0.0;
+            f64 zc = rz2 + CAM_DIST;
+            f64 invz = 1.0 / zc;
+            sx[v] = rx * invz * FOCAL + (f64)W * 0.5;
+            sy[v] = ry2 * invz * FOCAL + (f64)H * 0.5;
+            sz[v] = zc;
+            si[v] = inten;
+        }
+
+        for (i32 i = 0; i < W * H; i++) { color[i] = 0; zbuf[i] = 1.0e30; }
+
+        for (i32 ri = 0; ri < RINGS; ri++) {
+            for (i32 sj = 0; sj < SECTORS; sj++) {
+                i32 a = ri * (SECTORS + 1) + sj;
+                i32 b = a + (SECTORS + 1);
+                i32 tris[2][3] = {{a, b, a + 1}, {a + 1, b, b + 1}};
+                for (i32 t = 0; t < 2; t++) {
+                    i32 i0 = tris[t][0], i1 = tris[t][1], i2 = tris[t][2];
+                    f64 area = edge(sx[i0], sy[i0], sx[i1], sy[i1], sx[i2], sy[i2]);
+                    if (area <= 0.0) continue;
+                    f64 mnx = sx[i0];
+                    if (sx[i1] < mnx) mnx = sx[i1];
+                    if (sx[i2] < mnx) mnx = sx[i2];
+                    f64 mxx = sx[i0];
+                    if (sx[i1] > mxx) mxx = sx[i1];
+                    if (sx[i2] > mxx) mxx = sx[i2];
+                    f64 mny = sy[i0];
+                    if (sy[i1] < mny) mny = sy[i1];
+                    if (sy[i2] < mny) mny = sy[i2];
+                    f64 mxy = sy[i0];
+                    if (sy[i1] > mxy) mxy = sy[i1];
+                    if (sy[i2] > mxy) mxy = sy[i2];
+                    if (mnx < 0.0) mnx = 0.0;
+                    if (mxx > (f64)(W - 1)) mxx = (f64)(W - 1);
+                    if (mny < 0.0) mny = 0.0;
+                    if (mxy > (f64)(H - 1)) mxy = (f64)(H - 1);
+                    i32 x0 = (i32)mnx, x1 = (i32)mxx, y0 = (i32)mny, y1 = (i32)mxy;
+                    for (i32 py = y0; py <= y1; py++) {
+                        f64 pcy = (f64)py + 0.5;
+                        for (i32 px = x0; px <= x1; px++) {
+                            f64 pcx = (f64)px + 0.5;
+                            f64 w0 = edge(sx[i1], sy[i1], sx[i2], sy[i2], pcx, pcy);
+                            f64 w1 = edge(sx[i2], sy[i2], sx[i0], sy[i0], pcx, pcy);
+                            f64 w2 = edge(sx[i0], sy[i0], sx[i1], sy[i1], pcx, pcy);
+                            if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) {
+                                f64 l0 = w0 / area, l1 = w1 / area, l2 = w2 / area;
+                                f64 depth = l0 * sz[i0] + l1 * sz[i1] + l2 * sz[i2];
+                                i32 idx = py * W + px;
+                                if (depth < zbuf[idx]) {
+                                    zbuf[idx] = depth;
+                                    f64 inten = l0 * si[i0] + l1 * si[i1] + l2 * si[i2];
+                                    if (inten < 0.0) inten = 0.0;
+                                    if (inten > 1.0) inten = 1.0;
+                                    color[idx] = (u8)(inten * 255.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        u64 frame_sum = 0;
+        for (i32 i = 0; i < W * H; i++) frame_sum += color[i];
+        checksum = checksum * 1000003 + frame_sum;
+    }
+
+    printf("checksum %llu\n", (unsigned long long)checksum);
+    return 0;
+}
