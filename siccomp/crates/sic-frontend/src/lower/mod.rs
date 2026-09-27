@@ -3354,9 +3354,139 @@ pub(super) fn string_brace_len(items: &[InitItem]) -> Option<usize> {
     })
 }
 
+/// A folded integer constant, tracked with its C type (width in bits + signedness)
+/// so the evaluator applies correct integer-promotion / usual-arithmetic-conversion
+/// semantics. `v` is the value normalized to that type: a signed type is
+/// sign-extended to 64 bits, an unsigned type zero-extended, so `v` is the plain
+/// mathematical value a caller wants (e.g. `~0u` → 4294967295, not -1).
+#[derive(Clone, Copy)]
+pub(crate) struct ConstInt { pub v: i64, pub bits: u32, pub signed: bool }
+
+impl ConstInt {
+    /// Build and normalize a value to its (bits, signed) type.
+    pub(crate) fn new(v: i64, bits: u32, signed: bool) -> Self {
+        let bits = if bits >= 64 { 64 } else { bits };
+        if bits >= 64 { return ConstInt { v, bits: 64, signed }; }
+        let m = (v as u64) & ((1u64 << bits) - 1);
+        let v = if signed { let sh = 64 - bits; ((m << sh) as i64) >> sh } else { m as i64 };
+        ConstInt { v, bits, signed }
+    }
+    /// Unsigned value within the type's width (for unsigned ops/compares).
+    fn u128(self) -> u128 {
+        if self.bits >= 64 { (self.v as u64) as u128 }
+        else { ((self.v as u64) & ((1u64 << self.bits) - 1)) as u128 }
+    }
+    /// C integer promotion: a type narrower than `int` becomes `int` (32-bit signed).
+    fn promote(self) -> Self {
+        if self.bits < 32 { ConstInt::new(self.v, 32, true) } else { self }
+    }
+}
+
+/// C usual arithmetic conversions on two operands (each already representable as a
+/// 32- or 64-bit int/uint after promotion) → the common (bits, signed).
+fn const_usual_arith(a: ConstInt, b: ConstInt) -> (u32, bool) {
+    let (a, b) = (a.promote(), b.promote());
+    if a.bits == b.bits {
+        (a.bits, a.signed && b.signed)          // same rank: unsigned wins
+    } else {
+        let big = if a.bits > b.bits { a } else { b };
+        (big.bits, big.signed)                  // wider rank wins; a 64-bit signed
+    }                                           // represents all 32-bit unsigned
+}
+
+/// Type a bare integer constant (an enum constant / already-folded value) the way C
+/// types an integer literal: the smallest of `int`, `unsigned int`, `long` that
+/// holds it. Without this an enum constant above `INT_MAX` (`F = 0xFFFFFFFF`) would
+/// be forced to 32-bit signed and truncate to -1.
+pub(crate) fn const_int_for(v: i64) -> ConstInt {
+    if v >= i32::MIN as i64 && v <= i32::MAX as i64 { ConstInt::new(v, 32, true) }
+    else if v >= 0 && v <= u32::MAX as i64 { ConstInt::new(v, 32, false) }
+    else { ConstInt::new(v, 64, true) }
+}
+
+/// C unary `-`/`~` on a folded constant: the operand is integer-promoted first and
+/// the result keeps that promoted type (`~(unsigned char)0` → `int` -1, not 0xFF).
+pub(crate) fn const_unary(op: UnOpKind, a: ConstInt) -> ConstInt {
+    let a = a.promote();
+    match op {
+        UnOpKind::Neg    => ConstInt::new((a.v as i128).wrapping_neg() as i64, a.bits, a.signed),
+        UnOpKind::BitNot => ConstInt::new(!a.v, a.bits, a.signed),
+        UnOpKind::Not    => ConstInt::new((a.v == 0) as i64, 32, true),
+        _ => a,
+    }
+}
+
+/// Fold one binary op over two typed constants, applying C semantics: the usual
+/// arithmetic conversions pick the common type for arithmetic/bitwise/comparison
+/// (a mixed-sign compare goes unsigned), while a shift keeps the promoted LEFT
+/// type and shifts a signed value arithmetically. `None` = not constant-foldable
+/// (division by zero, a rotate whose width isn't known here). `LogAnd`/`LogOr`
+/// here assume both operands are known — a caller that must short-circuit a
+/// non-constant operand handles that before calling.
+pub(crate) fn const_binop(op: BinOpKind, a: ConstInt, b: ConstInt) -> Option<ConstInt> {
+    use std::cmp::Ordering;
+    let int32 = |v: i64| ConstInt::new(v, 32, true);
+    let (cbits, csigned) = const_usual_arith(a, b);
+    let cmp = |f: fn(Ordering) -> bool| {
+        let ord = if csigned {
+            ConstInt::new(a.v, cbits, true).v.cmp(&ConstInt::new(b.v, cbits, true).v)
+        } else {
+            ConstInt::new(a.v, cbits, false).u128().cmp(&ConstInt::new(b.v, cbits, false).u128())
+        };
+        int32(if f(ord) { 1 } else { 0 })
+    };
+    Some(match op {
+        // Shifts do NOT use usual arithmetic conversion: the result type is the
+        // PROMOTED left operand; a signed left shifts arithmetically.
+        BinOpKind::Shl => { let la = a.promote(); ConstInt::new(((la.v as i128) << (b.v & (la.bits as i64 - 1))) as i64, la.bits, la.signed) }
+        BinOpKind::Shr => {
+            let la = a.promote(); let sh = (b.v & (la.bits as i64 - 1)) as u32;
+            let r = if la.signed { la.v >> sh } else { (la.u128() as u64 >> sh) as i64 };
+            ConstInt::new(r, la.bits, la.signed)
+        }
+        // Equality is signedness-independent (equal normalized values); order uses
+        // the common signedness so `-1 < 1u` compares as unsigned (false).
+        BinOpKind::Eq => cmp(|o| o == Ordering::Equal),
+        BinOpKind::Ne => cmp(|o| o != Ordering::Equal),
+        BinOpKind::Lt => cmp(|o| o == Ordering::Less),
+        BinOpKind::Le => cmp(|o| o != Ordering::Greater),
+        BinOpKind::Gt => cmp(|o| o == Ordering::Greater),
+        BinOpKind::Ge => cmp(|o| o != Ordering::Less),
+        BinOpKind::LogAnd => int32((a.v != 0 && b.v != 0) as i64),
+        BinOpKind::LogOr  => int32((a.v != 0 || b.v != 0) as i64),
+        BinOpKind::RotL | BinOpKind::RotR => return None,
+        _ => {
+            let (au, bu) = (ConstInt::new(a.v, cbits, csigned), ConstInt::new(b.v, cbits, csigned));
+            let res: i128 = match op {
+                BinOpKind::Add => au.v as i128 + bu.v as i128,
+                BinOpKind::Sub => au.v as i128 - bu.v as i128,
+                BinOpKind::Mul => au.v as i128 * bu.v as i128,
+                BinOpKind::Div if bu.v != 0 =>
+                    if csigned { (au.v as i128) / (bu.v as i128) } else { (au.u128() / bu.u128()) as i128 },
+                BinOpKind::Rem if bu.v != 0 =>
+                    if csigned { (au.v as i128) % (bu.v as i128) } else { (au.u128() % bu.u128()) as i128 },
+                BinOpKind::BitAnd => (au.u128() & bu.u128()) as i128,
+                BinOpKind::BitOr  => (au.u128() | bu.u128()) as i128,
+                BinOpKind::BitXor => (au.u128() ^ bu.u128()) as i128,
+                _ => return None,   // Div/Rem by zero, or a non-arithmetic op
+            };
+            ConstInt::new(res as i64, cbits, csigned)
+        }
+    })
+}
+
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
+    eval_const_typed(e, enum_consts).map(|c| c.v)
+}
+
+/// Typed constant folding (see [`ConstInt`]). Kept private; [`eval_const_expr`]
+/// exposes just the value. Applies promotion/usual-arithmetic-conversion so a
+/// mixed-sign compare (`-1 < 1u` → 0) or an unsigned bit op (`~0u` → 0xFFFFFFFF)
+/// folds with the same result the typed IR/runtime path would produce.
+pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<ConstInt> {
+    let int32 = |v: i64| ConstInt::new(v, 32, true);
     match &e.kind {
-        ExprKind::IntLit(v, _) => Ok(*v),
+        ExprKind::IntLit(v, wide) => Ok(ConstInt::new(*v, if *wide { 64 } else { 32 }, true)),
         // `__builtin_constant_p(x)` folds to 0 here (sic can't prove constness),
         // matching how `lower_call` lowers it. This lets a
         // `__builtin_constant_p(x) ? <fold> : <runtime>` ternary fold to its
@@ -3365,13 +3495,13 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
         ExprKind::Call { func, .. }
             if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
         {
-            Ok(0)
+            Ok(int32(0))
         }
-        ExprKind::UIntLit(v, _) => Ok(*v as i64),
-        ExprKind::BoolLit(b) => Ok(*b as i64),
-        ExprKind::CharLit(v) => Ok(*v as i64),
+        ExprKind::UIntLit(v, wide) => Ok(ConstInt::new(*v as i64, if *wide { 64 } else { 32 }, false)),
+        ExprKind::BoolLit(b) => Ok(int32(*b as i64)),
+        ExprKind::CharLit(v) => Ok(int32(*v as i64)),
         ExprKind::Ident(name) => {
-            enum_consts.get(name.as_str()).copied().ok_or_else(|| {
+            enum_consts.get(name.as_str()).map(|v| const_int_for(*v)).ok_or_else(|| {
                 CompileError::at(format!("'{}' is not a constant", name), None, 0, 0)
             })
         }
@@ -3379,15 +3509,12 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
         // variant `Enum::VARIANT` (`std::FileStatus::IO`) folds to its discriminant/
         // tag — e.g. as a `switch` case label. Keyed by the variant (last segment).
         ExprKind::EnumVariant { variant, .. } => {
-            enum_consts.get(variant.as_str()).copied().ok_or_else(|| {
+            enum_consts.get(variant.as_str()).map(|v| const_int_for(*v)).ok_or_else(|| {
                 CompileError::at(format!("'{}' is not a constant", variant), None, 0, 0)
             })
         }
-        ExprKind::Unary { op: UnOpKind::Neg, expr } => Ok(-eval_const_expr(expr, enum_consts)?),
-        ExprKind::Unary { op: UnOpKind::BitNot, expr } => Ok(!eval_const_expr(expr, enum_consts)?),
-        ExprKind::Unary { op: UnOpKind::Not, expr } => {
-            Ok(if eval_const_expr(expr, enum_consts)? == 0 { 1 } else { 0 })
-        }
+        ExprKind::Unary { op: op @ (UnOpKind::Neg | UnOpKind::BitNot | UnOpKind::Not), expr } =>
+            Ok(const_unary(*op, eval_const_typed(expr, enum_consts)?)),
         ExprKind::BinOp { op, lhs, rhs } => {
             // Short-circuit `&&`/`||`: a constant-false `&&` (or constant-true `||`)
             // folds even when the other operand is not constant. This is what makes
@@ -3395,42 +3522,22 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
             // user-mode build — a dead branch, so its call to the (unstubbed)
             // `kvm_arch_get_supported_cpuid` is never emitted.
             if matches!(op, BinOpKind::LogAnd) {
-                if eval_const_expr(lhs, enum_consts)? == 0 { return Ok(0); }
-                return Ok(if eval_const_expr(rhs, enum_consts)? != 0 { 1 } else { 0 });
+                if eval_const_typed(lhs, enum_consts)?.v == 0 { return Ok(int32(0)); }
+                return Ok(int32(if eval_const_typed(rhs, enum_consts)?.v != 0 { 1 } else { 0 }));
             }
             if matches!(op, BinOpKind::LogOr) {
-                if eval_const_expr(lhs, enum_consts)? != 0 { return Ok(1); }
-                return Ok(if eval_const_expr(rhs, enum_consts)? != 0 { 1 } else { 0 });
+                if eval_const_typed(lhs, enum_consts)?.v != 0 { return Ok(int32(1)); }
+                return Ok(int32(if eval_const_typed(rhs, enum_consts)?.v != 0 { 1 } else { 0 }));
             }
-            let l = eval_const_expr(lhs, enum_consts)?;
-            let r = eval_const_expr(rhs, enum_consts)?;
-            Ok(match op {
-                BinOpKind::Add => l.wrapping_add(r),
-                BinOpKind::Sub => l.wrapping_sub(r),
-                BinOpKind::Mul => l.wrapping_mul(r),
-                BinOpKind::Div if r != 0 => l / r,
-                BinOpKind::Rem if r != 0 => l % r,
-                BinOpKind::BitAnd => l & r,
-                BinOpKind::BitOr  => l | r,
-                BinOpKind::BitXor => l ^ r,
-                BinOpKind::Shl    => l << (r & 63),
-                BinOpKind::Shr    => l >> (r & 63),
-                BinOpKind::Eq     => if l == r { 1 } else { 0 },
-                BinOpKind::Ne     => if l != r { 1 } else { 0 },
-                BinOpKind::Lt     => if l < r  { 1 } else { 0 },
-                BinOpKind::Le     => if l <= r { 1 } else { 0 },
-                BinOpKind::Gt     => if l > r  { 1 } else { 0 },
-                BinOpKind::Ge     => if l >= r { 1 } else { 0 },
-                BinOpKind::LogAnd => if l != 0 && r != 0 { 1 } else { 0 },
-                BinOpKind::LogOr  => if l != 0 || r != 0 { 1 } else { 0 },
-                _ => return Err(CompileError::new("non-constant expression")),
-            })
+            let a = eval_const_typed(lhs, enum_consts)?;
+            let b = eval_const_typed(rhs, enum_consts)?;
+            const_binop(*op, a, b).ok_or_else(|| CompileError::new("non-constant expression"))
         }
         ExprKind::Ternary { cond, then, else_ } => {
-            if eval_const_expr(cond, enum_consts)? != 0 {
-                eval_const_expr(then, enum_consts)
+            if eval_const_typed(cond, enum_consts)?.v != 0 {
+                eval_const_typed(then, enum_consts)
             } else {
-                eval_const_expr(else_, enum_consts)
+                eval_const_typed(else_, enum_consts)
             }
         }
         // `__builtin_choose_expr(cond, a, b)` selects an arm at compile time from
@@ -3442,21 +3549,21 @@ pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i
         // && ..., min, (void)0)` — a wrong 0 selects the un-foldable `(void)0`.
         ExprKind::ChooseExpr { cond, then, else_ } => {
             if choose_cond_const(cond, enum_consts) != 0 {
-                eval_const_expr(then, enum_consts)
+                eval_const_typed(then, enum_consts)
             } else {
-                eval_const_expr(else_, enum_consts)
+                eval_const_typed(else_, enum_consts)
             }
         }
         ExprKind::Cast { ty, expr } => {
-            let inner = eval_const_expr(expr, enum_consts)?;
-            // A cast to a primitive integer type truncates to that width and
-            // re-signs; a type-blind pass-through leaves an out-of-range value
-            // (e.g. `(int)0x80000000` == +2^31) that a later widen sign-extends
-            // wrongly. Non-primitive / typedef targets keep the value unchanged
-            // (no type context here to resolve them — matches the old behavior).
+            let inner = eval_const_typed(expr, enum_consts)?;
+            // A cast to a primitive integer type re-types the value to that width and
+            // signedness (truncating / re-signing). A non-primitive / typedef target
+            // keeps the value AND its type unchanged (no type context here to resolve
+            // it — matches the old behavior).
             Ok(match ast_prim_int_type(&ty.ty) {
-                Some(t) => apply_int_cast(inner, &t),
-                None => inner,
+                Some(Type::Int { bits, signed }) => ConstInt::new(inner.v, bits, signed),
+                Some(Type::Bool) => ConstInt::new((inner.v != 0) as i64, 32, true),
+                _ => inner,
             })
         }
         _ => {

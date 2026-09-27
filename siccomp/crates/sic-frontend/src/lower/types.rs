@@ -1097,19 +1097,37 @@ pub fn eval_const_size(
     ptr_size: u32,
     enum_consts: &HashMap<String, i64>,
 ) -> Option<i64> {
-    use crate::ast::{ExprKind, UnOpKind, BinOpKind, OffsetDesignator};
+    eval_const_size_typed(e, named, ptr_size, enum_consts).map(|c| c.v)
+}
+
+/// Typed variant of [`eval_const_size`] (see [`super::ConstInt`]): folds the same
+/// `sizeof`/`alignof`/`offsetof`-aware constant expressions but tracks each value's
+/// C type, so arithmetic / comparisons apply integer promotion and the usual
+/// arithmetic conversions (a mixed-sign compare or `~unsigned` folds the same way
+/// the runtime path would). `sizeof`/`alignof`/`offsetof` yield `size_t` (unsigned,
+/// pointer-width). Delegates the op logic to the shared `super::const_binop` /
+/// `super::const_unary` so it can never diverge from the plain evaluator.
+fn eval_const_size_typed(
+    e: &Expr,
+    named: &HashMap<String, Type>,
+    ptr_size: u32,
+    enum_consts: &HashMap<String, i64>,
+) -> Option<super::ConstInt> {
+    use crate::ast::{ExprKind, UnOpKind, OffsetDesignator};
+    use super::ConstInt;
+    let size_t = |v: i64| ConstInt::new(v, ptr_size * 8, false);
     match &e.kind {
-        ExprKind::IntLit(v, _) => Some(*v),
-        ExprKind::UIntLit(v, _) => Some(*v as i64),
-        ExprKind::CharLit(v) => Some(*v as i64),
-        ExprKind::Ident(name) => enum_consts.get(name.as_str()).copied(),
+        ExprKind::IntLit(v, wide) => Some(ConstInt::new(*v, if *wide { 64 } else { 32 }, true)),
+        ExprKind::UIntLit(v, wide) => Some(ConstInt::new(*v as i64, if *wide { 64 } else { 32 }, false)),
+        ExprKind::CharLit(v) => Some(ConstInt::new(*v as i64, 32, true)),
+        ExprKind::Ident(name) => enum_consts.get(name.as_str()).map(|v| super::const_int_for(*v)),
         ExprKind::SizeofType(qt) => {
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
-            Some(t.size_of(ptr_size) as i64)
+            Some(size_t(t.size_of(ptr_size) as i64))
         }
         ExprKind::AlignofType(qt) => {
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
-            Some(t.align_of(ptr_size) as i64)
+            Some(size_t(t.align_of(ptr_size) as i64))
         }
         ExprKind::OffsetOf { ty, designators } => {
             let mut cur = lower_ast_type(&ty.ty, named, ptr_size).ok()?;
@@ -1142,61 +1160,34 @@ pub fn eval_const_size(
                     }
                 }
             }
-            Some(offset)
+            Some(size_t(offset))
         }
-        ExprKind::Unary { op: UnOpKind::Neg, expr } =>
-            Some(eval_const_size(expr, named, ptr_size, enum_consts)?.wrapping_neg()),
-        ExprKind::Unary { op: UnOpKind::BitNot, expr } =>
-            Some(!eval_const_size(expr, named, ptr_size, enum_consts)?),
-        ExprKind::Unary { op: UnOpKind::Not, expr } =>
-            Some(if eval_const_size(expr, named, ptr_size, enum_consts)? == 0 { 1 } else { 0 }),
+        ExprKind::Unary { op: op @ (UnOpKind::Neg | UnOpKind::BitNot | UnOpKind::Not), expr } =>
+            Some(super::const_unary(*op, eval_const_size_typed(expr, named, ptr_size, enum_consts)?)),
         ExprKind::BinOp { op, lhs, rhs } => {
-            let l = eval_const_size(lhs, named, ptr_size, enum_consts)?;
-            let r = eval_const_size(rhs, named, ptr_size, enum_consts)?;
-            Some(match op {
-                BinOpKind::Add => l.wrapping_add(r),
-                BinOpKind::Sub => l.wrapping_sub(r),
-                BinOpKind::Mul => l.wrapping_mul(r),
-                BinOpKind::Div if r != 0 => l / r,
-                BinOpKind::Rem if r != 0 => l % r,
-                BinOpKind::BitAnd => l & r,
-                BinOpKind::BitOr  => l | r,
-                BinOpKind::BitXor => l ^ r,
-                BinOpKind::Shl    => l << (r & 63),
-                BinOpKind::Shr    => l >> (r & 63),
-                BinOpKind::Eq     => (l == r) as i64,
-                BinOpKind::Ne     => (l != r) as i64,
-                BinOpKind::Lt     => (l < r) as i64,
-                BinOpKind::Le     => (l <= r) as i64,
-                BinOpKind::Gt     => (l > r) as i64,
-                BinOpKind::Ge     => (l >= r) as i64,
-                BinOpKind::LogAnd => (l != 0 && r != 0) as i64,
-                BinOpKind::LogOr  => (l != 0 || r != 0) as i64,
-                // Div/Rem by zero fall through here.
-                BinOpKind::Div | BinOpKind::Rem => return None,
-                // Rotate width depends on the operand type; not constant-folded.
-                BinOpKind::RotL | BinOpKind::RotR => return None,
-            })
+            let l = eval_const_size_typed(lhs, named, ptr_size, enum_consts)?;
+            let r = eval_const_size_typed(rhs, named, ptr_size, enum_consts)?;
+            super::const_binop(*op, l, r)
         }
         ExprKind::Ternary { cond, then, else_ } => {
-            if eval_const_size(cond, named, ptr_size, enum_consts)? != 0 {
-                eval_const_size(then, named, ptr_size, enum_consts)
+            if eval_const_size_typed(cond, named, ptr_size, enum_consts)?.v != 0 {
+                eval_const_size_typed(then, named, ptr_size, enum_consts)
             } else {
-                eval_const_size(else_, named, ptr_size, enum_consts)
+                eval_const_size_typed(else_, named, ptr_size, enum_consts)
             }
         }
         ExprKind::Cast { ty, expr } => {
-            let inner = eval_const_size(expr, named, ptr_size, enum_consts)?;
-            // A cast to a primitive integer truncates and re-signs to that width;
-            // a type-blind pass-through leaves an out-of-range value that a later
-            // widen sign-extends wrongly (e.g. `(int)0x80000000` folding as +2^31).
+            let inner = eval_const_size_typed(expr, named, ptr_size, enum_consts)?;
+            // A cast to a primitive integer re-types (truncates / re-signs) to that
+            // width; a non-primitive target keeps the value and type unchanged.
             Some(match lower_type(ty, named, ptr_size) {
-                Ok(t @ (Type::Int { .. } | Type::Bool)) => super::apply_int_cast(inner, &t),
+                Ok(Type::Int { bits, signed }) => ConstInt::new(inner.v, bits, signed),
+                Ok(Type::Bool) => ConstInt::new((inner.v != 0) as i64, 32, true),
                 _ => inner,
             })
         }
-        // Fall back to the plain integer evaluator for anything else.
-        _ => super::eval_const_expr(e, enum_consts).ok(),
+        // Fall back to the plain typed integer evaluator for anything else.
+        _ => super::eval_const_typed(e, enum_consts).ok(),
     }
 }
 

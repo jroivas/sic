@@ -1,0 +1,49 @@
+// Constant folding is TYPE-AWARE (sic.md §"Integer sizes"): a fully-constant
+// condition folded at compile time (a `?:`/`if`/`case`/array-size context) must
+// apply C integer promotion and the usual arithmetic conversions, exactly as the
+// runtime path does. Historically the constant evaluator worked in bare signed
+// 64-bit, so `~0u` folded to -1 (not 0xFFFFFFFF) and a mixed-sign compare folded
+// signed (`-1 < 1u` → true instead of false), silently selecting the wrong branch.
+// Returns 42.
+#include <stdio.h>
+
+int main() {
+    // ~unsigned keeps its 32-bit width when folded
+    if (!(~0u == 0xFFFFFFFFu)) return 1;
+
+    // mixed-sign comparison converts the signed operand to unsigned (C rule):
+    // -1 becomes a huge unsigned, so it is NOT < 1u
+    if ((-1 < 1u) ? 1 : 0) return 2;               // must be false
+    if (!((-1 > 1u) ? 1 : 0)) return 3;            // and > is true
+
+    // -1 == 0xFFFFFFFFu after conversion (both become 0xFFFFFFFF)
+    if (!((-1 == 0xFFFFFFFFu) ? 1 : 0)) return 4;
+
+    // unsigned right shift of a 32-bit value zero-fills; signed shift is arithmetic
+    if (((unsigned)0x80000000u >> 4) != 0x08000000u) return 5;
+    if (((-8) >> 1) != -4) return 6;
+
+    // constant cast truncation/re-sign in a folded context
+    if (((char)300) != 44) return 7;
+    if (((unsigned char)-1) != 255) return 8;
+
+    // unsigned wrap in a constant context
+    if ((0xFFFFFFFFu + 1u) != 0u) return 9;
+
+    // still-correct signed arithmetic (no regression)
+    if ((3 + 4 * 2) != 11) return 10;
+    if ((-7 / 2) != -3 || (-7 % 2) != -1) return 11;
+
+    // a mixed-sign constant selecting an array size (must fold to 8, unsigned path)
+    i32 buf[(-1 < 1u) ? 4 : 8];                    // condition false -> size 8
+    if ((i32)(sizeof(buf) / sizeof(i32)) != 8) return 12;
+
+    // an UNSUFFIXED hex literal above INT_MAX is `unsigned int` (C 6.4.4.1), not a
+    // signed -1 — so it stays positive when widened, and `sizeof` it is 4.
+    if (((i64)0xFFFFFFFF) != 4294967295) return 13;
+    if (sizeof(0xFFFFFFFF) != 4) return 14;        // unsigned int, 4 bytes
+    if (sizeof(0x100000000) != 8) return 15;       // needs 64-bit
+    if ((0x80000000 > 0) ? 0 : 1) return 16;       // unsigned int is > 0 (not negative)
+
+    return 42;
+}

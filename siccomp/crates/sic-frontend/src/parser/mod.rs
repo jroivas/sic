@@ -3330,21 +3330,40 @@ fn subst_sentinel(ty: QualType, sentinel: &str, repl: &QualType) -> QualType {
 fn parse_int_literal(text: &str) -> (i64, bool, bool) {
     let s = text.trim_end_matches(|c| matches!(c, 'u'|'U'|'l'|'L'));
     let lower = text.to_lowercase();
-    let is_u = lower.contains('u');
+    let suffix_u = lower.contains('u');
     let suffix_l = lower.contains('l');
 
-    let raw: u64 = if s.starts_with("0x") || s.starts_with("0X") {
-        u64::from_str_radix(&s[2..], 16).unwrap_or(0)
+    let (raw, hex_oct): (u64, bool) = if s.starts_with("0x") || s.starts_with("0X") {
+        (u64::from_str_radix(&s[2..], 16).unwrap_or(0), true)
     } else if s.starts_with("0b") || s.starts_with("0B") {
         // Binary literal (C23 / GNU extension).
-        u64::from_str_radix(&s[2..], 2).unwrap_or(0)
+        (u64::from_str_radix(&s[2..], 2).unwrap_or(0), true)
     } else if s.len() > 1 && s.starts_with('0') {
-        u64::from_str_radix(&s[1..], 8).unwrap_or(0)
+        (u64::from_str_radix(&s[1..], 8).unwrap_or(0), true)
     } else {
-        s.parse::<u64>().unwrap_or(0)
+        (s.parse::<u64>().unwrap_or(0), false)
     };
 
-    let is_64 = suffix_l || raw > u32::MAX as u64;
+    // C integer-literal type (C11 6.4.4.1): walk the candidate types in order and
+    // pick the first that holds the value. A DECIMAL literal without a `u` suffix
+    // only ever picks SIGNED types (`int`→`long`→`long long`); a HEX/OCTAL/BINARY
+    // literal without `u` may fall through to an UNSIGNED type when the value does
+    // not fit the signed one (so `0xFFFFFFFF` is `unsigned int`, not a signed -1).
+    // A `u` suffix forces unsigned; an `l` suffix forces at least 64-bit.
+    let (is_u, is_64) = if suffix_u {
+        (true, suffix_l || raw > u32::MAX as u64)
+    } else if !suffix_l && raw <= i32::MAX as u64 {
+        (false, false)                                   // int
+    } else if hex_oct && !suffix_l && raw <= u32::MAX as u64 {
+        (true, false)                                    // unsigned int (hex/oct only)
+    } else if raw <= i64::MAX as u64 {
+        (false, true)                                    // long
+    } else {
+        // Doesn't fit signed 64-bit: hex/oct → unsigned long; a decimal here is
+        // technically `unsigned long long` in C too (a would-be-negative bare
+        // decimal), so treat both as unsigned 64-bit rather than a negative value.
+        (true, true)
+    };
     (raw as i64, is_u, is_64)
 }
 
