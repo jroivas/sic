@@ -2405,6 +2405,17 @@ impl Lowerer {
             self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
         }
         let init = self.build_global_init(d, &mut ir_ty);
+        // A `const` integer global with a folded constant value is itself a usable
+        // compile-time constant: record name→value so a LATER constant initializer
+        // or constant context can reference it (`const u32 SIZE = 1<<24; const u32
+        // MASK = SIZE - 1;`). Without this the reference failed to fold and the
+        // dependent global was silently left zero. Reuses `enum_consts`, which the
+        // constant evaluators already consult for a bare identifier.
+        if type_is_const(&d.ty) && matches!(&ir_ty, Type::Int { .. } | Type::Bool) {
+            if let Some(Constant::Int(v)) = &init {
+                self.enum_consts.entry(d.name.clone()).or_insert(*v);
+            }
+        }
         // If already declared, a definition must upgrade a prior `extern`
         // declaration — otherwise the definition is dropped and the symbol left
         // undefined at link time. This covers both a real initializer (`extern
@@ -2644,15 +2655,22 @@ impl Lowerer {
                                 };
                             }
                         }
-                        match &e.kind {
-                            ExprKind::FloatLit(f) => Some(Constant::Float(*f)),
-                            ExprKind::Cast { expr: inner, .. } => {
-                                if let ExprKind::FloatLit(f) = &inner.kind {
-                                    Some(Constant::Float(*f))
-                                } else {
-                                    None
-                                }
+                        // A floating global initializer. In SIC a decimal literal
+                        // is `DecimalLit` (a `fixed`/`f64` literal carrying its
+                        // digits), NOT `FloatLit` — so a `const f64 DT = 0.01;`
+                        // global was left zero without this branch.
+                        let float_of = |ex: &Expr| -> Option<f64> {
+                            match &ex.kind {
+                                ExprKind::FloatLit(f) => Some(*f),
+                                ExprKind::DecimalLit(t) => t.parse().ok(),
+                                _ => None,
                             }
+                        };
+                        match &e.kind {
+                            ExprKind::FloatLit(_) | ExprKind::DecimalLit(_) => float_of(e).map(Constant::Float),
+                            ExprKind::Cast { expr: inner, .. } => float_of(inner).map(Constant::Float),
+                            ExprKind::Unary { op: UnOpKind::Neg, expr: inner } =>
+                                float_of(inner).map(|f| Constant::Float(-f)),
                             _ => None,
                         }
                     }

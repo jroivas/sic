@@ -1,0 +1,40 @@
+// Constant `const` GLOBAL initializers (sic.md §"Types"): a const integer global is
+// itself a compile-time constant, so a later const global (or any constant context)
+// can reference it — `const u32 MASK = SIZE - 1` must fold, not silently become 0.
+// And a `const f64` global takes a decimal-literal initializer (in SIC a decimal is
+// a `DecimalLit`, not a C `FloatLit`) — `const f64 DT = 0.01` must hold 0.01, not 0.
+// Both were silent zero-inits that made a hash-map probe loop spin forever and an
+// n-body simulation do nothing. Returns 42.
+#include <stdio.h>
+
+const u32 SIZE = (1 << 24);
+const u32 MASK = (SIZE - 1);            // references a prior const global
+const i32 BITS = 24;
+const u32 SIZE2 = (1 << BITS);          // reference inside a shift
+const f64 DT = 0.01;                    // DecimalLit initializer
+const f64 EPS = 0.05;
+const f64 NEG = -1.5;                   // negated decimal literal
+const f64 SUM = 2.0;                    // whole-number decimal literal
+
+int main() {
+    if (SIZE != 16777216u) return 1;
+    if (MASK != 16777215u) return 2;              // was 0 before the fix
+    if (SIZE2 != 16777216u) return 3;
+    if ((123456u & MASK) != 123456u) return 4;    // MASK actually masks
+
+    // const f64 globals hold their real values (were 0 before the fix)
+    if ((i64)(DT * 100000.0 + 0.5) != 1000) return 5;     // 0.01
+    if ((i64)(EPS * 100000.0 + 0.5) != 5000) return 6;    // 0.05
+    if ((i64)(NEG * 100000.0 - 0.5) != -150000) return 7; // -1.5
+    if ((i64)(SUM * 100000.0 + 0.5) != 200000) return 8;  // 2.0
+
+    // use MASK the way the hashmap benchmark does: a bounded index
+    u32 idx = 999999u & MASK;
+    if (idx != 999999u) return 9;
+
+    // a const-global bound folds as an array size too
+    i32 buf[MASK > 0 ? 4 : 0];
+    if ((i64)(sizeof(buf) / sizeof(i32)) != 4) return 10;
+
+    return 42;
+}
