@@ -18,12 +18,18 @@ pub mod fold;
 pub mod algebraic;
 pub mod dce;
 pub mod tree_rec;
+pub mod inline;
 
 pub use pass::{IrPass, IrPassManager};
 
 /// Run the enabled IR-stage passes over `module` in place.
 pub fn run_ir_passes(module: &mut Module, cfg: &PassConfig) {
     let mut pm = IrPassManager::new(cfg.max_iters, cfg.debug);
+    // Inline first: it exposes more constants/dead code and larger loop bodies for
+    // the folding/algebraic/dce passes that follow.
+    if cfg.is_enabled("inline") {
+        pm.add(Box::new(inline::Inline::new(cfg.inline_threshold, cfg.inline_aggressive)));
+    }
     if cfg.is_enabled("ir-fold") { pm.add(Box::new(fold::IrFold::new())); }
     if cfg.is_enabled("algebraic") { pm.add(Box::new(algebraic::Algebraic::new())); }
     if cfg.is_enabled("dce") { pm.add(Box::new(dce::Dce::new())); }

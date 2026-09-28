@@ -17,11 +17,18 @@ pub struct PassConfig {
     enabled: HashSet<String>,
     pub debug: bool,
     pub max_iters: usize,
+    /// Inliner size budget: a called function of at most this many IR instructions
+    /// is a candidate for inlining. Higher `-O` raises it; `inline_aggressive`
+    /// ignores it entirely (bounded only by the per-caller growth cap).
+    pub inline_threshold: usize,
+    /// `-O3`+ : inline every eligible (non-recursive, non-variadic, scalar-return)
+    /// callee regardless of size, up to the per-caller growth cap.
+    pub inline_aggressive: bool,
 }
 
 impl PassConfig {
     pub fn new(enabled: HashSet<String>, debug: bool) -> Self {
-        PassConfig { enabled, debug, max_iters: 8 }
+        PassConfig { enabled, debug, max_iters: 8, inline_threshold: 0, inline_aggressive: false }
     }
     pub fn is_enabled(&self, name: &str) -> bool { self.enabled.contains(name) }
 }

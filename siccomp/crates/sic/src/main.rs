@@ -503,11 +503,13 @@ fn resolves_to_self(prog: &str) -> bool {
 /// Pass names: `const-fold`, `dead-branch` (AST stage); `ir-fold`, `algebraic`,
 /// `dce` (typed IR stage).
 fn pass_config(args: &Args) -> PassConfig {
-    const ALL: [&str; 6] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce", "tree-rec"];
+    const ALL: [&str; 7] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce", "tree-rec", "inline"];
     let o = args.opt.as_str();
     let level1 = o != "0";
     let level2 = matches!(o, "2" | "3" | "s" | "z")
         || o.parse::<u32>().map_or(false, |n| n >= 2);
+    // `-O3` and higher: more aggressive inlining (bigger callees, always-inline).
+    let level3 = o.parse::<u32>().map_or(false, |n| n >= 3);
 
     let mut enabled: std::collections::HashSet<String> = std::collections::HashSet::new();
     if level1 {
@@ -516,6 +518,11 @@ fn pass_config(args: &Args) -> PassConfig {
     if level2 {
         for p in ["algebraic", "dce", "tree-rec"] { enabled.insert(p.to_string()); }
     }
+    // NOTE: `inline` is deliberately NOT in the default -O set. The pass is correct
+    // for small leaf helpers, but inlining a moderate leaf into a function with
+    // fat-pointer bounds checks currently miscompiles (a promoted pointer reads as
+    // null across the spliced region). Until that is fixed it is opt-in only via
+    // `-finline=<max-callee-instrs>`, which the override loop below enables.
     // Per-pass overrides win over the -O default.
     for name in ALL {
         match args.f_options.get(name) {
@@ -524,7 +531,23 @@ fn pass_config(args: &Args) -> PassConfig {
             None => {}
         }
     }
-    PassConfig::new(enabled, args.debug)
+    let mut cfg = PassConfig::new(enabled, args.debug);
+    // Inliner budget: only LEAF functions are inlined (see ir/inline.rs), so the
+    // threshold bounds the size of a leaf helper that gets spliced in. Modest at
+    // -O2 (small helpers like a `min3`); a larger gate at -O3+ so bigger leaves
+    // qualify. `-finline=<n>` overrides the threshold explicitly.
+    //
+    // `inline_aggressive` (ignore the threshold — "always inline") is intentionally
+    // NOT enabled: inlining a large / control-flow-heavy body into a function that
+    // has fat-pointer bounds checks currently miscompiles (a promoted pointer reads
+    // as null across the spliced region; at the extreme, Cranelift's verifier trips).
+    // Until that interaction is fixed, both levels stay threshold-gated.
+    cfg.inline_threshold = if level3 { 40 } else { 24 };
+    cfg.inline_aggressive = false;
+    if let Some(FOption::Value(v)) = args.f_options.get("inline") {
+        if let Ok(n) = v.parse::<usize>() { cfg.inline_threshold = n; }
+    }
+    cfg
 }
 
 /// Map a GCC-style `-O` level to a Cranelift `opt_level` setting.
