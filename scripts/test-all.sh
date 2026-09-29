@@ -1,20 +1,4 @@
 #!/bin/bash
-
-set -e
-set -u
-
-PWD=$(pwd)
+# Compatibility alias for the current test suite. Forwards to compiletest_rust.sh.
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
-
-tests=0
-success=0
-while read test; do
-    tests=$((tests+1))
-    if ! "${SCRIPT_DIR}/run-test.sh" "$test"; then
-        continue
-    fi
-    success=$((success+1))
-done <<<$(ls "${SCRIPT_DIR}/../tests/test"*.sic)
-
-failed=$((tests-success))
-echo "*** Passed ${success}/${tests} (failed ${failed})"
+exec "${SCRIPT_DIR}/../compiletest_rust.sh" "$@"
