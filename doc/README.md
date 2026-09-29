@@ -6,9 +6,9 @@ information — without abandoning C's model or its ecosystem. C source compiles
 unchanged; the improvements are opt-in and live in `.sic` files.
 
 > This guide documents the language **as implemented today**. The design
-> specification (`sic.md` at the repo root) is broader and aspirational; where it
-> and the implementation differ, this guide describes what the compiler actually
-> does. Features named as *planned* are not usable yet.
+> specification (`sic.md` at the repo root) is the broader reference — most of it
+> is implemented, but where it and the compiler differ this guide describes what
+> the compiler actually does, and a few `sic.md` items are still marked *planned*.
 
 ## Contents
 
