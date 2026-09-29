@@ -129,9 +129,15 @@ fn fold_int(op: BinOpKind, l: i64, r: i64, w: bool) -> Option<ExprKind> {
 
 fn fold_uint(op: BinOpKind, l: u64, r: u64, w: bool) -> Option<ExprKind> {
     use BinOpKind::*;
+    // Arithmetic wraps at the OPERAND width: two 32-bit `unsigned int`s produce a
+    // 32-bit result (C 6.2.5/9 — unsigned overflow is defined modular arithmetic),
+    // so `0xFFFFFFFFu + 1u` is `0u`, not the 64-bit `0x100000000`. Only a 64-bit
+    // operand (`w`) yields a 64-bit result. (Previously this promoted to 64-bit
+    // whenever the value exceeded `u32::MAX`, which silently disagreed with the
+    // runtime and could flip a constant-folded branch condition.)
     let arith = |v: u64| {
-        let is64 = w || v > u32::MAX as u64;
-        ExprKind::UIntLit(v, is64)
+        if w { ExprKind::UIntLit(v, true) }
+        else { ExprKind::UIntLit(v & 0xFFFF_FFFF, false) }
     };
     let boolean = |b: bool| ExprKind::IntLit(i64::from(b), false);
     Some(match op {
