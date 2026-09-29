@@ -8,21 +8,27 @@
 //! Eligibility (a callee must be ALL of): defined here (not `extern`), not
 //! variadic, a SCALAR/void return (no aggregate/sret return — keeps parameter
 //! numbering simple and avoids the caller-slot ABI), free of frame-sensitive
-//! intrinsics (`__builtin_return_address`, `va_*`), and not self-recursive. A call
-//! is inlined when the callee is at most `threshold` IR instructions, or always
-//! when `aggressive` (`-O3`+). Per-caller growth is capped so nothing blows up.
+//! intrinsics (`__builtin_return_address`, `va_*`), and not directly self-recursive.
+//! A non-leaf callee (one that itself calls) is fine — its inner calls come along
+//! and may be inlined on a later pass iteration. A call is inlined when the callee
+//! is at most `threshold` IR instructions, or always when `aggressive` (`-O3`+).
+//! Per-caller growth and inline-count caps keep the worst case bounded.
 //!
 //! Correctness notes:
 //!  - Call arguments are already coerced to their parameter types at the call site
 //!    (`lower_call`), so feeding an argument into the callee's parameter store is
 //!    width-correct — a `Const` only reaches a `Call` when its width already
 //!    matches the parameter (otherwise coercion made it a `Cast`ed local).
-//!  - The call's result is materialized through a fresh return-slot alloca: each
-//!    callee `Ret v` stores `v` into the slot, and the continuation block loads it
-//!    into the call's original dest. This defines the dest with a real typed
-//!    `Load` (so a later `Store` of the result is width-correct) and merges
-//!    multiple returns without SSA phi handling. Cranelift's optimizer promotes
-//!    the slot back to a register.
+//!  - The result flows back either as an SSA value (single non-const return →
+//!    substitute the call's dest) or, for multiple / constant returns, through a
+//!    fresh return-slot alloca that the continuation block loads.
+//!  - BLOCK ORDER MATTERS: the inlined blocks + continuation are spliced in right
+//!    AFTER the split block, keeping the block vector in a mostly-topological order
+//!    (predecessors before successors). Appending them at the end instead broke
+//!    the backend's SSA reconstruction for a register-promoted pointer used in the
+//!    spliced continuation (`use_var` reconstructed a null value), which surfaced
+//!    as a null-pointer crash whenever inlining into a function with fat-pointer
+//!    bounds checks. See `do_inline` step 5/6.
 
 use std::collections::HashMap;
 use sic_ir::{Module, Function, BasicBlock, Instr, Terminator, Val, ValId, BlockId, Type};
@@ -80,22 +86,17 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
                     // caller's frame.
                     Instr::ReturnAddress { .. } | Instr::VaStart { .. }
                     | Instr::VaArg { .. } | Instr::VaEnd { .. } => { eligible = false; break 'scan; }
-                    // LEAF ONLY: a callee that itself makes a call is not inlined.
-                    // Besides self-recursion (unbounded), inlining a call-containing
-                    // body into a function that has fat-pointer bounds checks
-                    // currently miscompiles (a promoted pointer reads as null across
-                    // the spliced call region — pointer register-promotion interacts
-                    // badly with the inserted call/CFG). Leaf helpers — the common,
-                    // high-value inline targets (`min3`, an `edge`, a `floor`) — are
-                    // unaffected. Non-leaf inlining is a TODO pending that fix.
-                    Instr::Call { .. } | Instr::CallIndirect { .. } => { eligible = false; break 'scan; }
+                    // Directly self-recursive: inlining it into itself never
+                    // terminates (and into others it just re-expands to the caps).
+                    Instr::Call { func, .. } if !func.is_extern() && func.index() == self_idx => {
+                        eligible = false; break 'scan;
+                    }
                     _ => {}
                 }
             }
             if let Terminator::Ret(Some(_)) = &b.terminator { ret_val_count += 1; }
         }
     }
-    let _ = self_idx;   // self-recursion is a special case of the leaf-only rule
     FnInfo { eligible, size: func_size(f), ret_val_count }
 }
 
@@ -220,6 +221,13 @@ impl Inline {
         }
 
         // --- 5. Clone every callee block with the remap; rewrite returns. ---------
+        // Collected and inserted right AFTER the split block (rather than appended at
+        // the end of the function) so the block vector keeps a natural, mostly-
+        // topological order: predecessors precede successors. Cranelift's SSA builder
+        // is meant to be order-independent given `seal_all_blocks`, but a promoted
+        // pointer Variable used in a spliced continuation reconstructed to a wrong
+        // (null) value when the inlined blocks trailed all their predecessors.
+        let mut new_blocks: Vec<BasicBlock> = Vec::with_capacity(callee.blocks.len() + 1);
         for cb in &callee.blocks {
             let new_id = bmap[&cb.id];
             let mut nb = BasicBlock::new(new_id);
@@ -235,7 +243,7 @@ impl Inline {
                 }
                 other => remap_term(other, &vmap, &bmap),
             };
-            caller.add_block(nb);
+            new_blocks.push(nb);
         }
 
         // --- 6. Continuation block: materialize the result, then the caller tail. -
@@ -245,7 +253,11 @@ impl Inline {
         }
         cont.instrs.extend(tail);
         cont.terminator = orig_term;
-        caller.add_block(cont);
+        new_blocks.push(cont);
+
+        // Splice the inlined blocks + continuation in right after the split block.
+        let at = bi + 1;
+        caller.blocks.splice(at..at, new_blocks);
 
         // --- 7. SSA fast path: replace the call's dest with the single return value.
         // Safe to rewrite EVERY use (including `Store` values and terminators)

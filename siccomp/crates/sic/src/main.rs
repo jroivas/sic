@@ -516,13 +516,8 @@ fn pass_config(args: &Args) -> PassConfig {
         for p in ["const-fold", "dead-branch", "ir-fold"] { enabled.insert(p.to_string()); }
     }
     if level2 {
-        for p in ["algebraic", "dce", "tree-rec"] { enabled.insert(p.to_string()); }
+        for p in ["algebraic", "dce", "tree-rec", "inline"] { enabled.insert(p.to_string()); }
     }
-    // NOTE: `inline` is deliberately NOT in the default -O set. The pass is correct
-    // for small leaf helpers, but inlining a moderate leaf into a function with
-    // fat-pointer bounds checks currently miscompiles (a promoted pointer reads as
-    // null across the spliced region). Until that is fixed it is opt-in only via
-    // `-finline=<max-callee-instrs>`, which the override loop below enables.
     // Per-pass overrides win over the -O default.
     for name in ALL {
         match args.f_options.get(name) {
@@ -532,18 +527,13 @@ fn pass_config(args: &Args) -> PassConfig {
         }
     }
     let mut cfg = PassConfig::new(enabled, args.debug);
-    // Inliner budget: only LEAF functions are inlined (see ir/inline.rs), so the
-    // threshold bounds the size of a leaf helper that gets spliced in. Modest at
-    // -O2 (small helpers like a `min3`); a larger gate at -O3+ so bigger leaves
-    // qualify. `-finline=<n>` overrides the threshold explicitly.
-    //
-    // `inline_aggressive` (ignore the threshold — "always inline") is intentionally
-    // NOT enabled: inlining a large / control-flow-heavy body into a function that
-    // has fat-pointer bounds checks currently miscompiles (a promoted pointer reads
-    // as null across the spliced region; at the extreme, Cranelift's verifier trips).
-    // Until that interaction is fixed, both levels stay threshold-gated.
-    cfg.inline_threshold = if level3 { 40 } else { 24 };
-    cfg.inline_aggressive = false;
+    // Inliner budget: the threshold bounds the size of a callee that gets spliced
+    // in. Modest at -O2 (small helpers like a `min3`/`edge`); at -O3+ a much larger
+    // gate AND always-inline (`inline_aggressive` — every eligible callee regardless
+    // of size, bounded only by the per-caller growth cap). `-finline=<n>` overrides
+    // the threshold explicitly.
+    cfg.inline_threshold = if level3 { 200 } else { 24 };
+    cfg.inline_aggressive = level3;
     if let Some(FOption::Value(v)) = args.f_options.get("inline") {
         if let Ok(n) = v.parse::<usize>() { cfg.inline_threshold = n; }
     }
