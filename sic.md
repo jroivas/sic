@@ -3,8 +3,12 @@
 Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
 
-**REMARK** Most of the features described here are only planned, and **NOT** yet implemented.
-For now the focus has been implementing more or less standard C compiler.
+**STATUS** Most of the features described here are implemented in the current
+compiler (Rust front end, Cranelift back end). They are active for SIC-mode
+sources (`.sic` files); the same compiler also builds ordinary C (it compiles real
+C codebases such as SQLite and QEMU). A few advanced items remain partial or
+planned — noted inline where relevant (e.g. `std.File`, `@`-capture lambdas, and a
+cross-module generic template whose body calls other module functions).
 
 ## Limit undefined behavior
 

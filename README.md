@@ -1,69 +1,62 @@
-# SIC - Slightly Improved C
+# SIC — Slightly Improved C
 
-Slightly Improved C is a programming language that borrows a lot from C,
-but is not afraid to introduce breaking changes in order to improve it.
+Slightly Improved C is a programming language that borrows a lot from C, but is
+not afraid to introduce breaking changes in order to improve it.
 
+The compiler (`siccomp/`, a Rust workspace) has two front ends sharing one back
+end:
 
-To read more about the design see [sic.md](sic.md)
+  - a **C front end** — it compiles ordinary C, enough to build real codebases
+    (SQLite, QEMU); and
+  - a **SIC front end** — the memory-safe, undefined-behaviour-free language
+    described in [sic.md](sic.md).
 
+Both lower to a typed IR (`sic-ir`), are optimized by `sic-opt`, and are compiled
+to native code by a **Cranelift** back end (`sic-cranelift`). There is no LLVM
+dependency.
 
 ## Dependencies
 
-You need to have bootstrapping C compiler (both gcc and clang should work).
-For compiling with sic you need LLVM installed. Plus a linker.
+  - A **Rust toolchain** (`cargo`, stable) to build the compiler.
+  - A **C compiler / linker** (`cc`, gcc or clang) — `sic` links object files
+    through it, and it is the bootstrapping compiler.
+  - A system libc with headers, for compiling C and for some tests.
 
-System libc with headers is not mandatory but needed by few tests.
+## Build
 
+`build.sh` builds the compiler and then builds + installs the shipped standard
+library (`import std;`) into the compiler's module sysroot:
 
-## Build and run
+    ./build.sh release        # or: ./build.sh debug (default)
 
-SIC uses meson and ninja for builds. Make sure you install those first. Then:
+That is just a wrapper around `cargo`; you can also build the compiler alone:
 
-    mkdir build
-    cd build
-    meson setup ..
-    ninja
+    cd siccomp && cargo build --release
 
-To make static build instead issue this after setup step:
+The binary lands at `siccomp/target/release/sic` (or `.../debug/sic`).
 
-    meson configure -Ddefault_library=static
+## Usage
 
+    sic hello.c   -o hello       # compile C and link a binary
+    sic hello.sic -o hello       # compile SIC and link a binary
+    ./hello
 
-There's useful scripts in the scripts folder, for example to compile, build and
-run tests. This assume "sic" has been built and found on current folder:
+    sic -c foo.c -o foo.o        # compile to an object file, don't link
+    sic -S foo.sic               # dump the textual IR instead of compiling
+    sic -O2 foo.c -o foo         # optimize (0 | 1 | 2 | 3 | s | z)
 
-    ../scripts/compile.sh ../tests/test_0014.sic
-    ../scripts/build.sh ../tests/test_0014.sic
-    ../scripts/build_bin.sh ../tests/test_0014.sic
-    ../scripts/run-test.sh ../tests/test_0014.sic
+`sic` accepts the usual `-o -c -O -D -I -l -L -W` flags for gcc/clang
+compatibility; see `sic --help`.
 
-There's some environment variables to control the output of scripts:
+## Tests
 
-    VERBOSE=1
-    DUMP_IR=1
-    DUMP_TREE=1
+    ./compiletest_rust.sh        # the compile/run test suite (tests/)
+    ./moduletest.sh              # the module-system tests
+    ./check.sh                   # build both profiles + run every suite at every -O level
 
-To run all the tests in a batch run:
+Benchmarks comparing sic against gcc and rustc live in `benchmarks/` (`./benchmarks/run.sh`).
 
-    ../scripts/test-all.sh
+## Status
 
-## Output and manual steps
-
-Output of sic compiler is by default LLVM IR in text format.
-That can be assembled with `llvm-as` and compiled to binary with `llc`.
-
-Thus manual steps would be:
-
-    ./sic ../tests/test_0001.sic -o test_0001.sic.ir
-    llvm-as test_0001.sic.ir
-    llc -relocation-model=pic -filetype=obj test_0001.sic.ir.bc -o test_0001.ir.o
-    # Linking with cc or any other method that suits you
-    cc test_0001.ir.o -o test_0001.ir.bin -lm
-
-
-## Roadmap
-
- - Full support for function typedefs
- - Functions as variables
- - Other missing C features to sic make self hosting
- - Start implementing [sic features](sic.md)
+The SIC language features in [sic.md](sic.md) are largely implemented; a few
+advanced items remain partial or planned (noted inline there).
