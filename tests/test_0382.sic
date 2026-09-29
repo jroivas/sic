@@ -1,0 +1,32 @@
+// Deleting a `new`-allocated pointer that has already been `del`-ed is safe
+// and a no-op. `del NULL` is documented as a no-op; after first `del` the
+// pointer becomes null, so second `del` is also a no-op. Exit code.
+int main() {
+    int *p = new int(10);
+    *p = 42;
+    if (*p != 42) return 1;
+    del p;           // first del: frees
+    del p;           // second del: p is now null -> no-op (no crash)
+
+    // del NULL explicitly documented as a no-op
+    int *z = 0;
+    del z;
+    del z;           // double del on null is also no-op
+
+    // Array case: new T[n], double del
+    int *arr = new int[10];
+    arr[0] = 99;
+    if (arr[0] != 99) return 2;
+    del arr;
+    del arr;         // double del on array: no-op
+
+    // Struct pointer, double del
+    struct pt { int x, y; };
+    struct pt *q = new struct pt;
+    q->x = 3;
+    if (q->x != 3) return 3;
+    del q;
+    del q;           // double del on struct pointer: no-op
+
+    return 0;
+}

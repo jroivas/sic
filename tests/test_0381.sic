@@ -1,0 +1,33 @@
+// Deleting a string that has already been `del`-ed is safe and a no-op:
+// the second `del` sees an already-invalidated (empty) string and does nothing.
+// Exit code.
+int main() {
+    string a = "hello";
+    del a;           // first del: rc-- -> 0, frees buffer, a invalidated (becomes empty)
+    del a;           // second del: a is already empty, must be a no-op (no crash, no double-free)
+    if (a.size != 0) return 1;
+
+    // Also test with a shared copy: del on one copy, then del again on same copy.
+    string b = "world";
+    string c = b;    // rc = 2
+    del b;           // b's reference dropped (rc = 1), b is now empty
+    del b;           // double-del on b: already empty, no-op
+    if (b.size != 0) return 2;
+    if (c != "world") return 3;  // c still valid
+
+    // del on a constructed empty string; repeated safely.
+    string empty;
+    del empty;       // no-op on empty
+    del empty;       // no-op on already-empty
+    if (empty.size != 0) return 4;
+
+    // del on a literal view, double-del is safe.
+    string lit = "xyz";
+    string share = lit;
+    del lit;         // drops ref, lit becomes empty
+    del lit;         // double-del on a string that was a view: no-op
+    if (lit.size != 0) return 5;
+    if (share != "xyz") return 6;
+
+    return 0;
+}

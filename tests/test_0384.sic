@@ -1,0 +1,39 @@
+// `defer del` runs on all scope exit paths (fall-through, return, continue).
+// Even when combined with explicit del on the same pointer, no double-free
+// occurs. Exit code.
+int main() {
+    // Fall-through with defer del.
+    {
+        int *p = new int(10);
+        defer del p;
+        // fall through -- defer del frees p
+    }
+
+    // Explicit early del before fall-through + defer del -> safe.
+    {
+        int *q = new int(99);
+        defer del q;
+        del q;       // early free, q now null
+        // defer del q on null -> no-op
+    }
+
+    // Loop with continue: defer del runs each iteration.
+    for (int i = 0; i < 3; i++) {
+        int *r = new int(i);
+        defer del r;
+        if (i == 1) continue;   // defer del r runs here (frees each iteration)
+        // fall through -- defer del r runs here too
+    }
+
+    // Defer del on a newly allocated pointer inside a block -- freed at block exit.
+    int *outer = new int(7);
+    defer del outer;
+    {
+        int *inner = new int(3);
+        defer del inner;
+        // inner freed at inner block exit
+    }
+    // outer freed at outer scope exit (LIFO runs after inner block)
+
+    return 0;
+}

@@ -1,0 +1,25 @@
+// `defer del` combined with an explicit early `del`: a pointer that is `del`-ed
+// early AND also has a `defer del` must not double-free. The deferred `del` on
+// an already-null pointer is a no-op. Also tests that defer del on distinct
+// pointers frees each exactly once. Returns 42.
+int main() {
+    // Early del followed by deferred del on same pointer -- no double-free.
+    int *p = new int(42);
+    defer del p;
+    del p;           // early del: frees, p becomes null
+    // (defer del p runs now at scope exit on null -> no-op)
+
+    // Multiple defer del on different pointers: LIFO, each freed once.
+    int *a = new int(1);
+    int *b = new int(2);
+    defer del b;     // runs second (LIFO)
+    defer del a;     // runs first (LIFO)
+    // a freed first, then b -- both alive before scope exit
+
+    // del on NULL safely multiple times
+    int *n = 0;
+    del n;
+    del n;
+
+    return 42;
+}
