@@ -1,0 +1,37 @@
+// Loop bounds-check elimination over a SIC loop whose body uses DECIMAL float
+// literals (sic.md §"Scopes"): a decimal literal is `DecimalLit`, not C's
+// `FloatLit`, and the loop-BCE body scanner must treat it as a pure leaf so the
+// loop's fat-pointer bounds checks still hoist (they didn't — n-body ran 3x
+// slower than the C frontend because the per-iteration size loads spilled the
+// hot loop). This checks the CORRECTNESS of such a loop (the optimization must
+// not change results) and that an in-bounds float-constant kernel runs clean.
+// Returns 42.
+#include <stdio.h>
+
+int main() {
+    i32 n = 256;
+    f64 *a = new f64[n]; f64 *b = new f64[n]; defer del a; defer del b;
+    for (i32 i = 0; i < n; i++) { a[i] = (f64)i; b[i] = 1.0; }
+
+    // nested reduction with float constants in the body (the n-body shape)
+    f64 tot = 0.0;
+    for (i32 i = 0; i < n; i++) {
+        f64 acc = 0.0;
+        f64 xi = a[i];
+        for (i32 j = 0; j < n; j++) {
+            f64 d = a[j] - xi;
+            f64 g = (d * d + 1.0) * 0.5;      // DecimalLit constants 1.0, 0.5
+            acc += b[j] * g;
+        }
+        tot += acc;
+    }
+    // a[i]=i, b[j]=1 : inner sum_j ((a[j]-a[i])^2 + 1)/2 ; just check it's finite/positive
+    if (!(tot > 0.0)) return 1;
+
+    // exact small check: single-pass with float constants, bounds-checked
+    f64 s = 0.0;
+    for (i32 i = 0; i < 10; i++) s = s + a[i] * 2.0 + 0.0;   // 2*(0+..+9) = 90
+    if ((i64)s != 90) return 2;
+
+    return 42;
+}

@@ -3622,7 +3622,12 @@ impl<'m> FuncCtx<'m> {
         use crate::ast::{ExprKind as E, UnOpKind};
         match &e.kind {
             E::IntLit(..) | E::UIntLit(..) | E::Ident(_) | E::StringLit(..)
-            | E::CharLit(_) | E::FloatLit(..) => true,
+            // A SIC decimal literal is `DecimalLit`, not C's `FloatLit` — both are
+            // pure leaf constants. Missing `DecimalLit` made `bce_scan` bail on any
+            // SIC loop body with a float constant (`(d2 + 1.0) * 0.5` in n-body),
+            // so loop-BCE never hoisted its bounds checks and the fat-pointer size
+            // loads spilled the hot loop's registers (3x slower than the C frontend).
+            | E::CharLit(_) | E::FloatLit(..) | E::DecimalLit(..) | E::BoolLit(_) => true,
             E::BinOp { lhs, rhs, .. } =>
                 self.bce_scan_expr(lhs, ivar, mods, out) && self.bce_scan_expr(rhs, ivar, mods, out),
             E::Assign { lhs, rhs, .. } => {
