@@ -10,6 +10,7 @@ struct File {
     int fd;
     string name;
     u64 offset;
+    bool stream;
     ~File()
     {
         if (fd > 0)
@@ -42,16 +43,19 @@ enum FileStatus {
 File g_stdin = {
     .fd = 0,
     .name = "stdin",
+    .stream = true,
 };
 
 File g_stdout = {
     .fd = 1,
     .name = "stdout",
+    .stream = true,
 };
 
 File g_stderr = {
     .fd = 2,
     .name = "stderr",
+    .stream = true,
 };
 
 File *Stdin(void)
@@ -88,6 +92,7 @@ FileStatus Open(string name, OpenMode mode)
         return FileStatus::NotFound;
     }
     tmp->name = name;
+    tmp->stream = false;
 
     return FileStatus::Opened(tmp);
 }
@@ -107,25 +112,28 @@ FileStatus Close(File *f)
 FileStatus ReadFrom(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
 {
     ssize_t res;
-    int sres;
+    i64 sres;
 
     if (!f)
         return FileStatus::InvalidObject;
 
-    sres = fseek(f->fd, offset, SEEK_SET);
-    if (sres != 0)
+    if (!f->stream && offset != f->offset)
     {
-        res = errno;
-        /* FIXME Better error handling */
-        if (res == EIO)
-            return FileStatus::IO;
-        if (res == EBADF)
-            return FileStatus::InvalidFileHandle;
-        if (res == EINVAL)
-            return FileStatus::InvalidOffset;
-        return FileStatus::ReadError;
+        sres = lseek(f->fd, offset, SEEK_SET);
+        if (sres < 0)
+        {
+            res = errno;
+            /* FIXME Better error handling */
+            if (res == EIO)
+                return FileStatus::IO;
+            if (res == EBADF)
+                return FileStatus::InvalidFileHandle;
+            if (res == EINVAL)
+                return FileStatus::InvalidOffset;
+            return FileStatus::ReadError;
+        }
+        f->offset = offset;
     }
-    f->offset = offset;
 
     if (size > buf->capacity)
         size = buf->capacity;
@@ -154,25 +162,28 @@ FileStatus Read(File *f, u64 size, Buffer::Buffer *buf)
 FileStatus WriteTo(File *f, u64 offset, Buffer::Buffer *buf)
 {
     ssize_t res;
-    int sres;
+    i64 sres;
 
     if (!f)
         return FileStatus::InvalidObject;
 
-    sres = fseek(f->fd, offset, SEEK_SET);
-    if (sres != 0)
+    if (!f->stream && offset != f->offset)
     {
-        res = errno;
-        /* FIXME Better error handling */
-        if (res == EIO)
-            return FileStatus::IO;
-        if (res == EBADF)
-            return FileStatus::InvalidFileHandle;
-        if (res == EINVAL)
-            return FileStatus::InvalidOffset;
-        return FileStatus::ReadError;
+        sres = lseek(f->fd, offset, SEEK_SET);
+        if (sres < 0)
+        {
+            res = errno;
+            /* FIXME Better error handling */
+            if (res == EIO)
+                return FileStatus::IO;
+            if (res == EBADF)
+                return FileStatus::InvalidFileHandle;
+            if (res == EINVAL)
+                return FileStatus::InvalidOffset;
+            return FileStatus::WriteError;
+        }
+        f->offset = offset;
     }
-    f->offset = offset;
 
     res = write(f->fd, buf->data, buf->size);
     if (res < 0)
