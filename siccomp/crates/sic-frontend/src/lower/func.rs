@@ -2643,6 +2643,17 @@ impl<'m> FuncCtx<'m> {
     /// designators, or `cursor` when it has none. Returns the target pointer, its
     /// type, and the next cursor value (top-level index + 1).
     #[allow(clippy::type_complexity)]
+    /// Error for a designated initializer `.name = …` naming a field the aggregate
+    /// does not have.
+    fn unknown_field_err(&self, agg: &Type, name: &str) -> CompileError {
+        let tn = match &super::types::resolve_aggregate(agg, &self.lowerer.struct_types) {
+            Type::Struct(st) => st.name.clone().unwrap_or_else(|| "struct".into()),
+            Type::Union(u) => u.name.clone().unwrap_or_else(|| "union".into()),
+            _ => "aggregate".into(),
+        };
+        CompileError::new(format!("'{}' has no field '{}'", tn, name))
+    }
+
     fn resolve_init_target(&mut self, base: &Val, agg: &Type, designators: &[crate::ast::Designator], cursor: usize)
         -> Result<(Option<(Val, Type, Option<super::expr::BitField>)>, usize)>
     {
@@ -2651,7 +2662,7 @@ impl<'m> FuncCtx<'m> {
         let (first, top_index) = match designators.first() {
             Some(Designator::Field(name)) => {
                 let Some((off, fty, bf)) = super::expr::resolve_field_access(agg, name, self.ptr_size(), &self.lowerer.struct_types)
-                else { return Ok((None, cursor + 1)); };
+                else { return Err(self.unknown_field_err(agg, name)); };
                 (Some((self.gep_offset(base, off, &fty), fty, bf)), top_field_index(agg, name, &self.lowerer.struct_types))
             }
             Some(Designator::Index(e)) => {
@@ -2672,7 +2683,7 @@ impl<'m> FuncCtx<'m> {
             match d {
                 Designator::Field(name) => {
                     let Some((off, fty, sub_bf)) = super::expr::resolve_field_access(&cur_ty, name, self.ptr_size(), &self.lowerer.struct_types)
-                    else { return Ok((None, top_index + 1)); };
+                    else { return Err(self.unknown_field_err(&cur_ty, name)); };
                     ptr = self.gep_offset(&ptr, off, &fty);
                     cur_ty = fty;
                     bf = sub_bf;
@@ -4866,6 +4877,33 @@ impl<'m> FuncCtx<'m> {
         match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
             _ => {}
+        }
+
+        // A tagged-enum value (a `{tag, payload}` struct, passed as a pointer) has
+        // no meaningful conversion to a scalar — its bytes are not the payload. This
+        // used to silently reinterpret the struct as an integer (`u64 n = Size(f);`
+        // where `Size` returns a `FileStatus`), producing garbage. Require an
+        // explicit `match`/unwrap instead. (SIC-only: tagged enums don't exist in C,
+        // and a payload-less C enum is an `Int`, not a struct, so `E → int` is
+        // unaffected.)
+        if self.is_sic() && matches!(target,
+            Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80 | Type::Bool)
+        {
+            let tagged = match &src_ty {
+                Type::Struct(_) => self.is_tagged_enum_struct(&src_ty),
+                Type::Pointer(inner) => self.is_tagged_enum_struct(inner),
+                _ => false,
+            };
+            if tagged {
+                let en = match &src_ty {
+                    Type::Struct(st) => st.name.clone(),
+                    Type::Pointer(inner) => match inner.as_ref() { Type::Struct(st) => st.name.clone(), _ => None },
+                    _ => None,
+                }.unwrap_or_else(|| "enum".into());
+                return Err(CompileError::new(format!(
+                    "cannot convert tagged enum '{}' to a scalar — unwrap it with a `match` (or `{}::Variant(x)`) first",
+                    en, en)));
+            }
         }
 
         // sic (sic.md std): an `any` implicitly converts to the assigned type — read

@@ -2381,6 +2381,11 @@ impl Lowerer {
         // `all_cts[ARRAY_SIZE(constraint_sets)][...]` this way; a 0 made the
         // array 1 byte and process_constraint_sets scribbled over neighbours.
         self.resolve_global_array_dims(&mut ir_ty, &d.ty.ty);
+        // Reject a designated initializer naming a field the aggregate lacks
+        // (`File g = { .id = 0 }` where `File` has no `id`). The runtime/local path
+        // catches this in `resolve_init_target`; the const-serialization path used
+        // for globals otherwise silently drops the element.
+        if let Some(init) = &d.init { self.check_init_fields(&ir_ty, init)?; }
         // A declaration whose type is a function (e.g. `static Handler foo;` where
         // `Handler` is a function typedef) is a function prototype, not a variable.
         // Register it as an extern function so the real definition can supply it.
@@ -2784,6 +2789,52 @@ impl Lowerer {
                 self.serialize_scalar(e, &ty, buf, base, relocs)
             }
         }
+    }
+
+    /// Validate that every `.field` designator in a brace initializer names a real
+    /// field of the aggregate being initialized (recursively). Positional and
+    /// `[index]` elements are not name-checked here; only unknown *named* fields are
+    /// rejected. Best-effort on positional descent — when the member type can't be
+    /// pinned down it simply doesn't recurse (never a false error).
+    fn check_init_fields(&self, ty: &Type, init: &Initializer) -> Result<()> {
+        use crate::ast::Designator;
+        let Initializer::List(items) = init else { return Ok(()); };
+        let rty = types::resolve_aggregate(ty, &self.struct_types);
+        if !matches!(&rty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) { return Ok(()); }
+        let agg_name = |t: &Type| match t {
+            Type::Struct(st) => st.name.clone().unwrap_or_else(|| "struct".into()),
+            Type::Union(u) => u.name.clone().unwrap_or_else(|| "union".into()),
+            _ => "aggregate".into(),
+        };
+        let mut cursor = 0usize;
+        for item in items {
+            let mut cur_ty = rty.clone();
+            let mut known = true;
+            for d in &item.designators {
+                match d {
+                    Designator::Field(name) => {
+                        match crate::lower::expr::resolve_field_access(&cur_ty, name, self.ptr_size, &self.struct_types) {
+                            Some((_, fty, _)) => cur_ty = types::resolve_aggregate(&fty, &self.struct_types),
+                            None => return Err(CompileError::new(format!("'{}' has no field '{}'", agg_name(&cur_ty), name))),
+                        }
+                    }
+                    Designator::Index(_) | Designator::IndexRange(..) => {
+                        match &cur_ty { Type::Array { elem, .. } => cur_ty = types::resolve_aggregate(elem, &self.struct_types), _ => { known = false; break; } }
+                    }
+                }
+            }
+            if item.designators.is_empty() {
+                cur_ty = match &rty {
+                    Type::Struct(st) => match st.fields.get(cursor) { Some((_, ft)) => types::resolve_aggregate(ft, &self.struct_types), None => { known = false; rty.clone() } },
+                    Type::Array { elem, .. } => types::resolve_aggregate(elem, &self.struct_types),
+                    Type::Union(u) => match u.fields.first() { Some((_, ft)) => types::resolve_aggregate(ft, &self.struct_types), None => { known = false; rty.clone() } },
+                    _ => { known = false; rty.clone() }
+                };
+            }
+            cursor += 1;
+            if known { self.check_init_fields(&cur_ty, &item.init)?; }
+        }
+        Ok(())
     }
 
     /// Resolve a global brace-list element's byte offset, leaf type and the next

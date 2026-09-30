@@ -917,6 +917,14 @@ impl Parser {
         if self.at(TokenKind::Tilde) {
             self.advance();
             let name = self.expect_name()?;
+            // A destructor must name its own struct: `~S()` in `struct S`.
+            if let Some(sn) = struct_name {
+                if name != sn {
+                    return Err(CompileError::at(
+                        format!("destructor '~{}' does not match its struct '{}' (did you mean '~{}'?)", name, sn, sn),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+            }
             let (params, variadic) = self.parse_params()?;
             self.skip_attributes();
             let body = self.parse_compound_stmt_as_stmts()?;

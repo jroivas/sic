@@ -1,0 +1,4 @@
+// A tagged-enum value has no scalar conversion; assigning it to an int is rejected.
+enum St { A, Sz(u64) };
+St getsz() { return St::Sz(1234); }
+int main() { u64 x = getsz(); return (int)x; }

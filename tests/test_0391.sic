@@ -1,0 +1,3 @@
+// A destructor must name its own struct; `~Fild` in `struct File` is rejected.
+struct File { int fd; ~Fild() { } };
+int main() { return 0; }

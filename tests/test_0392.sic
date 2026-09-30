@@ -1,0 +1,3 @@
+// A designated initializer naming a field the struct lacks is rejected.
+struct P { int x; int y; };
+int main() { P p = { .z = 5 }; return p.x; }

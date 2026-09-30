@@ -10,7 +10,7 @@ struct File {
     int fd;
     string name;
     u64 offset;
-    ~Fild()
+    ~File()
     {
         if (fd > 0)
             close(fd);
@@ -40,17 +40,17 @@ enum FileStatus {
 };
 
 File g_stdin = {
-    .id = 0,
+    .fd = 0,
     .name = "stdin",
 };
 
 File g_stdout = {
-    .id = 1,
+    .fd = 1,
     .name = "stdout",
 };
 
 File g_stderr = {
-    .id = 2,
+    .fd = 2,
     .name = "stderr",
 };
 
@@ -73,9 +73,6 @@ FileStatus Open(string name, OpenMode mode)
 {
     File *tmp = new File() else return FileStatus::OutOfMemory;
     int flags = 0;
-
-    Println("OPEN: {}", name);
-    Println("mode: {}", mode);
 
     match (mode)
     {

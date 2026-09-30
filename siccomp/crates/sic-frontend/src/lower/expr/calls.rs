@@ -959,6 +959,29 @@ impl<'m> FuncCtx<'m> {
         }
         };
 
+        // Argument-count check (SIC only — C allows unprototyped/K&R calls). A
+        // direct call to a non-variadic function must pass exactly as many arguments
+        // as it declares. Skip variadic functions and SIC `va_array`/`va_dict`
+        // collectors (which absorb a variable tail); account for a hidden sret
+        // pointer parameter. `args` already includes a method's prepended `self`.
+        if self.is_sic() {
+            let ptr_size = self.ptr_size();
+            let sig = self.lowerer.module.func_sig(fref);
+            let variadic = sig.variadic
+                || sig.params.iter().any(|p| super::super::types::is_va_array(p)
+                    || super::super::types::is_va_dict(p));
+            if !variadic {
+                let mut expected = sig.params.len();
+                if super::super::ret_is_sret(&sig.ret, ptr_size) && expected > 0 { expected -= 1; }
+                if args.len() != expected {
+                    return Err(CompileError::at(
+                        format!("this call passes {} argument(s), but the function expects {}",
+                            args.len(), expected),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+            }
+        }
+
         let ret_ty = self.lowerer.module.func_sig(fref).ret.clone();
         let is_void = ret_ty == Type::Void;
 
