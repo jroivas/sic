@@ -5194,6 +5194,26 @@ impl<'m> FuncCtx<'m> {
             _ => tty.clone(),
         };
 
+        // Branchless fast path: when both arms are speculation-safe scalars — pure,
+        // side-effect-free, and non-trapping (so evaluating BOTH is observationally
+        // identical to evaluating only the taken one, in every mode including
+        // `unsafe`) — emit a single `Select` instead of a branch diamond. The back
+        // end lowers `Select` to a `cmov`, removing a data-dependent branch that
+        // would otherwise mispredict in a hot loop (e.g. the `a<b?a:b` in an
+        // edit-distance `min3`, which gcc/clang also make branchless). Scalars only:
+        // no bigint/fixed/container/aggregate refcount or temp handling is involved.
+        if matches!(&ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Bool)
+            && simple_select_arm(then) && simple_select_arm(else_)
+        {
+            let tv = self.lower_expr(then)?;
+            let tv = self.coerce(tv, &ty)?;
+            let ev = self.lower_expr(else_)?;
+            let ev = self.coerce(ev, &ty)?;
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Select { dest, cond: cond_bool, on_true: tv, on_false: ev, ty: ty.clone() });
+            return Ok(Val::Local(dest));
+        }
+
         let result_ptr = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: result_ptr, ty: ty.clone(), align: None });
 
@@ -6084,5 +6104,30 @@ fn rewrite_capture_expr(e: &mut Expr, name: &str, deref: bool) {
         ExprKind::VaEnd { list } => rewrite_capture_expr(list, name, deref),
         ExprKind::VaCopy { dst, src } => { rewrite_capture_expr(dst, name, deref); rewrite_capture_expr(src, name, deref); }
         _ => {}
+    }
+}
+
+/// Is `e` safe to evaluate speculatively as one arm of a branchless `Select`?
+/// True only for pure, side-effect-free, NON-TRAPPING scalar expressions, so that
+/// evaluating both arms of a `?:` is observationally identical to evaluating just
+/// the taken one — in every mode, `unsafe` included. Deliberately excludes:
+///   * memory reads (`*p`, `a[i]`, `s.f`, `p->f`) — could fault on the untaken arm;
+///   * `Add`/`Sub`/`Mul`/`Neg` and `Div`/`Rem` — can trap (overflow / ÷0) under
+///     `unsafe`, and ÷0 would also change a defined result if speculated;
+///   * calls, assignments, `++`/`--`, `new`, and anything with a side effect.
+/// The remaining set (names, literals, casts, comparisons, bitwise/shift, `!`/`~`)
+/// is pure and cannot trap, and covers the hot cases (`a<b?a:b`, `cost?0:1`).
+fn simple_select_arm(e: &crate::ast::Expr) -> bool {
+    use crate::ast::{ExprKind as E, BinOpKind as B, UnOpKind as U};
+    match &e.kind {
+        E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) | E::FloatLit(_)
+        | E::BoolLit(_) | E::Ident(_) | E::Nullptr => true,
+        E::Cast { expr, .. } => simple_select_arm(expr),
+        E::Unary { op: U::Not, expr } | E::Unary { op: U::BitNot, expr } => simple_select_arm(expr),
+        E::BinOp { op, lhs, rhs } => matches!(op,
+                B::BitAnd | B::BitOr | B::BitXor | B::Shl | B::Shr
+                | B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge)
+            && simple_select_arm(lhs) && simple_select_arm(rhs),
+        _ => false,
     }
 }

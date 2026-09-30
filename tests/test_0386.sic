@@ -1,0 +1,35 @@
+// Simple pure scalar ternaries `cond ? a : b` lower to a branchless `Select`
+// (a `cmov`), not a branch diamond — but ONLY when both arms are speculation-safe
+// (pure, non-trapping): a memory-read or trapping-arithmetic arm must still use the
+// conditional branch so the untaken arm is never evaluated. This pins the VALUES
+// across both paths. Compiled at -O2 (see .flags). Returns 42.
+#include <stdio.h>
+
+static int min3(int a, int b, int c) { int m = a < b ? a : b; return m < c ? m : c; }
+
+int main() {
+    // branchless path: idents / literals
+    if (min3(7, 3, 9) != 3) return 1;
+    if (min3(9, 3, 1) != 1) return 2;
+    int x = 5, y = 8;
+    if ((x < y ? x : y) != 5) return 3;
+    int cost = (x == y ? 0 : 1);
+    if (cost != 1) return 4;
+
+    // arm is a memory read: must NOT be speculated (still a branch). A null pointer
+    // on the untaken side must not be dereferenced.
+    int v = 42;
+    int *p = &v;
+    int *q = 0;
+    int got = (p != 0 ? *p : 0);          // takes *p
+    if (got != 42) return 5;
+    int safe = (q != 0 ? *q : -1);        // must NOT deref q
+    if (safe != -1) return 6;
+
+    // trapping arithmetic arm under unsafe: the untaken ÷ must not be evaluated
+    int d = 0;
+    int r = (d != 0 ? 100 / d : 777);     // must NOT compute 100/0
+    if (r != 777) return 7;
+
+    return 42;
+}
