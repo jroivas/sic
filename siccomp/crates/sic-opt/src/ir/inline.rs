@@ -49,7 +49,8 @@ impl Inline {
 struct FnInfo {
     /// May this function be inlined into a caller?
     eligible: bool,
-    /// Total IR instruction count (the size gate).
+    /// Estimated post-mem2reg size (see `inline_cost`) — the number the threshold
+    /// gate judges, not the raw IR count.
     size: usize,
     /// Number of `Ret(Some(_))` — a value-returning call needs at least one.
     ret_val_count: usize,
@@ -67,6 +68,46 @@ const MAX_CALLER_INSTRS: usize = 20000;
 
 fn func_size(f: &Function) -> usize {
     f.blocks.iter().map(|b| b.instrs.len()).sum()
+}
+
+/// Estimate a function's size *as the back end will actually compile it* — the
+/// number the inline threshold should judge, as opposed to `func_size` (raw IR,
+/// used only for the hard growth caps).
+///
+/// The frontend emits an alloca per local and a load/store per access, plus debug
+/// markers; the Cranelift backend's mem2reg promotes every non-escaping scalar
+/// alloca to a register, erasing the alloca and all its load/store traffic, and
+/// the debug pseudo-ops emit no machine code. Counting the raw IR therefore
+/// grossly overstates small helpers — a 6-op `min3` scans as ~30 instructions and
+/// never meets the -O2 threshold, so it is never inlined (and pays a call in the
+/// hot loop) even though gcc/clang inline it freely. This mirrors the promotion:
+/// debug markers and allocas cost 0, load/store to a local alloca slot cost 0
+/// (promoted to a register), and every real compute / call / memory op costs 1.
+fn inline_cost(f: &Function) -> usize {
+    // Scalar-ish slots the backend promotes: an alloca whose traffic disappears.
+    // (Approximate — we do not re-run escape analysis here; over-counting a
+    // promoted slot only forgoes an inline, and under-counting an escaping one is
+    // bounded by the per-caller growth cap. Inlining stays correct either way.)
+    let mut slots: std::collections::HashSet<ValId> = std::collections::HashSet::new();
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            if let Instr::Alloca { dest, .. } = ins { slots.insert(*dest); }
+        }
+    }
+    let promoted = |ptr: &Val| matches!(ptr, Val::Local(v) if slots.contains(v));
+    let mut cost = 0usize;
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            cost += match ins {
+                // Scaffolding the backend erases.
+                Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. } => 0,
+                Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } if promoted(ptr) => 0,
+                Instr::Store { ptr, .. } if promoted(ptr) => 0,
+                _ => 1,
+            };
+        }
+    }
+    cost
 }
 
 fn is_aggregate(t: &Type) -> bool {
@@ -97,7 +138,7 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
             if let Terminator::Ret(Some(_)) = &b.terminator { ret_val_count += 1; }
         }
     }
-    FnInfo { eligible, size: func_size(f), ret_val_count }
+    FnInfo { eligible, size: inline_cost(f), ret_val_count }
 }
 
 impl IrPass for Inline {
