@@ -12,6 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use sic_ir::{Module, Function, Instr, Val, ValId};
 use crate::pass::PassConfig;
+pub mod devirtual;
 
 pub mod pass;
 pub mod fold;
@@ -30,6 +31,7 @@ pub fn run_ir_passes(module: &mut Module, cfg: &PassConfig) {
     if cfg.is_enabled("inline") {
         pm.add(Box::new(inline::Inline::new(cfg.inline_threshold, cfg.inline_aggressive)));
     }
+    if cfg.is_enabled("devirtual") { pm.add(Box::new(devirtual::Devirtualize::new())); }
     if cfg.is_enabled("ir-fold") { pm.add(Box::new(fold::IrFold::new())); }
     if cfg.is_enabled("algebraic") { pm.add(Box::new(algebraic::Algebraic::new())); }
     if cfg.is_enabled("dce") { pm.add(Box::new(dce::Dce::new())); }
