@@ -1,0 +1,21 @@
+module std;
+
+// ASCII character classification (sic.md std). Each takes a code point in an
+// `i32` (as produced by indexing a `string`) and returns whether it is in the
+// class. A C preprocessor / lexer uses these constantly.
+
+bool IsSpace(i32 c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
+}
+
+bool IsDigit(i32 c) { return c >= '0' && c <= '9'; }
+
+bool IsAlpha(i32 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+bool IsAlnum(i32 c) { return IsAlpha(c) || IsDigit(c); }
+
+// Identifier characters (C rules): a letter or `_` may start one; a digit may
+// continue one.
+bool IsIdentStart(i32 c) { return IsAlpha(c) || c == '_'; }
+
+bool IsIdent(i32 c) { return IsIdentStart(c) || IsDigit(c); }

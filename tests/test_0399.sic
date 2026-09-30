@@ -1,0 +1,22 @@
+// Native `string` methods (sic.md §"Built-in string"): `.trim`/`.ltrim`/`.rtrim`
+// (borrowed views), `.starts_with`/`.ends_with` (bool), `.find` (index or -1).
+// Returns 42.
+int main() {
+    string s = "  Hello World  ";        // 2 + 11 + 2 = 15
+    string t = s.trim();
+    if (t.length != 11) return 1;
+    if (!t.starts_with("Hello")) return 2;
+    if (!t.ends_with("World")) return 3;
+    if (t.starts_with("World")) return 4;   // not a prefix
+    if (t.ends_with("Hello")) return 5;      // not a suffix
+    if (t.find("World") != 6) return 6;
+    if (t.find("xyz") != -1) return 7;
+    if (s.ltrim().length != 13) return 8;    // trailing spaces kept
+    if (s.rtrim().length != 13) return 9;    // leading spaces kept
+    string sp = "    ";
+    if (sp.trim().length != 0) return 10;    // all whitespace
+    string e = "";
+    if (e.trim().length != 0) return 11;     // empty
+    if (!t.starts_with("Hello World")) return 12;  // whole string is a prefix
+    return 42;
+}

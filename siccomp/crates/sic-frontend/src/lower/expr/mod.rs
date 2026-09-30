@@ -4380,6 +4380,153 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(r))
     }
 
+    /// `s.starts_with(p)` (`from_end = false`) / `s.ends_with(p)` (`true`)
+    /// (sic.md §"Built-in string") → `bool`: whether `p`'s bytes match the prefix
+    /// (suffix) of `s`. `memcmp` runs over `min(|p|, |s|)` bytes so it never reads
+    /// past either buffer, and the result is AND-ed with `|p| <= |s|`.
+    pub(crate) fn lower_string_starts_with(&mut self, base: &Expr, sub: &Expr, from_end: bool) -> Result<Val> {
+        let (hd, hs) = self.string_operand_parts(base)?;
+        let (nd, ns) = self.string_operand_parts(sub)?;
+        let i64t = Type::i64();
+        let hd = self.coerce(hd, &Type::char_ptr())?;
+        let nd = self.coerce(nd, &Type::char_ptr())?;
+        let hs = self.coerce(hs, &i64t)?;
+        let ns = self.coerce(ns, &i64t)?;
+        let fits = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: fits, op: CmpOp::ISLe, lhs: ns.clone(), rhs: hs.clone(), ty: i64t.clone() });
+        self.val_types.insert(fits.0, Type::Bool);
+        let minlen = self.alloc_val();
+        self.push_instr(Instr::Select { dest: minlen, cond: Val::Local(fits), on_true: ns.clone(), on_false: hs.clone(), ty: i64t.clone() });
+        let off = if from_end {
+            let diff = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: diff, op: BinOp::Sub, lhs: hs.clone(), rhs: ns.clone(), ty: i64t.clone() });
+            let o = self.alloc_val();
+            self.push_instr(Instr::Select { dest: o, cond: Val::Local(fits), on_true: Val::Local(diff), on_false: Constant::int(0), ty: i64t.clone() });
+            Val::Local(o)
+        } else { Constant::int(0) };
+        let bp = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: bp, base: hd, index: off, elem_size: 1, result_ty: Type::char_ptr() });
+        let voidp = Type::void_ptr();
+        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+        let memcmp = self.lowerer.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc { name: "memcmp".to_string(),
+                sig: FunctionType { ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false } })
+        });
+        let bpv = self.coerce(Val::Local(bp), &voidp)?;
+        let ndv = self.coerce(nd, &voidp)?;
+        let mlv = self.coerce(Val::Local(minlen), &usize_ty)?;
+        let cmp = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(cmp), func: memcmp, args: vec![bpv, ndv, mlv], ret_ty: Type::i32() });
+        let eq = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: Val::Local(cmp), rhs: Constant::zero(), ty: Type::i32() });
+        self.val_types.insert(eq.0, Type::Bool);
+        let res = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: res, op: BinOp::And, lhs: Val::Local(fits), rhs: Val::Local(eq), ty: Type::Bool });
+        self.val_types.insert(res.0, Type::Bool);
+        Ok(Val::Local(res))
+    }
+
+    /// `s.trim()` / `.ltrim()` / `.rtrim()` (sic.md §"Built-in string") → a borrowed
+    /// VIEW of `s` with leading and/or trailing ASCII whitespace removed (no copy).
+    pub(crate) fn lower_string_trim(&mut self, base: &Expr, left: bool, right: bool) -> Result<Val> {
+        let (d, s) = self.string_operand_parts(base)?;
+        let i64t = Type::i64();
+        let d = self.coerce(d, &Type::char_ptr())?;
+        let s = self.coerce(s, &i64t)?;
+        let start = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: start, ty: i64t.clone(), align: None });
+        self.push_instr(Instr::Store { val: Constant::int(0), ptr: Val::Local(start) });
+        let end = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: end, ty: i64t.clone(), align: None });
+        self.push_instr(Instr::Store { val: s, ptr: Val::Local(end) });
+        if left  { self.emit_trim_loop(&d, start, end, false)?; }
+        if right { self.emit_trim_loop(&d, start, end, true)?; }
+        let st = self.alloc_val();
+        self.push_instr(Instr::Load { dest: st, ptr: Val::Local(start), ty: i64t.clone() });
+        let en = self.alloc_val();
+        self.push_instr(Instr::Load { dest: en, ptr: Val::Local(end), ty: i64t.clone() });
+        let len = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: len, op: BinOp::Sub, lhs: Val::Local(en), rhs: Val::Local(st), ty: i64t.clone() });
+        let nd = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: nd, base: d, index: Val::Local(st), elem_size: 1, result_ty: Type::char_ptr() });
+        self.make_string_val(Val::Local(nd), Val::Local(len), Constant::int(0))
+    }
+
+    /// One side of `trim`: while the edge byte of `d[start..end]` is ASCII
+    /// whitespace, advance `start` (`from_right=false`) or retreat `end` (`true`).
+    fn emit_trim_loop(&mut self, d: &Val, start: ValId, end: ValId, from_right: bool) -> Result<()> {
+        let i64t = Type::i64();
+        let cond_bb = self.new_block_after_current();
+        let body_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::Jump(cond_bb));
+        self.switch_to_block(cond_bb);
+        let st = self.alloc_val();
+        self.push_instr(Instr::Load { dest: st, ptr: Val::Local(start), ty: i64t.clone() });
+        let en = self.alloc_val();
+        self.push_instr(Instr::Load { dest: en, ptr: Val::Local(end), ty: i64t.clone() });
+        // non-empty guard + index of the edge byte
+        let (nonempty, idx) = if from_right {
+            let ne = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: ne, op: CmpOp::ISGt, lhs: Val::Local(en), rhs: Val::Local(st), ty: i64t.clone() });
+            let i = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: i, op: BinOp::Sub, lhs: Val::Local(en), rhs: Constant::int(1), ty: i64t.clone() });
+            (ne, i)
+        } else {
+            let ne = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: ne, op: CmpOp::ISLt, lhs: Val::Local(st), rhs: Val::Local(en), ty: i64t.clone() });
+            (ne, st)
+        };
+        let cont_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(nonempty), then_bb: cont_bb, else_bb: done_bb });
+        self.switch_to_block(cont_bb);
+        let ep = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: ep, base: d.clone(), index: Val::Local(idx), elem_size: 1, result_ty: Type::char_ptr() });
+        let c = self.alloc_val();
+        self.push_instr(Instr::Load { dest: c, ptr: Val::Local(ep), ty: Type::Int { bits: 8, signed: false } });
+        let ci = self.coerce(Val::Local(c), &Type::i32())?;
+        let sp = self.emit_is_space(ci)?;
+        self.set_terminator(Terminator::CondJump { cond: sp, then_bb: body_bb, else_bb: done_bb });
+        self.switch_to_block(body_bb);
+        if from_right {
+            let e2 = self.alloc_val();
+            self.push_instr(Instr::Load { dest: e2, ptr: Val::Local(end), ty: i64t.clone() });
+            let ne = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: ne, op: BinOp::Sub, lhs: Val::Local(e2), rhs: Constant::int(1), ty: i64t.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(ne), ptr: Val::Local(end) });
+        } else {
+            let s2 = self.alloc_val();
+            self.push_instr(Instr::Load { dest: s2, ptr: Val::Local(start), ty: i64t.clone() });
+            let ns = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: ns, op: BinOp::Add, lhs: Val::Local(s2), rhs: Constant::int(1), ty: i64t.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(ns), ptr: Val::Local(start) });
+        }
+        self.set_terminator(Terminator::Jump(cond_bb));
+        self.switch_to_block(done_bb);
+        Ok(())
+    }
+
+    /// `c == ' ' | '\t' | '\n' | '\r' | '\v' | '\f'` for a byte in `i32` `c`.
+    fn emit_is_space(&mut self, c: Val) -> Result<Val> {
+        let i32t = Type::i32();
+        let mut acc: Option<Val> = None;
+        for ch in [32, 9, 10, 13, 11, 12] {
+            let e = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: e, op: CmpOp::IEq, lhs: c.clone(), rhs: Constant::int(ch), ty: i32t.clone() });
+            self.val_types.insert(e.0, Type::Bool);
+            acc = Some(match acc {
+                None => Val::Local(e),
+                Some(a) => {
+                    let o = self.alloc_val();
+                    self.push_instr(Instr::BinOp { dest: o, op: BinOp::Or, lhs: a, rhs: Val::Local(e), ty: Type::Bool });
+                    self.val_types.insert(o.0, Type::Bool);
+                    Val::Local(o)
+                }
+            });
+        }
+        Ok(acc.unwrap())
+    }
+
     /// `s.split(sep)` / `s.rsplit(sep)` (sic.md §"Built-in string") → a
     /// `tuple(before, after)` split at the first (last) occurrence of `sep`; when
     /// `sep` is absent the whole string is the first element and the second is empty.

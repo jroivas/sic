@@ -252,20 +252,33 @@ impl<'m> FuncCtx<'m> {
 
         // sic `string` methods (sic.md §"Built-in string"): `s.contains(sub)` (a
         // substring test — a single-char `sub` is a character search), and
-        // `s.split(sep)` / `s.rsplit(sep)` → a `tuple(before, after)`.
+        // Built-in `string` methods (sic.md §"Built-in string").
         if self.is_sic() {
             if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
-                if matches!(name.as_str(), "contains" | "split" | "rsplit")
-                    && matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t))
-                {
-                    let arg = args.first().ok_or_else(|| CompileError::at(
-                        format!("`.{}` takes one string argument", name),
-                        sp.file.clone(), sp.line, sp.col))?;
-                    return match name.as_str() {
-                        "contains" => self.lower_string_contains(base, arg),
-                        "split"    => self.lower_string_split(base, arg, false, sp),
-                        _          => self.lower_string_split(base, arg, true, sp),
-                    };
+                if matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t)) {
+                    // No-argument methods: whitespace trimming → a borrowed view.
+                    match name.as_str() {
+                        "trim"  => return self.lower_string_trim(base, true, true),
+                        "ltrim" => return self.lower_string_trim(base, true, false),
+                        "rtrim" => return self.lower_string_trim(base, false, true),
+                        _ => {}
+                    }
+                    // One-argument methods over another string.
+                    if matches!(name.as_str(),
+                        "contains" | "split" | "rsplit" | "starts_with" | "ends_with" | "find")
+                    {
+                        let arg = args.first().ok_or_else(|| CompileError::at(
+                            format!("`.{}` takes one string argument", name),
+                            sp.file.clone(), sp.line, sp.col))?;
+                        return match name.as_str() {
+                            "contains"    => self.lower_string_contains(base, arg),
+                            "split"       => self.lower_string_split(base, arg, false, sp),
+                            "rsplit"      => self.lower_string_split(base, arg, true, sp),
+                            "starts_with" => self.lower_string_starts_with(base, arg, false),
+                            "ends_with"   => self.lower_string_starts_with(base, arg, true),
+                            _ /* find */  => { let (idx, _, _, _) = self.lower_string_find(base, arg, false)?; Ok(idx) }
+                        };
+                    }
                 }
             }
         }

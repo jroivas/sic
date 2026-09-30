@@ -369,12 +369,15 @@ impl<'m> FuncCtx<'m> {
                 // bool; `.split`/`.rsplit` → `tuple(string, string)`.
                 if self.is_sic() {
                     if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
-                        if matches!(name.as_str(), "contains" | "split" | "rsplit")
-                            && matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t))
-                        {
-                            if name == "contains" { return Ok(Type::Bool); }
+                        if matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t)) {
                             let s = super::super::types::sic_string_type(self.ptr_size());
-                            return Ok(super::super::types::tuple_type(vec![s.clone(), s]));
+                            match name.as_str() {
+                                "contains" | "starts_with" | "ends_with" => return Ok(Type::Bool),
+                                "find" => return Ok(Type::i64()),
+                                "trim" | "ltrim" | "rtrim" => return Ok(s),
+                                "split" | "rsplit" => return Ok(super::super::types::tuple_type(vec![s.clone(), s])),
+                                _ => {}
+                            }
                         }
                     }
                 }
