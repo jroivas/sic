@@ -26,9 +26,10 @@ int main() {
     int safe = (q != 0 ? *q : -1);        // must NOT deref q
     if (safe != -1) return 6;
 
-    // trapping arithmetic arm under unsafe: the untaken ÷ must not be evaluated
+    // division arm: SIC defines ÷0 as 0 (no trap), so speculating it is harmless
+    // and the value is still the selected 777.
     int d = 0;
-    int r = (d != 0 ? 100 / d : 777);     // must NOT compute 100/0
+    int r = (d != 0 ? 100 / d : 777);
     if (r != 777) return 7;
 
     return 42;

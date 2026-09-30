@@ -5126,6 +5126,49 @@ impl<'m> FuncCtx<'m> {
         Ok(old)
     }
 
+    /// Is `e` safe to evaluate *speculatively* as one arm of a branchless `Select`?
+    /// True only for pure, side-effect-free expressions that cannot trap **in the
+    /// current context**, so evaluating both arms of a `?:` is observationally
+    /// identical to evaluating just the taken one.
+    ///
+    /// Always safe: names, literals, casts, comparisons, bitwise/shift, `!`/`~`.
+    /// Integer `+`/`-`/`*`/unary `-` don't trap unless overflow-checking is active
+    /// (`unsafe`, or an `overflow`/`exception` guard). Division/remainder can fault
+    /// (`÷0`, `INT_MIN/-1`), so it is admitted only by a nonzero, non-`-1` constant
+    /// divisor, or in SIC where those cases are defined and no trap is active.
+    /// Always excluded: memory reads (`*p`, `a[i]`, `s.f`) — could fault on the
+    /// untaken arm — and calls, assignments, `++`/`--`, `new`.
+    fn simple_select_arm(&self, e: &Expr) -> bool {
+        use crate::ast::{ExprKind as E, BinOpKind as B, UnOpKind as U};
+        match &e.kind {
+            E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) | E::FloatLit(_)
+            | E::BoolLit(_) | E::Ident(_) | E::Nullptr => true,
+            E::Cast { expr, .. } => self.simple_select_arm(expr),
+            E::Unary { op: U::Not, expr } | E::Unary { op: U::BitNot, expr } =>
+                self.simple_select_arm(expr),
+            // Negation can overflow (`-INT_MIN`) only where overflow traps.
+            E::Unary { op: U::Neg, expr } =>
+                !self.overflow_active() && self.simple_select_arm(expr),
+            E::BinOp { op, lhs, rhs } => match op {
+                B::BitAnd | B::BitOr | B::BitXor | B::Shl | B::Shr
+                | B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge =>
+                    self.simple_select_arm(lhs) && self.simple_select_arm(rhs),
+                B::Add | B::Sub | B::Mul =>
+                    !self.overflow_active()
+                        && self.simple_select_arm(lhs) && self.simple_select_arm(rhs),
+                B::Div | B::Rem => {
+                    let const_safe = matches!(&rhs.kind,
+                        E::IntLit(v, _) if *v != 0 && *v != -1);
+                    let sic_safe = self.is_sic() && !self.divzero_active() && !self.overflow_active();
+                    (const_safe || sic_safe)
+                        && self.simple_select_arm(lhs) && self.simple_select_arm(rhs)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     fn lower_ternary(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
         // Constant-fold a compile-time-constant condition to just the taken arm,
         // like gcc/clang. QEMU's `dup_const`/tcg macros nest
@@ -5203,7 +5246,7 @@ impl<'m> FuncCtx<'m> {
         // edit-distance `min3`, which gcc/clang also make branchless). Scalars only:
         // no bigint/fixed/container/aggregate refcount or temp handling is involved.
         if matches!(&ty, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Bool)
-            && simple_select_arm(then) && simple_select_arm(else_)
+            && self.simple_select_arm(then) && self.simple_select_arm(else_)
         {
             let tv = self.lower_expr(then)?;
             let tv = self.coerce(tv, &ty)?;
@@ -6107,27 +6150,3 @@ fn rewrite_capture_expr(e: &mut Expr, name: &str, deref: bool) {
     }
 }
 
-/// Is `e` safe to evaluate speculatively as one arm of a branchless `Select`?
-/// True only for pure, side-effect-free, NON-TRAPPING scalar expressions, so that
-/// evaluating both arms of a `?:` is observationally identical to evaluating just
-/// the taken one — in every mode, `unsafe` included. Deliberately excludes:
-///   * memory reads (`*p`, `a[i]`, `s.f`, `p->f`) — could fault on the untaken arm;
-///   * `Add`/`Sub`/`Mul`/`Neg` and `Div`/`Rem` — can trap (overflow / ÷0) under
-///     `unsafe`, and ÷0 would also change a defined result if speculated;
-///   * calls, assignments, `++`/`--`, `new`, and anything with a side effect.
-/// The remaining set (names, literals, casts, comparisons, bitwise/shift, `!`/`~`)
-/// is pure and cannot trap, and covers the hot cases (`a<b?a:b`, `cost?0:1`).
-fn simple_select_arm(e: &crate::ast::Expr) -> bool {
-    use crate::ast::{ExprKind as E, BinOpKind as B, UnOpKind as U};
-    match &e.kind {
-        E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) | E::FloatLit(_)
-        | E::BoolLit(_) | E::Ident(_) | E::Nullptr => true,
-        E::Cast { expr, .. } => simple_select_arm(expr),
-        E::Unary { op: U::Not, expr } | E::Unary { op: U::BitNot, expr } => simple_select_arm(expr),
-        E::BinOp { op, lhs, rhs } => matches!(op,
-                B::BitAnd | B::BitOr | B::BitXor | B::Shl | B::Shr
-                | B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge)
-            && simple_select_arm(lhs) && simple_select_arm(rhs),
-        _ => false,
-    }
-}
