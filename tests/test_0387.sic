@@ -1,0 +1,44 @@
+// Vectorized predicate-count reduction (-O2): `for(j) if (arr[j] CMP K) acc++`
+// becomes a SIMD compare + movemask + popcnt per lane-chunk plus a scalar
+// remainder (see `try_vectorize_predcount`). This pins that the COUNTS are exact
+// across comparison ops, a non-multiple-of-lanes length (exercises the remainder),
+// and both fat `new[]` (bounds-checked) and the empty-loop guard. Returns 42.
+#include <stdio.h>
+
+int main() {
+    // N = 100 is not a multiple of 16 (u8 lanes) → the tail runs the scalar body.
+    u8 *buf = new u8[100];
+    defer del buf;
+    for (i32 i = 0; i < 100; i++) buf[i] = (u8)i;   // 0,1,...,99
+
+    i64 ge50 = 0;
+    for (i32 i = 0; i < 100; i++) if (buf[i] >= 50) ge50++;    // 50..99 -> 50
+    if (ge50 != 50) return 1;
+
+    i64 lt10 = 0;
+    for (i32 i = 0; i < 100; i++) if (buf[i] < 10) lt10++;     // 0..9 -> 10
+    if (lt10 != 10) return 2;
+
+    i64 eq42 = 0;
+    for (i32 i = 0; i < 100; i++) if (buf[i] == 42) eq42++;    // -> 1
+    if (eq42 != 1) return 3;
+
+    i64 ne0 = 0;
+    for (i32 i = 0; i < 100; i++) if (buf[i] != 0) ne0++;      // all but i=0 -> 99
+    if (ne0 != 99) return 4;
+
+    // high-bit predicate on values that set it: buf[i]|0x80 for i in 30..; count>=128
+    u8 *hb = new u8[40];
+    defer del hb;
+    for (i32 i = 0; i < 40; i++) hb[i] = (u8)(i < 15 ? i : (i | 0x80));
+    i64 hi = 0;
+    for (i32 i = 0; i < 40; i++) if (hb[i] >= 128) hi++;       // i=15..39 -> 25
+    if (hi != 25) return 5;
+
+    // zero-length loop must count nothing (guard)
+    i64 z = 0;
+    for (i32 i = 0; i < 0; i++) if (buf[i] >= 50) z++;
+    if (z != 0) return 6;
+
+    return 42;
+}

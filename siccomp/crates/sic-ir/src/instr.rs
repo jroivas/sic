@@ -118,6 +118,13 @@ pub enum Instr {
     /// Select between two values based on a boolean condition.
     Select { dest: ValId, cond: Val, on_true: Val, on_false: Val, ty: Type },
 
+    /// Extract the high (sign) bit of each lane of a SIMD vector into a scalar
+    /// integer bitmask — lane `k` sets bit `k` (x86 `pmovmskb` / Cranelift
+    /// `vhigh_bits`). `ty` is the input vector type; `dest` is an i32. Fed a
+    /// lane-comparison mask, `popcnt(dest)` counts the matching lanes — the core
+    /// of the vectorized byte-predicate count (see `try_vectorize_predcount`).
+    VecMoveMask { dest: ValId, val: Val, ty: Type },
+
     /// MemCopy (used for struct assignments).
     MemCopy { dst: Val, src: Val, size: u64, align: u64 },
 
@@ -168,7 +175,8 @@ impl Instr {
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
-            Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. } => f(val),
+            Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
+            | Instr::VecMoveMask { val, .. } => f(val),
             Instr::Call { args, .. } => { for a in args { f(a); } }
             Instr::CallIndirect { fptr, args, .. } => { f(fptr); for a in args { f(a); } }
             Instr::GetFieldPtr { base, .. } => f(base),
@@ -195,7 +203,8 @@ impl Instr {
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
-            Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. } => f(val),
+            Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
+            | Instr::VecMoveMask { val, .. } => f(val),
             Instr::Call { args, .. } => { for a in args { f(a); } }
             Instr::CallIndirect { fptr, args, .. } => { f(fptr); for a in args { f(a); } }
             Instr::GetFieldPtr { base, .. } => f(base),
@@ -222,7 +231,7 @@ impl Instr {
             | Instr::Cast { dest, .. } | Instr::Cmp { dest, .. }
             | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
             | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. }
-            | Instr::BSwap { dest, .. } | Instr::VaArg { dest, .. }
+            | Instr::BSwap { dest, .. } | Instr::VecMoveMask { dest, .. } | Instr::VaArg { dest, .. }
             | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. }
             | Instr::AtomicCas { dest, .. }
             | Instr::ReturnAddress { dest } => Some(*dest),
@@ -242,6 +251,7 @@ impl Instr {
             Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. }
             | Instr::Cast { .. } | Instr::BSwap { .. } | Instr::GetFieldPtr { .. }
             | Instr::GetElemPtr { .. } | Instr::PtrOffset { .. } | Instr::Select { .. }
+            | Instr::VecMoveMask { .. }
             | Instr::LoadReadonly { .. })
     }
 }

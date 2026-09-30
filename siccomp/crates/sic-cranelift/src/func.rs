@@ -490,6 +490,17 @@ fn emit_instr(
         }
 
         Instr::Cmp { dest, op, lhs, rhs, ty } => {
+            // A vector-typed comparison is a per-lane SIMD compare: both operands
+            // are whole XMM values and the result is a lane mask (all-ones per
+            // matching lane). Feed them straight through — the scalar path would
+            // treat the array type as a pointer and corrupt them.
+            if let Some(vt) = vector_clty(ty) {
+                let l = rval(lhs, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+                let r = rval(rhs, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+                let v = emit_cmp(op, l, r, vt, builder);
+                val_map.insert(dest.0, v);
+                return;
+            }
             // Materialize both operands at the comparison's declared type so a
             // constant operand isn't truncated to a narrower guessed width.
             let cmp_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
@@ -648,6 +659,16 @@ fn emit_instr(
             let v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let v = coerce(v, cl_ty, builder, ptr_ty);
             let result = builder.ins().bswap(v);
+            val_map.insert(dest.0, result);
+        }
+
+        Instr::VecMoveMask { dest, val, ty } => {
+            // Extract each lane's high bit into a scalar bitmask (x86 `pmovmskb`).
+            // `val` is a SIMD vector; feed it straight through (the scalar path
+            // would misread the vector type as a pointer). The result is an i32.
+            let vt = vector_clty(ty).unwrap_or(ct::I8X16);
+            let v = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, vt);
+            let result = builder.ins().vhigh_bits(ct::I32, v);
             val_map.insert(dest.0, result);
         }
 

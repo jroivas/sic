@@ -142,6 +142,8 @@ impl fmt::Display for Instr {
                 write!(f, "  %{} = ptroff {}, {}", dest.0, base, offset),
             Instr::Select { dest, cond, on_true, on_false, ty } =>
                 write!(f, "  %{} = select {} {}, {}, {}", dest.0, ty, cond, on_true, on_false),
+            Instr::VecMoveMask { dest, val, ty } =>
+                write!(f, "  %{} = vmovemask {} {}", dest.0, ty, val),
             Instr::MemCopy { dst, src, size, align } =>
                 write!(f, "  memcopy {}, {}, size={}, align={}", dst, src, size, align),
             Instr::MemSet { dst, val, size, align } =>

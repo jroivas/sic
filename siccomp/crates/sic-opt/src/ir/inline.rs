@@ -371,6 +371,7 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         | Instr::BinOp { dest, .. } | Instr::UnaryOp { dest, .. } | Instr::Cast { dest, .. }
         | Instr::Cmp { dest, .. } | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
         | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. } | Instr::BSwap { dest, .. }
+        | Instr::VecMoveMask { dest, .. }
         | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. } | Instr::AtomicCas { dest, .. }
         | Instr::VaArg { dest, .. } | Instr::ReturnAddress { dest } => { *dest = md(*dest); }
         Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => { if let Some(d) = dest { *d = md(*d); } }

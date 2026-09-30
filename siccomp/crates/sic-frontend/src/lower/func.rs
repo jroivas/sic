@@ -2904,6 +2904,15 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // Vectorized predicate-count reduction (`if (arr[j] CMP K) acc++`): a SIMD
+        // compare + movemask + popcnt per lane-chunk (see `try_vectorize_predcount`).
+        if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
+            if self.try_vectorize_predcount(fi, c, p, body)? {
+                self.exit_scope();
+                return Ok(());
+            }
+        }
+
         // Dead counted-loop elimination: a counting loop whose body is only trivial
         // scalar-local assignments with no loop-carried dependency computes the same
         // final state as running just its last iteration, so it is replaced by a
@@ -3551,6 +3560,258 @@ impl<'m> FuncCtx<'m> {
                 }
             };
             self.push_instr(Instr::Store { val: res, ptr: waddr });
+            // j += W
+            let jn = self.emit_load(&jslot, &jty);
+            let inc = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(lanes as i64), ty: jty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
+            self.set_terminator(Terminator::Jump(vcond));
+        }
+
+        // ---- scalar remainder: while (j < HI) { <original body>; j++ } ----
+        self.switch_to_block(rem);
+        let rcond = self.new_block_after_current();
+        let rbody = self.new_block_after_current();
+        let done = self.new_block_after_current();
+        self.set_terminator(Terminator::Jump(rcond));
+        self.switch_to_block(rcond);
+        let jr = self.emit_load(&jslot, &jty);
+        let jr64 = self.coerce(jr, &i64t)?;
+        let rlt = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: rlt, op: CmpOp::ISLt, lhs: jr64, rhs: hi_v.clone(), ty: i64t.clone() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(rlt), then_bb: rbody, else_bb: done });
+        self.switch_to_block(rbody);
+        self.lower_stmt(body)?;
+        if !self.is_terminated() {
+            let jn = self.emit_load(&jslot, &jty);
+            let inc = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(1), ty: jty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
+            self.set_terminator(Terminator::Jump(rcond));
+        }
+        self.switch_to_block(done);
+        Ok(true)
+    }
+
+    /// Vectorize a byte/lane predicate-count reduction:
+    ///
+    /// ```text
+    ///   for (T j = LO; j < HI; j++)  if (arr[j] CMP K) acc++;
+    /// ```
+    ///
+    /// where `arr` is a fat integer array (8/16/32/64-bit lanes), `K` is a
+    /// compile-time constant that fits the element type, and `acc` a scalar integer
+    /// local incremented by one. Each `W`-lane chunk becomes: load a vector, compare
+    /// all lanes to `splat(K)` (one SIMD compare), extract the lane mask
+    /// (`pmovmskb`/`vhigh_bits`), `popcnt` it, and add that to `acc` — so `W` bytes
+    /// per step instead of `W` branches. A scalar remainder runs the original body
+    /// for the tail. This is the `bytecount` kernel (`buf[i] >= 128`), which LLVM
+    /// vectorizes and sic previously left as a per-byte branch.
+    ///
+    /// Soundness: `arr` is only READ and `acc` is a scalar local (cannot alias the
+    /// heap array), so no alias guard is needed; the hoisted bounds check covers the
+    /// whole `[LO, HI)` range; `K` constant-and-in-range means the `W`-wide lane
+    /// compare has the same truth value as the source's integer-promoted compare;
+    /// summing per-chunk popcounts plus the scalar remainder is exactly the scalar
+    /// count. Fails closed (`Ok(false)`) on anything not matched.
+    fn try_vectorize_predcount(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
+        use crate::ast::{ExprKind as E, BinOpKind as B};
+        if !self.lowerer.vectorize { return Ok(false); }
+
+        // -- induction variable + LO (fresh `for (T j = LO; …)`) --
+        let (ivar, jdecl, lo) = match init {
+            ForInit::Decl(Decl::Var { declarators, .. }) if declarators.len() == 1 => {
+                let d = &declarators[0];
+                match &d.init { Some(Initializer::Expr(e)) => (d.name.clone(), d.clone(), e.clone()), _ => return Ok(false) }
+            }
+            _ => return Ok(false),
+        };
+        // -- bound `j < HI` / `j <= HI` --
+        let (hi, inclusive) = match &cond.kind {
+            E::BinOp { op, lhs, rhs } => match (&lhs.kind, op) {
+                (E::Ident(n), B::Lt) if *n == ivar => ((**rhs).clone(), false),
+                (E::Ident(n), B::Le) if *n == ivar => ((**rhs).clone(), true),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        // -- unit step `j++` / `++j` / `j += 1` --
+        let unit = match &post.kind {
+            E::PostInc { inc: true, expr } | E::PreInc { inc: true, expr } =>
+                matches!(&expr.kind, E::Ident(n) if *n == ivar),
+            E::Assign { op: Some(B::Add), lhs, rhs } =>
+                matches!(&lhs.kind, E::Ident(n) if *n == ivar) && matches!(&rhs.kind, E::IntLit(1, _)),
+            _ => false,
+        };
+        if !unit { return Ok(false); }
+        if simple_expr_idents(&lo).is_none() || simple_expr_idents(&hi).is_none() { return Ok(false); }
+
+        // -- body must be exactly `if (arr[j] CMP K) acc++;` (no else) --
+        let ifstmt: &Stmt = match body {
+            Stmt::Block(v, _) if v.len() == 1 => &v[0],
+            s @ Stmt::If { .. } => s,
+            _ => return Ok(false),
+        };
+        let (pred, then) = match ifstmt {
+            Stmt::If { cond: c, then, else_: None, .. } => (c, then.as_ref()),
+            _ => return Ok(false),
+        };
+        // pred = `arr[j] CMP K`
+        let (arr, cmp_ast, k) = match &pred.kind {
+            E::BinOp { op, lhs, rhs }
+                if matches!(op, B::Lt | B::Le | B::Gt | B::Ge | B::Eq | B::Ne) =>
+            {
+                match &lhs.kind {
+                    E::Index { base, index } => match &base.kind {
+                        E::Ident(a) if matches!(affine_x(index, &ivar), Some(None)) =>
+                            (a.clone(), *op, (**rhs).clone()),
+                        _ => return Ok(false),
+                    },
+                    _ => return Ok(false),
+                }
+            }
+            _ => return Ok(false),
+        };
+        // then = `acc++` / `++acc` / `acc += 1` (optionally a 1-statement block)
+        let then_e: &Expr = match then {
+            Stmt::Expr(e, _) => e,
+            Stmt::Block(v, _) if v.len() == 1 => match &v[0] { Stmt::Expr(e, _) => e, _ => return Ok(false) },
+            _ => return Ok(false),
+        };
+        let acc = match &then_e.kind {
+            E::PostInc { inc: true, expr } | E::PreInc { inc: true, expr } =>
+                match &expr.kind { E::Ident(a) => a.clone(), _ => return Ok(false) },
+            E::Assign { op: Some(B::Add), lhs, rhs } =>
+                match (&lhs.kind, &rhs.kind) { (E::Ident(a), E::IntLit(1, _)) => a.clone(), _ => return Ok(false) },
+            _ => return Ok(false),
+        };
+
+        // -- arr must be an integer array/pointer; element 8/16/32/64-bit. A fat
+        //    `new[]` local carries a size header (bounds-checked, hoisted below); a
+        //    raw pointer (`malloc`) is unchecked in the scalar loop too, so it needs
+        //    no hoisted check to vectorize. --
+        if !self.is_vec_array(&arr) { return Ok(false); }
+        let et = match self.infer_expr_type(&Expr::new(E::Ident(arr.clone()), cond.span.clone())) {
+            Ok(Type::Pointer(t)) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+            Ok(Type::Array { elem, .. }) => (*elem).clone(),
+            _ => return Ok(false),
+        };
+        let (ebits, esign) = match &et { Type::Int { bits, signed } => (*bits, *signed), _ => return Ok(false) };
+        let lanes = match ebits { 8 => 16, 16 => 8, 32 => 4, 64 => 2, _ => return Ok(false) };
+        let vty = Type::Array { elem: Box::new(et.clone()), len: lanes };
+        if vty.simd128().is_none() { return Ok(false); }
+
+        // -- K must be a compile-time constant that fits the element type (so the
+        //    W-wide lane compare has the same truth as the source's promoted compare)
+        //    and must not name j or acc. acc a scalar int local, distinct from arr. --
+        if acc == arr { return Ok(false); }
+        match simple_expr_idents(&k) {
+            Some(ids) if !ids.contains(&ivar) && !ids.contains(&acc) => {}
+            _ => return Ok(false),
+        }
+        let kv = match crate::lower::eval_const_expr(&k, &self.lowerer.enum_consts) { Ok(v) => v, Err(_) => return Ok(false) };
+        let (emin, emax): (i128, i128) = if esign {
+            (-(1i128 << (ebits - 1)), (1i128 << (ebits - 1)) - 1)
+        } else { (0, (1i128 << ebits) - 1) };
+        if (kv as i128) < emin || (kv as i128) > emax { return Ok(false); }
+        let (acc_ty, acc_slot) = match self.lookup(&acc) {
+            Some(LookupResult::Local(t, vid)) if t.is_int() => (t.clone(), Val::Local(vid)),
+            _ => return Ok(false),
+        };
+        let cmpop = match (cmp_ast, esign) {
+            (B::Lt, true) => CmpOp::ISLt, (B::Lt, false) => CmpOp::IULt,
+            (B::Le, true) => CmpOp::ISLe, (B::Le, false) => CmpOp::IULe,
+            (B::Gt, true) => CmpOp::ISGt, (B::Gt, false) => CmpOp::IUGt,
+            (B::Ge, true) => CmpOp::ISGe, (B::Ge, false) => CmpOp::IUGe,
+            (B::Eq, _) => CmpOp::IEq, (B::Ne, _) => CmpOp::INe,
+            _ => return Ok(false),
+        };
+
+        // ===== EMIT ===== (mirrors `try_vectorize`'s scaffolding)
+        let i64_ty = QualType::new(AstType::LongLong { signed: true });
+        let mut jdecl_i64 = jdecl.clone();
+        jdecl_i64.ty = i64_ty.clone();
+        self.lower_local_decl(&Decl::Var {
+            base_ty: i64_ty, declarators: vec![jdecl_i64],
+            weak: false, thread_local: false, span: cond.span.clone(),
+        })?;
+        let (jty, jslot) = match self.lookup(&ivar) {
+            Some(LookupResult::Local(ty, vid)) => (ty.clone(), Val::Local(vid)),
+            _ => return Ok(false),
+        };
+        let i64t = Type::i64();
+        let esz = et.size_of(self.ptr_size());
+
+        // Hoisted bounds check over [LO, HI), guarded by the loop-entry condition.
+        let will = self.lower_expr(cond)?;
+        let willb = self.to_bool(will)?;
+        let chk_bb = self.new_block_after_current();
+        let loops_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: willb, then_bb: chk_bb, else_bb: loops_bb });
+        self.switch_to_block(chk_bb);
+        let one = Expr::new(E::IntLit(1, false), cond.span.clone());
+        let maxi = if inclusive { hi.clone() }
+                   else { Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(hi.clone()), rhs: Box::new(one) }, cond.span.clone()) };
+        // Only a fat pointer carries a size header to check; a raw pointer is
+        // unchecked in the scalar loop too, so vectorizing it adds no obligation.
+        if self.fat_locals.contains(&arr) {
+            self.emit_hoisted_bounds_check(&arr, &lo)?;
+            self.emit_hoisted_bounds_check(&arr, &maxi)?;
+        }
+        if !self.is_terminated() { self.set_terminator(Terminator::Jump(loops_bb)); }
+        self.switch_to_block(loops_bb);
+
+        // vend = LO + floor((HI - LO)/W)*W, in i64.
+        let lo_v = { let v = self.lower_expr(&lo)?; self.coerce(v, &i64t)? };
+        let hi_v = {
+            let v = self.lower_expr(&hi)?; let v = self.coerce(v, &i64t)?;
+            if inclusive {
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Add, lhs: v, rhs: Constant::int(1), ty: i64t.clone() });
+                Val::Local(d)
+            } else { v }
+        };
+        let count = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: count, op: BinOp::Sub, lhs: hi_v.clone(), rhs: lo_v.clone(), ty: i64t.clone() });
+        let vcnt = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: vcnt, op: BinOp::And, lhs: Val::Local(count), rhs: Constant::int(!((lanes as i64) - 1)), ty: i64t.clone() });
+        let vend = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: vend, op: BinOp::Add, lhs: lo_v.clone(), rhs: Val::Local(vcnt), ty: i64t.clone() });
+        let vend = Val::Local(vend);
+
+        // splat(K) built once, before the vector loop.
+        let kscalar = self.coerce(Constant::int(kv), &et)?;
+        let kvec = self.emit_splat(kscalar, &et, lanes);
+
+        // ---- vector loop: while (j < vend) { acc += popcnt(movemask(load(arr[j]) CMP K)); j += W } ----
+        let vcond = self.new_block_after_current();
+        let vbody = self.new_block_after_current();
+        let rem = self.new_block_after_current();
+        self.set_terminator(Terminator::Jump(vcond));
+        self.switch_to_block(vcond);
+        let jv = self.emit_load(&jslot, &jty);
+        let jv64 = self.coerce(jv, &i64t)?;
+        let lt = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: jv64, rhs: vend.clone(), ty: i64t.clone() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: vbody, else_bb: rem });
+        self.switch_to_block(vbody);
+        {
+            let jvb = self.emit_load(&jslot, &jty);
+            let jvb = self.coerce(jvb, &i64t)?;
+            let vaddr = self.vec_elem_addr(&arr, &None, &jvb, &et, esz)?;
+            let vv = self.alloc_val();
+            self.push_instr(Instr::Load { dest: vv, ptr: vaddr, ty: vty.clone() });
+            let mask = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: mask, op: cmpop, lhs: Val::Local(vv), rhs: kvec.clone(), ty: vty.clone() });
+            let mm = self.alloc_val();
+            self.push_instr(Instr::VecMoveMask { dest: mm, val: Val::Local(mask), ty: vty.clone() });
+            let pc = self.alloc_val();
+            self.push_instr(Instr::UnaryOp { dest: pc, op: UnOp::Popcnt, val: Val::Local(mm), ty: Type::i32() });
+            let pc_acc = self.coerce(Val::Local(pc), &acc_ty)?;
+            let accv = self.emit_load(&acc_slot, &acc_ty);
+            let sum = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: sum, op: BinOp::Add, lhs: accv, rhs: pc_acc, ty: acc_ty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(sum), ptr: acc_slot.clone() });
             // j += W
             let jn = self.emit_load(&jslot, &jty);
             let inc = self.alloc_val();
