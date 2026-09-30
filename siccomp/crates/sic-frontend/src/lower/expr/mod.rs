@@ -4968,6 +4968,18 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Val::Func(fref));
                     }
                 }
+                // `&container` ≡ the container handle. A `dict`/`list`/`set` value is
+                // already a heap handle and `dict* ≡ dict` (see `lower_type`), so the
+                // address-of is a no-op yielding the handle — NOT the address of the
+                // variable holding it (passing `&d` to a `dict*` param must pass the
+                // handle the callee subscripts, not a pointer to it).
+                if self.is_sic() {
+                    if let Ok(t) = self.infer_expr_type(inner) {
+                        if super::types::is_dict(&t) || super::types::is_list(&t) || super::types::is_set(&t) {
+                            return self.lower_expr(inner);
+                        }
+                    }
+                }
                 let lv = self.lower_lvalue(inner)?;
                 Ok(lv.ptr)
             }
@@ -4975,6 +4987,12 @@ impl<'m> FuncCtx<'m> {
                 let ptr = self.lower_expr(inner)?;
                 // Determine pointee type
                 let ptr_ty = self.val_type(&ptr);
+                // `*container` ≡ the container handle (the `dict* ≡ dict` collapse):
+                // dereferencing a handle yields the same handle, not a load.
+                if self.is_sic() && (super::types::is_dict(&ptr_ty)
+                    || super::types::is_list(&ptr_ty) || super::types::is_set(&ptr_ty)) {
+                    return Ok(ptr);
+                }
                 let inner_ty = self.pointee_of(&ptr_ty);
                 // Dereferencing a function pointer yields a function designator
                 // that immediately decays back to the pointer — emit no load

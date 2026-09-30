@@ -1,0 +1,23 @@
+// A `dict`/`list`/`set` passed by pointer (`dict<K,V>* m`) must subscript the
+// pointed-to container. Because a container handle is already a heap pointer and
+// `dict* ≡ dict` (see lower_type), `&d` must yield the handle and `*m`/`m[k]` must
+// operate on it — not treat the pointer-to-handle as the handle (which wrote
+// garbage and crashed). Returns 42.
+void put(dict<string,string> *m, string k, string v) { (*m)[k] = v; }
+string get(dict<string,string> *m, string k) { return m[k]; }   // via ptr, no deref
+void ladd(list<i32> *l, i32 x) { (*l).add(x); }
+
+int main() {
+    dict<string,string> d;
+    put(&d, "a", "xx");
+    put(&d, "bb", "yyy");
+    string va = get(&d, "a");
+    string vb = get(&d, "bb");
+    if (va.length != 2 || vb.length != 3) return 1;
+
+    list<i32> nums;
+    ladd(&nums, 10); ladd(&nums, 20); ladd(&nums, 30);
+    if (nums.length != 3 || nums[2] != 30) return 2;
+
+    return 42;
+}

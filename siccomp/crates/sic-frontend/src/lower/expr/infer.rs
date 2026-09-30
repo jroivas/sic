@@ -79,10 +79,20 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
+                // `&container` ≡ the container handle (`dict* ≡ dict`; see lower_unary).
+                if self.is_sic() && (super::super::types::is_dict(&inner_ty)
+                    || super::super::types::is_list(&inner_ty) || super::super::types::is_set(&inner_ty)) {
+                    return Ok(inner_ty);
+                }
                 Ok(Type::Pointer(Box::new(inner_ty)))
             }
             ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
+                // `*container` ≡ the container handle (the `dict* ≡ dict` collapse).
+                if self.is_sic() && (super::super::types::is_dict(&inner_ty)
+                    || super::super::types::is_list(&inner_ty) || super::super::types::is_set(&inner_ty)) {
+                    return Ok(inner_ty);
+                }
                 Ok(match inner_ty {
                     Type::Pointer(t) => self.pointee_of(&Type::Pointer(t)),
                     // An array decays to a pointer to its element, so `*arr` is
