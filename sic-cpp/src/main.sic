@@ -1,0 +1,847 @@
+// sic-cpp — C preprocessor in idiomatic SIC.
+//
+// Usage: sic-cpp [-DNAME[=val] ...] [-UNAME ...] [-Idir ...] [-std=std] [file]
+//        Preprocessed text is written to standard output.
+//
+// Pure SIC string operations throughout.  File I/O uses std::File.
+// Stdin reading still needs C stdio (stdin is not a regular file).
+
+import std;
+
+// ── Structs ────────────────────────────────────────────────────────────────
+
+struct Preprocessor {
+    // Macro table: name → encoding ("O|body" or "F|params|body")
+    dict<string, string> macros;
+    // Conditional compilation stack (fixed depth 128)
+    i32 cond_stack[128];
+    i32 cond_depth;
+    // Include search paths
+    list<string> include_dirs;
+    // User -D and -U flags
+    list<string> user_defines;
+    list<string> user_undefs;
+    // Current source tracking
+    string current_file;
+    i32 current_line;
+    // Output lines
+    list<string> output_lines;
+}
+
+// ── Utility functions ─────────────────────────────────────────────────────
+
+i32 is_space(i32 ch) {
+    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ? 1 : 0;
+}
+
+i32 is_ident_start(i32 ch) {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' ? 1 : 0;
+}
+
+i32 is_ident(i32 ch) {
+    return is_ident_start(ch) || (ch >= '0' && ch <= '9') ? 1 : 0;
+}
+
+i32 find_ch(string s, i32 ch) {
+    for (i32 i = 0; i < s.length; i++)
+        if (s[i] == ch) return i;
+    return -1;
+}
+
+i32 starts_with(string s, string prefix) {
+    if (prefix.length > s.length) return 0;
+    for (i32 i = 0; i < prefix.length; i++)
+        if (s[i] != prefix[i]) return 0;
+    return 1;
+}
+
+string ltrim(string s) {
+    i32 i = 0;
+    while (i < s.length && is_space(s[i])) i++;
+    return i == 0 ? s : s[i:s.length];
+}
+
+string trim(string s) {
+    i32 i = 0;
+    while (i < s.length && is_space(s[i])) i++;
+    i32 j = s.length - 1;
+    while (j >= 0 && is_space(s[j])) j--;
+    if (i > j) return "";
+    return s[i:j+1];
+}
+
+// ── File I/O using std::File (except stdin) ────────────────────────────────
+
+// Read a regular file into a string.  Returns "" on failure.
+string read_file(string path) {
+    auto status = std::Open(path, std::OpenMode::Read);
+    match (status) {
+        std::File::FileStatus::Opened(f): {
+            auto res = std::Size(f);
+            u64 size;
+            if (!(size = std::FileStatus::Size(res)))
+                return "";
+            if (size == 0)
+                return "";
+            auto buf = std::Buffer::Create(size);
+            if (!buf) { del f; return ""; }
+            auto rs = std::Read(f, size, buf);
+            string result = "";
+            match (rs) {
+                std::FileStatus::Read(cnt):
+                    result = std::Buffer::Value(buf).dup;
+                _:
+                    std::Println("Could not read file"),
+                    result = "";
+            }
+            del buf;
+            del f;
+            return result;
+        }
+        _: return "";
+    }
+}
+
+// Check if a file exists (for #include search).
+i32 file_exists(string path) {
+    auto status = std::Open(path, std::OpenMode::Read);
+    match (status) {
+        std::FileStatus::Opened(f): { del f; return 1; }
+        _: return 0;
+    }
+}
+
+// ── Tokenizer ──────────────────────────────────────────────────────────────
+
+list<string> tokenize(string input) {
+    list<string> tokens;
+    i32 i = 0;
+    while (i < input.length) {
+        i32 ch = input[i];
+        if (is_space(ch)) {
+            tokens.add(" ");
+            while (i < input.length && is_space(input[i])) i++;
+            continue;
+        }
+        if (ch == '/' && i + 1 < input.length && input[i+1] == '*') {
+            i += 2;
+            while (i + 1 < input.length && !(input[i] == '*' && input[i+1] == '/')) i++;
+            i += 2; tokens.add(" "); continue;
+        }
+        if (ch == '/' && i + 1 < input.length && input[i+1] == '/') {
+            while (i < input.length && input[i] != '\n') i++;
+            continue;
+        }
+        if (is_ident_start(ch)) {
+            i32 start = i;
+            while (i < input.length && is_ident(input[i])) i++;
+            tokens.add(input[start:i]); continue;
+        }
+        if (ch >= '0' && ch <= '9') {
+            i32 start = i;
+            if (ch == '0' && i+1 < input.length && (input[i+1] == 'x' || input[i+1] == 'X')) i += 2;
+            else if (ch == '0' && i+1 < input.length && (input[i+1] == 'b' || input[i+1] == 'B')) i += 2;
+            while (i < input.length && (is_ident(input[i]) || input[i] == '.')) i++;
+            tokens.add(input[start:i]); continue;
+        }
+        if (ch == '"') {
+            i32 start = i; i++;
+            while (i < input.length && input[i] != '"') { if (input[i] == '\\') i++; i++; }
+            if (i < input.length && input[i] == '"') i++;
+            tokens.add(input[start:i]); continue;
+        }
+        if (ch == '\'') {
+            i32 start = i; i++;
+            while (i < input.length && input[i] != '\'') { if (input[i] == '\\') i++; i++; }
+            if (i < input.length && input[i] == '\'') i++;
+            tokens.add(input[start:i]); continue;
+        }
+        // Multi-char punctuators
+        if (ch == '<' && i+1 < input.length && input[i+1] == '<') { tokens.add("<<"); i+=2; continue; }
+        if (ch == '>' && i+1 < input.length && input[i+1] == '>') { tokens.add(">>"); i+=2; continue; }
+        if (ch == '=' && i+1 < input.length && input[i+1] == '=') { tokens.add("=="); i+=2; continue; }
+        if (ch == '!' && i+1 < input.length && input[i+1] == '=') { tokens.add("!="); i+=2; continue; }
+        if (ch == '<' && i+1 < input.length && input[i+1] == '=') { tokens.add("<="); i+=2; continue; }
+        if (ch == '>' && i+1 < input.length && input[i+1] == '=') { tokens.add(">="); i+=2; continue; }
+        if (ch == '&' && i+1 < input.length && input[i+1] == '&') { tokens.add("&&"); i+=2; continue; }
+        if (ch == '|' && i+1 < input.length && input[i+1] == '|') { tokens.add("||"); i+=2; continue; }
+        if (ch == '+' && i+1 < input.length && input[i+1] == '+') { tokens.add("++"); i+=2; continue; }
+        if (ch == '-' && i+1 < input.length && input[i+1] == '-') { tokens.add("--"); i+=2; continue; }
+        if (ch == '-' && i+1 < input.length && input[i+1] == '>') { tokens.add("->"); i+=2; continue; }
+        if (ch == '#' && i+1 < input.length && input[i+1] == '#') { tokens.add("##"); i+=2; continue; }
+        if (ch == '.' && i+1 < input.length && i+2 < input.length
+            && input[i+1] == '.' && input[i+2] == '.') { tokens.add("..."); i+=3; continue; }
+        tokens.add(input[i:i+1]); i++;
+    }
+    return tokens;
+}
+
+// ── Expression evaluator ──────────────────────────────────────────────────
+
+i32 eval_expr(string expr, dict<string, string> *macros, i32 *pos);
+
+i32 eval_primary(string expr, dict<string, string> *macros, i32 *pos) {
+    while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+    if (*pos >= expr.length) return 0;
+
+    // defined name / defined(name)
+    if (*pos + 7 < expr.length && expr[*pos:*pos+7] == "defined") {
+        *pos += 7;
+        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        if (*pos < expr.length && expr[*pos] == '(') { (*pos)++; }
+        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        i32 start = *pos;
+        while (*pos < expr.length && is_ident(expr[*pos])) (*pos)++;
+        string name = expr[start:*pos];
+        // Check if macro exists: read from dict, our encodings are never empty
+        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
+        i32 found_via_get = 0;
+        {
+            string _v = macros[name];
+            if (_v.length >= 2) found_via_get = 1;
+        }
+        return found_via_get;
+    }
+
+    if (expr[*pos] == '(') {
+        (*pos)++;
+        i32 val = eval_expr(expr, macros, pos);
+        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
+        return val;
+    }
+    if (expr[*pos] == '+') { (*pos)++; return eval_primary(expr, macros, pos); }
+    if (expr[*pos] == '-') { (*pos)++; return -eval_primary(expr, macros, pos); }
+    if (expr[*pos] == '~') { (*pos)++; return ~eval_primary(expr, macros, pos); }
+    if (expr[*pos] == '!') { (*pos)++; return eval_primary(expr, macros, pos) ? 0 : 1; }
+
+    // Number literal
+    if (expr[*pos] >= '0' && expr[*pos] <= '9') {
+        i32 val = 0, radix = 10;
+        if (expr[*pos] == '0' && *pos + 1 < expr.length
+            && (expr[*pos+1] == 'x' || expr[*pos+1] == 'X')) { radix = 16; *pos += 2; }
+        else if (expr[*pos] == '0' && *pos + 1 < expr.length
+                 && (expr[*pos+1] == 'b' || expr[*pos+1] == 'B')) { radix = 2; *pos += 2; }
+        else if (expr[*pos] == '0') { radix = 8; *pos += 1; }
+        while (*pos < expr.length) {
+            i32 d = -1;
+            if (expr[*pos] >= '0' && expr[*pos] <= '9') d = expr[*pos] - '0';
+            else if (radix == 16 && expr[*pos] >= 'a' && expr[*pos] <= 'f') d = expr[*pos] - 'a' + 10;
+            else if (radix == 16 && expr[*pos] >= 'A' && expr[*pos] <= 'F') d = expr[*pos] - 'A' + 10;
+            else break;
+            if (d < radix) val = val * radix + d; else break;
+            (*pos)++;
+        }
+        while (*pos < expr.length && (expr[*pos] == 'U' || expr[*pos] == 'u'
+               || expr[*pos] == 'L' || expr[*pos] == 'l')) (*pos)++;
+        return val;
+    }
+
+    // Char constant
+    if (expr[*pos] == '\'') {
+        (*pos)++; i32 val = 0;
+        if (*pos < expr.length && expr[*pos] == '\\') {
+            (*pos)++;
+            if (*pos < expr.length) {
+                if (expr[*pos] == 'n') val = 10;
+                else if (expr[*pos] == 't') val = 9;
+                else if (expr[*pos] == 'r') val = 13;
+                else if (expr[*pos] == '0') val = 0;
+                else if (expr[*pos] == '\\') val = '\\';
+                else if (expr[*pos] == '\'') val = '\'';
+                else val = expr[*pos];
+                (*pos)++;
+            }
+        } else if (*pos < expr.length) { val = expr[*pos]; (*pos)++; }
+        while (*pos < expr.length && expr[*pos] != '\'') (*pos)++;
+        if (*pos < expr.length && expr[*pos] == '\'') (*pos)++;
+        return val;
+    }
+
+    // Unknown identifier → 0
+    while (*pos < expr.length && is_ident(expr[*pos])) (*pos)++;
+    return 0;
+}
+
+i32 eval_mul(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_primary(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && (e[*p] == '*' || e[*p] == '/' || e[*p] == '%')) {
+        i32 op = e[*p]; (*p)++; i32 rhs = eval_primary(e, m, p);
+        if (op == '*') val *= rhs; else if (op == '/') val = rhs ? val / rhs : 0; else val = rhs ? val % rhs : 0;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_add(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_mul(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && (e[*p] == '+' || e[*p] == '-')) {
+        i32 op = e[*p]; (*p)++; i32 rhs = eval_mul(e, m, p);
+        if (op == '+') val += rhs; else val -= rhs;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_shift(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_add(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p + 1 < e.length && ((e[*p] == '<' && e[*p+1] == '<') || (e[*p] == '>' && e[*p+1] == '>'))) {
+        i32 op = e[*p]; (*p) += 2; i32 rhs = eval_add(e, m, p);
+        if (op == '<') val <<= rhs; else val >>= rhs;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_rel(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_shift(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p + 1 < e.length) {
+        i32 op = e[*p];
+        if (op == '<' && e[*p+1] == '=') { (*p) += 2; val = val <= eval_shift(e, m, p) ? 1 : 0; }
+        else if (op == '>' && e[*p+1] == '=') { (*p) += 2; val = val >= eval_shift(e, m, p) ? 1 : 0; }
+        else if (op == '<') { (*p)++; val = val < eval_shift(e, m, p) ? 1 : 0; }
+        else if (op == '>') { (*p)++; val = val > eval_shift(e, m, p) ? 1 : 0; }
+        else break;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_eq(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_rel(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p + 1 < e.length && ((e[*p] == '=' && e[*p+1] == '=') || (e[*p] == '!' && e[*p+1] == '='))) {
+        if (e[*p] == '=') { (*p) += 2; val = val == eval_rel(e, m, p) ? 1 : 0; }
+        else { (*p) += 2; val = val != eval_rel(e, m, p) ? 1 : 0; }
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_and(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_eq(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && e[*p] == '&' && !(*p + 1 < e.length && e[*p+1] == '&')) {
+        (*p)++; val &= eval_eq(e, m, p);
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_xor(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_and(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && e[*p] == '^') { (*p)++; val ^= eval_and(e, m, p); while (*p < e.length && is_space(e[*p])) (*p)++; }
+    return val;
+}
+
+i32 eval_or(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_xor(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && e[*p] == '|' && !(*p + 1 < e.length && e[*p+1] == '|')) {
+        (*p)++; val |= eval_xor(e, m, p);
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_land(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_or(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p + 1 < e.length && e[*p] == '&' && e[*p+1] == '&') {
+        (*p) += 2; val = (val && eval_or(e, m, p)) ? 1 : 0;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_lor(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_land(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p + 1 < e.length && e[*p] == '|' && e[*p+1] == '|') {
+        (*p) += 2; val = val || eval_land(e, m, p) ? 1 : 0;
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+    }
+    return val;
+}
+
+i32 eval_ternary(string e, dict<string, string> *m, i32 *p) {
+    i32 val = eval_lor(e, m, p);
+    while (*p < e.length && is_space(e[*p])) (*p)++;
+    if (*p < e.length && e[*p] == '?') {
+        (*p)++; i32 t_val = eval_expr(e, m, p);
+        while (*p < e.length && is_space(e[*p])) (*p)++;
+        if (*p < e.length && e[*p] == ':') { (*p)++; i32 f_val = eval_ternary(e, m, p); return val ? t_val : f_val; }
+    }
+    return val;
+}
+
+i32 eval_expr(string expr, dict<string, string> *macros, i32 *pos) {
+    return eval_ternary(expr, macros, pos);
+}
+
+i32 eval_if_expr(string expr, dict<string, string> *macros) {
+    i32 pos = 0;
+    return eval_expr(expr, macros, &pos);
+}
+
+// ── Macro expansion ───────────────────────────────────────────────────────
+
+list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
+                         i32 cur_line, string cur_file) {
+    list<string> out;
+    for (i32 i = 0; i < tokens.length; i++) {
+        string tok = tokens[i];
+        if (tok == "##") continue;
+        if (tok == " ") {
+            if (out.length > 0 && out[out.length-1] != " ") out.add(" ");
+            continue;
+        }
+        // Predefined dynamic macros
+        if (tok == "__LINE__") { out.add(std::Fmt("{}", cur_line)); continue; }
+        if (tok == "__FILE__") { out.add("\"" + cur_file + "\""); continue; }
+        if (tok == "__DATE__") { out.add("\"Jan  1 2026\""); continue; }
+        if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
+        if (tok == "__STDC__") { out.add("1"); continue; }
+
+        // Macro lookup
+        // dict check: we can't iterate keys easily. Use a try approach.
+        string enc = macros[tok];
+        if (enc.length >= 2) {
+            if (enc[0] == 'F') {
+                // Function-like: is next token '(' ?
+                i32 j = i + 1;
+                while (j < tokens.length && tokens[j] == " ") j++;
+                if (j < tokens.length && tokens[j] == "(") {
+                    // Collect arg text between balanced parens
+                    i32 k = j + 1, depth = 1;
+                    while (k < tokens.length && depth > 0) {
+                        if (tokens[k] == "(") depth++;
+                        else if (tokens[k] == ")") depth--;
+                        k++;
+                    }
+                    string arg_str = "";
+                    for (i32 ai = j+1; ai < k-1; ai++) {
+                        if (tokens[ai] == " " && arg_str.length > 0 && arg_str[arg_str.length-1] == ' ') continue;
+                        arg_str = arg_str + tokens[ai];
+                    }
+                    // Parse | separated encoding: "F|params|body"
+                    tuple ep = enc.split("|");
+                    string params_section = "";
+                    string body = "";
+                    if (ep.length >= 2) {
+                        if (enc[0] == 'F') {
+                            tuple ep2 = ep[1].split("|");
+                            if (ep2.length >= 2) { params_section = ep2[0]; body = ep2[1]; }
+                            else { body = ep[1]; }
+                        } else {
+                            body = ep[1];
+                        }
+                    }
+
+                    // Split params by comma, args by top-level comma
+                    list<string> param_names;
+                    i32 pi = 0;
+                    while (pi < params_section.length) {
+                        i32 ps = pi;
+                        while (pi < params_section.length && params_section[pi] != ',') pi++;
+                        param_names.add(params_section[ps:pi]);
+                        if (pi < params_section.length && params_section[pi] == ',') { if (pi+1 < params_section.length) pi++; else break; }
+                    }
+
+                    list<string> args_list;
+                    if (arg_str.length > 0) {
+                        i32 ai = 0, d2 = 0, as2 = 0;
+                        while (ai <= arg_str.length) {
+                            if (ai == arg_str.length || (arg_str[ai] == ',' && d2 == 0)) {
+                                args_list.add(arg_str[as2:ai]);
+                                as2 = ai + 1;
+                            } else if (arg_str[ai] == '(' || arg_str[ai] == '[' || arg_str[ai] == '{') d2++;
+                            else if (arg_str[ai] == ')' || arg_str[ai] == ']' || arg_str[ai] == '}') d2--;
+                            ai++;
+                        }
+                    }
+
+                    // Param substitution (simple: replace name with expanded arg in body)
+                    for (i32 pi2 = 0; pi2 < param_names.length && pi2 < args_list.length; pi2++) {
+                        string pname = param_names[pi2];
+                        string arg_text = args_list[pi2];
+                        // Expand the arg
+                        list<string> atok = tokenize(arg_text);
+                        list<string> aexp = expand_tokens(atok, macros, cur_line, cur_file);
+                        string arg_exp = "";
+                        for (i32 ei = 0; ei < aexp.length; ei++) {
+                            if (aexp[ei] == " ") { if (arg_exp.length > 0 && arg_exp[arg_exp.length-1] != ' ') arg_exp = arg_exp + " "; }
+                            else arg_exp = arg_exp + aexp[ei];
+                        }
+                        // Replace pname with arg_exp in body (simple)
+                        // For now, do basic find and replace
+                        string nb = "";
+                        i32 bi = 0;
+                        while (bi < body.length) {
+                            i32 the_match = 1;
+                            for (i32 mi = 0; mi < pname.length && bi + mi < body.length; mi++)
+                                if (body[bi+mi] != pname[mi]) { the_match = 0; break; }
+                            if (the_match == 1 && (bi + pname.length >= body.length || !is_ident(body[bi + pname.length]))
+                                && (bi == 0 || !is_ident(body[bi-1]))) {
+                                nb = nb + arg_exp;
+                                bi += pname.length;
+                            } else {
+                                nb = nb + body[bi:bi+1];
+                                bi++;
+                            }
+                        }
+                        body = nb;
+                    }
+
+                    // Expand body and emit
+                    list<string> bt = tokenize(body);
+                    list<string> be = expand_tokens(bt, macros, cur_line, cur_file);
+                    for (i32 ei = 0; ei < be.length; ei++) {
+                        if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
+                        else out.add(be[ei]);
+                    }
+                i = k - 1; continue;
+                }
+            } else if (enc[0] == 'O') {
+                tuple ep = enc.split("|");
+                string body = ep.length >= 2 ? ep[1] : "";
+                list<string> bt = tokenize(body);
+                list<string> be = expand_tokens(bt, macros, cur_line, cur_file);
+                for (i32 ei = 0; ei < be.length; ei++) {
+                    if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
+                    else out.add(be[ei]);
+                }
+                continue;
+            }
+        }
+        // ## token pasting: if next token is ##, skip space
+        if (i + 1 < tokens.length && tokens[i + 1] == "##") {
+            out.add(tok); i++;
+            while (i + 1 < tokens.length && tokens[i + 1] == " ") i++;
+            continue;
+        }
+        out.add(tok);
+    }
+    return out;
+}
+
+string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file) {
+    list<string> toks = tokenize(line);
+    for (i32 pass = 0; pass < 10; pass++) {
+        list<string> expanded = expand_tokens(toks, macros, cur_line, cur_file);
+        i32 same = 1;
+        if (expanded.length == toks.length) {
+            for (i32 i = 0; i < expanded.length; i++)
+                if (expanded[i] != toks[i]) { same = 0; break; }
+        } else same = 0;
+        toks = expanded;
+        if (same) break;
+    }
+    string result = "";
+    for (i32 i = 0; i < toks.length; i++) {
+        if (toks[i] == " ") { if (result.length > 0 && result[result.length-1] != ' ') result = result + " "; }
+        else result = result + toks[i];
+    }
+    return result;
+}
+
+// ── Conditionals ──────────────────────────────────────────────────────────
+
+i32 cond_active(Preprocessor *pp) {
+    for (i32 i = 0; i < pp->cond_depth; i++)
+        if (pp->cond_stack[i] > 0) return 0;
+    return 1;
+}
+
+i32 cond_any_skip(Preprocessor *pp) {
+    for (i32 i = 0; i < pp->cond_depth; i++)
+        if (pp->cond_stack[i] > 0) return 1;
+    return 0;
+}
+
+// ── Directive handlers ────────────────────────────────────────────────────
+
+void pp_define(Preprocessor *pp, string rest) {
+    rest = ltrim(rest);
+    if (rest.length == 0) return;
+    i32 i = 0;
+    while (i < rest.length && is_ident(rest[i])) i++;
+    if (i == 0) return;
+    string name = rest[0:i];
+    i32 j = i;
+    while (j < rest.length && (rest[j] == ' ' || rest[j] == '\t')) j++;
+    if (j < rest.length && rest[j] == '(') {
+        j++;
+        i32 k = j, depth = 1;
+        while (k < rest.length && depth > 0) {
+            if (rest[k] == '(') depth++; else if (rest[k] == ')') depth--;
+            k++;
+        }
+        string params = rest[j:k-1];
+        string body = "";
+        while (k < rest.length && (rest[k] == ' ' || rest[k] == '\t')) k++;
+        if (k < rest.length) body = rest[k:rest.length];
+        pp->macros[name] = "F|" + params + "|" + body;
+    } else {
+        string body = rest[i:rest.length];
+        while (body.length > 0 && (body[0] == ' ' || body[0] == '\t')) body = body[1:body.length];
+        pp->macros[name] = "O|" + body;
+    }
+}
+
+void pp_include(Preprocessor *pp, string rest) {
+    rest = ltrim(rest);
+    if (rest.length == 0) return;
+    string path = "";
+    if (rest[0] == '"') {
+        tuple q = rest[1:].split("\"");
+        path = q[0];
+    } else if (rest[0] == '<') {
+        tuple q = rest[1:].split(">");
+        path = q[0];
+    }
+    if (path.length == 0) return;
+
+    string full_path = "";
+    if (rest[0] == '"') {
+        full_path = path;
+        if (!file_exists(full_path)) full_path = "";
+    }
+    if (full_path.length == 0) {
+        for (i32 di = 0; di < pp->include_dirs.length; di++) {
+            string cand = pp->include_dirs[di] + "/" + path;
+            if (file_exists(cand)) { full_path = cand; break; }
+        }
+    }
+    if (full_path.length == 0) {
+        full_path = path;
+        if (!file_exists(full_path)) full_path = "";
+    }
+
+    if (full_path.length > 0) {
+        string content = read_file(full_path);
+        if (content.length > 0) {
+            string saved_file = pp->current_file;
+            i32 saved_line = pp->current_line;
+            pp->current_file = full_path;
+            pp->current_line = 1;
+            i32 ci = 0;
+            while (ci < content.length) {
+                tuple parts = content[ci:].split("\n");
+                string line = parts[0];
+                if (parts.length > 1) ci += parts[0].length + 1; else ci = content.length;
+                pp_process_line(pp, line);
+            }
+            pp->current_file = saved_file;
+            pp->current_line = saved_line + 1;
+        }
+    } else {
+        std::Println("sic-cpp: {}:{}: {}: file not found",
+                     pp->current_file, pp->current_line, path);
+    }
+}
+
+i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
+    rest = ltrim(rest);
+    i32 i = 0;
+    while (i < rest.length && is_ident(rest[i])) i++;
+    string name = rest[0:i];
+    i32 found = 0;
+    string v = pp->macros[name];
+    if (v.length >= 2) found = 1;
+    return negate ? !found : found;
+}
+
+i32 pp_if(Preprocessor *pp, string rest) {
+    string expanded = expand_line(rest, &pp->macros, pp->current_line, pp->current_file);
+    return eval_if_expr(expanded, &pp->macros);
+}
+
+void pp_else(Preprocessor *pp) {
+    if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #else without #if", pp->current_file, pp->current_line); return; }
+    i32 state = pp->cond_stack[pp->cond_depth - 1];
+    if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;
+    else if (state == 1) {
+        i32 parent_skip = 0;
+        for (i32 i = 0; i < pp->cond_depth - 1; i++) if (pp->cond_stack[i] >= 2) { parent_skip = 1; break; }
+        if (!parent_skip) pp->cond_stack[pp->cond_depth - 1] = 0;
+    }
+}
+
+void pp_elif(Preprocessor *pp, string rest) {
+    if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #elif without #if", pp->current_file, pp->current_line); return; }
+    i32 state = pp->cond_stack[pp->cond_depth - 1];
+    if (state == 0) { pp->cond_stack[pp->cond_depth - 1] = 1; return; }
+    if (state == 1) {
+        i32 parent_skip = 0;
+        for (i32 i = 0; i < pp->cond_depth - 1; i++) if (pp->cond_stack[i] >= 2) { parent_skip = 1; break; }
+        if (!parent_skip) { i32 val = pp_if(pp, rest); pp->cond_stack[pp->cond_depth - 1] = val ? 0 : 1; }
+    }
+}
+
+void pp_endif(Preprocessor *pp) {
+    if (pp->cond_depth > 0) pp->cond_depth--;
+    else std::Println("sic-cpp: {}:{}: #endif without #if", pp->current_file, pp->current_line);
+}
+
+// ── Line processor ────────────────────────────────────────────────────────
+
+void pp_process_line(Preprocessor *pp, string line) {
+    string trimmed = ltrim(line);
+    if (trimmed.length == 0 || trimmed[0] != '#') {
+        if (cond_active(pp)) {
+            string expanded = expand_line(line, &pp->macros, pp->current_line, pp->current_file);
+            pp->output_lines.add(expanded);
+        }
+        pp->current_line++; return;
+    }
+    i32 di = 1;
+    while (di < trimmed.length && (trimmed[di] == ' ' || trimmed[di] == '\t')) di++;
+    if (di >= trimmed.length) { pp->current_line++; return; }
+    i32 kw_start = di;
+    while (kw_start < trimmed.length && trimmed[kw_start] >= 'a' && trimmed[kw_start] <= 'z') kw_start++;
+    string kw = trimmed[di:kw_start];
+    string rest = trimmed[kw_start:trimmed.length];
+    i32 skipping = cond_any_skip(pp);
+
+    if (kw == "define") { if (!skipping) pp_define(pp, rest); }
+    else if (kw == "undef") {
+        if (!skipping) {
+            tuple parts = trim(rest).split(" ");
+            string name = parts[0];
+            del pp->macros[name];
+        }
+    } else if (kw == "include") { if (!skipping) pp_include(pp, rest); }
+    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_if(pp, rest) ? 0 : 1)); }
+    else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_ifdef(pp, rest, 0) ? 0 : 1)); }
+    else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_ifdef(pp, rest, 1) ? 0 : 1)); }
+    else if (kw == "else") { pp_else(pp); }
+    else if (kw == "elif") { pp_elif(pp, rest); }
+    else if (kw == "endif") { pp_endif(pp); }
+    else if (kw == "error") { if (cond_active(pp)) { std::Println("{}:{}: error: {}", pp->current_file, pp->current_line, trim(rest)); std::Exit(1); } }
+    else if (kw == "warning") { if (cond_active(pp)) std::Println("{}:{}: warning: {}", pp->current_file, pp->current_line, trim(rest)); }
+    else if (kw == "line") {
+        if (!skipping) {
+            string rl = ltrim(rest);
+            i32 ni = 0;
+            while (ni < rl.length && rl[ni] >= '0' && rl[ni] <= '9') ni++;
+            if (ni > 0) {
+                pp->current_line = eval_if_expr(rl[0:ni], &pp->macros) - 1;
+                i32 fi = ni;
+                while (fi < rl.length && is_space(rl[fi])) fi++;
+                if (fi < rl.length && rl[fi] == '"') {
+                    fi++; i32 fn_start = fi;
+                    while (fi < rl.length && rl[fi] != '"') fi++;
+                    pp->current_file = rl[fn_start:fi];
+                }
+            }
+        }
+    }
+    // pragma and unknown directives are silently ignored
+    pp->current_line++;
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────
+
+int main(int argc, char **argv) {
+    Preprocessor pp;
+    pp.cond_depth = 0; pp.current_line = 1; pp.current_file = "";
+
+    // Predefined macros
+    pp.macros["__STDC__"] = "O|1";
+    pp.macros["__STDC_VERSION__"] = "O|202311L";
+    pp.macros["__STDC_HOSTED__"] = "O|1";
+    pp.macros["__SICC__"] = "O|1";
+    pp.macros["__SICC_MINOR__"] = "O|0";
+    pp.macros["__clang__"] = "O|1";
+    pp.macros["__clang_major__"] = "O|15";
+    pp.macros["__clang_minor__"] = "O|0";
+    pp.macros["__GNUC__"] = "O|4";
+    pp.macros["__GNUC_MINOR__"] = "O|2";
+
+    // Parse arguments
+    string input_file = "";
+    for (i32 ai = 1; ai < argc; ai++) {
+        string arg = argv[ai];
+        if (starts_with(arg, "-D") && arg.length > 2) { pp.user_defines.add(arg[2:arg.length]); }
+        else if (starts_with(arg, "-U") && arg.length > 2) { pp.user_undefs.add(arg[2:arg.length]); }
+        else if (starts_with(arg, "-I") && arg.length > 2) { pp.include_dirs.add(arg[2:arg.length]); }
+        else if (starts_with(arg, "-std=")) { /* ignore */ }
+        else if (arg == "-undef") { /* ignore */ }
+        else if (arg == "-") { input_file = "-"; }
+        else if (arg[0] != '-') { if (input_file.length == 0) input_file = arg; }
+    }
+
+    // Apply -D / -U
+    for (i32 i = 0; i < pp.user_defines.length; i++) {
+        string def = pp.user_defines[i];
+        tuple eq = def.split("=");
+        if (eq.length > 1) pp.macros[eq[0]] = "O|" + eq[1];
+        else pp.macros[def] = "O|1";
+    }
+    for (i32 i = 0; i < pp.user_undefs.length; i++) del pp.macros[pp.user_undefs[i]];
+
+    // Read input
+    string content;
+    if (input_file.length > 0 && input_file != "-") {
+        pp.current_file = input_file;
+        content = read_file(input_file);
+    } else {
+        pp.current_file = "<stdin>";
+        std::File *sin = std::Stdin();
+        content = "";
+        std::Buffer *buf = std::Buffer::Create(4096);
+        while (true)
+        {
+            auto status = std::Read(sin, buf.size, buf);
+            u64 sz;
+            if ((sz = std::FileStatus::Read(status)))
+            {
+                if (sz == 0)
+                    break;
+                else
+                    content = content + std::Buffer::Value(buf);
+                if (sz < buf.size)
+                    break;
+            } else
+                break;
+        }
+#if 0
+        while (!feof(stdin)) {
+            char buf[4096];
+            i32 n = fread(buf, 1, 4096, stdin);
+            if (n > 0) content = content + (string)(char*)buf;
+            if (n < 4096) break;
+        }
+#endif
+    }
+
+    if (content.length == 0) return 0;
+
+    // Main loop: process each line with backslash-newline joining
+    i32 ci = 0;
+    while (ci < content.length) {
+        string line = "";
+        while (ci < content.length && content[ci] != '\n') {
+            if (content[ci] == '\\' && ci + 1 < content.length && content[ci+1] == '\n') { ci += 2; continue; }
+            line = line + content[ci:ci+1]; ci++;
+        }
+        if (ci < content.length && content[ci] == '\n') ci++;
+        pp_process_line(&pp, line);
+    }
+
+    // Output
+    for (i32 i = 0; i < pp.output_lines.length; i++) {
+        string line = pp.output_lines[i];
+        if (i > 0) std::Println("");
+        std::Print("{}", line);
+    }
+    if (pp.output_lines.length > 0) std::Println("");
+    return 0;
+}
