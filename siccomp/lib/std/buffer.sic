@@ -27,10 +27,23 @@ namespace Buffer
         return buf;
     }
 
-    const u8* Value(Buffer *b)
+    // The buffer's bytes as a `string` — a non-owning VIEW over `b->data` with the
+    // buffer's own length, built without a copy or NUL-termination (so binary data
+    // and non-terminated reads are exact). The view borrows the buffer: it is valid
+    // only while `b` lives; `.dup` it (or copy into an owned `string`) to outlive a
+    // `del b`.
+    string Value(Buffer *b)
     {
         if (b == NULL)
-            return NULL
+            return "";
+        return string.create(b->data, b->size);
+    }
+
+    // The raw byte pointer, for callers that need it directly.
+    const u8* Data(Buffer *b)
+    {
+        if (b == NULL)
+            return NULL;
         return b->data;
     }
 }

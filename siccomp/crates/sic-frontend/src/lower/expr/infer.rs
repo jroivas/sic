@@ -344,6 +344,17 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // `string.create(bytes, len)` builds a `string` (see lower_call).
+                if self.is_sic() {
+                    if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
+                        if name == "create" && (matches!(&base.kind, ExprKind::Ident(n) if n == "string")
+                            || matches!(&base.kind, ExprKind::TypeIdOf(qt)
+                                if matches!(&qt.ty, crate::ast::AstType::Named(n) if n == "string")))
+                        {
+                            return Ok(super::super::types::sic_string_type(self.ptr_size()));
+                        }
+                    }
+                }
                 // sic `string` methods (sic.md §"Built-in string"): `.contains` →
                 // bool; `.split`/`.rsplit` → `tuple(string, string)`.
                 if self.is_sic() {

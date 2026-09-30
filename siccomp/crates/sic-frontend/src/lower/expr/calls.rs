@@ -137,6 +137,40 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // `string.create(bytes, len)` (SIC): build a `string` from an explicit
+        // pointer and byte length — a NON-owning VIEW (rc = null), with no copy and
+        // no `strlen`, so it works on non-NUL-terminated buffers and binary data
+        // with embedded NULs. The view borrows `bytes`; the caller keeps the backing
+        // alive (or `.dup`s it). `string` is a reserved type name, so `string.create`
+        // is unambiguous. Used by std's `Buffer::Value` to expose bytes as a string.
+        if self.is_sic() {
+            // `string` in expression position parses as either `Ident("string")` or
+            // `TypeIdOf(Named("string"))` depending on context.
+            let is_string_base = |b: &Expr| matches!(&b.kind,
+                ExprKind::Ident(n) if n == "string")
+                || matches!(&b.kind, ExprKind::TypeIdOf(qt)
+                    if matches!(&qt.ty, crate::ast::AstType::Named(n) if n == "string"));
+            if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                if name == "create" && is_string_base(base) {
+                    let [ptr_e, len_e] = args else {
+                        return Err(CompileError::at(
+                            "string.create(bytes, len) takes two arguments".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    };
+                    let ptr = self.lower_expr(ptr_e)?;
+                    let len = self.lower_expr(len_e)?;
+                    let v = self.make_string_val(ptr, len, Constant::int(0))?;
+                    // Tag the result as a `string` so a consumer recognizes it as an
+                    // already-built descriptor (not a raw `char*` to re-wrap).
+                    if let Val::Local(id) = &v {
+                        let sty = super::super::types::sic_string_type(self.ptr_size());
+                        self.val_types.insert(id.0, sty);
+                    }
+                    return Ok(v);
+                }
+            }
+        }
+
         // sic generic call with explicit type arguments (turbofish), `add<int>(…)`
         // (sic.md §"Generics"): monomorphize with the written types (no inference).
         if let ExprKind::GenericRef { name, type_args } = &func_expr.kind {

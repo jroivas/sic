@@ -1,0 +1,12 @@
+// `string.create(bytes, len)`: a non-owning, length-aware string view over raw
+// bytes — no copy and no strlen, so it is exact for a non-NUL-terminated buffer and
+// for binary data with an embedded NUL. Returns 42.
+int main() {
+    u8 *d = new u8(6);
+    defer del d;
+    d[0] = 'H'; d[1] = 'i'; d[2] = 0; d[3] = 'X'; d[4] = 'Y'; d[5] = 'Z';
+    string s = string.create(d, 6);
+    if (s.length != 6) return 1;                 // length-aware (strlen would give 2)
+    if (s[0] != 'H' || s[3] != 'X' || s[5] != 'Z') return 2;   // reads past the NUL
+    return 42;
+}
