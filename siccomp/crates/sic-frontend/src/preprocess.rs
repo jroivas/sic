@@ -1,6 +1,16 @@
 use std::process::Command;
 use crate::{Result, CompileError};
 
+/// Name of the C preprocessor binary to use.  Defaults to `"cpp"`; set
+/// `SIC_CPP` to override (e.g. `SIC_CPP=sic-cpp`).
+///
+/// The preprocessor must accept the same CLI interface as GCC's `cpp`:
+///   `cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] file`
+/// and produce preprocessed text on stdout.
+fn preprocessor_bin() -> String {
+    std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cpp".to_string())
+}
+
 /// Run the system C preprocessor on `file`, returning the preprocessed text.
 pub fn preprocess(
     file: &str,
@@ -11,7 +21,7 @@ pub fn preprocess(
     preprocess_ex(file, defines, include_dirs, std, &[])
 }
 
-/// Like [`preprocess`], but forwards extra flags to `cpp` (e.g. `-dM` to dump
+/// Like [`preprocess`], but forwards extra flags to the preprocessor (e.g. `-dM` to dump
 /// macro definitions). Used to implement the driver's `-E`/`-dM` options.
 pub fn preprocess_ex(
     file: &str,
@@ -20,7 +30,9 @@ pub fn preprocess_ex(
     std: &str,
     extra_flags: &[&str],
 ) -> Result<String> {
-    let mut cmd = Command::new("cpp");
+    let bin = preprocessor_bin();
+
+    let mut cmd = Command::new(&bin);
     cmd.arg("-undef");
     // Default to C23 so newer library features (e.g. C23's `timespec_get`
     // bases like `TIME_MONOTONIC`) are exposed by the system headers. Callers
@@ -40,19 +52,17 @@ pub fn preprocess_ex(
         cmd.arg(format!("-D{}", m));
     }
 
-    // `-undef` also strips numeric/type predefined macros like `__INT_MAX__`,
-    // `__LONG_LONG_MAX__`, `__SIZEOF_LONG__`, and `__*_TYPE__` that <limits.h>,
-    // <stdint.h>, <float.h> etc. rely on. Re-supply them from the host compiler
-    // (filtered to safe value-only macros — never feature flags like __GNUC__).
-    for (name, value) in host_numeric_predefines(std) {
-        cmd.arg(format!("-D{}={}", name, value));
-    }
-
-    // Identify as Clang so programs that gate on a minimum compiler version
-    // accept sic (e.g. QEMU's `__clang_major__ >= 10` check). We claim Clang 15
-    // with the GCC 4.2.1 compatibility that real Clang advertises.
-    for (name, value) in compiler_identity_predefines() {
-        cmd.arg(format!("-D{}={}", name, value));
+    // When using the system `cpp`, also re-supply host numeric predefines
+    // and compiler-identity predefines (the sic-cpp built-in already defines
+    // its own set of predefined macros, so we skip these extra flags to avoid
+    // redefinition noise).
+    if bin != "sic-cpp" {
+        for (name, value) in host_numeric_predefines(std) {
+            cmd.arg(format!("-D{}={}", name, value));
+        }
+        for (name, value) in compiler_identity_predefines() {
+            cmd.arg(format!("-D{}={}", name, value));
+        }
     }
 
     for d in defines {
@@ -74,19 +84,18 @@ pub fn preprocess_ex(
 
     cmd.arg(file);
 
-    // For `-` (read from standard input), `cpp` must see our stdin. `Command`'s
-    // `output()` otherwise defaults stdin to null, so the child would read EOF.
+    // For `-` (read from standard input), the preprocessor must see our stdin.
     if file == "-" {
         cmd.stdin(std::process::Stdio::inherit());
     }
 
     let output = cmd.output().map_err(|e| {
-        CompileError::new(format!("failed to run cpp: {}", e))
+        CompileError::new(format!("failed to run {}: {}", bin, e))
     })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CompileError::new(format!("preprocessor error:\n{}", stderr)));
+        return Err(CompileError::new(format!("preprocessor ({}) error:\n{}", bin, stderr)));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
