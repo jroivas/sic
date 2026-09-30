@@ -1,0 +1,20 @@
+// A ternary whose arms are `string` slices (`cond ? s[a:b] : s[c:d]`) must release
+// each arm's temporary in its OWN block. Previously both arms' releases ran at
+// function scope, so the untaken arm's uninitialized temp was freed — a crash.
+// This is the edit/`ltrim` line-splitting pattern. Returns 42.
+i32 is_sp(i32 c) { return c == ' ' ? 1 : 0; }
+i32 find_ch(string s, i32 c) { for (i32 i = 0; i < s.length; i++) if (s[i] == c) return i; return -1; }
+string ltrim(string s) { i32 i = 0; while (i < s.length && is_sp(s[i])) i++; return i == 0 ? s : s[i:s.length]; }
+
+int main() {
+    string content = (" ab\n cd\nef").dup;
+    i32 ci = 0; i32 total = 0;
+    while (ci < content.length) {
+        i32 nl = find_ch(content[ci:content.length], '\n');
+        string line = nl >= 0 ? content[ci:ci+nl] : content[ci:content.length];
+        if (nl >= 0) ci += nl + 1; else ci = content.length;
+        string t = ltrim(line);
+        total += (int)t.length;              // "ab"+"cd"+"ef" = 2+2+2
+    }
+    return total == 6 ? 42 : 1;
+}

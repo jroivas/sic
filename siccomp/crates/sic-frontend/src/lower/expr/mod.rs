@@ -5264,22 +5264,48 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Alloca { dest: slot, ty: aty.clone(), align: None });
             let size = aty.size_of(self.ptr_size());
             let align = aty.align_of(self.ptr_size());
+            // A refcounted `string` result needs per-arm ownership handling: each
+            // arm's value (e.g. a `s[a:b]` slice) is a temporary that registers a
+            // scope-exit release. Copying its descriptor into the result and letting
+            // BOTH arms' releases run at function scope frees the untaken arm's
+            // uninitialized temp — a crash. Instead, scope each arm so its temps are
+            // released *in that arm* (conditionally), retain the copied result so it
+            // survives that release, and register the result for release at the
+            // enclosing scope. (Plain/aggregate structs keep the simple copy.)
+            let is_str = self.is_sic() && super::types::is_sic_string(&aty);
             let then_bb  = self.new_block_after_current();
             let else_bb  = self.new_block_after_current();
             let merge_bb = self.new_block_after_current();
             self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
 
             self.switch_to_block(then_bb);
-            let tp = self.lower_aggregate_ptr(then)?;
-            self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+            if is_str { self.enter_scope(); let m = self.temp_mark();
+                let tp = self.lower_aggregate_ptr(then)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+                self.retain_string_at(&Val::Local(slot))?;
+                self.flush_temps_from(m); self.exit_scope();
+            } else {
+                let tp = self.lower_aggregate_ptr(then)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+            }
             self.set_terminator(Terminator::Jump(merge_bb));
 
             self.switch_to_block(else_bb);
-            let ep = self.lower_aggregate_ptr(else_)?;
-            self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+            if is_str { self.enter_scope(); let m = self.temp_mark();
+                let ep = self.lower_aggregate_ptr(else_)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+                self.retain_string_at(&Val::Local(slot))?;
+                self.flush_temps_from(m); self.exit_scope();
+            } else {
+                let ep = self.lower_aggregate_ptr(else_)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+            }
             self.set_terminator(Terminator::Jump(merge_bb));
 
             self.switch_to_block(merge_bb);
+            if is_str {
+                self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(slot) });
+            }
             return Ok(Val::Local(slot));
         }
         let ty = match (&tty, &ety) {
