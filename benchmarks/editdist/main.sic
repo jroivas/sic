@@ -40,7 +40,7 @@ int main() {
             i32 cost = A[i - 1] == B[j - 1] ? 0 : 1;
             cur[j] = edit_min3(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
         }
-        i32 *tmp = prev; prev = cur; cur = tmp;
+        prev <> cur;                     // SIC swap: no temp (see language-basics)
     }
 
     printf("checksum %u\n", (u32)prev[LB]);
