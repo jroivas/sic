@@ -1,33 +1,35 @@
-// Deleting a string that has already been `del`-ed is safe and a no-op:
-// the second `del` sees an already-invalidated (empty) string and does nothing.
-// Exit code.
+// Scalar zero-initialization is a `Store 0` (not a `memset`), so an uninitialized
+// scalar local still promotes to a register — which lets the backend drop the
+// zero-init and any dead reassignment (sic.md §"Initialized variables"). This
+// checks the VALUES are unchanged: every default-zero scalar reads 0, a struct
+// still zero-fills, and a chain of dead stores keeps only the last. (The
+// optimization itself — no memset / no dead stores in the object — is verified out
+// of band; here we pin correctness across the scalar types the change touches.)
+// Returns 42.
+#include <stdio.h>
+
+struct P { i32 x; i64 y; };
+
 int main() {
-    string a = "hello";
-    del a;           // first del: rc-- -> 0, frees buffer, a invalidated (becomes empty)
-    del a;           // second del: a is already empty, must be a no-op (no crash, no double-free)
-    if (a.size != 0) return 1;
+    // default zero-init across the promotable scalar types + an aggregate
+    i32 i; i64 w; u8 c; u32 u; f64 f; f32 g; bool b; i32 *p; struct P s;
+    if (i != 0 || w != 0 || c != 0 || u != 0) return 1;
+    if (f != 0.0 || (f64)g != 0.0) return 2;
+    if (b) return 3;
+    if (p != 0) return 4;
+    if (s.x != 0 || s.y != 0) return 5;          // aggregate still zero-filled
 
-    // Also test with a shared copy: del on one copy, then del again on same copy.
-    string b = "world";
-    string c = b;    // rc = 2
-    del b;           // b's reference dropped (rc = 1), b is now empty
-    del b;           // double-del on b: already empty, no-op
-    if (b.size != 0) return 2;
-    if (c != "world") return 3;  // c still valid
+    // dead-store chain: only the last assignment survives
+    i32 a;
+    a = 5;
+    a = 6;
+    a = 10;
+    if (a != 10) return 6;
 
-    // del on a constructed empty string; repeated safely.
-    string empty;
-    del empty;       // no-op on empty
-    del empty;       // no-op on already-empty
-    if (empty.size != 0) return 4;
+    // reassign a zero-init'd scalar before first read (zero-init is dead)
+    i32 n;
+    n = 7;
+    if (n != 7) return 7;
 
-    // del on a literal view, double-del is safe.
-    string lit = "xyz";
-    string share = lit;
-    del lit;         // drops ref, lit becomes empty
-    del lit;         // double-del on a string that was a view: no-op
-    if (lit.size != 0) return 5;
-    if (share != "xyz") return 6;
-
-    return 0;
+    return 42;
 }

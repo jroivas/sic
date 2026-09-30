@@ -2125,12 +2125,29 @@ impl<'m> FuncCtx<'m> {
                         self.expected_ty = prev_exp;
                         r?;
                     } else {
-                        // Zero-initialize
+                        // Zero-initialize. For a SCALAR local emit a `Store` of a
+                        // width-correct zero rather than a `MemSet`: a MemSet takes
+                        // the slot's ADDRESS, which makes the alloca escape and blocks
+                        // mem2reg register promotion — so neither the zero-init nor any
+                        // later dead store could ever be eliminated. A `Store` keeps
+                        // the slot promotable to an SSA value, and the backend's DCE
+                        // then drops the zero-init (and dead reassignments) whenever the
+                        // local is written before it is read (`i32 a; a=5; a=10;` →
+                        // just the last value). Aggregates stay on MemSet — they are
+                        // memory objects that never promote to a register.
                         let size = ty.size_of(self.ptr_size());
                         if size > 0 {
-                            self.push_instr(Instr::MemSet {
-                                dst: Val::Local(vid), val: Constant::zero(), size, align: ty.align_of(self.ptr_size()),
-                            });
+                            let scalar = matches!(&ty,
+                                Type::Int { .. } | Type::Float32 | Type::Float64
+                                | Type::Float80 | Type::Pointer(_) | Type::Bool);
+                            if scalar {
+                                let z = self.coerce(Constant::zero(), &ty)?;
+                                self.push_instr(Instr::Store { val: z, ptr: Val::Local(vid) });
+                            } else {
+                                self.push_instr(Instr::MemSet {
+                                    dst: Val::Local(vid), val: Constant::zero(), size, align: ty.align_of(self.ptr_size()),
+                                });
+                            }
                         }
                     }
                     // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh
