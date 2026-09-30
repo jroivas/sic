@@ -1,0 +1,37 @@
+// SIC fat-array loop-invariant code motion (-O2): a loop reading `arr[E]` where E
+// doesn't vary with the loop hoists that read to a guarded preheader (see licm.rs).
+// This pins that VALUES are unchanged — on the hoisted path, on loops that must NOT
+// hoist (the array is written inside the loop), and on the zero-trip guard.
+// Returns 42.
+#include <stdio.h>
+
+int main() {
+    i32 *a = new i32[8];
+    defer del a;
+    for (i32 i = 0; i < 8; i++) a[i] = i;         // a = 0,1,...,7
+
+    // hoistable: a[k] is invariant across the inner j-loop -> hoisted once per k
+    i32 *out = new i32[8];
+    defer del out;
+    i64 sum = 0;
+    for (i32 k = 1; k < 8; k++) {
+        for (i32 j = 0; j < 8; j++) out[j] = a[k] + j;
+        sum += out[7];                            // a[k] + 7 = k + 7
+    }
+    if (sum != 77) return 1;                      // sum_{k=1..7}(k+7) = 28 + 49
+
+    // NOT hoistable: e is written inside the loop, so e[0] must be reloaded
+    i32 *e = new i32[4];
+    defer del e;
+    for (i32 i = 0; i < 4; i++) e[i] = i;
+    i64 s = 0;
+    for (i32 j = 0; j < 4; j++) { e[0] = e[0] + 1; s += e[0]; }   // 1+2+3+4
+    if (s != 10) return 2;
+
+    // zero-trip: the guard must skip the hoisted (bounds-checked) preload entirely
+    i64 z = 0;
+    for (i32 j = 0; j < 0; j++) z += a[3];
+    if (z != 0) return 3;
+
+    return 42;
+}

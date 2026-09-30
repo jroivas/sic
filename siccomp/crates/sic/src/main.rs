@@ -503,7 +503,7 @@ fn resolves_to_self(prog: &str) -> bool {
 /// Pass names: `const-fold`, `dead-branch` (AST stage); `ir-fold`, `algebraic`,
 /// `dce` (typed IR stage).
 fn pass_config(args: &Args) -> PassConfig {
-    const ALL: [&str; 8] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce", "tree-rec", "inline", "devirtual"];
+    const ALL: [&str; 9] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce", "tree-rec", "inline", "devirtual", "licm"];
     let o = args.opt.as_str();
     let level1 = o != "0";
     let level2 = matches!(o, "2" | "3" | "s" | "z")
@@ -516,7 +516,7 @@ fn pass_config(args: &Args) -> PassConfig {
         for p in ["const-fold", "dead-branch", "ir-fold"] { enabled.insert(p.to_string()); }
     }
     if level2 {
-        for p in ["algebraic", "dce", "tree-rec", "inline", "devirtual"] { enabled.insert(p.to_string()); }
+        for p in ["algebraic", "dce", "tree-rec", "inline", "devirtual", "licm"] { enabled.insert(p.to_string()); }
     }
     // Per-pass overrides win over the -O default.
     for name in ALL {

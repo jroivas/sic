@@ -11,6 +11,7 @@ pub mod pass;
 pub mod util;
 pub mod const_fold;
 pub mod dead_branch;
+pub mod licm;
 pub mod ir;
 
 pub use const_fold::ConstFold;
@@ -23,6 +24,7 @@ pub fn run_ast_passes(tu: &mut TranslationUnit, cfg: &PassConfig) {
     let mut pm = PassManager::new(cfg.max_iters, cfg.debug);
     if cfg.is_enabled("const-fold") { pm.add(Box::new(ConstFold::new())); }
     if cfg.is_enabled("dead-branch") { pm.add(Box::new(dead_branch::DeadBranch::new())); }
+    if cfg.is_enabled("licm") { pm.add(Box::new(licm::Licm::new())); }
     pm.run(tu);
 }
 
