@@ -9,6 +9,12 @@ module std;
 
 extern int snprintf(char *s, unsigned long n, char *fmt, ...);
 extern long write(int fd, void *buf, unsigned long n);
+extern void exit(int status);
+
+void Exit(int status)
+{
+    exit(status);
+}
 
 // One argument as a `string` the caller can read, dispatched on its runtime type
 // (RTTI + `any` — no hand-written kind table). A `string`/`char*` argument is

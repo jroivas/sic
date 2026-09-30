@@ -3,6 +3,7 @@ module std;
 namespace Buffer
 {
     struct Buffer {
+        u64 capacity;
         u64 size;
         u8 *data;
         ~Buffer() {
@@ -20,8 +21,16 @@ namespace Buffer
             del buf;
             return NULL;
         }
-        buf->size = size;
+        buf->capacity = size;
+        buf->size = 0;
 
         return buf;
+    }
+
+    const u8* Value(Buffer *b)
+    {
+        if (b == NULL)
+            return NULL
+        return b->data;
     }
 }

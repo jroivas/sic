@@ -3,10 +3,13 @@ module std;
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
 struct File {
     int fd;
     string name;
+    u64 offset;
     ~Fild()
     {
         if (fd > 0)
@@ -27,16 +30,52 @@ enum FileStatus {
     InvalidObject,
     IO,
     InvalidFileHandle,
+    Read(u64),
+    Wrote(u64),
     ReadError,
     WriteError,
     OutOfMemory,
+    Size(u64),
+    InvalidOffset,
 };
 
+File g_stdin = {
+    .id = 0,
+    .name = "stdin",
+};
+
+File g_stdout = {
+    .id = 1,
+    .name = "stdout",
+};
+
+File g_stderr = {
+    .id = 2,
+    .name = "stderr",
+};
+
+File *Stdin(void)
+{
+    return &g_stdin;
+}
+
+File *Stdout(void)
+{
+    return &g_stdout;
+}
+
+File *Stderr(void)
+{
+    return &g_stderr;
+}
 
 FileStatus Open(string name, OpenMode mode)
 {
     File *tmp = new File() else return FileStatus::OutOfMemory;
     int flags = 0;
+
+    Println("OPEN: {}", name);
+    Println("mode: {}", mode);
 
     match (mode)
     {
@@ -68,15 +107,31 @@ FileStatus Close(File *f)
     return FileStatus::Success;
 }
 
-FileStatus Read(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
+FileStatus ReadFrom(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
 {
     ssize_t res;
+    int sres;
 
     if (!f)
         return FileStatus::InvalidObject;
 
-    if (size > buf->size)
-        size = buf->size;
+    sres = fseek(f->fd, offset, SEEK_SET);
+    if (sres != 0)
+    {
+        res = errno;
+        /* FIXME Better error handling */
+        if (res == EIO)
+            return FileStatus::IO;
+        if (res == EBADF)
+            return FileStatus::InvalidFileHandle;
+        if (res == EINVAL)
+            return FileStatus::InvalidOffset;
+        return FileStatus::ReadError;
+    }
+    f->offset = offset;
+
+    if (size > buf->capacity)
+        size = buf->capacity;
     res = read(f->fd, buf->data, size);
     if (res < 0)
     {
@@ -88,16 +143,39 @@ FileStatus Read(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
             return FileStatus::InvalidFileHandle;
         return FileStatus::ReadError;
     }
+    f->offset += res;
+    buf->size = res;
 
-    return FileStatus::Success;
+    return FileStatus::Read(res);
 }
 
-FileStatus Write(File *f, u64 offset, Buffer::Buffer *buf)
+FileStatus Read(File *f, u64 size, Buffer::Buffer *buf)
+{
+    return ReadFrom(f, f->offset, size, buf);
+}
+
+FileStatus WriteTo(File *f, u64 offset, Buffer::Buffer *buf)
 {
     ssize_t res;
+    int sres;
 
     if (!f)
         return FileStatus::InvalidObject;
+
+    sres = fseek(f->fd, offset, SEEK_SET);
+    if (sres != 0)
+    {
+        res = errno;
+        /* FIXME Better error handling */
+        if (res == EIO)
+            return FileStatus::IO;
+        if (res == EBADF)
+            return FileStatus::InvalidFileHandle;
+        if (res == EINVAL)
+            return FileStatus::InvalidOffset;
+        return FileStatus::ReadError;
+    }
+    f->offset = offset;
 
     res = write(f->fd, buf->data, buf->size);
     if (res < 0)
@@ -110,6 +188,38 @@ FileStatus Write(File *f, u64 offset, Buffer::Buffer *buf)
             return FileStatus::InvalidFileHandle;
         return FileStatus::WriteError;
     }
+    f->offset += res;
 
-    return FileStatus::Success;
+    return FileStatus::Wrote(res);
+}
+
+FileStatus Write(File *f, Buffer::Buffer *buf)
+{
+    return WriteTo(f, f->offset, buf);
+}
+
+FileStatus Size(File *f)
+{
+    struct stat sb;
+    int res;
+
+    if (!f)
+        return FileStatus::InvalidObject;
+
+    res = fstat(f->fd, &sb);
+    if (res == EBADF)
+        return FileStatus::InvalidFileHandle;
+    else if (res == EIO)
+        return FileStatus::IO;
+    else if (res != 0)
+        return FileStatus::ReadError;
+
+    return FileStatus::Size(sb.st_size);
+}
+
+bool Eof(File *f)
+{
+    if (!f)
+        return true;
+    return (feof(f->fd) == 0) ? false : true;
 }
