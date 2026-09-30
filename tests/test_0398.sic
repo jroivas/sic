@@ -1,0 +1,23 @@
+// A refcounted `string` temporary created in the short-circuited operand of
+// `&&`/`||` (e.g. a slice `e[a:b]` in `lhs && e[a:b] == "..."`) must be released
+// within that conditional block. Previously its scope-exit release was registered
+// at function scope and ran even when the operand was short-circuited, freeing an
+// uninitialized descriptor (crash). This is the C-preprocessor's `defined`/keyword
+// scan pattern. Returns 42.
+i32 f(string e) {
+    if (e.length > 100 && e[0:7] == "defined") return 1;   // '&&' short-circuits the slice
+    if (e.length >= 2 && e[0:2] == "hi") return 2;         // taken: slice really made
+    return 0;
+}
+i32 g(string e) {
+    if (e.length > 100 || e[0:3] == "abc") return 1;       // '||' second operand slice
+    return 0;
+}
+int main() {
+    if (f(("hi").dup) != 2) return 1;
+    if (f(("xy").dup) != 0) return 2;      // both '&&' left-operands false → short-circuit
+    if (f(("").dup)   != 0) return 3;      // length 0 → short-circuit, no slice
+    if (g(("abc").dup) != 1) return 4;
+    if (g(("z").dup)  != 0) return 5;
+    return 42;
+}

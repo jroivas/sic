@@ -4543,13 +4543,20 @@ impl<'m> FuncCtx<'m> {
         }
 
         self.switch_to_block(rhs_bb);
-        // The rhs is only evaluated on one path, so any bigint/fixed temporaries it
-        // creates live in this conditional block and must be freed here — the
-        // statement-end flush runs from a block they don't dominate.
+        // The rhs is only evaluated on one path (short-circuit), so any temporaries
+        // it creates live in this conditional block and must be freed here — the
+        // statement-end flush runs from a block they don't dominate. A `scope`
+        // brackets refcounted `string` temporaries (e.g. a slice `e[a:b]` in
+        // `lhs && e[a:b] == "..."`): their scope-exit release is otherwise registered
+        // at function scope and fires even when the rhs was short-circuited, freeing
+        // an uninitialized descriptor. `flush_temps_from` covers bigint/fixed/
+        // container temps the same way.
+        self.enter_scope();
         let rhs_mark = self.temp_mark();
         let rhs_val = self.lower_expr(rhs)?;
         let rhs_bool = self.to_bool(rhs_val)?;
         self.flush_temps_from(rhs_mark);
+        self.exit_scope();
         // Store 0 or 1 based on rhs bool
         let rhs_ext = self.alloc_val();
         self.push_instr(Instr::Cast { dest: rhs_ext, op: CastOp::ZExt, val: rhs_bool, to_ty: Type::i32() });
