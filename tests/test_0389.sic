@@ -1,0 +1,23 @@
+// A `match` arm's variant name (bare or qualified) on a payload-less C enum must
+// resolve within the SCRUTINEE's enum — even when another enum declares a variant
+// of the same name. Previously the arm's discriminant came from a global
+// name→value map, so a later enum's same-named variant (here the tagged
+// `FileStatus::Read`) clobbered `OpenMode::Read` and the arm compared against the
+// wrong tag, aborting with "no match". Returns 42.
+enum OpenMode { Read, Write, RW };
+enum FileStatus { Success, Opened, NotFound, Read(u64) };   // Read collides
+
+int classify(OpenMode m) {
+    match (m) {
+        Read: return 1;
+        Write: return 2;
+        RW: return 3;
+    }
+    return 0;
+}
+int main() {
+    if (classify(OpenMode::Read) != 1) return 1;
+    if (classify(OpenMode::Write) != 2) return 2;
+    if (classify(OpenMode::RW) != 3) return 3;
+    return 42;
+}

@@ -3653,8 +3653,62 @@ impl<'m> FuncCtx<'m> {
                 cargs.push(v);
             }
             self.push_instr(Instr::Call { dest: None, func: fref, args: cargs, ret_ty: Type::Void });
+        } else if self.is_sic() && self.new_needs_zero(&elem_ty) {
+            // A managed object (one with owned string/container/struct fields) must
+            // be zero-initialized: the fresh block is uninitialized, and the first
+            // assignment to a managed field RELEASES the old (garbage) value before
+            // storing (sic-lang-ownership) — releasing an uninitialized string/handle
+            // crashes. Non-managed allocations (`new u8[N]`) are left untouched so a
+            // scratch buffer pays no memset. Uses a runtime memset so array forms
+            // (`new T[n]`) with a runtime count are covered too.
+            self.emit_memset_zero(Val::Local(data), Val::Local(data_size))?;
         }
         Ok(Val::Local(data))
+    }
+
+    /// Does `new T` need its storage zeroed? True when `T` (a struct/union/array,
+    /// recursively) contains an owned/managed field — a `string`, `list`/`dict`/
+    /// `set`, tuple, `fixed`/`bigint`, or a struct with a destructor / owned or weak
+    /// fields — whose first assignment would otherwise release uninitialized memory.
+    /// Pointer fields are borrowed (not managed) and are not recursed into, so a
+    /// self-referential node struct (`T* left`) with only scalar/pointer fields does
+    /// NOT get zeroed.
+    fn new_needs_zero(&self, t: &Type) -> bool {
+        use super::types as ty;
+        let rt = ty::resolve_aggregate(t, &self.lowerer.struct_types);
+        if ty::is_sic_string(&rt) || ty::is_list(&rt) || ty::is_dict(&rt) || ty::is_set(&rt)
+            || ty::is_tuple(&rt) || ty::is_fixed(&rt) || ty::is_bigint(&rt) { return true; }
+        match &rt {
+            Type::Struct(st) => {
+                if let Some(n) = &st.name {
+                    if self.lowerer.struct_dtor.contains_key(n) { return true; }
+                    if self.lowerer.struct_owned_fields.get(n).map_or(false, |v| !v.is_empty()) { return true; }
+                    if self.lowerer.struct_weak_fields.get(n).map_or(false, |v| !v.is_empty()) { return true; }
+                }
+                st.fields.iter().any(|(_, ft)| self.new_needs_zero(ft))
+            }
+            Type::Union(_) => true, // conservative: a union may hold a managed member
+            Type::Array { elem, .. } => self.new_needs_zero(elem),
+            _ => false,
+        }
+    }
+
+    /// Emit a runtime `memset(dst, 0, size)` (libc) — used to zero a managed `new`
+    /// allocation whose size may be a runtime value.
+    fn emit_memset_zero(&mut self, dst: Val, size: Val) -> Result<()> {
+        let voidp = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("memset").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "memset".to_string(),
+                sig: FunctionType { ret: voidp.clone(), params: vec![voidp.clone(), Type::i32(), Type::u64()], variadic: false },
+            })
+        });
+        let d = self.coerce(dst, &voidp)?;
+        let z = self.coerce(Constant::int(0), &Type::i32())?;
+        let n = self.coerce(size, &Type::u64())?;
+        let r = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(r), func: fref, args: vec![d, z, n], ret_ty: voidp });
+        Ok(())
     }
 
     /// sic `del p;` — decrement the header refcount of a `new`-allocated pointer

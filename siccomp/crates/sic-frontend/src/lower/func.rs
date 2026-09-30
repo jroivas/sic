@@ -4682,8 +4682,15 @@ impl<'m> FuncCtx<'m> {
 
         for arm in arms.iter().filter(|a| a.variant.is_some()) {
             let vname = arm.variant.as_ref().unwrap();
-            let disc = *self.lowerer.enum_consts.get(vname).ok_or_else(|| CompileError::at(
-                format!("enum '{}' has no variant '{}'", ename, vname), sp.file.clone(), sp.line, sp.col))?;
+            // Resolve the discriminant within the SCRUTINEE's enum, not the global
+            // `enum_consts` map (which is keyed by bare variant name, so a same-named
+            // variant of another enum — e.g. a tagged `FileStatus::Read` vs
+            // `OpenMode::Read` — would clobber it and make the arm compare against
+            // the wrong tag).
+            let disc = self.lowerer.c_enum_defs.get(ename)
+                .and_then(|vs| vs.iter().find(|(n, _)| n == vname).map(|(_, d)| *d))
+                .ok_or_else(|| CompileError::at(
+                    format!("enum '{}' has no variant '{}'", ename, vname), sp.file.clone(), sp.line, sp.col))?;
             if arm.binding.is_some() {
                 return Err(CompileError::at(
                     format!("variant '{}::{}' carries no payload to bind", ename, vname),

@@ -1,0 +1,20 @@
+// `new <struct>` with owned/managed fields but no constructor must zero-initialize
+// the allocation: the first assignment to a managed field releases the OLD value
+// first (sic ownership), and releasing uninitialized memory used to crash. Returns 42.
+struct Box { int fd; string name; };
+enum St { Opened(Box*), Bad };
+
+St make(string nm) {
+    Box *b = new Box();       // no ctor: fields (incl. the string) must be zeroed
+    b->fd = 5;
+    b->name = nm;             // releases old (zeroed → null) name, then stores
+    return St::Opened(b);
+}
+int main() {
+    string s = "hello";
+    auto st = make(s);
+    match (st) {
+        St::Opened(b): { int n = (int)b->name.length; del b; return n == 5 ? 42 : 1; }
+        _: return 2;
+    }
+}
