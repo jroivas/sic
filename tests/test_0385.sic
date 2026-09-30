@@ -1,0 +1,61 @@
+// Dead counted-loop elimination (-O2): a counting loop whose body is only trivial
+// scalar-local assignments with no loop-carried dependency computes the same final
+// state as its last iteration, so the whole loop is collapsed to one guarded
+// iteration (see `FuncCtx::try_delete_loop`). Compiled at -O2 (see .flags) so the
+// pass runs; this pins that the VALUES are unchanged across the shapes it handles,
+// including the cases it must NOT fire on. Returns 42.
+
+int carried(int n) {          // loop-carried (a += i): must NOT be collapsed
+    int a = 0; int i;
+    for (i = 0; i < n; i++) { a = a + i; }
+    return a;                 // 0+1+...+(n-1)
+}
+
+int main() {
+    // basic: constant bound, last i wins
+    u32 a; u32 i;
+    for (i = 0; i < 100000; i++) { a = i; }
+    if (a != 99999) return 1;
+
+    // variable bound (`<`, 32-bit index)
+    int b; int j; int n = 5000;
+    for (j = 0; j < n; j++) { b = j * 2; }
+    if (b != 9998) return 2;
+
+    // zero-iteration keeps the pre-loop value
+    int c = 7; int k;
+    for (k = 10; k < 5; k++) { c = k; }
+    if (c != 7) return 3;
+
+    // inclusive `<=`
+    int d; int p;
+    for (p = 0; p <= 100; p++) { d = p; }
+    if (d != 100) return 4;
+
+    // multi-assign, intra-iteration order preserved, no loop-carried dep
+    int e; int f; int q;
+    for (q = 0; q < 50; q++) { e = q; f = q + 1; }
+    if (e != 49 || f != 50) return 5;
+
+    // signed negative start
+    int g; int r;
+    for (r = -5; r < 0; r++) { g = r; }
+    if (g != -1) return 6;
+
+    // induction variable's post-loop value is preserved
+    int m;
+    for (m = 0; m < 30; m++) { a = i; }
+    if (m != 30) return 7;
+
+    // narrow type whose bound would overflow (u8 < 256) is genuinely infinite,
+    // so it must be left alone — verified out of band (it would hang); here we
+    // just exercise a narrow loop that DOES terminate (bound fits u8)
+    u8 h; u8 t;
+    for (t = 0; t < 200; t++) { h = t; }
+    if (h != 199) return 8;
+
+    // the loop-carried helper still sums correctly (proves it was not collapsed)
+    if (carried(100) != 4950) return 9;
+
+    return 42;
+}

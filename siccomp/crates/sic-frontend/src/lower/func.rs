@@ -2904,6 +2904,19 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // Dead counted-loop elimination: a counting loop whose body is only trivial
+        // scalar-local assignments with no loop-carried dependency computes the same
+        // final state as running just its last iteration, so it is replaced by a
+        // single guarded iteration (see `try_delete_loop`). Emits the whole loop on
+        // success. Runs before `init` lowering so it can own the emission (like
+        // `try_vectorize`).
+        if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
+            if self.try_delete_loop(fi, c, p, body)? {
+                self.exit_scope();
+                return Ok(());
+            }
+        }
+
         if let Some(fi) = init {
             match fi {
                 ForInit::Decl(d) => self.lower_local_decl(d)?,
@@ -2974,6 +2987,199 @@ impl<'m> FuncCtx<'m> {
         self.bce_proven.truncate(bce_mark);
         self.exit_scope();
         Ok(())
+    }
+
+    /// Dead counted-loop elimination. Recognizes a unit-stride counting loop
+    /// `for (i = LO; i <|<= HI; i++)` whose body is *only* trivial scalar-local
+    /// assignments `L = <pure arithmetic of i and loop-invariant names>` with no
+    /// loop-carried dependency, and replaces the whole loop with a single guarded
+    /// iteration at the terminal index:
+    ///
+    /// ```text
+    ///   init;                       // i = LO
+    ///   if (i <|<= HI) {            // loop-entry test, evaluated once at i == LO
+    ///       i = i_last;             // HI-1 for `<`, HI for `<=`
+    ///       body;                   // runs exactly once, seeing the last i
+    ///       i = i_post;             // HI for `<`, HI+1 for `<=`
+    ///   }
+    /// ```
+    ///
+    /// Soundness. (1) *Termination + no wrap*: we fire only when the loop provably
+    /// runs a finite number of `+1` steps and `i`'s final value is representable in
+    /// its type — a constant bound is checked against the type's range; a variable
+    /// bound is allowed only for `<` with a width-≥32 index no narrower than the
+    /// bound (so `i` is compared in its own type and reaches `HI` without wrapping).
+    /// So a genuinely infinite loop is never collapsed. (2) *Last-iteration
+    /// equivalence*: the body writes only scalar locals, contains no calls, memory
+    /// writes, or control flow, and every RHS is pure and references neither a
+    /// body-assigned name (no loop-carried value) nor memory (no masked
+    /// out-of-range trap) — only `i` and loop-invariant names. Running the body once
+    /// with `i` at its last value therefore yields exactly the state the loop would.
+    /// (3) *Zero-iteration*: the guard reproduces the loop-entry test at `i == LO`,
+    /// so a loop that never ran leaves `i` and every local at its pre-loop value.
+    /// Fails closed (`Ok(false)`, keeping the normal loop) on anything unproven.
+    fn try_delete_loop(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
+        use crate::ast::{ExprKind as E, BinOpKind as B};
+        use std::collections::HashSet;
+        if !self.lowerer.loop_delete { return Ok(false); }
+
+        // -- induction variable `i` (and its declared type for a `for (T i = …)`). --
+        let (ivar, decl_ty): (String, Option<Type>) = match init {
+            ForInit::Decl(d @ Decl::Var { declarators, .. }) if declarators.len() == 1 => {
+                let de = &declarators[0];
+                if de.init.is_none() { return Ok(false); }
+                let _ = d;
+                (de.name.clone(), Some(self.lower_type(&de.ty)?))
+            }
+            ForInit::Expr(e) => match &e.kind {
+                E::Assign { op: None, lhs, .. } => match &lhs.kind {
+                    E::Ident(n) => (n.clone(), None),
+                    _ => return Ok(false),
+                },
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+
+        // -- bound `i < HI` / `i <= HI`. --
+        let (hi, inclusive) = match &cond.kind {
+            E::BinOp { op, lhs, rhs } => match (&lhs.kind, op) {
+                (E::Ident(n), B::Lt) if *n == ivar => ((**rhs).clone(), false),
+                (E::Ident(n), B::Le) if *n == ivar => ((**rhs).clone(), true),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        // HI must be pure (re-evaluated for the guard and the terminal index).
+        if simple_expr_idents(&hi).is_none() { return Ok(false); }
+
+        // -- step must be exactly `i++` / `++i` / `i += 1` (unit stride). --
+        let unit = match &post.kind {
+            E::PostInc { inc: true, expr } | E::PreInc { inc: true, expr } =>
+                matches!(&expr.kind, E::Ident(n) if *n == ivar),
+            E::Assign { op: Some(B::Add), lhs, rhs } =>
+                matches!(&lhs.kind, E::Ident(n) if *n == ivar)
+                    && matches!(&rhs.kind, E::IntLit(1, _)),
+            _ => false,
+        };
+        if !unit { return Ok(false); }
+
+        // -- body: a flat list of trivial scalar-local assignments only. --
+        let stmts: Vec<&Stmt> = match body {
+            Stmt::Block(v, _) => v.iter().collect(),
+            Stmt::Expr(_, _) => vec![body],
+            Stmt::Null(_) => Vec::new(),
+            _ => return Ok(false),
+        };
+        let mut assigned: HashSet<String> = HashSet::new();
+        let mut rhs_idsets: Vec<HashSet<String>> = Vec::new();
+        for s in &stmts {
+            let (lname, rhs) = match s {
+                Stmt::Expr(e, _) => match &e.kind {
+                    E::Assign { op: None, lhs, rhs } => match &lhs.kind {
+                        E::Ident(n) => (n.clone(), rhs),
+                        _ => return Ok(false),
+                    },
+                    _ => return Ok(false),
+                },
+                _ => return Ok(false),
+            };
+            if lname == ivar { return Ok(false); }
+            // LHS must be a plain local scalar (a global could be observed
+            // elsewhere; an aggregate is not a trivial assign).
+            match self.lookup(&lname) {
+                Some(LookupResult::Local(ty, _)) if matches!(ty,
+                    Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80
+                    | Type::Pointer(_) | Type::Bool) => {}
+                _ => return Ok(false),
+            }
+            // RHS must be pure arithmetic of names/literals only (no memory reads,
+            // calls, or writes) — `simple_expr_idents` enforces exactly that.
+            let ids = match simple_expr_idents(rhs) { Some(s) => s, None => return Ok(false) };
+            assigned.insert(lname);
+            rhs_idsets.push(ids);
+        }
+        // No loop-carried dependency: no RHS may read a value the body writes.
+        // (Referencing `i` or a loop-invariant name is fine.)
+        for ids in &rhs_idsets {
+            if ids.iter().any(|n| assigned.contains(n)) { return Ok(false); }
+        }
+
+        // -- `i`'s integer type (bits/signedness) drives the termination proof. --
+        let ity: Type = match &decl_ty {
+            Some(t) => t.clone(),
+            None => match self.lookup(&ivar) {
+                Some(LookupResult::Local(t, _)) => t.clone(),
+                _ => return Ok(false),
+            },
+        };
+        let (bits, signed) = match &ity {
+            Type::Int { bits, signed } => (*bits, *signed),
+            _ => return Ok(false),
+        };
+        let type_max: u128 = if signed {
+            if bits >= 128 { i128::MAX as u128 } else { (1u128 << (bits - 1)) - 1 }
+        } else if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 };
+
+        // -- termination + no-wrap proof. --
+        let proven = match crate::lower::eval_const_expr(&hi, &self.lowerer.enum_consts) {
+            // Constant bound: `i` reaches it iff it fits the type (and, for `<=`,
+            // with room for the terminating `HI+1` step). A negative bound means the
+            // loop is empty; the guard handles that, but bail to keep this simple.
+            Ok(v) if v >= 0 => {
+                let hv = v as u128;
+                if inclusive { hv < type_max } else { hv <= type_max }
+            }
+            Ok(_) => false,
+            // Variable bound: only `<`, and only when `i` is compared in its own
+            // (≥32-bit) type against a no-wider bound of the same signedness, so `i`
+            // counts up to `HI` without a promotion-induced wrap.
+            Err(_) => {
+                if inclusive || bits < 32 { false }
+                else {
+                    matches!(self.infer_expr_type(&hi),
+                        Ok(Type::Int { bits: hb, signed: hs }) if hb <= bits && hs == signed)
+                }
+            }
+        };
+        if !proven { return Ok(false); }
+
+        // ===== EMIT: init; if (cond) { i = i_last; body; i = i_post; } =====
+        match init {
+            ForInit::Decl(d) => self.lower_local_decl(d)?,
+            ForInit::Expr(e) => { self.lower_expr(e)?; }
+        }
+        // Loop-entry guard, evaluated with `i == LO` (init just ran).
+        let will = self.lower_expr(cond)?;
+        let willb = self.to_bool(will)?;
+        let body_bb = self.new_block_after_current();
+        let end_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: willb, then_bb: body_bb, else_bb: end_bb });
+        self.switch_to_block(body_bb);
+
+        // Terminal index: for `<`, last body `i` is HI-1 and post-loop `i` is HI;
+        // for `<=`, HI and HI+1. Synthesized as normal assignments so lowering
+        // applies the correct type coercion (the proof above guarantees no wrap).
+        let sp = cond.span.clone();
+        let one = || Expr::new(E::IntLit(1, false), sp.clone());
+        let sub1 = |e: &Expr| Expr::new(E::BinOp { op: B::Sub, lhs: Box::new(e.clone()), rhs: Box::new(one()) }, sp.clone());
+        let add1 = |e: &Expr| Expr::new(E::BinOp { op: B::Add, lhs: Box::new(e.clone()), rhs: Box::new(one()) }, sp.clone());
+        let i_last = if inclusive { hi.clone() } else { sub1(&hi) };
+        let i_post = if inclusive { add1(&hi) } else { hi.clone() };
+        let assign_i = |rhs: Expr| Expr::new(E::Assign {
+            op: None,
+            lhs: Box::new(Expr::new(E::Ident(ivar.clone()), sp.clone())),
+            rhs: Box::new(rhs),
+        }, sp.clone());
+
+        self.lower_expr(&assign_i(i_last))?;
+        self.lower_stmt(body)?;
+        if !self.is_terminated() {
+            self.lower_expr(&assign_i(i_post))?;
+            self.set_terminator(Terminator::Jump(end_bb));
+        }
+        self.switch_to_block(end_bb);
+        Ok(true)
     }
 
     /// sic loop bounds-check elimination (see the TODO at `emit_bounds_check`).

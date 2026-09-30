@@ -808,6 +808,17 @@ fn lower_tu(
     // Auto-vectorization is on by default; `-fno-vectorize` disables it (e.g. to
     // keep C-mode codegen scalar while validating SQLite/QEMU).
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled));
+    // Dead counted-loop elimination: default on at -O2+, overridable via -f.
+    {
+        let o = args.opt.as_str();
+        let level2 = matches!(o, "2" | "3" | "s" | "z")
+            || o.parse::<u32>().map_or(false, |n| n >= 2);
+        lowerer.loop_delete = match args.f_options.get("loop-delete") {
+            Some(FOption::Enabled) | Some(FOption::Value(_)) => true,
+            Some(FOption::Disabled) => false,
+            None => level2,
+        };
+    }
     lowerer.lower(tu).map_err(|e| format!("{}", e).into())
 }
 

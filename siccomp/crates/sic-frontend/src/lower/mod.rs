@@ -35,6 +35,11 @@ pub struct Lowerer {
     /// `FuncCtx::try_vectorize`). On by default; `-fno-vectorize` turns it off
     /// (e.g. to keep C-mode codegen scalar while validating SQLite/QEMU).
     pub vectorize: bool,
+    /// Dead counted-loop elimination (see `FuncCtx::try_delete_loop`): a counting
+    /// loop whose body is only trivial scalar-local assignments with no
+    /// loop-carried dependency is collapsed to its last iteration. Off at `-O0/1`,
+    /// on at `-O2+`; `-fno-loop-delete` forces it off, `-floop-delete` on.
+    pub loop_delete: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -236,6 +241,7 @@ impl Lowerer {
             ptr_size: 8, // assume 64-bit
             struct_order_default: crate::ast::StructOrder::Default,
             vectorize: true,
+            loop_delete: false,
             struct_order_seed: 0,
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),
