@@ -638,6 +638,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
     }
     match s {
         "auto"           => TokenKind::Auto,
+        // GNU `__auto_type x = e;` = C23 `auto x = e;` (type from the initializer).
+        "__auto_type"    => TokenKind::Auto,
         "break"          => TokenKind::Break,
         "case"           => TokenKind::Case,
         "char"           => TokenKind::Char,

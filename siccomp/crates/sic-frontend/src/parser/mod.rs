@@ -787,8 +787,11 @@ impl Parser {
             }
         }
 
-        // Resolve long combinations
-        if base.is_none() {
+        // Resolve long combinations. With NO specifier at all (`static x;`,
+        // `const y = 1;`, C23 `auto z = e;`) leave `base` unset here: implicit int
+        // (or `auto` inference) is decided below — this used to fall through to
+        // `long long`, silently making implicit-int variables 8 bytes.
+        if base.is_none() && (long_count > 0 || signed.is_some()) {
             let s = signed.unwrap_or(true);
             base = Some(match long_count {
                 0 if signed.is_some() => AstType::Int { signed: s },
@@ -815,6 +818,17 @@ impl Parser {
             base = Some(AstType::Int { signed: signed.unwrap_or(true) });
         }
 
+        // C23 `auto x = init;` / GNU `__auto_type x = init;`: `auto` with NO type
+        // specifier infers the type from the initializer (sic defaults to C23).
+        // `auto int x;` keeps the old storage-class meaning. SIC has its own
+        // `auto` inference (storage Auto + implicit int), left as is.
+        if self.lang != Lang::Sic && base.is_none() && signed.is_none() && long_count == 0
+            && matches!(storage, Some(StorageClass::Auto))
+        {
+            let mut qt = QualType::new(AstType::Auto);
+            qt.qualifiers = quals;
+            return Ok((qt, None));
+        }
         let ty = base.unwrap_or(AstType::Int { signed: true });
         let mut qt = QualType::new(ty);
         qt.qualifiers = quals;

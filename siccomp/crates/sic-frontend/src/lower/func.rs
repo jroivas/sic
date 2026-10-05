@@ -1924,6 +1924,42 @@ impl<'m> FuncCtx<'m> {
                         self.static_locals.insert(d.name.clone(), (gty, gref));
                         continue;
                     }
+                    // C23 `auto x = e;` / GNU `__auto_type x = e;` (parsed as
+                    // `AstType::Auto`): the type is the initializer's (after the
+                    // usual decay, so an array/function initializer gives a pointer).
+                    if matches!(d.ty.ty, AstType::Auto) && !self.is_sic() {
+                        let Some(Initializer::Expr(e)) = &d.init else {
+                            return Err(CompileError::at(
+                                format!("`auto` / `__auto_type` variable `{}` needs an initializer", d.name),
+                                d.span.file.clone(), d.span.line, d.span.col));
+                        };
+                        let it = self.infer_expr_type(e)?;
+                        let it = match it {
+                            Type::Array { elem, .. } => Type::Pointer(elem),
+                            Type::Function(_) => Type::Pointer(Box::new(it)),
+                            // An inferred aggregate may be the opaque (name-only)
+                            // form; bind the full layout so `x.field` resolves.
+                            other => super::types::resolve_aggregate(&other, &self.lowerer.struct_types),
+                        };
+                        let vid = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: vid, ty: it.clone(), align: None });
+                        if matches!(it, Type::Struct(_) | Type::Union(_)) {
+                            // Copy the aggregate's bytes from its address.
+                            let src = self.lower_aggregate_ptr(e)?;
+                            let ps = self.ptr_size();
+                            self.push_instr(Instr::MemCopy { dst: Val::Local(vid), src, size: it.size_of(ps), align: it.align_of(ps) as u64 });
+                        } else {
+                            let v = self.lower_expr(e)?;
+                            let v = self.coerce(v, &it)?;
+                            self.push_instr(Instr::Store { val: v, ptr: Val::Local(vid) });
+                        }
+                        // Bound AFTER the initializer, so `auto x = x;` sees the outer x.
+                        self.define_local(d.name.clone(), it.clone(), vid);
+                        if !d.name.is_empty() {
+                            self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: it, slot: vid, is_param: false });
+                        }
+                        continue;
+                    }
                     let mut ty = self.lower_type(&d.ty)?;
                     // sic `auto x = expr;` — infer the variable's type from its
                     // initializer (rather than C's storage-class `auto`, which
