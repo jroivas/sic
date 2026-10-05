@@ -1,9 +1,10 @@
 // sic-cpp — C preprocessor in idiomatic SIC.
 //
 // Usage: sic-cpp [-DNAME[=val] ...] [-UNAME ...] [-Idir ...] [-std=std]
-//                [-nostdinc] [-undef] [-v] [--gcc-lines] [file]
-//        Preprocessed text is written to standard output, without blank lines;
-//        `--gcc-lines` reproduces gcc `cpp -P`'s line layout byte for byte.
+//                [-P] [-nostdinc] [-undef] [-ffreestanding] [-v] [--gcc-lines] [file]
+//        Preprocessed text is written to standard output with gcc-style
+//        linemarkers (`# 495 "/usr/include/string.h" 2 3 4`). `-P` omits them
+//        and drops blank lines; `-P --gcc-lines` keeps gcc `cpp -P`'s layout.
 //
 // Pure SIC string operations throughout.  File I/O uses std::File.
 // Stdin reading still needs C stdio (stdin is not a regular file).
@@ -35,6 +36,27 @@ struct Preprocessor {
     // `#pragma once` files, and the `#pragma push_macro` stack ("name\x02enc").
     list<string> once_files;
     list<string> pushed_macros;
+    // Linemarkers (`# N "file" flags`, gcc's default output; off with -P).
+    // `out_file`/`out_line` is where the NEXT output line sits as far as the
+    // reader knows; `cur_sys` = the current file is a system header (flags 3 4);
+    // `user_dirs` = how many leading include dirs are -I (non-system) dirs.
+    i32 markers;
+    string out_file;
+    i32 out_line;
+    i32 cur_sys;
+    i32 user_dirs;
+    i32 force_marker;
+    // Whether the last printed TOKEN came from a system header (gcc re-marks
+    // the position when that flips).
+    i32 prev_sys_tok;
+    // Include guards (path → guard macro), detected on first inclusion: a header
+    // whose guard is defined is not re-entered at all (gcc's multiple-include
+    // optimization — no markers, no work).
+    dict<string, string> guards;
+    // Search-list index the current file was found at (-1: not via the search
+    // path — the main file, an absolute path, or `"x"` from the includer's
+    // directory). `#include_next` continues after it, or from the start if -1.
+    i32 cur_dir_idx;
 }
 
 
@@ -1124,6 +1146,43 @@ string stringize_arg(string arg) {
     return out + "\"";
 }
 
+// `line` ends inside an open macro invocation; where in `next` (the following
+// physical line) does that invocation close? Returns the offset just after its
+// closing `)`, or -1 if it is still open at the end of `next`.
+i32 call_close_offset(Preprocessor *pp, string line, string next) {
+    string all = line + " " + next;
+    i32 base = line.size + 1;
+    i32 i = 0, depth = 0, in_call = 0;
+    while (i < all.size) {
+        i32 c = all[i];
+        if (c == '"' || c == '\'') {
+            i32 q = c; i++;
+            while (i < all.size && all[i] != q) { if (all[i] == '\\') i++; i++; }
+            i++; continue;
+        }
+        if (in_call) {
+            if (c == '(') depth++;
+            else if (c == ')') {
+                depth--;
+                if (depth == 0) { in_call = 0; if (i >= base) return i + 1 - base; }
+            }
+            i++; continue;
+        }
+        if (is_ident_start(c)) {
+            i32 st = i;
+            while (i < all.size && is_ident(all[i])) i++;
+            if (pp->macros[all[st:i]].starts_with("F|")) {
+                i32 k = i;
+                while (k < all.size && (all[k] == ' ' || all[k] == '\t')) k++;
+                if (k < all.size && all[k] == '(') { in_call = 1; depth = 1; i = k + 1; }
+            }
+            continue;
+        }
+        i++;
+    }
+    return -1;
+}
+
 // Whether `line` ends inside an unclosed function-like macro invocation: a
 // name defined as a function-like macro, followed by `(`, whose parentheses are
 // not balanced by the end of the line. String/char literals are skipped.
@@ -1161,11 +1220,13 @@ void pp_process_content(Preprocessor *pp, string content) {
     string rest = content;
     while (rest.size > 0) {
         string line = "";
+        i32 nphys = 0;   // physical lines this logical line spans
         while (true) {
             i32 n = 0;
             while (n < rest.size && rest[n] != '\n') n++;
             string phys = rest[0:n];
             rest = n < rest.size ? rest[n+1:] : rest[n:];
+            nphys++;
             // A trailing `\` (optionally followed by `\r`) continues the line.
             if (phys.ends_with("\\")) { line = line + phys[0:phys.size-1]; if (rest.size > 0) continue; }
             else if (phys.ends_with("\\\r")) { line = line + phys[0:phys.size-2]; if (rest.size > 0) continue; }
@@ -1181,11 +1242,28 @@ void pp_process_content(Preprocessor *pp, string content) {
                 while (n < rest.size && rest[n] != '\n') n++;
                 string next = rest[0:n];
                 if (next.ltrim().starts_with("#")) break;   // never swallow a directive
+                string after = n < rest.size ? rest[n+1:] : rest[n:];
+                // With linemarkers, gcc prints only the macro call at its first
+                // line; tokens after the call's closing `)` stay on THEIR source
+                // line. So cut there and push the remainder back as its own line,
+                // keeping its column (it is not counted as consumed here).
+                i32 k = pp->markers ? call_close_offset(pp, line, next) : -1;
+                if (k >= 0 && next[k:].trim().size > 0) {
+                    line = line + " " + next[0:k];
+                    // `\x02` tags it as a continuation (see pp_process_line).
+                    rest = ("\x02" + spaces(k) + next[k:] + (n < rest.size ? "\n" : "") + after).dup;
+                    break;
+                }
                 line = line + " " + next;
-                rest = n < rest.size ? rest[n+1:] : rest[n:];
+                rest = after;
+                nphys++;
             }
         }
+        // The line is attributed to its FIRST physical line; afterwards skip the
+        // rest it consumed (pp_process_line itself advances by one), so later
+        // line numbers, `__LINE__` and linemarkers stay exact.
         pp_process_line(pp, line);
+        pp->current_line += nphys - 1;
     }
 }
 
@@ -1209,19 +1287,17 @@ string header_name(string rest, i32 *quoted) {
     return "";
 }
 
-// Index of the include directory the current file was found in (-1 if none),
-// for `#include_next`.
-i32 current_dir_index(Preprocessor *pp) {
-    string here = dir_of(pp->current_file);
-    for (i32 di = 0; di < pp->include_dirs.length; di++)
-        if (pp->include_dirs[di] == here || here.starts_with(pp->include_dirs[di] + "/")) return di;
-    return -1;
-}
+// Index of the include directory the current file was found in (-1 if it was
+// not found via the search path), for `#include_next`.
+i32 current_dir_index(Preprocessor *pp) { return pp->cur_dir_idx; }
 
 // Resolve a header to a path ("" if not found). `"x"` first tries the including
 // file's directory (C11 6.10.2); then the search list from index `from`
 // (`#include_next` starts after the current file's directory).
-string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from) {
+// `*dir` receives the search-list index it was found in, or -1 (an absolute
+// path, or the includer's own directory).
+string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from, i32 *dir) {
+    *dir = -1;
     if (path.size == 0) return "";
     if (path[0] == '/') return file_exists(path) ? path : "";
     if (quoted && from == 0) {
@@ -1231,7 +1307,7 @@ string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from) {
     }
     for (i32 di = from; di < pp->include_dirs.length; di++) {
         string cand = pp->include_dirs[di] + "/" + path;
-        if (file_exists(cand)) return cand;
+        if (file_exists(cand)) { *dir = di; return cand; }
     }
     return "";
 }
@@ -1247,25 +1323,93 @@ void pp_include(Preprocessor *pp, string rest, i32 next) {
     }
     i32 from = 0;
     if (next) { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
-    string full_path = resolve_include(pp, path, quoted, from);
+    i32 dir = -1;
+    string full_path = resolve_include(pp, path, quoted, from, &dir);
     // `#pragma once`: a header already included is skipped entirely.
     for (i32 i = 0; i < pp->once_files.length; i++) if (pp->once_files[i] == full_path) return;
 
     if (full_path.size > 0) {
-        string content = strip_comments(read_file(full_path));
-        if (content.size > 0) {
-            string saved_file = pp->current_file;
-            i32 saved_line = pp->current_line;
-            pp->current_file = full_path;
-            pp->current_line = 1;
-            pp_process_content(pp, content);
-            pp->current_file = saved_file;
-            pp->current_line = saved_line + 1;
-        }
+        // A system header: found in a system directory — or, by `"x"` from the
+        // includer's own directory, a header next to a system header.
+        i32 sys = dir >= 0 ? dir >= pp->user_dirs : pp->cur_sys;
+        enter_file(pp, full_path, sys, dir);
     } else {
         std::Println("sic-cpp: {}:{}: {}: file not found",
                      pp->current_file, pp->current_line, path, target = 2);
     }
+}
+
+// The include-guard macro of a header (`#ifndef X` / `#if !defined X` as the
+// first directive, its matching `#endif` as the last line, nothing outside but
+// blank lines), or "" when it is not guarded that way.
+string include_guard(string content) {
+    string rest = content;
+    i32 depth = 0;
+    i32 closed = 0;     // the guard's #endif has been seen
+    string guard = "";
+    while (rest.size > 0) {
+        i32 n = 0;
+        while (n < rest.size && rest[n] != '\n') n++;
+        string l = rest[0:n].trim();
+        rest = n < rest.size ? rest[n+1:] : rest[n:];
+        if (l.size == 0) continue;
+        if (closed) return "";                      // something after the #endif
+        if (l[0] != '#') { if (depth == 0) return ""; continue; }
+        string d = l[1:].ltrim();
+        if (guard.size == 0) {
+            string name = "";
+            if (d.starts_with("ifndef")) name = d[6:].trim();
+            else if (d.starts_with("if")) {
+                string e = d[2:].trim();
+                if (e.starts_with("!")) {
+                    e = e[1:].trim();
+                    if (e.starts_with("defined")) {
+                        e = e[7:].trim();
+                        if (e.starts_with("(") && e.ends_with(")")) e = e[1:e.size-1].trim();
+                        name = e;
+                    }
+                }
+            }
+            i32 k = 0;
+            while (k < name.size && is_ident(name[k])) k++;
+            if (k == 0 || k != name.size) return "";
+            guard = name.dup;
+            depth = 1;
+            continue;
+        }
+        if (d.starts_with("if")) depth++;
+        else if (d.starts_with("endif")) { depth--; if (depth == 0) closed = 1; }
+        else if (depth == 1 && (d.starts_with("else") || d.starts_with("elif"))) return "";
+    }
+    return closed ? guard : "";
+}
+
+// Preprocess an included file in place: `# 1 "file" 1` on entry, and on return
+// `# N "includer" 2` with N = the line after the `#include`.
+void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx) {
+    // Guarded and already included (guard macro defined): skip entirely.
+    string g = pp->guards[path];
+    if (g.size > 0 && pp->macros[g].size >= 2) return;
+    string content = strip_comments(read_file(path));
+    if (g.size == 0) { string ng = include_guard(content); if (ng.size > 0) pp->guards[path] = ng.dup; }
+    // The reader is first brought to the `#include` line itself.
+    if (pp->markers && pp->current_file != "<command-line>") sync_to(pp);
+    string saved_file = pp->current_file;
+    i32 saved_line = pp->current_line;
+    i32 saved_sys = pp->cur_sys;
+    i32 saved_dir = pp->cur_dir_idx;
+    pp->current_file = path;
+    pp->current_line = 1;
+    pp->cur_sys = sys;
+    pp->cur_dir_idx = dir_idx;
+    if (pp->markers) emit_marker(pp, 1, path, " 1" + sys_flags(pp));
+    pp_process_content(pp, content);
+    pp->current_file = saved_file;
+    pp->current_line = saved_line;   // the #include line; pp_process_line advances it
+    pp->cur_sys = saved_sys;
+    pp->cur_dir_idx = saved_dir;
+    // (Returning to the pseudo-file `<command-line>` is shown as its line 0.)
+    if (pp->markers) emit_marker(pp, saved_file == "<command-line>" ? 0 : saved_line + 1, saved_file, " 2" + sys_flags(pp));
 }
 
 i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
@@ -1355,7 +1499,8 @@ string substitute_defined(Preprocessor *pp, string rest) {
                 }
                 i32 from = 0;
                 if (word == "__has_include_next") { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
-                out = out + (resolve_include(pp, path, quoted, from).size > 0 ? "1" : "0");
+                i32 dummy = 0;
+                out = out + (resolve_include(pp, path, quoted, from, &dummy).size > 0 ? "1" : "0");
                 continue;
             }
             if (word == "__has_attribute" || word == "__has_c_attribute" || word == "__has_cpp_attribute"
@@ -1419,6 +1564,54 @@ void pp_endif(Preprocessor *pp) {
 
 // ── Line processor ────────────────────────────────────────────────────────
 
+// Emit a linemarker and make it the reader's position.
+void emit_marker(Preprocessor *pp, i32 line, string file, string flags) {
+    pp->output_lines.add("# " + std::Fmt("{}", line) + " \"" + file + "\"" + flags);
+    pp->out_file = file.dup;
+    pp->out_line = line;
+    pp->force_marker = 0;
+}
+
+string sys_flags(Preprocessor *pp) { return pp->cur_sys ? " 3 4" : ""; }
+
+// Add one output line produced at the current source position. With
+// linemarkers, first bring the reader to that position the way gcc does: a gap
+// of fewer than 8 lines in the same file is filled with empty lines, anything
+// else (another file, going backwards, a bigger jump) gets `# N "file"`.
+// Bring the reader to the current source position (gcc's maybe_print_line):
+// fewer than 8 lines ahead in the same file → empty lines, else a marker.
+void sync_to(Preprocessor *pp) {
+    i32 line = pp->current_line;
+    if (pp->force_marker || pp->out_file != pp->current_file
+        || line < pp->out_line || line >= pp->out_line + 8) {
+        emit_marker(pp, line, pp->current_file, sys_flags(pp));
+    } else {
+        while (pp->out_line < line) { pp->output_lines.add(""); pp->out_line++; }
+    }
+}
+
+void add_out(Preprocessor *pp, string text) {
+    if (pp->markers) {
+        i32 line = pp->current_line;
+        sync_to(pp);
+        // gcc tracks whether the previous printed token came from a system
+        // header; when the next one's system-ness differs it ends the line and
+        // re-emits the marker with the new flags (an empty line + `# N "file"`).
+        // (Pragma lines are printed outside the token stream: they don't count.)
+        // (A pragma line doesn't trigger that re-mark, but does count as the
+        // last printed token.)
+        i32 pragma = text.starts_with("#pragma ");
+        i32 toks = text.trim().size > 0 && !pragma;
+        if (toks && pp->cur_sys != pp->prev_sys_tok) {
+            pp->output_lines.add("");
+            emit_marker(pp, line, pp->current_file, sys_flags(pp));
+        }
+        if (toks || pragma) pp->prev_sys_tok = pp->cur_sys;
+        pp->out_line++;
+    }
+    pp->output_lines.add(text);
+}
+
 // Emit one output line, turning each `_Pragma("…")` operator (C11 6.10.9) into a
 // `#pragma …` line of its own as gcc does: the text before it ends the current
 // line (an empty line if there was none), the text after continues on a new
@@ -1447,14 +1640,14 @@ void emit_text(Preprocessor *pp, string text) {
             if (lit[i] == '\\' && i + 1 < lit.size - 1 && (lit[i+1] == '"' || lit[i+1] == '\\')) i++;
             body = body + lit[i:i+1];
         }
-        pp->output_lines.add(rest[0:at].rtrim().dup);
-        pp->output_lines.add("#pragma " + normalize_tokens(body));
+        add_out(pp, rest[0:at].rtrim().dup);
+        add_out(pp, "#pragma " + normalize_tokens(body));
         string after = rest[k:].ltrim();
         // gcc still ends the pragma with the continuation line, empty or not.
-        if (after.size == 0) { pp->output_lines.add(""); return; }
+        if (after.size == 0) { add_out(pp, ""); return; }
         rest = (" " + after).dup;
     }
-    pp->output_lines.add(rest);
+    add_out(pp, rest);
 }
 
 // Tokens joined with single spaces where the source had whitespace (literals intact).
@@ -1483,7 +1676,7 @@ void pp_pragma(Preprocessor *pp, string rest) {
         while (q1 < r.size && r[q1] != '"') q1++;
         i32 q2 = q1 + 1;
         while (q2 < r.size && r[q2] != '"') q2++;
-        if (q2 >= r.size) { pp->output_lines.add("       "); return; }
+        if (q2 >= r.size) { add_out(pp, "       "); return; }
         string name = r[q1+1:q2];
         if (a.starts_with("push_macro")) {
             pp->pushed_macros.add(name + "\x02" + pp->macros[name]);
@@ -1507,13 +1700,31 @@ void pp_pragma(Preprocessor *pp, string rest) {
         std::Println("{}:{}: {}: {}", pp->current_file, pp->current_line, b, msg, target = 2);
         if (b == "error") std::Exit(1);
     } else {
-        pp->output_lines.add("#pragma " + r);
+        add_out(pp, "#pragma " + r);
         return;
     }
-    pp->output_lines.add("       ");
+    add_out(pp, "       ");
 }
 
 void pp_process_line(Preprocessor *pp, string line) {
+    // A continuation (the rest of a physical line after a multi-line macro
+    // call): gcc places it by the column of its first PRINTED token, so skip
+    // leading names that expand to nothing (`__wur`, `__THROW`, …).
+    if (line.starts_with("\x02")) {
+        string l = line[1:];
+        i32 col = 0;
+        while (true) {
+            while (col < l.size && std::IsSpace(l[col])) col++;
+            if (col >= l.size || !is_ident_start(l[col])) break;
+            i32 e = col;
+            while (e < l.size && is_ident(l[e])) e++;
+            string enc = pp->macros[l[col:e]];
+            if (!enc.starts_with("O|")) break;
+            if (expand_line(l[col:e], &pp->macros, pp->current_line, pp->current_file).trim().size > 0) break;
+            col = e;
+        }
+        line = (spaces(col) + l[col:]).dup;
+    }
     string trimmed = line.ltrim();
     if (trimmed.size == 0 || trimmed[0] != '#') {
         // gcc `-P` output rules: a line with no tokens (blank, or only comments
@@ -1581,6 +1792,7 @@ void pp_process_line(Preprocessor *pp, string line) {
                     while (fi < rl.size && rl[fi] != '"') fi++;
                     pp->current_file = rl[fn_start:fi];
                 }
+                pp->force_marker = 1;   // the reader learns the new position
             }
         }
     }
@@ -1597,7 +1809,9 @@ int main(int argc, char **argv) {
 
     // Parse arguments
     string input_file = "";
-    i32 nostdinc = 0, verbose = 0, undef = 0, gcc_lines = 0;
+    i32 nostdinc = 0, verbose = 0, undef = 0, gcc_lines = 0, no_markers = 0, freestanding = 0;
+    pp.markers = 0; pp.out_line = 1; pp.out_file = ""; pp.cur_sys = 0; pp.user_dirs = 0; pp.force_marker = 0;
+    pp.prev_sys_tok = 0; pp.cur_dir_idx = -1;
     for (i32 ai = 1; ai < argc; ai++) {
         string arg = argv[ai];
         if (arg.starts_with("-D") && arg.size > 2) { pp.user_defines.add(arg[2:arg.size]); }
@@ -1608,6 +1822,8 @@ int main(int argc, char **argv) {
         else if (arg == "-nostdinc") { nostdinc = 1; }
         else if (arg == "-v") { verbose = 1; }
         else if (arg == "--gcc-lines") { gcc_lines = 1; }
+        else if (arg == "-P") { no_markers = 1; }
+        else if (arg == "-ffreestanding") { freestanding = 1; }
         else if (arg == "-") { input_file = "-"; }
         else if (arg[0] != '-') { if (input_file.size == 0) input_file = arg; }
     }
@@ -1628,6 +1844,7 @@ int main(int argc, char **argv) {
             for (i32 k = 0; k < sys.length; k++) if (sys[k] == pp.include_dirs[i]) is_sys = 1;
             if (!is_sys) user.add(pp.include_dirs[i]);
         }
+        pp.user_dirs = user.length;
         for (i32 i = 0; i < sys.length; i++) add_dir(&user, sys[i]);
         pp.include_dirs = user;
     }
@@ -1732,8 +1949,28 @@ int main(int argc, char **argv) {
     }
 
     content = strip_comments(content);
-    if (content.size == 0) return 0;
+    if (nostdinc) pp.user_dirs = pp.include_dirs.length;   // no system dirs at all
+    pp.markers = !no_markers;
+    string main_file = pp.current_file;
 
+    // gcc's preamble, then the implicit `-include stdc-predef.h` (glibc's
+    // __STDC_IEC_559__, __STDC_ISO_10646__, …) when the C library provides one
+    // on the system path — gcc does this unless -nostdinc/-ffreestanding.
+    if (pp.markers) {
+        emit_marker(&pp, 0, main_file, "");
+        emit_marker(&pp, 0, "<built-in>", "");
+        emit_marker(&pp, 0, "<command-line>", "");
+    }
+    if (!nostdinc && !freestanding) {
+        i32 dir = -1;
+        pp.current_file = "<command-line>";
+        pp.current_line = 0;
+        string predef = resolve_include(&pp, "stdc-predef.h", 0, pp.user_dirs, &dir);
+        if (predef.size > 0) enter_file(&pp, predef, 1, dir);
+    }
+    pp.current_file = main_file;
+    pp.current_line = 1;
+    if (pp.markers) emit_marker(&pp, 1, main_file, "");
     pp_process_content(&pp, content);
 
     // Output. Lines with no visible content — tokens that expanded to nothing
@@ -1743,7 +1980,7 @@ int main(int argc, char **argv) {
     i32 printed = 0;
     for (i32 i = 0; i < pp.output_lines.length; i++) {
         string line = pp.output_lines[i];
-        if (!gcc_lines && line.trim().size == 0) continue;
+        if (!gcc_lines && !pp.markers && line.trim().size == 0) continue;
         if (printed > 0) std::Println("");
         std::Print("{}", line);
         printed++;
