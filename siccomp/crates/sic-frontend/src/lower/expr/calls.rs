@@ -110,14 +110,9 @@ impl<'m> FuncCtx<'m> {
                 let exp = self.coerce(exp, &ty)?;
                 let des = self.lower_expr(&args[1])?;
                 let des = self.coerce(des, &ty)?;
-                let old = self.alloc_val();
-                self.push_instr(Instr::AtomicCas {
-                    dest: old, ptr: lv.ptr.clone(), expected: exp.clone(), desired: des, ty: ty.clone(),
-                });
                 // Success ⇔ the observed old value equals `expected`.
-                let ok = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: ok, op: CmpOp::IEq, lhs: Val::Local(old), rhs: exp, ty });
-                Ok(Val::Local(ok))
+                let (_old, ok) = self.emit_atomic_cas(lv.ptr.clone(), exp, des, &ty);
+                Ok(ok)
             }
             _ => unreachable!("atomic method dispatch"),
         }
@@ -465,10 +460,12 @@ impl<'m> FuncCtx<'m> {
                 return self.lower_carry_builtin(is_sub, a_expr, b_expr, cin_expr, cout_expr);
             }
 
-            // Atomic builtins. We lower these to plain (non-atomic) load/store
-            // and treat fences as no-ops. This is functionally correct for
-            // single-threaded execution and the relaxed-ordering uses sqlite
-            // makes; it is not a true multi-threaded atomic implementation.
+            // Atomic builtins. A 1/2/4/8-byte integer/bool/pointer operand uses
+            // sic's real atomic instructions (AtomicLoad/Store/Rmw/Cas — the same
+            // ones behind the `atomic` qualifier), which are sequentially
+            // consistent, so every requested memory order is satisfied; fences
+            // are no-ops on top of that. Wider operands (`__int128`, structs)
+            // fall back to plain (single-thread-correct) code.
             match name.as_str() {
                 // T __atomic_load_n(const T *ptr, int memorder)
                 "__atomic_load_n" => {
@@ -479,7 +476,11 @@ impl<'m> FuncCtx<'m> {
                             _ => Type::i32(),
                         };
                         let dest = self.alloc_val();
-                        self.push_instr(Instr::Load { dest, ptr, ty });
+                        if super::atomic_lock_free_type(&ty, self.ptr_size()) {
+                            self.push_instr(Instr::AtomicLoad { dest, ptr, ty });
+                        } else {
+                            self.push_instr(Instr::Load { dest, ptr, ty });
+                        }
                         return Ok(Val::Local(dest));
                     }
                 }
@@ -492,6 +493,12 @@ impl<'m> FuncCtx<'m> {
                             Type::Pointer(t) => super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
                             _ => Type::i32(),
                         };
+                        if super::atomic_lock_free_type(&ty, self.ptr_size()) {
+                            let v = self.alloc_val();
+                            self.push_instr(Instr::AtomicLoad { dest: v, ptr, ty });
+                            self.push_instr(Instr::Store { val: Val::Local(v), ptr: ret });
+                            return Ok(Constant::zero());
+                        }
                         let size = ty.size_of(self.ptr_size());
                         let align = ty.align_of(self.ptr_size());
                         self.push_instr(Instr::MemCopy { dst: ret, src: ptr, size, align });
@@ -507,6 +514,12 @@ impl<'m> FuncCtx<'m> {
                             Type::Pointer(t) => super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
                             _ => Type::i32(),
                         };
+                        if super::atomic_lock_free_type(&ty, self.ptr_size()) {
+                            let v = self.alloc_val();
+                            self.push_instr(Instr::Load { dest: v, ptr: val, ty: ty.clone() });
+                            self.push_instr(Instr::AtomicStore { ptr, val: Val::Local(v), ty });
+                            return Ok(Constant::zero());
+                        }
                         let size = ty.size_of(self.ptr_size());
                         let align = ty.align_of(self.ptr_size());
                         self.push_instr(Instr::MemCopy { dst: ptr, src: val, size, align });
@@ -523,7 +536,11 @@ impl<'m> FuncCtx<'m> {
                             _ => self.val_type(&val),
                         };
                         let cv = self.coerce(val, &ty)?;
-                        self.push_instr(Instr::Store { val: cv, ptr });
+                        if super::atomic_lock_free_type(&ty, self.ptr_size()) {
+                            self.push_instr(Instr::AtomicStore { ptr, val: cv, ty });
+                        } else {
+                            self.push_instr(Instr::Store { val: cv, ptr });
+                        }
                         return Ok(Constant::zero());
                     }
                 }
@@ -622,6 +639,91 @@ impl<'m> FuncCtx<'m> {
                 }
                 // Fences / barriers: no-ops for a single thread.
                 "__atomic_thread_fence" | "__atomic_signal_fence" => return Ok(Constant::zero()),
+                // bool __atomic_test_and_set(void *p, int order): atomically set the
+                // byte at `p` to 1 (`__GCC_ATOMIC_TEST_AND_SET_TRUEVAL`) and return
+                // whether it was already set. <stdatomic.h> passes the
+                // `atomic_flag*` itself, so it always works on the first byte.
+                "__atomic_test_and_set" => {
+                    if let [ptr_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let u8t = Type::Int { bits: 8, signed: false };
+                        let one = self.coerce(Constant::int(1), &u8t)?;
+                        let old = self.alloc_val();
+                        self.push_instr(Instr::AtomicRmw { dest: old, op: AtomicOp::Xchg, ptr, val: one, ty: u8t.clone() });
+                        let was = self.alloc_val();
+                        self.push_instr(Instr::Cmp { dest: was, op: CmpOp::INe, lhs: Val::Local(old), rhs: Constant::int(0), ty: u8t });
+                        let r = self.alloc_val();
+                        self.push_instr(Instr::Cast { dest: r, op: CastOp::ZExt, val: Val::Local(was), to_ty: Type::i32() });
+                        return Ok(Val::Local(r));
+                    }
+                }
+                // void __atomic_clear(void *p, int order): atomically store 0 to the byte.
+                "__atomic_clear" => {
+                    if let [ptr_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let u8t = Type::Int { bits: 8, signed: false };
+                        let zero = self.coerce(Constant::int(0), &u8t)?;
+                        self.push_instr(Instr::AtomicStore { ptr, val: zero, ty: u8t });
+                        return Ok(Constant::zero());
+                    }
+                }
+                // void __atomic_exchange(T *p, T *val, T *ret, int order): *ret = old
+                // *p, *p = *val — one atomic exchange for a lock-free-sized T
+                // (1/2/4/8-byte integer, bool, pointer), else a plain copy sequence.
+                "__atomic_exchange" => {
+                    if let [ptr_expr, val_expr, ret_expr, ..] = args {
+                        let ptr = self.lower_expr(ptr_expr)?;
+                        let valp = self.lower_expr(val_expr)?;
+                        let retp = self.lower_expr(ret_expr)?;
+                        let ty = match self.val_type(&ptr) {
+                            Type::Pointer(t) => super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
+                            _ => Type::i32(),
+                        };
+                        if super::atomic_lock_free_type(&ty, self.ptr_size()) {
+                            let nv = self.alloc_val();
+                            self.push_instr(Instr::Load { dest: nv, ptr: valp, ty: ty.clone() });
+                            let old = self.alloc_val();
+                            self.push_instr(Instr::AtomicRmw { dest: old, op: AtomicOp::Xchg, ptr, val: Val::Local(nv), ty: ty.clone() });
+                            self.push_instr(Instr::Store { val: Val::Local(old), ptr: retp });
+                        } else {
+                            let ps = self.ptr_size();
+                            let (size, align) = (ty.size_of(ps), ty.align_of(ps));
+                            let tmp = self.alloc_val();
+                            self.push_instr(Instr::Alloca { dest: tmp, ty: ty.clone(), align: None });
+                            self.push_instr(Instr::MemCopy { dst: Val::Local(tmp), src: ptr.clone(), size, align });
+                            self.push_instr(Instr::MemCopy { dst: ptr, src: valp, size, align });
+                            self.push_instr(Instr::MemCopy { dst: retp, src: Val::Local(tmp), size, align });
+                        }
+                        return Ok(Constant::zero());
+                    }
+                }
+                // bool __atomic_{is,always}_lock_free(size_t size, void *p): sic's
+                // atomics are single lock-free instructions for 1/2/4/8 bytes.
+                "__atomic_is_lock_free" | "__atomic_always_lock_free" => {
+                    if let [size_expr, ..] = args {
+                        if let Ok(n) = crate::lower::eval_const_expr(size_expr, &self.lowerer.enum_consts) {
+                            return Ok(Constant::int(matches!(n, 1 | 2 | 4 | 8) as i64));
+                        }
+                        let sz = self.lower_expr(size_expr)?;
+                        let sz = self.coerce(sz, &Type::u64())?;
+                        let mut acc: Option<Val> = None;
+                        for k in [1i64, 2, 4, 8] {
+                            let c = self.alloc_val();
+                            self.push_instr(Instr::Cmp { dest: c, op: CmpOp::IEq, lhs: sz.clone(), rhs: Constant::int(k), ty: Type::u64() });
+                            let ci = self.alloc_val();
+                            self.push_instr(Instr::Cast { dest: ci, op: CastOp::ZExt, val: Val::Local(c), to_ty: Type::i32() });
+                            acc = Some(match acc {
+                                None => Val::Local(ci),
+                                Some(a) => {
+                                    let o = self.alloc_val();
+                                    self.push_instr(Instr::BinOp { dest: o, op: BinOp::Or, lhs: a, rhs: Val::Local(ci), ty: Type::i32() });
+                                    Val::Local(o)
+                                }
+                            });
+                        }
+                        return Ok(acc.unwrap());
+                    }
+                }
                 // T __atomic_exchange_n(ptr, val, order) / __sync_lock_test_and_set(ptr, val)
                 "__atomic_exchange_n" | "__sync_lock_test_and_set" => {
                     if let [ptr_expr, val_expr, ..] = args {
@@ -648,8 +750,10 @@ impl<'m> FuncCtx<'m> {
                 n if sync_builtin_base(n) == "__sync_bool_compare_and_swap" => {
                     if let [p, o, d, ..] = args { return self.lower_atomic_cas(p, o, d, true); }
                 }
+                // `_n` takes `desired` by value; the generic form by pointer.
                 "__atomic_compare_exchange_n" | "__atomic_compare_exchange" => {
-                    if let [p, eptr, d, ..] = args { return self.lower_atomic_compare_exchange(p, eptr, d); }
+                    let by_ptr = name.as_str() == "__atomic_compare_exchange";
+                    if let [p, eptr, d, ..] = args { return self.lower_atomic_compare_exchange(p, eptr, d, by_ptr); }
                 }
                 // Branch-prediction hints: the value is just the first argument.
                 "__builtin_expect" | "__builtin_expect_with_probability" => {
@@ -1793,3 +1897,4 @@ impl<'m> FuncCtx<'m> {
         }
     }
 }
+

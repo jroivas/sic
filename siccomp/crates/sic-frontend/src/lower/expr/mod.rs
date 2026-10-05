@@ -5884,61 +5884,101 @@ impl<'m> FuncCtx<'m> {
     fn lower_atomic_exchange(&mut self, ptr_expr: &Expr, val_expr: &Expr) -> Result<Val> {
         let ptr = self.lower_expr(ptr_expr)?;
         let ty = self.pointee_ty(&ptr);
-        let old = self.alloc_val();
-        self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
         let val = self.lower_expr(val_expr)?;
         let val = self.coerce(val, &ty)?;
-        self.push_instr(Instr::Store { val, ptr });
+        let old = self.alloc_val();
+        if atomic_lock_free_type(&ty, self.ptr_size()) {
+            // One atomic exchange — the same instruction as sic's `.swap`.
+            self.push_instr(Instr::AtomicRmw { dest: old, op: AtomicOp::Xchg, ptr, val, ty });
+        } else {
+            self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
+            self.push_instr(Instr::Store { val, ptr });
+        }
         Ok(Val::Local(old))
     }
 
     /// `__sync_{val,bool}_compare_and_swap(ptr, oldv, newv)`: if `*ptr == oldv`
     /// set `*ptr = newv`. Returns the prior value (`ret_bool == false`) or whether
     /// the swap happened. Non-atomic (single-thread) emulation.
+    /// Atomic compare-and-swap of `ty` at `ptr` — sic's one CAS primitive, shared
+    /// by `x.cas(e, d)` and the C `__atomic_compare_exchange*` /
+    /// `__sync_*_compare_and_swap` builtins. Returns `(old, ok)`: the value
+    /// observed in memory, and `old == expected` (whether `desired` was stored).
+    pub(crate) fn emit_atomic_cas(&mut self, ptr: Val, expected: Val, desired: Val, ty: &Type) -> (Val, Val) {
+        let old = self.alloc_val();
+        self.push_instr(Instr::AtomicCas { dest: old, ptr, expected: expected.clone(), desired, ty: ty.clone() });
+        let ok = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: ok, op: CmpOp::IEq, lhs: Val::Local(old), rhs: expected, ty: ty.clone() });
+        (Val::Local(old), Val::Local(ok))
+    }
+
     fn lower_atomic_cas(&mut self, ptr_expr: &Expr, old_expr: &Expr, new_expr: &Expr, ret_bool: bool) -> Result<Val> {
         let ptr = self.lower_expr(ptr_expr)?;
         let ty = self.pointee_ty(&ptr);
-        let cur = self.alloc_val();
-        self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
         let oldv = self.lower_expr(old_expr)?; let oldv = self.coerce(oldv, &ty)?;
         let newv = self.lower_expr(new_expr)?; let newv = self.coerce(newv, &ty)?;
-        let matched = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: oldv, ty: ty.clone() });
-        let sel = self.alloc_val();
-        self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: newv, on_false: Val::Local(cur), ty: ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
+        let (cur, matched) = if atomic_lock_free_type(&ty, self.ptr_size()) {
+            self.emit_atomic_cas(ptr, oldv, newv, &ty)
+        } else {
+            // Wider than one lock-free instruction (e.g. QEMU's 128-bit CAS):
+            // plain compare-and-select.
+            let cur = self.alloc_val();
+            self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
+            let matched = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: oldv, ty: ty.clone() });
+            let sel = self.alloc_val();
+            self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: newv, on_false: Val::Local(cur), ty: ty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
+            (Val::Local(cur), Val::Local(matched))
+        };
         if ret_bool {
             let ext = self.alloc_val();
-            self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: Val::Local(matched), to_ty: Type::i32() });
+            self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: matched, to_ty: Type::i32() });
             Ok(Val::Local(ext))
         } else {
-            Ok(Val::Local(cur))
+            Ok(cur)
         }
     }
 
     /// `bool __atomic_compare_exchange_n(ptr, expected_ptr, desired, ...)`: like
     /// CAS, but on failure writes the current value back through `expected_ptr`.
-    fn lower_atomic_compare_exchange(&mut self, ptr_expr: &Expr, exp_ptr_expr: &Expr, des_expr: &Expr) -> Result<Val> {
+    /// `bool __atomic_compare_exchange_n(T *p, T *expected, T desired, weak, s, f)`
+    /// and the generic `__atomic_compare_exchange(T *p, T *expected, T *desired, …)`
+    /// (`desired_by_ptr`). On failure the observed value is written back to
+    /// `*expected` (C11 7.17.7.4). A weak CAS never fails spuriously here.
+    fn lower_atomic_compare_exchange(&mut self, ptr_expr: &Expr, exp_ptr_expr: &Expr, des_expr: &Expr, desired_by_ptr: bool) -> Result<Val> {
         let ptr = self.lower_expr(ptr_expr)?;
         let ty = self.pointee_ty(&ptr);
         let eptr = self.lower_expr(exp_ptr_expr)?;
-        let cur = self.alloc_val();
-        self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
         let expected = self.alloc_val();
         self.push_instr(Instr::Load { dest: expected, ptr: eptr.clone(), ty: ty.clone() });
-        let desired = self.lower_expr(des_expr)?; let desired = self.coerce(desired, &ty)?;
-        let matched = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: Val::Local(expected), ty: ty.clone() });
-        // *ptr = matched ? desired : cur
-        let sel = self.alloc_val();
-        self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: desired, on_false: Val::Local(cur), ty: ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
-        // *expected_ptr = matched ? expected : cur  (write current back on failure)
+        let desired = if desired_by_ptr {
+            let dp = self.lower_expr(des_expr)?;
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: dp, ty: ty.clone() });
+            Val::Local(d)
+        } else {
+            let d = self.lower_expr(des_expr)?;
+            self.coerce(d, &ty)?
+        };
+        let (cur, matched) = if atomic_lock_free_type(&ty, self.ptr_size()) {
+            self.emit_atomic_cas(ptr, Val::Local(expected), desired, &ty)
+        } else {
+            let cur = self.alloc_val();
+            self.push_instr(Instr::Load { dest: cur, ptr: ptr.clone(), ty: ty.clone() });
+            let matched = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: matched, op: CmpOp::IEq, lhs: Val::Local(cur), rhs: Val::Local(expected), ty: ty.clone() });
+            let sel = self.alloc_val();
+            self.push_instr(Instr::Select { dest: sel, cond: Val::Local(matched), on_true: desired, on_false: Val::Local(cur), ty: ty.clone() });
+            self.push_instr(Instr::Store { val: Val::Local(sel), ptr });
+            (Val::Local(cur), Val::Local(matched))
+        };
+        // *expected = ok ? expected : observed
         let esel = self.alloc_val();
-        self.push_instr(Instr::Select { dest: esel, cond: Val::Local(matched), on_true: Val::Local(expected), on_false: Val::Local(cur), ty: ty.clone() });
+        self.push_instr(Instr::Select { dest: esel, cond: matched.clone(), on_true: Val::Local(expected), on_false: cur, ty: ty.clone() });
         self.push_instr(Instr::Store { val: Val::Local(esel), ptr: eptr });
         let ext = self.alloc_val();
-        self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: Val::Local(matched), to_ty: Type::i32() });
+        self.push_instr(Instr::Cast { dest: ext, op: CastOp::ZExt, val: matched, to_ty: Type::i32() });
         Ok(Val::Local(ext))
     }
 
@@ -6136,14 +6176,32 @@ impl<'m> FuncCtx<'m> {
             Type::Pointer(t) => super::types::resolve_aggregate(&t, &self.lowerer.struct_types),
             other => other,
         };
-        let old = self.alloc_val();
-        self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
         let rhs = self.lower_expr(val_expr)?;
         let rhs = self.coerce(rhs, &ty)?;
-        let newv = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: newv, op, lhs: Val::Local(old), rhs, ty: ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(newv), ptr });
-        Ok(Val::Local(if ret_new { newv } else { old }))
+        let aop = match op {
+            BinOp::Add => Some(AtomicOp::Add), BinOp::Sub => Some(AtomicOp::Sub),
+            BinOp::And => Some(AtomicOp::And), BinOp::Or => Some(AtomicOp::Or),
+            BinOp::Xor => Some(AtomicOp::Xor), _ => None,
+        };
+        let old = self.alloc_val();
+        match aop {
+            // One atomic RMW instruction — the same as sic's `atomic x += v`. The
+            // OP_fetch forms recompute the new value from the returned old one.
+            Some(aop) if atomic_lock_free_type(&ty, self.ptr_size()) => {
+                self.push_instr(Instr::AtomicRmw { dest: old, op: aop, ptr, val: rhs.clone(), ty: ty.clone() });
+                if !ret_new { return Ok(Val::Local(old)); }
+                let newv = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: newv, op, lhs: Val::Local(old), rhs, ty });
+                Ok(Val::Local(newv))
+            }
+            _ => {
+                self.push_instr(Instr::Load { dest: old, ptr: ptr.clone(), ty: ty.clone() });
+                let newv = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: newv, op, lhs: Val::Local(old), rhs, ty: ty.clone() });
+                self.push_instr(Instr::Store { val: Val::Local(newv), ptr });
+                Ok(Val::Local(if ret_new { newv } else { old }))
+            }
+        }
     }
 
     // ---- SIMD vector intrinsics (scalar-emulated over the byte aggregate) ----
@@ -6440,3 +6498,14 @@ fn rewrite_capture_expr(e: &mut Expr, name: &str, deref: bool) {
     }
 }
 
+/// Whether `ty` is handled by one lock-free atomic instruction: a 1/2/4/8-byte
+/// integer, `bool`, or a pointer (what the backend's atomic ops support). Wider
+/// types (`__int128`, aggregates) take the builtins' plain fallback paths.
+pub(crate) fn atomic_lock_free_type(ty: &Type, ptr_size: u32) -> bool {
+    match ty {
+        Type::Int { bits, .. } => matches!(bits, 8 | 16 | 32 | 64),
+        Type::Bool => true,
+        Type::Pointer(_) => ptr_size == 4 || ptr_size == 8,
+        _ => false,
+    }
+}
