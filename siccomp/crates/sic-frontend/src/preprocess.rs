@@ -282,4 +282,9 @@ fn is_safe_predefine(name: &str) -> bool {
         || name.starts_with("__LDBL_")
         || name.starts_with("__DEC")
         || name == "__FLT_RADIX__"
+        // Symbol-name prefixes (empty on ELF). glibc builds asm labels with
+        // `__ASMNAME (x)` → `__STRING (__USER_LABEL_PREFIX__) "x"`; with the
+        // macro missing that became the literal label "__USER_LABEL_PREFIX__x".
+        || name == "__USER_LABEL_PREFIX__"
+        || name == "__REGISTER_PREFIX__"
 }
