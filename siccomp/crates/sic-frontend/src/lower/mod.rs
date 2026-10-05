@@ -193,6 +193,10 @@ pub struct Lowerer {
     /// arguments to positions. An empty name marks a parameter whose name is unknown
     /// (e.g. an imported prototype), which only positional/variadic use can fill.
     pub fn_param_names: HashMap<String, (Vec<String>, bool)>,
+    /// sic default arguments (sic.md §"Default parameters"): function name → each
+    /// parameter's default expression (`None` for a required one). A call that omits
+    /// a trailing argument supplies the default at the call site.
+    pub fn_param_defaults: HashMap<String, Vec<Option<crate::ast::Expr>>>,
     /// sic bitfields (sic.md §"Bitfields"): bitfield name → its member list, in
     /// declaration order, including `_` placeholders (a member's value is `1 <<
     /// index_in_this_list`). The list length is the flag capacity (bit count).
@@ -285,6 +289,7 @@ impl Lowerer {
             generic_enum_defs: HashMap::new(),
             generic_fn_defs: HashMap::new(),
             fn_param_names: HashMap::new(),
+            fn_param_defaults: HashMap::new(),
         }
     }
 
@@ -538,6 +543,19 @@ impl Lowerer {
                             o.insert((names, *variadic));
                         }
                     }
+                }
+                // Record default argument expressions, if any parameter has one.
+                // Truncate at the first `va_array`/`va_dict` sink: defaults sit
+                // strictly before it, and a call that omits a defaulted parameter
+                // supplies no va arguments either, so the fixed-parameter prefix is
+                // all the call site needs.
+                if params.iter().any(|p| p.default.is_some()) {
+                    let fixed = params.iter()
+                        .position(|p| matches!(&p.ty.ty, AstType::Named(n) if n == "va_array" || n == "va_dict"))
+                        .unwrap_or(params.len());
+                    let defs: Vec<Option<crate::ast::Expr>> =
+                        params[..fixed].iter().map(|p| p.default.clone()).collect();
+                    self.fn_param_defaults.insert(name.clone(), defs);
                 }
             }
         }
@@ -1970,6 +1988,7 @@ impl Lowerer {
                         }))),
                         quals: vec![],
                     }),
+                    default: None,
                     span: sp.clone(),
                 };
                 // Field names, so a constructor/destructor's bare `field` reference

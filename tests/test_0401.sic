@@ -1,0 +1,24 @@
+// Default parameter values (sic.md §"Default parameters"): a parameter may declare
+// `= expr`; a call that omits it supplies the default at the call site. Order must
+// be [required] [defaulted] [va_array/va_dict] — a default may sit before a va sink,
+// but a required param may not follow a default. Returns 42.
+import std;
+
+int add(int a, int b = 5) { return a + b; }
+int add3(int a, int b = 10, int c = 100) { return a + b + c; }
+
+// A default BEFORE a va_array sink: `prefix` defaults, `parts` collects the rest.
+i32 count_with(i32 base = 0, va_array parts) { return base + (i32)parts.length; }
+
+int main() {
+    if (add(2, 4) != 6) return 1;        // explicit arg overrides default
+    if (add(2) != 7) return 2;           // b defaults to 5
+    if (add3(1) != 111) return 3;        // b=10, c=100
+    if (add3(1, 2) != 103) return 4;     // b=2, c=100
+    if (add3(1, 2, 3) != 6) return 5;    // all explicit
+
+    if (count_with() != 0) return 6;         // base default, no parts
+    if (count_with(10) != 10) return 7;      // explicit base, no parts
+    if (count_with(10, 1, 2, 3) != 13) return 8;  // base + 3 va parts
+    return 42;
+}

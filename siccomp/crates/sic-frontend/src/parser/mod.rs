@@ -1392,6 +1392,8 @@ impl Parser {
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         let mut variadic = false;
+        let mut seen_default = false;
+        let mut seen_va = false;
 
         if self.eat(TokenKind::RParen) { return Ok((params, variadic)); }
 
@@ -1416,7 +1418,32 @@ impl Parser {
             let (name, ty) = self.parse_declarator(base_ty)?;
             // Parameter attribute, e.g. `f(const T *cfg __attribute__((unused)))`.
             self.skip_attributes();
-            params.push(Param { name: if name.is_empty() { None } else { Some(name) }, ty, span: psp });
+            // sic default argument (sic.md §"Default parameters"): `int b = 5`. The
+            // default is a single assignment-expression (no top-level comma, which
+            // separates parameters).
+            let default = if self.lang == Lang::Sic && self.eat(TokenKind::Eq) {
+                Some(self.parse_assign_expr()?)
+            } else { None };
+            // Parameter order must be [required] [defaulted] [va_array/va_dict]:
+            //   * a `va_array`/`va_dict` sink may follow defaults (it collects the
+            //     rest), but a default may not follow it;
+            //   * a required (non-default, non-va) parameter may not follow a default.
+            let is_va = matches!(&ty.ty, AstType::Named(n) if n == "va_array" || n == "va_dict");
+            if default.is_some() {
+                if seen_va {
+                    return Err(CompileError::at(
+                        "a default parameter cannot follow a `va_array`/`va_dict`".to_string(),
+                        psp.file.clone(), psp.line, psp.col));
+                }
+                seen_default = true;
+            } else if is_va {
+                seen_va = true;
+            } else if seen_default {
+                return Err(CompileError::at(
+                    "a required parameter cannot follow one with a default value".to_string(),
+                    psp.file.clone(), psp.line, psp.col));
+            }
+            params.push(Param { name: if name.is_empty() { None } else { Some(name) }, ty, default, span: psp });
             if !self.eat(TokenKind::Comma) { break; }
             if self.at(TokenKind::Ellipsis) { self.advance(); variadic = true; break; }
         }

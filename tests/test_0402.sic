@@ -1,0 +1,4 @@
+// A required parameter may not follow one with a default value — rejected at
+// parse time (defaults must form a trailing run before any va sink).
+int f(int a = 1, int b) { return a + b; }
+int main() { return f(1, 2); }

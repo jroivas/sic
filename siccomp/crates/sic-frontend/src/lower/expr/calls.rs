@@ -137,6 +137,23 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic default arguments (sic.md §"Default parameters"): if the call omits
+        // trailing parameters that declare a default, append those default
+        // expressions and re-enter with the completed positional list. Only a
+        // directly-named callee carries defaults; defaults are trailing-only (parser
+        // enforced), so `args.len()..n` are exactly the omitted ones.
+        if self.is_sic() {
+            if let ExprKind::Ident(name) = &func_expr.kind {
+                if let Some(defs) = self.lowerer.fn_param_defaults.get(name).cloned() {
+                    if args.len() < defs.len() && defs[args.len()..].iter().all(|d| d.is_some()) {
+                        let mut full: Vec<Expr> = args.to_vec();
+                        for d in &defs[args.len()..] { full.push(d.clone().unwrap()); }
+                        return self.lower_call(func_expr, &full, sp);
+                    }
+                }
+            }
+        }
+
         // `string.create(bytes, len)` (SIC): build a `string` from an explicit
         // pointer and byte length — a NON-owning VIEW (rc = null), with no copy and
         // no `strlen`, so it works on non-NUL-terminated buffers and binary data

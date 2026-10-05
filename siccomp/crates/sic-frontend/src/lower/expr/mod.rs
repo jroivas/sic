@@ -1384,6 +1384,7 @@ impl<'m> FuncCtx<'m> {
                 base: Box::new(ast::QualType::new(ast::AstType::Named(env_name.clone()))),
                 quals: vec![],
             }),
+            default: None,
             span: span.clone(),
         };
         let mut fn_params = vec![self_param];

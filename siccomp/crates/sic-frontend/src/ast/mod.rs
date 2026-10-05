@@ -232,6 +232,10 @@ pub struct EnumVariant {
 pub struct Param {
     pub name: Option<String>,
     pub ty: QualType,
+    /// sic default argument (sic.md §"Default parameters"): `int b = 5`. When a
+    /// call omits this (trailing) argument, the default expression is supplied at
+    /// the call site. `None` for an ordinary parameter.
+    pub default: Option<Expr>,
     pub span: Span,
 }
 
