@@ -30,6 +30,9 @@ struct Preprocessor {
     // its cached answers keyed by the query text.
     string cc;
     dict<string, string> has_cache;
+    // `#pragma once` files, and the `#pragma push_macro` stack ("name\x02enc").
+    list<string> once_files;
+    list<string> pushed_macros;
 }
 
 
@@ -333,7 +336,8 @@ void fallback_predefines(Preprocessor *pp) {
 // Which host predefines to adopt — the same policy as the sic compiler, so code
 // preprocessed by sic-cpp sees what sic itself would:
 //  * value-only numeric/type macros (`__SIZEOF_*__`, `*_MAX__`, `*_TYPE__`,
-//    `__CHAR_BIT__`, byte order, float properties, …) — always;
+//    `__CHAR_BIT__`, byte order, float properties, `__GCC_ATOMIC_*` atomic ABI,
+//    …) — always;
 //  * target/OS/ABI identification (`__x86_64__`, `__aarch64__`, `__riscv*`,
 //    `__linux__`, `__APPLE__`, `__LP64__`, `__ELF__`, …) — unless `-undef`;
 //  * NOT compiler feature flags (`__OPTIMIZE__`, `__GNUC_*`, `__SSE2__`,
@@ -346,7 +350,9 @@ i32 keep_predefine(string name, i32 undef) {
         || name.ends_with("_MAX__") || name.ends_with("_MIN__") || name.ends_with("_WIDTH__")
         || name.ends_with("_TYPE__") || name.starts_with("__FLT") || name.starts_with("__DBL_")
         || name.starts_with("__LDBL_") || name.starts_with("__DEC")
-        || name == "__USER_LABEL_PREFIX__" || name == "__REGISTER_PREFIX__")
+        || name == "__USER_LABEL_PREFIX__" || name == "__REGISTER_PREFIX__"
+        // Target atomic ABI (lock-free levels, atomic_flag's set value).
+        || name.starts_with("__GCC_ATOMIC_"))
         return 1;
     if (undef) return 0;
     // OS / object format / data model.
@@ -397,6 +403,14 @@ void add_env_dirs(list<string> *dirs, string var) {
     for (i32 i = 0; i < parts.length; i++) if (parts[i].size > 0) add_dir(dirs, parts[i]);
 }
 
+// `n` spaces (for output indentation / blanked-out comments).
+string spaces(i32 n) {
+    string blank = "                                                                ";
+    string out = "";
+    while (n > blank.size) { out = out + blank; n -= blank.size; }
+    return out + blank[0:n];
+}
+
 // ── Comment stripping ───────────────────────────────────────────────────────
 
 // Replace C comments with whitespace over the WHOLE source before line-splitting,
@@ -406,22 +420,26 @@ void add_env_dirs(list<string> *dirs, string var) {
 // `//` line comment is dropped to end of line. String and character literals are
 // copied verbatim so `"a/*b"` / `'/'` are not mistaken for comments.
 string strip_comments(string s) {
-    // Verbatim text is copied as whole slices (`s[run:i]`), one concatenation per
-    // comment rather than per character — linear instead of quadratic in the
-    // file size (system headers are tens of KB).
+    // Each comment is replaced by SPACES of the same width (its newlines kept),
+    // so line numbers, directive boundaries and token columns all survive — gcc
+    // indents `-P` output by the first token's source column, and a comment
+    // before it counts. Verbatim text is copied as whole slices, one
+    // concatenation per comment line (linear in the file size).
     string out = "";
     i32 run = 0;   // start of the pending verbatim run
     i32 i = 0;
     while (i < s.size) {
         i32 c = s[i];
         if (c == '/' && i + 1 < s.size && s[i+1] == '*') {
-            out = out + s[run:i] + " ";
+            out = out + s[run:i];
+            i32 col = i;   // start of the current blanked segment
             i += 2;
             while (i + 1 < s.size && !(s[i] == '*' && s[i+1] == '/')) {
-                if (s[i] == '\n') out = out + "\n";   // keep line count
+                if (s[i] == '\n') { out = out + spaces(i - col) + "\n"; col = i + 1; }
                 i++;
             }
             i = i + 2 <= s.size ? i + 2 : s.size;   // skip the closing */
+            out = out + spaces(i - col);
             run = i;
             continue;
         }
@@ -779,7 +797,10 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
         string tok = tokens[i];
         if (tok == "##") continue;
         if (tok == " ") {
-            if (out.length > 0 && out[out.length-1] != " ") out.add(" ");
+            // Keep a space that follows tokens which expanded to nothing (`i > 0`
+            // with nothing emitted yet): gcc prints it before the first printed
+            // token (`EMPTY int d;` → ` int d;`). Plain leading whitespace drops.
+            if (out.length > 0 ? out[out.length-1] != " " : i > 0) out.add(" ");
             continue;
         }
         // Predefined dynamic macros
@@ -963,7 +984,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     list<string> bt = paste_tokens(tokenize(body));
                     list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
                     for (i32 ei = 0; ei < be.length; ei++) {
-                        if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
+                        if (be[ei] == " ") { if (out.length == 0 || out[out.length-1] != " ") out.add(" "); }
                         else out.add(be[ei]);
                     }
                 i = k - 1; continue;
@@ -974,7 +995,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                 list<string> bt = paste_tokens(tokenize(body));
                 list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
                 for (i32 ei = 0; ei < be.length; ei++) {
-                    if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
+                    if (be[ei] == " ") { if (out.length == 0 || out[out.length-1] != " ") out.add(" "); }
                     else out.add(be[ei]);
                 }
                 continue;
@@ -1225,6 +1246,8 @@ void pp_include(Preprocessor *pp, string rest, i32 next) {
     i32 from = 0;
     if (next) { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
     string full_path = resolve_include(pp, path, quoted, from);
+    // `#pragma once`: a header already included is skipped entirely.
+    for (i32 i = 0; i < pp->once_files.length; i++) if (pp->once_files[i] == full_path) return;
 
     if (full_path.size > 0) {
         string content = strip_comments(read_file(full_path));
@@ -1394,12 +1417,125 @@ void pp_endif(Preprocessor *pp) {
 
 // ── Line processor ────────────────────────────────────────────────────────
 
+// Emit one output line, turning each `_Pragma("…")` operator (C11 6.10.9) into a
+// `#pragma …` line of its own as gcc does: the text before it ends the current
+// line (an empty line if there was none), the text after continues on a new
+// line with a leading space.
+void emit_text(Preprocessor *pp, string text) {
+    string rest = text;
+    while (true) {
+        i32 at = -1;
+        for (i32 i = 0; i + 7 <= rest.size; i++) {
+            if (rest[i] == '"' || rest[i] == '\'') {        // skip literals
+                i32 q = rest[i]; i++;
+                while (i < rest.size && rest[i] != q) { if (rest[i] == '\\') i++; i++; }
+                continue;
+            }
+            if (rest[i:i+7] == "_Pragma" && (i == 0 || !is_ident(rest[i-1]))
+                && (i + 7 >= rest.size || !is_ident(rest[i+7]))) { at = i; break; }
+        }
+        if (at < 0) break;
+        i32 k = at + 7;
+        string args = paren_group(rest, &k);
+        string lit = args.trim();
+        if (lit.size < 2 || lit[0] != '"') break;              // malformed: leave as text
+        // Destringize: drop the quotes, unescape \" and \\.
+        string body = "";
+        for (i32 i = 1; i < lit.size - 1; i++) {
+            if (lit[i] == '\\' && i + 1 < lit.size - 1 && (lit[i+1] == '"' || lit[i+1] == '\\')) i++;
+            body = body + lit[i:i+1];
+        }
+        pp->output_lines.add(rest[0:at].rtrim().dup);
+        pp->output_lines.add("#pragma " + normalize_tokens(body));
+        string after = rest[k:].ltrim();
+        // gcc still ends the pragma with the continuation line, empty or not.
+        if (after.size == 0) { pp->output_lines.add(""); return; }
+        rest = (" " + after).dup;
+    }
+    pp->output_lines.add(rest);
+}
+
+// Tokens joined with single spaces where the source had whitespace (literals intact).
+string normalize_tokens(string text) {
+    list<string> t = tokenize(text);
+    string out = "";
+    for (i32 i = 0; i < t.length; i++) {
+        if (t[i] == " ") { if (out.size > 0 && out[out.size-1] != ' ') out = out + " "; }
+        else out = out + t[i];
+    }
+    return out.trim().dup;
+}
+
+// `#pragma`: the ones cpp itself implements are acted on and leave a line of 7
+// spaces (gcc prints exactly that); every other pragma is passed through as
+// `#pragma <normalized tokens>` for the compiler.
+void pp_pragma(Preprocessor *pp, string rest) {
+    string r = normalize_tokens(rest);
+    list<string> w = split_all(r, ' ');
+    string a = w.length > 0 ? w[0] : "";
+    string b = w.length > 1 ? w[1] : "";
+    if (a == "once") {
+        pp->once_files.add(pp->current_file);
+    } else if (a.starts_with("push_macro") || a.starts_with("pop_macro")) {
+        i32 q1 = 0;
+        while (q1 < r.size && r[q1] != '"') q1++;
+        i32 q2 = q1 + 1;
+        while (q2 < r.size && r[q2] != '"') q2++;
+        if (q2 >= r.size) { pp->output_lines.add("       "); return; }
+        string name = r[q1+1:q2];
+        if (a.starts_with("push_macro")) {
+            pp->pushed_macros.add(name + "\x02" + pp->macros[name]);
+        } else {
+            // Restore the most recent push of `name`, and drop it from the stack.
+            list<string> keep;
+            i32 found = -1;
+            for (i32 i = pp->pushed_macros.length - 1; i >= 0; i--)
+                if (found < 0 && pp->pushed_macros[i].starts_with(name + "\x02")) found = i;
+            for (i32 i = 0; i < pp->pushed_macros.length; i++) if (i != found) keep.add(pp->pushed_macros[i]);
+            if (found >= 0) {
+                string enc = pp->pushed_macros[found][name.size + 1:];
+                if (enc.size >= 2) pp->macros[name] = enc.dup; else del pp->macros[name];
+            }
+            pp->pushed_macros = keep;
+        }
+    } else if (a == "GCC" && (b == "system_header" || b == "poison" || b == "dependency" || b == "pch_preprocess")) {
+        // Accepted; no effect on the text output.
+    } else if (a == "GCC" && (b == "warning" || b == "error")) {
+        string msg = r[4 + b.size:].trim();
+        std::Println("{}:{}: {}: {}", pp->current_file, pp->current_line, b, msg, target = 2);
+        if (b == "error") std::Exit(1);
+    } else {
+        pp->output_lines.add("#pragma " + r);
+        return;
+    }
+    pp->output_lines.add("       ");
+}
+
 void pp_process_line(Preprocessor *pp, string line) {
     string trimmed = line.ltrim();
     if (trimmed.size == 0 || trimmed[0] != '#') {
-        if (cond_active(pp)) {
-            string expanded = expand_line(line, &pp->macros, pp->current_line, pp->current_file);
-            pp->output_lines.add(expanded);
+        // gcc `-P` output rules: a line with no tokens (blank, or only comments
+        // — already turned into spaces) prints nothing; a line WITH tokens prints
+        // even when they expand to nothing (`__BEGIN_DECLS` → an empty line). Its
+        // indentation is the first token's source column - 1, as spaces (a tab
+        // counts as one column, a comment keeps its width).
+        if (cond_active(pp) && trimmed.size > 0) {
+            // A sentinel token in front keeps the expansion's own leading space
+            // (after leading tokens that vanished) from being taken for
+            // indentation; it is dropped again below.
+            string ex = expand_line("\x01" + trimmed, &pp->macros, pp->current_line, pp->current_file);
+            ex = ex.size > 0 ? ex[1:] : ex;
+            i32 lead = ex.starts_with(" ");
+            ex = ex.ltrim();
+            // gcc: (column - 2) spaces, plus one more when the first PRINTED token
+            // had whitespace before it — i.e. the line was indented, or leading
+            // tokens expanded to nothing before a space.
+            i32 indent = line.size - trimmed.size;
+            string text = "";
+            // (When every token vanished gcc still prints the column-2 indentation.)
+            text = spaces(indent > 0 ? indent - 1 : 0);
+            if (ex.size > 0) text = text + ((indent > 0 || lead) ? " " : "") + ex;
+            emit_text(pp, text);
         }
         pp->current_line++; return;
     }
@@ -1446,7 +1582,8 @@ void pp_process_line(Preprocessor *pp, string line) {
             }
         }
     }
-    // pragma and unknown directives are silently ignored
+    else if (kw == "pragma") { if (!skipping) pp_pragma(pp, rest); }
+    // other unknown directives are silently ignored
     pp->current_line++;
 }
 
