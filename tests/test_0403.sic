@@ -1,0 +1,23 @@
+// A `string` parameter that the callee REASSIGNS (or writes through `&param`)
+// must not release the caller's string: string params are borrowed, so a mutated
+// one becomes an owned local (retained on entry, released at scope exit).
+// Previously `s = s.ltrim()` in the callee freed the caller's heap string. Returns 42.
+import std;
+
+void trim_in_place(string s) { s = s.ltrim(); }
+string trimmed(string s) { s = s.trim(); return s; }
+void skip(string *r) { *r = (*r).ltrim(); }
+i32 skip_len(string s) { skip(&s); return (i32)s.length; }
+
+int main() {
+    string base = "   hello";
+    string owned = (base + " world  ").dup;           // heap, refcounted
+    for (i32 k = 0; k < 3; k++) trim_in_place(owned);
+    if (owned != "   hello world  ") return 1;      // caller's string intact
+    string t = trimmed(owned);
+    if (t != "hello world") return 2;
+    if (owned != "   hello world  ") return 3;
+    if (skip_len(owned) != 13) return 4;            // "hello world  "
+    if (owned.length != 16) return 5;
+    return 42;
+}

@@ -1,0 +1,27 @@
+// A `string` read out of a container (`list[i]`) and passed straight to a
+// `string` parameter must be passed as the string itself. It lowers to an untyped
+// descriptor pointer, which the argument coercion mistook for a `char*` and
+// strlen-wrapped — the callee saw garbage. Returns 42.
+void add_to(list<string> *dst, string d) { dst->add(d); }
+i32 len_of(string s) { return (i32)s.length; }
+string ident(string s) { return s; }          // string-returning (sret) callee
+
+int main() {
+    list<string> src;
+    string b = "/usr";
+    src.add((b + "/include").dup);
+    src.add((b + "/lib").dup);
+    list<string> dst;
+    for (i32 i = 0; i < src.length; i++) add_to(&dst, src[i]);
+    if (dst.length != 2) return 1;
+    if (dst[0] != "/usr/include") return 2;
+    if (dst[1] != "/usr/lib") return 3;
+    if (len_of(src[1]) != 8) return 4;
+    dict<string, string> m;
+    m["k"] = (b + "/bin").dup;
+    if (len_of(m["k"]) != 8) return 5;
+    if (ident(src[0]) != "/usr/include") return 6;  // the sret call path too
+    string acc = "x:"; acc = acc + ident(src[1]);
+    if (acc != "x:/usr/lib") return 7;
+    return 42;
+}

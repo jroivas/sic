@@ -1076,11 +1076,7 @@ impl<'m> FuncCtx<'m> {
                     if matches!(pty, Type::Struct(_) | Type::Union(_)) {
                         if self.build_enum_arg(pval, pty, sp)? { continue; }
                         if self.is_sic() && super::super::types::is_sic_string(pty) {
-                            let vt = self.val_type(pval);
-                            let already = matches!(&vt, Type::Pointer(inner) if super::super::types::is_sic_string(inner));
-                            if !already {
-                                *pval = self.cstr_to_string(pval.clone())?;
-                            }
+                            *pval = self.string_param_arg(pval.clone(), args.get(i))?;
                         }
                         continue;
                     }
@@ -1120,11 +1116,7 @@ impl<'m> FuncCtx<'m> {
                     // be wrapped in a (non-owning) descriptor; a real string arg is
                     // already a descriptor pointer.
                     if self.is_sic() && super::super::types::is_sic_string(pty) {
-                        let vt = self.val_type(pval);
-                        let already = matches!(&vt, Type::Pointer(inner) if super::super::types::is_sic_string(inner));
-                        if !already {
-                            *pval = self.cstr_to_string(pval.clone())?;
-                        }
+                        *pval = self.string_param_arg(pval.clone(), args.get(i))?;
                     }
                     continue;
                 }
@@ -1224,6 +1216,23 @@ impl<'m> FuncCtx<'m> {
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// The value to pass for a `string` parameter. A real string argument is
+    /// already a descriptor pointer and passes as-is; a `char*` / string literal
+    /// is wrapped in a non-owning descriptor. Decided by the SOURCE type as well
+    /// as the IR value type: a `string` read out of a container (`list[i]`,
+    /// `dict[k]`) lowers to an untyped `void*` descriptor pointer, and wrapping
+    /// THAT as a C string ran strlen over the descriptor and passed garbage.
+    fn string_param_arg(&mut self, val: Val, src: Option<&Expr>) -> Result<Val> {
+        let src_is_string = src
+            .and_then(|a| self.infer_expr_type(a).ok())
+            .is_some_and(|t| super::super::types::is_sic_string(&t));
+        let vt = self.val_type(&val);
+        if src_is_string || matches!(&vt, Type::Pointer(inner) if super::super::types::is_sic_string(inner)) {
+            return Ok(val);
+        }
+        self.cstr_to_string(val)
     }
 
     /// Complete a call's argument list with omitted default values (sic.md

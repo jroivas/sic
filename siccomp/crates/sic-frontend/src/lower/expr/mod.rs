@@ -1016,6 +1016,17 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::Arrow { base, name } => {
+                // sic containers: a `list*`/`dict*`/`set*` IS the container handle
+                // (pointer-to-handle collapses), so `p->length` / `p->keys` mean the
+                // same as `p.length` — route to the `.` accessors instead of a
+                // (nonexistent) struct field.
+                if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t)
+                    if super::types::is_dict(&t) || super::types::is_list(&t)
+                        || matches!(&t, Type::Pointer(i) if super::types::is_dict(i) || super::types::is_list(i)))
+                {
+                    let as_field = Expr { kind: ExprKind::Field { base: base.clone(), name: name.clone() }, span: expr.span.clone() };
+                    return self.lower_expr(&as_field);
+                }
                 let lv = self.lower_lvalue_arrow(base, name)?;
                 if matches!(lv.ty, Type::Array { .. }) {
                     return Ok(lv.ptr);
@@ -1040,6 +1051,24 @@ impl<'m> FuncCtx<'m> {
                 }
                 if self.is_sic() && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_any(&t)) {
                     return self.unbox_any(inner, &target, &expr.span);
+                }
+                // sic `(string)cstr`: wrap a NUL-terminated `char*` / `char[]` as a
+                // `string` view (strlen), exactly like `string s = cstr;`. Without
+                // this the cast reinterpreted the pointer as the descriptor itself
+                // (garbage data/size/rc → empty string or a crash in retain). A view
+                // of a LOCAL stack array (possibly through `(char*)buf`) gets the
+                // copy-on-escape sentinel.
+                if self.is_sic() && super::types::is_sic_string(&target) {
+                    let src_ty = self.infer_expr_type(inner)?;
+                    let is_cstr = matches!(&src_ty, Type::Pointer(p) if matches!(p.as_ref(), Type::Int { bits: 8, .. }))
+                        || matches!(&src_ty, Type::Array { elem, .. } if matches!(elem.as_ref(), Type::Int { bits: 8, .. }));
+                    if is_cstr {
+                        let mut base = inner.as_ref();
+                        while let ExprKind::Cast { expr: e2, .. } = &base.kind { base = e2.as_ref(); }
+                        let rc = if self.needs_copy_on_escape(base) { Self::RC_LOCAL_SENTINEL } else { 0 };
+                        let v = self.lower_expr(inner)?;
+                        return self.cstr_to_string_rc(v, rc);
+                    }
                 }
                 // sic `u8char` (sic.md §"Integer sizes"): `(u8char)i` builds a code
                 // point from an integer; `(int)c` / `(u32)c` extracts the code point.

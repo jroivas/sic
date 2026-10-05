@@ -536,6 +536,21 @@ impl Parser {
 
         loop {
             self.skip_attributes();
+            // sic (sic.md §"Structs"): an aggregate DEFINITION may omit its `;`.
+            // Once its body has closed, a storage class or a base-type keyword
+            // starts the NEXT declaration — without this, `struct S {..}` followed
+            // by `extern int f(..);` folded into one declaration whose type was `S`
+            // (the `int` silently dropped), so `f` was called as if it returned `S`.
+            if self.lang == Lang::Sic
+                && base.as_ref().is_some_and(is_aggregate_definition)
+                && (matches!(self.peek_kind(),
+                        TokenKind::Extern | TokenKind::Static | TokenKind::Typedef
+                        | TokenKind::Auto | TokenKind::Register | TokenKind::Inline
+                        | TokenKind::TypeName)
+                    || self.at_base_type_kw())
+            {
+                break;
+            }
             match self.peek_kind() {
                 // GCC `__extension__` is a transparent prefix on a declaration
                 // (used e.g. on `long long` struct members in glibc headers).
@@ -1303,6 +1318,26 @@ impl Parser {
 
         // Direct declarator: name, grouped, or abstract
         if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
+            // sic: a built-in type word (`fixed`, `string`, `i32`, `any`, …) cannot
+            // name a variable/parameter/function — every later use of the name
+            // resolves to the TYPE, so `i32 fixed = n - 1;` silently compiled into
+            // a garbage value. (The contextual words `list`/`set`/`Fn`/`weak` are
+            // already plain identifiers here unless followed by `<`.)
+            if self.lang == Lang::Sic && self.at(TokenKind::TypeName)
+                && matches!(self.peek().text.as_str(),
+                    "i8" | "i16" | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128"
+                    | "f32" | "f64" | "f80" | "f128" | "isize" | "usize"
+                    | "string" | "bigint" | "fixed" | "any" | "u8char"
+                    | "dict" | "va_dict" | "va_array")
+                // Only in SIC sources: a C header `#include`d from SIC is still C,
+                // where these are ordinary names (SDL3: `wchar_t *string`).
+                && self.peek().span.file.as_deref().map_or(true, |f| f.ends_with(".sic"))
+            {
+                let t = self.peek().clone();
+                return Err(CompileError::at(
+                    format!("`{}` is a built-in type name and cannot be used as a declaration name", t.text),
+                    t.span.file.clone(), t.span.line, t.span.col));
+            }
             let name = self.advance().text.clone();
             // sic generic functions (sic.md §"Generics"): a `<T, U>` type-parameter
             // list between the function name and its `(` parameter list. Captured

@@ -1,0 +1,3 @@
+// A built-in type word cannot name a variable: every use of the name would
+// resolve to the TYPE (this silently produced garbage values). Rejected.
+int main() { int fixed = 3; return fixed; }

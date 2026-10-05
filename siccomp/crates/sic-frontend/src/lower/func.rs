@@ -1442,7 +1442,19 @@ impl<'m> Lowerer {
                 fc.push_instr(Instr::DbgVar {
                     name: pname.clone(), ty: pty.clone(), slot: ptr_vid, is_param: true,
                 });
+                // sic `string` params are BORROWED (the caller keeps ownership; no
+                // retain on entry). But assigning to one releases its old value, which
+                // the callee never owned — freeing the caller's string. A string param
+                // the body assigns to (or takes the address of) therefore becomes an
+                // owned local, exactly like `string s = arg;`: retained on entry and
+                // released at scope exit. Untouched params stay zero-cost borrows.
+                let owned_string_param = fc.is_sic() && super::types::is_sic_string(&pty)
+                    && fc.moved_names.contains(pname);
                 fc.define_local(pname.clone(), pty, ptr_vid);
+                if owned_string_param {
+                    fc.retain_string_at(&Val::Local(ptr_vid))?;
+                    fc.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(ptr_vid) });
+                }
                 if let Some(en) = fc.c_enum_name_of(&p.ty.ty) {
                     fc.enum_locals.insert(pname.clone(), en);
                 }
@@ -1939,6 +1951,18 @@ impl<'m> FuncCtx<'m> {
                         match &d.init {
                             Some(Initializer::Expr(e)) => {
                                 let pty = self.infer_expr_type(e).unwrap_or(ty);
+                                // The initializer must BE a tuple. A parenthesized
+                                // list `("a", "b")` is a comma expression (its last
+                                // operand), not a tuple — treating that string/int as
+                                // a tuple block crashed at run time in the retain.
+                                if !super::types::is_tuple(&pty) {
+                                    let hint = if matches!(e.kind, ExprKind::Comma(..)) {
+                                        "; `(a, b)` is a comma expression — build a tuple with `tuple(a, b, …)`"
+                                    } else { "" };
+                                    return Err(CompileError::at(
+                                        format!("cannot initialize tuple `{}` from a non-tuple value{}", d.name, hint),
+                                        e.span.file.clone(), e.span.line, e.span.col));
+                                }
                                 let vid = self.alloc_val();
                                 self.push_instr(Instr::Alloca { dest: vid, ty: pty.clone(), align: None });
                                 self.define_local(d.name.clone(), pty.clone(), vid);
