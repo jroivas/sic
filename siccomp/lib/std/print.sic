@@ -1,19 +1,25 @@
 module std;
 
 // `Print(fmt, a, b, …)` — format `fmt` with the arguments (the same `{}`
-// placeholders as `Fmt`) and write the result to stdout. `args` is forwarded to
-// `Fmt` as one already-collected `va_array`, not re-boxed.
-int Print(string fmt, va_array args, va_dict kwargs) {
+// placeholders as `Fmt`) and write the result to a target file descriptor,
+// defaulting to stdout. Because the default parameter sits before the `va_array`,
+// the target is keyword-only at the call site (sic.md §"Default parameters"):
+// `Print("x={}", x)` writes to stdout, `Print("x={}", x, target=2)` to stderr.
+// `args` is forwarded to `Fmt` as one already-collected `va_array`, not re-boxed.
+int Print(string fmt, int target = 1, va_array args, va_dict kwargs) {
     string s = Fmt(fmt, args, kwargs);
-    write(1, s.ptr, s.size);
+    write(target, s.ptr, s.size);
     return 0;
 }
 
 // `Println(fmt, a, b, …)` — like `Print`, followed by a newline. Named arguments
-// (`name = value`) are collected into `kwargs` for `{name}` placeholders.
-int Println(string fmt, va_array args, va_dict kwargs) {
+// (`name = value`) other than `target` are collected into `kwargs` for `{name}`
+// placeholders; `target` selects the output fd (default stdout).
+int Println(string fmt, int target = 1, va_array args, va_dict kwargs) {
     string s = Fmt(fmt, args, kwargs);
-    write(1, s.ptr, s.size);
-    write(1, "\n", 1);
+    write(target, s.ptr, s.size);
+    write(target, "\n", 1);
     return 0;
 }
+// NOTE: cross-module default-argument support (below) carries these defaults in
+// the `.smod` manifest so a consumer's `std::Print(...)` fills `target`.

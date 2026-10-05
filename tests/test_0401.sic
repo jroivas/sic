@@ -17,8 +17,11 @@ int main() {
     if (add3(1, 2) != 103) return 4;     // b=2, c=100
     if (add3(1, 2, 3) != 6) return 5;    // all explicit
 
-    if (count_with() != 0) return 6;         // base default, no parts
-    if (count_with(10) != 10) return 7;      // explicit base, no parts
-    if (count_with(10, 1, 2, 3) != 13) return 8;  // base + 3 va parts
+    // With a va sink, `base` is KEYWORD-ONLY: a plain positional flows to the
+    // va_array, so `base` must be named to override its default.
+    if (count_with() != 0) return 6;              // base=0, no parts
+    if (count_with(base = 10) != 10) return 7;    // named base, no parts
+    if (count_with(1, 2, 3) != 3) return 8;       // base=0 default, 3 va parts
+    if (count_with(base = 10, 1, 2, 3) != 13) return 9;  // named base + 3 va parts
     return 42;
 }

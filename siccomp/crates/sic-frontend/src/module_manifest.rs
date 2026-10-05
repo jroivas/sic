@@ -80,6 +80,10 @@ pub struct ModuleManifest {
     /// sic module dependencies (sic.md §"Imports"): the other modules this one
     /// `import`s, so a consumer chain-loads them (their types/enums/dtors + links).
     pub deps: Vec<String>,
+    /// sic default-argument export (sic.md §"Default parameters"): `(fn name, fixed
+    /// param names, per-param int-literal default — `None` = required)`, so a
+    /// consumer's `mod::f(...)` fills omitted defaults and binds keyword-only ones.
+    pub fn_defaults: Vec<(String, Vec<String>, Vec<Option<i64>>)>,
 }
 
 impl ModuleManifest {
@@ -167,6 +171,7 @@ impl ModuleManifest {
             struct_ctors: ir.sic_struct_ctors.clone(),
             struct_dtors: ir.sic_struct_dtors.clone(),
             deps: ir.sic_module_deps.clone(),
+            fn_defaults: ir.sic_fn_defaults.clone(),
         }
     }
 
@@ -239,6 +244,16 @@ impl ModuleManifest {
         for (name, sym) in &self.struct_dtors {
             s.push_str(&format!("dtor {} {}\n", name, sym));
         }
+        // Default arguments: `default <fn> <pname>:<lit|-> …` (`-` = required).
+        for (fname, pnames, lits) in &self.fn_defaults {
+            let mut line = format!("default {}", fname);
+            for (i, pn) in pnames.iter().enumerate() {
+                let d = lits.get(i).copied().flatten();
+                line.push_str(&format!(" {}:{}", pn, d.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string())));
+            }
+            line.push('\n');
+            s.push_str(&line);
+        }
 
         for e in &self.exports {
             match &e.ty {
@@ -279,6 +294,7 @@ impl ModuleManifest {
         let mut struct_ctors: Vec<(String, String)> = Vec::new();
         let mut struct_dtors: Vec<(String, String)> = Vec::new();
         let mut deps: Vec<String> = Vec::new();
+        let mut fn_defaults: Vec<(String, Vec<String>, Vec<Option<i64>>)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
@@ -436,6 +452,23 @@ impl ModuleManifest {
                     if kw == "ctor" { struct_ctors.push((name.to_string(), sym.to_string())); }
                     else { struct_dtors.push((name.to_string(), sym.to_string())); }
                 }
+                "default" => {
+                    // `default <fn> <pname>:<lit|-> …`
+                    let fname = it.next()
+                        .ok_or_else(|| format!("line {}: default function name missing", lineno + 1))?
+                        .to_string();
+                    let mut pnames = Vec::new();
+                    let mut lits = Vec::new();
+                    for tok in it {
+                        let (pn, d) = tok.rsplit_once(':')
+                            .ok_or_else(|| format!("line {}: bad default entry '{}'", lineno + 1, tok))?;
+                        pnames.push(pn.to_string());
+                        lits.push(if d == "-" { None } else {
+                            Some(d.parse::<i64>().map_err(|_| format!("line {}: bad default value '{}'", lineno + 1, d))?)
+                        });
+                    }
+                    fn_defaults.push((fname, pnames, lits));
+                }
                 other => {
                     return Err(format!("line {}: unknown record '{}'", lineno + 1, other));
                 }
@@ -455,6 +488,7 @@ impl ModuleManifest {
             deps,
             links,
             exports,
+            fn_defaults,
         })
     }
 }
@@ -707,6 +741,7 @@ mod tests {
             struct_ctors: vec![],
             struct_dtors: vec![],
             deps: vec![],
+            fn_defaults: vec![],
         };
         let text = m.to_text();
         let back = ModuleManifest::parse(&text, 8).unwrap();
@@ -737,6 +772,7 @@ mod tests {
             struct_ctors: vec![],
             struct_dtors: vec![],
             deps: vec![],
+            fn_defaults: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct __sic_string"), "manifest:\n{}", text);
@@ -772,6 +808,7 @@ mod tests {
             struct_ctors: vec![],
             struct_dtors: vec![],
             deps: vec![],
+            fn_defaults: vec![],
         };
         let text = m.to_text();
         assert!(text.contains("struct Point x:i32 y:i32"), "manifest:\n{}", text);

@@ -185,6 +185,41 @@ else
     bad "std-static" "static compile/link failed: $(cat err)"
 fi
 
+# ── Default arguments across modules (sic.md §"Default parameters") ──────────
+# A module exports functions with default parameters; the consumer fills omitted
+# defaults from the manifest, including keyword-only defaults before a va sink.
+mkdir -p defmod_dir
+cat > defmod_dir/defmod.sic <<'EOF'
+module defmod;
+int addk(int a, int b = 5) { return a + b; }
+int pick(int base = 7, va_array parts) { return base + (i32)parts.length; }
+EOF
+if "$SIC" --emit-module defmod_dir >/dev/null 2>derr && [ -f defmod_dir/module_defmod.smod ]; then
+    ok "defmod-build"
+else
+    bad "defmod-build" "emit-module failed: $(cat derr 2>/dev/null)"
+fi
+grep -q "^default addk a:- b:5" defmod_dir/module_defmod.smod && ok "defmod-manifest" \
+    || bad "defmod-manifest" "manifest missing default line:\n$(grep '^default' defmod_dir/module_defmod.smod 2>/dev/null)"
+cat > defuser.sic <<'EOF'
+import defmod;
+int main() {
+    if (defmod::addk(2, 4) != 6) return 1;          // explicit
+    if (defmod::addk(2) != 7) return 2;             // b defaults to 5 (cross-module)
+    if (defmod::pick() != 7) return 3;              // base default, no parts
+    if (defmod::pick(base = 20) != 20) return 4;    // keyword-only base
+    if (defmod::pick(1, 2, 3) != 10) return 5;      // base default (7) + 3 va parts
+    if (defmod::pick(base = 20, 1, 2) != 22) return 6;
+    return 42;
+}
+EOF
+if "$SIC" -x sic -Idefmod_dir defuser.sic -o defuser 2>derr; then
+    ./defuser; dg=$?
+    [ "$dg" -eq 42 ] && ok "defmod-defaults" || bad "defmod-defaults" "expected 42, got $dg"
+else
+    bad "defmod-defaults" "compile/link failed: $(cat derr)"
+fi
+
 # ── Generic functions across modules (sic.md §"Generics") ────────────────────
 # A module exports generic function templates; the consumer re-instantiates them
 # locally (inference and turbofish), with no imported symbol.

@@ -124,6 +124,35 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // Canonicalize a plain module call `Module::sym(args)` (EnumVariant form) to
+        // the `module.sym(args)` (Field) form FIRST, so default-argument filling and
+        // named-argument handling below see one canonical callee shape and run
+        // exactly once (the keyword-only default fill is not idempotent). Only a
+        // bare imported-module name that is NOT itself an enum is rewritten here;
+        // generic/nested/namespace/tagged-enum `::` forms fall through unchanged.
+        if self.is_sic() {
+            if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
+                if self.lowerer.imported_modules.contains_key(enum_name)
+                    && !self.lowerer.generic_fn_defs.contains_key(variant)
+                    && !self.lowerer.enum_defs.contains_key(enum_name)
+                    && self.resolve_plain_enum_const(enum_name, variant).is_none()
+                {
+                    let callee = Expr { kind: ExprKind::Field {
+                        base: Box::new(Expr { kind: ExprKind::Ident(enum_name.clone()), span: sp.clone() }),
+                        name: variant.clone(),
+                    }, span: sp.clone() };
+                    return self.lower_call(&callee, args, sp);
+                }
+            }
+        }
+
+        // sic default arguments (sic.md §"Default parameters"): complete the call's
+        // argument list with any omitted defaults. Done before named-arg handling so
+        // a `name = value` that targets a defaulted parameter binds to it rather than
+        // spilling into a `va_dict`.
+        let filled = self.fill_default_args(func_expr, args, sp)?;
+        let args: &[Expr] = filled.as_deref().unwrap_or(args);
+
         // sic named parameters (sic.md §"Named parameters"): if any argument is
         // `name = value`, map every argument to the callee's parameters — reordering,
         // filling, and (for a variadic) dropping unmatched names to the tail — then
@@ -134,23 +163,6 @@ impl<'m> FuncCtx<'m> {
             if !self.callee_has_va_dict(func_expr) {
                 let reordered = self.resolve_named_args(func_expr, args, sp)?;
                 return self.lower_call(func_expr, &reordered, sp);
-            }
-        }
-
-        // sic default arguments (sic.md §"Default parameters"): if the call omits
-        // trailing parameters that declare a default, append those default
-        // expressions and re-enter with the completed positional list. Only a
-        // directly-named callee carries defaults; defaults are trailing-only (parser
-        // enforced), so `args.len()..n` are exactly the omitted ones.
-        if self.is_sic() {
-            if let ExprKind::Ident(name) = &func_expr.kind {
-                if let Some(defs) = self.lowerer.fn_param_defaults.get(name).cloned() {
-                    if args.len() < defs.len() && defs[args.len()..].iter().all(|d| d.is_some()) {
-                        let mut full: Vec<Expr> = args.to_vec();
-                        for d in &defs[args.len()..] { full.push(d.clone().unwrap()); }
-                        return self.lower_call(func_expr, &full, sp);
-                    }
-                }
             }
         }
 
@@ -1212,6 +1224,93 @@ impl<'m> FuncCtx<'m> {
                 .unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// Complete a call's argument list with omitted default values (sic.md
+    /// §"Default parameters"). Returns `Some(new_args)` when it changes anything,
+    /// else `None`. Two regimes, by whether the callee has a `va_array`/`va_dict`:
+    ///
+    ///  * **No va sink** — defaults fill positionally: a call shorter than the
+    ///    parameter list has the trailing defaults appended (`add(2)` → `add(2,5)`).
+    ///    Deferred to the named-arg path if the call already uses `name = value`.
+    ///  * **With a va sink** — the defaulted parameters are KEYWORD-ONLY: the first
+    ///    R positionals fill the required params, each defaulted param takes a
+    ///    matching `name = value` (consumed) or its default, any remaining
+    ///    positionals flow to the va sink, and leftover `name = value` go to the
+    ///    `va_dict`. So `Print("x={}", x, target=stderr)` binds target by name and
+    ///    sends `x` to the varargs, while `Print("x={}", x)` uses target's default.
+    fn fill_default_args(&self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span)
+        -> Result<Option<Vec<Expr>>>
+    {
+        if !self.is_sic() { return Ok(None); }
+        // Resolve the callee's (param names, defaults) — from this unit for a
+        // directly-named function, or from an imported module's manifest for
+        // `mod::f(...)` / `mod.f(...)`. The defaults carry param names so a
+        // keyword-only default can be bound by name.
+        let (pnames, defs): (Vec<String>, Vec<Option<Expr>>) = match &func_expr.kind {
+            ExprKind::Ident(n) => {
+                let defs = match self.lowerer.fn_param_defaults.get(n) { Some(d) => d.clone(), None => return Ok(None) };
+                let pnames = self.lowerer.fn_param_names.get(n).map(|(ns, _)| ns.clone()).unwrap_or_default();
+                (pnames, defs)
+            }
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                match &base.kind {
+                    ExprKind::Ident(m) => match self.lowerer.module_fn_defaults.get(&(m.clone(), name.clone())) {
+                        Some((ns, lits)) => (ns.clone(), lits.iter().map(|l| l.map(|v| Expr::new(ExprKind::IntLit(v, false), sp.clone()))).collect()),
+                        None => return Ok(None),
+                    },
+                    _ => return Ok(None),
+                }
+            }
+            // `Module::sym(...)` (EnumVariant form) is canonicalized to the `Field`
+            // form at the top of `lower_call` before fill runs, so it never reaches
+            // here — no EnumVariant arm needed (handling it would double-fill).
+            _ => return Ok(None),
+        };
+        if !defs.iter().any(|d| d.is_some()) { return Ok(None); }
+        let has_va = self.callee_param_types(func_expr).iter()
+            .any(|t| super::super::types::is_va_array(t) || super::super::types::is_va_dict(t));
+
+        if !has_va {
+            // Positional fill. Leave a call that already names arguments to the
+            // named-arg path.
+            if args.iter().any(|a| matches!(a.kind, ExprKind::NamedArg { .. })) { return Ok(None); }
+            if args.len() < defs.len() && defs[args.len()..].iter().all(|d| d.is_some()) {
+                let mut out = args.to_vec();
+                for d in &defs[args.len()..] { out.push(d.clone().unwrap()); }
+                return Ok(Some(out));
+            }
+            return Ok(None);
+        }
+
+        // va present → defaulted params are keyword-only.
+        let r = defs.iter().take_while(|d| d.is_none()).count(); // required prefix
+        let mut positional: Vec<Expr> = Vec::new();
+        let mut named: Vec<(String, Expr)> = Vec::new();
+        for a in args {
+            if let ExprKind::NamedArg { name: n, value } = &a.kind { named.push((n.clone(), (**value).clone())); }
+            else { positional.push(a.clone()); }
+        }
+        let mut out: Vec<Expr> = Vec::new();
+        let mut pi = 0usize;
+        for _ in 0..r { if pi < positional.len() { out.push(positional[pi].clone()); pi += 1; } }
+        for i in r..defs.len() {
+            let pn = pnames.get(i).cloned().unwrap_or_default();
+            if let Some(k) = named.iter().position(|(n, _)| !pn.is_empty() && *n == pn) {
+                out.push(named.remove(k).1);
+            } else if let Some(d) = &defs[i] {
+                out.push(d.clone());
+            } else {
+                // A required param slot in the keyword-only region with no value:
+                // leave the call unchanged and let normal checking report it.
+                return Ok(None);
+            }
+        }
+        while pi < positional.len() { out.push(positional[pi].clone()); pi += 1; }
+        for (n, v) in named {
+            out.push(Expr::new(ExprKind::NamedArg { name: n, value: Box::new(v) }, sp.clone()));
+        }
+        Ok(Some(out))
     }
 
     /// Whether the callee declares a `va_dict` parameter (the named-varargs sink).

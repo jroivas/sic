@@ -153,6 +153,13 @@ pub struct Module {
     /// `import`s. A consumer chain-loads these so a dependency's types/enums/dtors
     /// and link flags come along automatically (`import extra` pulls in `std`).
     pub sic_module_deps: Vec<String>,
+    /// sic module default-argument export (sic.md §"Default parameters"): for each
+    /// exported function that has defaults, `(fn name, param names [fixed prefix],
+    /// default int literals per param — `None` = required)`. Carries enough for a
+    /// consumer's `mod::f(...)` to fill omitted defaults (and bind keyword-only
+    /// defaults when the function also has a `va` sink). Only integer-literal
+    /// defaults cross a module boundary.
+    pub sic_fn_defaults: Vec<(String, Vec<String>, Vec<Option<i64>>)>,
 }
 
 impl Module {
@@ -173,6 +180,7 @@ impl Module {
             sic_struct_ctors: Vec::new(),
             sic_struct_dtors: Vec::new(),
             sic_module_deps: Vec::new(),
+            sic_fn_defaults: Vec::new(),
         }
     }
 

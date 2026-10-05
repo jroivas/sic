@@ -197,6 +197,11 @@ pub struct Lowerer {
     /// parameter's default expression (`None` for a required one). A call that omits
     /// a trailing argument supplies the default at the call site.
     pub fn_param_defaults: HashMap<String, Vec<Option<crate::ast::Expr>>>,
+    /// sic default arguments across a module boundary (sic.md §"Default
+    /// parameters"): `(module, fn)` → `(fixed param names, int-literal defaults)`,
+    /// loaded from each imported manifest so a consumer's `mod::f(...)` fills
+    /// omitted defaults.
+    pub module_fn_defaults: HashMap<(String, String), (Vec<String>, Vec<Option<i64>>)>,
     /// sic bitfields (sic.md §"Bitfields"): bitfield name → its member list, in
     /// declaration order, including `_` placeholders (a member's value is `1 <<
     /// index_in_this_list`). The list length is the flag capacity (bit count).
@@ -290,6 +295,7 @@ impl Lowerer {
             generic_fn_defs: HashMap::new(),
             fn_param_names: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            module_fn_defaults: HashMap::new(),
         }
     }
 
@@ -470,6 +476,22 @@ impl Lowerer {
             for (sname, sym) in &self.struct_dtor {
                 if self.private_types.contains(sname) || imp(sname) { continue; }
                 self.module.sic_struct_dtors.push((sname.clone(), sym.clone()));
+            }
+            // sic default arguments (sic.md §"Default parameters"): publish each
+            // public function's fixed-parameter names + integer-literal defaults, so
+            // a consumer's `mod::f(...)` can fill omitted defaults (and bind
+            // keyword-only ones). Only int-literal defaults cross a module boundary.
+            for (fname, defs) in &self.fn_param_defaults {
+                if self.private_types.contains(fname) || imp(fname) { continue; }
+                let names = self.fn_param_names.get(fname).map(|(n, _)| n.clone()).unwrap_or_default();
+                let lits: Vec<Option<i64>> = defs.iter()
+                    .map(|d| d.as_ref().and_then(const_int_literal)).collect();
+                // Export only when every default present is an int literal we can
+                // carry (a non-literal default stays a same-unit-only convenience).
+                let ok = defs.iter().zip(&lits).all(|(d, l)| d.is_none() == l.is_none());
+                if ok && defs.iter().any(|d| d.is_some()) {
+                    self.module.sic_fn_defaults.push((fname.clone(), names[..defs.len().min(names.len())].to_vec(), lits));
+                }
             }
             // Dependencies: the other modules this one imports, for chain-loading.
             let mut deps: Vec<String> = self.imported_modules.keys().cloned().collect();
@@ -784,6 +806,12 @@ impl Lowerer {
                 exports.insert(e.name.clone(), (e.symbol.clone(), e.ty.clone()));
             }
             self.imported_modules.insert(module.to_string(), exports);
+            // sic default arguments (sic.md §"Default parameters"): record each
+            // exported function's param names + int-literal defaults for `mod::f(...)`.
+            for (fname, pnames, lits) in &manifest.fn_defaults {
+                self.module_fn_defaults.insert(
+                    (module.to_string(), fname.clone()), (pnames.clone(), lits.clone()));
+            }
             // sic module type export (sic.md §"Namespace"): register the module's
             // public aggregate types so the consumer can name `mod::Type` (which
             // resolves to the last segment) and bare `Type`.
@@ -4171,6 +4199,23 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
             for p in params { collect_generics_type(&p.ty.ty, out); }
         }
         _ => {}
+    }
+}
+
+/// Extract a plain integer-literal value from a default-argument expression, for
+/// carrying across a module boundary (sic.md §"Default parameters"). Handles
+/// int/uint/char/bool literals and a unary `-`/`~`; anything else → `None` (such a
+/// default remains a same-unit-only convenience).
+fn const_int_literal(e: &Expr) -> Option<i64> {
+    use crate::ast::{ExprKind as E, UnOpKind as U};
+    match &e.kind {
+        E::IntLit(v, _) => Some(*v),
+        E::UIntLit(v, _) => Some(*v as i64),
+        E::CharLit(v) => Some(*v as i64),
+        E::BoolLit(b) => Some(if *b { 1 } else { 0 }),
+        E::Unary { op: U::Neg, expr } => const_int_literal(expr).map(|v| -v),
+        E::Unary { op: U::BitNot, expr } => const_int_literal(expr).map(|v| !v),
+        _ => None,
     }
 }
 
