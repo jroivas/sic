@@ -28,47 +28,6 @@ struct Preprocessor {
     list<string> output_lines;
 }
 
-// ── Utility functions ─────────────────────────────────────────────────────
-
-i32 is_space(i32 ch) {
-    return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' ? 1 : 0;
-}
-
-i32 is_ident_start(i32 ch) {
-    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_' ? 1 : 0;
-}
-
-i32 is_ident(i32 ch) {
-    return is_ident_start(ch) || (ch >= '0' && ch <= '9') ? 1 : 0;
-}
-
-i32 find_ch(string s, i32 ch) {
-    for (i32 i = 0; i < s.length; i++)
-        if (s[i] == ch) return i;
-    return -1;
-}
-
-i32 starts_with(string s, string prefix) {
-    if (prefix.length > s.length) return 0;
-    for (i32 i = 0; i < prefix.length; i++)
-        if (s[i] != prefix[i]) return 0;
-    return 1;
-}
-
-string ltrim(string s) {
-    i32 i = 0;
-    while (i < s.length && is_space(s[i])) i++;
-    return i == 0 ? s : s[i:s.length];
-}
-
-string trim(string s) {
-    i32 i = 0;
-    while (i < s.length && is_space(s[i])) i++;
-    i32 j = s.length - 1;
-    while (j >= 0 && is_space(s[j])) j--;
-    if (i > j) return "";
-    return s[i:j+1];
-}
 
 // ── File I/O using std::File (except stdin) ────────────────────────────────
 
@@ -118,9 +77,9 @@ list<string> tokenize(string input) {
     i32 i = 0;
     while (i < input.length) {
         i32 ch = input[i];
-        if (is_space(ch)) {
+        if (std::IsSpace(ch)) {
             tokens.add(" ");
-            while (i < input.length && is_space(input[i])) i++;
+            while (i < input.length && std::IsSpace(input[i])) i++;
             continue;
         }
         if (ch == '/' && i + 1 < input.length && input[i+1] == '*') {
@@ -132,16 +91,16 @@ list<string> tokenize(string input) {
             while (i < input.length && input[i] != '\n') i++;
             continue;
         }
-        if (is_ident_start(ch)) {
+        if (std::IsIdentStart(ch)) {
             i32 start = i;
-            while (i < input.length && is_ident(input[i])) i++;
+            while (i < input.length && std::IsIdent(input[i])) i++;
             tokens.add(input[start:i]); continue;
         }
         if (ch >= '0' && ch <= '9') {
             i32 start = i;
             if (ch == '0' && i+1 < input.length && (input[i+1] == 'x' || input[i+1] == 'X')) i += 2;
             else if (ch == '0' && i+1 < input.length && (input[i+1] == 'b' || input[i+1] == 'B')) i += 2;
-            while (i < input.length && (is_ident(input[i]) || input[i] == '.')) i++;
+            while (i < input.length && (std::IsIdent(input[i]) || input[i] == '.')) i++;
             tokens.add(input[start:i]); continue;
         }
         if (ch == '"') {
@@ -181,20 +140,20 @@ list<string> tokenize(string input) {
 i32 eval_expr(string expr, dict<string, string> *macros, i32 *pos);
 
 i32 eval_primary(string expr, dict<string, string> *macros, i32 *pos) {
-    while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+    while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
     if (*pos >= expr.length) return 0;
 
     // defined name / defined(name)
     if (*pos + 7 < expr.length && expr[*pos:*pos+7] == "defined") {
         *pos += 7;
-        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
         if (*pos < expr.length && expr[*pos] == '(') { (*pos)++; }
-        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
         i32 start = *pos;
-        while (*pos < expr.length && is_ident(expr[*pos])) (*pos)++;
+        while (*pos < expr.length && std::IsIdent(expr[*pos])) (*pos)++;
         string name = expr[start:*pos];
         // Check if macro exists: read from dict, our encodings are never empty
-        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
         if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
         i32 found_via_get = 0;
         {
@@ -207,7 +166,7 @@ i32 eval_primary(string expr, dict<string, string> *macros, i32 *pos) {
     if (expr[*pos] == '(') {
         (*pos)++;
         i32 val = eval_expr(expr, macros, pos);
-        while (*pos < expr.length && is_space(expr[*pos])) (*pos)++;
+        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
         if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
         return val;
     }
@@ -260,46 +219,46 @@ i32 eval_primary(string expr, dict<string, string> *macros, i32 *pos) {
     }
 
     // Unknown identifier → 0
-    while (*pos < expr.length && is_ident(expr[*pos])) (*pos)++;
+    while (*pos < expr.length && std::IsIdent(expr[*pos])) (*pos)++;
     return 0;
 }
 
 i32 eval_mul(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_primary(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p < e.length && (e[*p] == '*' || e[*p] == '/' || e[*p] == '%')) {
         i32 op = e[*p]; (*p)++; i32 rhs = eval_primary(e, m, p);
         if (op == '*') val *= rhs; else if (op == '/') val = rhs ? val / rhs : 0; else val = rhs ? val % rhs : 0;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_add(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_mul(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p < e.length && (e[*p] == '+' || e[*p] == '-')) {
         i32 op = e[*p]; (*p)++; i32 rhs = eval_mul(e, m, p);
         if (op == '+') val += rhs; else val -= rhs;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_shift(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_add(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p + 1 < e.length && ((e[*p] == '<' && e[*p+1] == '<') || (e[*p] == '>' && e[*p+1] == '>'))) {
         i32 op = e[*p]; (*p) += 2; i32 rhs = eval_add(e, m, p);
         if (op == '<') val <<= rhs; else val >>= rhs;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_rel(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_shift(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p + 1 < e.length) {
         i32 op = e[*p];
         if (op == '<' && e[*p+1] == '=') { (*p) += 2; val = val <= eval_shift(e, m, p) ? 1 : 0; }
@@ -307,75 +266,75 @@ i32 eval_rel(string e, dict<string, string> *m, i32 *p) {
         else if (op == '<') { (*p)++; val = val < eval_shift(e, m, p) ? 1 : 0; }
         else if (op == '>') { (*p)++; val = val > eval_shift(e, m, p) ? 1 : 0; }
         else break;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_eq(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_rel(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p + 1 < e.length && ((e[*p] == '=' && e[*p+1] == '=') || (e[*p] == '!' && e[*p+1] == '='))) {
         if (e[*p] == '=') { (*p) += 2; val = val == eval_rel(e, m, p) ? 1 : 0; }
         else { (*p) += 2; val = val != eval_rel(e, m, p) ? 1 : 0; }
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_and(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_eq(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p < e.length && e[*p] == '&' && !(*p + 1 < e.length && e[*p+1] == '&')) {
         (*p)++; val &= eval_eq(e, m, p);
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_xor(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_and(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
-    while (*p < e.length && e[*p] == '^') { (*p)++; val ^= eval_and(e, m, p); while (*p < e.length && is_space(e[*p])) (*p)++; }
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+    while (*p < e.length && e[*p] == '^') { (*p)++; val ^= eval_and(e, m, p); while (*p < e.length && std::IsSpace(e[*p])) (*p)++; }
     return val;
 }
 
 i32 eval_or(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_xor(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p < e.length && e[*p] == '|' && !(*p + 1 < e.length && e[*p+1] == '|')) {
         (*p)++; val |= eval_xor(e, m, p);
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_land(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_or(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p + 1 < e.length && e[*p] == '&' && e[*p+1] == '&') {
         (*p) += 2; val = (val && eval_or(e, m, p)) ? 1 : 0;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_lor(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_land(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     while (*p + 1 < e.length && e[*p] == '|' && e[*p+1] == '|') {
         (*p) += 2; val = val || eval_land(e, m, p) ? 1 : 0;
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     }
     return val;
 }
 
 i32 eval_ternary(string e, dict<string, string> *m, i32 *p) {
     i32 val = eval_lor(e, m, p);
-    while (*p < e.length && is_space(e[*p])) (*p)++;
+    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
     if (*p < e.length && e[*p] == '?') {
         (*p)++; i32 t_val = eval_expr(e, m, p);
-        while (*p < e.length && is_space(e[*p])) (*p)++;
+        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
         if (*p < e.length && e[*p] == ':') { (*p)++; i32 f_val = eval_ternary(e, m, p); return val ? t_val : f_val; }
     }
     return val;
@@ -392,8 +351,16 @@ i32 eval_if_expr(string expr, dict<string, string> *macros) {
 
 // ── Macro expansion ───────────────────────────────────────────────────────
 
+// Is `name` already being expanded (the C "blue paint" hide set)? A macro in the
+// active set is emitted literally instead of re-expanded, so `#define A B` /
+// `#define B A` terminates (yielding `A`) instead of recursing forever.
+i32 name_active(list<string> active, string name) {
+    for (i32 i = 0; i < active.length; i++) if (active[i] == name) return 1;
+    return 0;
+}
+
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
-                         i32 cur_line, string cur_file) {
+                         i32 cur_line, string cur_file, list<string> active) {
     list<string> out;
     for (i32 i = 0; i < tokens.length; i++) {
         string tok = tokens[i];
@@ -409,10 +376,14 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
         if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
         if (tok == "__STDC__") { out.add("1"); continue; }
 
-        // Macro lookup
-        // dict check: we can't iterate keys easily. Use a try approach.
-        string enc = macros[tok];
+        // Macro lookup. A macro already being expanded (blue-painted) is emitted
+        // literally — not re-expanded — so recursive macros terminate.
+        string enc = name_active(active, tok) ? "" : macros[tok];
         if (enc.length >= 2) {
+            // The expansion of this macro hides its own name.
+            list<string> nactive;
+            for (i32 ni = 0; ni < active.length; ni++) nactive.add(active[ni]);
+            nactive.add(tok);
             if (enc[0] == 'F') {
                 // Function-like: is next token '(' ?
                 i32 j = i + 1;
@@ -467,13 +438,45 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         }
                     }
 
+                    // Stringize `#param` → "<raw arg>" (the UNexpanded argument,
+                    // C11 6.10.3.2). Done before normal substitution so the `#`
+                    // operator sees the parameter, not its replacement. A `##` is
+                    // left alone (handled as token-paste elsewhere).
+                    {
+                        string sb = "";
+                        i32 si = 0;
+                        while (si < body.length) {
+                            // Leave `##` (token paste) intact — consume both chars.
+                            if (body[si] == '#' && si + 1 < body.length && body[si+1] == '#') {
+                                sb = sb + "##"; si += 2; continue;
+                            }
+                            if (body[si] == '#') {
+                                i32 sj = si + 1;
+                                while (sj < body.length && (body[sj] == ' ' || body[sj] == '\t')) sj++;
+                                i32 ns = sj;
+                                while (sj < body.length && std::IsIdent(body[sj])) sj++;
+                                string nm = body[ns:sj];
+                                i32 matched = -1;
+                                for (i32 pp2 = 0; pp2 < param_names.length && pp2 < args_list.length; pp2++)
+                                    if (nm.length > 0 && param_names[pp2] == nm) { matched = pp2; break; }
+                                if (matched >= 0) {
+                                    sb = sb + "\"" + args_list[matched].trim() + "\"";
+                                    si = sj; continue;
+                                }
+                            }
+                            sb = sb + body[si:si+1];
+                            si++;
+                        }
+                        body = sb;
+                    }
+
                     // Param substitution (simple: replace name with expanded arg in body)
                     for (i32 pi2 = 0; pi2 < param_names.length && pi2 < args_list.length; pi2++) {
                         string pname = param_names[pi2];
                         string arg_text = args_list[pi2];
                         // Expand the arg
                         list<string> atok = tokenize(arg_text);
-                        list<string> aexp = expand_tokens(atok, macros, cur_line, cur_file);
+                        list<string> aexp = expand_tokens(atok, macros, cur_line, cur_file, active);
                         string arg_exp = "";
                         for (i32 ei = 0; ei < aexp.length; ei++) {
                             if (aexp[ei] == " ") { if (arg_exp.length > 0 && arg_exp[arg_exp.length-1] != ' ') arg_exp = arg_exp + " "; }
@@ -487,8 +490,8 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                             i32 the_match = 1;
                             for (i32 mi = 0; mi < pname.length && bi + mi < body.length; mi++)
                                 if (body[bi+mi] != pname[mi]) { the_match = 0; break; }
-                            if (the_match == 1 && (bi + pname.length >= body.length || !is_ident(body[bi + pname.length]))
-                                && (bi == 0 || !is_ident(body[bi-1]))) {
+                            if (the_match == 1 && (bi + pname.length >= body.length || !std::IsIdent(body[bi + pname.length]))
+                                && (bi == 0 || !std::IsIdent(body[bi-1]))) {
                                 nb = nb + arg_exp;
                                 bi += pname.length;
                             } else {
@@ -501,7 +504,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
 
                     // Expand body and emit
                     list<string> bt = tokenize(body);
-                    list<string> be = expand_tokens(bt, macros, cur_line, cur_file);
+                    list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
                     for (i32 ei = 0; ei < be.length; ei++) {
                         if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
                         else out.add(be[ei]);
@@ -512,7 +515,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                 tuple ep = enc.split("|");
                 string body = ep.length >= 2 ? ep[1] : "";
                 list<string> bt = tokenize(body);
-                list<string> be = expand_tokens(bt, macros, cur_line, cur_file);
+                list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
                 for (i32 ei = 0; ei < be.length; ei++) {
                     if (be[ei] == " ") { if (out.length > 0 && out[out.length-1] != " ") out.add(" "); }
                     else out.add(be[ei]);
@@ -534,7 +537,8 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
 string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file) {
     list<string> toks = tokenize(line);
     for (i32 pass = 0; pass < 10; pass++) {
-        list<string> expanded = expand_tokens(toks, macros, cur_line, cur_file);
+        list<string> nothing_active;
+        list<string> expanded = expand_tokens(toks, macros, cur_line, cur_file, nothing_active);
         i32 same = 1;
         if (expanded.length == toks.length) {
             for (i32 i = 0; i < expanded.length; i++)
@@ -548,7 +552,10 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
         if (toks[i] == " ") { if (result.length > 0 && result[result.length-1] != ' ') result = result + " "; }
         else result = result + toks[i];
     }
-    return result;
+    // Trailing whitespace (e.g. where a line-end comment became a space) is never
+    // significant in preprocessed output — drop it, matching `cpp`. `.rtrim()` is a
+    // view into the local `result`, so `.dup` it to return an owned string.
+    return result.rtrim().dup;
 }
 
 // ── Conditionals ──────────────────────────────────────────────────────────
@@ -568,10 +575,10 @@ i32 cond_any_skip(Preprocessor *pp) {
 // ── Directive handlers ────────────────────────────────────────────────────
 
 void pp_define(Preprocessor *pp, string rest) {
-    rest = ltrim(rest);
+    rest = rest.ltrim();
     if (rest.length == 0) return;
     i32 i = 0;
-    while (i < rest.length && is_ident(rest[i])) i++;
+    while (i < rest.length && std::IsIdent(rest[i])) i++;
     if (i == 0) return;
     string name = rest[0:i];
     i32 j = i;
@@ -596,7 +603,7 @@ void pp_define(Preprocessor *pp, string rest) {
 }
 
 void pp_include(Preprocessor *pp, string rest) {
-    rest = ltrim(rest);
+    rest = rest.ltrim();
     if (rest.length == 0) return;
     string path = "";
     if (rest[0] == '"') {
@@ -648,9 +655,9 @@ void pp_include(Preprocessor *pp, string rest) {
 }
 
 i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
-    rest = ltrim(rest);
+    rest = rest.ltrim();
     i32 i = 0;
-    while (i < rest.length && is_ident(rest[i])) i++;
+    while (i < rest.length && std::IsIdent(rest[i])) i++;
     string name = rest[0:i];
     i32 found = 0;
     string v = pp->macros[name];
@@ -658,31 +665,63 @@ i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
     return negate ? !found : found;
 }
 
+// Replace every `defined NAME` / `defined(NAME)` in `rest` with `1` or `0`
+// BEFORE macro expansion — the operand of `defined` is not itself expanded
+// (C11 6.10.1), so `#if defined(FOO) && FOO` must test FOO's definedness, not the
+// expansion of the token `FOO`.
+string substitute_defined(string rest, dict<string, string> *macros) {
+    string out = "";
+    i32 i = 0;
+    while (i < rest.length) {
+        if (i + 7 <= rest.length && rest[i:i+7] == "defined"
+            && (i == 0 || !std::IsIdent(rest[i-1]))
+            && (i + 7 >= rest.length || !std::IsIdent(rest[i+7]))) {
+            i += 7;
+            while (i < rest.length && std::IsSpace(rest[i])) i++;
+            i32 paren = 0;
+            if (i < rest.length && rest[i] == '(') { paren = 1; i++; }
+            while (i < rest.length && std::IsSpace(rest[i])) i++;
+            i32 ns = i;
+            while (i < rest.length && std::IsIdent(rest[i])) i++;
+            string name = rest[ns:i];
+            while (i < rest.length && std::IsSpace(rest[i])) i++;
+            if (paren && i < rest.length && rest[i] == ')') i++;
+            string v = (*macros)[name];
+            out = out + (v.length >= 2 ? "1" : "0");
+        } else {
+            out = out + rest[i:i+1];
+            i++;
+        }
+    }
+    return out;
+}
+
 i32 pp_if(Preprocessor *pp, string rest) {
-    string expanded = expand_line(rest, &pp->macros, pp->current_line, pp->current_file);
+    string pre = substitute_defined(rest, &pp->macros);
+    string expanded = expand_line(pre, &pp->macros, pp->current_line, pp->current_file);
     return eval_if_expr(expanded, &pp->macros);
 }
 
+// Conditional-group state per `#if` nesting level:
+//   0 = active (this branch taken, emit)
+//   1 = done   (a branch already matched; skip the rest of the group to #endif)
+//   2 = waiting (no branch matched yet; a later #elif/#else may activate)
+//   3 = parent-skip (an enclosing level is inactive; never activate)
 void pp_else(Preprocessor *pp) {
     if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #else without #if", pp->current_file, pp->current_line); return; }
     i32 state = pp->cond_stack[pp->cond_depth - 1];
-    if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;
-    else if (state == 1) {
-        i32 parent_skip = 0;
-        for (i32 i = 0; i < pp->cond_depth - 1; i++) if (pp->cond_stack[i] >= 2) { parent_skip = 1; break; }
-        if (!parent_skip) pp->cond_stack[pp->cond_depth - 1] = 0;
-    }
+    if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;        // was active → done
+    else if (state == 2) pp->cond_stack[pp->cond_depth - 1] = 0;   // waiting → activate else
 }
 
 void pp_elif(Preprocessor *pp, string rest) {
     if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #elif without #if", pp->current_file, pp->current_line); return; }
     i32 state = pp->cond_stack[pp->cond_depth - 1];
-    if (state == 0) { pp->cond_stack[pp->cond_depth - 1] = 1; return; }
-    if (state == 1) {
-        i32 parent_skip = 0;
-        for (i32 i = 0; i < pp->cond_depth - 1; i++) if (pp->cond_stack[i] >= 2) { parent_skip = 1; break; }
-        if (!parent_skip) { i32 val = pp_if(pp, rest); pp->cond_stack[pp->cond_depth - 1] = val ? 0 : 1; }
+    if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;        // was active → done
+    else if (state == 2) {                                         // still looking: test it
+        pp->cond_stack[pp->cond_depth - 1] = pp_if(pp, rest) ? 0 : 2;
     }
+    // state 1 (done) and 3 (parent-skip) stay put.
 }
 
 void pp_endif(Preprocessor *pp) {
@@ -693,7 +732,7 @@ void pp_endif(Preprocessor *pp) {
 // ── Line processor ────────────────────────────────────────────────────────
 
 void pp_process_line(Preprocessor *pp, string line) {
-    string trimmed = ltrim(line);
+    string trimmed = line.ltrim();
     if (trimmed.length == 0 || trimmed[0] != '#') {
         if (cond_active(pp)) {
             string expanded = expand_line(line, &pp->macros, pp->current_line, pp->current_file);
@@ -713,28 +752,28 @@ void pp_process_line(Preprocessor *pp, string line) {
     if (kw == "define") { if (!skipping) pp_define(pp, rest); }
     else if (kw == "undef") {
         if (!skipping) {
-            tuple parts = trim(rest).split(" ");
+            tuple parts = rest.trim().split(" ");
             string name = parts[0];
             del pp->macros[name];
         }
     } else if (kw == "include") { if (!skipping) pp_include(pp, rest); }
-    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_if(pp, rest) ? 0 : 1)); }
-    else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_ifdef(pp, rest, 0) ? 0 : 1)); }
-    else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 2 : (pp_ifdef(pp, rest, 1) ? 0 : 1)); }
+    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest) ? 0 : 2)); }
+    else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 0) ? 0 : 2)); }
+    else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 1) ? 0 : 2)); }
     else if (kw == "else") { pp_else(pp); }
     else if (kw == "elif") { pp_elif(pp, rest); }
     else if (kw == "endif") { pp_endif(pp); }
-    else if (kw == "error") { if (cond_active(pp)) { std::Println("{}:{}: error: {}", pp->current_file, pp->current_line, trim(rest)); std::Exit(1); } }
-    else if (kw == "warning") { if (cond_active(pp)) std::Println("{}:{}: warning: {}", pp->current_file, pp->current_line, trim(rest)); }
+    else if (kw == "error") { if (cond_active(pp)) { std::Println("{}:{}: error: {}", pp->current_file, pp->current_line, rest.trim()); std::Exit(1); } }
+    else if (kw == "warning") { if (cond_active(pp)) std::Println("{}:{}: warning: {}", pp->current_file, pp->current_line, rest.trim()); }
     else if (kw == "line") {
         if (!skipping) {
-            string rl = ltrim(rest);
+            string rl = rest.ltrim();
             i32 ni = 0;
             while (ni < rl.length && rl[ni] >= '0' && rl[ni] <= '9') ni++;
             if (ni > 0) {
                 pp->current_line = eval_if_expr(rl[0:ni], &pp->macros) - 1;
                 i32 fi = ni;
-                while (fi < rl.length && is_space(rl[fi])) fi++;
+                while (fi < rl.length && std::IsSpace(rl[fi])) fi++;
                 if (fi < rl.length && rl[fi] == '"') {
                     fi++; i32 fn_start = fi;
                     while (fi < rl.length && rl[fi] != '"') fi++;
@@ -769,10 +808,10 @@ int main(int argc, char **argv) {
     string input_file = "";
     for (i32 ai = 1; ai < argc; ai++) {
         string arg = argv[ai];
-        if (starts_with(arg, "-D") && arg.length > 2) { pp.user_defines.add(arg[2:arg.length]); }
-        else if (starts_with(arg, "-U") && arg.length > 2) { pp.user_undefs.add(arg[2:arg.length]); }
-        else if (starts_with(arg, "-I") && arg.length > 2) { pp.include_dirs.add(arg[2:arg.length]); }
-        else if (starts_with(arg, "-std=")) { /* ignore */ }
+        if (arg.starts_with("-D") && arg.length > 2) { pp.user_defines.add(arg[2:arg.length]); }
+        else if (arg.starts_with("-U") && arg.length > 2) { pp.user_undefs.add(arg[2:arg.length]); }
+        else if (arg.starts_with("-I") && arg.length > 2) { pp.include_dirs.add(arg[2:arg.length]); }
+        else if (arg.starts_with("-std=")) { /* ignore */ }
         else if (arg == "-undef") { /* ignore */ }
         else if (arg == "-") { input_file = "-"; }
         else if (arg[0] != '-') { if (input_file.length == 0) input_file = arg; }
