@@ -287,4 +287,9 @@ fn is_safe_predefine(name: &str) -> bool {
         // macro missing that became the literal label "__USER_LABEL_PREFIX__x".
         || name == "__USER_LABEL_PREFIX__"
         || name == "__REGISTER_PREFIX__"
+        // Atomic ABI of the target (sic's atomics are lock-free): the
+        // `__GCC_ATOMIC_*_LOCK_FREE` levels behind <stdatomic.h>'s
+        // `ATOMIC_*_LOCK_FREE`, and `__GCC_ATOMIC_TEST_AND_SET_TRUEVAL`, which
+        // picks `atomic_flag`'s member type (`_Bool` vs `unsigned char`).
+        || name.starts_with("__GCC_ATOMIC_")
 }
