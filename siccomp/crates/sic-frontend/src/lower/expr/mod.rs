@@ -2755,9 +2755,17 @@ impl<'m> FuncCtx<'m> {
                 e.span.file.clone(), e.span.line, e.span.col,
             ));
         }
-        let data_lv = self.lower_lvalue_field(e, "data")?;
+        // Force the known string layout. When `e` is a string reached THROUGH a
+        // pointer (`(*sp)`, a `string*` parameter), its pointee is stored opaque
+        // (name only, no fields — see [[sic-opaque-aggregates]]), so resolving
+        // `.data`/`.size` off the inferred type fails. The string descriptor's
+        // layout is fixed, so take `e`'s address and read the fields against
+        // `sic_string_type` directly.
+        let sty = super::types::sic_string_type(self.ptr_size());
+        let ptr = match self.lower_lvalue(e) { Ok(lv) => lv.ptr, Err(_) => self.lower_aggregate_ptr(e)? };
+        let data_lv = self.field_ptr_from(LValue::plain(ptr.clone(), sty.clone()), "data", false, &e.span)?;
         let data = self.load_lvalue(&data_lv)?;
-        let size_lv = self.lower_lvalue_field(e, "size")?;
+        let size_lv = self.field_ptr_from(LValue::plain(ptr, sty), "size", false, &e.span)?;
         let size = self.load_lvalue(&size_lv)?;
         let size = self.coerce(size, &Type::i64())?;
         Ok((data, size))

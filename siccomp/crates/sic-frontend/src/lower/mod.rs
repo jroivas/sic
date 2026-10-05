@@ -297,6 +297,14 @@ impl Lowerer {
     /// Enable SIC-language semantics (`.sic` sources). See [`Lowerer::sic`].
     pub fn set_sic(&mut self, on: bool) {
         self.sic = on;
+        // Register the native `string` layout under its reserved name so an opaque
+        // string pointee (reached through a `string*`, where pointer pointees are
+        // stored field-less — see [[sic-opaque-aggregates]]) resolves to the full
+        // `{data,size,rc}` struct for field access (`(*sp).data`, slicing, `.length`).
+        if on {
+            let sty = crate::lower::types::sic_string_type(self.ptr_size);
+            self.struct_types.entry(crate::lower::types::SIC_STRING_NAME.to_string()).or_insert(sty);
+        }
     }
 
     /// Set the global struct-ordering default (`-fstruct-order`) and the build-wide

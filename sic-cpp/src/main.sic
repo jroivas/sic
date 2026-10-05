@@ -91,16 +91,16 @@ list<string> tokenize(string input) {
             while (i < input.length && input[i] != '\n') i++;
             continue;
         }
-        if (std::IsIdentStart(ch)) {
+        if (is_ident_start(ch)) {
             i32 start = i;
-            while (i < input.length && std::IsIdent(input[i])) i++;
+            while (i < input.length && is_ident(input[i])) i++;
             tokens.add(input[start:i]); continue;
         }
         if (ch >= '0' && ch <= '9') {
             i32 start = i;
             if (ch == '0' && i+1 < input.length && (input[i+1] == 'x' || input[i+1] == 'X')) i += 2;
             else if (ch == '0' && i+1 < input.length && (input[i+1] == 'b' || input[i+1] == 'B')) i += 2;
-            while (i < input.length && (std::IsIdent(input[i]) || input[i] == '.')) i++;
+            while (i < input.length && (is_ident(input[i]) || input[i] == '.')) i++;
             tokens.add(input[start:i]); continue;
         }
         if (ch == '"') {
@@ -137,216 +137,228 @@ list<string> tokenize(string input) {
 
 // ── Expression evaluator ──────────────────────────────────────────────────
 
-i32 eval_expr(string expr, dict<string, string> *macros, i32 *pos);
+// The evaluator is a recursive-descent parser over a shrinking VIEW of the
+// expression: each function takes `string *r`, the remaining text to parse, and
+// consumes from its front by re-slicing (`*r = (*r)[n:]`) — no copies, no indices.
+// `peek`/`peek2` read the front without consuming; `skip_ws` drops leading space.
 
-i32 eval_primary(string expr, dict<string, string> *macros, i32 *pos) {
-    while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
-    if (*pos >= expr.length) return 0;
+// C-identifier rules (parser-specific, so not in std).
+i32 is_ident_start(i32 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+i32 is_ident(i32 c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
 
-    // defined name / defined(name)
-    if (*pos + 7 < expr.length && expr[*pos:*pos+7] == "defined") {
-        *pos += 7;
-        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
-        if (*pos < expr.length && expr[*pos] == '(') { (*pos)++; }
-        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
-        i32 start = *pos;
-        while (*pos < expr.length && std::IsIdent(expr[*pos])) (*pos)++;
-        string name = expr[start:*pos];
-        // Check if macro exists: read from dict, our encodings are never empty
-        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
-        if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
-        i32 found_via_get = 0;
-        {
-            string _v = macros[name];
-            if (_v.length >= 2) found_via_get = 1;
-        }
-        return found_via_get;
+i32 peek(string r)  { return r.length > 0 ? r[0] : 0; }
+i32 peek2(string r) { return r.length > 1 ? r[1] : 0; }
+void skip_ws(string *r) { *r = (*r).ltrim(); }
+
+i32 eval_expr(string *r, dict<string, string> *macros);
+
+i32 eval_primary(string *r, dict<string, string> *macros) {
+    skip_ws(r);
+    if ((*r).length == 0) return 0;
+
+    // defined NAME / defined(NAME) — a leftover fallback (pp_if pre-substitutes).
+    if ((*r).starts_with("defined") && !is_ident(peek((*r)[7:]))) {
+        *r = (*r)[7:];
+        skip_ws(r);
+        i32 paren = peek(*r) == '(';
+        if (paren) *r = (*r)[1:];
+        skip_ws(r);
+        i32 n = 0;
+        while (n < (*r).length && is_ident((*r)[n])) n++;
+        string name = (*r)[0:n];
+        *r = (*r)[n:];
+        skip_ws(r);
+        if (paren && peek(*r) == ')') *r = (*r)[1:];
+        return (*macros)[name].length >= 2 ? 1 : 0;
     }
 
-    if (expr[*pos] == '(') {
-        (*pos)++;
-        i32 val = eval_expr(expr, macros, pos);
-        while (*pos < expr.length && std::IsSpace(expr[*pos])) (*pos)++;
-        if (*pos < expr.length && expr[*pos] == ')') (*pos)++;
+    i32 c = peek(*r);
+    if (c == '(') {
+        *r = (*r)[1:];
+        i32 val = eval_expr(r, macros);
+        skip_ws(r);
+        if (peek(*r) == ')') *r = (*r)[1:];
         return val;
     }
-    if (expr[*pos] == '+') { (*pos)++; return eval_primary(expr, macros, pos); }
-    if (expr[*pos] == '-') { (*pos)++; return -eval_primary(expr, macros, pos); }
-    if (expr[*pos] == '~') { (*pos)++; return ~eval_primary(expr, macros, pos); }
-    if (expr[*pos] == '!') { (*pos)++; return eval_primary(expr, macros, pos) ? 0 : 1; }
+    if (c == '+') { *r = (*r)[1:]; return eval_primary(r, macros); }
+    if (c == '-') { *r = (*r)[1:]; return -eval_primary(r, macros); }
+    if (c == '~') { *r = (*r)[1:]; return ~eval_primary(r, macros); }
+    if (c == '!') { *r = (*r)[1:]; return eval_primary(r, macros) ? 0 : 1; }
 
     // Number literal
-    if (expr[*pos] >= '0' && expr[*pos] <= '9') {
+    if (c >= '0' && c <= '9') {
         i32 val = 0, radix = 10;
-        if (expr[*pos] == '0' && *pos + 1 < expr.length
-            && (expr[*pos+1] == 'x' || expr[*pos+1] == 'X')) { radix = 16; *pos += 2; }
-        else if (expr[*pos] == '0' && *pos + 1 < expr.length
-                 && (expr[*pos+1] == 'b' || expr[*pos+1] == 'B')) { radix = 2; *pos += 2; }
-        else if (expr[*pos] == '0') { radix = 8; *pos += 1; }
-        while (*pos < expr.length) {
+        if (c == '0' && (peek2(*r) == 'x' || peek2(*r) == 'X')) { radix = 16; *r = (*r)[2:]; }
+        else if (c == '0' && (peek2(*r) == 'b' || peek2(*r) == 'B')) { radix = 2; *r = (*r)[2:]; }
+        else if (c == '0') { radix = 8; *r = (*r)[1:]; }
+        while ((*r).length > 0) {
+            i32 ch = (*r)[0];
             i32 d = -1;
-            if (expr[*pos] >= '0' && expr[*pos] <= '9') d = expr[*pos] - '0';
-            else if (radix == 16 && expr[*pos] >= 'a' && expr[*pos] <= 'f') d = expr[*pos] - 'a' + 10;
-            else if (radix == 16 && expr[*pos] >= 'A' && expr[*pos] <= 'F') d = expr[*pos] - 'A' + 10;
+            if (ch >= '0' && ch <= '9') d = ch - '0';
+            else if (radix == 16 && ch >= 'a' && ch <= 'f') d = ch - 'a' + 10;
+            else if (radix == 16 && ch >= 'A' && ch <= 'F') d = ch - 'A' + 10;
             else break;
-            if (d < radix) val = val * radix + d; else break;
-            (*pos)++;
+            if (d >= radix) break;
+            val = val * radix + d;
+            *r = (*r)[1:];
         }
-        while (*pos < expr.length && (expr[*pos] == 'U' || expr[*pos] == 'u'
-               || expr[*pos] == 'L' || expr[*pos] == 'l')) (*pos)++;
+        while (peek(*r) == 'U' || peek(*r) == 'u' || peek(*r) == 'L' || peek(*r) == 'l') *r = (*r)[1:];
         return val;
     }
 
     // Char constant
-    if (expr[*pos] == '\'') {
-        (*pos)++; i32 val = 0;
-        if (*pos < expr.length && expr[*pos] == '\\') {
-            (*pos)++;
-            if (*pos < expr.length) {
-                if (expr[*pos] == 'n') val = 10;
-                else if (expr[*pos] == 't') val = 9;
-                else if (expr[*pos] == 'r') val = 13;
-                else if (expr[*pos] == '0') val = 0;
-                else if (expr[*pos] == '\\') val = '\\';
-                else if (expr[*pos] == '\'') val = '\'';
-                else val = expr[*pos];
-                (*pos)++;
-            }
-        } else if (*pos < expr.length) { val = expr[*pos]; (*pos)++; }
-        while (*pos < expr.length && expr[*pos] != '\'') (*pos)++;
-        if (*pos < expr.length && expr[*pos] == '\'') (*pos)++;
+    if (c == '\'') {
+        *r = (*r)[1:];
+        i32 val = 0;
+        if (peek(*r) == '\\') {
+            *r = (*r)[1:];
+            i32 e = peek(*r);
+            if (e == 'n') val = 10;
+            else if (e == 't') val = 9;
+            else if (e == 'r') val = 13;
+            else if (e == '0') val = 0;
+            else val = e;
+            if ((*r).length > 0) *r = (*r)[1:];
+        } else if ((*r).length > 0) { val = (*r)[0]; *r = (*r)[1:]; }
+        while ((*r).length > 0 && (*r)[0] != '\'') *r = (*r)[1:];
+        if (peek(*r) == '\'') *r = (*r)[1:];
         return val;
     }
 
-    // Unknown identifier → 0
-    while (*pos < expr.length && std::IsIdent(expr[*pos])) (*pos)++;
+    // Unknown identifier → 0 (per C, an undefined macro in #if is 0).
+    while ((*r).length > 0 && is_ident((*r)[0])) *r = (*r)[1:];
     return 0;
 }
 
-i32 eval_mul(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_primary(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p < e.length && (e[*p] == '*' || e[*p] == '/' || e[*p] == '%')) {
-        i32 op = e[*p]; (*p)++; i32 rhs = eval_primary(e, m, p);
+i32 eval_mul(string *r, dict<string, string> *m) {
+    i32 val = eval_primary(r, m);
+    skip_ws(r);
+    while (peek(*r) == '*' || peek(*r) == '/' || peek(*r) == '%') {
+        i32 op = peek(*r); *r = (*r)[1:];
+        i32 rhs = eval_primary(r, m);
         if (op == '*') val *= rhs; else if (op == '/') val = rhs ? val / rhs : 0; else val = rhs ? val % rhs : 0;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_add(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_mul(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p < e.length && (e[*p] == '+' || e[*p] == '-')) {
-        i32 op = e[*p]; (*p)++; i32 rhs = eval_mul(e, m, p);
+i32 eval_add(string *r, dict<string, string> *m) {
+    i32 val = eval_mul(r, m);
+    skip_ws(r);
+    while (peek(*r) == '+' || peek(*r) == '-') {
+        i32 op = peek(*r); *r = (*r)[1:];
+        i32 rhs = eval_mul(r, m);
         if (op == '+') val += rhs; else val -= rhs;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_shift(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_add(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p + 1 < e.length && ((e[*p] == '<' && e[*p+1] == '<') || (e[*p] == '>' && e[*p+1] == '>'))) {
-        i32 op = e[*p]; (*p) += 2; i32 rhs = eval_add(e, m, p);
+i32 eval_shift(string *r, dict<string, string> *m) {
+    i32 val = eval_add(r, m);
+    skip_ws(r);
+    while ((peek(*r) == '<' && peek2(*r) == '<') || (peek(*r) == '>' && peek2(*r) == '>')) {
+        i32 op = peek(*r); *r = (*r)[2:];
+        i32 rhs = eval_add(r, m);
         if (op == '<') val <<= rhs; else val >>= rhs;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_rel(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_shift(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p + 1 < e.length) {
-        i32 op = e[*p];
-        if (op == '<' && e[*p+1] == '=') { (*p) += 2; val = val <= eval_shift(e, m, p) ? 1 : 0; }
-        else if (op == '>' && e[*p+1] == '=') { (*p) += 2; val = val >= eval_shift(e, m, p) ? 1 : 0; }
-        else if (op == '<') { (*p)++; val = val < eval_shift(e, m, p) ? 1 : 0; }
-        else if (op == '>') { (*p)++; val = val > eval_shift(e, m, p) ? 1 : 0; }
+i32 eval_rel(string *r, dict<string, string> *m) {
+    i32 val = eval_shift(r, m);
+    skip_ws(r);
+    while (true) {
+        i32 c = peek(*r);
+        if (c == '<' && peek2(*r) == '=') { *r = (*r)[2:]; val = val <= eval_shift(r, m) ? 1 : 0; }
+        else if (c == '>' && peek2(*r) == '=') { *r = (*r)[2:]; val = val >= eval_shift(r, m) ? 1 : 0; }
+        else if (c == '<') { *r = (*r)[1:]; val = val < eval_shift(r, m) ? 1 : 0; }
+        else if (c == '>') { *r = (*r)[1:]; val = val > eval_shift(r, m) ? 1 : 0; }
         else break;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_eq(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_rel(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p + 1 < e.length && ((e[*p] == '=' && e[*p+1] == '=') || (e[*p] == '!' && e[*p+1] == '='))) {
-        if (e[*p] == '=') { (*p) += 2; val = val == eval_rel(e, m, p) ? 1 : 0; }
-        else { (*p) += 2; val = val != eval_rel(e, m, p) ? 1 : 0; }
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+i32 eval_eq(string *r, dict<string, string> *m) {
+    i32 val = eval_rel(r, m);
+    skip_ws(r);
+    while ((peek(*r) == '=' && peek2(*r) == '=') || (peek(*r) == '!' && peek2(*r) == '=')) {
+        i32 ne = peek(*r) == '!'; *r = (*r)[2:];
+        i32 rhs = eval_rel(r, m);
+        val = (ne ? val != rhs : val == rhs) ? 1 : 0;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_and(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_eq(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p < e.length && e[*p] == '&' && !(*p + 1 < e.length && e[*p+1] == '&')) {
-        (*p)++; val &= eval_eq(e, m, p);
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+i32 eval_and(string *r, dict<string, string> *m) {
+    i32 val = eval_eq(r, m);
+    skip_ws(r);
+    while (peek(*r) == '&' && peek2(*r) != '&') {
+        *r = (*r)[1:]; val &= eval_eq(r, m);
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_xor(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_and(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p < e.length && e[*p] == '^') { (*p)++; val ^= eval_and(e, m, p); while (*p < e.length && std::IsSpace(e[*p])) (*p)++; }
+i32 eval_xor(string *r, dict<string, string> *m) {
+    i32 val = eval_and(r, m);
+    skip_ws(r);
+    while (peek(*r) == '^') { *r = (*r)[1:]; val ^= eval_and(r, m); skip_ws(r); }
     return val;
 }
 
-i32 eval_or(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_xor(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p < e.length && e[*p] == '|' && !(*p + 1 < e.length && e[*p+1] == '|')) {
-        (*p)++; val |= eval_xor(e, m, p);
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+i32 eval_or(string *r, dict<string, string> *m) {
+    i32 val = eval_xor(r, m);
+    skip_ws(r);
+    while (peek(*r) == '|' && peek2(*r) != '|') {
+        *r = (*r)[1:]; val |= eval_xor(r, m);
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_land(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_or(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p + 1 < e.length && e[*p] == '&' && e[*p+1] == '&') {
-        (*p) += 2; val = (val && eval_or(e, m, p)) ? 1 : 0;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+i32 eval_land(string *r, dict<string, string> *m) {
+    i32 val = eval_or(r, m);
+    skip_ws(r);
+    while (peek(*r) == '&' && peek2(*r) == '&') {
+        *r = (*r)[2:]; val = (val && eval_or(r, m)) ? 1 : 0;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_lor(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_land(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    while (*p + 1 < e.length && e[*p] == '|' && e[*p+1] == '|') {
-        (*p) += 2; val = val || eval_land(e, m, p) ? 1 : 0;
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
+i32 eval_lor(string *r, dict<string, string> *m) {
+    i32 val = eval_land(r, m);
+    skip_ws(r);
+    while (peek(*r) == '|' && peek2(*r) == '|') {
+        *r = (*r)[2:]; val = (val || eval_land(r, m)) ? 1 : 0;
+        skip_ws(r);
     }
     return val;
 }
 
-i32 eval_ternary(string e, dict<string, string> *m, i32 *p) {
-    i32 val = eval_lor(e, m, p);
-    while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-    if (*p < e.length && e[*p] == '?') {
-        (*p)++; i32 t_val = eval_expr(e, m, p);
-        while (*p < e.length && std::IsSpace(e[*p])) (*p)++;
-        if (*p < e.length && e[*p] == ':') { (*p)++; i32 f_val = eval_ternary(e, m, p); return val ? t_val : f_val; }
+i32 eval_ternary(string *r, dict<string, string> *m) {
+    i32 val = eval_lor(r, m);
+    skip_ws(r);
+    if (peek(*r) == '?') {
+        *r = (*r)[1:];
+        i32 t_val = eval_expr(r, m);
+        skip_ws(r);
+        if (peek(*r) == ':') { *r = (*r)[1:]; i32 f_val = eval_ternary(r, m); return val ? t_val : f_val; }
     }
     return val;
 }
 
-i32 eval_expr(string expr, dict<string, string> *macros, i32 *pos) {
-    return eval_ternary(expr, macros, pos);
+i32 eval_expr(string *r, dict<string, string> *macros) {
+    return eval_ternary(r, macros);
 }
 
 i32 eval_if_expr(string expr, dict<string, string> *macros) {
-    i32 pos = 0;
-    return eval_expr(expr, macros, &pos);
+    string r = expr;
+    return eval_expr(&r, macros);
 }
 
 // ── Macro expansion ───────────────────────────────────────────────────────
@@ -454,7 +466,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 i32 sj = si + 1;
                                 while (sj < body.length && (body[sj] == ' ' || body[sj] == '\t')) sj++;
                                 i32 ns = sj;
-                                while (sj < body.length && std::IsIdent(body[sj])) sj++;
+                                while (sj < body.length && is_ident(body[sj])) sj++;
                                 string nm = body[ns:sj];
                                 i32 matched = -1;
                                 for (i32 pp2 = 0; pp2 < param_names.length && pp2 < args_list.length; pp2++)
@@ -490,8 +502,8 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                             i32 the_match = 1;
                             for (i32 mi = 0; mi < pname.length && bi + mi < body.length; mi++)
                                 if (body[bi+mi] != pname[mi]) { the_match = 0; break; }
-                            if (the_match == 1 && (bi + pname.length >= body.length || !std::IsIdent(body[bi + pname.length]))
-                                && (bi == 0 || !std::IsIdent(body[bi-1]))) {
+                            if (the_match == 1 && (bi + pname.length >= body.length || !is_ident(body[bi + pname.length]))
+                                && (bi == 0 || !is_ident(body[bi-1]))) {
                                 nb = nb + arg_exp;
                                 bi += pname.length;
                             } else {
@@ -578,7 +590,7 @@ void pp_define(Preprocessor *pp, string rest) {
     rest = rest.ltrim();
     if (rest.length == 0) return;
     i32 i = 0;
-    while (i < rest.length && std::IsIdent(rest[i])) i++;
+    while (i < rest.length && is_ident(rest[i])) i++;
     if (i == 0) return;
     string name = rest[0:i];
     i32 j = i;
@@ -657,7 +669,7 @@ void pp_include(Preprocessor *pp, string rest) {
 i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
     rest = rest.ltrim();
     i32 i = 0;
-    while (i < rest.length && std::IsIdent(rest[i])) i++;
+    while (i < rest.length && is_ident(rest[i])) i++;
     string name = rest[0:i];
     i32 found = 0;
     string v = pp->macros[name];
@@ -674,15 +686,15 @@ string substitute_defined(string rest, dict<string, string> *macros) {
     i32 i = 0;
     while (i < rest.length) {
         if (i + 7 <= rest.length && rest[i:i+7] == "defined"
-            && (i == 0 || !std::IsIdent(rest[i-1]))
-            && (i + 7 >= rest.length || !std::IsIdent(rest[i+7]))) {
+            && (i == 0 || !is_ident(rest[i-1]))
+            && (i + 7 >= rest.length || !is_ident(rest[i+7]))) {
             i += 7;
             while (i < rest.length && std::IsSpace(rest[i])) i++;
             i32 paren = 0;
             if (i < rest.length && rest[i] == '(') { paren = 1; i++; }
             while (i < rest.length && std::IsSpace(rest[i])) i++;
             i32 ns = i;
-            while (i < rest.length && std::IsIdent(rest[i])) i++;
+            while (i < rest.length && is_ident(rest[i])) i++;
             string name = rest[ns:i];
             while (i < rest.length && std::IsSpace(rest[i])) i++;
             if (paren && i < rest.length && rest[i] == ')') i++;

@@ -1,0 +1,21 @@
+// A `string` reached through a pointer (`string*`) must support field access and
+// methods: its pointee is stored opaque, so `.data`/`.size`/`.length`, slicing, and
+// string methods must resolve against the known string layout. A view-threading
+// parser (cursor = `string*`, advanced by re-slicing) depends on this. Returns 42.
+void skip_ws(string *r) { *r = (*r).ltrim(); }
+i32 take_digits(string *r) {
+    i32 n = 0;
+    while ((*r).length > 0 && (*r)[0] >= '0' && (*r)[0] <= '9') { n = n*10 + ((*r)[0]-'0'); *r = (*r)[1:]; }
+    return n;
+}
+int main() {
+    string s = "   123abc";
+    string r = s;
+    skip_ws(&r);                      // method through pointer
+    if (r.length != 6) return 1;      // "123abc"
+    i32 v = take_digits(&r);          // index + slice through pointer
+    if (v != 123) return 2;
+    if (r != "abc") return 3;         // compare the remaining view
+    if (!r.starts_with("ab")) return 4;
+    return 42;
+}
