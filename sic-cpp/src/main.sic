@@ -1,7 +1,9 @@
 // sic-cpp — C preprocessor in idiomatic SIC.
 //
-// Usage: sic-cpp [-DNAME[=val] ...] [-UNAME ...] [-Idir ...] [-std=std] [file]
-//        Preprocessed text is written to standard output.
+// Usage: sic-cpp [-DNAME[=val] ...] [-UNAME ...] [-Idir ...] [-std=std]
+//                [-nostdinc] [-undef] [-v] [--gcc-lines] [file]
+//        Preprocessed text is written to standard output, without blank lines;
+//        `--gcc-lines` reproduces gcc `cpp -P`'s line layout byte for byte.
 //
 // Pure SIC string operations throughout.  File I/O uses std::File.
 // Stdin reading still needs C stdio (stdin is not a regular file).
@@ -1595,7 +1597,7 @@ int main(int argc, char **argv) {
 
     // Parse arguments
     string input_file = "";
-    i32 nostdinc = 0, verbose = 0, undef = 0;
+    i32 nostdinc = 0, verbose = 0, undef = 0, gcc_lines = 0;
     for (i32 ai = 1; ai < argc; ai++) {
         string arg = argv[ai];
         if (arg.starts_with("-D") && arg.size > 2) { pp.user_defines.add(arg[2:arg.size]); }
@@ -1605,6 +1607,7 @@ int main(int argc, char **argv) {
         else if (arg == "-undef") { undef = 1; }
         else if (arg == "-nostdinc") { nostdinc = 1; }
         else if (arg == "-v") { verbose = 1; }
+        else if (arg == "--gcc-lines") { gcc_lines = 1; }
         else if (arg == "-") { input_file = "-"; }
         else if (arg[0] != '-') { if (input_file.size == 0) input_file = arg; }
     }
@@ -1733,12 +1736,18 @@ int main(int argc, char **argv) {
 
     pp_process_content(&pp, content);
 
-    // Output
+    // Output. Lines with no visible content — tokens that expanded to nothing
+    // (`__BEGIN_DECLS`), consumed-pragma placeholders, empty `_Pragma`
+    // continuations — are dropped. `--gcc-lines` keeps them, reproducing gcc
+    // `cpp -P` byte for byte.
+    i32 printed = 0;
     for (i32 i = 0; i < pp.output_lines.length; i++) {
         string line = pp.output_lines[i];
-        if (i > 0) std::Println("");
+        if (!gcc_lines && line.trim().size == 0) continue;
+        if (printed > 0) std::Println("");
         std::Print("{}", line);
+        printed++;
     }
-    if (pp.output_lines.length > 0) std::Println("");
+    if (printed > 0) std::Println("");
     return 0;
 }
