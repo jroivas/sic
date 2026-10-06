@@ -7,7 +7,15 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SIC="${SIC:-$ROOT/siccomp/target/debug/sic}"
+# Profile, as with ./build.sh: `./moduletest.sh [release|debug] [...]` or
+# PROFILE=release; default debug. An explicit SIC=/path/to/sic wins. SIC is
+# exported so nested runs (CPP_MODE=both) test the same binary.
+PROFILE="${PROFILE:-debug}"
+case "${1:-}" in release|debug) PROFILE="$1"; shift ;; esac
+case "$PROFILE" in release|debug) ;; *) echo "unknown profile '$PROFILE' (release, debug)"; exit 2 ;; esac
+SIC="${SIC:-$ROOT/siccomp/target/$PROFILE/sic}"
+if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PROFILE"; exit 2; fi
+export SIC
 CC="${CC:-cc}"
 # Guard against testing a stale compiler: warn when any compiler source is
 # newer than the binary under test (e.g. only the release build was rebuilt).

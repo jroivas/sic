@@ -17,8 +17,49 @@ set -u
 
 MYDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 TESTDIR="$MYDIR/module_test"
-SIC="${SIC:-$MYDIR/siccomp/target/debug/sic}"
+# Profile, as with ./build.sh: `./moduletest_rust.sh [release|debug] [...]` or
+# PROFILE=release; default debug. An explicit SIC=/path/to/sic wins. SIC is
+# exported so nested runs (CPP_MODE=both) test the same binary.
+PROFILE="${PROFILE:-debug}"
+case "${1:-}" in release|debug) PROFILE="$1"; shift ;; esac
+case "$PROFILE" in release|debug) ;; *) echo "unknown profile '$PROFILE' (release, debug)"; exit 2 ;; esac
+SIC="${SIC:-$MYDIR/siccomp/target/$PROFILE/sic}"
+if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PROFILE"; exit 2; fi
+export SIC
 VALGRIND="${VALGRIND:-valgrind}"
+
+# Guard against testing a stale compiler: warn when any compiler source is
+# newer than the binary under test (e.g. only the release build was rebuilt).
+if [ -x "$SIC" ] && [ -d "$MYDIR/siccomp/crates" ]; then
+    newer="$(find "$MYDIR/siccomp/crates" -name '*.rs' -newer "$SIC" -print -quit 2>/dev/null)"
+    [ -n "$newer" ] && echo "WARNING: $SIC is older than $newer — rebuild it (cargo build / ./build.sh)" >&2
+fi
+# CPP_MODE selects the preprocessor sic runs:
+#   global  the system `cpp`
+#   sic     this repository's sic-cpp (sic-cpp/sic-cpp; must be built)
+#   both    run the whole suite once with each, and fail if either fails
+#   unset   sic's own choice: $SIC_CPP, else sic-cpp on PATH, else the repo's
+#           sic-cpp, else `cpp` (see `sic -print-prog-name=cpp`)
+case "${CPP_MODE:-}" in
+    global) export SIC_CPP="cpp" ;;
+    sic)
+        export SIC_CPP="$MYDIR/sic-cpp/sic-cpp"
+        [ -x "$SIC_CPP" ] || { echo "CPP_MODE=sic: $SIC_CPP is not built (make -C sic-cpp)"; exit 2; }
+        ;;
+    both)
+        both_rc=0
+        for m in global sic; do
+            echo "=== CPP_MODE=$m"
+            CPP_MODE=$m "$0" "$@" || both_rc=1
+        done
+        exit $both_rc
+        ;;
+    "") ;;
+    *) echo "unknown CPP_MODE '${CPP_MODE}' (global, sic, both)"; exit 2 ;;
+esac
+# (A sic older than -print-prog-name reports nothing useful; say so.)
+pp_name="$("$SIC" -print-prog-name=cpp 2>/dev/null)" || pp_name=""
+echo "preprocessor: ${pp_name:-unknown ($SIC predates -print-prog-name; rebuild it)}"
 
 outroot="${1:-/tmp/sic_module_tests}"
 rm -rf "$outroot"; mkdir -p "$outroot"

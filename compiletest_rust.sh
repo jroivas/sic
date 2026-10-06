@@ -3,7 +3,15 @@ set -eu
 
 MYDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 TESTDIR="$MYDIR/tests"
-SIC="${SIC:-$MYDIR/siccomp/target/debug/sic}"
+# Profile, as with ./build.sh: `./compiletest_rust.sh [release|debug] [...]` or
+# PROFILE=release; default debug. An explicit SIC=/path/to/sic wins. SIC is
+# exported so nested runs (CPP_MODE=both) test the same binary.
+PROFILE="${PROFILE:-debug}"
+case "${1:-}" in release|debug) PROFILE="$1"; shift ;; esac
+case "$PROFILE" in release|debug) ;; *) echo "unknown profile '$PROFILE' (release, debug)"; exit 2 ;; esac
+SIC="${SIC:-$MYDIR/siccomp/target/$PROFILE/sic}"
+if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PROFILE"; exit 2; fi
+export SIC
 CC="${CC:-cc}"
 CFLAGS=${CFLAGS:-}
 # FAILFAST=1: stop at the first failing test and exit non-zero immediately (used by
