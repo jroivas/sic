@@ -1,13 +1,14 @@
 // sic-cpp — C preprocessor in idiomatic SIC.
 //
-// Usage: sic-cpp [-DNAME[=val] ...] [-UNAME ...] [-Idir ...] [-std=std]
-//                [-P] [-nostdinc] [-undef] [-ffreestanding] [-v] [--gcc-lines] [file]
-//        Preprocessed text is written to standard output with gcc-style
-//        linemarkers (`# 495 "/usr/include/string.h" 2 3 4`). `-P` omits them
-//        and drops blank lines; `-P --gcc-lines` keeps gcc `cpp -P`'s layout.
-//
-// Pure SIC string operations throughout.  File I/O uses std::File.
-// Stdin reading still needs C stdio (stdin is not a regular file).
+// Usage: sic-cpp [options] [infile [outfile]]     (a drop-in for `cpp`)
+//   -D name[=def] / -U name (in order), -I dir, -iquote / -isystem / -idirafter
+//   dir, -include / -imacros file, -nostdinc, -undef, -ffreestanding, -o file,
+//   -P (no linemarkers), -M / -MM / -MD / -MMD / -MG / -MP / -MF / -MT / -MQ,
+//   -dM, -v. Compiler-only flags (-W*, -f*, -m*, -O*, -g*, -E, -std=) are
+//   accepted and ignored. sic-cpp-specific: --compact drops lines with no
+//   visible content (gcc's layout is the default).
+//   It presents as the sic compiler (clang 15 / gcc 4.2 identity); target and
+//   include paths come from the host C compiler (see "System include paths").
 
 import std;
 
@@ -57,6 +58,28 @@ struct Preprocessor {
     // path — the main file, an absolute path, or `"x"` from the includer's
     // directory). `#include_next` continues after it, or from the start if -1.
     i32 cur_dir_idx;
+    // `-iquote` dirs: searched for `#include "x"` only, after the includer's dir.
+    list<string> quote_dirs;
+    // Dependency tracking (-M family): every file read, in first-seen order,
+    // with whether it is a system header (-MM leaves those out). -MG: a missing
+    // header is a dependency instead of an error.
+    list<string> deps;
+    list<i32> deps_sys;
+    i32 missing_ok;
+    // The current logical line's text (for diagnostics' column).
+    string cur_text;
+    // Output settings (see `finish`).
+    string out_path;          // -o / second operand; "" = stdout
+    i32 compact;              // --compact: drop content-less lines
+    i32 dump_macros;          // -dM
+    i32 dep_only;             // -M / -MM: write the rule instead of the text
+    i32 dep_side;             // -MD / -MMD: also write a .d file
+    i32 dep_no_sys;           // -MM / -MMD: leave system headers out
+    i32 dep_phony;            // -MP
+    string dep_file;          // -MF (or derived)
+    list<string> dep_targets; // -MT / -MQ (MQ already escaped)
+    string input_name;        // as given (for the default target)
+    i32 discard;              // -imacros: run the file, keep only its macros
 }
 
 
@@ -368,7 +391,9 @@ void fallback_predefines(Preprocessor *pp) {
 //    `__GCC_HAVE_*`, …), which would steer headers into code paths that assume
 //    a full GCC/Clang frontend.
 // The target set is recognised by NAME, so any arch/OS/libc is handled.
-i32 keep_predefine(string name, i32 undef) {
+i32 keep_predefine(string name, i32 undef, i32 strict) {
+    // Non-reserved spellings (`linux`, `unix`, `i386`) exist only in GNU modes.
+    if (strict && name.size > 0 && name[0] != '_') return 0;
     if (name == "__CHAR_BIT__" || name == "__BYTE_ORDER__" || name == "__FLOAT_WORD_ORDER__"
         || name.starts_with("__ORDER_") || name.starts_with("__SIZEOF_") || name.starts_with("__ATOMIC_")
         || name.ends_with("_MAX__") || name.ends_with("_MIN__") || name.ends_with("_WIDTH__")
@@ -857,6 +882,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     string arg_str = "";
                     for (i32 ai = j+1; ai < k-1; ai++) {
                         if (tokens[ai] == " " && arg_str.size > 0 && arg_str[arg_str.size-1] == ' ') continue;
+                        if (tokens[ai] == "\x03") continue;          // padding is not argument text
                         arg_str = arg_str + tokens[ai];
                     }
                     // Parse | separated encoding: "F|params|body"
@@ -995,7 +1021,10 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 while (r < body.size && (body[r] == ' ' || body[r] == '\t')) r++;
                                 i32 pasted = (l >= 1 && body[l] == '#' && body[l-1] == '#')
                                           || (r + 1 < body.size && body[r] == '#' && body[r+1] == '#');
-                                nb = nb + (pasted ? args_list[pidx].trim() : arg_exps[pidx]);
+                                // An expanded argument is fenced with padding (`\x03`):
+                                // where it meets a neighbour without whitespace, the
+                                // final join decides whether a space is needed.
+                                nb = nb + (pasted ? args_list[pidx].trim() : "\x03" + arg_exps[pidx] + "\x03");
                                 continue;
                             }
                             nb = nb + body[bi:bi+1];
@@ -1007,10 +1036,12 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // Expand body and emit
                     list<string> bt = paste_tokens(tokenize(body));
                     list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
+                    out.add("\x03");   // padding: the expansion's boundaries
                     for (i32 ei = 0; ei < be.length; ei++) {
                         if (be[ei] == " ") { if (out.length == 0 || out[out.length-1] != " ") out.add(" "); }
                         else out.add(be[ei]);
                     }
+                    out.add("\x03");
                 i = k - 1; continue;
                 }
             } else if (enc[0] == 'O') {
@@ -1018,10 +1049,12 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                 string body = ep.length >= 2 ? ep[1] : "";
                 list<string> bt = paste_tokens(tokenize(body));
                 list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
+                out.add("\x03");   // padding: the expansion's boundaries
                 for (i32 ei = 0; ei < be.length; ei++) {
                     if (be[ei] == " ") { if (out.length == 0 || out[out.length-1] != " ") out.add(" "); }
                     else out.add(be[ei]);
                 }
+                out.add("\x03");
                 continue;
             }
         }
@@ -1034,6 +1067,39 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
         out.add(tok);
     }
     return out;
+}
+
+// gcc's cpp_avoid_paste: would token `a` immediately followed by token `b`
+// lex differently (as one token, or a comment)?
+i32 avoid_paste(string a, string b) {
+    if (a.size == 0 || b.size == 0) return 0;
+    i32 b0 = b[0];
+    i32 b_name = is_ident_start(b0);
+    i32 b_num = (b0 >= '0' && b0 <= '9') || (b0 == '.' && b.size > 1 && b[1] >= '0' && b[1] <= '9');
+    i32 b_str = b0 == '"';
+    i32 b_chr = b0 == '\'';
+    i32 c = (b_name || b_num || b_str || b_chr) ? -1 : b0;   // first char of an operator
+    // Everything that can take a following `=` (`+=`, `==`, `<<=`, …).
+    if (c == '=' && (a == "=" || a == "!" || a == ">" || a == "<" || a == "+" || a == "-"
+        || a == "*" || a == "/" || a == "%" || a == "&" || a == "|" || a == "^" || a == ">>" || a == "<<"))
+        return 1;
+    if (a == ">") return c == '>';
+    if (a == "<") return c == '<' || c == '%' || c == ':';
+    if (a == "+") return c == '+';
+    if (a == "-") return c == '-' || c == '>';
+    if (a == "/") return c == '/' || c == '*';
+    if (a == "%") return c == ':' || c == '%';
+    if (a == "&") return c == '&';
+    if (a == "|") return c == '|';
+    if (a == ":") return c == ':' || c == '>';
+    if (a == "->") return c == '*';
+    if (a == ".") return c == '.' || c == '%' || b_num;
+    if (a == "#") return c == '#' || c == '%';
+    i32 a0 = a[0];
+    if (is_ident_start(a0)) return b_name || b_chr || b_str;
+    if ((a0 >= '0' && a0 <= '9') || (a0 == '.' && a.size > 1))
+        return b_num || b_name || b_chr || c == '.' || c == '+' || c == '-';
+    return 0;
 }
 
 string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file) {
@@ -1049,10 +1115,23 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
         toks = expanded;
         if (same) break;
     }
+    // Join. At a padding boundary (`\x03`, around macro expansions and
+    // substituted arguments) with no whitespace, add a space where the two
+    // tokens would otherwise lex as one (`- -1`, not `--1`; `4 .5`, not `4.5`).
     string result = "";
+    string prev = "";
+    i32 pad = 0;
     for (i32 i = 0; i < toks.length; i++) {
-        if (toks[i] == " ") { if (result.size > 0 && result[result.size-1] != ' ') result = result + " "; }
-        else result = result + toks[i];
+        string t = toks[i];
+        if (t == "\x03") { pad = 1; continue; }
+        if (t == " ") {
+            if (result.size > 0 && result[result.size-1] != ' ') result = result + " ";
+            continue;
+        }
+        if (pad && result.size > 0 && result[result.size-1] != ' ' && avoid_paste(prev, t)) result = result + " ";
+        pad = 0;
+        result = result + t;
+        prev = t;
     }
     // Trailing whitespace (e.g. where a line-end comment became a space) is never
     // significant in preprocessed output — drop it, matching `cpp`. `.rtrim()` is a
@@ -1304,6 +1383,10 @@ string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from, i32 
         string here = dir_of(pp->current_file);
         string cand = here.size > 0 ? here + "/" + path : path;
         if (file_exists(cand)) return cand;
+        for (i32 qi = 0; qi < pp->quote_dirs.length; qi++) {      // -iquote
+            string qc = pp->quote_dirs[qi] + "/" + path;
+            if (file_exists(qc)) return qc;
+        }
     }
     for (i32 di = from; di < pp->include_dirs.length; di++) {
         string cand = pp->include_dirs[di] + "/" + path;
@@ -1333,9 +1416,17 @@ void pp_include(Preprocessor *pp, string rest, i32 next) {
         // includer's own directory, a header next to a system header.
         i32 sys = dir >= 0 ? dir >= pp->user_dirs : pp->cur_sys;
         enter_file(pp, full_path, sys, dir);
+    } else if (pp->missing_ok) {
+        add_dep(pp, path, 0);          // -MG: assume it will be generated
     } else {
-        std::Println("sic-cpp: {}:{}: {}: file not found",
-                     pp->current_file, pp->current_line, path, target = 2);
+        // As gcc: a missing header is fatal (exit status 1).
+        i32 col = 1;
+        while (col <= pp->cur_text.size && pp->cur_text[col-1] != '"' && pp->cur_text[col-1] != '<') col++;
+        if (col > pp->cur_text.size) col = 1;
+        std::Println("{}:{}:{}: fatal error: {}: No such file or directory",
+                     pp->current_file, pp->current_line, col, path, target = 2);
+        std::Println("compilation terminated.", target = 2);
+        flush_and_exit(pp, 1);
     }
 }
 
@@ -1386,7 +1477,15 @@ string include_guard(string content) {
 
 // Preprocess an included file in place: `# 1 "file" 1` on entry, and on return
 // `# N "includer" 2` with N = the line after the `#include`.
+// Record a dependency once (first-seen order).
+void add_dep(Preprocessor *pp, string path, i32 sys) {
+    for (i32 i = 0; i < pp->deps.length; i++) if (pp->deps[i] == path) return;
+    pp->deps.add(path.dup);
+    pp->deps_sys.add(sys);
+}
+
 void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx) {
+    add_dep(pp, path, sys);
     // Guarded and already included (guard macro defined): skip entirely.
     string g = pp->guards[path];
     if (g.size > 0 && pp->macros[g].size >= 2) return;
@@ -1591,6 +1690,8 @@ void sync_to(Preprocessor *pp) {
 }
 
 void add_out(Preprocessor *pp, string text) {
+    // -imacros: the text is dropped but, as in gcc, the lines still advance.
+    if (pp->discard) text = "";
     if (pp->markers) {
         i32 line = pp->current_line;
         sync_to(pp);
@@ -1707,6 +1808,7 @@ void pp_pragma(Preprocessor *pp, string rest) {
 }
 
 void pp_process_line(Preprocessor *pp, string line) {
+    pp->cur_text = line;
     // A continuation (the rest of a physical line after a multi-line macro
     // call): gcc places it by the column of its first PRINTED token, so skip
     // leading names that expand to nothing (`__wur`, `__THROW`, …).
@@ -1801,31 +1903,238 @@ void pp_process_line(Preprocessor *pp, string line) {
     pp->current_line++;
 }
 
+
+// ── Output ─────────────────────────────────────────────────────────────────
+
+extern int open(char *path, int flags, int mode);
+extern i64 read(int fd, void *buf, u64 n);
+extern int close(int fd);
+
+// Open `path` for writing (create/truncate); -1 on failure.
+i32 open_out(string path) { return open(path.str, 0x241, 420); }   // O_WRONLY|O_CREAT|O_TRUNC, 0644
+
+// Make-escape a file name the way gcc's mkdeps does: `$` → `$$`, `#` → `\#`,
+// and a space/tab gets a backslash (backslashes right before it doubled).
+string make_escape(string name) {
+    string out = "";
+    for (i32 i = 0; i < name.size; i++) {
+        i32 c = name[i];
+        if (c == ' ' || c == '\t') {
+            i32 j = i - 1;
+            while (j >= 0 && name[j] == '\\') { out = out + "\\"; j--; }
+            out = out + "\\" + name[i:i+1];
+        } else if (c == '$') out = out + "$$";
+        else if (c == '#') out = out + "\\#";
+        else out = out + name[i:i+1];
+    }
+    return out;
+}
+
+// One word of a make rule, wrapping at `colmax` like gcc (`\` + newline + space).
+string make_word(string w, i32 *col, i32 colmax) {
+    string out = "";
+    if (*col > 0) {
+        if (colmax > 0 && *col + w.size > colmax) { out = " \\\n"; *col = 0; }
+        *col = *col + 1;
+        out = out + " ";
+    }
+    *col = *col + w.size;
+    return out + w;
+}
+
+// The dependency rule (gcc format, 72 columns).
+string dep_rule(Preprocessor *pp) {
+    list<string> targets;
+    for (i32 i = 0; i < pp->dep_targets.length; i++) targets.add(pp->dep_targets[i]);
+    if (targets.length == 0) {
+        // Default: the input's basename with its suffix replaced by `.o`.
+        string base = pp->input_name;
+        i32 sl = base.size - 1;
+        while (sl >= 0 && base[sl] != '/') sl--;
+        base = base[sl+1:];
+        i32 dot = base.size - 1;
+        while (dot > 0 && base[dot] != '.') dot--;
+        if (dot > 0) base = base[0:dot];
+        targets.add(make_escape(base + ".o"));
+    }
+    list<string> deps;
+    for (i32 i = 0; i < pp->deps.length; i++)
+        if (!(pp->dep_no_sys && pp->deps_sys[i])) deps.add(make_escape(pp->deps[i]));
+    string out = "";
+    i32 col = 0;
+    for (i32 i = 0; i < targets.length; i++) out = out + make_word(targets[i], &col, 0);
+    out = out + ":";
+    col++;
+    for (i32 i = 0; i < deps.length; i++) out = out + make_word(deps[i], &col, 72);
+    out = out + "\n";
+    if (pp->dep_phony) for (i32 i = 1; i < deps.length; i++) out = out + deps[i] + ":\n";
+    return out;
+}
+
+// `#define` lines for every macro (-dM).
+string macro_dump(Preprocessor *pp) {
+    string out = "";
+    for (tuple kv : pp->macros) {
+        string name = kv[0];
+        string enc = kv[1];
+        if (enc.starts_with("O|")) out = out + "#define " + name + " " + enc[2:] + "\n";
+        else if (enc.starts_with("F|")) {
+            tuple pb = enc[2:].split("|");
+            string body = pb.length > 1 ? pb[1] : "";
+            out = out + "#define " + name + "(" + pb[0] + ")" + (body.size > 0 ? " " + body : "") + "\n";
+        }
+    }
+    return out;
+}
+
+// Write the results and exit: the preprocessed text (or -dM's macros, or -M's
+// rule) to -o / stdout, plus -MD's .d file.
+void flush_and_exit(Preprocessor *pp, i32 code) {
+    i32 fd = 1;
+    if (pp->out_path.size > 0) {
+        fd = open_out(pp->out_path);
+        if (fd < 0) {
+            std::Println("sic-cpp: fatal error: opening output file {}: cannot write", pp->out_path, target = 2);
+            std::Exit(1);
+        }
+    }
+    if (pp->dep_only) {
+        string rule = dep_rule(pp);
+        if (pp->dep_file.size > 0) {
+            i32 df = open_out(pp->dep_file);
+            if (df >= 0) { std::Print("{}", rule, target = df); close(df); }
+        } else std::Print("{}", rule, target = fd);
+    } else if (pp->dump_macros) {
+        std::Print("{}", macro_dump(pp), target = fd);
+    } else {
+        // Written in ~64 KB chunks (one growing string would be quadratic).
+        string text = "";
+        for (i32 i = 0; i < pp->output_lines.length; i++) {
+            string line = pp->output_lines[i];
+            if (pp->compact && line.trim().size == 0) continue;
+            text = text + line + "\n";
+            if (text.size > 65536) { std::Print("{}", text, target = fd); text = ""; }
+        }
+        std::Print("{}", text, target = fd);
+        if (pp->dep_side) {
+            i32 df = open_out(pp->dep_file);
+            if (df >= 0) { std::Print("{}", dep_rule(pp), target = df); close(df); }
+        }
+    }
+    if (fd != 1) close(fd);
+    std::Exit(code);
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
     Preprocessor pp;
     pp.cond_depth = 0; pp.current_line = 1; pp.current_file = "";
 
-    // Parse arguments
+    // Parse arguments — gcc `cpp` compatible: separate and attached forms of
+    // -D/-U/-I/-o/-x/-include/-imacros/-iquote/-isystem/-idirafter/-MF/-MT/-MQ,
+    // `cpp in [out]`, -M family, -dM; compiler-only flags (-W*, -f*, -m*, -O*,
+    // -g*, -E, …) are accepted and ignored.
     string input_file = "";
-    i32 nostdinc = 0, verbose = 0, undef = 0, gcc_lines = 0, no_markers = 0, freestanding = 0;
+    i32 nostdinc = 0, verbose = 0, undef = 0, no_markers = 0, freestanding = 0;
     pp.markers = 0; pp.out_line = 1; pp.out_file = ""; pp.cur_sys = 0; pp.user_dirs = 0; pp.force_marker = 0;
     pp.prev_sys_tok = 0; pp.cur_dir_idx = -1;
+    pp.missing_ok = 0; pp.discard = 0; pp.out_path = ""; pp.compact = 0; pp.dump_macros = 0;
+    pp.dep_only = 0; pp.dep_side = 0; pp.dep_no_sys = 0; pp.dep_phony = 0; pp.dep_file = "";
+    list<string> def_ops;          // "D<def>" / "U<name>", applied in command-line order
+    list<string> isystem_dirs;
+    list<string> after_dirs;
+    list<string> include_files;    // -include
+    list<string> imacros_files;    // -imacros
+    i32 positional = 0;
+    string std_name = "gnu23";     // gcc's default dialect
     for (i32 ai = 1; ai < argc; ai++) {
         string arg = argv[ai];
-        if (arg.starts_with("-D") && arg.size > 2) { pp.user_defines.add(arg[2:arg.size]); }
-        else if (arg.starts_with("-U") && arg.size > 2) { pp.user_undefs.add(arg[2:arg.size]); }
-        else if (arg.starts_with("-I") && arg.size > 2) { add_dir(&pp.include_dirs, arg[2:arg.size]); }
-        else if (arg.starts_with("-std=")) { /* ignore */ }
+        // A flag whose value is either attached (`-Ifoo`) or the next argument.
+        string val = "";
+        i32 takes = 0;
+        list<string> valued;
+        valued.add("-D"); valued.add("-U"); valued.add("-I"); valued.add("-o"); valued.add("-x");
+        valued.add("-include"); valued.add("-imacros"); valued.add("-iquote"); valued.add("-isystem");
+        valued.add("-idirafter"); valued.add("-MF"); valued.add("-MT"); valued.add("-MQ");
+        string flag = "";
+        for (i32 vi = 0; vi < valued.length; vi++) {
+            string f = valued[vi];
+            if (arg == f) { flag = f; takes = 1; break; }
+            // attached form; `-include`/`-imacros` only separate (as gcc)
+            if (arg.starts_with(f) && arg.size > f.size && f != "-include" && f != "-imacros"
+                && !(f == "-I" && (arg.starts_with("-iquote") || arg.starts_with("-isystem") || arg.starts_with("-idirafter")))) {
+                // the longest matching flag wins (`-isystem` vs `-I`)
+                if (flag.size < f.size) { flag = f; val = arg[f.size:]; }
+            }
+        }
+        if (takes) {
+            if (ai + 1 >= argc) {
+                std::Println("sic-cpp: error: missing argument to '{}'", arg, target = 2);
+                return 1;
+            }
+            ai++;
+            val = argv[ai];
+        }
+        if (flag == "-D") { def_ops.add("D" + val); }
+        else if (flag == "-U") { def_ops.add("U" + val); }
+        else if (flag == "-I") { add_dir(&pp.include_dirs, val); }
+        else if (flag == "-o") { pp.out_path = val; }
+        else if (flag == "-x") { /* C only — accepted */ }
+        else if (flag == "-include") { include_files.add(val); }
+        else if (flag == "-imacros") { imacros_files.add(val); }
+        else if (flag == "-iquote") { pp.quote_dirs.add(val); }
+        else if (flag == "-isystem") { isystem_dirs.add(val); }
+        else if (flag == "-idirafter") { after_dirs.add(val); }
+        else if (flag == "-MF") { pp.dep_file = val; }
+        else if (flag == "-MT") { pp.dep_targets.add(val); }
+        else if (flag == "-MQ") { pp.dep_targets.add(make_escape(val)); }
+        else if (arg == "-M") { pp.dep_only = 1; }
+        else if (arg == "-MM") { pp.dep_only = 1; pp.dep_no_sys = 1; }
+        else if (arg == "-MD") { pp.dep_side = 1; }
+        else if (arg == "-MMD") { pp.dep_side = 1; pp.dep_no_sys = 1; }
+        else if (arg == "-MP") { pp.dep_phony = 1; }
+        else if (arg == "-MG") { pp.missing_ok = 1; }
+        else if (arg == "-dM") { pp.dump_macros = 1; }
+        else if (arg.starts_with("-std=")) { std_name = arg[5:]; }
+        else if (arg == "-ansi") { std_name = "c90"; }
+        else if (arg.starts_with("-W") || arg == "-w" || arg == "-E"
+                 || (arg.starts_with("-f") && arg != "-ffreestanding") || arg.starts_with("-m")
+                 || arg.starts_with("-O") || arg.starts_with("-g") || arg == "-pipe"
+                 || arg.starts_with("-pedantic") || arg.starts_with("-d")
+                 || arg == "--gcc-lines" || arg == "-C" || arg == "-CC" || arg == "-H"
+                 || arg == "-trigraphs" || arg == "-traditional-cpp") {
+            if (arg == "-C" || arg == "-CC")
+                std::Println("sic-cpp: warning: {} is not supported; comments are removed", arg, target = 2);
+        }
         else if (arg == "-undef") { undef = 1; }
         else if (arg == "-nostdinc") { nostdinc = 1; }
         else if (arg == "-v") { verbose = 1; }
-        else if (arg == "--gcc-lines") { gcc_lines = 1; }
+        else if (arg == "--compact") { pp.compact = 1; }
         else if (arg == "-P") { no_markers = 1; }
         else if (arg == "-ffreestanding") { freestanding = 1; }
-        else if (arg == "-") { input_file = "-"; }
-        else if (arg[0] != '-') { if (input_file.size == 0) input_file = arg; }
+        else if (arg == "-" || arg[0] != '-') {
+            // `cpp [in] [out]`
+            if (positional == 0) input_file = arg;
+            else if (positional == 1) pp.out_path = arg;
+            positional++;
+        }
+        else std::Println("sic-cpp: warning: unrecognized option '{}' (ignored)", arg, target = 2);
+    }
+    pp.input_name = input_file.size > 0 && input_file != "-" ? input_file : "-";
+    // -MD/-MMD without -MF: the .d file sits next to the output (`out.i` →
+    // `out.d`), or is named after the input without -o.
+    if (pp.dep_side && pp.dep_file.size == 0) {
+        string base = pp.out_path.size > 0 ? pp.out_path : pp.input_name;
+        if (pp.out_path.size == 0) {
+            i32 sl = base.size - 1;
+            while (sl >= 0 && base[sl] != '/') sl--;
+            base = base[sl+1:];
+        }
+        i32 dot = base.size - 1;
+        while (dot > 0 && base[dot] != '.' && base[dot] != '/') dot--;
+        if (dot > 0 && base[dot] == '.') base = base[0:dot];
+        pp.dep_file = base + ".d";
     }
 
     // Search order (as gcc): -I dirs, then CPATH / C_INCLUDE_PATH, then the
@@ -1833,11 +2142,18 @@ int main(int argc, char **argv) {
     string cc = (nostdinc && undef) ? "" : find_compiler();
     add_env_dirs(&pp.include_dirs, "CPATH");
     add_env_dirs(&pp.include_dirs, "C_INCLUDE_PATH");
-    if (!nostdinc) {
+    {
         // As gcc: a -I naming a system directory is ignored, so the directory
         // keeps its system position (else -I/usr/include would shadow the
         // compiler's own stddef.h/stdarg.h).
-        list<string> sys = system_include_dirs(cc);
+        list<string> std_dirs;
+        if (!nostdinc) std_dirs = system_include_dirs(cc);   // -nostdinc drops only these
+        // The <x> chain: -I, then -isystem, the standard dirs, then -idirafter
+        // (all but -I are system directories).
+        list<string> sys;
+        for (i32 i = 0; i < isystem_dirs.length; i++) add_dir(&sys, isystem_dirs[i]);
+        for (i32 i = 0; i < std_dirs.length; i++) add_dir(&sys, std_dirs[i]);
+        for (i32 i = 0; i < after_dirs.length; i++) add_dir(&sys, after_dirs[i]);
         list<string> user;
         for (i32 i = 0; i < pp.include_dirs.length; i++) {
             i32 is_sys = 0;
@@ -1852,6 +2168,16 @@ int main(int argc, char **argv) {
     // Predefined macros: the target description from the host compiler (unless
     // -undef), then sic-cpp's own identity on top — it presents as the sic
     // compiler (clang 15 / gcc 4.2 compatible), whatever compiler was consulted.
+    // The dialect (-std= / -ansi): __STDC_VERSION__, and in strict ISO modes
+    // __STRICT_ANSI__ (removed again by -undef, as in gcc).
+    i32 strict = std_name.starts_with("c") || std_name.starts_with("iso");
+    string stdc_version = "202311L";
+    if (std_name == "c89" || std_name == "c90" || std_name == "gnu89" || std_name == "gnu90"
+        || std_name == "iso9899:1990") stdc_version = "";
+    else if (std_name == "iso9899:199409") stdc_version = "199409L";
+    else if (std_name.ends_with("99") || std_name.ends_with("9x") || std_name == "iso9899:1999") stdc_version = "199901L";
+    else if (std_name.ends_with("11") || std_name.ends_with("1x") || std_name == "iso9899:2011") stdc_version = "201112L";
+    else if (std_name.ends_with("17") || std_name.ends_with("18") || std_name == "iso9899:2017" || std_name == "iso9899:2018") stdc_version = "201710L";
     if (cc.size == 0) {
         if (!undef) fallback_predefines(&pp);
     } else {
@@ -1860,7 +2186,7 @@ int main(int argc, char **argv) {
             string d = defs[i][8:];                       // drop "#define "
             i32 n = 0;
             while (n < d.size && is_ident(d[n])) n++;
-            if (keep_predefine(d[0:n], undef)) pp_define(&pp, d);
+            if (keep_predefine(d[0:n], undef, strict)) pp_define(&pp, d);
         }
     }
     pp.cc = cc;
@@ -1885,7 +2211,13 @@ int main(int argc, char **argv) {
         }
     }
     pp.macros["__STDC__"] = "O|1";
-    pp.macros["__STDC_VERSION__"] = "O|202311L";
+    if (stdc_version.size > 0) pp.macros["__STDC_VERSION__"] = "O|" + stdc_version;
+    if (strict && !undef) pp.macros["__STRICT_ANSI__"] = "O|1";
+    // char16_t/char32_t are UTF-16/-32 from C11 on.
+    if (stdc_version.size > 0 && stdc_version != "199409L" && stdc_version != "199901L") {
+        pp.macros["__STDC_UTF_16__"] = "O|1";
+        pp.macros["__STDC_UTF_32__"] = "O|1";
+    }
     pp.macros["__STDC_HOSTED__"] = "O|1";
     pp.macros["__SICC__"] = "O|1";
     pp.macros["__SICC_MINOR__"] = "O|0";
@@ -1904,54 +2236,45 @@ int main(int argc, char **argv) {
         std::Println("End of search list.", target = 2);
     }
 
-    // Apply -D / -U
-    for (i32 i = 0; i < pp.user_defines.length; i++) {
-        string def = pp.user_defines[i];
-        tuple eq = def.split("=");
-        if (eq.length > 1) pp.macros[eq[0]] = "O|" + eq[1];
-        else pp.macros[def] = "O|1";
+    // Apply -D / -U in command-line order (`-DX -UX` leaves X undefined). A
+    // define is `NAME[(params)][=body]`, body defaulting to 1 — handed to the
+    // #define handler, so function-like command-line macros work too.
+    for (i32 i = 0; i < def_ops.length; i++) {
+        string op = def_ops[i];
+        string d = op[1:];
+        if (op[0] == 'U') { del pp.macros[d.trim()]; continue; }
+        i32 eq = 0;
+        while (eq < d.size && d[eq] != '=') eq++;
+        if (eq < d.size) pp_define(&pp, d[0:eq] + " " + d[eq+1:]);
+        else pp_define(&pp, d + " 1");
     }
-    for (i32 i = 0; i < pp.user_undefs.length; i++) del pp.macros[pp.user_undefs[i]];
 
     // Read input
     string content;
     if (input_file.size > 0 && input_file != "-") {
         pp.current_file = input_file;
+        if (!file_exists(input_file)) {
+            std::Println("sic-cpp: fatal error: {}: No such file or directory", input_file, target = 2);
+            std::Println("compilation terminated.", target = 2);
+            return 1;
+        }
         content = read_file(input_file);
     } else {
         pp.current_file = "<stdin>";
-        std::File *sin = std::Stdin();
+        // Plain read(2) until EOF (works for pipes, terminals and files alike).
         content = "";
-        std::Buffer *buf = std::Buffer::Create(4096);
-        while (true)
-        {
-            auto status = std::Read(sin, buf.size, buf);
-            u64 sz;
-            if ((sz = std::FileStatus::Read(status)))
-            {
-                if (sz == 0)
-                    break;
-                else
-                    content = content + std::Buffer::Value(buf);
-                if (sz < buf.size)
-                    break;
-            } else
-                break;
+        u8 buf[65536];
+        while (true) {
+            i64 n = read(0, (void*)buf, 65536);
+            if (n <= 0) break;
+            content = content + string.create((char*)buf, (u64)n);
         }
-#if 0
-        while (!feof(stdin)) {
-            char buf[4096];
-            i32 n = fread(buf, 1, 4096, stdin);
-            if (n > 0) content = content + (string)(char*)buf;
-            if (n < 4096) break;
-        }
-#endif
     }
 
     content = strip_comments(content);
-    if (nostdinc) pp.user_dirs = pp.include_dirs.length;   // no system dirs at all
-    pp.markers = !no_markers;
+    pp.markers = !no_markers && !pp.dep_only && !pp.dump_macros;
     string main_file = pp.current_file;
+    add_dep(&pp, main_file, 0);
 
     // gcc's preamble, then the implicit `-include stdc-predef.h` (glibc's
     // __STDC_IEC_559__, __STDC_ISO_10646__, …) when the C library provides one
@@ -1961,30 +2284,43 @@ int main(int argc, char **argv) {
         emit_marker(&pp, 0, "<built-in>", "");
         emit_marker(&pp, 0, "<command-line>", "");
     }
+    pp.current_file = "<command-line>";
+    pp.current_line = 0;
+    // -imacros files first (only their macros are kept), then stdc-predef.h,
+    // then -include files — gcc's order.
+    for (i32 i = 0; i < imacros_files.length; i++) {
+        pp.discard = 1;
+        cmdline_include(&pp, imacros_files[i]);
+        pp.discard = 0;
+    }
     if (!nostdinc && !freestanding) {
         i32 dir = -1;
-        pp.current_file = "<command-line>";
-        pp.current_line = 0;
         string predef = resolve_include(&pp, "stdc-predef.h", 0, pp.user_dirs, &dir);
         if (predef.size > 0) enter_file(&pp, predef, 1, dir);
     }
+    for (i32 i = 0; i < include_files.length; i++) cmdline_include(&pp, include_files[i]);
     pp.current_file = main_file;
     pp.current_line = 1;
     if (pp.markers) emit_marker(&pp, 1, main_file, "");
     pp_process_content(&pp, content);
-
-    // Output. Lines with no visible content — tokens that expanded to nothing
-    // (`__BEGIN_DECLS`), consumed-pragma placeholders, empty `_Pragma`
-    // continuations — are dropped. `--gcc-lines` keeps them, reproducing gcc
-    // `cpp -P` byte for byte.
-    i32 printed = 0;
-    for (i32 i = 0; i < pp.output_lines.length; i++) {
-        string line = pp.output_lines[i];
-        if (!gcc_lines && !pp.markers && line.trim().size == 0) continue;
-        if (printed > 0) std::Println("");
-        std::Print("{}", line);
-        printed++;
-    }
-    if (printed > 0) std::Println("");
+    flush_and_exit(&pp, 0);
     return 0;
 }
+
+// A command-line `-include`/`-imacros` file: looked up in the current working
+// directory first (gcc shows it as `./name`), then like `#include "name"`.
+void cmdline_include(Preprocessor *pp, string name) {
+    string path = "";
+    i32 dir = -1;
+    if (name.starts_with("/")) path = file_exists(name) ? name : "";
+    else if (file_exists("./" + name)) path = "./" + name;
+    else path = resolve_include(pp, name, 1, 0, &dir);
+    if (path.size == 0) {
+        std::Println("<command-line>: fatal error: {}: No such file or directory", name, target = 2);
+        std::Println("compilation terminated.", target = 2);
+        flush_and_exit(pp, 1);
+    }
+    enter_file(pp, path, dir >= 0 ? dir >= pp->user_dirs : 0, dir);
+}
+
+
