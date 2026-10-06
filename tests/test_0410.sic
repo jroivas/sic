@@ -1,0 +1,23 @@
+// Comparing a tagged-enum value with a BARE variant name tests the variant only:
+// `res != Status::Read` works even though `Read` carries a payload (it could not
+// be constructed without its value — that used to be an error). Generic enums
+// resolve through the other operand's type. Returns 42.
+
+enum Status { Ok, Read(u64), Failed(i32) }
+
+Status do_read(i32 n) { if (n > 0) return Status::Read((u64)n); return Status::Failed(n); }
+
+int main() {
+    Status a = do_read(5);
+    Status b = do_read(-1);
+    if (a != Status::Read) return 1;          // payload variant, bare
+    if (!(a == Status::Read)) return 2;
+    if (b == Status::Read) return 3;
+    if (b != Status::Failed) return 4;
+    if (Status::Read != a) return 5;           // bare name on the left
+    if (a == Status::Ok) return 6;             // payload-less variant still fine
+    Option<int> o = Option::Some(3);
+    if (o != Option::Some) return 7;           // generic: via the other side's type
+    if (o == Option::None) return 8;
+    return 42;
+}

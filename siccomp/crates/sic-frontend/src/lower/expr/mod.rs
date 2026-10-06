@@ -1647,8 +1647,13 @@ impl<'m> FuncCtx<'m> {
             && (matches!(self.infer_expr_type(lhs), Ok(t) if self.is_tagged_enum_struct(&t))
                 || matches!(self.infer_expr_type(rhs), Ok(t) if self.is_tagged_enum_struct(&t)))
         {
-            let lt = self.enum_operand_tag(lhs)?;
-            let rt = self.enum_operand_tag(rhs)?;
+            // A bare variant name on either side (`res != FileStatus::Read`) is
+            // just that variant's TAG — even for a payload variant, which could
+            // not be constructed without its value. Compares the variant only.
+            let lty = self.infer_expr_type(lhs).ok();
+            let rty = self.infer_expr_type(rhs).ok();
+            let lt = match self.bare_variant_tag(lhs, rty.as_ref()) { Some(t) => Constant::int(t), None => self.enum_operand_tag(lhs)? };
+            let rt = match self.bare_variant_tag(rhs, lty.as_ref()) { Some(t) => Constant::int(t), None => self.enum_operand_tag(rhs)? };
             let dest = self.alloc_val();
             let cmp = if op == BinOpKind::Eq { CmpOp::IEq } else { CmpOp::INe };
             self.push_instr(Instr::Cmp { dest, op: cmp, lhs: lt, rhs: rt, ty: Type::i32() });
@@ -3460,6 +3465,29 @@ impl<'m> FuncCtx<'m> {
     /// The discriminant tag of an operand in a tagged-enum comparison (sic.md
     /// §"Match"): a tagged-enum value yields its loaded `tag`; anything else (a bare
     /// discriminant / int) is taken as the tag directly.
+    /// The discriminant of a bare tagged-enum variant name (`E::V`, `mod::E::V`)
+    /// used as a comparison operand, without constructing a value. A generic
+    /// enum's variant (`Option::Some`) is resolved through the other operand's
+    /// concrete type (`Option<int>`). `None` if `e` is not such a name.
+    fn bare_variant_tag(&self, e: &Expr, other: Option<&Type>) -> Option<i64> {
+        if !self.is_sic() { return None; }
+        let ExprKind::EnumVariant { enum_name, variant } = &e.kind else { return None };
+        let mut names: Vec<String> = vec![enum_name.clone()];
+        if let Some(last) = enum_name.rsplit("::").next() { names.push(last.to_string()); }
+        if let Some(Type::Struct(st)) = other {
+            if let Some(n) = &st.name {
+                let base = enum_name.rsplit("::").next().unwrap_or(enum_name);
+                if n == base || n.starts_with(&format!("{}<", base)) { names.push(n.clone()); }
+            }
+        }
+        for n in names {
+            if let Some(info) = self.lowerer.enum_defs.get(&n) {
+                if let Some(v) = info.variant(variant) { return Some(v.tag); }
+            }
+        }
+        None
+    }
+
     fn enum_operand_tag(&mut self, e: &Expr) -> Result<Val> {
         if matches!(self.infer_expr_type(e), Ok(t) if self.is_tagged_enum_struct(&t)) {
             let ty = self.infer_expr_type(e)?;

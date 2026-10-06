@@ -1836,6 +1836,12 @@ impl Parser {
         if !is_typename {
             return false;
         }
+        // `Type::…` is a qualified path (`Enum::Variant`, `mod::Type`):
+        // `qualified_scope_decl` already decided whether it declares something;
+        // as an operand (`if (Status::Read != a)`) it is an expression.
+        if self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::ColonColon) {
+            return false;
+        }
         if self.lang == Lang::Sic {
             return true;
         }
