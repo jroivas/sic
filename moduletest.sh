@@ -257,6 +257,17 @@ if PATH="$PWD/recur_bin:$PATH" CC=sic timeout 60 sic recur.c -o recur 2>err && [
 else
     bad "cc-sic-no-recursion" "build failed or timed out: $(cat err)"
 fi
+# Forced to query sic, with SIC_CPP_NESTED scrubbed from the query environment:
+# the nested sic must still spot its sic-cpp ancestor (one sic-cpp run in all).
+printf '#!/bin/sh\necho x >> "%s/recur_cpp.log"\nexec "%s" "$@"\n' "$PWD" "$("$SIC" -print-prog-name=cpp)" > recur_bin/sic-cpp
+chmod +x recur_bin/sic-cpp
+: > recur_cpp.log
+if PATH="$PWD/recur_bin:$PATH" SIC_HOST_CC="env -u SIC_CPP_NESTED sic" timeout 60 sic recur.c -o recur 2>err && [ "$(./recur)" = ok ]; then
+    n=$(wc -l < recur_cpp.log)
+    [ "$n" -le 1 ] && ok "scrubbed-env-no-recursion" || bad "scrubbed-env-no-recursion" "sic-cpp ran $n times"
+else
+    bad "scrubbed-env-no-recursion" "build failed or timed out: $(cat err)"
+fi
 [ "$(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)" = cpp ] \
     && ok "nested-uses-plain-cpp" || bad "nested-uses-plain-cpp" "got: $(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)"
 

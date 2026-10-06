@@ -9,9 +9,11 @@ use crate::{Result, CompileError};
 ///      `<exe dir>/../../../sic-cpp/sic-cpp`;
 ///   4. the system `cpp`.
 ///
-/// Under one of sic-cpp's own host-compiler queries (`SIC_CPP_NESTED` set — a
-/// build with `CC=sic` makes sic that host compiler) sic-cpp is never chosen,
-/// so sic and sic-cpp cannot start each other without end.
+/// Under one of sic-cpp's own host-compiler queries (a build with `CC=sic`
+/// makes sic that host compiler) sic-cpp is never chosen, so sic and sic-cpp
+/// cannot start each other without end. Detected by `SIC_CPP_NESTED` (which
+/// sic-cpp exports) and, should a build tool scrub the environment, by a
+/// sic-cpp among this process's ancestors.
 ///
 /// The preprocessor must accept GCC `cpp`'s command line
 /// (`cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] … file`) and write the
@@ -19,7 +21,7 @@ use crate::{Result, CompileError};
 pub fn preprocessor_bin() -> String {
     static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
-        let nested = std::env::var_os("SIC_CPP_NESTED").is_some();
+        let nested = std::env::var_os("SIC_CPP_NESTED").is_some() || spawned_by_sic_cpp();
         if let Some(v) = std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()) {
             if !(nested && is_sic_cpp(&v)) { return v; }
         }
@@ -45,6 +47,24 @@ pub fn preprocessor_bin() -> String {
 /// target/identity macros itself.
 pub fn is_sic_cpp(bin: &str) -> bool {
     std::path::Path::new(bin).file_name().map_or(false, |n| n == "sic-cpp")
+}
+
+/// Whether a `sic-cpp` process is among our ancestors (it starts sic through
+/// `sh -c`, so not necessarily the parent). Linux `/proc`; false elsewhere.
+fn spawned_by_sic_cpp() -> bool {
+    let ppid_of = |pid: u32| -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
+        // `pid (comm) state ppid ...` — comm may hold spaces/parens: split after the last ')'.
+        stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+    };
+    let mut pid = std::process::id();
+    for _ in 0..64 {
+        pid = match ppid_of(pid) { Some(p) if p > 1 => p, _ => return false };
+        if let Ok(exe) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
+            if exe.file_name().map_or(false, |n| n == "sic-cpp") { return true; }
+        }
+    }
+    false
 }
 
 fn is_executable(p: &std::path::Path) -> bool {
