@@ -9,6 +9,30 @@ set -u
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 SIC="${SIC:-$ROOT/siccomp/target/debug/sic}"
 CC="${CC:-cc}"
+# CPP_MODE selects the preprocessor sic runs:
+#   global  the system `cpp`
+#   sic     this repository's sic-cpp (sic-cpp/sic-cpp; must be built)
+#   both    run the whole suite once with each, and fail if either fails
+#   unset   sic's own choice: $SIC_CPP, else sic-cpp on PATH, else the repo's
+#           sic-cpp, else `cpp` (see `sic -print-prog-name=cpp`)
+case "${CPP_MODE:-}" in
+    global) export SIC_CPP="cpp" ;;
+    sic)
+        export SIC_CPP="$ROOT/sic-cpp/sic-cpp"
+        [ -x "$SIC_CPP" ] || { echo "CPP_MODE=sic: $SIC_CPP is not built (make -C sic-cpp)"; exit 2; }
+        ;;
+    both)
+        both_rc=0
+        for m in global sic; do
+            echo "=== CPP_MODE=$m"
+            CPP_MODE=$m "$0" "$@" || both_rc=1
+        done
+        exit $both_rc
+        ;;
+    "") ;;
+    *) echo "unknown CPP_MODE '${CPP_MODE}' (global, sic, both)"; exit 2 ;;
+esac
+echo "preprocessor: $("$SIC" -print-prog-name=cpp)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

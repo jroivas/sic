@@ -5,7 +5,7 @@ pub mod parser;
 pub mod lower;
 pub mod module_manifest;
 
-pub use preprocess::{preprocess, preprocess_ex};
+pub use preprocess::{preprocess, preprocess_ex, preprocessor_bin};
 pub use lexer::{Lexer, Lang};
 pub use parser::Parser;
 pub use lower::Lowerer;

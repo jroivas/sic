@@ -1,14 +1,56 @@
 use std::process::Command;
 use crate::{Result, CompileError};
 
-/// Name of the C preprocessor binary to use.  Defaults to `"cpp"`; set
-/// `SIC_CPP` to override (e.g. `SIC_CPP=sic-cpp`).
+/// The C preprocessor to run, resolved once per process:
+///   1. `SIC_CPP` from the environment, when set (an explicit override wins);
+///   2. `sic-cpp` found on `PATH` (an installed sic toolchain);
+///   3. `sic-cpp/sic-cpp` of the sic repository this compiler was built in —
+///      the binary lives at `<repo>/siccomp/target/<profile>/sic`, so that is
+///      `<exe dir>/../../../sic-cpp/sic-cpp`;
+///   4. the system `cpp`.
 ///
-/// The preprocessor must accept the same CLI interface as GCC's `cpp`:
-///   `cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] file`
-/// and produce preprocessed text on stdout.
-fn preprocessor_bin() -> String {
-    std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cpp".to_string())
+/// The preprocessor must accept GCC `cpp`'s command line
+/// (`cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] … file`) and write the
+/// preprocessed text to stdout.
+pub fn preprocessor_bin() -> String {
+    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BIN.get_or_init(|| {
+        if let Some(v) = std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()) {
+            return v;
+        }
+        if let Some(p) = find_in_path("sic-cpp") {
+            return p;
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let cand = dir.join("../../../sic-cpp/sic-cpp");
+                if is_executable(&cand) {
+                    if let Ok(c) = cand.canonicalize() { return c.to_string_lossy().into_owned(); }
+                }
+            }
+        }
+        "cpp".to_string()
+    }).clone()
+}
+
+/// Whether `bin` is sic's own preprocessor (by file name), which provides the
+/// target/identity macros itself.
+pub fn is_sic_cpp(bin: &str) -> bool {
+    std::path::Path::new(bin).file_name().map_or(false, |n| n == "sic-cpp")
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).map_or(false, |m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// `name` resolved against `PATH` (first executable match).
+fn find_in_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|c| is_executable(c))
+        .map(|c| c.to_string_lossy().into_owned())
 }
 
 /// Run the system C preprocessor on `file`, returning the preprocessed text.
@@ -56,7 +98,7 @@ pub fn preprocess_ex(
     // and compiler-identity predefines (the sic-cpp built-in already defines
     // its own set of predefined macros, so we skip these extra flags to avoid
     // redefinition noise).
-    if bin != "sic-cpp" {
+    if !is_sic_cpp(&bin) {
         for (name, value) in host_numeric_predefines(std) {
             cmd.arg(format!("-D{}={}", name, value));
         }

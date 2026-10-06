@@ -258,6 +258,12 @@ fn handle_version_query(args: &[String]) -> bool {
                 println!("{}", target_triple());
                 return true;
             }
+            // gcc's `-print-prog-name=cpp`: the preprocessor sic will run
+            // (SIC_CPP, else sic-cpp on PATH / in the sic repo, else cpp).
+            "-print-prog-name=cpp" | "--print-prog-name=cpp" => {
+                println!("{}", sic_frontend::preprocessor_bin());
+                return true;
+            }
             _ => {}
         }
     }
