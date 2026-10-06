@@ -15,7 +15,7 @@ wild = ["dep:libwild"]
 # changes between minor releases. No default features: `zstd` would build the C
 # zstd library with a C compiler, which sic must not need.
 libwild = { version = "=0.10.0", default-features = false, optional = true }
-object  = { version = "0.39", default-features = false, features = ["write"] }
+object  = { version = "0.40", default-features = false, features = ["write"] }
 # libwild hashes with blake3, whose build script otherwise assembles SIMD code
 # with a C compiler; `pure` selects its pure-Rust implementation (enabled here,
 # it unifies into libwild's copy).

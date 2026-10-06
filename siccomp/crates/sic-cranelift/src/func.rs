@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use cranelift_codegen::ir::{self as cir, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{self as cir, InstBuilder, MemFlagsData};
 use cranelift_codegen::ir::types as ct;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -160,19 +160,19 @@ pub fn compile_function(
             let mut idx = bp;
             for k in 0..n_gp_fill {
                 if idx < params.len() {
-                    builder.ins().store(MemFlags::new(), params[idx], reg_save, ((n_gp + k) * 8) as i32);
+                    builder.ins().store(MemFlagsData::new(), params[idx], reg_save, ((n_gp + k) * 8) as i32);
                 }
                 idx += 1;
             }
             for k in 0..n_fp_fill {
                 if idx < params.len() {
-                    builder.ins().store(MemFlags::new(), params[idx], reg_save, (48 + (n_fp + k) * 16) as i32);
+                    builder.ins().store(MemFlagsData::new(), params[idx], reg_save, (48 + (n_fp + k) * 16) as i32);
                 }
                 idx += 1;
             }
             for k in 0..VA_OVERFLOW_SLOTS {
                 if idx < params.len() {
-                    builder.ins().store(MemFlags::new(), params[idx], overflow, (k * 8) as i32);
+                    builder.ins().store(MemFlagsData::new(), params[idx], overflow, (k * 8) as i32);
                 }
                 idx += 1;
             }
@@ -293,7 +293,7 @@ pub fn compile_function(
     }
 
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(target_config);
     Ok(())
 }
 
@@ -354,7 +354,7 @@ fn emit_instr(
             // A vector-typed load reads a whole XMM register in one unaligned move
             // (the `new[]`/stack arrays these come from are only element-aligned).
             let cl_ty = vector_clty(ty).unwrap_or_else(|| cl_type(ty, ptr_size).unwrap_or(ct::I32));
-            let v = builder.ins().load(cl_ty, MemFlags::new(), pv, 0);
+            let v = builder.ins().load(cl_ty, MemFlagsData::new(), pv, 0);
             val_map.insert(dest.0, v);
         }
 
@@ -364,7 +364,7 @@ fn emit_instr(
         Instr::LoadReadonly { dest, ptr, ty } => {
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let flags = MemFlags::new().with_readonly().with_notrap();
+            let flags = MemFlagsData::new().with_readonly().with_notrap();
             let v = builder.ins().load(cl_ty, flags, pv, 0);
             val_map.insert(dest.0, v);
         }
@@ -388,7 +388,7 @@ fn emit_instr(
                 val_map.get(&id.0).map(|&v| builder.func.dfg.value_type(v)).unwrap_or(ct::I32)
             } else { ct::I32 };
             let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
-            builder.ins().store(MemFlags::new(), sv, pv, 0);
+            builder.ins().store(MemFlagsData::new(), sv, pv, 0);
         }
 
         // Atomic operations (sic `atomic` types). All sequentially consistent —
@@ -396,7 +396,7 @@ fn emit_instr(
         Instr::AtomicLoad { dest, ptr, ty } => {
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
-            let v = builder.ins().atomic_load(cl_ty, MemFlags::new(), pv);
+            let v = builder.ins().atomic_load(cl_ty, MemFlagsData::new(), pv);
             val_map.insert(dest.0, v);
         }
         Instr::AtomicStore { ptr, val, ty } => {
@@ -404,7 +404,7 @@ fn emit_instr(
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let sv = coerce(sv, cl_ty, builder, ptr_ty);
-            builder.ins().atomic_store(MemFlags::new(), sv, pv);
+            builder.ins().atomic_store(MemFlagsData::new(), sv, pv);
         }
         Instr::AtomicRmw { dest, op, ptr, val, ty } => {
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
@@ -419,7 +419,7 @@ fn emit_instr(
                 AtomicOp::Xor  => cir::AtomicRmwOp::Xor,
                 AtomicOp::Xchg => cir::AtomicRmwOp::Xchg,
             };
-            let old = builder.ins().atomic_rmw(cl_ty, MemFlags::new(), clop, pv, xv);
+            let old = builder.ins().atomic_rmw(cl_ty, MemFlagsData::new(), clop, pv, xv);
             val_map.insert(dest.0, old);
         }
         Instr::AtomicCas { dest, ptr, expected, desired, ty } => {
@@ -431,7 +431,7 @@ fn emit_instr(
             let dv = coerce(dv, cl_ty, builder, ptr_ty);
             // Returns the observed old value; success is old == expected (the
             // frontend does that comparison for `.cas() -> bool`).
-            let old = builder.ins().atomic_cas(MemFlags::new(), pv, ev, dv);
+            let old = builder.ins().atomic_cas(MemFlagsData::new(), pv, ev, dv);
             val_map.insert(dest.0, old);
         }
 
@@ -615,7 +615,7 @@ fn emit_instr(
 
         Instr::GetFieldPtr { dest, base, byte_offset, .. } => {
             let bv = rval(base, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let addr = builder.ins().iadd_imm(bv, *byte_offset as i64);
+            let addr = builder.ins().iadd_imm_s(bv, *byte_offset as i64);
             val_map.insert(dest.0, addr);
         }
 
@@ -632,7 +632,7 @@ fn emit_instr(
             let cv = rval(cond, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I8);
             let tv = rval(on_true, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
             let fv = rval(on_false, val_map, callee_refs, data_refs, builder, ptr_ty, cl_ty);
-            let cb = builder.ins().icmp_imm(cir::condcodes::IntCC::NotEqual, cv, 0);
+            let cb = builder.ins().icmp_imm_s(cir::condcodes::IntCC::NotEqual, cv, 0);
             let tv = coerce(tv, cl_ty, builder, ptr_ty);
             let fv = coerce(fv, cl_ty, builder, ptr_ty);
             let v = builder.ins().select(cb, tv, fv);
@@ -678,11 +678,11 @@ fn emit_instr(
             if let Some(va) = va_info {
                 let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
                 let gp = builder.ins().iconst(ct::I32, va.gp_start as i64);
-                builder.ins().store(MemFlags::new(), gp, lp, 0);
+                builder.ins().store(MemFlagsData::new(), gp, lp, 0);
                 let fp = builder.ins().iconst(ct::I32, va.fp_start as i64);
-                builder.ins().store(MemFlags::new(), fp, lp, 4);
-                builder.ins().store(MemFlags::new(), va.overflow, lp, 8);
-                builder.ins().store(MemFlags::new(), va.reg_save, lp, 16);
+                builder.ins().store(MemFlagsData::new(), fp, lp, 4);
+                builder.ins().store(MemFlagsData::new(), va.overflow, lp, 8);
+                builder.ins().store(MemFlagsData::new(), va.reg_save, lp, 16);
             }
         }
 
@@ -706,27 +706,27 @@ fn emit_instr(
             let (off_field, threshold, step): (i32, i64, i64) =
                 if is_fp { (4, 176, 16) } else { (0, 48, 8) };
 
-            let offset = builder.ins().load(ct::I32, MemFlags::new(), lp, off_field);
+            let offset = builder.ins().load(ct::I32, MemFlagsData::new(), lp, off_field);
             let offset64 = builder.ins().uextend(ct::I64, offset);
-            let reg_save = builder.ins().load(ptr_ty, MemFlags::new(), lp, 16);
-            let overflow = builder.ins().load(ptr_ty, MemFlags::new(), lp, 8);
+            let reg_save = builder.ins().load(ptr_ty, MemFlagsData::new(), lp, 16);
+            let overflow = builder.ins().load(ptr_ty, MemFlagsData::new(), lp, 8);
 
             let thr = builder.ins().iconst(ct::I32, threshold);
             let in_reg = builder.ins().icmp(IntCC::UnsignedLessThan, offset, thr);
 
             let reg_addr = builder.ins().iadd(reg_save, offset64);
-            let new_off = builder.ins().iadd_imm(offset, step);
-            let new_ovf = builder.ins().iadd_imm(overflow, 8);
+            let new_off = builder.ins().iadd_imm_s(offset, step);
+            let new_ovf = builder.ins().iadd_imm_s(overflow, 8);
 
             let addr = builder.ins().select(in_reg, reg_addr, overflow);
             // Advance gp/fp_offset only when the value came from a register.
             let stored_off = builder.ins().select(in_reg, new_off, offset);
-            builder.ins().store(MemFlags::new(), stored_off, lp, off_field);
+            builder.ins().store(MemFlagsData::new(), stored_off, lp, off_field);
             // Advance overflow only when the value came from the stack.
             let stored_ovf = builder.ins().select(in_reg, overflow, new_ovf);
-            builder.ins().store(MemFlags::new(), stored_ovf, lp, 8);
+            builder.ins().store(MemFlagsData::new(), stored_ovf, lp, 8);
 
-            let v = builder.ins().load(cl_ty, MemFlags::new(), addr, 0);
+            let v = builder.ins().load(cl_ty, MemFlagsData::new(), addr, 0);
             val_map.insert(dest.0, v);
         }
 
@@ -893,7 +893,7 @@ fn emit_terminator(
             for (arm_val, arm_bb) in arms {
                 let arm_cl = bb_map[&arm_bb.0];
                 let next_bb = builder.create_block();
-                let eq = builder.ins().icmp_imm(cir::condcodes::IntCC::Equal, v, *arm_val);
+                let eq = builder.ins().icmp_imm_s(cir::condcodes::IntCC::Equal, v, *arm_val);
                 builder.ins().brif(eq, arm_cl, &[], next_bb, &[]);
                 builder.seal_block(next_bb);
                 builder.switch_to_block(next_bb);
@@ -919,7 +919,7 @@ fn coerce_scalar(builder: &mut FunctionBuilder<'_>, v: cir::Value, to: cir::Type
     } else if from.is_float() && to.is_float() {
         if from.bits() < to.bits() { builder.ins().fpromote(to, v) } else { builder.ins().fdemote(to, v) }
     } else if from.bits() == to.bits() {
-        builder.ins().bitcast(to, MemFlags::new(), v)
+        builder.ins().bitcast(to, MemFlagsData::new(), v)
     } else {
         v // width+category mismatch — not produced for a promoted scalar local
     }
@@ -950,7 +950,7 @@ fn rval(
                 if is_tls {
                     builder.ins().tls_value(ptr_ty, gv)
                 } else {
-                    builder.ins().global_value(ptr_ty, gv)
+                    builder.ins().symbol_value(ptr_ty, gv)
                 }
             } else {
                 builder.ins().iconst(ptr_ty, 0)

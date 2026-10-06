@@ -299,7 +299,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         } else {
             format!(".init_array.{:05}", prio)
         };
-        desc.set_segment_section("", &section, 0); // 0 = macho section flags (ELF: unused)
+        desc.set_custom_section(&section);
         obj_module.define_data(did, &desc)?;
     }
 

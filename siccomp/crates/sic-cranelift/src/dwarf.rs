@@ -172,7 +172,7 @@ pub fn emit_dwarf(
     let comp_dir_ls = LineString::String(comp_dir.clone().into_bytes());
     let comp_file_ls = LineString::String(file_name.clone().into_bytes());
     let mut line_program =
-        LineProgram::new(encoding, LineEncoding::default(), comp_dir_ls, comp_file_ls, None);
+        LineProgram::new(encoding, LineEncoding::default(), comp_dir_ls, None, comp_file_ls, None);
     let dir_id = line_program.default_directory();
     let file_id =
         line_program.add_file(LineString::String(file_name.clone().into_bytes()), dir_id, None);

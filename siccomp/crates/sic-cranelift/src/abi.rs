@@ -3,7 +3,7 @@
 //! into/out of the register-sized pieces. See `siccomp/ABI.md` and
 //! `sic-ir/src/abi.rs`.
 
-use cranelift_codegen::ir::{types as ct, AbiParam, ArgumentPurpose, InstBuilder, MemFlags, Type as ClType, Value};
+use cranelift_codegen::ir::{types as ct, AbiParam, ArgumentPurpose, InstBuilder, MemFlagsData, Type as ClType, Value};
 use cranelift_frontend::FunctionBuilder;
 use sic_ir::abi::{classify_struct_union, AggClass, Chunk, RegClass};
 use sic_ir::Type;
@@ -83,7 +83,7 @@ pub fn push_param_abi(ty: &Type, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<Ab
 /// `chunk_cl_type(chunk)`. Reads exactly `chunk.bytes` bytes so it never runs
 /// past the aggregate's storage.
 pub fn load_chunk(builder: &mut FunctionBuilder, base: Value, chunk: &Chunk) -> Value {
-    let flags = MemFlags::new();
+    let flags = MemFlagsData::new();
     let off = chunk.offset as i32;
     match chunk.class {
         RegClass::Sse => {
@@ -99,7 +99,7 @@ pub fn load_chunk(builder: &mut FunctionBuilder, base: Value, chunk: &Chunk) -> 
                 let (ty, n) = if rem >= 4 { (ct::I32, 4) } else if rem >= 2 { (ct::I16, 2) } else { (ct::I8, 1) };
                 let piece = builder.ins().load(ty, flags, base, off + pos as i32);
                 let wide = builder.ins().uextend(ct::I64, piece);
-                let shifted = if pos == 0 { wide } else { builder.ins().ishl_imm(wide, (pos * 8) as i64) };
+                let shifted = if pos == 0 { wide } else { builder.ins().ishl_imm_u(wide, (pos * 8) as i64) };
                 acc = Some(match acc {
                     None => shifted,
                     Some(a) => builder.ins().bor(a, shifted),
@@ -114,7 +114,7 @@ pub fn load_chunk(builder: &mut FunctionBuilder, base: Value, chunk: &Chunk) -> 
 /// Store one eightbyte `val` (of `chunk_cl_type`) into `dst + chunk.offset`,
 /// writing exactly `chunk.bytes` bytes.
 pub fn store_chunk(builder: &mut FunctionBuilder, val: Value, dst: Value, chunk: &Chunk) {
-    let flags = MemFlags::new();
+    let flags = MemFlagsData::new();
     let off = chunk.offset as i32;
     match chunk.class {
         RegClass::Sse => {
@@ -125,7 +125,7 @@ pub fn store_chunk(builder: &mut FunctionBuilder, val: Value, dst: Value, chunk:
             while pos < chunk.bytes {
                 let rem = chunk.bytes - pos;
                 let (ty, n) = if rem >= 4 { (ct::I32, 4) } else if rem >= 2 { (ct::I16, 2) } else { (ct::I8, 1) };
-                let shifted = if pos == 0 { val } else { builder.ins().ushr_imm(val, (pos * 8) as i64) };
+                let shifted = if pos == 0 { val } else { builder.ins().ushr_imm_u(val, (pos * 8) as i64) };
                 let narrow = builder.ins().ireduce(ty, shifted);
                 builder.ins().store(flags, narrow, dst, off + pos as i32);
                 pos += n;
