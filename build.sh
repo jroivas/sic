@@ -8,6 +8,8 @@
 # relocatable sysroot the compiler searches by default. After this, `import std;`
 # works with no flags (dynamic by default; `-static` links `libstd.a`).
 #
+# Finally it builds sic-cpp, the preprocessor sic uses by default.
+#
 # Usage: ./build.sh [debug|release]   (default: debug)
 set -euo pipefail
 
@@ -42,6 +44,17 @@ cp "$ART_BUILD"/libart.* "$SYSROOT/"
 sed "s|$ART_BUILD|$SYSROOT|g" "$ART_BUILD/module_art.smod" > "$SYSROOT/module_art.smod"
 [ -f "$ART_BUILD/module_art.h" ] && cp "$ART_BUILD/module_art.h" "$SYSROOT/"
 
+echo ">> building sic-cpp (sic's default preprocessor)"
+# sic picks sic-cpp/sic-cpp next to the repo as its preprocessor (after $SIC_CPP
+# and a sic-cpp on PATH), so build it here — it needs std, installed above.
+# Bootstrap it with the system cpp when there is one, so a stale sic-cpp from an
+# earlier build can never break building the new one.
+BOOT_CPP=""
+command -v cpp >/dev/null 2>&1 && BOOT_CPP="cpp"
+SIC_CPP="${BOOT_CPP}" make -B -C "$ROOT/sic-cpp" SIC="$SIC"
+
 echo ">> done. installed:"
 ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
-      "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so
+      "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so \
+      "$ROOT/sic-cpp/sic-cpp"
+echo ">> preprocessor: $("$SIC" -print-prog-name=cpp)"

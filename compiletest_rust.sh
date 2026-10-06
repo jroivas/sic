@@ -33,7 +33,9 @@ case "${CPP_MODE:-}" in
     "") ;;
     *) echo "unknown CPP_MODE '${CPP_MODE}' (global, sic, both)"; exit 2 ;;
 esac
-echo "preprocessor: $("$SIC" -print-prog-name=cpp)"
+# (A sic older than -print-prog-name reports nothing useful; say so.)
+pp_name="$("$SIC" -print-prog-name=cpp 2>/dev/null)" || pp_name=""
+echo "preprocessor: ${pp_name:-unknown ($SIC predates -print-prog-name; rebuild it)}"
 
 outfolder="${1:-/tmp/sic_rust_tests}"
 mkdir -p "$outfolder"
