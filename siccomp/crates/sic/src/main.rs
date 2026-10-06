@@ -838,6 +838,10 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .to_string();
     let mut ir_module = lower_tu(&tu, lang, &module_name, args)?;
     ir_module.source_file = Some(path.to_string());
+    // Record which preprocessor produced this object (`readelf -p .comment`):
+    // its program name, not the full path, so objects don't encode where the
+    // toolchain lives.
+    ir_module.producer = Some(producer_string());
 
     // Typed IR optimization stage (post-lowering, pre-codegen).
     sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
@@ -846,6 +850,15 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         eprintln!("{}", print_module(&ir_module));
     }
     Ok(ir_module)
+}
+
+/// `sic <version> (preprocessor: <name>)` — the identification sic writes
+/// into every object's `.comment` (and DWARF producer with `-g`).
+fn producer_string() -> String {
+    let bin = sic_frontend::preprocessor_bin();
+    let name = std::path::Path::new(&bin).file_name()
+        .map(|n| n.to_string_lossy().into_owned()).unwrap_or(bin.clone());
+    format!("sic {} (preprocessor: {})", env!("CARGO_PKG_VERSION"), name)
 }
 
 /// Codegen a lowered IR module to object-file bytes.

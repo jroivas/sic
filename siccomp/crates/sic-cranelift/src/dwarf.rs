@@ -144,6 +144,7 @@ pub fn emit_dwarf(
     source_path: &str,
     funcs: &[FuncLines],
     address_size: u8,
+    producer: &str,
 ) -> Result<(), String> {
     if funcs.is_empty() {
         return Ok(());
@@ -199,7 +200,7 @@ pub fn emit_dwarf(
     let root = dwarf.unit.root();
     {
         let die = dwarf.unit.get_mut(root);
-        die.set(gimli::DW_AT_producer, AttributeValue::String(b"sic (SIC Compiler)".to_vec()));
+        die.set(gimli::DW_AT_producer, AttributeValue::String(producer.as_bytes().to_vec()));
         die.set(gimli::DW_AT_language, AttributeValue::Language(gimli::DW_LANG_C11));
         die.set(gimli::DW_AT_name, AttributeValue::String(file_name.clone().into_bytes()));
         die.set(gimli::DW_AT_comp_dir, AttributeValue::String(comp_dir.clone().into_bytes()));

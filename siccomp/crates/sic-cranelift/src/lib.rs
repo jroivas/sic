@@ -406,9 +406,20 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
                     vars: vars.clone(),
                 })
                 .collect();
-            dwarf::emit_dwarf(&mut product.object, src, &funcs, ptr_size as u8)
+            let producer = ir_module.producer.clone().unwrap_or_else(|| "sic (SIC Compiler)".to_string());
+            dwarf::emit_dwarf(&mut product.object, src, &funcs, ptr_size as u8, &producer)
                 .map_err(CraneliftError::Unsupported)?;
         }
+    }
+    // Identification in `.comment` (as gcc/clang do): a NUL-terminated string in
+    // a mergeable-strings section, which the linker keeps (merged) in the final
+    // executable — `readelf -p .comment a.out` shows which compiler and
+    // preprocessor built it.
+    if let Some(producer) = &ir_module.producer {
+        let id = product.object.add_section(Vec::new(), b".comment".to_vec(), object::SectionKind::OtherString);
+        let mut bytes = producer.as_bytes().to_vec();
+        bytes.push(0);
+        product.object.section_mut(id).set_data(bytes, 1);
     }
     Ok(product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
 }

@@ -211,6 +211,23 @@ else
     bad "std-static" "static compile/link failed: $(cat err)"
 fi
 
+# ── Producer identification (.comment) ──────────────────────────────────────
+# Every object records which preprocessor built it; the linker keeps the
+# strings (merged) in the executable — `readelf -p .comment`.
+if command -v readelf >/dev/null 2>&1; then
+    printf 'int pa(void){return 41;}\n' > pa.c
+    printf 'int pa(void);\nint main(void){return pa()+1;}\n' > pb.c
+    if SIC_CPP=cpp "$SIC" -c pa.c -o pa.o 2>err && "$SIC" -c pb.c -o pb.o 2>>err && "$CC" pa.o pb.o -o pab 2>>err; then
+        want_pp="$(basename "$("$SIC" -print-prog-name=cpp)")"
+        cmt="$(readelf -p .comment pab 2>/dev/null)"
+        echo "$cmt" | grep -q "sic .* (preprocessor: cpp)" \
+            && echo "$cmt" | grep -q "sic .* (preprocessor: $want_pp)" \
+            && ok "comment-producer" || bad "comment-producer" "got:\n$cmt"
+    else
+        bad "comment-producer" "build failed: $(cat err)"
+    fi
+fi
+
 # ── Default arguments across modules (sic.md §"Default parameters") ──────────
 # A module exports functions with default parameters; the consumer fills omitted
 # defaults from the manifest, including keyword-only defaults before a va sink.
