@@ -80,6 +80,11 @@ struct Preprocessor {
     list<string> dep_targets; // -MT / -MQ (MQ already escaped)
     string input_name;        // as given (for the default target)
     i32 discard;              // -imacros: run the file, keep only its macros
+    i32 dump_defines;         // -dD: also output #define/#undef directives
+    i32 dump_names;           // -dN: … with macro names only
+    i32 dump_includes;        // -dI: also output #include directives
+    i32 errors;               // diagnostics that make the exit status 1
+    list<string> embed_dirs;  // --embed-dir
 }
 
 
@@ -462,6 +467,60 @@ string spaces(i32 n) {
 
 // ── Comment stripping ───────────────────────────────────────────────────────
 
+// -C (1) / -CC (2): keep comments in the output instead of stripping them.
+// Global because the tokenizer has no preprocessor handle.
+i32 g_keep_comments = 0;
+
+// Whether `line` ends inside an unterminated block comment (literals skipped).
+i32 open_block_comment(string line) {
+    i32 i = 0;
+    while (i < line.size) {
+        i32 c = line[i];
+        if (c == '"' || c == '\'') {
+            i32 q = c; i++;
+            while (i < line.size && line[i] != q) { if (line[i] == '\\') i++; i++; }
+            i++; continue;
+        }
+        if (c == '/' && i + 1 < line.size && line[i+1] == '/') return 0;
+        if (c == '/' && i + 1 < line.size && line[i+1] == '*') {
+            i += 2;
+            while (i + 1 < line.size && !(line[i] == '*' && line[i+1] == '/')) i++;
+            if (i + 1 >= line.size) return 1;
+            i += 2; continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+// -CC: inside a macro body a `//` comment would swallow the rest of the line
+// the macro is expanded into, so it becomes a block comment (as gcc does).
+string line_comments_to_block(string text) {
+    string out = "";
+    i32 i = 0;
+    while (i < text.size) {
+        i32 c = text[i];
+        if (c == '"' || c == '\'') {
+            i32 st = i; i++;
+            while (i < text.size && text[i] != c) { if (text[i] == '\\') i++; i++; }
+            if (i < text.size) i++;
+            out = out + text[st:i]; continue;
+        }
+        if (c == '/' && i + 1 < text.size && text[i+1] == '*') {
+            i32 st = i; i += 2;
+            while (i + 1 < text.size && !(text[i] == '*' && text[i+1] == '/')) i++;
+            i = i + 2 <= text.size ? i + 2 : text.size;
+            out = out + text[st:i]; continue;
+        }
+        if (c == '/' && i + 1 < text.size && text[i+1] == '/') {
+            out = out + "/*" + text[i+2:].rtrim() + " */";
+            return out;
+        }
+        out = out + text[i:i+1]; i++;
+    }
+    return out;
+}
+
 // Replace C comments with whitespace over the WHOLE source before line-splitting,
 // so a `/* … */` spanning multiple lines is handled (the per-line tokenizer can't
 // see across lines). A block comment becomes a single space, but its embedded
@@ -523,12 +582,19 @@ list<string> tokenize(string input) {
             continue;
         }
         if (ch == '/' && i + 1 < input.size && input[i+1] == '*') {
+            i32 st = i;
             i += 2;
             while (i + 1 < input.size && !(input[i] == '*' && input[i+1] == '/')) i++;
-            i += 2; tokens.add(" "); continue;
+            i += 2;
+            if (i > input.size) i = input.size;
+            // -C/-CC: the comment is output as a token; otherwise it is a space.
+            if (g_keep_comments) tokens.add(input[st:i]); else tokens.add(" ");
+            continue;
         }
         if (ch == '/' && i + 1 < input.size && input[i+1] == '/') {
+            i32 st = i;
             while (i < input.size && input[i] != '\n') i++;
+            if (g_keep_comments) tokens.add(input[st:i].rtrim());
             continue;
         }
         if (is_ident_start(ch)) {
@@ -1300,16 +1366,52 @@ void pp_process_content(Preprocessor *pp, string content) {
     while (rest.size > 0) {
         string line = "";
         i32 nphys = 0;   // physical lines this logical line spans
+        i32 splices = 0; // backslash-newlines in the current run
+        i32 all_splices = 0;
+        string before_last = "";
         while (true) {
             i32 n = 0;
             while (n < rest.size && rest[n] != '\n') n++;
             string phys = rest[0:n];
             rest = n < rest.size ? rest[n+1:] : rest[n:];
             nphys++;
+            before_last = line;
             // A trailing `\` (optionally followed by `\r`) continues the line.
-            if (phys.ends_with("\\")) { line = line + phys[0:phys.size-1]; if (rest.size > 0) continue; }
-            else if (phys.ends_with("\\\r")) { line = line + phys[0:phys.size-2]; if (rest.size > 0) continue; }
-            else line = line + phys;
+            if (phys.ends_with("\\")) { line = line + phys[0:phys.size-1]; splices++; all_splices++; if (rest.size > 0) continue; }
+            else if (phys.ends_with("\\\r")) { line = line + phys[0:phys.size-2]; splices++; all_splices++; if (rest.size > 0) continue; }
+            else {
+                // -C with linemarkers: tokens after a comment that a splice made
+                // span lines stay on their own physical line (as gcc prints
+                // them) — push the remainder back, keeping its column.
+                if (g_keep_comments && pp->markers && all_splices > 0 && open_block_comment(before_last)) {
+                    i32 k = 0;
+                    while (k + 1 < phys.size && !(phys[k] == '*' && phys[k+1] == '/')) k++;
+                    k += 2;
+                    if (k < phys.size && phys[k:].trim().size > 0) {
+                        line = line + phys[0:k];
+                        rest = ("\x02" + spaces(k) + phys[k:] + "\n" + rest).dup;
+                        nphys--;
+                        break;
+                    }
+                }
+                line = line + phys;
+            }
+            // -C: a block comment left open continues onto the next line.
+            if (g_keep_comments && rest.size > 0 && open_block_comment(line)) {
+                // gcc removes backslash-newlines from its line buffer in place,
+                // and -C copies a comment out of that buffer: the freed bytes
+                // still hold the original line's last 2k-1 characters, which
+                // therefore appear (after a newline) inside the comment. Kept
+                // byte-compatible.
+                if (splices > 0) {
+                    i32 stale = 2 * splices - 1;
+                    if (stale > phys.size) stale = phys.size;
+                    line = line + "\n" + phys[phys.size - stale:];
+                }
+                splices = 0;
+                line = line + "\n";
+                continue;
+            }
             break;
         }
         // A function-like macro invocation may span lines (glibc's
@@ -1489,10 +1591,11 @@ void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx) {
     // Guarded and already included (guard macro defined): skip entirely.
     string g = pp->guards[path];
     if (g.size > 0 && pp->macros[g].size >= 2) return;
-    string content = strip_comments(read_file(path));
+    string content = read_file(path);
+    if (!g_keep_comments) content = strip_comments(content);
     if (g.size == 0) { string ng = include_guard(content); if (ng.size > 0) pp->guards[path] = ng.dup; }
     // The reader is first brought to the `#include` line itself.
-    if (pp->markers && pp->current_file != "<command-line>") sync_to(pp);
+    if (pp->markers) sync_to(pp);
     string saved_file = pp->current_file;
     i32 saved_line = pp->current_line;
     i32 saved_sys = pp->cur_sys;
@@ -1563,6 +1666,45 @@ string paren_group(string rest, i32 *i) {
     return inner;
 }
 
+// `__has_include(…)` / `__has_embed(…)` in ordinary text: an error (they belong
+// to #if), but — as in gcc — still replaced by their value.
+string has_ops_in_text(Preprocessor *pp, string line) {
+    string out = "";
+    i32 i = 0;
+    while (i < line.size) {
+        i32 c = line[i];
+        if (c == '"' || c == '\'') {
+            i32 st = i; i++;
+            while (i < line.size && line[i] != c) { if (line[i] == '\\') i++; i++; }
+            if (i < line.size) i++;
+            out = out + line[st:i];
+            continue;
+        }
+        if (is_ident_start(c) && (i == 0 || !is_ident(line[i-1]))) {
+            i32 st = i;
+            while (i < line.size && is_ident(line[i])) i++;
+            string w = line[st:i];
+            if (w == "__has_include" || w == "__has_include_next" || w == "__has_embed") {
+                diag(pp, "error", "‘" + w + "’ used outside of preprocessing directive", st + 1);
+                string arg = paren_group(line, &i);
+                if (w == "__has_embed") { out = out + has_embed(pp, arg); continue; }
+                i32 quoted = 0;
+                string path = header_name(arg, &quoted);
+                i32 from = 0;
+                if (w == "__has_include_next") { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
+                i32 dummy = 0;
+                out = out + (resolve_include(pp, path, quoted, from, &dummy).size > 0 ? "1" : "0");
+                continue;
+            }
+            out = out + w;
+            continue;
+        }
+        out = out + line[i:i+1];
+        i++;
+    }
+    return out;
+}
+
 // `#if` pre-pass, before macro expansion: `defined X` / `defined(X)` and the
 // `__has_*` operators are replaced by 0/1 — their operands must NOT be expanded
 // (C11 6.10.1p4: `#if defined(VER) && VER==42` must test the name `VER`).
@@ -1586,6 +1728,11 @@ string substitute_defined(Preprocessor *pp, string rest) {
                 while (i < rest.size && std::IsSpace(rest[i])) i++;
                 if (paren && i < rest.size && rest[i] == ')') i++;
                 out = out + (pp->macros[name].size >= 2 ? "1" : "0");
+                continue;
+            }
+            if (word == "__has_embed") {
+                string arg = paren_group(rest, &i);
+                out = out + has_embed(pp, arg);
                 continue;
             }
             if (word == "__has_include" || word == "__has_include_next") {
@@ -1656,6 +1803,189 @@ void pp_elif(Preprocessor *pp, string rest) {
     // state 1 (done) and 3 (parent-skip) stay put.
 }
 
+// C23 `#elifdef X` / `#elifndef X`.
+void pp_elifdef(Preprocessor *pp, string rest, i32 negate) {
+    if (pp->cond_depth == 0) { diag(pp, "error", "#elifdef without #if", 2); return; }
+    i32 state = pp->cond_stack[pp->cond_depth - 1];
+    if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;
+    else if (state == 2) pp->cond_stack[pp->cond_depth - 1] = pp_ifdef(pp, rest, negate) ? 0 : 2;
+}
+
+// gcc-style diagnostic `file:line:col: kind: msg`; an error makes exit status 1.
+void diag(Preprocessor *pp, string kind, string msg, i32 col) {
+    std::Println("{}:{}:{}: {}: {}", pp->current_file, pp->current_line, col, kind, msg, target = 2);
+    if (kind == "error") pp->errors++;
+}
+
+// ── #embed (C23) ───────────────────────────────────────────────────────────
+
+struct EmbedSpec {
+    string name;        // resource name as written
+    i32 quoted;
+    i32 name_pos;       // offset of the header-name token in the directive text
+    i64 limit;          // -1 = none
+    i64 offset;         // gnu::offset
+    i32 has_prefix; string prefix; i32 prefix_pos;
+    i32 has_suffix; string suffix;
+    i32 has_if_empty; string if_empty; i32 if_empty_pos;
+    string bad;         // first unknown parameter ("" = all fine)
+}
+
+// Parse `<name>`/`"name"` [parameters] of #embed / __has_embed. Standard
+// parameters may be spelled `limit` or `__limit__`; `gnu::offset` is gcc's.
+EmbedSpec embed_parse(Preprocessor *pp, string text) {
+    EmbedSpec e;
+    e.limit = -1; e.offset = 0; e.has_prefix = 0; e.has_suffix = 0; e.has_if_empty = 0;
+    e.bad = ""; e.name = ""; e.quoted = 0; e.prefix = ""; e.suffix = ""; e.if_empty = "";
+    e.prefix_pos = 0; e.if_empty_pos = 0;
+    i32 i = 0;
+    while (i < text.size && std::IsSpace(text[i])) i++;
+    e.name_pos = i;
+    if (i < text.size && (text[i] == '"' || text[i] == '<')) {
+        i32 close = text[i] == '"' ? '"' : '>';
+        e.quoted = text[i] == '"';
+        i32 st = i + 1;
+        i++;
+        while (i < text.size && text[i] != close) i++;
+        e.name = text[st:i].dup;
+        if (i < text.size) i++;
+    } else {
+        // `#embed MACRO …`: the header name comes from the expansion.
+        i32 st = i;
+        while (i < text.size && is_ident(text[i])) i++;
+        string ex = expand_line(text[st:i], &pp->macros, pp->current_line, pp->current_file).trim();
+        i32 q = 0;
+        e.name = header_name(ex, &q).dup;
+        e.quoted = q;
+    }
+    while (true) {
+        while (i < text.size && std::IsSpace(text[i])) i++;
+        if (i >= text.size || !is_ident_start(text[i])) break;
+        i32 st = i;
+        while (i < text.size && (is_ident(text[i]) || text[i] == ':')) i++;
+        string pname = text[st:i];
+        i32 gpos = i;
+        while (gpos < text.size && std::IsSpace(text[gpos])) gpos++;
+        string arg = "";
+        i32 arg_pos = gpos + 1;
+        if (gpos < text.size && text[gpos] == '(') { i = gpos; arg = paren_group(text, &i); }
+        while (arg_pos < text.size && std::IsSpace(text[arg_pos])) arg_pos++;
+        // Normalize `__x__` / `__gnu__::__x__` spellings.
+        string n = pname;
+        if (n.starts_with("__gnu__::")) n = "gnu::" + n[9:];
+        if (n.starts_with("gnu::__") && n.ends_with("__")) n = "gnu::" + n[7:n.size-2];
+        else if (n.starts_with("__") && n.ends_with("__") && n.size > 4) n = n[2:n.size-2];
+        if (n == "limit" || n == "gnu::offset") {
+            string v = substitute_defined(pp, arg);
+            v = expand_line(v, &pp->macros, pp->current_line, pp->current_file);
+            i64 val = eval_if_expr(v, &pp->macros);
+            if (n == "limit") e.limit = val; else e.offset = val;
+        } else if (n == "prefix") { e.has_prefix = 1; e.prefix = normalize_tokens(arg).dup; e.prefix_pos = arg_pos; }
+        else if (n == "suffix") { e.has_suffix = 1; e.suffix = normalize_tokens(arg).dup; }
+        else if (n == "if_empty") { e.has_if_empty = 1; e.if_empty = normalize_tokens(arg).dup; e.if_empty_pos = arg_pos; }
+        else if (e.bad.size == 0) e.bad = pname.dup;
+    }
+    return e;
+}
+
+// Locate a resource: `"x"` next to the current file, then --embed-dir dirs;
+// `<x>` only in the --embed-dir dirs.
+string embed_find(Preprocessor *pp, EmbedSpec *e) {
+    if (e->name.size == 0) return "";
+    if (e->name[0] == '/') return file_exists(e->name) ? e->name : "";
+    if (e->quoted) {
+        string here = dir_of(pp->current_file);
+        string cand = here.size > 0 ? here + "/" + e->name : e->name;
+        if (file_exists(cand)) return cand;
+    }
+    for (i32 i = 0; i < pp->embed_dirs.length; i++) {
+        string cand = pp->embed_dirs[i] + "/" + e->name;
+        if (file_exists(cand)) return cand;
+    }
+    return "";
+}
+
+// The resource's bytes after gnu::offset and limit.
+string embed_bytes(string path, EmbedSpec *e) {
+    string data = read_file(path);
+    i64 off = e->offset < 0 ? 0 : e->offset;
+    if (off > data.size) off = data.size;
+    i64 end = data.size;
+    if (e->limit >= 0 && off + e->limit < end) end = off + e->limit;
+    return data[off:end].dup;
+}
+
+// `__has_embed(…)` → __STDC_EMBED_NOT_FOUND__ (0) / _FOUND__ (1) / _EMPTY__ (2).
+string has_embed(Preprocessor *pp, string arg) {
+    EmbedSpec e = embed_parse(pp, arg);
+    if (e.bad.size > 0) return "0";
+    string path = embed_find(pp, &e);
+    if (path.size == 0) return "0";
+    return embed_bytes(path, &e).size == 0 ? "2" : "1";
+}
+
+// `#embed resource [params]` → the bytes as a comma-separated list of integer
+// constants. (gcc hands big resources to cc1 as a base64 `#embed` extension;
+// the sic compiler reads plain C, so sic-cpp always writes the numbers —
+// 128 per output line.) Placed at the column of its first token, as gcc does.
+void pp_embed(Preprocessor *pp, string rest, i32 rest_off) {
+    EmbedSpec e = embed_parse(pp, rest);
+    if (e.bad.size > 0) {
+        diag(pp, "error", "unknown embed parameter '" + e.bad + "'", rest_off + e.name_pos + 1);
+        return;
+    }
+    string path = embed_find(pp, &e);
+    if (path.size == 0) {
+        if (!e.quoted && pp->embed_dirs.length == 0)
+            diag(pp, "error", "no include path in which to search for " + e.name, rest_off + e.name_pos + 1);
+        else {
+            std::Println("{}:{}:{}: fatal error: {}: No such file or directory",
+                         pp->current_file, pp->current_line, rest_off + e.name_pos + 1, e.name, target = 2);
+            std::Println("compilation terminated.", target = 2);
+            flush_and_exit(pp, 1);
+        }
+        return;
+    }
+    add_dep(pp, path, 0);
+    string data = embed_bytes(path, &e);
+    if (data.size == 0) {
+        if (e.has_if_empty && e.if_empty.size > 0)
+            add_out(pp, spaces(rest_off + e.if_empty_pos) + e.if_empty);
+        return;
+    }
+    list<string> num;
+    for (i32 v = 0; v < 256; v++) num.add(std::Fmt("{}", v));
+    i32 col0 = e.has_prefix ? rest_off + e.prefix_pos : rest_off + e.name_pos;
+    string line = spaces(col0) + (e.has_prefix && e.prefix.size > 0 ? e.prefix + " " : "");
+    i32 first = 1;
+    for (i64 i = 0; i < data.size; i++) {
+        line = line + num[data[i] & 255];
+        if (i + 1 < data.size) line = line + ",";
+        if ((i + 1) % 128 == 0 && i + 1 < data.size) {
+            if (first) { add_out(pp, line); first = 0; }
+            else { pp->output_lines.add(line); if (pp->markers) pp->out_line++; }
+            line = "";
+        }
+    }
+    if (e.has_suffix && e.suffix.size > 0) line = line + " " + e.suffix;
+    if (first) add_out(pp, line);
+    else { pp->output_lines.add(line); if (pp->markers) pp->out_line++; }
+}
+
+// The `#define …` line for macro `name` as -dD/-dM print it.
+string define_text(Preprocessor *pp, string name) {
+    string enc = pp->macros[name];
+    if (enc.starts_with("F|")) {
+        tuple pb = enc[2:].split("|");
+        string params = "";
+        list<string> ps = split_all(pb[0], ',');
+        for (i32 i = 0; i < ps.length; i++) { if (i > 0) params = params + ","; params = params + ps[i].trim(); }
+        string body = pb.length > 1 ? pb[1] : "";
+        return "#define " + name + "(" + params + ") " + normalize_tokens(body);
+    }
+    return "#define " + name + " " + normalize_tokens(enc[2:]);
+}
+
 void pp_endif(Preprocessor *pp) {
     if (pp->cond_depth > 0) pp->cond_depth--;
     else std::Println("sic-cpp: {}:{}: #endif without #if", pp->current_file, pp->current_line, target = 2);
@@ -1702,13 +2032,16 @@ void add_out(Preprocessor *pp, string text) {
         // (A pragma line doesn't trigger that re-mark, but does count as the
         // last printed token.)
         i32 pragma = text.starts_with("#pragma ");
-        i32 toks = text.trim().size > 0 && !pragma;
+        // -dD/-dN/-dI echo lines are printed outside the token stream entirely.
+        i32 echo = text.starts_with("#define ") || text.starts_with("#undef ") || text.starts_with("#include");
+        i32 toks = text.trim().size > 0 && !pragma && !echo;
         if (toks && pp->cur_sys != pp->prev_sys_tok) {
             pp->output_lines.add("");
             emit_marker(pp, line, pp->current_file, sys_flags(pp));
         }
         if (toks || pragma) pp->prev_sys_tok = pp->cur_sys;
         pp->out_line++;
+        for (i32 k = 0; k < text.size; k++) if (text[k] == '\n') pp->out_line++;
     }
     pp->output_lines.add(text);
 }
@@ -1727,6 +2060,14 @@ void emit_text(Preprocessor *pp, string text) {
                 while (i < rest.size && rest[i] != q) { if (rest[i] == '\\') i++; i++; }
                 continue;
             }
+            // … and comments kept by -C (`_Pragma` inside one is just text).
+            if (rest[i] == '/' && i + 1 < rest.size && rest[i+1] == '*') {
+                i += 2;
+                while (i + 1 < rest.size && !(rest[i] == '*' && rest[i+1] == '/')) i++;
+                i++;
+                continue;
+            }
+            if (rest[i] == '/' && i + 1 < rest.size && rest[i+1] == '/') break;
             if (rest[i:i+7] == "_Pragma" && (i == 0 || !is_ident(rest[i-1]))
                 && (i + 7 >= rest.size || !is_ident(rest[i+7]))) { at = i; break; }
         }
@@ -1808,6 +2149,25 @@ void pp_pragma(Preprocessor *pp, string rest) {
 }
 
 void pp_process_line(Preprocessor *pp, string line) {
+    // -C/-CC: comments are still in the text. A directive never keeps them —
+    // except a -CC #define, whose body keeps its comments (`//` → `/* */`).
+    if (g_keep_comments && line.ltrim().starts_with("#")) {
+        string st = strip_comments(line);
+        string flat = "";
+        for (i32 k = 0; k < st.size; k++) flat = flat + (st[k] == '\n' ? " " : st[k:k+1]);
+        string d = flat.ltrim()[1:].ltrim();
+        // (-C keeps a #pragma's comments too: it is passed through.)
+        if (d.starts_with("pragma")) {
+            string pc = "";
+            for (i32 k = 0; k < line.size; k++) pc = pc + (line[k] == '\n' ? " " : line[k:k+1]);
+            line = pc.dup;
+        } else if (g_keep_comments == 2 && d.starts_with("define")) {
+            string cc = "";
+            string lc = line_comments_to_block(line);
+            for (i32 k = 0; k < lc.size; k++) cc = cc + (lc[k] == '\n' ? " " : lc[k:k+1]);
+            line = cc.dup;
+        } else line = flat.dup;
+    }
     pp->cur_text = line;
     // A continuation (the rest of a physical line after a multi-line macro
     // call): gcc places it by the column of its first PRINTED token, so skip
@@ -1834,6 +2194,10 @@ void pp_process_line(Preprocessor *pp, string line) {
         // even when they expand to nothing (`__BEGIN_DECLS` → an empty line). Its
         // indentation is the first token's source column - 1, as spaces (a tab
         // counts as one column, a comment keeps its width).
+        if (cond_active(pp) && trimmed.size > 0 && trimmed.contains("__has_")) {
+            line = has_ops_in_text(pp, line);
+            trimmed = line.ltrim();
+        }
         if (cond_active(pp) && trimmed.size > 0) {
             // A sentinel token in front keeps the expansion's own leading space
             // (after leading tokens that vanished) from being taken for
@@ -1863,23 +2227,48 @@ void pp_process_line(Preprocessor *pp, string line) {
     string rest = trimmed[kw_start:trimmed.size];
     i32 skipping = cond_any_skip(pp);
 
-    if (kw == "define") { if (!skipping) pp_define(pp, rest); }
+    if (kw == "define") {
+        if (!skipping) {
+            pp_define(pp, rest);
+            if (pp->dump_defines || pp->dump_names) {
+                string r = rest.ltrim();
+                i32 n = 0;
+                while (n < r.size && is_ident(r[n])) n++;
+                string name = r[0:n];
+                add_out(pp, pp->dump_defines ? define_text(pp, name) : "#define " + name);
+            }
+        }
+    }
     else if (kw == "undef") {
         if (!skipping) {
             tuple parts = rest.trim().split(" ");
             string name = parts[0];
             del pp->macros[name];
+            if (pp->dump_defines || pp->dump_names) add_out(pp, "#undef " + name);
         }
-    } else if (kw == "include") { if (!skipping) pp_include(pp, rest, 0); }
-    else if (kw == "include_next") { if (!skipping) pp_include(pp, rest, 1); }
+    } else if (kw == "include" || kw == "include_next") {
+        if (!skipping) {
+            if (pp->dump_includes) add_out(pp, "#" + kw + " " + normalize_tokens(rest));
+            pp_include(pp, rest, kw == "include_next");
+        }
+    }
+    else if (kw == "embed") { if (!skipping) pp_embed(pp, rest, line.size - trimmed.size + kw_start); }
+    else if (kw == "elifdef") { pp_elifdef(pp, rest, 0); }
+    else if (kw == "elifndef") { pp_elifdef(pp, rest, 1); }
     else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest) ? 0 : 2)); }
     else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 0) ? 0 : 2)); }
     else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 1) ? 0 : 2)); }
     else if (kw == "else") { pp_else(pp); }
     else if (kw == "elif") { pp_elif(pp, rest); }
     else if (kw == "endif") { pp_endif(pp); }
-    else if (kw == "error") { if (cond_active(pp)) { std::Println("{}:{}: error: {}", pp->current_file, pp->current_line, rest.trim(), target = 2); std::Exit(1); } }
-    else if (kw == "warning") { if (cond_active(pp)) std::Println("{}:{}: warning: {}", pp->current_file, pp->current_line, rest.trim(), target = 2); }
+    // `#error` / `#warning`: reported (gcc style, column of the directive name)
+    // and preprocessing continues; an #error makes the exit status 1.
+    else if (kw == "error" || kw == "warning") {
+        if (cond_active(pp)) {
+            string msg = ("#" + kw + " " + normalize_tokens(rest)).trim() + (kw == "warning" ? " [-Wcpp]" : "");
+            diag(pp, kw, msg.dup, line.size - trimmed.size + di + 1);
+        }
+    }
     else if (kw == "line") {
         if (!skipping) {
             string rl = rest.ltrim();
@@ -2039,7 +2428,8 @@ int main(int argc, char **argv) {
     i32 nostdinc = 0, verbose = 0, undef = 0, no_markers = 0, freestanding = 0;
     pp.markers = 0; pp.out_line = 1; pp.out_file = ""; pp.cur_sys = 0; pp.user_dirs = 0; pp.force_marker = 0;
     pp.prev_sys_tok = 0; pp.cur_dir_idx = -1;
-    pp.missing_ok = 0; pp.discard = 0; pp.out_path = ""; pp.compact = 0; pp.dump_macros = 0;
+    pp.missing_ok = 0; pp.discard = 0; pp.out_path = ""; pp.dump_defines = 0; pp.dump_names = 0;
+    pp.dump_includes = 0; pp.errors = 0; pp.compact = 0; pp.dump_macros = 0;
     pp.dep_only = 0; pp.dep_side = 0; pp.dep_no_sys = 0; pp.dep_phony = 0; pp.dep_file = "";
     list<string> def_ops;          // "D<def>" / "U<name>", applied in command-line order
     list<string> isystem_dirs;
@@ -2096,17 +2486,23 @@ int main(int argc, char **argv) {
         else if (arg == "-MP") { pp.dep_phony = 1; }
         else if (arg == "-MG") { pp.missing_ok = 1; }
         else if (arg == "-dM") { pp.dump_macros = 1; }
+        else if (arg == "-dD") { pp.dump_defines = 1; }
+        else if (arg == "-dN") { pp.dump_names = 1; }
+        else if (arg == "-dI") { pp.dump_includes = 1; }
+        else if (arg.starts_with("--embed-dir=")) { pp.embed_dirs.add(arg[12:]); }
+        else if (arg == "--embed-dir" && ai + 1 < argc) { ai++; string ed = argv[ai]; pp.embed_dirs.add(ed); }
         else if (arg.starts_with("-std=")) { std_name = arg[5:]; }
         else if (arg == "-ansi") { std_name = "c90"; }
         else if (arg.starts_with("-W") || arg == "-w" || arg == "-E"
                  || (arg.starts_with("-f") && arg != "-ffreestanding") || arg.starts_with("-m")
                  || arg.starts_with("-O") || arg.starts_with("-g") || arg == "-pipe"
                  || arg.starts_with("-pedantic") || arg.starts_with("-d")
-                 || arg == "--gcc-lines" || arg == "-C" || arg == "-CC" || arg == "-H"
+                 || arg == "--gcc-lines" || arg == "-H"
                  || arg == "-trigraphs" || arg == "-traditional-cpp") {
-            if (arg == "-C" || arg == "-CC")
-                std::Println("sic-cpp: warning: {} is not supported; comments are removed", arg, target = 2);
+
         }
+        else if (arg == "-C") { if (g_keep_comments == 0) g_keep_comments = 1; }
+        else if (arg == "-CC") { g_keep_comments = 2; }
         else if (arg == "-undef") { undef = 1; }
         else if (arg == "-nostdinc") { nostdinc = 1; }
         else if (arg == "-v") { verbose = 1; }
@@ -2194,6 +2590,10 @@ int main(int argc, char **argv) {
     // also `defined` / `#ifdef`-visible, as in gcc and clang.
     pp.macros["__has_include"] = "B|";
     pp.macros["__has_include_next"] = "B|";
+    pp.macros["__has_embed"] = "B|";
+    pp.macros["__STDC_EMBED_NOT_FOUND__"] = "O|0";
+    pp.macros["__STDC_EMBED_FOUND__"] = "O|1";
+    pp.macros["__STDC_EMBED_EMPTY__"] = "O|2";
     // Which of the query operators exist is itself compiler-specific (gcc 14
     // added `__has_feature`/`__has_extension`): ask the host once, in one run.
     if (cc.size > 0) {
@@ -2239,14 +2639,34 @@ int main(int argc, char **argv) {
     // Apply -D / -U in command-line order (`-DX -UX` leaves X undefined). A
     // define is `NAME[(params)][=body]`, body defaulting to 1 — handed to the
     // #define handler, so function-like command-line macros work too.
+    // (-dD/-dN print the predefined macros under <built-in> and these under
+    // <command-line>, as gcc does.)
+    list<string> builtin_lines;
+    list<string> cmdline_lines;
+    if (pp.dump_defines || pp.dump_names) {
+        for (tuple kv : pp.macros) {
+            string n = kv[0];
+            string enc = kv[1];
+            if (enc.starts_with("O|") || enc.starts_with("F|"))
+                builtin_lines.add(pp.dump_defines ? define_text(&pp, n) : "#define " + n);
+        }
+    }
     for (i32 i = 0; i < def_ops.length; i++) {
         string op = def_ops[i];
         string d = op[1:];
-        if (op[0] == 'U') { del pp.macros[d.trim()]; continue; }
+        if (op[0] == 'U') {
+            del pp.macros[d.trim()];
+            if (pp.dump_defines || pp.dump_names) cmdline_lines.add("#undef " + d.trim());
+            continue;
+        }
         i32 eq = 0;
         while (eq < d.size && d[eq] != '=') eq++;
         if (eq < d.size) pp_define(&pp, d[0:eq] + " " + d[eq+1:]);
         else pp_define(&pp, d + " 1");
+        i32 n = 0;
+        while (n < d.size && is_ident(d[n])) n++;
+        if (pp.dump_defines || pp.dump_names)
+            cmdline_lines.add(pp.dump_defines ? define_text(&pp, d[0:n]) : "#define " + d[0:n]);
     }
 
     // Read input
@@ -2271,7 +2691,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    content = strip_comments(content);
+    if (!g_keep_comments) content = strip_comments(content);
     pp.markers = !no_markers && !pp.dep_only && !pp.dump_macros;
     string main_file = pp.current_file;
     add_dep(&pp, main_file, 0);
@@ -2279,11 +2699,16 @@ int main(int argc, char **argv) {
     // gcc's preamble, then the implicit `-include stdc-predef.h` (glibc's
     // __STDC_IEC_559__, __STDC_ISO_10646__, …) when the C library provides one
     // on the system path — gcc does this unless -nostdinc/-ffreestanding.
-    if (pp.markers) {
-        emit_marker(&pp, 0, main_file, "");
-        emit_marker(&pp, 0, "<built-in>", "");
-        emit_marker(&pp, 0, "<command-line>", "");
-    }
+    // (-dD/-dN definitions sit at line 0 of <built-in> / <command-line>, so —
+    // exactly as in gcc — each one after the first is re-marked.)
+    if (pp.markers) emit_marker(&pp, 0, main_file, "");
+    pp.current_file = "<built-in>";
+    pp.current_line = 0;
+    if (pp.markers) emit_marker(&pp, 0, "<built-in>", "");
+    for (i32 i = 0; i < builtin_lines.length; i++) add_out(&pp, builtin_lines[i]);
+    pp.current_file = "<command-line>";
+    if (pp.markers) emit_marker(&pp, 0, "<command-line>", "");
+    for (i32 i = 0; i < cmdline_lines.length; i++) add_out(&pp, cmdline_lines[i]);
     pp.current_file = "<command-line>";
     pp.current_line = 0;
     // -imacros files first (only their macros are kept), then stdc-predef.h,
@@ -2303,7 +2728,7 @@ int main(int argc, char **argv) {
     pp.current_line = 1;
     if (pp.markers) emit_marker(&pp, 1, main_file, "");
     pp_process_content(&pp, content);
-    flush_and_exit(&pp, 0);
+    flush_and_exit(&pp, pp.errors > 0 ? 1 : 0);
     return 0;
 }
 
