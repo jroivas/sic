@@ -1796,13 +1796,14 @@ i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
 string host_has(Preprocessor *pp, string kind, string arg) {
     string a = arg.trim();
     if (pp->info_mode) {
-        // sic lists attributes by plain name: `__cold__`, `gnu::cold` and
-        // `__gnu__::__cold__` are all `cold`.
+        // sic lists names plainly: `__cold__`, `gnu::cold` and `__gnu__::__cold__`
+        // are all `cold`; `__c_atomic__` is `c_atomic` (features too, as in
+        // gcc/clang). Builtin names are exact.
         if (kind.contains("attribute")) {
             if (a.starts_with("gnu::")) a = a[5:];
             else if (a.starts_with("__gnu__::")) a = a[9:];
-            if (a.size > 4 && a.starts_with("__") && a.ends_with("__")) a = a[2:a.size-2];
         }
+        if (kind != "__has_builtin" && a.size > 4 && a.starts_with("__") && a.ends_with("__")) a = a[2:a.size-2];
         string v = pp->has_cache[kind + "(" + a + ")"];
         return v.size > 0 ? v : "0";
     }

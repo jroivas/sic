@@ -43,7 +43,7 @@ pub fn info_text() -> String {
         s.push_str(&line("cpp_attribute", vec![]));
         s.push_str(&line("builtin", builtin_names()));
         s.push_str(&line("feature", FEATURES.iter().map(|a| a.to_string()).collect()));
-        s.push_str(&line("extension", FEATURES.iter().chain(EXTENSIONS).map(|a| a.to_string()).collect()));
+        s.push_str(&line("extension", FEATURES.iter().map(|a| a.to_string()).collect()));
         s
     }).clone()
 }
@@ -222,7 +222,7 @@ const ATTRIBUTES: &[&str] = &[
     "access", "alloc_align", "alloc_size", "always_inline", "artificial", "assume",
     "assume_aligned", "cold", "const", "deprecated", "designated_init", "error",
     "externally_visible", "fallthrough", "flag_enum", "flatten", "format", "format_arg",
-    "hot", "leaf", "malloc", "may_alias", "no_address_safety_analysis", "no_icf",
+    "hot", "indirect_return", "leaf", "malloc", "may_alias", "no_address_safety_analysis", "no_icf",
     "no_instrument_function", "no_profile_instrument_function", "no_reorder",
     "no_sanitize", "no_sanitize_address", "no_sanitize_thread", "no_sanitize_undefined",
     "no_split_stack", "no_stack_protector", "noclone", "noinline", "noipa", "nonnull",
@@ -232,12 +232,14 @@ const ATTRIBUTES: &[&str] = &[
     "warn_unused_result", "warning",
 ];
 
-/// `__has_feature` answers (also `__has_extension`).
+/// `__has_feature` / `__has_extension` answers: the C features sic supports
+/// (the set gcc answers 1 for; glibc's C23 `strchr`/`memchr` qualifier-preserving
+/// macros key on `c_generic_selections`).
 const FEATURES: &[&str] = &[
-    "attribute_deprecated_with_message", "c_static_assert", "c_thread_local", "cxx_binary_literals",
+    "attribute_deprecated_with_message", "attribute_unavailable_with_message", "c_alignas",
+    "c_alignof", "c_atomic", "c_generic_selections", "c_static_assert", "c_thread_local",
+    "cxx_binary_literals",
 ];
-/// `__has_extension`-only answers.
-const EXTENSIONS: &[&str] = &["attribute_unavailable_with_message", "c_atomic"];
 
 /// Builtins sic lowers itself (besides the families below).
 const BUILTINS: &[&str] = &[

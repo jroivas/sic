@@ -272,6 +272,17 @@ if [ "$(basename "$SICCPP")" = sic-cpp ]; then
         grep -q "SIC_RECURSION" err && ok "sic-cpp-recursion-bailout" || bad "sic-cpp-recursion-bailout" "$(cat err)"
     fi
 fi
+# `__has_*` answers come from sic: what it supports, `__x__` spellings included
+# (glibc: `__has_extension(__attribute_deprecated_with_message__)`), and 0 for
+# what it lacks (C23 `[[...]]`, `__builtin_trap`).
+if [ "$(basename "$SICCPP")" = sic-cpp ]; then
+    printf '%s\n' '#if __has_extension(__attribute_deprecated_with_message__) && __has_extension(c_generic_selections)' \
+        'ok1' '#endif' '#if __has_attribute(__noreturn__) && __has_attribute(gnu::cold) && __has_builtin(__builtin_clzll)' \
+        'ok2' '#endif' '#if !__has_c_attribute(nodiscard) && !__has_builtin(__builtin_trap) && !__has_attribute(destructor)' \
+        'ok3' '#endif' > has.c
+    [ "$("$SICCPP" -P has.c | tr -d '\n ')" = ok1ok2ok3 ] \
+        && ok "has-answers-from-sic" || bad "has-answers-from-sic" "got: $("$SICCPP" -P has.c | tr '\n' ' ')"
+fi
 # SIC_RECURSION: sic refuses to start a preprocessor, but still answers the query.
 if SIC_RECURSION=1 "$SIC" -c recur.c -o recur_x.o 2>err; then
     bad "sic-recursion-bailout" "sic preprocessed"
