@@ -9,24 +9,14 @@ use crate::{Result, CompileError};
 ///      `<exe dir>/../../../sic-cpp/sic-cpp`;
 ///   4. the system `cpp`.
 ///
-/// Under one of sic-cpp's own host-compiler queries (a build with `CC=sic`
-/// makes sic that host compiler) sic-cpp is never chosen, so sic and sic-cpp
-/// cannot start each other without end. Detected by `SIC_CPP_NESTED` (which
-/// sic-cpp exports) and, should a build tool scrub the environment, by a
-/// sic-cpp among this process's ancestors.
-///
 /// The preprocessor must accept GCC `cpp`'s command line
 /// (`cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] … file`) and write the
 /// preprocessed text to stdout.
 pub fn preprocessor_bin() -> String {
     static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
-        let nested = std::env::var_os("SIC_CPP_NESTED").is_some() || spawned_by_sic_cpp();
         if let Some(v) = std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()) {
-            if !(nested && is_sic_cpp(&v)) { return v; }
-        }
-        if nested {
-            return "cpp".to_string();
+            return v;
         }
         if let Some(p) = find_in_path("sic-cpp") {
             return p;
@@ -47,24 +37,6 @@ pub fn preprocessor_bin() -> String {
 /// target/identity macros itself.
 pub fn is_sic_cpp(bin: &str) -> bool {
     std::path::Path::new(bin).file_name().map_or(false, |n| n == "sic-cpp")
-}
-
-/// Whether a `sic-cpp` process is among our ancestors (it starts sic through
-/// `sh -c`, so not necessarily the parent). Linux `/proc`; false elsewhere.
-fn spawned_by_sic_cpp() -> bool {
-    let ppid_of = |pid: u32| -> Option<u32> {
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).ok()?;
-        // `pid (comm) state ppid ...` — comm may hold spaces/parens: split after the last ')'.
-        stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
-    };
-    let mut pid = std::process::id();
-    for _ in 0..64 {
-        pid = match ppid_of(pid) { Some(p) if p > 1 => p, _ => return false };
-        if let Ok(exe) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
-            if exe.file_name().map_or(false, |n| n == "sic-cpp") { return true; }
-        }
-    }
-    false
 }
 
 fn is_executable(p: &std::path::Path) -> bool {
@@ -100,9 +72,21 @@ pub fn preprocess_ex(
     std: &str,
     extra_flags: &[&str],
 ) -> Result<String> {
+    // A sic started by sic-cpp (to ask for its info) must never start a
+    // preprocessor: with `CC=sic` that was sic -> sic-cpp -> sic -> ... forever.
+    if crate::cpp_info::in_recursion() {
+        return Err(CompileError::new(format!(
+            "refusing to preprocess '{}': {} is set or sic was started by sic-cpp \
+             (sic and sic-cpp would call each other recursively)",
+            file, crate::cpp_info::RECURSION_ENV)));
+    }
     let bin = preprocessor_bin();
 
     let mut cmd = Command::new(&bin);
+    // Everything the preprocessor needs, from sic itself (sic-cpp then runs no
+    // host-compiler queries); and the recursion marker for anything it starts.
+    cmd.env(crate::cpp_info::INFO_ENV, crate::cpp_info::info_text());
+    cmd.env(crate::cpp_info::RECURSION_ENV, "1");
     cmd.arg("-undef");
     // Default to C23 so newer library features (e.g. C23's `timespec_get`
     // bases like `TIME_MONOTONIC`) are exposed by the system headers. Callers
@@ -174,7 +158,7 @@ pub fn preprocess_ex(
 /// Target-describing predefined macros for the host this compiler was built
 /// for. Mirrors what GCC/Clang would define so `-undef`'d system headers pick
 /// the correct ABI branch (e.g. `<gnu/stubs.h>` → `stubs-64.h`).
-fn target_predefines() -> Vec<&'static str> {
+pub(crate) fn target_predefines() -> Vec<&'static str> {
     let mut defs = Vec::new();
 
     #[cfg(target_arch = "x86_64")]
@@ -294,41 +278,16 @@ fn compiler_identity_predefines() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Query the host C compiler for its predefined macros and return the safe,
-/// value-only numeric/type ones (limits, type sizes, underlying types, byte
-/// order). These are needed by `<limits.h>`, `<stdint.h>`, `<float.h>` etc. but
-/// are stripped by `-undef`. Feature-flag macros (`__GNUC__`, `__STDC_*`,
-/// `__has_*`, ...) are deliberately excluded so we don't re-enable header code
-/// paths that assume a full GCC/Clang frontend.
-fn host_numeric_predefines(std: &str) -> Vec<(String, String)> {
-    let cc = std::env::var("SIC_CC").ok().filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "cc".to_string());
-    let output = Command::new(&cc)
-        .args(["-dM", "-E", &format!("-std={}", std), "-x", "c", "/dev/null"])
-        .output();
-    let stdout = match output {
-        Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(), // best effort: headers may still work
-    };
-
-    let mut defs = Vec::new();
-    for line in String::from_utf8_lossy(&stdout).lines() {
-        // Lines look like: `#define NAME VALUE` (object-like) or
-        // `#define NAME(args) ...` (function-like — skipped).
-        let rest = match line.strip_prefix("#define ") {
-            Some(r) => r,
-            None => continue,
-        };
-        let (name, value) = match rest.split_once(' ') {
-            Some((n, v)) => (n, v),
-            None => continue, // valueless (e.g. `#define NAME`) — skip
-        };
-        if name.contains('(') { continue; } // function-like macro
-        if is_safe_predefine(name) {
-            defs.push((name.to_string(), value.to_string()));
-        }
-    }
-    defs
+/// The target's safe, value-only numeric/type predefines (limits, type sizes,
+/// underlying types, byte order, float properties) from sic's own table — needed
+/// by `<limits.h>`, `<stdint.h>`, `<float.h>` etc. but stripped by `-undef`.
+/// Feature-flag macros (`__GNUC__`, `__STDC_*`, `__has_*`, ...) are excluded so
+/// we don't re-enable header code paths that assume a full GCC/Clang frontend.
+fn host_numeric_predefines(_std: &str) -> Vec<(String, String)> {
+    crate::cpp_info::target_macros().into_iter()
+        .filter(|(n, _)| is_safe_predefine(n))
+        .map(|(n, v)| (n.to_string(), v))
+        .collect()
 }
 
 /// Whether a predefined macro name is a safe value-only numeric/type macro to

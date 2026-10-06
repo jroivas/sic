@@ -7,8 +7,9 @@
 //   -dM, -v. Compiler-only flags (-W*, -f*, -m*, -O*, -g*, -E, -std=) are
 //   accepted and ignored. sic-cpp-specific: --compact drops lines with no
 //   visible content (gcc's layout is the default).
-//   It presents as the sic compiler (clang 15 / gcc 4.2 identity); target and
-//   include paths come from the host C compiler (see "System include paths").
+//   It presents as the sic compiler (clang 15 / gcc 4.2 identity); include
+//   paths, target macros and `__has_*` answers come from sic itself (see
+//   "System include paths").
 
 import std;
 
@@ -34,6 +35,9 @@ struct Preprocessor {
     // its cached answers keyed by the query text.
     string cc;
     dict<string, string> has_cache;
+    // The `__has_*` answers came from sic (SIC_CPP_INFO): has_cache is complete,
+    // an unlisted query answers 0.
+    i32 info_mode;
     // `#pragma once` files, and the `#pragma push_macro` stack ("name\x02enc").
     list<string> once_files;
     list<string> pushed_macros;
@@ -132,11 +136,13 @@ i32 file_exists(string path) {
 // ── System include paths ────────────────────────────────────────────────────
 //
 // Detected at startup, without hard-coding any C library, version or arch:
-//   1. Ask the host C compiler (`$CC`, else `cc`) for its `#include <...>` search
-//      list (`cc -xc -E -v /dev/null`). This is exact for gcc and clang on glibc,
-//      musl or anything else, including the compiler's private header directory
-//      (stddef.h/stdarg.h) and the multiarch directory.
-//   2. With no compiler, probe the filesystem: the compiler-builtin header dir of
+//   0. From sic: SIC_CPP_INFO when sic runs us, else `sic -print-cpp-info` (sic
+//      on PATH, else the one in this sic repository). Needs no other toolchain.
+//   1. With no sic, ask the host C compiler (`$SIC_HOST_CC`, `$CC` unless sic,
+//      else cc/gcc/clang) for its `#include <...>` search list
+//      (`cc -xc -E -v /dev/null`), including the compiler's private header
+//      directory (stddef.h/stdarg.h) and the multiarch directory.
+//   2. With neither, probe the filesystem: the compiler-builtin header dir of
 //      the HOST triple (gcc or clang, newest version), `/usr/local/include`, the
 //      multiarch `/usr/include/<triple>` (any subdir holding `bits/` or `asm/`),
 //      and `/usr/include`.
@@ -146,6 +152,7 @@ extern int pclose(void *f);
 extern char *fgets(char *s, int n, void *f);
 extern char *getenv(char *name);
 extern int setenv(char *name, char *value, int overwrite);
+extern char *realpath(char *path, char *resolved);
 // POSIX glob_t: glibc and musl agree on the first three fields; the tail is padding.
 struct __attribute__((order_c)) GlobT { u64 pathc; char **pathv; u64 offs; u8 reserved[128]; }
 extern int glob(char *pattern, int flags, void *errfunc, GlobT *g);
@@ -208,11 +215,63 @@ string dir_of(string path) {
     return i < 0 ? "" : path[0:i];
 }
 
-// Set while sic-cpp runs its host-compiler queries. A sic started by one of
-// them must not preprocess with sic-cpp again, and a sic-cpp started under it
-// must not query a host compiler: with `CC=sic` (as builds commonly set) that
-// was sic -> sic-cpp -> sic -> ... without end.
-string NESTED_ENV = "SIC_CPP_NESTED";
+// sic describes everything sic-cpp needs (system include dirs, target macros,
+// `__has_*` answers) — no other toolchain required. Run by sic, sic-cpp gets it
+// in SIC_CPP_INFO; run standalone, it asks sic (`sic -print-cpp-info`) with
+// SIC_RECURSION=1 set. A sic seeing SIC_RECURSION never starts a preprocessor,
+// and a sic-cpp seeing it without SIC_CPP_INFO never starts sic: with `CC=sic`
+// the two used to start each other without end.
+string RECURSION_ENV = "SIC_RECURSION";
+string INFO_ENV = "SIC_CPP_INFO";
+
+// Whether `text` is sic's info format (`include`/`define`/`has` records).
+i32 is_info(string text) {
+    return text.starts_with("include ") || text.starts_with("define ") || text.starts_with("has ") ? 1 : 0;
+}
+
+// sic's info text: from SIC_CPP_INFO, else from the sic on PATH or of the sic
+// repository this sic-cpp was built in. "" when no sic answers (then a host C
+// compiler / the filesystem probe is used). Exits on recursion.
+string sic_info() {
+    char *env = getenv(INFO_ENV.str);
+    if (env) return ((string)env).dup;
+    if (getenv(RECURSION_ENV.str)) {
+        std::Println("sic-cpp: fatal error: {} is set but {} is not: refusing to start sic "
+                     "(sic and sic-cpp would call each other recursively)", RECURSION_ENV, INFO_ENV, target = 2);
+        std::Exit(1);
+    }
+    setenv(RECURSION_ENV.str, "1", 1);
+    list<string> cands;
+    list<string> onpath = run_lines("command -v sic 2>/dev/null");
+    if (onpath.length > 0) cands.add(onpath[0]);
+    char buf[4096];
+    if (realpath("/proc/self/exe", buf)) {
+        string root = dir_of(dir_of((string)(char*)buf));   // <repo>/sic-cpp/sic-cpp -> <repo>
+        cands.add(root + "/siccomp/target/release/sic");
+        cands.add(root + "/siccomp/target/debug/sic");
+    }
+    for (i32 i = 0; i < cands.length; i++) {
+        if (!file_exists(cands[i])) continue;
+        list<string> out = run_lines("'" + cands[i] + "' -print-cpp-info 2>/dev/null");
+        string text = "";
+        for (i32 k = 0; k < out.length; k++) text = text + out[k] + "\n";
+        if (is_info(text)) return text;
+    }
+    return "";
+}
+
+// The `kind` records of an info text: `include DIR` -> "DIR", `define N V` ->
+// "N V", `has K a b` -> "K a b".
+list<string> info_records(string info, string kind) {
+    list<string> out;
+    list<string> lines = split_all(info, '\n');
+    string pre = kind + " ";
+    for (i32 i = 0; i < lines.length; i++) {
+        if (lines[i].starts_with(pre)) out.add(lines[i][pre.size:].dup);
+        else if (lines[i] == kind) out.add("");
+    }
+    return out;
+}
 
 // True if the program `prog` (searched on PATH) is sic itself.
 i32 is_sic_program(string prog) {
@@ -234,11 +293,10 @@ string usable_program(string cmd) {
     return e[0:n].dup;
 }
 
-// The host C compiler to consult: `$SIC_HOST_CC`, else `$CC` unless that is
-// sic, else the first of cc/gcc/clang on PATH. "" when none is available, or
-// when nested under another sic-cpp (then the filesystem probe is used).
+// The host C compiler to consult when no sic answers: `$SIC_HOST_CC`, else
+// `$CC` unless that is sic, else the first of cc/gcc/clang on PATH. "" when
+// none is available (then the filesystem probe is used).
 string find_compiler() {
-    if (getenv(NESTED_ENV.str)) return "";
     char *host = getenv("SIC_HOST_CC");
     if (host && usable_program((string)host).size > 0) return ((string)host).trim().dup;
     char *env = getenv("CC");
@@ -1663,6 +1721,17 @@ i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
 // cached. Only identifier-like operands (`noreturn`, `gnu::cold`) are queried.
 string host_has(Preprocessor *pp, string kind, string arg) {
     string a = arg.trim();
+    if (pp->info_mode) {
+        // sic lists attributes by plain name: `__cold__`, `gnu::cold` and
+        // `__gnu__::__cold__` are all `cold`.
+        if (kind.contains("attribute")) {
+            if (a.starts_with("gnu::")) a = a[5:];
+            else if (a.starts_with("__gnu__::")) a = a[9:];
+            if (a.size > 4 && a.starts_with("__") && a.ends_with("__")) a = a[2:a.size-2];
+        }
+        string v = pp->has_cache[kind + "(" + a + ")"];
+        return v.size > 0 ? v : "0";
+    }
     string key = kind + "(" + a + ")";
     string hit = pp->has_cache[key];
     if (hit.size > 0) return hit;
@@ -2563,8 +2632,9 @@ int main(int argc, char **argv) {
 
     // Search order (as gcc): -I dirs, then CPATH / C_INCLUDE_PATH, then the
     // detected system dirs (unless -nostdinc).
-    string cc = (nostdinc && undef) ? "" : find_compiler();
-    setenv(NESTED_ENV.str, "1", 1);   // for every host query below
+    string info = sic_info();
+    string cc = (info.size > 0 || (nostdinc && undef)) ? "" : find_compiler();
+    setenv(RECURSION_ENV.str, "1", 1);   // for every host query below
     add_env_dirs(&pp.include_dirs, "CPATH");
     add_env_dirs(&pp.include_dirs, "C_INCLUDE_PATH");
     {
@@ -2572,7 +2642,7 @@ int main(int argc, char **argv) {
         // keeps its system position (else -I/usr/include would shadow the
         // compiler's own stddef.h/stdarg.h).
         list<string> std_dirs;
-        if (!nostdinc) std_dirs = system_include_dirs(cc);   // -nostdinc drops only these
+        if (!nostdinc) std_dirs = info.size > 0 ? info_records(info, "include") : system_include_dirs(cc);   // -nostdinc drops only these
         // The <x> chain: -I, then -isystem, the standard dirs, then -idirafter
         // (all but -I are system directories).
         list<string> sys;
@@ -2603,12 +2673,12 @@ int main(int argc, char **argv) {
     else if (std_name.ends_with("99") || std_name.ends_with("9x") || std_name == "iso9899:1999") stdc_version = "199901L";
     else if (std_name.ends_with("11") || std_name.ends_with("1x") || std_name == "iso9899:2011") stdc_version = "201112L";
     else if (std_name.ends_with("17") || std_name.ends_with("18") || std_name == "iso9899:2017" || std_name == "iso9899:2018") stdc_version = "201710L";
-    if (cc.size == 0) {
+    if (info.size == 0 && cc.size == 0) {
         if (!undef) fallback_predefines(&pp);
     } else {
-        list<string> defs = compiler_predefines(cc);
+        list<string> defs = info.size > 0 ? info_records(info, "define") : compiler_predefines(cc);
         for (i32 i = 0; i < defs.length; i++) {
-            string d = defs[i][8:];                       // drop "#define "
+            string d = info.size > 0 ? defs[i] : defs[i][8:];   // drop "#define "
             i32 n = 0;
             while (n < d.size && is_ident(d[n])) n++;
             if (keep_predefine(d[0:n], undef, strict)) pp_define(&pp, d);
@@ -2623,9 +2693,25 @@ int main(int argc, char **argv) {
     pp.macros["__STDC_EMBED_NOT_FOUND__"] = "O|0";
     pp.macros["__STDC_EMBED_FOUND__"] = "O|1";
     pp.macros["__STDC_EMBED_EMPTY__"] = "O|2";
-    // Which of the query operators exist is itself compiler-specific (gcc 14
-    // added `__has_feature`/`__has_extension`): ask the host once, in one run.
-    if (cc.size > 0) {
+    // Which of the query operators exist, and their answers: from sic, else
+    // compiler-specific (gcc 14 added `__has_feature`/`__has_extension`): ask
+    // the host once, in one run.
+    if (info.size > 0) {
+        pp.info_mode = 1;
+        list<string> has = info_records(info, "has");
+        for (i32 i = 0; i < has.length; i++) {
+            list<string> f = split_all(has[i], ' ');
+            string op = "__has_" + f[0];
+            pp.macros[op] = "B|";
+            for (i32 k = 1; k < f.length; k++) {
+                if (f[k].size == 0) continue;
+                i32 eq = 0;
+                while (eq < f[k].size && f[k][eq] != '=') eq++;
+                string v = eq < f[k].size ? f[k][eq+1:] : "1";
+                pp.has_cache[op + "(" + f[k][0:eq] + ")"] = v.dup;
+            }
+        }
+    } else if (cc.size > 0) {
         list<string> ops;
         ops.add("__has_attribute"); ops.add("__has_c_attribute"); ops.add("__has_cpp_attribute");
         ops.add("__has_builtin"); ops.add("__has_feature"); ops.add("__has_extension");

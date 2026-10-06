@@ -257,19 +257,29 @@ if PATH="$PWD/recur_bin:$PATH" CC=sic timeout 60 sic recur.c -o recur 2>err && [
 else
     bad "cc-sic-no-recursion" "build failed or timed out: $(cat err)"
 fi
-# Forced to query sic, with SIC_CPP_NESTED scrubbed from the query environment:
-# the nested sic must still spot its sic-cpp ancestor (one sic-cpp run in all).
-printf '#!/bin/sh\necho x >> "%s/recur_cpp.log"\nexec "%s" "$@"\n' "$PWD" "$("$SIC" -print-prog-name=cpp)" > recur_bin/sic-cpp
-chmod +x recur_bin/sic-cpp
-: > recur_cpp.log
-if PATH="$PWD/recur_bin:$PATH" SIC_HOST_CC="env -u SIC_CPP_NESTED sic" timeout 60 sic recur.c -o recur 2>err && [ "$(./recur)" = ok ]; then
-    n=$(wc -l < recur_cpp.log)
-    [ "$n" -le 1 ] && ok "scrubbed-env-no-recursion" || bad "scrubbed-env-no-recursion" "sic-cpp ran $n times"
-else
-    bad "scrubbed-env-no-recursion" "build failed or timed out: $(cat err)"
+# sic-cpp run standalone asks sic for its info (`sic -print-cpp-info`), once,
+# and queries no other compiler.
+SICCPP="$("$SIC" -print-prog-name=cpp)"
+if [ "$(basename "$SICCPP")" = sic-cpp ]; then
+    : > recur.log
+    PATH="$PWD/recur_bin:$PATH" timeout 60 "$SICCPP" -P recur.c > /dev/null 2>err
+    n=$(wc -l < recur.log)
+    [ "$n" -eq 1 ] && ok "standalone-sic-cpp-asks-sic-once" || bad "standalone-sic-cpp-asks-sic-once" "sic ran $n times: $(cat err)"
+    # SIC_RECURSION without SIC_CPP_INFO: sic-cpp refuses to start sic.
+    if SIC_RECURSION=1 timeout 60 "$SICCPP" -P recur.c > /dev/null 2>err; then
+        bad "sic-cpp-recursion-bailout" "sic-cpp ran"
+    else
+        grep -q "SIC_RECURSION" err && ok "sic-cpp-recursion-bailout" || bad "sic-cpp-recursion-bailout" "$(cat err)"
+    fi
 fi
-[ "$(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)" = cpp ] \
-    && ok "nested-uses-plain-cpp" || bad "nested-uses-plain-cpp" "got: $(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)"
+# SIC_RECURSION: sic refuses to start a preprocessor, but still answers the query.
+if SIC_RECURSION=1 "$SIC" -c recur.c -o recur_x.o 2>err; then
+    bad "sic-recursion-bailout" "sic preprocessed"
+else
+    grep -q "SIC_RECURSION" err && ok "sic-recursion-bailout" || bad "sic-recursion-bailout" "$(cat err)"
+fi
+SIC_RECURSION=1 "$SIC" -print-cpp-info | grep -q "^has builtin" \
+    && ok "print-cpp-info" || bad "print-cpp-info" "no info"
 
 # ── Default arguments across modules (sic.md §"Default parameters") ──────────
 # A module exports functions with default parameters; the consumer fills omitted

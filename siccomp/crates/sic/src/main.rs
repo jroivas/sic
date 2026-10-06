@@ -260,6 +260,13 @@ fn handle_version_query(args: &[String]) -> bool {
             }
             // gcc's `-print-prog-name=cpp`: the preprocessor sic will run
             // (SIC_CPP, else sic-cpp on PATH / in the sic repo, else cpp).
+            // What a preprocessor needs to preprocess for sic (include dirs,
+            // target macros, `__has_*` answers) — sic-cpp run standalone asks
+            // for it with SIC_RECURSION=1. Needs no preprocessor itself.
+            "-print-cpp-info" | "--print-cpp-info" => {
+                print!("{}", sic_frontend::cpp_info::info_text());
+                return true;
+            }
             "-print-prog-name=cpp" | "--print-prog-name=cpp" => {
                 println!("{}", sic_frontend::preprocessor_bin());
                 return true;

@@ -1,4 +1,5 @@
 pub mod preprocess;
+pub mod cpp_info;
 pub mod lexer;
 pub mod ast;
 pub mod parser;
