@@ -1,6 +1,5 @@
 use crate::ast::{Expr, ExprKind};
 use crate::{Result, CompileError};
-use sic_ir::*;
 use super::super::func::{FuncCtx, LookupResult};
 #[allow(unused_imports)]
 use super::*;

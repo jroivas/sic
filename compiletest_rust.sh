@@ -10,6 +10,12 @@ CFLAGS=${CFLAGS:-}
 # check.sh). Either way, the script exits non-zero at the end if any test failed.
 FAILFAST="${FAILFAST:-}"
 
+# Guard against testing a stale compiler: warn when any compiler source is
+# newer than the binary under test (e.g. only the release build was rebuilt).
+if [ -x "$SIC" ] && [ -d "$MYDIR/siccomp/crates" ]; then
+    newer="$(find "$MYDIR/siccomp/crates" -name '*.rs' -newer "$SIC" -print -quit 2>/dev/null)"
+    [ -n "$newer" ] && echo "WARNING: $SIC is older than $newer — rebuild it (cargo build / ./build.sh)" >&2
+fi
 # CPP_MODE selects the preprocessor sic runs:
 #   global  the system `cpp`
 #   sic     this repository's sic-cpp (sic-cpp/sic-cpp; must be built)

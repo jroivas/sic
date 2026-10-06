@@ -1,6 +1,5 @@
 use crate::ast::{Expr, BinOpKind};
 use crate::{Result, CompileError};
-use sic_ir::*;
 use super::super::func::FuncCtx;
 #[allow(unused_imports)]
 use super::*;
