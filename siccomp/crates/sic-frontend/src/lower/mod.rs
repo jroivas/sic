@@ -2604,6 +2604,21 @@ impl Lowerer {
         }
     }
 
+    /// A compound literal's complete type: an implicit-length array `(T[]){…}`
+    /// gets its length from the initializer — `(char[]){"abc"}` from the string
+    /// (C11 6.7.9p14), otherwise from the element count/designators.
+    pub(crate) fn compound_literal_type(&self, mut ir_ty: Type, items: &[InitItem]) -> Type {
+        if let Type::Array { elem, len } = &mut ir_ty {
+            if *len == 0 {
+                *len = match string_brace_items(items).map(|e| &e.kind) {
+                    Some(ExprKind::StringLit(s)) if matches!(elem.as_ref(), Type::Int { bits: 8, .. }) => s.len() + 1,
+                    _ => self.infer_array_len(items),
+                };
+            }
+        }
+        ir_ty
+    }
+
     fn infer_array_len(&self, items: &[InitItem]) -> usize {
         let mut cursor: usize = 0;
         let mut max_len: usize = 0;
@@ -3114,6 +3129,8 @@ impl Lowerer {
                     .map(|(_, fty, _)| fty)
             }
             ExprKind::Cast { ty, .. } => lower_type(ty, &self.struct_types, self.ptr_size).ok(),
+            ExprKind::CompoundLiteral { ty, init } => lower_type(ty, &self.struct_types, self.ptr_size).ok()
+                .map(|t| self.compound_literal_type(t, init)),
             ExprKind::StringLit(s) => Some(Type::Array {
                 elem: Box::new(Type::Int { bits: 8, signed: true }),
                 len: s.len() + 1,
@@ -3189,10 +3206,7 @@ impl Lowerer {
     /// global and return its ref. Used when a compound literal appears in another
     /// global's initializer (it needs a real address to point at).
     fn emit_compound_literal_global(&mut self, ty: &QualType, items: &[InitItem]) -> Option<GlobalRef> {
-        let mut ir_ty = lower_type(ty, &self.struct_types, self.ptr_size).ok()?;
-        if let Type::Array { len, .. } = &mut ir_ty {
-            if *len == 0 { *len = self.infer_array_len(items); }
-        }
+        let ir_ty = self.compound_literal_type(lower_type(ty, &self.struct_types, self.ptr_size).ok()?, items);
         let total = ir_ty.size_of(self.ptr_size) as usize;
         let init = Initializer::List(items.to_vec());
         let mut buf = vec![0u8; total.max(1)];

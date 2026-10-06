@@ -63,6 +63,8 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             ExprKind::Cast { ty, .. } => self.lower_type(ty),
+            // `sizeof((int[]){1, 2, 3})` is the whole array (it used to be `int`).
+            ExprKind::CompoundLiteral { ty, init } => Ok(self.lowerer.compound_literal_type(self.lower_type(ty)?, init)),
             ExprKind::ChooseExpr { cond, then, else_ } => {
                 if self.eval_choose_cond(cond) != 0 { self.infer_expr_type(then) }
                 else { self.infer_expr_type(else_) }
