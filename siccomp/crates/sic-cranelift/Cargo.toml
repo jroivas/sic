@@ -11,8 +11,9 @@ cranelift-object   = "0.136.2"
 cranelift-module   = "0.136.2"
 target-lexicon     = "0.13"
 cranelift-native   = "0.136.2"
-thiserror          = "1"
+thiserror          = "2"
 # DWARF debug-info emission (line tables + compile unit). `gimli`'s write side
-# and the `object` writer must match the versions cranelift-object 0.136 uses.
-gimli              = { version = "0.33", default-features = false, features = ["write"] }
+# and the `object` writer must match the versions cranelift-object 0.136 uses
+# (gimli is only used to build our own sections, so it may be newer).
+gimli              = { version = "0.34", default-features = false, features = ["write"] }
 object             = { version = "0.40", default-features = false, features = ["write"] }
