@@ -9,14 +9,22 @@ use crate::{Result, CompileError};
 ///      `<exe dir>/../../../sic-cpp/sic-cpp`;
 ///   4. the system `cpp`.
 ///
+/// Under one of sic-cpp's own host-compiler queries (`SIC_CPP_NESTED` set — a
+/// build with `CC=sic` makes sic that host compiler) sic-cpp is never chosen,
+/// so sic and sic-cpp cannot start each other without end.
+///
 /// The preprocessor must accept GCC `cpp`'s command line
 /// (`cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] … file`) and write the
 /// preprocessed text to stdout.
 pub fn preprocessor_bin() -> String {
     static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BIN.get_or_init(|| {
+        let nested = std::env::var_os("SIC_CPP_NESTED").is_some();
         if let Some(v) = std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()) {
-            return v;
+            if !(nested && is_sic_cpp(&v)) { return v; }
+        }
+        if nested {
+            return "cpp".to_string();
         }
         if let Some(p) = find_in_path("sic-cpp") {
             return p;

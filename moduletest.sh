@@ -242,6 +242,24 @@ if command -v readelf >/dev/null 2>&1; then
     fi
 fi
 
+# ── No sic <-> sic-cpp recursion ─────────────────────────────────────────────
+# Builds often set CC=sic. sic-cpp must not pick sic as its host compiler, and
+# even when forced to (SIC_HOST_CC=sic), the nested sic must not start sic-cpp
+# again (that was an unbounded process fork). A counting `sic` wrapper on PATH.
+mkdir -p recur_bin
+printf '#!/bin/sh\necho x >> "%s/recur.log"\nexec "%s" "$@"\n' "$PWD" "$SIC" > recur_bin/sic
+chmod +x recur_bin/sic
+printf '#include <stdio.h>\nint main(void){puts("ok");return 0;}\n' > recur.c
+: > recur.log
+if PATH="$PWD/recur_bin:$PATH" CC=sic timeout 60 sic recur.c -o recur 2>err && [ "$(./recur)" = ok ]; then
+    n=$(wc -l < recur.log)
+    [ "$n" -eq 1 ] && ok "cc-sic-no-recursion" || bad "cc-sic-no-recursion" "sic ran $n times"
+else
+    bad "cc-sic-no-recursion" "build failed or timed out: $(cat err)"
+fi
+[ "$(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)" = cpp ] \
+    && ok "nested-uses-plain-cpp" || bad "nested-uses-plain-cpp" "got: $(SIC_CPP_NESTED=1 "$SIC" -print-prog-name=cpp)"
+
 # ── Default arguments across modules (sic.md §"Default parameters") ──────────
 # A module exports functions with default parameters; the consumer fills omitted
 # defaults from the manifest, including keyword-only defaults before a va sink.
