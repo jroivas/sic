@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 sic-ir = { path = "../sic-ir" }
-cranelift-codegen  = { version = "0.136.2", features = ["all-arch", "disas"] }
+# No "disas": it builds the capstone C library (sic never disassembles), and
+# sic must build without a C compiler.
+cranelift-codegen  = { version = "0.136.2", features = ["all-arch"] }
 cranelift-frontend = "0.136.2"
 cranelift-object   = "0.136.2"
 cranelift-module   = "0.136.2"
