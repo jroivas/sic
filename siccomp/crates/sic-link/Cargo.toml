@@ -1,0 +1,22 @@
+[package]
+name = "sic-link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+# Link in-process with the wild linker (pure Rust). Without it, sic links
+# through an external ld-compatible linker (SIC_LD, else `ld`).
+default = ["wild"]
+wild = ["dep:libwild"]
+
+[dependencies]
+# Pinned exactly: libwild's API is the ld command line, but it is young and
+# changes between minor releases. No default features: `zstd` would build the C
+# zstd library with a C compiler, which sic must not need.
+libwild = { version = "=0.10.0", default-features = false, optional = true }
+object  = { version = "0.39", default-features = false, features = ["write"] }
+# libwild hashes with blake3, whose build script otherwise assembles SIMD code
+# with a C compiler; `pure` selects its pure-Rust implementation (enabled here,
+# it unifies into libwild's copy).
+blake3  = { version = "1", default-features = false, features = ["pure", "std"] }

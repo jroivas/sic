@@ -24,6 +24,30 @@ if [ -x "$SIC" ] && [ -d "$MYDIR/siccomp/crates" ]; then
     newer="$(find "$MYDIR/siccomp/crates" -name '*.rs' -newer "$SIC" -print -quit 2>/dev/null)"
     [ -n "$newer" ] && echo "WARNING: $SIC is older than $newer — rebuild it (cargo build / ./build.sh)" >&2
 fi
+# LINK_MODE selects what links the test programs:
+#   sic     sic itself, as the driver (default) — the built-in wild linker, or
+#           whatever $SIC_LD names
+#   cc      the system C driver ($CC), the way it used to be
+#   both    run the whole suite once with each, and fail if either fails
+case "${LINK_MODE:-sic}" in
+    sic) LINKER="$SIC" ;;
+    cc)  LINKER="$CC" ;;
+    both)
+        both_rc=0
+        for m in sic cc; do
+            echo "=== LINK_MODE=$m"
+            LINK_MODE=$m "$0" "$@" || both_rc=1
+        done
+        exit $both_rc
+        ;;
+    *) echo "unknown LINK_MODE '${LINK_MODE}' (sic, cc, both)"; exit 2 ;;
+esac
+if [ "$LINKER" = "$SIC" ]; then
+    echo "linker: sic ($("$SIC" -print-prog-name=ld 2>/dev/null || echo unknown))"
+else
+    echo "linker: $LINKER"
+fi
+
 # CPP_MODE selects the preprocessor sic runs:
 #   global  the system `cpp`
 #   sic     this repository's sic-cpp (sic-cpp/sic-cpp; must be built)
@@ -84,7 +108,7 @@ dotest() {
         cat /tmp/sic_err_$base
         return 1
     fi
-    if ! $CC "$obj_file" -o "$bin_file" -lm $flags 2>/tmp/link_err_$base; then
+    if ! $LINKER "$obj_file" -o "$bin_file" -lm $flags 2>/tmp/link_err_$base; then
         echo "FAIL $base: link error"
         cat /tmp/link_err_$base
         return 1

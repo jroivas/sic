@@ -2,6 +2,7 @@
 name = "sic"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "sic"
@@ -12,5 +13,6 @@ sic-ir        = { path = "../sic-ir" }
 sic-frontend  = { path = "../sic-frontend" }
 sic-opt       = { path = "../sic-opt" }
 sic-cranelift = { path = "../sic-cranelift" }
+sic-link      = { path = "../sic-link" }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"

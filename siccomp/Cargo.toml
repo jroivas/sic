@@ -4,6 +4,7 @@ members = [
     "crates/sic-frontend",
     "crates/sic-opt",
     "crates/sic-cranelift",
+    "crates/sic-link",
     "crates/sic",
 ]
 resolver = "2"
@@ -11,6 +12,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# libwild (the built-in linker, crates/sic-link) needs Rust 1.94.
+rust-version = "1.94"
 
 # Build DEPENDENCIES optimized even in dev/debug builds. The `"*"` spec matches
 # only non-workspace packages, so the workspace crates stay at opt-level 0 (fast

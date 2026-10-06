@@ -264,6 +264,15 @@ fn handle_version_query(args: &[String]) -> bool {
                 println!("{}", sic_frontend::preprocessor_bin());
                 return true;
             }
+            // … and the linker it uses: wild built in, $SIC_LD, or the legacy
+            // C driver named by $SIC_CC.
+            "-print-prog-name=ld" | "--print-prog-name=ld" => {
+                match legacy_link_driver() {
+                    Some(cc) => println!("{} (legacy C driver, SIC_CC)", cc),
+                    None => println!("{}", sic_link::backend_name()),
+                }
+                return true;
+            }
             _ => {}
         }
     }
@@ -473,7 +482,23 @@ fn main() {
     }
 }
 
-/// Resolve the external C driver used to perform the final link.
+/// The legacy link path: link through an external C compiler driver, used only
+/// when `SIC_CC` explicitly names one (e.g. `SIC_CC=cc`). Otherwise sic is the
+/// driver itself and links with sic-link (wild in-process, or `SIC_LD`).
+fn legacy_link_driver() -> Option<String> {
+    std::env::var("SIC_CC").ok().filter(|s| !s.is_empty() && !resolves_to_self(s))
+}
+
+/// Build a sic-link request from driver-level link tokens.
+fn link_with_driver(output: &str, inputs: Vec<String>, shared: bool, static_link: bool, gc_sections: bool)
+    -> Result<(), Box<dyn std::error::Error>>
+{
+    let req = sic_link::LinkRequest { output: output.to_string(), inputs, shared, static_link, gc_sections };
+    sic_link::link(&req).map_err(|e| e.into())
+}
+
+/// Resolve the external C driver used to assemble `.s`/`.S` sources (and to
+/// link, on the legacy `SIC_CC` path).
 ///
 /// We deliberately do NOT honor `$CC` here: build systems (CMake, autotools)
 /// commonly set `CC=sic` to use sic as *their* compiler, and if sic then read
@@ -974,12 +999,16 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     // time. `-fPIC` is not needed — sic emits position-independent code.
     let shared = dirp.join(format!("lib{}.so", name));
     let _ = fs::remove_file(&shared);
-    let cc = resolve_linker();
-    let status = Command::new(&cc)
-        .arg("-shared").arg("-o").arg(&shared).arg(obj.path())
-        .status()?;
-    if !status.success() {
-        return Err(format!("linking {} failed with exit code {:?}", shared.display(), status.code()).into());
+    if legacy_link_driver().is_none() {
+        link_with_driver(&shared.to_string_lossy(), vec![obj.path().to_string_lossy().into_owned()], true, false, false)?;
+    } else {
+        let cc = resolve_linker();
+        let status = Command::new(&cc)
+            .arg("-shared").arg("-o").arg(&shared).arg(obj.path())
+            .status()?;
+        if !status.success() {
+            return Err(format!("linking {} failed with exit code {:?}", shared.display(), status.code()).into());
+        }
     }
 
     // Manifest link line: `-L<absdir> -Wl,-rpath,<absdir> -l<name>` makes the
@@ -1169,6 +1198,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if args.link_order.is_empty() {
             return Err("no input files".into());
         }
+        if legacy_link_driver().is_none() {
+            return sic_link::run_linker(&sic_link::query_args(&args.link_order)).map_err(|e| e.into());
+        }
         let status = Command::new(&cc).args(&args.link_order).status()?;
         return if status.success() {
             Ok(())
@@ -1198,6 +1230,29 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let out_path = args.output.as_deref().unwrap_or("a.out");
+
+    // sic as the driver (default): the same inputs, in the same order, handed to
+    // sic-link, which adds the system part (start files, loader, libc, …).
+    if legacy_link_driver().is_none() {
+        let src_obj: std::collections::HashMap<&str, std::path::PathBuf> = sources.iter()
+            .zip(&tmp_objs)
+            .map(|(s, t)| (s.as_str(), t.path().to_path_buf()))
+            .collect();
+        let mut inputs: Vec<String> = Vec::new();
+        for tok in &args.link_order {
+            match src_obj.get(tok.as_str()) {
+                Some(obj) => inputs.push(obj.to_string_lossy().into_owned()),
+                None => inputs.push(tok.clone()),
+            }
+        }
+        for dir in module_search_dirs() {
+            inputs.push(format!("-L{}", dir));
+            if !args.static_link { inputs.push(format!("-Wl,-rpath,{}", dir)); }
+        }
+        inputs.extend(module_link_flags.iter().cloned());
+        return link_with_driver(out_path, inputs, args.shared, args.static_link, !args.shared);
+    }
+
     let mut link = Command::new(&cc);
 
     // Map each source path to the temp object it compiled to, so we can splice
