@@ -1,0 +1,14 @@
+// `mut` / `strict` are contextual: a declaration modifier only before something
+// that continues a declaration; otherwise ordinary identifiers. `if (strict && x)`
+// used to parse `strict` as the start of a declaration. Returns 42.
+int f(int strict, int mut) {
+    if (strict && mut) return strict + mut;
+    return 0;
+}
+int main() {
+    mut int a = 20;
+    int strict = 2;
+    int mut = 20;
+    int s = strict * mut;          // 40
+    return f(1, 1) + s;            // 2 + 40
+}

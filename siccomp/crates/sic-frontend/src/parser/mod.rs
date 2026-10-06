@@ -563,8 +563,7 @@ impl Parser {
                 // when immutable-by-default is on) and `strict` (mark a function
                 // strict) are accepted here. Immutability enforcement is not yet done,
                 // so for now they parse and are otherwise no-ops.
-                TokenKind::Ident if self.lang == Lang::Sic
-                    && (self.peek().text == "mut" || self.peek().text == "strict") =>
+                TokenKind::Ident if self.at_mut_strict_modifier() =>
                 {
                     self.advance();
                 }
@@ -1526,12 +1525,28 @@ impl Parser {
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum)
     }
 
+    /// sic strict mode's contextual `mut` / `strict` (sic.md §"Strict mode"): a
+    /// declaration modifier only when what follows can continue a declaration
+    /// (`mut int x`, `strict int f()`, `mut x`). Followed by an operator, a `)`,
+    /// … it is an ordinary identifier — `if (strict && x)` uses a variable.
+    fn at_mut_strict_modifier(&self) -> bool {
+        if self.lang != Lang::Sic || self.peek_kind() != TokenKind::Ident { return false; }
+        if self.peek().text != "mut" && self.peek().text != "strict" { return false; }
+        matches!(self.tokens.get(self.pos + 1).map(|t| t.kind),
+            Some(TokenKind::Ident | TokenKind::TypeName | TokenKind::At
+                | TokenKind::Void | TokenKind::Char | TokenKind::Short | TokenKind::Int
+                | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
+                | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex
+                | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Tuple
+                | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict | TokenKind::Atomic
+                | TokenKind::Static | TokenKind::Extern | TokenKind::Auto | TokenKind::Register
+                | TokenKind::Inline | TokenKind::Typedef | TokenKind::ThreadLocal | TokenKind::Extension))
+    }
+
     fn starts_decl_specifier(&self) -> bool {
         // sic strict mode (sic.md §"Strict mode"): a leading `mut`/`strict` begins a
         // declaration (`mut int x`, `strict int f()`).
-        if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
-            && (self.peek().text == "mut" || self.peek().text == "strict")
-        {
+        if self.at_mut_strict_modifier() {
             return true;
         }
         // sic `tuple <name>` starts a declaration; `tuple(` is a pack/unpack expr.
@@ -1750,9 +1765,7 @@ impl Parser {
 
     fn is_decl_start(&self) -> bool {
         // sic strict mode (sic.md §"Strict mode"): a local `mut int x` / `strict …`.
-        if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
-            && (self.peek().text == "mut" || self.peek().text == "strict")
-        {
+        if self.at_mut_strict_modifier() {
             return true;
         }
         // sic `tuple <name>` is a declaration; `tuple(` is a pack/unpack expression.
