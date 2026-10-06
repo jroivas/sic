@@ -613,23 +613,40 @@ string line_comments_to_block(string text) {
 // newlines are preserved so line numbering and directive boundaries survive; a
 // `//` line comment is dropped to end of line. String and character literals are
 // copied verbatim so `"a/*b"` / `'/'` are not mistaken for comments.
+// Whether the logical line starting at s[i] is a directive (first non-blank `#`).
+i32 directive_starts(string s, i32 i) {
+    while (i < s.size && (s[i] == ' ' || s[i] == '\t')) i++;
+    return i < s.size && s[i] == '#' ? 1 : 0;
+}
+
 string strip_comments(string s) {
     // Each comment is replaced by SPACES of the same width (its newlines kept),
     // so line numbers, directive boundaries and token columns all survive — gcc
     // indents `-P` output by the first token's source column, and a comment
     // before it counts. Verbatim text is copied as whole slices, one
     // concatenation per comment line (linear in the file size).
+    // Comments go before directives are split into lines (C11 5.1.1.2 phase 3):
+    // a block comment spanning lines inside a directive does not end it (glib's
+    // `#define G_C_STD_CHECK_VERSION(version) ( … /* …\n … */ \` ), so there its
+    // newlines become line splices — the directive stays one logical line and
+    // the physical line count is kept.
     string out = "";
     i32 run = 0;   // start of the pending verbatim run
     i32 i = 0;
+    i32 dir = directive_starts(s, 0);   // is the current logical line a directive?
     while (i < s.size) {
         i32 c = s[i];
+        if (c == '\n') {
+            if (i == 0 || s[i-1] != '\\') dir = directive_starts(s, i + 1);
+            i++;
+            continue;
+        }
         if (c == '/' && i + 1 < s.size && s[i+1] == '*') {
             out = out + s[run:i];
             i32 col = i;   // start of the current blanked segment
             i += 2;
             while (i + 1 < s.size && !(s[i] == '*' && s[i+1] == '/')) {
-                if (s[i] == '\n') { out = out + spaces(i - col) + "\n"; col = i + 1; }
+                if (s[i] == '\n') { out = out + spaces(i - col) + (dir ? "\\\n" : "\n"); col = i + 1; }
                 i++;
             }
             i = i + 2 <= s.size ? i + 2 : s.size;   // skip the closing */
@@ -638,8 +655,14 @@ string strip_comments(string s) {
             continue;
         }
         if (c == '/' && i + 1 < s.size && s[i+1] == '/') {
+            // A line comment runs to the end of the LOGICAL line: a backslash-
+            // newline continues it (phase 2 splices before phase 3); each spliced
+            // newline is kept so the line count survives.
             out = out + s[run:i];
-            while (i < s.size && s[i] != '\n') i++;
+            while (i < s.size && !(s[i] == '\n' && s[i-1] != '\\')) {
+                if (s[i] == '\n') out = out + "\n";
+                i++;
+            }
             run = i;   // the newline itself stays in the next run
             continue;
         }
@@ -1401,12 +1424,12 @@ void pp_define(Preprocessor *pp, string rest) {
         string params = rest[j:k-1];
         string body = "";
         while (k < rest.size && (rest[k] == ' ' || rest[k] == '\t')) k++;
-        if (k < rest.size) body = rest[k:rest.size];
+        if (k < rest.size) body = rest[k:rest.size].rtrim();   // where a comment was: not body
         pp->macros[name] = "F|" + params + "|" + body;
     } else {
         string body = rest[i:rest.size];
         while (body.size > 0 && (body[0] == ' ' || body[0] == '\t')) body = body[1:body.size];
-        pp->macros[name] = "O|" + body;
+        pp->macros[name] = "O|" + body.rtrim();
     }
 }
 
