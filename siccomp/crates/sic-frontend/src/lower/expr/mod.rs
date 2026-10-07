@@ -5531,6 +5531,36 @@ impl<'m> FuncCtx<'m> {
         // slot and yield that slot's pointer (how aggregate values flow in the
         // IR). A scalar Store/Load would truncate the aggregate to a register.
         // QEMU's decoder does `*entry = repz ? pause : nop;` (X86OpEntry copy).
+        // An ARRAY arm (`info ? hmp_info_cmds : hmp_cmds`) decays to a pointer to
+        // its first element: select the arms' ADDRESSES, never a copy. Copying
+        // into a stack slot returned a pointer to that temporary — QEMU's HMP
+        // command lookup then walked a dead stack frame and crashed `screendump`.
+        // A GCC vector is an Array here too; it flows as the address of its
+        // storage, so its consumers copy from the selected arm — also correct.
+        if let Some(rty) = ternary_array_result(&tty, &ety) {
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: Type::void_ptr(), align: None });
+            let then_bb  = self.new_block_after_current();
+            let else_bb  = self.new_block_after_current();
+            let merge_bb = self.new_block_after_current();
+            self.set_terminator(Terminator::CondJump { cond: cond_bool, then_bb, else_bb });
+            for (bb, arm, aty) in [(then_bb, then, &tty), (else_bb, else_, &ety)] {
+                self.switch_to_block(bb);
+                let p = if matches!(aty, Type::Array { .. }) {
+                    self.lower_aggregate_ptr(arm)?
+                } else {
+                    let v = self.lower_expr(arm)?;
+                    self.coerce(v, &Type::void_ptr())?
+                };
+                self.push_instr(Instr::Store { val: p, ptr: Val::Local(slot) });
+                self.set_terminator(Terminator::Jump(merge_bb));
+            }
+            self.switch_to_block(merge_bb);
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Load { dest, ptr: Val::Local(slot), ty: Type::void_ptr() });
+            self.val_types.insert(dest.0, rty);
+            return Ok(Val::Local(dest));
+        }
         let agg_ty = match (&tty, &ety) {
             (Type::Struct(_) | Type::Union(_) | Type::Array { .. }, _) => Some(tty.clone()),
             (_, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) => Some(ety.clone()),
@@ -6575,5 +6605,20 @@ pub(crate) fn atomic_lock_free_type(ty: &Type, ptr_size: u32) -> bool {
         Type::Bool => true,
         Type::Pointer(_) => ptr_size == 4 || ptr_size == 8,
         _ => false,
+    }
+}
+
+/// The type of `c ? a : b` when an arm is an array (and neither is a struct or
+/// union): the arrays decay, so the result is a pointer to the element type —
+/// except two arms of the SAME array type keep it, since that may be a GCC
+/// `vector_size` value (sic's vectors are arrays); the value is then the
+/// selected arm's address either way. `None` = no array arm.
+pub(crate) fn ternary_array_result(tty: &Type, ety: &Type) -> Option<Type> {
+    let agg = |t: &Type| matches!(t, Type::Struct(_) | Type::Union(_));
+    if agg(tty) || agg(ety) { return None; }
+    match (tty, ety) {
+        (Type::Array { .. }, _) if tty == ety => Some(tty.clone()),
+        (Type::Array { elem, .. }, _) | (_, Type::Array { elem, .. }) => Some(Type::Pointer(elem.clone())),
+        _ => None,
     }
 }

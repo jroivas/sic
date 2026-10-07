@@ -495,6 +495,7 @@ impl<'m> FuncCtx<'m> {
                 // Mirror lower_ternary/lower_elvis's result-type selection.
                 let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
                 let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+                if let Some(t) = super::ternary_array_result(&tty, &ety) { return Ok(t); }
                 Ok(match (&tty, &ety) {
                     (Type::Pointer(_), _) | (Type::Void, _) => tty,
                     (_, Type::Pointer(_)) => ety,
