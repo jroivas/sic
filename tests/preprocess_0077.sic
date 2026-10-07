@@ -1,0 +1,5 @@
+#define E3(op, a, b) [op|a|b]
+#define E2(op, a) E3(op, a, 2op)
+#define S(x) "#x" #x
+E2(ADD, G)
+S(q)

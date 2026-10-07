@@ -1402,6 +1402,16 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         string sb = "";
                         i32 si = 0;
                         while (si < body.size) {
+                            // A string/char literal in the body is copied as is: a
+                            // `#x` inside "…#x…" is not the # operator.
+                            if (body[si] == '"' || body[si] == '\'') {
+                                i32 q = body[si], st = si;
+                                si++;
+                                while (si < body.size && body[si] != q) { if (body[si] == '\\') si++; si++; }
+                                if (si < body.size) si++;
+                                sb = sb + body[st:si];
+                                continue;
+                            }
                             // Leave `##` (token paste) intact — consume both chars.
                             if (body[si] == '#' && si + 1 < body.size && body[si+1] == '#') {
                                 sb = sb + "##"; si += 2; continue;
@@ -1452,6 +1462,23 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 i32 st = bi; bi++;
                                 while (bi < body.size && body[bi] != c) { if (body[bi] == '\\') bi++; bi++; }
                                 if (bi < body.size) bi++;
+                                nb = nb + body[st:bi];
+                                continue;
+                            }
+                            // A preprocessing number (`2op`, `0x1f`, `1e+5`) is ONE
+                            // token: no parameter is substituted inside it (QEMU's
+                            // `X86_OP_ENTRY3(op, …, 2op, …)` became `2ADD`…, so every
+                            // x86 decode-table entry got a wrong operand type).
+                            if (std::IsDigit(c) || (c == '.' && bi + 1 < body.size && std::IsDigit(body[bi+1]))) {
+                                i32 st = bi;
+                                bi++;
+                                while (bi < body.size) {
+                                    i32 d = body[bi];
+                                    if ((d == '+' || d == '-') && (body[bi-1] == 'e' || body[bi-1] == 'E'
+                                        || body[bi-1] == 'p' || body[bi-1] == 'P')) { bi++; continue; }
+                                    if (is_ident(d) || d == '.') { bi++; continue; }
+                                    break;
+                                }
                                 nb = nb + body[st:bi];
                                 continue;
                             }

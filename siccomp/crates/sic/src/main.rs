@@ -173,7 +173,11 @@ fn effective_dep_flags(args: &Args) -> Vec<String> {
     let mut flags = args.dep_flags.clone();
     let has_target = flags.iter()
         .any(|f| f.starts_with("-MT") || f.starts_with("-MQ"));
-    if !has_target {
+    // A default target only when dependency output is requested — `-P` rides in
+    // this list too, and gcc's cpp rejects `-MQ` without `-M`/`-MD`
+    // (`sic -E -P -o x.i` failed with SIC_CPP=cpp).
+    let wants_deps = flags.iter().any(|f| matches!(f.as_str(), "-M" | "-MM" | "-MD" | "-MMD"));
+    if !has_target && wants_deps {
         if let Some(out) = &args.output {
             flags.push("-MQ".to_string());
             flags.push(out.clone());
