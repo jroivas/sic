@@ -1091,6 +1091,21 @@ list<string> paste_tokens(list<string> t) {
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                          i32 cur_line, string cur_file, list<string> active);
 
+// Argument `i`, fully macro-expanded (computed on first use, then cached).
+string expanded_arg(list<string> *exps, list<i32> *done, list<string> *args, i32 i,
+                    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active) {
+    if ((*done)[i]) return (*exps)[i];
+    list<string> aexp = expand_tokens(tokenize((*args)[i]), macros, cur_line, cur_file, active);
+    string arg_exp = "";
+    for (i32 ei = 0; ei < aexp.length; ei++) {
+        if (aexp[ei] == " ") { if (arg_exp.size > 0 && arg_exp[arg_exp.size-1] != ' ') arg_exp = arg_exp + " "; }
+        else arg_exp = arg_exp + aexp[ei];
+    }
+    (*exps)[i] = arg_exp.trim().dup;
+    (*done)[i] = 1;
+    return (*exps)[i];
+}
+
 // Emit `be`, the expansion of a macro use that ended just before tokens[k],
 // fenced with padding. The expansion is rescanned "along with all subsequent
 // preprocessing tokens" (C11 6.10.3.4p1): when it ends in a function-like macro
@@ -1314,16 +1329,15 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // parameter's name is not substituted again), and an operand of
                     // `##` gets the RAW argument while every other use gets the fully
                     // macro-expanded one.
+                    // An argument is macro-expanded only where its parameter is
+                    // substituted (C11 6.10.3.1), lazily on first use: an unused one
+                    // is never expanded — QEMU's `fGEN_TCG_J2_endloop0(SHORTCODE)`
+                    // ignores an argument that calls a macro not defined in that build.
                     list<string> arg_exps;
+                    list<i32> arg_done;
                     for (i32 pi2 = 0; pi2 < param_names.length && pi2 < args_list.length; pi2++) {
-                        list<string> atok = tokenize(args_list[pi2]);
-                        list<string> aexp = expand_tokens(atok, macros, cur_line, cur_file, active);
-                        string arg_exp = "";
-                        for (i32 ei = 0; ei < aexp.length; ei++) {
-                            if (aexp[ei] == " ") { if (arg_exp.size > 0 && arg_exp[arg_exp.size-1] != ' ') arg_exp = arg_exp + " "; }
-                            else arg_exp = arg_exp + aexp[ei];
-                        }
-                        arg_exps.add(arg_exp.trim().dup);
+                        arg_exps.add("");
+                        arg_done.add(0);
                     }
                     {
                         string nb = "";
@@ -1355,7 +1369,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 // An expanded argument is fenced with padding (`\x03`):
                                 // where it meets a neighbour without whitespace, the
                                 // final join decides whether a space is needed.
-                                if (!pasted) { nb = nb + "\x03" + arg_exps[pidx] + "\x03"; continue; }
+                                if (!pasted) { nb = nb + "\x03" + expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active) + "\x03"; continue; }
                                 string raw = args_list[pidx].trim();
                                 // GNU `, ## __VA_ARGS__` is not a paste: with the variadic
                                 // argument OMITTED (`F(a)`; `F()` too unless strict ISO) the
@@ -1376,7 +1390,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                         } else {
                                             nb = nb[0:h].dup;          // keep the comma, drop the `##`
                                             if (args_list[pidx].size > 0 && std::IsSpace(args_list[pidx][0])) nb = nb + " ";
-                                            nb = nb + "\x03" + arg_exps[pidx] + "\x03";
+                                            nb = nb + "\x03" + expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active) + "\x03";
                                         }
                                         continue;
                                     }
