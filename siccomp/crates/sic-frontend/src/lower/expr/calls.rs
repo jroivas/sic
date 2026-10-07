@@ -7,6 +7,32 @@ use super::*;
 impl<'m> FuncCtx<'m> {
     /// Resolve a namespaced module call `module.sym` to a mangled extern FuncRef,
     /// creating the extern on first use. Errors if the module has no such export.
+    /// A pointer/scalar argument for a UNION parameter: only legal C for a GCC
+    /// `transparent_union` (glibc's `__SOCKADDR_ARG` of bind/connect/accept…,
+    /// with _GNU_SOURCE), which takes the value as that member. Build the union
+    /// in a temporary with the value at offset 0 and pass it (by-value ABI). It
+    /// used to treat the pointer as the union's ADDRESS and copy 8 bytes from
+    /// what it points at — `bind(fd, (struct sockaddr *)&un, len)` passed the
+    /// sockaddr's contents as the pointer (EFAULT: QEMU's sockets all failed).
+    fn transparent_union_arg(&mut self, pval: &mut Val, pty: &Type, arg: Option<&Expr>) -> Result<bool> {
+        let Type::Union(u) = pty else { return Ok(false) };
+        let Some(arg) = arg else { return Ok(false) };
+        let aty = match self.infer_expr_type(arg) { Ok(t) => t, Err(_) => return Ok(false) };
+        if matches!(aty, Type::Struct(_) | Type::Union(_) | Type::Array { .. } | Type::Void) { return Ok(false); }
+        let Some((_, first)) = u.fields.first() else { return Ok(false) };
+        let first = first.clone();
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: pty.clone(), align: None });
+        let size = pty.size_of(self.ptr_size());
+        if size > 0 {
+            self.push_instr(Instr::MemSet { dst: Val::Local(slot), val: Constant::zero(), size, align: pty.align_of(self.ptr_size()) });
+        }
+        let v = self.coerce(pval.clone(), &first)?;
+        self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+        *pval = Val::Local(slot);
+        Ok(true)
+    }
+
     fn resolve_module_call(&mut self, module: &str, sym: &str, sp: &crate::lexer::Span) -> Result<FuncRef> {
         let (symbol, ty) = self.lowerer.imported_modules
             .get(module)
@@ -1177,6 +1203,7 @@ impl<'m> FuncCtx<'m> {
             for (i, pval) in arg_vals.iter_mut().enumerate() {
                 if let Some(pty) = param_tys.get(i) {
                     if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                        if self.transparent_union_arg(pval, pty, args.get(i))? { continue; }
                         if self.build_enum_arg(pval, pty, sp)? { continue; }
                         if self.is_sic() && super::super::types::is_sic_string(pty) {
                             *pval = self.string_param_arg(pval.clone(), args.get(i))?;
@@ -1212,6 +1239,7 @@ impl<'m> FuncCtx<'m> {
                 // Struct/union args are already lowered to a pointer to the value
                 // (by-value ABI); leave them as-is.
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {
+                    if self.transparent_union_arg(pval, pty, args.get(i))? { continue; }
                     // sic: a bare (payload-less) variant discriminant passed to an
                     // enum parameter is materialized into the enum value here.
                     if self.build_enum_arg(pval, pty, sp)? { continue; }
