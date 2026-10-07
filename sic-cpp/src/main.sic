@@ -804,7 +804,7 @@ string g_expand_error = "";
 void eval_fail(string msg) { if (g_eval_error.size == 0) g_eval_error = msg.dup; }
 void expand_fail(string msg) { if (g_expand_error.size == 0) g_expand_error = msg.dup; }
 
-i32 eval_expr(string *r, dict<string, string> *macros);
+PPV eval_expr(string *r, dict<string, string> *macros);
 
 // The token at the front of `r`, for a diagnostic (`a`, `\`, `(`, `"s"`).
 string front_token(string r) {
@@ -813,9 +813,24 @@ string front_token(string r) {
     return "";
 }
 
-i32 eval_primary(string *r, dict<string, string> *macros) {
+// An #if value (C11 6.10.1p4): every integer is intmax_t or uintmax_t — 64
+// bits here — and an operator with an unsigned operand works unsigned. (It
+// used to be a 32-bit int: `UINTPTR_MAX == UINT32_MAX` held on x86-64, so
+// QEMU's TCG took TCG_TYPE_PTR for 32-bit and emitted `mov %edi,%ebp`.)
+struct PPV { i64 v; i32 u; }
+
+PPV ppv(i64 v, i32 u) { PPV p; p.v = v; p.u = u; return p; }
+PPV ppb(i32 b) { return ppv(b ? 1 : 0, 0); }   // a truth value (`int`)
+
+// In C23 mode `true` / `false` are 1 / 0 in #if (gcc).
+i32 g_if_true_false = 0;
+// > 0 while parsing an operand that is not evaluated (`0 && x`, `1 || x`, the
+// other arm of `?:`): its division by zero is no error (C11 6.5.13/14/15).
+i32 g_eval_skip = 0;
+
+PPV eval_primary(string *r, dict<string, string> *macros) {
     skip_ws(r);
-    if ((*r).size == 0) { eval_fail("expected value in expression"); return 0; }
+    if ((*r).size == 0) { eval_fail("expected value in expression"); return ppv(0, 0); }
 
     // defined NAME / defined(NAME) — a leftover fallback (pp_if pre-substitutes).
     if ((*r).starts_with("defined") && !is_ident(peek((*r)[7:]))) {
@@ -830,26 +845,28 @@ i32 eval_primary(string *r, dict<string, string> *macros) {
         *r = (*r)[n:];
         skip_ws(r);
         if (paren && peek(*r) == ')') *r = (*r)[1:];
-        return (*macros)[name].size >= 2 ? 1 : 0;
+        return ppb((*macros)[name].size >= 2);
     }
 
     i32 c = peek(*r);
     if (c == '(') {
         *r = (*r)[1:];
-        i32 val = eval_expr(r, macros);
+        PPV val = eval_expr(r, macros);
         skip_ws(r);
         if (peek(*r) == ')') *r = (*r)[1:];
         else eval_fail("missing ')' in expression");
         return val;
     }
     if (c == '+') { *r = (*r)[1:]; return eval_primary(r, macros); }
-    if (c == '-') { *r = (*r)[1:]; return -eval_primary(r, macros); }
-    if (c == '~') { *r = (*r)[1:]; return ~eval_primary(r, macros); }
-    if (c == '!') { *r = (*r)[1:]; return eval_primary(r, macros) ? 0 : 1; }
+    if (c == '-') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppv((i64)(0 - (u64)a.v), a.u); }
+    if (c == '~') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppv(~a.v, a.u); }
+    if (c == '!') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppb(a.v == 0); }
 
-    // Number literal
+    // Integer constant: decimal / 0x hex / 0b binary / 0 octal, suffixes u U l L.
+    // A value beyond INT64_MAX is unsigned (as gcc), beyond UINT64_MAX an error.
     if (c >= '0' && c <= '9') {
-        i32 val = 0, radix = 10;
+        u64 val = 0;
+        i32 radix = 10, too_big = 0;
         if (c == '0' && (peek2(*r) == 'x' || peek2(*r) == 'X')) { radix = 16; *r = (*r)[2:]; }
         else if (c == '0' && (peek2(*r) == 'b' || peek2(*r) == 'B')) { radix = 2; *r = (*r)[2:]; }
         else if (c == '0') { radix = 8; *r = (*r)[1:]; }
@@ -859,19 +876,28 @@ i32 eval_primary(string *r, dict<string, string> *macros) {
             if (ch >= '0' && ch <= '9') d = ch - '0';
             else if (radix == 16 && ch >= 'a' && ch <= 'f') d = ch - 'a' + 10;
             else if (radix == 16 && ch >= 'A' && ch <= 'F') d = ch - 'A' + 10;
+            else if (ch == '\'') { *r = (*r)[1:]; continue; }   // C23 digit separator
             else break;
             if (d >= radix) break;
-            val = val * radix + d;
+            u64 limit = (18446744073709551615u - (u64)d) / (u64)radix;
+            if (val > limit) too_big = 1;
+            val = val * (u64)radix + (u64)d;
             *r = (*r)[1:];
         }
-        while (peek(*r) == 'U' || peek(*r) == 'u' || peek(*r) == 'L' || peek(*r) == 'l') *r = (*r)[1:];
-        return val;
+        i32 uns = 0;
+        while (peek(*r) == 'U' || peek(*r) == 'u' || peek(*r) == 'L' || peek(*r) == 'l') {
+            if (peek(*r) == 'U' || peek(*r) == 'u') uns = 1;
+            *r = (*r)[1:];
+        }
+        if (too_big) eval_fail("integer constant is too large for its type");
+        if (val > 9223372036854775807u) uns = 1;
+        return ppv((i64)val, uns);
     }
 
-    // Char constant
+    // Char constant (an `int`).
     if (c == '\'') {
         *r = (*r)[1:];
-        i32 val = 0;
+        i64 val = 0;
         if (peek(*r) == '\\') {
             *r = (*r)[1:];
             i32 e = peek(*r);
@@ -881,158 +907,232 @@ i32 eval_primary(string *r, dict<string, string> *macros) {
             else if (e == '0') val = 0;
             else val = e;
             if ((*r).size > 0) *r = (*r)[1:];
-        } else if ((*r).size > 0) { val = (*r)[0]; *r = (*r)[1:]; }
+        } else if ((*r).size > 0) { val = (i64)(i8)(*r)[0]; *r = (*r)[1:]; }
         while ((*r).size > 0 && (*r)[0] != '\'') *r = (*r)[1:];
         if (peek(*r) == '\'') *r = (*r)[1:];
-        return val;
+        return ppv(val, 0);
     }
 
-    // Unknown identifier → 0 (per C, an undefined macro in #if is 0).
+    // An identifier left after expansion is 0 (C), except C23's true/false.
     if (is_ident_start(c)) {
-        while ((*r).size > 0 && is_ident((*r)[0])) *r = (*r)[1:];
-        return 0;
+        i32 n = 0;
+        while (n < (*r).size && is_ident((*r)[n])) n++;
+        string w = (*r)[0:n];
+        *r = (*r)[n:];
+        if (g_if_true_false && w == "true") return ppv(1, 0);
+        return ppv(0, 0);
     }
     // Anything else (`\`, a string, `@`, a stray operator) cannot start a value.
     string t = front_token(*r);
     eval_fail("token ‘" + t + "’ is not valid in preprocessor expressions");
     *r = (*r)[t.size > 0 ? t.size : 1:];
-    return 0;
+    return ppv(0, 0);
 }
 
-i32 eval_mul(string *r, dict<string, string> *m) {
-    i32 val = eval_primary(r, m);
+// `a op b` with the usual arithmetic conversions: unsigned if either is.
+PPV pp_arith(i32 op, PPV a, PPV b) {
+    i32 u = a.u || b.u;
+    u64 x = (u64)a.v, y = (u64)b.v;
+    if (op == '+') return ppv((i64)(x + y), u);
+    if (op == '-') return ppv((i64)(x - y), u);
+    if (op == '*') return ppv((i64)(x * y), u);
+    if (op == '&') return ppv((i64)(x & y), u);
+    if (op == '|') return ppv((i64)(x | y), u);
+    if (op == '^') return ppv((i64)(x ^ y), u);
+    // `/` and `%`
+    if (y == 0) { if (g_eval_skip == 0) eval_fail("division by zero in #if"); return ppv(0, u); }
+    if (u) return ppv((i64)(op == '/' ? x / y : x % y), 1);
+    if (a.v == -9223372036854775807 - 1 && b.v == -1) return ppv(op == '/' ? a.v : 0, 0);   // overflow wraps
+    return ppv(op == '/' ? a.v / b.v : a.v % b.v, 0);
+}
+
+// `a << n` / `a >> n`: the result has the LEFT operand's type; a negative count
+// shifts the other way and a count of 64 or more leaves 0 (or -1), as gcc.
+PPV pp_shift(i32 left, PPV a, PPV n) {
+    i64 cnt = n.v;
+    if (!n.u && cnt < 0) {
+        left = !left;
+        cnt = cnt == -9223372036854775807 - 1 ? 64 : 0 - cnt;   // -INT64_MIN overflows
+    }
+    if (n.u && n.v < 0) cnt = 64;                       // a huge unsigned count
+    if (left) {
+        if (cnt >= 64) return ppv(0, a.u);
+        return ppv((i64)((u64)a.v << (u64)cnt), a.u);
+    }
+    if (a.u) {
+        if (cnt >= 64) return ppv(0, 1);
+        return ppv((i64)((u64)a.v >> (u64)cnt), 1);
+    }
+    if (cnt >= 64) return ppv(a.v < 0 ? -1 : 0, 0);
+    return ppv(a.v >> cnt, 0);                          // arithmetic
+}
+
+// `a < b` etc.: compared unsigned if either is; the result is an `int`.
+i32 pp_less(PPV a, PPV b) {
+    if (a.u || b.u) return (u64)a.v < (u64)b.v ? 1 : 0;
+    return a.v < b.v ? 1 : 0;
+}
+
+PPV eval_mul(string *r, dict<string, string> *m) {
+    PPV val = eval_primary(r, m);
     skip_ws(r);
     while (peek(*r) == '*' || peek(*r) == '/' || peek(*r) == '%') {
         i32 op = peek(*r); *r = (*r)[1:];
-        i32 rhs = eval_primary(r, m);
-        if (op == '*') val *= rhs; else if (op == '/') val = rhs ? val / rhs : 0; else val = rhs ? val % rhs : 0;
+        PPV rhs = eval_primary(r, m);
+        val = pp_arith(op, val, rhs);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_add(string *r, dict<string, string> *m) {
-    i32 val = eval_mul(r, m);
+PPV eval_add(string *r, dict<string, string> *m) {
+    PPV val = eval_mul(r, m);
     skip_ws(r);
     while (peek(*r) == '+' || peek(*r) == '-') {
         i32 op = peek(*r); *r = (*r)[1:];
-        i32 rhs = eval_mul(r, m);
-        if (op == '+') val += rhs; else val -= rhs;
+        PPV rhs = eval_mul(r, m);
+        val = pp_arith(op, val, rhs);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_shift(string *r, dict<string, string> *m) {
-    i32 val = eval_add(r, m);
+PPV eval_shift(string *r, dict<string, string> *m) {
+    PPV val = eval_add(r, m);
     skip_ws(r);
     while ((peek(*r) == '<' && peek2(*r) == '<') || (peek(*r) == '>' && peek2(*r) == '>')) {
         i32 op = peek(*r); *r = (*r)[2:];
-        i32 rhs = eval_add(r, m);
-        if (op == '<') val <<= rhs; else val >>= rhs;
+        PPV rhs = eval_add(r, m);
+        val = pp_shift(op == '<', val, rhs);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_rel(string *r, dict<string, string> *m) {
-    i32 val = eval_shift(r, m);
+PPV eval_rel(string *r, dict<string, string> *m) {
+    PPV val = eval_shift(r, m);
     skip_ws(r);
     while (true) {
         i32 c = peek(*r);
-        if (c == '<' && peek2(*r) == '=') { *r = (*r)[2:]; val = val <= eval_shift(r, m) ? 1 : 0; }
-        else if (c == '>' && peek2(*r) == '=') { *r = (*r)[2:]; val = val >= eval_shift(r, m) ? 1 : 0; }
-        else if (c == '<') { *r = (*r)[1:]; val = val < eval_shift(r, m) ? 1 : 0; }
-        else if (c == '>') { *r = (*r)[1:]; val = val > eval_shift(r, m) ? 1 : 0; }
+        if (c == '<' && peek2(*r) == '=') { *r = (*r)[2:]; PPV b = eval_shift(r, m); val = ppb(!pp_less(b, val)); }
+        else if (c == '>' && peek2(*r) == '=') { *r = (*r)[2:]; PPV b = eval_shift(r, m); val = ppb(!pp_less(val, b)); }
+        else if (c == '<') { *r = (*r)[1:]; PPV b = eval_shift(r, m); val = ppb(pp_less(val, b)); }
+        else if (c == '>') { *r = (*r)[1:]; PPV b = eval_shift(r, m); val = ppb(pp_less(b, val)); }
         else break;
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_eq(string *r, dict<string, string> *m) {
-    i32 val = eval_rel(r, m);
+PPV eval_eq(string *r, dict<string, string> *m) {
+    PPV val = eval_rel(r, m);
     skip_ws(r);
     while ((peek(*r) == '=' && peek2(*r) == '=') || (peek(*r) == '!' && peek2(*r) == '=')) {
         i32 ne = peek(*r) == '!'; *r = (*r)[2:];
-        i32 rhs = eval_rel(r, m);
-        val = (ne ? val != rhs : val == rhs) ? 1 : 0;
+        PPV rhs = eval_rel(r, m);
+        i32 eq = val.v == rhs.v;   // same bits either way after the conversions
+        val = ppb(ne ? !eq : eq);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_and(string *r, dict<string, string> *m) {
-    i32 val = eval_eq(r, m);
+PPV eval_and(string *r, dict<string, string> *m) {
+    PPV val = eval_eq(r, m);
     skip_ws(r);
     while (peek(*r) == '&' && peek2(*r) != '&') {
-        *r = (*r)[1:]; val &= eval_eq(r, m);
+        *r = (*r)[1:]; PPV b = eval_eq(r, m); val = pp_arith('&', val, b);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_xor(string *r, dict<string, string> *m) {
-    i32 val = eval_and(r, m);
+PPV eval_xor(string *r, dict<string, string> *m) {
+    PPV val = eval_and(r, m);
     skip_ws(r);
-    while (peek(*r) == '^') { *r = (*r)[1:]; val ^= eval_and(r, m); skip_ws(r); }
+    while (peek(*r) == '^') { *r = (*r)[1:]; PPV b = eval_and(r, m); val = pp_arith('^', val, b); skip_ws(r); }
     return val;
 }
 
-i32 eval_or(string *r, dict<string, string> *m) {
-    i32 val = eval_xor(r, m);
+PPV eval_or(string *r, dict<string, string> *m) {
+    PPV val = eval_xor(r, m);
     skip_ws(r);
     while (peek(*r) == '|' && peek2(*r) != '|') {
-        *r = (*r)[1:]; val |= eval_xor(r, m);
+        *r = (*r)[1:]; PPV b = eval_xor(r, m); val = pp_arith('|', val, b);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_land(string *r, dict<string, string> *m) {
-    i32 val = eval_or(r, m);
+PPV eval_land(string *r, dict<string, string> *m) {
+    PPV val = eval_or(r, m);
     skip_ws(r);
     while (peek(*r) == '&' && peek2(*r) == '&') {
         // Always PARSE the right operand (a short-circuiting `val && eval_or(r)`
         // would skip it and leave the cursor before it); combine afterwards.
-        *r = (*r)[2:]; i32 rhs = eval_or(r, m); val = (val && rhs) ? 1 : 0;
+        *r = (*r)[2:];
+        i32 skip = val.v == 0;
+        g_eval_skip += skip;
+        PPV rhs = eval_or(r, m);
+        g_eval_skip -= skip;
+        val = ppb(val.v != 0 && rhs.v != 0);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_lor(string *r, dict<string, string> *m) {
-    i32 val = eval_land(r, m);
+PPV eval_lor(string *r, dict<string, string> *m) {
+    PPV val = eval_land(r, m);
     skip_ws(r);
     while (peek(*r) == '|' && peek2(*r) == '|') {
-        *r = (*r)[2:]; i32 rhs = eval_land(r, m); val = (val || rhs) ? 1 : 0;   // parse rhs always
+        *r = (*r)[2:];
+        i32 skip = val.v != 0;
+        g_eval_skip += skip;
+        PPV rhs = eval_land(r, m);                   // parse rhs always
+        g_eval_skip -= skip;
+        val = ppb(val.v != 0 || rhs.v != 0);
         skip_ws(r);
     }
     return val;
 }
 
-i32 eval_ternary(string *r, dict<string, string> *m) {
-    i32 val = eval_lor(r, m);
+PPV eval_ternary(string *r, dict<string, string> *m) {
+    PPV val = eval_lor(r, m);
     skip_ws(r);
     if (peek(*r) == '?') {
         *r = (*r)[1:];
-        i32 t_val = eval_expr(r, m);
+        i32 cond = val.v != 0;
+        g_eval_skip += !cond;
+        PPV t_val = eval_expr(r, m);
+        g_eval_skip -= !cond;
         skip_ws(r);
-        if (peek(*r) == ':') { *r = (*r)[1:]; i32 f_val = eval_ternary(r, m); return val ? t_val : f_val; }
+        if (peek(*r) == ':') {
+            *r = (*r)[1:];
+            g_eval_skip += cond;
+            PPV f_val = eval_ternary(r, m);
+            g_eval_skip -= cond;
+            // The result has the common type of both arms.
+            PPV res = val.v != 0 ? t_val : f_val;
+            res.u = t_val.u || f_val.u;
+            return res;
+        }
+        eval_fail("‘?’ without following ‘:’");
     }
     return val;
 }
 
-i32 eval_expr(string *r, dict<string, string> *macros) {
+PPV eval_expr(string *r, dict<string, string> *macros) {
     return eval_ternary(r, macros);
 }
 
 // Evaluate a whole #if expression; errors (gcc's wording) go to g_eval_error.
-i32 eval_if_expr(string expr, dict<string, string> *macros) {
+// The result is its truth value (or, for `#line N`, the number itself).
+i64 eval_if_value(string expr, dict<string, string> *macros) {
     g_eval_error = "";
+    g_eval_skip = 0;
     if (expr.trim().size == 0) { eval_fail("with no expression"); return 0; }
     string r = expr;
-    i32 val = eval_expr(&r, macros);
+    PPV val = eval_expr(&r, macros);
     skip_ws(&r);
     if (r.size > 0 && g_eval_error.size == 0) {
         // A complete expression followed by more tokens (`defined(X)a`).
@@ -1043,7 +1143,11 @@ i32 eval_if_expr(string expr, dict<string, string> *macros) {
         else
             eval_fail("token ‘" + t + "’ is not valid in preprocessor expressions");
     }
-    return val;
+    return val.v;
+}
+
+i32 eval_if_expr(string expr, dict<string, string> *macros) {
+    return eval_if_value(expr, macros) != 0 ? 1 : 0;
 }
 
 // ── Macro expansion ───────────────────────────────────────────────────────
@@ -2678,7 +2782,7 @@ void pp_process_line(Preprocessor *pp, string line) {
             i32 ni = 0;
             while (ni < rl.size && rl[ni] >= '0' && rl[ni] <= '9') ni++;
             if (ni > 0) {
-                pp->current_line = eval_if_expr(rl[0:ni], &pp->macros) - 1;
+                pp->current_line = (i32)eval_if_value(rl[0:ni], &pp->macros) - 1;
                 i32 fi = ni;
                 while (fi < rl.size && std::IsSpace(rl[fi])) fi++;
                 if (fi < rl.size && rl[fi] == '"') {
@@ -3034,6 +3138,7 @@ int main(int argc, char **argv) {
     }
     pp.macros["__STDC__"] = "O|1";
     if (stdc_version.size > 0) pp.macros["__STDC_VERSION__"] = "O|" + stdc_version;
+    g_if_true_false = stdc_version == "202311L";   // C23: `#if true`
     if (strict && !undef) pp.macros["__STRICT_ANSI__"] = "O|1";
     // char16_t/char32_t are UTF-16/-32 from C11 on.
     if (stdc_version.size > 0 && stdc_version != "199409L" && stdc_version != "199901L") {
