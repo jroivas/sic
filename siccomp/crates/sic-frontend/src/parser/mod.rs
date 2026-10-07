@@ -3342,14 +3342,22 @@ impl Parser {
     /// Wrap `ty` as a `vector_size(n)` vector: an array of `n / sizeof(elem)`
     /// elements (a sized aggregate, so `sizeof`/lane-indexing/`|`/`&` work).
     fn apply_vector_size(&self, ty: QualType, n: u32) -> QualType {
-        let elem_sz = ast_type_byte_size(&ty.ty).max(1);
-        let lanes = (n / elem_sz).max(1);
         let span = Span::default();
-        let base = Box::new(ty);
-        QualType::new(AstType::Array {
-            base,
-            size: Some(Box::new(Expr::new(ExprKind::IntLit(lanes as i64, false), span))),
-        })
+        // The parser knows only typedef NAMES, not their sizes: for a typedef
+        // element (`int64_t __attribute__((vector_size(16)))`) the lane count is
+        // left as `n / sizeof(elem)` for type lowering to fold. (Assuming size 1
+        // gave 16 lanes = a 128-byte "vector".)
+        let size = if matches!(ty.ty, AstType::Named(_)) {
+            Expr::new(ExprKind::BinOp {
+                op: BinOpKind::Div,
+                lhs: Box::new(Expr::new(ExprKind::IntLit(n as i64, false), span.clone())),
+                rhs: Box::new(Expr::new(ExprKind::SizeofType(ty.clone()), span.clone())),
+            }, span)
+        } else {
+            let lanes = (n / ast_type_byte_size(&ty.ty).max(1)).max(1);
+            Expr::new(ExprKind::IntLit(lanes as i64, false), span)
+        };
+        QualType::new(AstType::Array { base: Box::new(ty), size: Some(Box::new(size)) })
     }
 
     fn skip_balanced_parens(&mut self) {
