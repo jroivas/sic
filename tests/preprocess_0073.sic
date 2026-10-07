@@ -1,0 +1,8 @@
+#define F(x) [x]
+#define G F
+F
+(SUCCESS1)
+G
+
+  (SUCCESS2)
+int F;

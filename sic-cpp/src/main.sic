@@ -1641,6 +1641,37 @@ i32 open_macro_call(Preprocessor *pp, string line) {
     return in_call;
 }
 
+// The identifier a text ends with ("" if it does not end with one).
+string trailing_ident(string text) {
+    string t = text.rtrim();
+    i32 e = t.size, b = t.size;
+    while (b > 0 && is_ident(t[b-1])) b--;
+    if (b == e || !is_ident_start(t[b])) return "";   // `0x1F` is a number, not a name
+    return t[b:e];
+}
+
+// Whether a TEXT line ends with a macro that a `(` on a FOLLOWING line would
+// invoke: a function-like macro name, or an object-like macro whose expansion
+// ends with one (`#define g m`). gcc looks past the newline for the `(` —
+// QEMU's `logout\n    ("…");`.
+i32 ends_with_callable(Preprocessor *pp, string line) {
+    string name = trailing_ident(line);
+    for (i32 depth = 0; depth < 16 && name.size > 0; depth++) {
+        string enc = pp->macros[name];
+        if (enc.starts_with("F|")) return 1;
+        if (!enc.starts_with("O|")) return 0;
+        name = trailing_ident(enc[2:]);
+    }
+    return 0;
+}
+
+// Whether the next non-blank text in `rest` is a `(`.
+i32 next_starts_paren(string rest) {
+    i32 i = 0;
+    while (i < rest.size && (std::IsSpace(rest[i]) || rest[i] == 2)) i++;
+    return i < rest.size && rest[i] == '(' ? 1 : 0;
+}
+
 void pp_process_content(Preprocessor *pp, string content) {
     string rest = content;
     while (rest.size > 0) {
@@ -1699,7 +1730,8 @@ void pp_process_content(Preprocessor *pp, string content) {
         // inside an open invocation, join the following lines onto it.
         if (cond_active(pp) && !line.ltrim().starts_with("#")) {
             i32 glue = 0;   // the previous joined line ended in a splice
-            while (rest.size > 0 && open_macro_call(pp, line)) {
+            while (rest.size > 0 && (open_macro_call(pp, line)
+                                     || (ends_with_callable(pp, line) && next_starts_paren(rest)))) {
                 i32 n = 0;
                 while (n < rest.size && rest[n] != '\n') n++;
                 string next = rest[0:n];
