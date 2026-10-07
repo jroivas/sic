@@ -162,6 +162,8 @@ impl MutVisitor for WriteScan {
     }
     fn visit_stmt(&mut self, s: &mut Stmt) {
         if let Stmt::Delete(e, _) = s { collect_idents(e, &mut self.dels); }
+        // An asm output is a write the expression scan cannot see.
+        if let Stmt::Asm(a) = s { for o in &a.outputs { self.note_lhs(&o.expr); } }
         walk_stmt(self, s);
     }
     fn visit_expr(&mut self, e: &mut Expr) {

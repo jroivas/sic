@@ -399,7 +399,33 @@ pub enum Stmt {
     /// - boolean: `cond else return;` (`binding = None`) — runs `else_body` when
     ///   `cond` is false (a terse `if (!cond)` that reduces nesting).
     Guard { binding: Option<(Option<QualType>, String)>, cond: Expr, else_body: BoxStmt, span: Span },
+    /// GNU inline assembly `asm [volatile] ("tmpl" : outs : ins : clobbers);`.
+    /// Cranelift has no inline asm, so lowering recognises a fixed set of x86-64
+    /// templates (see `lower/expr/asm.rs`); anything else warns and traps.
+    Asm(Box<AsmStmt>),
     Null(Span),
+}
+
+/// A GNU extended-asm statement. Operands are numbered outputs first, then
+/// inputs (`%0`, `%1`, …), as in GCC.
+#[derive(Debug, Clone)]
+pub struct AsmStmt {
+    /// The template with string-literal escapes already decoded.
+    pub template: String,
+    pub outputs: Vec<AsmOperand>,
+    pub inputs: Vec<AsmOperand>,
+    pub clobbers: Vec<String>,
+    /// `asm goto` (has a label list) — never recognised.
+    pub goto: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsmOperand {
+    /// `[name]` symbolic operand name, if any.
+    pub name: Option<String>,
+    pub constraint: String,
+    pub expr: Expr,
 }
 
 /// sic exception-guard kind (sic.md §"Integer overflow", §"Errors and exceptions").

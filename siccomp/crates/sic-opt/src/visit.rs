@@ -105,6 +105,9 @@ pub fn walk_stmt<V: MutVisitor>(v: &mut V, s: &mut Stmt) {
             for a in arms { v.visit_stmt(&mut a.body); }
         }
         Stmt::Guard { cond, else_body, .. } => { v.visit_expr(cond); v.visit_stmt(else_body); }
+        Stmt::Asm(a) => {
+            for o in a.outputs.iter_mut().chain(a.inputs.iter_mut()) { v.visit_expr(&mut o.expr); }
+        }
     }
 }
 

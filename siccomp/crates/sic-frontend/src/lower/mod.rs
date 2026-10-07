@@ -4321,6 +4321,9 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             if let Some((_, n)) = binding { out.push(n.clone()); }
             collect_stmt_names(else_body, out);
         }
+        Stmt::Asm(a) => {
+            for o in a.outputs.iter().chain(&a.inputs) { collect_expr_names(&o.expr, out); }
+        }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
         | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) => {}
     }

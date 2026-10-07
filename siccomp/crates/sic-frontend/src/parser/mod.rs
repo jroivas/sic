@@ -1676,8 +1676,8 @@ impl Parser {
             TokenKind::Ident | TokenKind::TypeName if self.is_label() => self.parse_label(),
             TokenKind::Case => self.parse_case(),
             TokenKind::Default => self.parse_default(),
-            // inline asm — skip
-            TokenKind::Asm => { self.parse_asm_skip()?; Ok(Stmt::Null(sp)) }
+            // GNU inline asm statement
+            TokenKind::Asm => self.parse_asm_stmt(sp),
             // __extension__ — skip
             TokenKind::Extension => { self.advance(); self.parse_stmt() }
             // Statement attribute, e.g. `__attribute__((fallthrough));`.
@@ -3371,6 +3371,58 @@ impl Parser {
                 _ => { self.advance(); }
             }
         }
+    }
+
+    /// `asm [volatile|inline|goto]* ( "tmpl" [: outs [: ins [: clobbers [: labels]]]] );`
+    /// A `::` token (sic mode lexes one) counts as two section separators.
+    fn parse_asm_stmt(&mut self, sp: Span) -> Result<Stmt> {
+        self.advance(); // asm / __asm__
+        let mut goto = false;
+        loop {
+            if self.at(TokenKind::Volatile) || self.at(TokenKind::Inline) { self.advance(); continue; }
+            if self.at(TokenKind::Goto) { self.advance(); goto = true; continue; }
+            break;
+        }
+        self.expect(TokenKind::LParen)?;
+        let mut template = String::new();
+        while self.at(TokenKind::StringLit) {
+            let t = self.advance().text.as_bytes().to_vec();
+            unsafe { template.as_mut_vec().extend_from_slice(&t); }
+        }
+        // Section index: 0 = outputs, 1 = inputs, 2 = clobbers, 3 = labels.
+        let mut sections: [Vec<AsmOperand>; 2] = [Vec::new(), Vec::new()];
+        let mut clobbers = Vec::new();
+        let mut section: i32 = -1;
+        while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
+            if self.eat(TokenKind::ColonColon) { section += 2; continue; }
+            if self.eat(TokenKind::Colon) { section += 1; continue; }
+            if self.eat(TokenKind::Comma) { continue; }
+            match section {
+                0 | 1 => {
+                    let mut name = None;
+                    if self.eat(TokenKind::LBracket) {
+                        name = Some(self.advance().text.clone());
+                        self.expect(TokenKind::RBracket)?;
+                    }
+                    let mut constraint = String::new();
+                    while self.at(TokenKind::StringLit) { constraint.push_str(&self.advance().text.clone()); }
+                    self.expect(TokenKind::LParen)?;
+                    let expr = self.parse_expr()?;
+                    self.expect(TokenKind::RParen)?;
+                    sections[section as usize].push(AsmOperand { name, constraint, expr });
+                }
+                2 => {
+                    let mut c = String::new();
+                    while self.at(TokenKind::StringLit) { c.push_str(&self.advance().text.clone()); }
+                    if c.is_empty() { self.advance(); } else { clobbers.push(c); }
+                }
+                _ => { self.advance(); goto = true; }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.eat(TokenKind::Semi);
+        let [outputs, inputs] = sections;
+        Ok(Stmt::Asm(Box::new(AsmStmt { template, outputs, inputs, clobbers, goto, span: sp })))
     }
 
     fn parse_asm_skip(&mut self) -> Result<()> {

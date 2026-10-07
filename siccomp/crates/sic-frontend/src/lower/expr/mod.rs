@@ -9,6 +9,7 @@ mod enums;
 mod calls;
 mod lvalue;
 mod infer;
+mod asm;
 
 
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
@@ -6482,6 +6483,7 @@ fn rewrite_capture_ref(s: &mut ast::Stmt, name: &str, deref: bool) {
             for a in arms { rewrite_capture_ref(&mut a.body, name, deref); }
         }
         Guard { cond, else_body, .. } => { rewrite_capture_expr(cond, name, deref); rewrite_capture_ref(else_body, name, deref); }
+        Asm(a) => for o in a.outputs.iter_mut().chain(a.inputs.iter_mut()) { rewrite_capture_expr(&mut o.expr, name, deref); },
         Return(None, _) | Break(_) | Continue(_) | Fallthrough(_) | Goto(_, _) | Null(_) => {}
     }
 }

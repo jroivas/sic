@@ -139,6 +139,18 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     for (i, e) in ir_module.externs.iter().enumerate() {
         if !used_externs.contains(&i) { continue; }
         let sig = build_cl_sig(&e.sig, ptr_size, obj_module.target_config().default_call_conv);
+        // A recognised inline-asm template lowers to a call of a `__sic_asm_*`
+        // helper (sic_ir::asm_helpers): emit its x86-64 machine code as a
+        // module-local function instead of importing the symbol.
+        if let Some(code) = sic_ir::asm_helpers::asm_helper_code(&e.name) {
+            if !matches!(obj_module.isa().triple().architecture, target_lexicon::Architecture::X86_64) {
+                return Err(CraneliftError::Unsupported(format!("inline assembly (`{}`) is only supported on x86-64", e.name)));
+            }
+            let fid = obj_module.declare_function(&e.name, CLinkage::Local, &sig)?;
+            obj_module.define_function_bytes(fid, 16, code, &[])?;
+            func_ids.insert(FuncRef::extern_(i).0, fid);
+            continue;
+        }
         let fid = obj_module.declare_function(&e.name, CLinkage::Import, &sig)?;
         func_ids.insert(FuncRef::extern_(i).0, fid);
     }
