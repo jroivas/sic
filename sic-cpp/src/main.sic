@@ -556,6 +556,7 @@ string spaces(i32 n) {
 // -C (1) / -CC (2): keep comments in the output instead of stripping them.
 // Global because the tokenizer has no preprocessor handle.
 i32 g_keep_comments = 0;
+i64 g_counter = 0;   // the next __COUNTER__ value
 // A strict ISO dialect (-std=c99/c11/…, not gnu*): GNU `, ## __VA_ARGS__` then
 // keeps the comma for a macro with no fixed parameters (`M()`), as gcc does.
 i32 g_strict_iso = 0;
@@ -1277,6 +1278,9 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
         }
         // Predefined dynamic macros
         if (tok == "__LINE__") { out.add(std::Fmt("{}", cur_line)); continue; }
+        // 0, 1, 2, … per use (gcc): QEMU makes unique names with
+        // glue(_val, __COUNTER__); left as text, nested macros shared one name.
+        if (tok == "__COUNTER__") { out.add(std::Fmt("{}", g_counter)); g_counter++; continue; }
         if (tok == "__FILE__") { out.add("\"" + cur_file + "\""); continue; }
         if (tok == "__DATE__") { out.add("\"Jan  1 2026\""); continue; }
         if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
@@ -3126,6 +3130,7 @@ int main(int argc, char **argv) {
     // `__has_*` are operators of `#if` (handled before expansion), but they are
     // also `defined` / `#ifdef`-visible, as in gcc and clang.
     pp.macros["__has_include"] = "B|";
+    pp.macros["__COUNTER__"] = "B|";   // dynamic (expand_tokens); `#ifdef __COUNTER__`
     pp.macros["__has_include_next"] = "B|";
     pp.macros["__has_embed"] = "B|";
     pp.macros["__STDC_EMBED_NOT_FOUND__"] = "O|0";
