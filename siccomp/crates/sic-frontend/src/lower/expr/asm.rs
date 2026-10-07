@@ -51,6 +51,32 @@ fn instructions(t: &str) -> Vec<String> {
         .collect()
 }
 
+/// Drop instructions that are no-ops on real hardware: `xchg %r,%r` and `rol`
+/// rotations of one register that add up to whole turns. This is Valgrind's
+/// client-request marker (`rolq $3/$13/$61/$51,%rdi ; xchgq %rbx,%rbx`, from
+/// <valgrind/valgrind.h>, run by QEMU's coroutine stack registration): natively
+/// it changes no register, so the request yields its tied default value.
+/// Rotations that do not cancel are kept (the template is then not recognised).
+fn strip_native_nops(insns: Vec<String>) -> Vec<String> {
+    let mut turns: std::collections::HashMap<String, u32> = Default::default();
+    let mut rest = Vec::new();
+    for i in &insns {
+        if let Some((mnem, ops)) = i.split_once(' ') {
+            if let Some((a, b)) = ops.split_once(',') {
+                if matches!(mnem, "xchg" | "xchgq") && a == b && a.starts_with('%') { continue; }
+                if mnem == "rolq" && b.starts_with('%') {
+                    if let Some(n) = a.strip_prefix('$').and_then(|n| n.parse::<u32>().ok()) {
+                        *turns.entry(b.to_string()).or_default() += n;
+                        continue;
+                    }
+                }
+            }
+        }
+        rest.push(i.clone());
+    }
+    if turns.values().all(|n| n % 64 == 0) { rest } else { insns }
+}
+
 /// `%N` / `%bN` / `%kN` / `%qN` / `%wN` → N.
 fn operand_ref(s: &str) -> Option<usize> {
     let s = s.strip_prefix('%')?;
@@ -72,7 +98,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Lower a recognised template; `false` = not recognised (nothing emitted).
     fn try_lower_asm(&mut self, a: &AsmStmt) -> Result<bool> {
-        let insns = instructions(&a.template);
+        let insns = strip_native_nops(instructions(&a.template));
         let ins: Vec<&str> = insns.iter().map(|s| s.as_str()).collect();
         let memory_clobber = a.clobbers.iter().any(|c| c == "memory");
         // Every operand must be understood by the template handled below; a
