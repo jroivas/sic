@@ -1708,7 +1708,7 @@ impl<'m> FuncCtx<'m> {
                 self.exit_scope();
                 self.unsafe_depth -= 1;
             }
-            Stmt::Break(_) => {
+            Stmt::Break(sp) => {
                 // `break` targets the innermost enclosing loop *or* switch,
                 // whichever is nested deeper — a switch inside a loop breaks the
                 // switch, not the loop.
@@ -1718,17 +1718,17 @@ impl<'m> FuncCtx<'m> {
                     }
                     self.set_terminator(Terminator::Jump(end));
                 } else {
-                    return Err(CompileError::new("break outside loop/switch"));
+                    return Err(CompileError::at("break outside loop/switch".to_string(), sp.file.clone(), sp.line, sp.col));
                 }
             }
-            Stmt::Continue(_) => {
+            Stmt::Continue(sp) => {
                 if let Some(&(_, cont)) = self.loop_stack.last() {
                     if let Some(&depth) = self.continue_scope_depth.last() {
                         self.emit_cleanups_to(depth);
                     }
                     self.set_terminator(Terminator::Jump(cont));
                 } else {
-                    return Err(CompileError::new("continue outside loop"));
+                    return Err(CompileError::at("continue outside loop".to_string(), sp.file.clone(), sp.line, sp.col));
                 }
             }
             Stmt::Goto(label, _) => {

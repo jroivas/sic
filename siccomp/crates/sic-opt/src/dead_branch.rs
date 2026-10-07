@@ -54,6 +54,36 @@ fn as_bool(e: &Expr) -> Option<bool> {
 
 fn dummy(span: &Span) -> Expr { Expr::new(ExprKind::Nullptr, span.clone()) }
 
+/// Whether `body` holds a `break` or `continue` aimed at the loop it is the body
+/// of: one not nested in an inner loop (or, for `break`, an inner `switch`).
+/// Statement expressions and lambdas are searched too — conservatively, since a
+/// construct not modelled here only makes the answer `true` (keep the loop).
+fn exits_loop(body: &mut Stmt) -> bool {
+    struct Finder { loops: u32, switches: u32, found: bool }
+    impl MutVisitor for Finder {
+        fn visit_stmt(&mut self, s: &mut Stmt) {
+            match s {
+                Stmt::Break(_) if self.loops == 0 && self.switches == 0 => self.found = true,
+                Stmt::Continue(_) if self.loops == 0 => self.found = true,
+                Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => {
+                    self.loops += 1;
+                    walk_stmt(self, s);
+                    self.loops -= 1;
+                }
+                Stmt::Switch { .. } => {
+                    self.switches += 1;
+                    walk_stmt(self, s);
+                    self.switches -= 1;
+                }
+                _ => walk_stmt(self, s),
+            }
+        }
+    }
+    let mut f = Finder { loops: 0, switches: 0, found: false };
+    f.visit_stmt(body);
+    f.found
+}
+
 impl DeadBranch {
     fn fold_stmt(&mut self, s: &mut Stmt) {
         let repl: Option<Stmt> = match s {
@@ -70,12 +100,18 @@ impl DeadBranch {
             // `while (0) body` never runs.
             Stmt::While { cond, span, .. } if as_bool(cond) == Some(false) =>
                 Some(Stmt::Null(span.clone())),
-            // `do body while (0)` runs the body exactly once.
-            Stmt::DoWhile { body, cond, span } if as_bool(cond) == Some(false) =>
-                Some(Stmt::Block(
-                    vec![std::mem::replace(body.as_mut(), Stmt::Null(span.clone()))],
-                    span.clone(),
-                )),
+            // `do body while (0)` runs the body exactly once — unless the body
+            // leaves THIS loop with `break`/`continue` (QEMU's
+            // `do { … if (err) break; … } while (0)`): unwrapped, those would lose
+            // their target, or silently retarget an enclosing loop.
+            Stmt::DoWhile { body, cond, span } if as_bool(cond) == Some(false) => {
+                if exits_loop(body.as_mut()) { None } else {
+                    Some(Stmt::Block(
+                        vec![std::mem::replace(body.as_mut(), Stmt::Null(span.clone()))],
+                        span.clone(),
+                    ))
+                }
+            }
             _ => None,
         };
         if let Some(r) = repl {
@@ -122,6 +158,20 @@ mod tests {
 
     fn e(k: ExprKind) -> Expr { Expr::new(k, Span::default()) }
     fn int(n: i64) -> Box<Expr> { Box::new(e(ExprKind::IntLit(n, false))) }
+
+    #[test]
+    fn do_while_zero_with_break_is_kept() {
+        let sp = Span::default();
+        let brk = Stmt::If { cond: *int(1), then: Box::new(Stmt::Break(sp.clone())), else_: None, span: sp.clone() };
+        let mut s = Stmt::DoWhile { body: Box::new(Stmt::Block(vec![brk], sp.clone())), cond: *int(0), span: sp.clone() };
+        DeadBranch::new().visit_stmt(&mut s);
+        assert!(matches!(s, Stmt::DoWhile { .. }), "a break targets the do-while: keep it");
+        // A break inside an inner loop does not target it: unwrap.
+        let inner = Stmt::While { cond: *int(1), body: Box::new(Stmt::Break(sp.clone())), span: sp.clone() };
+        let mut t = Stmt::DoWhile { body: Box::new(Stmt::Block(vec![inner], sp.clone())), cond: *int(0), span: sp.clone() };
+        DeadBranch::new().visit_stmt(&mut t);
+        assert!(matches!(t, Stmt::Block(..)));
+    }
 
     #[test]
     fn constant_ternary_picks_arm() {
