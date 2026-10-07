@@ -635,7 +635,26 @@ fn emit_instr(
             let cb = builder.ins().icmp_imm_s(cir::condcodes::IntCC::NotEqual, cv, 0);
             let tv = coerce(tv, cl_ty, builder, ptr_ty);
             let fv = coerce(fv, cl_ty, builder, ptr_ty);
-            let v = builder.ins().select(cb, tv, fv);
+            let v = if cl_ty == ct::I128 {
+                // Cranelift's mid-end turns `select(icmp(x, y), x, y)` into
+                // `smin`/`umin`/`smax`/`umax` for every integer type, but the x64
+                // back end cannot lower those on i128 ("should be implemented in
+                // ISLE": QEMU's int128_min/max at -O2). A branch the optimizer
+                // cannot fold back into a select avoids that.
+                let then_b = builder.create_block();
+                let else_b = builder.create_block();
+                let join = builder.create_block();
+                let res = builder.append_block_param(join, ct::I128);
+                builder.ins().brif(cb, then_b, &[], else_b, &[]);
+                builder.switch_to_block(then_b);
+                builder.ins().jump(join, &[tv.into()]);
+                builder.switch_to_block(else_b);
+                builder.ins().jump(join, &[fv.into()]);
+                builder.switch_to_block(join);
+                res
+            } else {
+                builder.ins().select(cb, tv, fv)
+            };
             val_map.insert(dest.0, v);
         }
 
