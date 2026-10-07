@@ -30,7 +30,7 @@
 
 use sic_ir::{
     Module, Function, BasicBlock, Instr, Terminator, Val, ValId, BlockId,
-    Type, FuncRef, CastOp, Constant, RelocTarget,
+    Type, FuncRef, CastOp, Constant, RelocTarget, GlobalRef, Linkage,
 };
 use crate::ir::pass::IrPass;
 
@@ -92,19 +92,21 @@ impl Devirtualize {
                     if let Some((targets, discriminator)) =
                             Self::trace_to_array(fptr, &m.functions[fi], m)
                     {
-                        if targets.len() == 1 {
+                        let known = targets.iter().filter(|t| t.is_some()).count();
+                        if targets.len() == 1 && targets[0].is_some() {
+                            // A one-slot table: any other index is out of bounds.
                             let func = &mut m.functions[fi];
                             let block = &mut func.blocks[bi];
                             if let Instr::CallIndirect { dest, args, ret_ty, .. } = &block.instrs[ii] {
                                 block.instrs[ii] = Instr::Call {
                                     dest: *dest,
-                                    func: targets[0],
+                                    func: targets[0].unwrap(),
                                     args: args.clone(),
                                     ret_ty: ret_ty.clone(),
                                 };
                             }
                             changed = true;
-                        } else if targets.len() <= 16 {
+                        } else if known >= 1 && known <= 16 {
                             Self::rewrite_switch(m, fi, bi, ii, &call, targets, discriminator);
                             changed = true;
                         }
@@ -131,7 +133,7 @@ impl Devirtualize {
         fptr: &Val,
         func: &Function,
         module: &Module,
-    ) -> Option<(Vec<FuncRef>, Val)> {
+    ) -> Option<(Vec<Option<FuncRef>>, Val)> {
         let fptr_id = match fptr { Val::Local(id) => *id, _ => return None };
 
         // fptr = Load(gep_ptr)
@@ -152,30 +154,159 @@ impl Devirtualize {
 
         match &base {
             Val::Global(gr) => {
+                // Only a table that cannot change at run time: `const`, or an
+                // internal one whose address only ever feeds loads.
+                if !Self::global_table_immutable(module, *gr) { return None; }
                 let global = module.globals.get(gr.0 as usize)?;
-                let targets: Vec<FuncRef> = match &global.init {
-                    Some(Constant::Aggregate { relocs, .. }) => {
-                        let mut frefs = Vec::with_capacity(relocs.len());
-                        for reloc in relocs {
-                            match &reloc.1 {
-                                RelocTarget::Func(fr) => { frefs.push(*fr); }
-                                _ => return None,
-                            }
-                        }
-                        frefs
-                    }
-                    _ => return None,
-                };
-                if targets.is_empty() { return None; }
+                let targets = Self::global_table(&global.init, elem_size)?;
+                if targets.iter().all(|t| t.is_none()) { return None; }
                 Some((targets, discriminator))
             }
             Val::Local(alloca_id) => {
-                // Local array: collect per-element stores of Func values.
+                // Local array: collect per-element stores of Func values — only if
+                // nothing else can write it (no runtime-value store, no escape).
+                if !Self::alloca_only_table_uses(func, *alloca_id) { return None; }
                 Self::extract_alloca_targets(func, *alloca_id, elem_size)
-                    .map(|targets| (targets, discriminator))
+                    .map(|targets| (targets.into_iter().map(Some).collect(), discriminator))
             }
             _ => None,
         }
+    }
+
+    /// The function pointers of a global table by element INDEX (`None` = a NULL
+    /// slot). A table's relocations cover only its non-null slots, so their byte
+    /// offsets — not their order — give the indices (QEMU's
+    /// `qdestroy[] = { [QTYPE_NONE] = NULL, [QTYPE_QNULL] = NULL, [QTYPE_QNUM] = … }`
+    /// was dispatched two slots off). Every non-relocated slot must be all zero.
+    fn global_table(init: &Option<Constant>, elem_size: u64) -> Option<Vec<Option<FuncRef>>> {
+        if elem_size != 8 { return None; }
+        let (bytes, relocs) = match init {
+            Some(Constant::Aggregate { bytes, relocs }) => (bytes, relocs),
+            _ => return None,
+        };
+        if bytes.is_empty() || bytes.len() % 8 != 0 { return None; }
+        let n = bytes.len() / 8;
+        let mut table: Vec<Option<FuncRef>> = vec![None; n];
+        for (off, tgt) in relocs {
+            if off % 8 != 0 || off / 8 >= n { return None; }
+            let RelocTarget::Func(fr) = tgt else { return None };
+            if table[off / 8].is_some() { return None; }
+            if bytes[*off..*off + 8].iter().any(|b| *b != 0) { return None; }   // an addend
+            table[off / 8] = Some(*fr);
+        }
+        for (i, t) in table.iter().enumerate() {
+            if t.is_none() && bytes[i * 8..i * 8 + 8].iter().any(|b| *b != 0) { return None; }
+        }
+        Some(table)
+    }
+
+    /// Whether global `gr` cannot be written at run time: `const`, or internal
+    /// with no address escaping — every use is the base of a `GetElemPtr` whose
+    /// result is only loaded from (no store, memcpy, call argument, …), and no
+    /// other global's initializer points at it.
+    fn global_table_immutable(module: &Module, gr: GlobalRef) -> bool {
+        let Some(g) = module.globals.get(gr.0 as usize) else { return false };
+        if g.constant { return true; }
+        if !matches!(g.linkage, Linkage::Internal | Linkage::Private) { return false; }
+        for og in &module.globals {
+            if let Some(Constant::Aggregate { relocs, .. }) = &og.init {
+                if relocs.iter().any(|(_, t)| matches!(t, RelocTarget::Global(x, _) if *x == gr)) {
+                    return false;
+                }
+            }
+        }
+        let me = Val::Global(gr);
+        for f in &module.functions {
+            let mut derived: Vec<ValId> = Vec::new();
+            for b in &f.blocks {
+                for ins in &b.instrs {
+                    if let Instr::GetElemPtr { dest, base, index, .. } = ins {
+                        if *base == me && *index != me { derived.push(*dest); continue; }
+                    }
+                    let mut hit = false;
+                    ins.for_each_val(|v| if *v == me { hit = true; });
+                    if hit { return false; }
+                }
+                let mut hit = false;
+                b.terminator.for_each_val(|v| if *v == me { hit = true; });
+                if hit { return false; }
+            }
+            if !Self::only_loaded(f, &derived) { return false; }
+        }
+        true
+    }
+
+    /// Whether every use of the pointers `ids` is as the address of a load.
+    fn only_loaded(f: &Function, ids: &[ValId]) -> bool {
+        if ids.is_empty() { return true; }
+        for b in &f.blocks {
+            for ins in &b.instrs {
+                let is_load = matches!(ins, Instr::Load { .. } | Instr::LoadReadonly { .. });
+                let mut bad = false;
+                ins.for_each_val(|v| if let Val::Local(id) = v { if ids.contains(id) && !is_load { bad = true; } });
+                if bad { return false; }
+            }
+            let mut bad = false;
+            b.terminator.for_each_val(|v| if let Val::Local(id) = v { if ids.contains(id) { bad = true; } });
+            if bad { return false; }
+        }
+        true
+    }
+
+    /// Whether local array `alloca_id` is only used as a function table: its
+    /// address only feeds element pointers (GEP / field / offset) and a zeroing
+    /// memset, and an element pointer is only loaded from or has a function
+    /// stored INTO it. A runtime-value store, a memcpy, or the address escaping
+    /// (call argument, stored, returned) could change the table: not devirtualized.
+    fn alloca_only_table_uses(func: &Function, alloca_id: ValId) -> bool {
+        let me = Val::Local(alloca_id);
+        let mut derived: Vec<ValId> = Vec::new();
+        for b in &func.blocks {
+            for ins in &b.instrs {
+                match ins {
+                    Instr::GetElemPtr { dest, base, .. } | Instr::GetFieldPtr { dest, base, .. }
+                    | Instr::PtrOffset { dest, base, .. } if *base == me => { derived.push(*dest); }
+                    Instr::MemSet { dst, val: Val::Const(Constant::Int(0)), .. } if *dst == me => {}
+                    Instr::Alloca { dest, .. } if *dest == alloca_id => {}
+                    _ => {
+                        let mut hit = false;
+                        ins.for_each_val(|v| if *v == me { hit = true; });
+                        if hit { return false; }
+                    }
+                }
+            }
+            let mut hit = false;
+            b.terminator.for_each_val(|v| if *v == me { hit = true; });
+            if hit { return false; }
+        }
+        for b in &func.blocks {
+            for ins in &b.instrs {
+                match ins {
+                    Instr::Load { .. } | Instr::LoadReadonly { .. } => {}
+                    Instr::Store { val, ptr: Val::Local(p) } if derived.contains(p) => {
+                        // Only a known function (possibly through a BitCast).
+                        let ok = match val {
+                            Val::Func(_) => true,
+                            Val::Local(v) => Self::find_def(func, *v, |d| match d {
+                                Instr::Cast { op: CastOp::BitCast, val: Val::Func(_), .. } => Some(()),
+                                _ => None,
+                            }).is_some(),
+                            _ => false,
+                        };
+                        if !ok { return false; }
+                    }
+                    _ => {
+                        let mut bad = false;
+                        ins.for_each_val(|v| if let Val::Local(id) = v { if derived.contains(id) { bad = true; } });
+                        if bad { return false; }
+                    }
+                }
+            }
+            let mut bad = false;
+            b.terminator.for_each_val(|v| if let Val::Local(id) = v { if derived.contains(id) { bad = true; } });
+            if bad { return false; }
+        }
+        true
     }
 
     /// For a local alloca initialized with per-element `Store` instructions of
@@ -320,7 +451,7 @@ impl Devirtualize {
         bi: usize,
         ii: usize,
         call: &Instr,
-        targets: Vec<FuncRef>,
+        targets: Vec<Option<FuncRef>>,
         discriminator: Val,
     ) {
         let Instr::CallIndirect { dest, args, ret_ty, .. } = call else { return; };
@@ -338,6 +469,10 @@ impl Devirtualize {
             arm_ids.push(func.alloc_block());
             arm_dests.push(has_ret.then(|| func.alloc_val()));
         }
+        // Any other index is undefined behavior in C (a NULL slot, or past the
+        // table's end): trap there, deterministically — the pass used to skip the
+        // call silently, leaving its result undefined.
+        let default_id = func.alloc_block();
 
         // ── Phase 2: split the block at the CallIndirect. ───────────────────
         let mut tail = func.blocks[bi].instrs.split_off(ii);
@@ -358,6 +493,7 @@ impl Devirtualize {
         let mut arms: Vec<(i64, BlockId)> = Vec::with_capacity(targets.len());
 
         for (i, target) in targets.iter().enumerate() {
+            let Some(target) = target else { continue };
             arms.push((i as i64, arm_ids[i]));
             let mut arm_block = BasicBlock::new(arm_ids[i]);
 
@@ -378,6 +514,9 @@ impl Devirtualize {
             arm_block.terminator = Terminator::Jump(cont_id);
             new_blocks.push(arm_block);
         }
+        // (The trap block goes at the END of the function, out of the hot path.)
+        let mut trap_block = BasicBlock::new(default_id);
+        trap_block.terminator = Terminator::Unreachable;
 
         // ── Phase 4: build the merge continuation block. ────────────────────
         let mut cont_block = BasicBlock::new(cont_id);
@@ -397,12 +536,13 @@ impl Devirtualize {
         // ── Phase 5: set the split block's terminator to Switch. ────────────
         func.blocks[bi].terminator = Terminator::Switch {
             val: discriminator,
-            default: cont_id,
+            default: default_id,
             arms,
         };
 
         // ── Phase 6: splice the new blocks in right after the split block. ──
         let at = bi + 1;
         func.blocks.splice(at..at, new_blocks);
+        func.blocks.push(trap_block);
     }
 }
