@@ -556,6 +556,9 @@ string spaces(i32 n) {
 // -C (1) / -CC (2): keep comments in the output instead of stripping them.
 // Global because the tokenizer has no preprocessor handle.
 i32 g_keep_comments = 0;
+// A strict ISO dialect (-std=c99/c11/…, not gnu*): GNU `, ## __VA_ARGS__` then
+// keeps the comma for a macro with no fixed parameters (`M()`), as gcc does.
+i32 g_strict_iso = 0;
 
 // Whether `line` ends inside an unterminated block comment (literals skipped).
 i32 open_block_comment(string line) {
@@ -689,10 +692,16 @@ string strip_comments(string s) {
 // "\x05name" marks a PENDING function-like macro name: one met at the very end
 // of a replacement/argument (no `(` follows in its own context). Whether it is
 // invoked is decided by what follows that context (see emit_rescan).
+// "\x07" is a `##` that came in through a macro ARGUMENT: plain text, never the
+// paste operator (only a `##` of the replacement list itself pastes); it is
+// spelled `##` again in the output and in stringized text.
 string unpaint(string s) {
-    if (!s.contains("\x04") && !s.contains("\x05")) return s;
+    if (!s.contains("\x04") && !s.contains("\x05") && !s.contains("\x07")) return s;
     string out = "";
-    for (i32 i = 0; i < s.size; i++) if (s[i] != 4 && s[i] != 5) out = out + s[i:i+1];
+    for (i32 i = 0; i < s.size; i++) {
+        if (s[i] == 7) out = out + "##";
+        else if (s[i] != 4 && s[i] != 5) out = out + s[i:i+1];
+    }
     return out;
 }
 
@@ -1027,10 +1036,16 @@ list<string> paste_tokens(list<string> t) {
             if (k >= t.length || t[k] != "##" || acc == " ") break;
             k++;
             while (k < t.length && t[k] == " ") k++;
-            if (k < t.length) { acc = unpaint(acc) + unpaint(t[k]); k++; }   // a new token
+            if (k < t.length) {
+                // A placemarker (`\x06`, an empty argument) pastes as nothing.
+                if (t[k] == "\x06") {}
+                else if (acc == "\x06") acc = unpaint(t[k]);
+                else acc = unpaint(acc) + unpaint(t[k]);   // a new token
+                k++;
+            }
             j = k;
         }
-        out.add(acc);
+        if (acc != "\x06") out.add(acc);   // a placemarker leaves nothing behind
         i = j;
     }
     return out;
@@ -1157,7 +1172,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         if (tokens[ai] == "(") adepth++;
                         else if (tokens[ai] == ")") adepth--;
                         if (tokens[ai] == "," && adepth == 0) { split_args.add(cur_arg); cur_arg = ""; }
-                        else cur_arg = cur_arg + tokens[ai];
+                        else cur_arg = cur_arg + (tokens[ai] == "##" ? "\x07" : tokens[ai]);   // an argument's `##` is text
                     }
                     split_args.add(cur_arg);
                     // Parse | separated encoding: "F|params|body"
@@ -1192,7 +1207,10 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // Variadic macro (C11 6.10.3p12): a trailing `...` is named
                     // `__VA_ARGS__` (GNU `name...` names it `name`) and receives every
                     // remaining argument, commas included.
+                    i32 is_va = 0;
+                    i32 n_given = args_list.length;   // arguments as written, before folding
                     if (param_names.length > 0 && param_names[param_names.length-1].ends_with("...")) {
+                        is_va = 1;
                         string last = param_names[param_names.length-1];
                         string vname = last == "..." ? "__VA_ARGS__" : last[0:last.size-3].trim();
                         i32 nfixed = param_names.length - 1;
@@ -1289,7 +1307,37 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 // An expanded argument is fenced with padding (`\x03`):
                                 // where it meets a neighbour without whitespace, the
                                 // final join decides whether a space is needed.
-                                nb = nb + (pasted ? args_list[pidx].trim() : "\x03" + arg_exps[pidx] + "\x03");
+                                if (!pasted) { nb = nb + "\x03" + arg_exps[pidx] + "\x03"; continue; }
+                                string raw = args_list[pidx].trim();
+                                // GNU `, ## __VA_ARGS__` is not a paste: with the variadic
+                                // argument OMITTED (`F(a)`; `F()` too unless strict ISO) the
+                                // comma is dropped, otherwise the comma stays and the
+                                // argument is substituted (macro-expanded) as usual.
+                                if (is_va && pidx == param_names.length - 1 && l >= 1 && body[l] == '#' && body[l-1] == '#') {
+                                    i32 e = nb.size;
+                                    while (e > 0 && (nb[e-1] == ' ' || nb[e-1] == '\t')) e--;
+                                    i32 h = e - 2;                     // at the `##`
+                                    while (h > 0 && (nb[h-1] == ' ' || nb[h-1] == '\t')) h--;
+                                    if (e >= 2 && nb[e-1] == '#' && nb[e-2] == '#' && h > 0 && nb[h-1] == ',') {
+                                        i32 nfixed = param_names.length - 1;
+                                        i32 absent = n_given <= nfixed || (nfixed == 0 && raw.size == 0 && !g_strict_iso);
+                                        if (absent) {
+                                            i32 c0 = h - 1;            // drop the comma and the space before it
+                                            while (c0 > 0 && (nb[c0-1] == ' ' || nb[c0-1] == '\t')) c0--;
+                                            nb = nb[0:c0].dup;
+                                        } else {
+                                            nb = nb[0:h].dup;          // keep the comma, drop the `##`
+                                            if (args_list[pidx].size > 0 && std::IsSpace(args_list[pidx][0])) nb = nb + " ";
+                                            nb = nb + "\x03" + arg_exps[pidx] + "\x03";
+                                        }
+                                        continue;
+                                    }
+                                }
+                                if (raw.size > 0) { nb = nb + raw; continue; }
+                                // An empty `##` operand is a placemarker (C11 6.10.3.3p2):
+                                // `TG##_t##TG2` with TG2 empty is `TG_t` — it must not paste
+                                // the next token (the `,` that ended the argument).
+                                nb = nb + "\x06";
                                 continue;
                             }
                             nb = nb + body[bi:bi+1];
@@ -1372,7 +1420,7 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
     for (i32 i = 0; i < toks.length; i++) {
         string t = toks[i];
         if (t == "\x03") { pad = 1; continue; }
-        if (t.size > 0 && (t[0] == 4 || t[0] == 5)) t = unpaint(t);
+        if (t.size > 0 && (t[0] == 4 || t[0] == 5 || t[0] == 7)) t = unpaint(t);
         if (t == " ") {
             if (result.size > 0 && result[result.size-1] != ' ') result = result + " ";
             continue;
@@ -1601,24 +1649,33 @@ void pp_process_content(Preprocessor *pp, string content) {
         // `__REDIRECT (name, (args…,\n more…), alias)`): while a TEXT line ends
         // inside an open invocation, join the following lines onto it.
         if (cond_active(pp) && !line.ltrim().starts_with("#")) {
+            i32 glue = 0;   // the previous joined line ended in a splice
             while (rest.size > 0 && open_macro_call(pp, line)) {
                 i32 n = 0;
                 while (n < rest.size && rest[n] != '\n') n++;
                 string next = rest[0:n];
-                if (next.ltrim().starts_with("#")) break;   // never swallow a directive
+                if (!glue && next.ltrim().starts_with("#")) break;   // never swallow a directive
                 string after = n < rest.size ? rest[n+1:] : rest[n:];
+                // A backslash-newline inside the invocation is a splice (phase 2):
+                // drop it and glue the next line on directly — it used to stay in
+                // the arguments (a stringized `#x` then held `\`: QEMU's
+                // gen_semantics wrote unparsable Python).
+                string sep = glue ? "" : " ";
+                glue = 0;
+                if (next.ends_with("\\")) { next = next[0:next.size-1]; glue = 1; }
+                else if (next.ends_with("\\\r")) { next = next[0:next.size-2]; glue = 1; }
                 // With linemarkers, gcc prints only the macro call at its first
                 // line; tokens after the call's closing `)` stay on THEIR source
                 // line. So cut there and push the remainder back as its own line,
                 // keeping its column (it is not counted as consumed here).
                 i32 k = pp->markers ? call_close_offset(pp, line, next) : -1;
                 if (k >= 0 && next[k:].trim().size > 0) {
-                    line = line + " " + next[0:k];
+                    line = line + sep + next[0:k];
                     // `\x02` tags it as a continuation (see pp_process_line).
                     rest = ("\x02" + spaces(k) + next[k:] + (n < rest.size ? "\n" : "") + after).dup;
                     break;
                 }
-                line = line + " " + next;
+                line = line + sep + next;
                 rest = after;
                 nphys++;
             }
@@ -2764,6 +2821,7 @@ int main(int argc, char **argv) {
     // The dialect (-std= / -ansi): __STDC_VERSION__, and in strict ISO modes
     // __STRICT_ANSI__ (removed again by -undef, as in gcc).
     i32 strict = std_name.starts_with("c") || std_name.starts_with("iso");
+    g_strict_iso = strict;
     string stdc_version = "202311L";
     if (std_name == "c89" || std_name == "c90" || std_name == "gnu89" || std_name == "gnu90"
         || std_name == "iso9899:1990") stdc_version = "";
