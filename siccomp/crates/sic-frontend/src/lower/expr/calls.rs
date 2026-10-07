@@ -299,7 +299,7 @@ impl<'m> FuncCtx<'m> {
                             "rsplit"      => self.lower_string_split(base, arg, true, sp),
                             "starts_with" => self.lower_string_starts_with(base, arg, false),
                             "ends_with"   => self.lower_string_starts_with(base, arg, true),
-                            _ /* find */  => { let (idx, _, _, _) = self.lower_string_find(base, arg, false)?; Ok(idx) }
+                            _ /* find */  => { let (idx, _, _, _, _) = self.lower_string_find(base, arg, false)?; Ok(idx) }
                         };
                     }
                 }

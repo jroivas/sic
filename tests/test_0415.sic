@@ -1,0 +1,22 @@
+// A view returned by `.trim()`/`.ltrim()`/`.rtrim()` or `.split()` keeps its
+// parent's buffer alive, like a slice: stored past the parent's scope it must
+// still read the same bytes (it used to dangle — sic-cpp's `#line` file names
+// came out as garbage). The freed block is reused on purpose. Returns 42.
+struct Holder { string name; string tail; }
+void fill(Holder *h, string text) {
+    string line = text + "    ";                 // owned, freed at scope exit
+    h->name = line.trim();
+    tuple parts = line.ltrim().split("/");
+    h->tail = parts[1].rtrim();
+}
+int main() {
+    Holder h;
+    fill(&h, "   /some/long/path/to/file.y");
+    for (i32 i = 0; i < 64; i++) {               // reuse the freed buffer
+        string junk = "################################" + "##";
+        if (junk.size == 0) return 1;
+    }
+    if (h.name != "/some/long/path/to/file.y") return 2;
+    if (h.tail != "some/long/path/to/file.y") return 3;   // split at the first `/`
+    return 42;
+}

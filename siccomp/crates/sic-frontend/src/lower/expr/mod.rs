@@ -2764,9 +2764,17 @@ impl<'m> FuncCtx<'m> {
     /// i64). A `string` reads its slice fields; a literal uses a fresh cstring
     /// global and its compile-time byte length.
     fn string_operand_parts(&mut self, e: &Expr) -> Result<(Val, Val)> {
+        let (data, size, _) = self.string_operand_parts_rc(e)?;
+        Ok((data, size))
+    }
+
+    /// [`string_operand_parts`] plus, for a native `string` operand, its `rc`
+    /// (the owner a VIEW of it must retain — `s.trim()`, `s.split(..)`), read from
+    /// the same descriptor so `e` is evaluated once. `None` for a literal/`char*`.
+    fn string_operand_parts_rc(&mut self, e: &Expr) -> Result<(Val, Val, Option<Val>)> {
         if let ExprKind::StringLit(s) = &e.kind {
             let data = self.emit_cstring(s);
-            return Ok((data, Constant::int(s.len() as i64)));
+            return Ok((data, Constant::int(s.len() as i64), None));
         }
         let ty = self.infer_expr_type(e)?;
         // A `char*` / `char[]` operand is a NUL-terminated C string: its parts are
@@ -2779,7 +2787,7 @@ impl<'m> FuncCtx<'m> {
             let cp = self.coerce(v, &Type::char_ptr())?;
             let len = self.emit_strlen(cp.clone())?;
             let len = self.coerce(len, &Type::i64())?;
-            return Ok((cp, len));
+            return Ok((cp, len, None));
         }
         if !super::types::is_sic_string(&ty) {
             return Err(CompileError::at(
@@ -2797,10 +2805,12 @@ impl<'m> FuncCtx<'m> {
         let ptr = match self.lower_lvalue(e) { Ok(lv) => lv.ptr, Err(_) => self.lower_aggregate_ptr(e)? };
         let data_lv = self.field_ptr_from(LValue::plain(ptr.clone(), sty.clone()), "data", false, &e.span)?;
         let data = self.load_lvalue(&data_lv)?;
-        let size_lv = self.field_ptr_from(LValue::plain(ptr, sty), "size", false, &e.span)?;
+        let size_lv = self.field_ptr_from(LValue::plain(ptr.clone(), sty.clone()), "size", false, &e.span)?;
         let size = self.load_lvalue(&size_lv)?;
         let size = self.coerce(size, &Type::i64())?;
-        Ok((data, size))
+        let rc_lv = self.field_ptr_from(LValue::plain(ptr, sty), "rc", false, &e.span)?;
+        let rc = self.load_lvalue(&rc_lv)?;
+        Ok((data, size, Some(rc)))
     }
 
     /// sic native string comparison `a == b` / `a != b` (sic.md §"Built-in
@@ -4420,8 +4430,8 @@ impl<'m> FuncCtx<'m> {
     /// Byte index of the first (or, with `reverse`, last) occurrence of `sub` in
     /// `base`, or -1 (sic.md §"Built-in string"). Both are length-counted strings;
     /// a single-character `sub` gives an efficient character search.
-    fn lower_string_find(&mut self, base: &Expr, sub: &Expr, reverse: bool) -> Result<(Val, Val, Val, Val)> {
-        let (hd, hs) = self.string_operand_parts(base)?;
+    fn lower_string_find(&mut self, base: &Expr, sub: &Expr, reverse: bool) -> Result<(Val, Val, Val, Val, Option<Val>)> {
+        let (hd, hs, hrc) = self.string_operand_parts_rc(base)?;
         let (nd, ns) = self.string_operand_parts(sub)?;
         let hd = self.coerce(hd, &Type::char_ptr())?;
         let nd = self.coerce(nd, &Type::char_ptr())?;
@@ -4431,12 +4441,12 @@ impl<'m> FuncCtx<'m> {
         let idx = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(idx), func: f, args: vec![hd.clone(), hs.clone(), nd, ns.clone()], ret_ty: Type::i64() });
         self.val_types.insert(idx.0, Type::i64());
-        Ok((Val::Local(idx), hd, hs, ns))
+        Ok((Val::Local(idx), hd, hs, ns, hrc))
     }
 
     /// `s.contains(sub)` (sic.md §"Built-in string") → `bool`: `find(sub) >= 0`.
     pub(crate) fn lower_string_contains(&mut self, base: &Expr, sub: &Expr) -> Result<Val> {
-        let (idx, _, _, _) = self.lower_string_find(base, sub, false)?;
+        let (idx, _, _, _, _) = self.lower_string_find(base, sub, false)?;
         let r = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: r, op: CmpOp::ISGe, lhs: idx, rhs: Constant::int(0), ty: Type::i64() });
         self.val_types.insert(r.0, Type::Bool);
@@ -4492,7 +4502,7 @@ impl<'m> FuncCtx<'m> {
     /// `s.trim()` / `.ltrim()` / `.rtrim()` (sic.md §"Built-in string") → a borrowed
     /// VIEW of `s` with leading and/or trailing ASCII whitespace removed (no copy).
     pub(crate) fn lower_string_trim(&mut self, base: &Expr, left: bool, right: bool) -> Result<Val> {
-        let (d, s) = self.string_operand_parts(base)?;
+        let (d, s, rc) = self.string_operand_parts_rc(base)?;
         let i64t = Type::i64();
         let d = self.coerce(d, &Type::char_ptr())?;
         let s = self.coerce(s, &i64t)?;
@@ -4512,7 +4522,16 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::BinOp { dest: len, op: BinOp::Sub, lhs: Val::Local(en), rhs: Val::Local(st), ty: i64t.clone() });
         let nd = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: nd, base: d, index: Val::Local(st), elem_size: 1, result_ty: Type::char_ptr() });
-        self.make_string_val(Val::Local(nd), Val::Local(len), Constant::int(0))
+        // Like a slice, the trimmed view shares the parent's buffer: it retains the
+        // parent's `rc` (the temp's reference is released at scope exit), so a
+        // stored `x = s.trim()` keeps the bytes alive (it used to dangle).
+        let Some(rc) = rc else {
+            return self.make_string_val(Val::Local(nd), Val::Local(len), Constant::int(0));
+        };
+        self.emit_string_retain(rc.clone());
+        let sv = self.make_string_val(Val::Local(nd), Val::Local(len), rc)?;
+        self.register_scope_exit(super::func::Cleanup::StringRelease { addr: sv.clone() });
+        Ok(sv)
     }
 
     /// One side of `trim`: while the edge byte of `d[start..end]` is ASCII
@@ -4595,7 +4614,7 @@ impl<'m> FuncCtx<'m> {
     /// `sep` is absent the whole string is the first element and the second is empty.
     /// The two parts are borrowed VIEWS into `s` (valid while `s` is), like a slice.
     pub(crate) fn lower_string_split(&mut self, base: &Expr, sub: &Expr, reverse: bool, sp: &crate::lexer::Span) -> Result<Val> {
-        let (idx, hd, hs, ns) = self.lower_string_find(base, sub, reverse)?;
+        let (idx, hd, hs, ns, hrc) = self.lower_string_find(base, sub, reverse)?;
         // found = idx >= 0
         let found = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: found, op: CmpOp::ISGe, lhs: idx.clone(), rhs: Constant::int(0), ty: Type::i64() });
@@ -4610,12 +4629,14 @@ impl<'m> FuncCtx<'m> {
         // after_len = hs - after_start
         let after_len = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: after_len, op: BinOp::Sub, lhs: hs, rhs: Val::Local(after_start), ty: Type::i64() });
-        // before = view(hd, before_len); after = view(hd + after_start, after_len).
-        // rc = 0 → borrowed (no own/free), so the parts alias `s`'s bytes.
-        let before = self.make_string_val(hd.clone(), Val::Local(before_len), Constant::int(0))?;
+        // before = view(hd, before_len); after = view(hd + after_start, after_len),
+        // both sharing `s`'s buffer: the tuple retains `s`'s rc for each part (see
+        // build_string_pair), so the parts stay valid as long as the tuple does.
+        let rc = hrc.unwrap_or_else(|| Constant::int(0));
+        let before = self.make_string_val(hd.clone(), Val::Local(before_len), rc.clone())?;
         let ap = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: ap, base: hd, index: Val::Local(after_start), elem_size: 1, result_ty: Type::char_ptr() });
-        let after = self.make_string_val(Val::Local(ap), Val::Local(after_len), Constant::int(0))?;
+        let after = self.make_string_val(Val::Local(ap), Val::Local(after_len), rc)?;
         let tup = self.build_string_pair(before, after, sp)?;
         // `.length` is 2 when the separator was found, 1 when absent (`(whole,)`),
         // so `res.length > 1` distinguishes a real split. Both slots are always
@@ -4631,14 +4652,17 @@ impl<'m> FuncCtx<'m> {
     fn build_string_pair(&mut self, a: Val, b: Val, sp: &crate::lexer::Span) -> Result<Val> {
         let sty = super::types::sic_string_type(self.ptr_size());
         let layout = super::types::tuple_layout(vec![sty.clone(), sty.clone()]);
-        // The two parts are borrowed *views* into the source string (rc 0), not
-        // owned — so this tuple gets a null element destructor (no retain/release).
-        let data = self.emit_tuple_alloc(&layout, None)?;
+        // The two parts are views sharing the source string's buffer: the tuple
+        // owns a reference for each (retained here, released by its element
+        // destructor), as for any tuple holding strings.
+        let dtor = self.lowerer.ensure_tuple_dtor(&layout);
+        let data = self.emit_tuple_alloc(&layout, dtor)?;
         let size = sty.size_of(self.ptr_size());
         let align = sty.align_of(self.ptr_size());
         for (i, v) in [a, b].into_iter().enumerate() {
             let fld = self.field_ptr_from(LValue::plain(data.clone(), layout.clone()), &i.to_string(), false, sp)?;
-            self.push_instr(Instr::MemCopy { dst: fld.ptr, src: v, size, align });
+            self.push_instr(Instr::MemCopy { dst: fld.ptr.clone(), src: v, size, align });
+            self.retain_string_at(&fld.ptr)?;
         }
         self.register_tuple_release(data.clone())?;
         Ok(data)
