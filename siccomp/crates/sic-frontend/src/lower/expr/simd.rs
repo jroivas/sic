@@ -44,6 +44,14 @@ impl<'m> FuncCtx<'m> {
     /// lane-by-lane over the vector's element type into a fresh result vector.
     /// Comparisons yield an all-ones (`-1`) / all-zeros lane per GCC semantics.
     pub(crate) fn lower_vector_binop(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr, vty: Type) -> Result<Val> {
+        let lp = self.lower_aggregate_ptr(lhs)?;
+        let rp = self.lower_aggregate_ptr(rhs)?;
+        self.lower_vector_binop_ptrs(op, lp, rp, vty)
+    }
+
+    /// [`lower_vector_binop`] on operands already lowered to their addresses
+    /// (`v op= w` evaluates its left side once). Returns a fresh result vector.
+    pub(crate) fn lower_vector_binop_ptrs(&mut self, op: BinOpKind, lp: Val, rp: Val, vty: Type) -> Result<Val> {
         let (elem, lanes) = match &vty {
             Type::Array { elem, len } => ((**elem).clone(), *len),
             _ => return Err(CompileError::new("vector binop on non-array type")),
@@ -79,8 +87,6 @@ impl<'m> FuncCtx<'m> {
             None
         };
         if let Some(vop) = fast_op {
-            let lp = self.lower_aggregate_ptr(lhs)?;
-            let rp = self.lower_aggregate_ptr(rhs)?;
             let lv = self.vec_load(&lp, 0, vty.clone());
             let rv = self.vec_load(&rp, 0, vty.clone());
             let res = self.vec_bin(vop, lv, rv, vty.clone());
@@ -116,8 +122,6 @@ impl<'m> FuncCtx<'m> {
         if arith.is_none() && cmp.is_none() {
             return Err(CompileError::new(format!("unsupported vector operator {:?}", op)));
         }
-        let lp = self.lower_aggregate_ptr(lhs)?;
-        let rp = self.lower_aggregate_ptr(rhs)?;
         let rp_out = self.vec_alloca(vty.clone());
         let esz = elem.size_of(self.ptr_size()) as i64;
         for i in 0..lanes {

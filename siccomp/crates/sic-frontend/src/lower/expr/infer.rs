@@ -288,11 +288,12 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // `p[i]` is `*(p + i)`: for `T *p` it is a `T` — also when `T` is
+                // itself an array (`int (*q)[4]` → a row; a `vector_size` vector,
+                // whose `v2di *p` → `p[i]` used to be typed `long long`, so vector
+                // init/assign/ops took the scalar path on its address).
                 let elem = match bt {
-                    Type::Pointer(t) => match *t {
-                        Type::Array { elem, .. } => *elem,
-                        other => other,
-                    },
+                    Type::Pointer(t) => *t,
                     Type::Array { elem, .. } => *elem,
                     _ => Type::i32(),
                 };

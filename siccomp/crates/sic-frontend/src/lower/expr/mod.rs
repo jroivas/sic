@@ -4804,6 +4804,23 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // GCC vector extension `v op= w` on two vectors: the element-wise op, its
+        // result copied back into `v` (the left side evaluated once). It used to
+        // take the scalar path and `or` the operands' ADDRESSES (QEMU's
+        // buffer_zero_sse2 `v |= e[-1]`: a Cranelift verifier error).
+        if let Some(bop) = op {
+            if let (Ok(lt @ Type::Array { .. }), Ok(Type::Array { .. })) =
+                (self.infer_expr_type(lhs), self.infer_expr_type(rhs))
+            {
+                let lv = self.lower_lvalue(lhs)?;
+                let rp = self.lower_aggregate_ptr(rhs)?;
+                let res = self.lower_vector_binop_ptrs(bop, lv.ptr.clone(), rp, lt.clone())?;
+                let size = lt.size_of(self.ptr_size());
+                let align = lt.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src: res, size, align });
+                return Ok(lv.ptr);
+            }
+        }
         // sic weak reference assignment (sic.md §"Weak"): writing a `weak<T>` local
         // or struct field takes a NON-owning reference — weak-release the old target
         // and weak-retain the new one, without keeping the container alive. A weak
