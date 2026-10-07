@@ -1,0 +1,6 @@
+#define CAT(a, b) a ## b
+
+#define X foo
+#define Y bar
+
+CAT(X, Y)

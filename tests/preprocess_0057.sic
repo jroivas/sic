@@ -1,0 +1,5 @@
+#if THIS_DOES_NOT_EXIST
+BAD
+#else
+GOOD
+#endif

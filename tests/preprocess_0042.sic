@@ -1,0 +1,4 @@
+#define A B
+#define B(x) x + 1
+
+A(10)

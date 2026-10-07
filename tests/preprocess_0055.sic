@@ -1,0 +1,6 @@
+#define X 1
+#define Y X
+
+#if defined(Y) && Y
+YES
+#endif

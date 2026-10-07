@@ -1,0 +1,6 @@
+#define X 1
+#if X
+yes
+#else
+no
+#endif

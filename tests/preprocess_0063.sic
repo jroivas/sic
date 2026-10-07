@@ -1,0 +1,7 @@
+#define S(x) #x
+
+S(foo    bar)
+S( foo bar )
+S(foo /* comment */ bar)
+S(foo
+   bar)

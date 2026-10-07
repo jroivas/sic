@@ -1,0 +1,4 @@
+#define ID(x) x
+#define A 100
+
+ID(ID(A))

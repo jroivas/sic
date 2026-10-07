@@ -1,0 +1,6 @@
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
+#define A 123
+
+STR(A)

@@ -1,0 +1,5 @@
+#define CAT(a,b) a ## b
+
+CAT(123, 456)
+CAT(1.2, 3)
+CAT(0x, FF)

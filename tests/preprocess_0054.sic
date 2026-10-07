@@ -1,0 +1,8 @@
+#define A 10
+#define B A + 5
+
+#if B == 15
+YES
+#else
+NO
+#endif

@@ -1,0 +1,5 @@
+#define F(...) G(__VA_ARGS__)
+#define G(...) H(__VA_ARGS__)
+#define H(...) __VA_ARGS__
+
+F(1, 2, 3)

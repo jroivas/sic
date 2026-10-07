@@ -1,0 +1,7 @@
+#define A B
+#define B C
+#define C 123
+
+A
+B
+C

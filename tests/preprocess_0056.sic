@@ -1,0 +1,10 @@
+#define X Y
+#define Y 1
+
+#if defined(X)
+A
+#endif
+
+#if defined(Y)
+B
+#endif

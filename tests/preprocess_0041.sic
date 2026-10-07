@@ -1,0 +1,5 @@
+#define A(x) B(x)
+#define B(x) C(x)
+#define C(x) x
+
+A(123)

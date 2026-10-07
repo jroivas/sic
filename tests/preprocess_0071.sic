@@ -1,0 +1,51 @@
+#define CAT_(a, b) a ## b
+#define CAT(a, b) CAT_(a, b)
+
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
+#define ID(x) x
+
+#define A 10
+#define B A
+#define C B
+
+#define foo_bar 999
+
+#define MAKE_NAME(a, b) CAT(a, b)
+
+#define TEST(x) \
+    STR(x)      \
+    CAT(x, _suffix)
+
+#define X foo
+#define Y bar
+
+#define SELECT_0(a, b) b
+#define SELECT_1(a, b) a
+
+#define SELECT(n, a, b) CAT(SELECT_, n)(a, b)
+
+A
+B
+C
+
+STR(A)
+STR_(A)
+
+CAT(foo, _bar)
+CAT(X, Y)
+
+MAKE_NAME(foo, _bar)
+
+SELECT(0, hello, world)
+SELECT(1, hello, world)
+
+ID(ID(ID(123))))
+
+#define R R
+R
+
+#define P Q
+#define Q P
+P

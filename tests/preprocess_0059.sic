@@ -1,0 +1,9 @@
+#define CAT_(a,b) a ## b
+#define CAT(a,b) CAT_(a,b)
+
+#define PREFIX foo
+#define SUFFIX bar
+
+#define foobar 123
+
+CAT(PREFIX, SUFFIX)

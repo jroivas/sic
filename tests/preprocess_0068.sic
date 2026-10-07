@@ -1,0 +1,13 @@
+#define CAT_(a,b) a ## b
+#define CAT(a,b) CAT_(a,b)
+
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
+#define A foo
+#define B bar
+
+#define foo_bar 42
+
+STR(CAT(A, B))
+CAT(A, B)

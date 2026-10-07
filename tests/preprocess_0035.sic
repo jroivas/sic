@@ -1,0 +1,4 @@
+#define F(x) [x]
+#define A 123
+
+F(A)

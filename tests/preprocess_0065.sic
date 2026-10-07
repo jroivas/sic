@@ -1,0 +1,6 @@
+#define FOO 123
+
+FOO
+FOOBAR
+_BARFOO
+FOO_BAR

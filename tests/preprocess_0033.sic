@@ -1,0 +1,4 @@
+#define A 10
+#define F(x) x + x
+
+F(A)
