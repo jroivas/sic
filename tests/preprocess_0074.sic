@@ -1,0 +1,15 @@
+#define X 1
+#define D(a, b) [a|b]
+D(1,
+#ifdef X
+SUCCESS
+#else
+ERROR
+#endif
+)
+D(2,
+#if defined(X) && \
+    X == 1
+OK
+#endif
+)

@@ -1735,8 +1735,42 @@ void pp_process_content(Preprocessor *pp, string content) {
                 i32 n = 0;
                 while (n < rest.size && rest[n] != '\n') n++;
                 string next = rest[0:n];
-                if (!glue && next.ltrim().starts_with("#")) break;   // never swallow a directive
                 string after = n < rest.size ? rest[n+1:] : rest[n:];
+                if (!glue && next.ltrim().starts_with("#")) {
+                    // gcc: a conditional (or #define/#undef) between a macro's
+                    // arguments is processed in place and the collection goes on —
+                    // QEMU's qemu-options.def has `#ifdef CONFIG_POSIX` inside a
+                    // DEF(...). Any other directive ends the collection, as before.
+                    string dk = next.ltrim()[1:].ltrim();
+                    i32 w = 0;
+                    while (w < dk.size && is_ident(dk[w])) w++;
+                    string kwd = dk[0:w];
+                    if (kwd != "if" && kwd != "ifdef" && kwd != "ifndef" && kwd != "elif"
+                        && kwd != "elifdef" && kwd != "elifndef" && kwd != "else" && kwd != "endif"
+                        && kwd != "define" && kwd != "undef") break;
+                    // The directive itself may continue with backslash-newlines.
+                    i32 at = pp->current_line;
+                    i32 dir_line = at + nphys;           // the directive's own line
+                    string dtext = next;
+                    nphys++;
+                    while (dtext.ends_with("\\") && after.size > 0) {
+                        i32 m = 0;
+                        while (m < after.size && after[m] != '\n') m++;
+                        dtext = dtext[0:dtext.size-1] + after[0:m];
+                        after = m < after.size ? after[m+1:] : after[m:];
+                        nphys++;
+                    }
+                    pp->current_line = dir_line;
+                    pp_process_line(pp, dtext);
+                    pp->current_line = at;
+                    rest = after;
+                    continue;
+                }
+                if (!glue && !cond_active(pp)) {          // a line of a skipped branch
+                    rest = after;
+                    nphys++;
+                    continue;
+                }
                 // A backslash-newline inside the invocation is a splice (phase 2):
                 // drop it and glue the next line on directly — it used to stay in
                 // the arguments (a stringized `#x` then held `\`: QEMU's
