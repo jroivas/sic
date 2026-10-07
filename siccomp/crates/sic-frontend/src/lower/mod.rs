@@ -1017,6 +1017,7 @@ impl Lowerer {
                     weak_fields.push((fname.clone(), fty.clone()));
                 }
                 let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
+                let fty = types::c_bitfield_field_type(fty, bw);
                 if bw.is_some() { any_bitfield = true; }
                 if f.align.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
