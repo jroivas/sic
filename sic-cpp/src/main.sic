@@ -2476,7 +2476,7 @@ void pp_process_line(Preprocessor *pp, string line) {
                 if (fi < rl.size && rl[fi] == '"') {
                     fi++; i32 fn_start = fi;
                     while (fi < rl.size && rl[fi] != '"') fi++;
-                    pp->current_file = rl[fn_start:fi];
+                    pp->current_file = rl[fn_start:fi].dup;   // owned: rl dies with the line
                 }
                 pp->force_marker = 1;   // the reader learns the new position
             }
@@ -2684,7 +2684,7 @@ int main(int argc, char **argv) {
         else if (arg == "-dD") { pp.dump_defines = 1; }
         else if (arg == "-dN") { pp.dump_names = 1; }
         else if (arg == "-dI") { pp.dump_includes = 1; }
-        else if (arg.starts_with("--embed-dir=")) { pp.embed_dirs.add(arg[12:]); }
+        else if (arg.starts_with("--embed-dir=")) { pp.embed_dirs.add(arg[12:].dup); }
         else if (arg == "--embed-dir" && ai + 1 < argc) { ai++; string ed = argv[ai]; pp.embed_dirs.add(ed); }
         else if (arg.starts_with("-std=")) { std_name = arg[5:]; }
         else if (arg == "-ansi") { std_name = "c90"; }
