@@ -1,0 +1,7 @@
+#define L 1000
+#line L
+#if __LINE__ == 1000
+SUCCESS
+#else
+ERROR
+#endif

@@ -796,11 +796,26 @@ i32 peek(string r)  { return r.size > 0 ? r[0] : 0; }
 i32 peek2(string r) { return r.size > 1 ? r[1] : 0; }
 void skip_ws(string *r) { *r = (*r).ltrim(); }
 
+// The first error met while evaluating an #if expression / expanding a line
+// ("" = none). The evaluator and the expander have no Preprocessor at hand, so
+// they record it here and the caller reports it with the current position.
+string g_eval_error = "";
+string g_expand_error = "";
+void eval_fail(string msg) { if (g_eval_error.size == 0) g_eval_error = msg.dup; }
+void expand_fail(string msg) { if (g_expand_error.size == 0) g_expand_error = msg.dup; }
+
 i32 eval_expr(string *r, dict<string, string> *macros);
+
+// The token at the front of `r`, for a diagnostic (`a`, `\`, `(`, `"s"`).
+string front_token(string r) {
+    list<string> t = tokenize(r.ltrim());
+    for (i32 i = 0; i < t.length; i++) if (t[i] != " ") return t[i].dup;
+    return "";
+}
 
 i32 eval_primary(string *r, dict<string, string> *macros) {
     skip_ws(r);
-    if ((*r).size == 0) return 0;
+    if ((*r).size == 0) { eval_fail("expected value in expression"); return 0; }
 
     // defined NAME / defined(NAME) — a leftover fallback (pp_if pre-substitutes).
     if ((*r).starts_with("defined") && !is_ident(peek((*r)[7:]))) {
@@ -824,6 +839,7 @@ i32 eval_primary(string *r, dict<string, string> *macros) {
         i32 val = eval_expr(r, macros);
         skip_ws(r);
         if (peek(*r) == ')') *r = (*r)[1:];
+        else eval_fail("missing ')' in expression");
         return val;
     }
     if (c == '+') { *r = (*r)[1:]; return eval_primary(r, macros); }
@@ -872,7 +888,14 @@ i32 eval_primary(string *r, dict<string, string> *macros) {
     }
 
     // Unknown identifier → 0 (per C, an undefined macro in #if is 0).
-    while ((*r).size > 0 && is_ident((*r)[0])) *r = (*r)[1:];
+    if (is_ident_start(c)) {
+        while ((*r).size > 0 && is_ident((*r)[0])) *r = (*r)[1:];
+        return 0;
+    }
+    // Anything else (`\`, a string, `@`, a stray operator) cannot start a value.
+    string t = front_token(*r);
+    eval_fail("token ‘" + t + "’ is not valid in preprocessor expressions");
+    *r = (*r)[t.size > 0 ? t.size : 1:];
     return 0;
 }
 
@@ -1004,9 +1027,23 @@ i32 eval_expr(string *r, dict<string, string> *macros) {
     return eval_ternary(r, macros);
 }
 
+// Evaluate a whole #if expression; errors (gcc's wording) go to g_eval_error.
 i32 eval_if_expr(string expr, dict<string, string> *macros) {
+    g_eval_error = "";
+    if (expr.trim().size == 0) { eval_fail("with no expression"); return 0; }
     string r = expr;
-    return eval_expr(&r, macros);
+    i32 val = eval_expr(&r, macros);
+    skip_ws(&r);
+    if (r.size > 0 && g_eval_error.size == 0) {
+        // A complete expression followed by more tokens (`defined(X)a`).
+        string t = front_token(r);
+        i32 c0 = t.size > 0 ? t[0] : 0;
+        if (is_ident_start(c0) || (c0 >= '0' && c0 <= '9') || c0 == '(' || c0 == '\'')
+            eval_fail("missing binary operator before token ‘" + t + "’");
+        else
+            eval_fail("token ‘" + t + "’ is not valid in preprocessor expressions");
+    }
+    return val;
 }
 
 // ── Macro expansion ───────────────────────────────────────────────────────
@@ -1209,6 +1246,17 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // remaining argument, commas included.
                     i32 is_va = 0;
                     i32 n_given = args_list.length;   // arguments as written, before folding
+                    {
+                        // gcc: a call must match the parameter count (a variadic
+                        // macro may omit its variadic part, C23 / GNU).
+                        i32 np = param_names.length;
+                        i32 va = np > 0 && param_names[np-1].ends_with("...");
+                        i32 need = va ? np - 1 : np;
+                        if (!va && n_given > np)
+                            expand_fail("macro ‘" + tok + "’ passed " + std::Fmt("{}", n_given) + " arguments, but takes just " + std::Fmt("{}", np));
+                        else if (n_given < need)
+                            expand_fail("macro ‘" + tok + "’ requires " + std::Fmt("{}", need) + " arguments, but only " + std::Fmt("{}", n_given) + " given");
+                    }
                     if (param_names.length > 0 && param_names[param_names.length-1].ends_with("...")) {
                         is_va = 1;
                         string last = param_names[param_names.length-1];
@@ -1410,6 +1458,7 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
     // produced (emit_rescan), so nothing is left for a second pass — which would
     // wrongly expand what C leaves alone (`DEFER(f)(1)` stays `f (1)`).
     list<string> nothing_active;
+    g_expand_error = "";   // a caller that reports it does so right after
     list<string> toks = expand_tokens(tokenize(line), macros, cur_line, cur_file, nothing_active);
     // Join. At a padding boundary (`\x03`, around macro expansions and
     // substituted arguments) with no whitespace, add a space where the two
@@ -2024,13 +2073,30 @@ string substitute_defined(Preprocessor *pp, string rest) {
     return out;
 }
 
-i32 pp_if(Preprocessor *pp, string rest) {
+i32 pp_if(Preprocessor *pp, string rest, string kw) {
     string pre = substitute_defined(pp, rest);
     string expanded = expand_line(pre, &pp->macros, pp->current_line, pp->current_file);
+    report_expand_error(pp);
     // A macro may expand TO an operator (glibc: `__glibc_has_attribute (x)` →
     // `__has_attribute (x)`), so evaluate the operators again, as gcc does.
     string post = substitute_defined(pp, expanded);
-    return eval_if_expr(post, &pp->macros);
+    i32 val = eval_if_expr(post, &pp->macros);
+    if (g_eval_error.size > 0) {
+        // gcc: `#if with no expression`, otherwise the message alone. The group
+        // is then skipped (taken as false).
+        string msg = g_eval_error.starts_with("with no") ? "#" + kw + " " + g_eval_error : g_eval_error;
+        diag(pp, "error", msg, 2);
+        g_eval_error = "";
+        return 0;
+    }
+    return val;
+}
+
+// Report (once) a macro-call error recorded by the expander.
+void report_expand_error(Preprocessor *pp) {
+    if (g_expand_error.size == 0) return;
+    diag(pp, "error", g_expand_error, 1);
+    g_expand_error = "";
 }
 
 // Conditional-group state per `#if` nesting level:
@@ -2050,7 +2116,7 @@ void pp_elif(Preprocessor *pp, string rest) {
     i32 state = pp->cond_stack[pp->cond_depth - 1];
     if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;        // was active → done
     else if (state == 2) {                                         // still looking: test it
-        pp->cond_stack[pp->cond_depth - 1] = pp_if(pp, rest) ? 0 : 2;
+        pp->cond_stack[pp->cond_depth - 1] = pp_if(pp, rest, "elif") ? 0 : 2;
     }
     // state 1 (done) and 3 (parent-skip) stay put.
 }
@@ -2455,6 +2521,7 @@ void pp_process_line(Preprocessor *pp, string line) {
             // (after leading tokens that vanished) from being taken for
             // indentation; it is dropped again below.
             string ex = expand_line("\x01" + trimmed, &pp->macros, pp->current_line, pp->current_file);
+            report_expand_error(pp);
             ex = ex.size > 0 ? ex[1:] : ex;
             i32 lead = ex.starts_with(" ");
             ex = ex.ltrim();
@@ -2507,7 +2574,7 @@ void pp_process_line(Preprocessor *pp, string line) {
     else if (kw == "embed") { if (!skipping) pp_embed(pp, rest, line.size - trimmed.size + kw_start); }
     else if (kw == "elifdef") { pp_elifdef(pp, rest, 0); }
     else if (kw == "elifndef") { pp_elifdef(pp, rest, 1); }
-    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest) ? 0 : 2)); }
+    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest, "if") ? 0 : 2)); }
     else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 0) ? 0 : 2)); }
     else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 1) ? 0 : 2)); }
     else if (kw == "else") { pp_else(pp); }
@@ -2524,6 +2591,10 @@ void pp_process_line(Preprocessor *pp, string line) {
     else if (kw == "line") {
         if (!skipping) {
             string rl = rest.ltrim();
+            // Not `#line DIGITS ["file"]` as written: the operands are macro-
+            // expanded first (C11 6.10.4p5: `#define line 1000` / `#line line`).
+            if (rl.size > 0 && !(rl[0] >= '0' && rl[0] <= '9'))
+                rl = expand_line(rl, &pp->macros, pp->current_line, pp->current_file).ltrim().dup;
             i32 ni = 0;
             while (ni < rl.size && rl[ni] >= '0' && rl[ni] <= '9') ni++;
             if (ni > 0) {
