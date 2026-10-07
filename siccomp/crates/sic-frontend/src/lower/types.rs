@@ -1066,8 +1066,16 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
     let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
-        let fty = lower_type(&f.ty, named, ptr_size)?;
+        let mut fty = lower_type(&f.ty, named, ptr_size)?;
         let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
+        // A `bool x:1` bit-field lives in a BYTE storage unit: as `i1` its
+        // read-modify-write masks were 1-bit (`and i1 x, -3` == x), and -O2's
+        // algebraic pass rightly dropped them — the bit was never cleared (QEMU's
+        // decode loop `e->is_decode = false` ran forever: qemu-system-i386 ate
+        // all memory translating the first BIOS instruction). Same size, same layout.
+        if bw.is_some() && matches!(fty, Type::Bool) {
+            fty = Type::Int { bits: 8, signed: false };
+        }
         if bw.is_some() { any_bitfield = true; }
         if f.align.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
