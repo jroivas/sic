@@ -2824,16 +2824,34 @@ impl<'m> FuncCtx<'m> {
 
     // ─── Control flow ────────────────────────────────────────────────────────
 
-    /// Lower a condition expression to a bool, freeing any bigint/fixed temporaries
-    /// it creates in-place (sic.md §"Integer sizes"/"fixed point"). A loop
-    /// condition re-executes each iteration, so its temps must be freed there —
-    /// not by the statement-end flush, which runs once.
-    fn lower_cond(&mut self, cond: &Expr) -> Result<Val> {
+    /// Branch on a condition straight to `then_bb` / `else_bb`. `a && b` and
+    /// `a || b` become control flow — `a` branches to a block testing `b`, or
+    /// directly to the outcome — instead of a 0/1 value built through a stack
+    /// slot and tested again (lz's `while (p + len < N && len < MAX && buf[i] ==
+    /// buf[j])` ran ~2x gcc's instructions). Each operand keeps
+    /// `lower_logical`'s temporary handling: a scope + temp flush around it, so a
+    /// short-circuited operand never releases temporaries it did not create; a
+    /// loop condition re-executes each iteration, so its bigint/fixed temps are
+    /// freed there, not by the statement-end flush.
+    fn lower_cond_branch(&mut self, cond: &Expr, then_bb: BlockId, else_bb: BlockId) -> Result<()> {
+        if let ExprKind::BinOp { op: op @ (crate::ast::BinOpKind::LogAnd | crate::ast::BinOpKind::LogOr), lhs, rhs } = &cond.kind {
+            let mid = self.new_block_after_current();
+            if *op == crate::ast::BinOpKind::LogAnd {
+                self.lower_cond_branch(lhs, mid, else_bb)?;
+            } else {
+                self.lower_cond_branch(lhs, then_bb, mid)?;
+            }
+            self.switch_to_block(mid);
+            return self.lower_cond_branch(rhs, then_bb, else_bb);
+        }
+        self.enter_scope();
         let mark = self.temp_mark();
         let v = self.lower_expr(cond)?;
         let b = self.to_bool(v)?;
         self.flush_temps_from(mark);
-        Ok(b)
+        self.exit_scope();
+        self.set_terminator(Terminator::CondJump { cond: b, then_bb, else_bb });
+        Ok(())
     }
 
     fn lower_if(&mut self, cond: &Expr, then: &Stmt, else_: Option<&Stmt>) -> Result<()> {
@@ -2851,17 +2869,11 @@ impl<'m> FuncCtx<'m> {
             }
             return Ok(());
         }
-        let cond_bool = self.lower_cond(cond)?;
-
         let then_bb = self.new_block_after_current();
         let merge_bb = self.new_block_after_current();
         let else_bb = if else_.is_some() { self.new_block_after_current() } else { merge_bb };
 
-        self.set_terminator(Terminator::CondJump {
-            cond: cond_bool,
-            then_bb,
-            else_bb: if else_.is_some() { else_bb } else { merge_bb },
-        });
+        self.lower_cond_branch(cond, then_bb, if else_.is_some() { else_bb } else { merge_bb })?;
 
         // Each branch is its own scope, even a non-`{}` statement (C block
         // semantics). This confines any temporaries created evaluating the branch
@@ -2899,8 +2911,7 @@ impl<'m> FuncCtx<'m> {
             self.set_terminator(Terminator::Jump(cond_bb));
         }
         self.switch_to_block(cond_bb);
-        let cb = self.lower_cond(cond)?;
-        self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
+        self.lower_cond_branch(cond, body_bb, end_bb)?;
 
         self.loop_stack.push((end_bb, cond_bb));
         self.break_stack.push(end_bb);
@@ -2953,8 +2964,7 @@ impl<'m> FuncCtx<'m> {
         self.loop_stack.pop();
 
         self.switch_to_block(cond_bb);
-        let cb = self.lower_cond(cond)?;
-        self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
+        self.lower_cond_branch(cond, body_bb, end_bb)?;
 
         self.switch_to_block(end_bb);
         Ok(())
@@ -3031,9 +3041,7 @@ impl<'m> FuncCtx<'m> {
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(cond_bb)); }
         self.switch_to_block(cond_bb);
         if let Some(c) = cond {
-            let cv = self.lower_expr(c)?;
-            let cb = self.to_bool(cv)?;
-            self.set_terminator(Terminator::CondJump { cond: cb, then_bb: body_bb, else_bb: end_bb });
+            self.lower_cond_branch(c, body_bb, end_bb)?;
         } else {
             self.set_terminator(Terminator::Jump(body_bb));
         }
