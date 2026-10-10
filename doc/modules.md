@@ -159,6 +159,10 @@ run across the module boundary: a consumer's `new mod::S()` / `del`, and ordinar
 scope exit for a `mod::S` value, call the module's `S()` / `~S()`. So a type like
 `std::Buffer` cleans itself up in your code exactly as it does inside `std`.
 
+Its **methods** cross the boundary too: `obj.method(args)` on a value of an
+exported struct calls the module's method (`auto g = std::random::rng();
+g.gen64();`).
+
 ## A module that imports modules
 
 A module may `import` other modules and use them in its own implementation:

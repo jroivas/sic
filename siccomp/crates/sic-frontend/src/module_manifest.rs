@@ -77,6 +77,9 @@ pub struct ModuleManifest {
     /// `new S()` / `del p` / scope-exit cleanup calls the module's `S()` / `~S()`.
     pub struct_ctors: Vec<(String, String)>,
     pub struct_dtors: Vec<(String, String)>,
+    /// sic module struct methods: `(struct, method, symbol)`; the method's
+    /// signature is the `fn` export of that symbol.
+    pub struct_methods: Vec<(String, String, String)>,
     /// sic module dependencies (sic.md §"Imports"): the other modules this one
     /// `import`s, so a consumer chain-loads them (their types/enums/dtors + links).
     pub deps: Vec<String>,
@@ -158,6 +161,10 @@ impl ModuleManifest {
             .cloned()
             .collect();
 
+        // Only methods whose signature is exported (representable) as `fn`.
+        let struct_methods: Vec<(String, String, String)> = ir.sic_struct_methods.iter()
+            .filter(|(_, _, sym)| exports.iter().any(|e| &e.symbol == sym))
+            .cloned().collect();
         ModuleManifest {
             version: MANIFEST_VERSION,
             module: module.to_string(),
@@ -170,6 +177,7 @@ impl ModuleManifest {
             generic_fns: ir.sic_generic_fn_exports.clone(),
             struct_ctors: ir.sic_struct_ctors.clone(),
             struct_dtors: ir.sic_struct_dtors.clone(),
+            struct_methods,
             deps: ir.sic_module_deps.clone(),
             fn_defaults: ir.sic_fn_defaults.clone(),
         }
@@ -244,6 +252,10 @@ impl ModuleManifest {
         for (name, sym) in &self.struct_dtors {
             s.push_str(&format!("dtor {} {}\n", name, sym));
         }
+        // Struct methods: `method Struct name symbol`.
+        for (sname, m, sym) in &self.struct_methods {
+            s.push_str(&format!("method {} {} {}\n", sname, m, sym));
+        }
         // Default arguments: `default <fn> <pname>:<lit|-> …` (`-` = required).
         for (fname, pnames, lits) in &self.fn_defaults {
             let mut line = format!("default {}", fname);
@@ -293,6 +305,7 @@ impl ModuleManifest {
         let mut generic_fns: Vec<String> = Vec::new();
         let mut struct_ctors: Vec<(String, String)> = Vec::new();
         let mut struct_dtors: Vec<(String, String)> = Vec::new();
+        let mut struct_methods: Vec<(String, String, String)> = Vec::new();
         let mut deps: Vec<String> = Vec::new();
         let mut fn_defaults: Vec<(String, Vec<String>, Vec<Option<i64>>)> = Vec::new();
         // Aggregate records decoded so far, keyed by name; later records and
@@ -452,6 +465,12 @@ impl ModuleManifest {
                     if kw == "ctor" { struct_ctors.push((name.to_string(), sym.to_string())); }
                     else { struct_dtors.push((name.to_string(), sym.to_string())); }
                 }
+                "method" => {
+                    let mut field = |what: &str| it.next().map(|s| s.to_string())
+                        .ok_or_else(|| format!("line {}: method {} missing", lineno + 1, what));
+                    let (sname, m, sym) = (field("struct name")?, field("name")?, field("symbol")?);
+                    struct_methods.push((sname, m, sym));
+                }
                 "default" => {
                     // `default <fn> <pname>:<lit|-> …`
                     let fname = it.next()
@@ -485,6 +504,7 @@ impl ModuleManifest {
             generic_fns,
             struct_ctors,
             struct_dtors,
+            struct_methods,
             deps,
             links,
             exports,
@@ -740,6 +760,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],
         };
@@ -771,6 +792,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],
         };
@@ -807,6 +829,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],
         };

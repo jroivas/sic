@@ -159,6 +159,9 @@ pub struct Module {
     /// / scope-exit cleanup calls the module's `S()` / `~S()`.
     pub sic_struct_ctors: Vec<(String, String)>,
     pub sic_struct_dtors: Vec<(String, String)>,
+    /// sic module struct methods: `(struct, method, symbol)` of each exported
+    /// method, so a consumer's `obj.method()` calls the module's code.
+    pub sic_struct_methods: Vec<(String, String, String)>,
     /// sic module dependencies (sic.md §"Imports"): the other modules THIS module
     /// `import`s. A consumer chain-loads these so a dependency's types/enums/dtors
     /// and link flags come along automatically (`import extra` pulls in `std`).
@@ -190,6 +193,7 @@ impl Module {
             sic_generic_fn_exports: Vec::new(),
             sic_struct_ctors: Vec::new(),
             sic_struct_dtors: Vec::new(),
+            sic_struct_methods: Vec::new(),
             sic_module_deps: Vec::new(),
             sic_fn_defaults: Vec::new(),
         }

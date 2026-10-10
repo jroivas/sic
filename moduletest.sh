@@ -368,6 +368,51 @@ printf 'packages = sic-no-such-package\n' > confbad/module.conf
 "$SIC" --emit-module confbad 2>err && bad "module-conf-nopkg" "accepted a missing package" \
     || { grep -q "sic-no-such-package" err && ok "module-conf-nopkg" || bad "module-conf-nopkg" "wrong error: $(cat err)"; }
 
+# ── Struct methods across a module boundary ─────────────────────────────────
+# A module's struct methods are exported (`method S m symbol` in the manifest)
+# so a consumer's `obj.m()` works — it used to fail with "no field 'm' in type"
+# (std::random's `g.gen64()`). Value and pointer receivers, arguments, a method
+# calling a method, and a struct (sret) return; dynamic and -static.
+mkdir -p methmod
+cat > methmod/counter.sic <<'EOF'
+module ctr;
+namespace counter {
+    struct Pair { i64 a; i64 b; };
+    struct Counter {
+        i64 n;
+        i64 step;
+        i64 next(struct Counter *self) { self->n += self->step; return self->n; }
+        i64 skip(struct Counter *self, i64 k) { for (i64 i = 0; i < k; i++) self->next(); return self->n; }
+        Pair both(struct Counter *self) { Pair p; p.a = self->n; p.b = self->step; return p; }
+    };
+    Counter make(i64 step) { Counter c; c.n = 0; c.step = step; return c; }
+}
+EOF
+cat > methuse.sic <<'EOF'
+import ctr;
+int main() {
+    auto c = ctr::counter::make(3);
+    c.next();                         // 3   (value receiver)
+    c.skip(4);                        // 15
+    ctr::counter::Counter *p = &c;
+    p->next();                        // 18  (pointer receiver)
+    ctr::counter::Pair q = c.both();  // {18, 3}  (struct return)
+    return (int)(q.a + q.b * 8);      // 18 + 24 = 42
+}
+EOF
+if "$SIC" --emit-module methmod 2>err && grep -q "^method Counter skip " methmod/module_ctr.smod; then
+    for mode in "" "-static"; do
+        if "$SIC" $mode methuse.sic -Imethmod -o methuse 2>err; then
+            ./methuse; got=$?
+            [ "$got" -eq 42 ] && ok "module-methods$mode" || bad "module-methods$mode" "expected 42, got $got"
+        else
+            bad "module-methods$mode" "compile/link failed: $(cat err)"
+        fi
+    done
+else
+    bad "module-methods" "module build / manifest failed: $(cat err) $(grep ^method methmod/module_ctr.smod)"
+fi
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.

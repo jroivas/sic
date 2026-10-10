@@ -491,6 +491,13 @@ impl Lowerer {
                 if self.private_types.contains(sname) || imp(sname) { continue; }
                 self.module.sic_struct_dtors.push((sname.clone(), sym.clone()));
             }
+            // sic struct methods: `(struct, method, symbol)` of public structs.
+            let mut methods: Vec<(String, String, String)> = self.struct_methods.iter()
+                .filter(|((s, _), _)| !self.private_types.contains(s) && !imp(s))
+                .map(|((s, m), sym)| (s.clone(), m.clone(), sym.clone()))
+                .collect();
+            methods.sort();
+            self.module.sic_struct_methods = methods;
             // sic default arguments (sic.md §"Default parameters"): publish each
             // public function's fixed-parameter names + integer-literal defaults, so
             // a consumer's `mod::f(...)` can fill omitted defaults (and bind
@@ -877,6 +884,22 @@ impl Lowerer {
             for (sname, sym) in &manifest.struct_dtors {
                 self.struct_dtor.entry(sname.clone()).or_insert_with(|| sym.clone());
                 self.imported_type_names.insert(sname.clone());
+            }
+            // sic module struct methods: declare each as an extern with its exported
+            // signature and route `obj.method()` to it.
+            for (sname, mname, sym) in &manifest.struct_methods {
+                let Some(e) = manifest.exports.iter().find(|e| &e.symbol == sym) else { continue };
+                let Type::Function(ft) = &e.ty else { continue };
+                if self.module.func_ref_by_name(sym).is_none() {
+                    let mut ft = (**ft).clone();
+                    // An aggregate return takes the hidden sret pointer first, as
+                    // the definition does (see `module_extern`).
+                    if ret_is_sret(&ft.ret, self.ptr_size) {
+                        ft.params.insert(0, Type::Pointer(Box::new(ft.ret.clone())));
+                    }
+                    self.module.add_extern(ExternFunc { name: sym.clone(), sig: ft });
+                }
+                self.struct_methods.entry((sname.clone(), mname.clone())).or_insert_with(|| sym.clone());
             }
             for l in &manifest.links {
                 if !self.imported_links.contains(l) {
@@ -2119,7 +2142,14 @@ impl Lowerer {
                 for m in &sdef.methods {
                     let (mangled, params, body) = match m.kind {
                         MethodKind::Method => {
-                            let mangled = format!("__sic_m_{}_{}", sname, m.name);
+                            // A module's methods are exported under a module-qualified
+                            // symbol (`{module}_{S}__{m}`, like its ctor/dtor) so a
+                            // consumer's `obj.m()` can call them; a plain build keeps
+                            // the unit-local `__sic_m_{S}_{m}`.
+                            let mangled = match &module_name {
+                                Some(md) => format!("{}_{}__{}", md, sname, m.name),
+                                None => format!("__sic_m_{}_{}", sname, m.name),
+                            };
                             self.struct_methods.insert((sname.clone(), m.name.clone()), mangled.clone());
                             (mangled, m.params.clone(), m.body.clone())
                         }
@@ -2163,9 +2193,9 @@ impl Lowerer {
                         template_src: None,
                         is_async: false,
                         body: Some(body),
-                        // Methods stay local; a module's ctor/dtor is exported so
-                        // consumers can link it (see `in_module`).
-                        storage: if in_module && matches!(m.kind, MethodKind::Ctor | MethodKind::Dtor) {
+                        // A module's methods and ctor/dtor are exported so consumers
+                        // can link them (see `in_module`); a plain build keeps them local.
+                        storage: if in_module {
                             None
                         } else {
                             Some(StorageClass::Static)
