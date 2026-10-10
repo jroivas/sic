@@ -235,8 +235,8 @@ cat > stdthread.sic <<'EOF'
 // detached thread frees itself. Returns 42.
 import std;
 
-int counter = 0;
-int detached_done = 0;
+atomic int counter = 0;
+atomic int detached_done = 0;
 
 int join(std::Thread::ThreadStatus st)
 {
@@ -260,7 +260,7 @@ int main()
     for (int i = 1; i <= 8; i++) {
         int add = i;
         joined += join(std::Thread::Spawn([add]() {
-            for (int k = 0; k < 1000; k++) __sync_fetch_and_add(&counter, add);
+            for (int k = 0; k < 1000; k++) counter += add;
             std::Thread::Yield();
         }));
     }
@@ -283,7 +283,7 @@ int main()
     del other;
 
     // A detached thread runs to completion on its own and frees itself.
-    match (std::Thread::Spawn([]() { std::Thread::Sleep(10); __sync_fetch_and_add(&detached_done, 1); })) {
+    match (std::Thread::Spawn([]() { std::Thread::Sleep(10); detached_done++; })) {
         std::Thread::ThreadStatus::Created(t): {
             match (std::Thread::Detach(t)) {
                 std::Thread::ThreadStatus::Detached: {}
@@ -292,7 +292,7 @@ int main()
         }
         _: return 4;
     }
-    for (int w = 0; w < 500 && __sync_fetch_and_add(&detached_done, 0) == 0; w++) std::Thread::Sleep(2);
+    for (int w = 0; w < 500 && detached_done == 0; w++) std::Thread::Sleep(2);
     if (detached_done != 1) return 5;
 
     match (std::Thread::Join(NULL)) {

@@ -22,9 +22,9 @@ module std;
 // once. Scalars captured by value are always safe.
 namespace Thread
 {
-    // Lifecycle of a Thread, changed only by compare-and-swap so that exactly
-    // one side frees it: the thread ending (Running → Finished) or Detach()
-    // (Running → Detached). Whoever finds the other state already set frees it.
+    // Lifecycle of a Thread (its `atomic int state`), changed only by `.cas` so
+    // that exactly one side frees it: the thread ending (Running → Finished) or
+    // Detach() (Running → Detached). Whoever finds the other state set frees it.
     static const int RUNNING = 0;
     static const int FINISHED = 1;
     static const int DETACHED = 2;
@@ -35,7 +35,7 @@ namespace Thread
         list<any> args;
         Fn<void()> run;             // Spawn(): called with no arguments
         bool has_args;
-        int state;
+        atomic int state;
         ~Thread()
         {
             del func;
@@ -64,7 +64,7 @@ namespace Thread
         else
             thr->run();
 
-        if (!__sync_bool_compare_and_swap(&thr->state, RUNNING, FINISHED))
+        if (!thr->state.cas(RUNNING, FINISHED))
             del thr;                // detached: nobody else will free it
         return NULL;
     }
@@ -123,7 +123,7 @@ namespace Thread
         if (res != 0)
             return ThreadStatus::Error(res);
         // Already finished: its end saw no Detach, so the Thread is ours to free.
-        if (!__sync_bool_compare_and_swap(&thr->state, RUNNING, DETACHED))
+        if (!thr->state.cas(RUNNING, DETACHED))
             del thr;
         return ThreadStatus::Detached;
     }
