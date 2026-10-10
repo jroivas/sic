@@ -403,6 +403,11 @@ pub enum Stmt {
     /// Cranelift has no inline asm, so lowering recognises a fixed set of x86-64
     /// templates (see `lower/expr/asm.rs`); anything else warns and traps.
     Asm(Box<AsmStmt>),
+    /// sic-only memory barriers (sic.md §"Memory barriers"): `fence;` is a full,
+    /// sequentially consistent fence (CPU + compiler); `barrier;` (`full ==
+    /// false`) is compiler-only — no memory access is cached or moved across it,
+    /// but no instruction is emitted.
+    Fence { full: bool, span: Span },
     Null(Span),
 }
 

@@ -1678,6 +1678,16 @@ impl Parser {
             TokenKind::Default => self.parse_default(),
             // GNU inline asm statement
             TokenKind::Asm => self.parse_asm_stmt(sp),
+            // sic memory barriers `fence;` / `barrier;` — contextual keywords: only
+            // a whole statement, so `fence` stays usable as an identifier.
+            TokenKind::Ident if self.lang == Lang::Sic
+                && matches!(self.peek().text.as_str(), "fence" | "barrier")
+                && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Semi) =>
+            {
+                let full = self.advance().text == "fence";
+                self.advance(); // ;
+                Ok(Stmt::Fence { full, span: sp })
+            }
             // __extension__ — skip
             TokenKind::Extension => { self.advance(); self.parse_stmt() }
             // Statement attribute, e.g. `__attribute__((fallthrough));`.

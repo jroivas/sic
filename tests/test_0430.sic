@@ -1,0 +1,19 @@
+// sic memory barriers: `fence;` (full seq_cst fence: CPU + compiler) and
+// `barrier;` (compiler-only). Contextual keywords: only a whole statement, so
+// `fence`/`barrier` remain usable as names. Returns 42.
+int fence_count(int fence) { return fence + 1; }
+
+int main() {
+    int data = 0;
+    int ready = 0;
+    data = 40;
+    fence;
+    ready = 1;
+    barrier;
+    int barrier = fence_count(1);
+    if (ready == 1) {
+        fence;
+        return data + barrier;
+    }
+    return 1;
+}

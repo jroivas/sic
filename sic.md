@@ -1846,6 +1846,27 @@ Complex casting is not supported. However one can manually cast:
     // a <> (i64)b; // This would cause error since 64-bit "a" can't fit into
                       // 32-bit "b". This would be the default as well.
 
+## Memory barriers
+
+Two statements order memory accesses for multi-threaded code:
+
+```c
+data = 40;
+fence;      // full memory fence
+ready = 1;
+```
+
+- `fence;` is a full, sequentially consistent fence. No load or store moves
+  across it, neither by the compiler nor by the CPU (`mfence` on x86-64). It
+  equals C's `atomic_thread_fence(memory_order_seq_cst)`.
+- `barrier;` is a compiler-only barrier. The compiler may not cache memory in
+  registers or move accesses across it, but no instruction is emitted. Use it
+  where only compiler reordering matters (e.g. against a signal handler), or as
+  an acquire/release fence on x86-64, whose memory model already orders those.
+
+Both are contextual keywords: they are recognised only as a whole statement, so
+`fence` and `barrier` stay usable as variable or function names.
+
 ## Errors and exceptions
 
 We have been talking about errors and exceptions earlier in this document, but haven't yet specified how they work.

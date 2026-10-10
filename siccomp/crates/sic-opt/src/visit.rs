@@ -90,7 +90,7 @@ pub fn walk_stmt<V: MutVisitor>(v: &mut V, s: &mut Stmt) {
         Stmt::ForEach { iterable, body, .. } => { v.visit_expr(iterable); v.visit_stmt(body); }
         Stmt::Return(Some(e), _) => v.visit_expr(e),
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Fallthrough(_) | Stmt::Goto(_, _) | Stmt::Null(_) => {}
+        | Stmt::Fallthrough(_) | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fence { .. } => {}
         Stmt::Defer(inner, _) => v.visit_stmt(inner),
         Stmt::Delete(e, _) => v.visit_expr(e),
         Stmt::Label(_, inner, _) => v.visit_stmt(inner),
