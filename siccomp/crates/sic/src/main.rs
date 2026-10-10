@@ -8,6 +8,7 @@ mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
 mod list_runtime;
+mod module_conf;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -26,7 +27,7 @@ enum FOption {
     Value(String),
 }
 
-#[derive(ClapParser, Debug)]
+#[derive(ClapParser, Debug, Clone)]
 #[command(name = "sic", about = "SIC compiler (Rust/Cranelift)")]
 struct Args {
     /// Input files: C sources to compile and/or object files to link
@@ -979,6 +980,14 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     if !dirp.is_dir() {
         return Err(format!("--emit-module: '{}' is not a directory", dir).into());
     }
+    // The folder's `module.conf` (optional): compile flags for its sources, link
+    // flags for lib<name>.so and its consumers, pkg-config packages for both.
+    let absdir = fs::canonicalize(&dirp).unwrap_or(dirp.clone());
+    let conf = module_conf::load(&dirp)?;
+    let margs = apply_module_cflags(args, &conf.cflags, &absdir)?;
+    let args = &margs;
+    let mut conf_links = module_link_tokens(&conf.ldflags, &absdir)?;
+    if args.pthread && !conf_links.iter().any(|t| t == "-pthread") { conf_links.push("-pthread".to_string()); }
 
     // Gather `.sic` files (no recursion) and parse each. A file participates iff
     // it declares a `module x;`; all participants must name the same module.
@@ -1040,12 +1049,16 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     // time. `-fPIC` is not needed — sic emits position-independent code.
     let shared = dirp.join(format!("lib{}.so", name));
     let _ = fs::remove_file(&shared);
+    // The module's own link flags go into the shared object itself, so it records
+    // its dependencies (a std using libm needs `-lm` here: `acos` was undefined).
     if legacy_link_driver().is_none() {
-        link_with_driver(&shared.to_string_lossy(), vec![obj.path().to_string_lossy().into_owned()], true, false, None, false)?;
+        let mut inputs = vec![obj.path().to_string_lossy().into_owned()];
+        inputs.extend(conf_links.iter().cloned());
+        link_with_driver(&shared.to_string_lossy(), inputs, true, false, None, false)?;
     } else {
         let cc = resolve_linker();
         let status = Command::new(&cc)
-            .arg("-shared").arg("-o").arg(&shared).arg(obj.path())
+            .arg("-shared").arg("-o").arg(&shared).arg(obj.path()).args(&conf_links)
             .status()?;
         if !status.success() {
             return Err(format!("linking {} failed with exit code {:?}", shared.display(), status.code()).into());
@@ -1058,7 +1071,6 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     // default), and the rpath lets the produced binary find it at run time. A
     // `-static` consumer ignores the `.so`/rpath and pulls the archive instead.
     // Then this module's own libs and any transitively imported modules' flags.
-    let absdir = fs::canonicalize(&dirp).unwrap_or(dirp.clone());
     let mut links: Vec<String> = vec![
         format!("-L{}", absdir.display()),
         format!("-Wl,-rpath,{}", absdir.display()),
@@ -1068,6 +1080,10 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         if tok == "-pthread" || tok.starts_with("-l") || tok.starts_with("-L") {
             if !links.contains(tok) { links.push(tok.clone()); }
         }
+    }
+    // module.conf link flags, so consumers (and `-static` ones) link them too.
+    for l in &conf_links {
+        if !links.contains(l) { links.push(l.clone()); }
     }
     for l in &ir_module.imported_links {
         if !links.contains(l) { links.push(l.clone()); }
@@ -1147,12 +1163,116 @@ fn def_file_for(manifest: &sic_frontend::ModuleManifest) -> String {
     s
 }
 
-fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    // Warning flags; `-Wl,`/`-Wp,`/`-Wa,` are pass-through options, not warnings.
+/// Configure the warning engine from `-W…`/`-w`. `-Wl,`/`-Wp,`/`-Wa,` are
+/// pass-through options, not warnings.
+fn configure_warnings(args: &Args) {
     let warn_flags: Vec<&String> = args.warnings.iter()
         .filter(|w| !(w.starts_with("l,") || w.starts_with("p,") || w.starts_with("a,")))
         .collect();
     sic_frontend::diag::configure(&warn_flags, args.no_warnings);
+}
+
+/// Apply a folder module's `module.conf` cflags (incl. pkg-config `--cflags`) to
+/// a copy of the driver arguments used to compile its sources. Preprocessor,
+/// language, optimization, debug and warning flags are understood; anything
+/// else is an error rather than silently ignored. A relative include path is
+/// taken relative to the module dir `dir`, so the module builds from anywhere.
+fn apply_module_cflags(args: &Args, cflags: &[String], dir: &std::path::Path) -> Result<Args, String> {
+    let abs = |p: &str| -> String {
+        let pb = std::path::Path::new(p);
+        if pb.is_absolute() { p.to_string() } else { dir.join(pb).to_string_lossy().into_owned() }
+    };
+    let mut a = args.clone();
+    let mut warnings_changed = false;
+    let mut it = cflags.iter();
+    while let Some(f) = it.next() {
+        let mut value = |opt: &str| -> Result<String, String> {
+            it.next().cloned().ok_or_else(|| format!("{}: cflag '{}' needs a value", module_conf::FILE_NAME, opt))
+        };
+        if let Some(v) = f.strip_prefix("-D") {
+            a.defines.push(if v.is_empty() { value(f)? } else { v.to_string() });
+        } else if let Some(v) = f.strip_prefix("-I") {
+            a.includes.push(abs(&if v.is_empty() { value(f)? } else { v.to_string() }));
+        } else if f == "-U" {
+            let v = value(f)?;
+            a.cpp_include_flags.push(format!("-U{}", v));
+        } else if matches!(f.as_str(), "-isystem" | "-iquote" | "-idirafter" | "-include" | "-imacros") {
+            let v = value(f)?;
+            a.cpp_include_flags.push(f.clone());
+            a.cpp_include_flags.push(abs(&v));
+        } else if f.starts_with("-U") {
+            a.cpp_include_flags.push(f.clone());
+        } else if let Some((opt, p)) = ["-isystem", "-iquote", "-idirafter"].iter()
+            .find_map(|o| f.strip_prefix(o).map(|p| (*o, p))) {
+            a.cpp_include_flags.push(format!("{}{}", opt, abs(p)));
+        } else if f == "-pthread" || f == "-pthreads" {
+            a.pthread = true;
+        } else if let Some(s) = f.strip_prefix("-std=") {
+            a.std = s.to_string();
+        } else if let Some(o) = f.strip_prefix("-O") {
+            a.opt = if o.is_empty() { "1".to_string() } else { o.to_string() };
+        } else if f.starts_with("-g") {
+            a.debug_info = true;
+        } else if f.starts_with("-W") && !f.starts_with("-Wl,") && !f.starts_with("-Wp,") && !f.starts_with("-Wa,") {
+            a.warnings.push(f[2..].to_string());
+            warnings_changed = true;
+        } else if f == "-w" {
+            a.no_warnings = true;
+            warnings_changed = true;
+        } else if f.starts_with("-f") && f.len() > 2 {
+            if let Some((name, v)) = parse_f_option(f) { a.f_options.insert(name, v); }
+        } else if f.starts_with("-m") && f.len() > 2 {
+            // CPU tuning hints: accepted and ignored, as on the command line.
+        } else {
+            return Err(format!(
+                "{}: unsupported cflag '{}' (supported: -D -U -I -isystem -iquote -idirafter \
+                 -include -imacros -std= -O -g -pthread -W -w -f -m)", module_conf::FILE_NAME, f));
+        }
+    }
+    if warnings_changed { configure_warnings(&a); }
+    Ok(a)
+}
+
+/// The link tokens of a folder module's `module.conf` ldflags (incl. pkg-config
+/// `--libs`): `-l`, `-L`, `-Wl,…`, `-Xlinker x`, `-pthread`, and library/object
+/// paths. A relative `-L` dir or file path is taken relative to the module dir,
+/// so the manifest works from any consumer's directory.
+fn module_link_tokens(ldflags: &[String], dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let abs = |p: &str| -> String {
+        let pb = std::path::Path::new(p);
+        if pb.is_absolute() { p.to_string() } else { dir.join(pb).to_string_lossy().into_owned() }
+    };
+    let mut out = Vec::new();
+    let mut it = ldflags.iter();
+    while let Some(f) = it.next() {
+        let mut value = |opt: &str| -> Result<String, String> {
+            it.next().cloned().ok_or_else(|| format!("{}: ldflag '{}' needs a value", module_conf::FILE_NAME, opt))
+        };
+        if f == "-l" {
+            out.push(format!("-l{}", value(f)?));
+        } else if f.starts_with("-l") {
+            out.push(f.clone());
+        } else if f == "-L" {
+            out.push(format!("-L{}", abs(&value(f)?)));
+        } else if let Some(d) = f.strip_prefix("-L") {
+            out.push(format!("-L{}", abs(d)));
+        } else if f.starts_with("-Wl,") || f == "-pthread" {
+            out.push(f.clone());
+        } else if f == "-Xlinker" {
+            out.push(format!("-Wl,{}", value(f)?));
+        } else if !f.starts_with('-') && (f.ends_with(".a") || f.ends_with(".o") || f.ends_with(".so") || f.contains(".so.")) {
+            out.push(abs(f));
+        } else {
+            return Err(format!(
+                "{}: unsupported ldflag '{}' (supported: -l -L -Wl, -Xlinker -pthread, \
+                 library/object paths)", module_conf::FILE_NAME, f));
+        }
+    }
+    Ok(out)
+}
+
+fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    configure_warnings(args);
     if args.debug && !args.f_options.is_empty() {
         eprintln!("-f options: {:?}", args.f_options);
     }

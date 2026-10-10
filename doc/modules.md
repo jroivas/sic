@@ -43,6 +43,33 @@ A multi-file module just puts several `.sic` files with the same `module math;`
 in the folder; they're compiled together, so they can call one another's
 functions.
 
+## Build settings: `module.conf`
+
+A folder module (`sic --emit-module DIR`) may carry a `module.conf` with the flags
+its build needs:
+
+```text
+# module.conf
+cflags   = -DUSE_FAST_PATH=1 -Iinclude    # compiling the module's sources
+ldflags  = -lm -L/opt/xyz/lib -lxyz       # linking lib<name>.so and its consumers
+packages = zlib libpng                    # pkg-config --cflags / --libs
+```
+
+- **`cflags`** apply to every source of the module: `-D`, `-U`, `-I`,
+  `-isystem`/`-iquote`/`-idirafter`, `-include`/`-imacros`, `-std=`, `-O<n>`,
+  `-g`, `-pthread`, and `-W…`/`-w`/`-f…`/`-m…` as on the command line.
+- **`ldflags`** — `-l`, `-L`, `-Wl,…`, `-Xlinker`, `-pthread`, library/object
+  paths — are linked into `lib<name>.so` itself (so it records its own
+  dependencies) and written to the manifest, so every consumer, `-static` ones
+  included, links them without any flags of its own.
+- **`packages`** are passed to `pkg-config` (`$PKG_CONFIG` overrides the program);
+  their `--cflags` join `cflags` and their `--libs` join `ldflags`.
+
+One `key = value` per line (`+=` and repeated keys append); values split like a
+shell command line, with `'…'` / `"…"` quoting; `#` starts a comment. Relative
+paths are taken relative to the module's folder. An unknown key, an unsupported
+flag or a missing package is an error. `std` itself uses one to link libm.
+
 ## Importing
 
 A plain `import` makes a module's symbols reachable **only under its namespace**;

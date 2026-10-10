@@ -185,6 +185,7 @@ fi
 STD_SRC="$ROOT/siccomp/lib/std"
 mkdir -p sysroot
 cp "$STD_SRC"/*.sic sysroot/
+[ -f "$STD_SRC/module.conf" ] && cp "$STD_SRC/module.conf" sysroot/
 if "$SIC" --emit-module sysroot 2>err && [ -f sysroot/module_std.smod ]; then
     ok "std-build"
 else
@@ -310,6 +311,62 @@ for mode in "" "-static"; do
         bad "std-thread$mode" "compile/link failed: $(cat err)"
     fi
 done
+
+# ── module.conf: cflags / ldflags / pkg-config packages for a folder module ──
+# The module compiles with the conf's -D/-I (an include dir relative to the
+# module), links libm into lib<name>.so and its manifest, and takes a package's
+# --cflags/--libs from pkg-config (a local .pc via PKG_CONFIG_PATH). A consumer
+# needs no flags; an unknown key and a missing package are reported.
+mkdir -p confmod/inc pc
+cat > confmod/inc/scale.h <<'EOF'
+#define SCALE 2
+EOF
+cat > confmod/geo.sic <<'EOF'
+module geo;
+#include <math.h>
+#include "scale.h"
+double hyp(double a, double b) { return sqrt(a * a + b * b) * SCALE + BONUS + PKG_BONUS; }
+EOF
+cat > confmod/module.conf <<'EOF'
+# geo build settings
+cflags   = -DBONUS=10 -Iinc       # relative to the module dir
+ldflags  = -lm
+packages = sicfakepkg
+EOF
+cat > pc/sicfakepkg.pc <<'EOF'
+Name: sicfakepkg
+Description: test package for module.conf
+Version: 1.0
+Cflags: -DPKG_BONUS=22
+Libs: -lm
+EOF
+cat > confuse.sic <<'EOF'
+import geo;
+int main() { return (int) geo::hyp(3.0, 4.0); }   // 5*2 + 10 + 22 = 42
+EOF
+if PKG_CONFIG_PATH="$WORK/pc" "$SIC" --emit-module confmod 2>err; then
+    if grep -q "^link .* -lm" confmod/module_geo.smod && readelf -d confmod/libgeo.so 2>/dev/null | grep -q "libm.so"; then
+        ok "module-conf-build"
+    else
+        bad "module-conf-build" "no -lm in manifest/libgeo.so:\n$(grep ^link confmod/module_geo.smod)"
+    fi
+    for mode in "" "-static"; do
+        if "$SIC" $mode confuse.sic -Iconfmod -o confuse 2>err; then
+            ./confuse; got=$?
+            [ "$got" -eq 42 ] && ok "module-conf-run$mode" || bad "module-conf-run$mode" "expected 42, got $got"
+        else
+            bad "module-conf-run$mode" "compile/link failed: $(cat err)"
+        fi
+    done
+else
+    bad "module-conf-build" "emit-module failed: $(cat err)"
+fi
+mkdir -p confbad && cp confmod/geo.sic confbad/ && printf 'cflag = -DX\n' > confbad/module.conf
+"$SIC" --emit-module confbad 2>err && bad "module-conf-badkey" "accepted an unknown key" \
+    || { grep -q "unknown key 'cflag'" err && ok "module-conf-badkey" || bad "module-conf-badkey" "wrong error: $(cat err)"; }
+printf 'packages = sic-no-such-package\n' > confbad/module.conf
+"$SIC" --emit-module confbad 2>err && bad "module-conf-nopkg" "accepted a missing package" \
+    || { grep -q "sic-no-such-package" err && ok "module-conf-nopkg" || bad "module-conf-nopkg" "wrong error: $(cat err)"; }
 
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
