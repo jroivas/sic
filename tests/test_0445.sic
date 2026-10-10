@@ -1,0 +1,34 @@
+// sic `atomic` STRUCT FIELDS (they used to be plain, without .cas/.swap): load,
+// store, ++/+=, .cas and .swap are atomic through `->`, `.` on a value and `.` on
+// a pointer (auto-deref); four threads bumping one field lose no update. Returns 42.
+#include <pthread.h>
+struct Counter {
+    int plain;
+    atomic int n;
+    atomic u64 big;
+    atomic bool flag;
+};
+void *bump(void *arg) {
+    Counter *c = (Counter *)arg;
+    for (int i = 0; i < 100000; i++) { c->n++; c->big += 2; }
+    return NULL;
+}
+int main() {
+    Counter *c = new Counter();
+    if (!c->n.cas(0, 5)) return 1;              // 0 -> 5
+    if (c->n.cas(0, 7)) return 2;               // fails: is 5
+    if (c->n.swap(9) != 5 || c->n != 9) return 3;
+    Counter local;
+    local.n = 3;
+    local.n += 4;
+    if (!local.n.cas(7, 1) || local.n != 1) return 4;
+    Counter *p = &local;
+    if (!p.flag.cas(false, true) || !p->flag) return 5;   // `.` auto-derefs
+    c->n = 0;
+    pthread_t th[4];
+    for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, bump, c);
+    for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
+    if (c->n != 400000 || c->big != 800000) return 6;
+    del c;
+    return 42;
+}

@@ -55,6 +55,26 @@ int cur;
 do { cur = a; } while (cur < CAP && !a.cas(cur, cur + 1));
 ```
 
+## Atomic struct fields
+
+A struct field can be `atomic` too. Every access to it — through `->`, through
+`.` on a struct value, or through `.` on a struct pointer — is atomic, and it
+takes `.swap` / `.cas` like an atomic variable:
+
+```sic
+struct Job {
+    Fn<void()> work;
+    atomic int state;            // RUNNING / FINISHED / DETACHED
+};
+
+j->state = RUNNING;                       // atomic store
+j->state++;                               // one atomic RMW
+if (!j->state.cas(RUNNING, FINISHED))     // exactly one side wins
+    cleanup(j);
+```
+
+The same lock-free rule applies: an `atomic double` field is a compile error.
+
 ## Atomic pointers
 
 A pointer whose *own* value is read/written atomically is spelled with the
@@ -82,7 +102,7 @@ if (head.cas(cur, n)) { … }       // lock-free push
 
 | | read / `=` | `+= -= &= |= ^=` `++ --` | `.swap` | `.cas` | `*= /= %= <<= >>=` |
 |---|:---:|:---:|:---:|:---:|:---:|
-| `atomic` integer / bool | ✅ | ✅ | ✅ | ✅ | ✗ |
+| `atomic` integer / bool (variable or struct field) | ✅ | ✅ | ✅ | ✅ | ✗ |
 | `atomic(T *)` pointer | ✅ | ✗ | ✅ | ✅ | ✗ |
 
 Next: [standard library](standard-library.md).

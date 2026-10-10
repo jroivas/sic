@@ -18,6 +18,9 @@ pub struct Lowerer {
     pub globals_map: HashMap<String, (Type, GlobalRef)>,
     /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
     pub atomic_globals: std::collections::HashSet<String>,
+    /// sic `atomic` struct fields (sic.md §"Atomics"): `(struct name, field)`.
+    /// Their lvalues load/store/RMW atomically and take `.cas`/`.swap`.
+    pub atomic_fields: std::collections::HashSet<(String, String)>,
     /// Known enum variant values
     pub enum_consts: HashMap<String, i64>,
     /// Named struct/union types
@@ -246,6 +249,7 @@ impl Lowerer {
             module: Module::new(name),
             globals_map: HashMap::new(),
             atomic_globals: std::collections::HashSet::new(),
+            atomic_fields: std::collections::HashSet::new(),
             enum_consts: HashMap::new(),
             struct_types: HashMap::new(),
             ptr_size: 8, // assume 64-bit
@@ -1019,6 +1023,11 @@ impl Lowerer {
                 }
                 let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
                 let fty = types::c_bitfield_field_type(fty, bw);
+                // sic `atomic int state;` field: lock-free sizes only, like locals.
+                if self.sic && f.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) && !fname.is_empty() {
+                    func::FuncCtx::check_atomic_type(&fty, &f.span)?;
+                    self.atomic_fields.insert((name.clone(), fname.clone()));
+                }
                 if bw.is_some() { any_bitfield = true; }
                 if f.align.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));

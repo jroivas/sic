@@ -382,11 +382,17 @@ impl<'m> FuncCtx<'m> {
                 _ => None,
             };
             if let Some((base, name)) = recv {
-                if matches!(&base.kind, ExprKind::Ident(n) if self.is_atomic_name(n)) {
+                if matches!(&base.kind, ExprKind::Ident(n) if self.is_atomic_name(n))
+                    || self.is_atomic_field_expr(base)
+                {
                     return self.lower_atomic_method(base, name, args, sp);
                 }
-                // `.cas`/`.swap` on a non-atomic is an error (they only exist on atomics).
-                if matches!(&base.kind, ExprKind::Ident(_)) {
+                // `.cas`/`.swap` on a non-atomic is an error (they only exist on atomics):
+                // a variable, or a scalar struct field (a struct-typed field may have a
+                // method of that name).
+                let scalar_field = matches!(&base.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. })
+                    && matches!(self.infer_expr_type(base), Ok(Type::Int { .. } | Type::Bool | Type::Pointer(_)));
+                if matches!(&base.kind, ExprKind::Ident(_)) || scalar_field {
                     return Err(CompileError::at(
                         format!("`.{}` is only available on an `atomic` value", name),
                         sp.file.clone(), sp.line, sp.col));

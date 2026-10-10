@@ -1,0 +1,4 @@
+// An `atomic` struct field must be lock-free: a 1/2/4/8-byte integer, bool or
+// pointer — `atomic double` is rejected, as for a variable.
+struct S { int plain; atomic double d; };
+int main() { return 0; }

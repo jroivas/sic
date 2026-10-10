@@ -277,13 +277,40 @@ impl<'m> FuncCtx<'m> {
                     sp.file.clone(), sp.line, sp.col,
                 ))?;
 
+        let atomic = self.is_atomic_field(&struct_ty, field_name);
         let base_ptr = lv.ptr;
         let dest = self.alloc_val();
         let result_ty = Type::Pointer(Box::new(field_ty.clone()));
         self.push_instr(Instr::GetFieldPtr {
             dest, base: base_ptr, field_idx: 0, struct_name: None, byte_offset, result_ty,
         });
-        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic: false })
+        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic })
+    }
+
+    /// Whether `field` of struct type `struct_ty` is declared `atomic` (sic).
+    pub(crate) fn is_atomic_field(&self, struct_ty: &Type, field: &str) -> bool {
+        if !self.is_sic() || self.lowerer.atomic_fields.is_empty() { return false; }
+        match super::super::types::resolve_aggregate(struct_ty, &self.lowerer.struct_types) {
+            Type::Struct(st) => st.name.map_or(false, |n| self.lowerer.atomic_fields.contains(&(n, field.to_string()))),
+            _ => false,
+        }
+    }
+
+    /// Whether `e` is `s.f` / `p->f` naming an atomic struct field.
+    pub(crate) fn is_atomic_field_expr(&self, e: &Expr) -> bool {
+        let (base, name, via_ptr) = match &e.kind {
+            ExprKind::Field { base, name } => (base, name, false),
+            ExprKind::Arrow { base, name } => (base, name, true),
+            _ => return false,
+        };
+        let Ok(bt) = self.infer_expr_type(base) else { return false };
+        // `.` on a struct pointer auto-derefs in sic, like `->`.
+        let st = match bt {
+            Type::Pointer(t) => *t,
+            t if !via_ptr => t,
+            _ => return false,
+        };
+        self.is_atomic_field(&st, name)
     }
 
     // ─── Type inference ───────────────────────────────────────────────────────
