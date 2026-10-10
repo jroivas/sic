@@ -475,6 +475,53 @@ else
     bad "module-generic-enums" "module build / manifest failed: $(cat err)"
 fi
 
+# ── By-value module types must be fully described ───────────────────────────
+# A struct with array fields (std::random::ChaCha12) had no manifest record: the
+# consumer decoded it as empty and a by-value return overran its buffer. Arrays
+# are now `[N]elem`; a type still not describable (an anonymous union member)
+# makes its function omitted with a note instead of exported with a bad layout.
+mkdir -p arrmod
+cat > arrmod/arr.sic <<'EOF'
+module arr;
+namespace a {
+    struct Blk { u32 key[8]; u64 n; u32 block[16]; };
+    Option<Blk> make(u32 seed) {
+        Blk b;
+        for (int i = 0; i < 8; i++) b.key[i] = seed + i;
+        for (int i = 0; i < 16; i++) b.block[i] = seed * 2 + i;
+        b.n = 99;
+        return Some(b);
+    }
+    struct Odd { int tag; union { int i; float f; } u; };
+    Odd odd() { Odd o; o.tag = 1; o.u.i = 2; return o; }
+}
+EOF
+cat > arruse.sic <<'EOF'
+import arr;
+int main() {
+    auto b = arr::a::make(10) else return 1;
+    u64 s = b.n;                                  // 99
+    for (int i = 0; i < 8; i++) s += b.key[i];    // 10..17 = 108
+    s += b.block[15];                             // 20 + 15 = 35
+    return (int)(s - 200);                        // 42
+}
+EOF
+if "$SIC" --emit-module arrmod 2>err && grep -q "^struct Blk key:\[8\]u32 " arrmod/module_arr.smod; then
+    grep -q "export 'a__odd' passes or returns a type the manifest cannot describe" err \
+        && ! grep -q "^fn a__odd " arrmod/module_arr.smod \
+        && ok "module-undescribable-omitted" || bad "module-undescribable-omitted" "$(cat err)"
+    for mode in "" "-static"; do
+        if "$SIC" $mode arruse.sic -Iarrmod -o arruse 2>err; then
+            ./arruse; got=$?
+            [ "$got" -eq 42 ] && ok "module-array-fields$mode" || bad "module-array-fields$mode" "expected 42, got $got"
+        else
+            bad "module-array-fields$mode" "compile/link failed: $(cat err)"
+        fi
+    done
+else
+    bad "module-array-fields" "module build / manifest failed: $(cat err)"
+fi
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.

@@ -99,6 +99,9 @@ impl ModuleManifest {
     pub fn from_ir(ir: &Module, module: &str, triple: &str, links: &[String], ptr_size: u32) -> Self {
         let prefix = format!("{}_", module);
         let mut exports = Vec::new();
+        let tagenums: std::collections::HashMap<&str, Vec<&Type>> = ir.sic_tagenum_exports.iter()
+            .map(|(n, vs)| (n.as_str(), vs.iter().filter_map(|(_, _, p)| p.as_ref()).collect()))
+            .collect();
 
         for f in &ir.functions {
             if f.linkage != Linkage::External || !f.name.starts_with(&prefix) {
@@ -119,10 +122,16 @@ impl ModuleManifest {
             if sic_ir::abi::ret_in_memory(&sig.ret, ptr_size) && !sig.params.is_empty() {
                 sig.params.remove(0);
             }
-            if !fn_type_representable(&sig) {
+            // Every aggregate passed or returned BY VALUE must be fully described,
+            // or the consumer would assume a different size (a record-less struct
+            // decodes as empty: std::random::chacha12's by-value return overran
+            // the caller's buffer). Omit such an export instead of exporting a lie.
+            let described = by_value_ok(&sig.ret, &tagenums, ptr_size)
+                && sig.params.iter().all(|p| by_value_ok(p, &tagenums, ptr_size));
+            if !fn_type_representable(&sig) || !described {
                 eprintln!(
-                    "sic: note: module '{}' export '{}' has an unnameable aggregate \
-                     in its signature and is omitted from the manifest",
+                    "sic: note: module '{}' export '{}' passes or returns a type the \
+                     manifest cannot describe and is omitted from the manifest",
                     module, unmangled
                 );
                 continue;
@@ -548,6 +557,28 @@ fn unescape_line(s: &str) -> String {
 }
 
 /// True if every type in a function signature is representable in the manifest.
+/// Whether every struct/union reached BY VALUE from `ty` (through arrays and
+/// tagged-enum payloads; a pointer stops the walk) can be reconstructed by a
+/// consumer: a compiler-known marker, an exported tagged enum, or a type whose
+/// manifest record encodes completely.
+fn by_value_ok(ty: &Type, tagenums: &std::collections::HashMap<&str, Vec<&Type>>, ptr_size: u32) -> bool {
+    match ty {
+        Type::Struct(s) => {
+            let Some(name) = s.name.as_deref() else { return false };
+            if known_marker(name, ptr_size).is_some() { return true; }
+            if let Some(payloads) = tagenums.get(name) {
+                return payloads.iter().all(|p| by_value_ok(p, tagenums, ptr_size));
+            }
+            encode_aggregate_record(ty).is_some()
+                && s.fields.iter().all(|(_, f)| by_value_ok(f, tagenums, ptr_size))
+        }
+        Type::Union(u) => u.name.is_some() && encode_aggregate_record(ty).is_some()
+            && u.fields.iter().all(|(_, f)| by_value_ok(f, tagenums, ptr_size)),
+        Type::Array { elem, .. } => by_value_ok(elem, tagenums, ptr_size),
+        _ => true,
+    }
+}
+
 fn fn_type_representable(ft: &FunctionType) -> bool {
     encode_type(&ft.ret).is_some() && ft.params.iter().all(|p| encode_type(p).is_some())
 }
