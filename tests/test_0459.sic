@@ -1,0 +1,13 @@
+/* The valid ways to iterate a list/dict still work (see test_0458). Returns 42. */
+int main() {
+    list<string> w; w.add("ab"); w.add("c");
+    dict<string, int> d; d["k"] = 30;
+    int n = 0;
+    for (tuple iv : w) { string s = iv[1]; n += s.length; }   // 3
+    for (auto iv : w) { usize i = iv[0]; n += (int)i; }        // 1
+    for (string s : w.values) n += s.length;                   // 3
+    for (tuple kv : d) { int v = kv[1]; n += v; }              // 30
+    for (string k : d.keys) n += k.length;                     // 1
+    for (any a : w) n += 1;                                    // 2
+    return n + 2;                                              // 42
+}

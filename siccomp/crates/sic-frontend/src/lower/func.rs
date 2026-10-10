@@ -4463,6 +4463,27 @@ impl<'m> FuncCtx<'m> {
         let is_list = super::types::is_list(&ity)
             || matches!(&ity, Type::Pointer(i) if super::types::is_list(i));
 
+        // A `list`/`dict` yields `tuple(index|key, value)`: a loop variable of
+        // any other type silently got a converted tuple POINTER (`for (int e : l)`
+        // yielded garbage, `string e` an empty string). Say so, and how to get the
+        // plain elements.
+        if (is_list || is_dict) && !is_set {   // a `set` (a dict) yields elements
+            let is_auto = matches!(ty.storage, Some(StorageClass::Auto));
+            let ok = is_auto || self.lower_type(ty).map_or(true, |t|
+                super::types::is_tuple(&t) || super::types::is_any(&t));
+            if !ok {
+                let (what, alt) = if is_list {
+                    ("a `list` yields `tuple(index, value)`", "iterate `.values` for the plain elements")
+                } else {
+                    ("a `dict` yields `tuple(key, value)`", "iterate `.keys` or `.values` for one side")
+                };
+                return Err(CompileError::at(
+                    format!("range-`for` variable `{}`: {}; declare it `tuple` (or `auto`), or {}",
+                        name, what, alt),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+        }
+
         // (2b) `set<T>` (sic.md §"Set"): iterate its elements (keys) directly.
         if is_set {
             let kname = format!("__fe_k_{}", uid);

@@ -1,0 +1,9 @@
+/* A list yields tuple(index, value): a range-for variable of another type got
+ * a converted tuple pointer (`for (int e : l)` yielded garbage, `string e` an
+ * empty string). It is now an error pointing at `.values`. */
+int main() {
+    list<int> l;
+    l.add(5);
+    for (int e : l) return e;
+    return 0;
+}
