@@ -519,9 +519,9 @@ Elements are owned by the list — string and struct elements are copied and fre
 with the list (and reclaimed when overwritten via `l[i] = …`). `l[i].field` and
 `l[i][j]` work for aggregate elements.
 
-> A bare `list` (or `set`) is an ordinary identifier — the type form is always
-> written generic (`list<T>` / `set<T>`), so existing code that uses `list`/`set` as a
-> variable name is unaffected.
+> A plain `list` is `list<any>` (likewise `set` = `set<any>` and `dict` =
+> `dict<any, any>`). As a type name it is contextual: code that uses `list`/`set`
+> as a variable name is unaffected.
 
 # Set
 
