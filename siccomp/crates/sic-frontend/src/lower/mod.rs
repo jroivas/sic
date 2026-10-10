@@ -18,6 +18,9 @@ pub struct Lowerer {
     pub globals_map: HashMap<String, (Type, GlobalRef)>,
     /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
     pub atomic_globals: std::collections::HashSet<String>,
+    /// Value of each foldable `const` integer global, by global index (see
+    /// `lower_global_var`): an rvalue read becomes an immediate.
+    pub const_global_vals: HashMap<u32, i64>,
     /// sic `atomic` struct fields (sic.md §"Atomics"): `(struct name, field)`.
     /// Their lvalues load/store/RMW atomically and take `.cas`/`.swap`.
     pub atomic_fields: std::collections::HashSet<(String, String)>,
@@ -252,6 +255,7 @@ impl Lowerer {
             module: Module::new(name),
             globals_map: HashMap::new(),
             atomic_globals: std::collections::HashSet::new(),
+            const_global_vals: HashMap::new(),
             atomic_fields: std::collections::HashSet::new(),
             enum_consts: HashMap::new(),
             struct_types: HashMap::new(),
@@ -371,6 +375,7 @@ impl Lowerer {
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
+        types::clear_typedefs();
         let dbg = std::env::var("SIC_TIMING").is_ok();
         let t0 = std::time::Instant::now();
         // sic struct methods (sic.md §"Memory safety" / §"Iterators"): hoist each
@@ -969,6 +974,7 @@ impl Lowerer {
                 if existing_complete { return; }
             }
         }
+        types::note_typedef(&name, &ty);
         self.struct_types.insert(name, ty);
     }
 
@@ -2567,6 +2573,17 @@ impl Lowerer {
         if type_is_const(&d.ty) && matches!(&ir_ty, Type::Int { .. } | Type::Bool) {
             if let Some(Constant::Int(v)) = &init {
                 self.enum_consts.entry(d.name.clone()).or_insert(*v);
+                // Reads of it fold to the value (an immediate, not a load from
+                // memory in every loop iteration — `const i64 N` in a loop bound).
+                // Not for a volatile, weak (overridable at link time) or
+                // thread-local global. Keyed by the global, not the name, so a
+                // same-named static local is unaffected.
+                let volatile = d.ty.qualifiers.contains(&crate::ast::TypeQual::Volatile);
+                if !volatile && !weak && !thread_local {
+                    if let Some((_, gref)) = self.globals_map.get(&d.name) {
+                        self.const_global_vals.insert(gref.0, *v);
+                    }
+                }
             }
         }
         // If already declared, a definition must upgrade a prior `extern`
@@ -3816,6 +3833,15 @@ fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
         AstType::Short { signed } => Type::Int { bits: 16, signed: *signed },
         AstType::Int { signed } => Type::Int { bits: 32, signed: *signed },
         AstType::Long { signed } | AstType::LongLong { signed } => Type::Int { bits: 64, signed: *signed },
+        // sic's built-in aliases, then integer typedefs (`uint8_t`, `size_t`, …).
+        AstType::Named(n) => match n.as_str() {
+            "i8" => Type::Int { bits: 8, signed: true },   "u8" => Type::Int { bits: 8, signed: false },
+            "i16" => Type::Int { bits: 16, signed: true }, "u16" => Type::Int { bits: 16, signed: false },
+            "i32" => Type::Int { bits: 32, signed: true }, "u32" => Type::Int { bits: 32, signed: false },
+            "i64" | "isize" => Type::Int { bits: 64, signed: true },
+            "u64" | "usize" => Type::Int { bits: 64, signed: false },
+            _ => return types::int_typedef(n),
+        },
         _ => return None,
     })
 }

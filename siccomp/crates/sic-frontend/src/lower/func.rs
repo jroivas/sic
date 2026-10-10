@@ -2383,6 +2383,7 @@ impl<'m> FuncCtx<'m> {
                     // locals (the scope-less lowerer made every such T an `int` —
                     // QEMU's loongarch DO_VMUH multiplied in 32 bits).
                     if let Ok(ir_ty) = self.lower_type(ty) {
+                        super::types::note_typedef(name, &ir_ty);
                         self.lowerer.struct_types.insert(name.clone(), ir_ty);
                     }
                 }

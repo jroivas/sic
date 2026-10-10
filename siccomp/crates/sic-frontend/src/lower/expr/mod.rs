@@ -583,6 +583,12 @@ impl<'m> FuncCtx<'m> {
                         if matches!(ty, Type::Array { .. }) {
                             return Ok(Val::Global(gref));
                         }
+                        // A `const` integer global with a known value is that value.
+                        if !atomic {
+                            if let Some(&v) = self.lowerer.const_global_vals.get(&gref.0) {
+                                return self.coerce(Constant::int(v), &ty);
+                            }
+                        }
                         let dest = self.alloc_val();
                         if atomic {
                             self.push_instr(Instr::AtomicLoad { dest, ptr: Val::Global(gref), ty });

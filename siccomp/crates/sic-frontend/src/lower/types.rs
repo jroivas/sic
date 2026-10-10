@@ -12,6 +12,31 @@ thread_local! {
     /// enum comes out length 0 — QEMU's `init_type_list[MODULE_INIT_MAX]` then
     /// overlaps the next global and crashes at startup.
     static ENUM_CONSTS: RefCell<HashMap<String, i64>> = RefCell::new(HashMap::new());
+    /// Typedef names that denote an integer/bool type (`uint8_t` → u8), recorded
+    /// as typedefs are registered, so type-blind constant folding can apply a
+    /// cast to one: `(uint8_t)(U8 + 100)` must fold to 44, not 300 (a folded
+    /// `if` condition took the wrong branch).
+    static INT_TYPEDEFS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+}
+
+/// Record typedef `name` → `ty` for constant folding (an integer/bool type is
+/// remembered; any other type shadows an earlier integer typedef of that name).
+pub fn note_typedef(name: &str, ty: &Type) {
+    INT_TYPEDEFS.with(|m| {
+        let mut m = m.borrow_mut();
+        if matches!(ty, Type::Int { .. } | Type::Bool) { m.insert(name.to_string(), ty.clone()); }
+        else { m.remove(name); }
+    });
+}
+
+/// Forget all recorded typedefs (start of a translation unit).
+pub fn clear_typedefs() {
+    INT_TYPEDEFS.with(|m| m.borrow_mut().clear());
+}
+
+/// The integer/bool type a typedef name denotes, if recorded.
+pub fn int_typedef(name: &str) -> Option<Type> {
+    INT_TYPEDEFS.with(|m| m.borrow().get(name).cloned())
 }
 
 /// Publish the current file-scope enum constants for array-dimension folding.

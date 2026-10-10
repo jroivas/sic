@@ -1,0 +1,15 @@
+// SIC `const` globals (loop bounds in idiomatic SIC) fold to immediates with
+// their declared types: `const i64 N`, `const u8`, `const i32 MAXLEN`. Returns 42.
+const i64 N = 3000000000;
+const u8 SMALL = 250;
+const i32 MAXLEN = 64;
+int main() {
+    i64 n = N;
+    if (n / 1000000000 != 3 || n * 2 != 6000000000) return 1;
+    if (SMALL + 10 != 260) return 2;
+    i32 len = 0;
+    while (len < MAXLEN && len != 40) len++;
+    const i32 *p = &MAXLEN;
+    if (*p != 64) return 3;
+    return len + 2;
+}
