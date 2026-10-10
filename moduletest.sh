@@ -549,6 +549,43 @@ else
     bad "module-namespaced-var" "build failed: $(cat err)"
 fi
 
+# ── Containers are released in a module consumer ────────────────────────────
+# A consumer whose container runtime lives in the module's library looked up
+# __sic_list_free without declaring it; where nothing had declared it yet, the
+# scope-exit release was silently dropped (a list unwrapped from a module's
+# Option<list>, and the `.values` projection of a range-for, leaked).
+mkdir -p lkmod
+cat > lkmod/lk.sic <<'EOF'
+module lk;
+Option<list<int>> nums(int n) { list<int> l; for (int i = 0; i < n; i++) l.add(i); return Option::Some(l); }
+EOF
+cat > lkuse.sic <<'EOF'
+import lk;
+#include <malloc.h>
+int sum(int n) {
+    auto l = lk::nums(n) else return -1;
+    int s = 0;
+    for (int v : l.values) s += v;
+    return s;
+}
+int main() {
+    for (int i = 0; i < 10; i++) sum(8);
+    usize before = mallinfo2().uordblks;
+    int t = 0;
+    for (int i = 0; i < 2000; i++) t += sum(8);
+    usize after = mallinfo2().uordblks;
+    if (t != 2000 * 28) return 2;
+    return after - before < 4096 ? 42 : 1;
+}
+EOF
+if "$SIC" --emit-module lkmod 2>err && "$SIC" lkuse.sic -Ilkmod -o lkuse 2>err; then
+    ./lkuse; got=$?
+    [ "$got" -eq 42 ] && ok "module-consumer-container-release" \
+        || bad "module-consumer-container-release" "expected 42 (no leak), got $got"
+else
+    bad "module-consumer-container-release" "build failed: $(cat err)"
+fi
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.

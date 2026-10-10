@@ -736,12 +736,17 @@ impl<'m> FuncCtx<'m> {
             Cleanup::DictFree { slot } => {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
-                let _ = self.emit_bigint_call("__sic_dict_free", vec![Val::Local(p)], Type::Void);
+                // Declared on demand: in a program that gets the container runtime
+                // from a module (libstd) it is not predefined, and the old lookup
+                // silently dropped the call — every dict/list local leaked.
+                let f = self.dict_runtime_fn("__sic_dict_free");
+                self.push_instr(Instr::Call { dest: None, func: f, args: vec![Val::Local(p)], ret_ty: Type::Void });
             }
             Cleanup::ListFree { slot } => {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
-                let _ = self.emit_bigint_call("__sic_list_free", vec![Val::Local(p)], Type::Void);
+                let f = self.list_runtime_fn("__sic_list_free");
+                self.push_instr(Instr::Call { dest: None, func: f, args: vec![Val::Local(p)], ret_ty: Type::Void });
             }
             Cleanup::AnyRelease { addr } => { let _ = self.any_refcount_at(addr, false); }
             Cleanup::ClosureRelease { slot } => {
