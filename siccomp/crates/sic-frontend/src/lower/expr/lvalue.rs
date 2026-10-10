@@ -279,11 +279,10 @@ impl<'m> FuncCtx<'m> {
         // Resolve the member — including through anonymous struct/union members —
         // to a cumulative byte offset, type, and (if any) bit-field descriptor.
         let (byte_offset, field_ty, bitfield) =
-            resolve_field_access(&struct_ty, field_name, self.ptr_size(), &self.lowerer.struct_types)
-                .ok_or_else(|| CompileError::at(
-                    format!("no field '{}' in type", field_name),
-                    sp.file.clone(), sp.line, sp.col,
-                ))?;
+            match resolve_field_access(&struct_ty, field_name, self.ptr_size(), &self.lowerer.struct_types) {
+                Some(r) => r,
+                None => return Err(self.no_member_error(&struct_ty, field_name, sp)),
+            };
 
         let atomic = self.is_atomic_field(&struct_ty, field_name);
         let base_ptr = lv.ptr;
@@ -293,6 +292,42 @@ impl<'m> FuncCtx<'m> {
             dest, base: base_ptr, field_idx: 0, struct_name: None, byte_offset, result_ty,
         });
         Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic })
+    }
+
+    /// "no field 'x' in type" with the type named — and, for a tagged enum
+    /// (`Option<T>`, `Result<T, E>`, …) whose payload has that member, a hint to
+    /// unwrap it first: `g.gen64()` on an `Option<SplitMix64>` (std::random's
+    /// constructors return one) said only "no field 'gen64' in type".
+    pub(crate) fn no_member_error(&self, ty: &Type, member: &str, sp: &crate::lexer::Span) -> CompileError {
+        let resolved = super::super::types::resolve_aggregate(ty, &self.lowerer.struct_types);
+        let name = match &resolved {
+            Type::Struct(st) => st.name.clone(),
+            Type::Union(u) => u.name.clone(),
+            _ => None,
+        };
+        let shown = name.as_deref().map(pretty_type_name).unwrap_or_else(|| "this type".to_string());
+        let what = if self.is_sic() { "field or method" } else { "field" };
+        let mut msg = match &name {
+            Some(_) => format!("'{}' has no {} '{}'", shown, what, member),
+            None => format!("no {} '{}' in this type", what, member),
+        };
+        // A tagged enum whose payload has the member: unwrap first.
+        if let Some(info) = name.as_ref().and_then(|n| self.lowerer.enum_defs.get(n)) {
+            let has = |t: &Type| -> bool {
+                let t = match t { Type::Pointer(inner) => inner.as_ref().clone(), t => t.clone() };
+                match super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types) {
+                    Type::Struct(st) => st.fields.iter().any(|(f, _)| f == member)
+                        || st.name.as_ref().map_or(false, |sn| self.lowerer.struct_methods.contains_key(&(sn.clone(), member.to_string()))),
+                    _ => false,
+                }
+            };
+            if let Some(v) = info.variants.iter().find(|v| v.payload.as_ref().map_or(false, |p| has(p))) {
+                msg.push_str(&format!(
+                    "; the value is an enum — unwrap it first, e.g. `auto v = x else return …;` \
+                     or `match (x) {{ {}(v): … v.{} …; _: … }}`", v.name, member));
+            }
+        }
+        CompileError::at(msg, sp.file.clone(), sp.line, sp.col)
     }
 
     /// Whether `field` of struct type `struct_ty` is declared `atomic` (sic).
@@ -418,4 +453,11 @@ impl<'m> FuncCtx<'m> {
             }
         }
     }
+}
+
+/// A registry type name as the user writes it: generic arguments without the
+/// `s_` struct prefix (`Option<s_SplitMix64>` → `Option<SplitMix64>`) and
+/// namespace mangling undone (`Thread__Status` → `Thread::Status`).
+fn pretty_type_name(n: &str) -> String {
+    n.replace("<s_", "<").replace(",s_", ",").replace("__", "::")
 }
