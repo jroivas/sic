@@ -121,6 +121,9 @@ pub struct Lowerer {
     /// sic namespaces (sic.md §"Namespace"): `(namespace, member)` → the mangled
     /// top-level symbol the member was flattened to, so `N::member` resolves.
     pub namespace_members: HashMap<(String, String), String>,
+    /// sic namespaced enums (sic.md §"Namespace"): `(scope, name)` → mangled
+    /// registry name (`("Thread", "Status")` → `Thread__Status`).
+    pub namespace_types: HashMap<(String, String), String>,
     /// sic module type export (sic.md §"Namespace"/§"Imports"): names of aggregate
     /// types *defined in this module*, in definition order, to publish in the
     /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
@@ -279,6 +282,7 @@ impl Lowerer {
             c_enum_alias: HashMap::new(),
             struct_methods: HashMap::new(),
             namespace_members: HashMap::new(),
+            namespace_types: HashMap::new(),
             module_defined_types: Vec::new(),
             imported_type_names: std::collections::HashSet::new(),
             qualified_only: HashMap::new(),
@@ -1914,12 +1918,23 @@ impl Lowerer {
     /// that enum's name. `enum E`, and a bare `Named`/typedef referring to one, all
     /// resolve; a tagged (payload-carrying) enum has struct identity already and is
     /// not tracked here.
+    /// The registry key of a possibly scope-qualified type or enum name (see
+    /// `types::scoped_type_key`): `Thread::Status` / `std::Thread::Status` →
+    /// `Thread__Status` when that namespaced type exists, else the last segment.
+    pub(crate) fn type_key(&self, path: &str) -> String {
+        types::scoped_type_key(path, |k| self.struct_types.contains_key(k)
+            || self.enum_defs.contains_key(k) || self.c_enum_defs.contains_key(k)
+            || self.bitfield_defs.contains_key(k) || self.generic_enum_defs.contains_key(k)
+            || self.c_enum_alias.contains_key(k))
+    }
+
     pub(crate) fn c_enum_name_of_ast(&self, ty: &crate::ast::AstType) -> Option<String> {
         use crate::ast::AstType;
         match ty {
             AstType::Enum(e) => e.name.as_ref()
                 .filter(|n| self.c_enum_defs.contains_key(*n)).cloned(),
             AstType::Named(n) | AstType::Builtin(n) => {
+                let n = &self.type_key(n);
                 if let Some(canon) = self.c_enum_alias.get(n) { return Some(canon.clone()); }
                 if self.c_enum_defs.contains_key(n) { return Some(n.clone()); }
                 None
@@ -1996,17 +2011,20 @@ impl Lowerer {
             }
         }
         // Second pass, once every member of every namespace is known: a bare
-        // member name inside a namespace's own code names the mangled symbol.
+        // member (or enum type) name inside a namespace's own code names the
+        // mangled symbol — innermost enclosing namespace first.
+        fn chain(map: &HashMap<(String, String), String>, scope: &str, name: &str) -> Option<String> {
+            let mut s = scope;
+            loop {
+                if let Some(m) = map.get(&(s.to_string(), name.to_string())) { return Some(m.clone()); }
+                match s.rfind("::") { Some(i) => s = &s[..i], None => return None }
+            }
+        }
         for (idx, scope) in &scoped {
-            let members = &self.namespace_members;
-            let resolve = |name: &str| -> Option<String> {
-                let mut s = scope.as_str();
-                loop {
-                    if let Some(m) = members.get(&(s.to_string(), name.to_string())) { return Some(m.clone()); }
-                    match s.rfind("::") { Some(i) => s = &s[..i], None => return None }
-                }
-            };
-            ns_resolve::NsRenamer::new(&resolve).top_decl(&mut out[*idx]);
+            let (members, types) = (&self.namespace_members, &self.namespace_types);
+            let resolve = |name: &str| chain(members, scope, name);
+            let resolve_type = |name: &str| chain(types, scope, name);
+            ns_resolve::NsRenamer::new(&resolve, &resolve_type).top_decl(&mut out[*idx]);
         }
         tu.decls = out;
     }
@@ -2023,7 +2041,9 @@ impl Lowerer {
                     self.namespace_members.insert((scope.to_string(), name), mangled.clone());
                     out.push(Decl::Func { name: mangled, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, is_async, span });
                 }
-                Decl::Var { base_ty, mut declarators, weak, thread_local, span } => {
+                Decl::Var { mut base_ty, mut declarators, weak, thread_local, span } => {
+                    // `enum Status { … };` (and `enum E { … } v;`) define an enum.
+                    if let AstType::Enum(ed) = &mut base_ty.ty { self.mangle_ns_enum(scope, &prefix, ed); }
                     for de in &mut declarators {
                         let mangled = format!("{}__{}", prefix, de.name);
                         self.namespace_members.insert((scope.to_string(), de.name.clone()), mangled.clone());
@@ -2034,10 +2054,27 @@ impl Lowerer {
                 Decl::Namespace { name: inner, decls, .. } => {
                     self.flatten_ns_into(&format!("{}::{}", scope, inner), decls, out, scoped);
                 }
-                // Types (struct/union/enum/typedef) are hoisted to file scope as-is;
-                // qualified `N::Type` access is not supported yet.
+                // An enum is registered under a mangled name (`N__Status`) so two
+                // namespaces may each define a `Status`; `N::Status` and a bare
+                // `Status` inside `N` resolve to it. Structs/unions/typedefs are
+                // still hoisted under their bare names.
+                Decl::EnumDecl(mut ed) => {
+                    self.mangle_ns_enum(scope, &prefix, &mut ed);
+                    out.push(Decl::EnumDecl(ed));
+                }
                 other => out.push(other),
             }
+        }
+    }
+
+    /// Give a namespace's enum definition its mangled registry name (generic
+    /// enums keep theirs: instantiation is keyed by the template name).
+    fn mangle_ns_enum(&mut self, scope: &str, prefix: &str, ed: &mut EnumDef) {
+        if ed.variants.is_none() || !ed.type_params.is_empty() { return; }
+        if let Some(n) = ed.name.clone() {
+            let mangled = format!("{}__{}", prefix, n);
+            self.namespace_types.insert((scope.to_string(), n), mangled.clone());
+            ed.name = Some(mangled);
         }
     }
 
@@ -2163,7 +2200,7 @@ impl Lowerer {
         match ty {
             AstType::Bitfield(b) => Some(b.name.clone()),
             AstType::Named(n) | AstType::Builtin(n)
-                if self.bitfield_defs.contains_key(n) => Some(n.clone()),
+                if self.bitfield_defs.contains_key(&self.type_key(n)) => Some(self.type_key(n)),
             _ => None,
         }
     }

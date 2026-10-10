@@ -600,6 +600,7 @@ impl<'m> FuncCtx<'m> {
             AstType::Enum(e) => e.name.as_ref()
                 .filter(|n| self.lowerer.c_enum_defs.contains_key(*n)).cloned(),
             AstType::Named(n) | AstType::Builtin(n) => {
+                let n = &self.lowerer.type_key(n);
                 if let Some(canon) = self.lowerer.c_enum_alias.get(n) { return Some(canon.clone()); }
                 if self.lowerer.c_enum_defs.contains_key(n) { return Some(n.clone()); }
                 None
@@ -770,7 +771,7 @@ impl<'m> FuncCtx<'m> {
         match ty {
             AstType::Bitfield(b) => Some(b.name.clone()),
             AstType::Named(n) | AstType::Builtin(n)
-                if self.lowerer.bitfield_defs.contains_key(n) => Some(n.clone()),
+                if self.lowerer.bitfield_defs.contains_key(&self.lowerer.type_key(n)) => Some(self.lowerer.type_key(n)),
             _ => None,
         }
     }

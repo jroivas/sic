@@ -1,0 +1,31 @@
+// Enums of the same name in different namespaces stay distinct (std has both
+// File::Status and Thread::Status): a namespace's enum is registered mangled
+// (`A__Status`); inside the namespace the bare name finds it, outside `A::Status`
+// does. Also: `auto x = N::f()` infers the namespace function's return type
+// (it fell back to int). Returns 42.
+namespace A {
+    enum Status { Ok, Bad(int) };
+    enum Mode { Read, Write };
+    Status f() { return Status::Bad(3); }
+    Mode m() { return Mode::Write; }
+}
+namespace B {
+    enum Status { Created(int*), Joined, Failed(int) };
+    enum Mode { Write, Read, RW };            // same names, other values
+    Status g() { return Status::Failed(30); }
+    Mode m() { return Mode::RW; }
+}
+int main() {
+    auto x = A::f();
+    auto y = B::g();
+    A::Status z = A::Status::Ok;
+    int r = 0;
+    match (x) { A::Status::Bad(v): r = v; _: r = 100; }          // 3
+    match (y) { B::Status::Failed(v): r = r + v; _: r = r + 1000; } // 33
+    match (z) { A::Status::Ok: r = r + 1; _: r = r + 1000; }     // 34
+    if (A::m() != A::Mode::Write || A::Mode::Write != 1) return 1;
+    if (B::m() != B::Mode::RW || B::Mode::Write != 0) return 2;
+    B::Status w = B::Status::Joined;
+    match (w) { B::Status::Joined: r = r + 8; _: r = r + 1000; }  // 42
+    return r;
+}

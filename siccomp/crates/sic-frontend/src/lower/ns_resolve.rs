@@ -19,13 +19,22 @@ pub(crate) struct NsRenamer<'a> {
     /// Member name → mangled symbol for the namespace chain of the code being
     /// renamed (innermost scope first), or `None` when not a member.
     resolve: &'a dyn Fn(&str) -> Option<String>,
+    /// Bare enum type name → its mangled registry name (`Status` → `N__Status`).
+    resolve_type: &'a dyn Fn(&str) -> Option<String>,
     /// Names declared in the enclosing function scopes (innermost last).
     scopes: Vec<HashSet<String>>,
 }
 
 impl<'a> NsRenamer<'a> {
-    pub(crate) fn new(resolve: &'a dyn Fn(&str) -> Option<String>) -> Self {
-        NsRenamer { resolve, scopes: Vec::new() }
+    pub(crate) fn new(resolve: &'a dyn Fn(&str) -> Option<String>,
+                      resolve_type: &'a dyn Fn(&str) -> Option<String>) -> Self {
+        NsRenamer { resolve, resolve_type, scopes: Vec::new() }
+    }
+
+    /// A bare (unqualified) type or enum name naming a namespace enum.
+    fn rename_type(&self, name: &mut String) {
+        if name.contains("::") { return; }
+        if let Some(m) = (self.resolve_type)(name) { *name = m; }
     }
 
     fn shadowed(&self, name: &str) -> bool {
@@ -121,7 +130,13 @@ impl<'a> NsRenamer<'a> {
             AstType::Typeof(e) => self.expr(e),
             AstType::Struct(sd) => self.struct_def(sd),
             AstType::Union(ud) => self.fields(ud.fields.as_mut()),
-            AstType::Enum(ed) => self.enum_def(ed),
+            AstType::Enum(ed) => {
+                // `enum Status x` names a namespace enum (a body is a definition,
+                // already renamed when hoisted).
+                if ed.variants.is_none() { if let Some(n) = &mut ed.name { self.rename_type(n); } }
+                self.enum_def(ed)
+            }
+            AstType::Named(n) => self.rename_type(n),
             AstType::Generic { args, .. } => for a in args.iter_mut() { self.qual_type(a); },
             AstType::Closure { ret, params } => {
                 self.qual_type(ret);
@@ -130,7 +145,7 @@ impl<'a> NsRenamer<'a> {
             AstType::Void | AstType::Char { .. } | AstType::Short { .. } | AstType::Int { .. }
             | AstType::Long { .. } | AstType::LongLong { .. } | AstType::Float | AstType::Double
             | AstType::LongDouble | AstType::Bool | AstType::Complex | AstType::Bitfield(_)
-            | AstType::Named(_) | AstType::Builtin(_) | AstType::Tuple | AstType::Fixed { .. }
+            | AstType::Builtin(_) | AstType::Tuple | AstType::Fixed { .. }
             | AstType::Auto => {}
         }
     }
@@ -306,7 +321,9 @@ impl<'a> NsRenamer<'a> {
             ExprKind::VaCopy { dst, src } => { self.expr(dst); self.expr(src); }
             ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::BoolLit(_) | ExprKind::BigIntLit(_)
             | ExprKind::DecimalLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_)
-            | ExprKind::CharLit(_) | ExprKind::Nullptr | ExprKind::EnumVariant { .. } => {}
+            | ExprKind::CharLit(_) | ExprKind::Nullptr => {}
+            // `Status::Joined` inside the namespace that defines `Status`.
+            ExprKind::EnumVariant { enum_name, .. } => self.rename_type(enum_name),
         }
     }
 }

@@ -900,7 +900,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 "_Float16" | "__bf16" | "__fp16" => return Ok(Type::Int { bits: 16, signed: false }),
                 _ => {}
             }
-            named.get(n).cloned().ok_or_else(|| {
+            let key = scoped_type_key(n, |k| named.contains_key(k));
+            named.get(&key).cloned().ok_or_else(|| {
                 CompileError::new(format!("unknown type '{}'", n))
             })?
         }
@@ -1296,4 +1297,22 @@ pub const SIC_STRING_NAME: &str = "__sic_string";
 /// Whether `ty` is sic's native `string` slice type.
 pub fn is_sic_string(ty: &Type) -> bool {
     matches!(ty, Type::Struct(st) if st.name.as_deref() == Some(SIC_STRING_NAME))
+}
+
+/// The registry key of a possibly scope-qualified type name (sic.md
+/// §"Namespace"). A type declared in a namespace is registered mangled
+/// (`namespace Thread { enum Status }` → `Thread__Status`), so two namespaces can
+/// each have a `Status`. A path resolves to its LONGEST suffix that names a known
+/// type, joined with `__`: `std::Thread::Status` → `Thread__Status` (the module
+/// prefix is not part of the key). Types still hoisted under their bare name
+/// (structs) resolve by the last segment, as before. An unqualified name is
+/// returned unchanged.
+pub(crate) fn scoped_type_key(path: &str, known: impl Fn(&str) -> bool) -> String {
+    if !path.contains("::") { return path.to_string(); }
+    let segs: Vec<&str> = path.split("::").collect();
+    for start in 0..segs.len() {
+        let key = segs[start..].join("__");
+        if known(&key) { return key; }
+    }
+    segs[segs.len() - 1].to_string()
 }

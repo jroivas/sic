@@ -3486,10 +3486,11 @@ impl<'m> FuncCtx<'m> {
         if !self.is_sic() { return None; }
         let ExprKind::EnumVariant { enum_name, variant } = &e.kind else { return None };
         let mut names: Vec<String> = vec![enum_name.clone()];
-        if let Some(last) = enum_name.rsplit("::").next() { names.push(last.to_string()); }
+        let key = self.lowerer.type_key(enum_name);
+        names.push(key.clone());
         if let Some(Type::Struct(st)) = other {
             if let Some(n) = &st.name {
-                let base = enum_name.rsplit("::").next().unwrap_or(enum_name);
+                let base = key.as_str();
                 if n == base || n.starts_with(&format!("{}<", base)) { names.push(n.clone()); }
             }
         }

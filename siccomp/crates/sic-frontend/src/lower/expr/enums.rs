@@ -7,10 +7,10 @@ use super::*;
 impl<'m> FuncCtx<'m> {
     /// sic (sic.md §"Match"/§"Namespace"): the discriminant of a plain (payload-less)
     /// C enum variant named `Enum::VARIANT`. `enum_name` may be scope-qualified
-    /// (`N::E`, `mod::E`); the enum is its last `::` segment (alias-resolved).
+    /// (`N::E`, `mod::E`); the enum is its registry key (alias-resolved).
     pub(crate) fn resolve_plain_enum_const(&self, enum_name: &str, variant: &str) -> Option<i64> {
-        let ename = enum_name.rsplit("::").next().unwrap_or(enum_name);
-        let canon = self.lowerer.c_enum_alias.get(ename).map(|s| s.as_str()).unwrap_or(ename);
+        let ename = self.lowerer.type_key(enum_name);
+        let canon = self.lowerer.c_enum_alias.get(&ename).map(|s| s.as_str()).unwrap_or(&ename);
         let vs = self.lowerer.c_enum_defs.get(canon)?;
         vs.iter().find(|(n, _)| n == variant).map(|(_, v)| *v)
     }
@@ -39,7 +39,7 @@ impl<'m> FuncCtx<'m> {
     /// for a missing module member — and type inference gave it no location.
     pub(crate) fn unresolved_path_error(&self, path: &str, name: &str, sp: &crate::lexer::Span) -> CompileError {
         let (head, rest) = match path.split_once("::") { Some((h, r)) => (h, Some(r)), None => (path, None) };
-        let leaf = path.rsplit("::").next().unwrap_or(path);
+        let leaf = &self.lowerer.type_key(path);
         let msg = if self.is_sic() && self.lowerer.imported_modules.contains_key(head) {
             let sym = match rest { Some(r) => format!("{}__{}", r.replace("::", "__"), name), None => name.to_string() };
             self.lowerer.module_missing_symbol(head, &sym)
@@ -64,10 +64,12 @@ impl<'m> FuncCtx<'m> {
                 return Ok(Constant::int(v));
             }
         }
-        // A scope-qualified tagged enum `mod::Enum` / `N::Enum` resolves to its last
-        // `::` segment (sic.md §"Namespace").
+        // A scope-qualified tagged enum `mod::N::Enum` / `N::Enum` resolves to its
+        // registry key (sic.md §"Namespace").
+        let key;
         let enum_name = if self.is_sic() && !self.lowerer.enum_defs.contains_key(enum_name) {
-            enum_name.rsplit("::").next().unwrap_or(enum_name)
+            key = self.lowerer.type_key(enum_name);
+            key.as_str()
         } else { enum_name };
         // A generic constructor (`Option::Some(5)` / `None`) names the template;
         // resolve it to the concrete monomorph via the expected target type.

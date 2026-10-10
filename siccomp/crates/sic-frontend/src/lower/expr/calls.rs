@@ -250,8 +250,7 @@ impl<'m> FuncCtx<'m> {
             // qualified *enum* path `mod::Enum::Variant(x)` is a construct/unwrap, not
             // a member call — let it fall through to `construct_enum`.
             if self.is_sic() {
-                let leaf = enum_name.rsplit("::").next().unwrap_or(enum_name);
-                let is_enum = self.lowerer.enum_defs.contains_key(leaf)
+                let is_enum = self.lowerer.enum_defs.contains_key(&self.lowerer.type_key(enum_name))
                     || self.resolve_plain_enum_const(enum_name, variant).is_some();
                 if let Some((module, rest)) = enum_name.split_once("::") {
                     if !is_enum && self.lowerer.imported_modules.contains_key(module) {

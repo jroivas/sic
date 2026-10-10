@@ -343,11 +343,11 @@ impl<'m> FuncCtx<'m> {
                 // target type (sic.md §"Match").
                 let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
                 let ename0 = resolved.as_deref().unwrap_or(enum_name);
-                // A module/namespace-qualified enum (`mod::Enum`) is keyed by its
-                // last segment.
-                let ename = if self.lowerer.enum_defs.contains_key(ename0) { ename0 }
-                            else { ename0.rsplit("::").next().unwrap_or(ename0) };
-                self.lowerer.enum_defs.get(ename).map(|i| i.struct_type.clone())
+                // A module/namespace-qualified enum (`mod::N::Enum`) resolves to its
+                // registry key (`N__Enum`, or the last segment).
+                let ename = if self.lowerer.enum_defs.contains_key(ename0) { ename0.to_string() }
+                            else { self.lowerer.type_key(ename0) };
+                self.lowerer.enum_defs.get(&ename).map(|i| i.struct_type.clone())
                     .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
@@ -394,19 +394,31 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // sic namespace member call `N::f(args)` (sic.md §"Namespace"): the
+                // hoisted `N__f`'s return type. It fell through to `int`, so
+                // `auto st = N::f();` returning a tagged enum failed to convert.
+                if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
+                    if self.is_sic() {
+                        if let Some(m) = self.lowerer.namespace_members.get(&(enum_name.clone(), variant.clone())).cloned() {
+                            let callee = Expr { kind: ExprKind::Ident(m), span: func.span.clone() };
+                            let call = Expr { kind: ExprKind::Call { func: Box::new(callee), args: args.clone() }, span: expr.span.clone() };
+                            return self.infer_expr_type(&call);
+                        }
+                    }
+                }
                 // sic tagged-enum constructor / unwrap.
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
                     let resolved = self.resolve_generic_ctor(enum_name, &expr.span).ok().flatten();
                     let enum_name0 = resolved.as_deref().unwrap_or(enum_name.as_str());
-                    let enum_name = if self.lowerer.enum_defs.contains_key(enum_name0) { enum_name0 }
-                                    else { enum_name0.rsplit("::").next().unwrap_or(enum_name0) };
-                    if let Some(info) = self.lowerer.enum_defs.get(enum_name) {
+                    let enum_name = if self.lowerer.enum_defs.contains_key(enum_name0) { enum_name0.to_string() }
+                                    else { self.lowerer.type_key(enum_name0) };
+                    if let Some(info) = self.lowerer.enum_defs.get(&enum_name) {
                         // `Enum::VARIANT(inst)` unwraps → payload type; otherwise
                         // it constructs → the enum struct.
                         if let Some(v) = info.variant(variant) {
                             if v.payload.is_some() && args.len() == 1 {
                                 if let Ok(t) = self.infer_expr_type(&args[0]) {
-                                    if self.is_enum_struct(&t, enum_name) {
+                                    if self.is_enum_struct(&t, &enum_name) {
                                         return Ok(v.payload.clone().unwrap());
                                     }
                                 }
