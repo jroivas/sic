@@ -1,0 +1,151 @@
+module std;
+
+#include <pthread.h>
+#include <sched.h>
+#include <time.h>
+#include <errno.h>
+
+// Threads: run a closure on a new POSIX thread.
+//
+//     auto st = std::Thread::Spawn([n]() { work(n); });
+//     match (st) {
+//         std::Thread::ThreadStatus::Created(t): std::Thread::Join(t);
+//         _: return 1;
+//     }
+//
+// The Thread object is owned by the wrapper: Join() waits for the thread and
+// frees it; after Detach() the thread frees it itself when it finishes. Either
+// way the handle must not be used afterwards.
+//
+// sic reference counts are not atomic: hand a closure (and the strings, lists,
+// … it captures) over to the thread rather than using it from both threads at
+// once. Scalars captured by value are always safe.
+namespace Thread
+{
+    // Lifecycle of a Thread, changed only by compare-and-swap so that exactly
+    // one side frees it: the thread ending (Running → Finished) or Detach()
+    // (Running → Detached). Whoever finds the other state already set frees it.
+    static const int RUNNING = 0;
+    static const int FINISHED = 1;
+    static const int DETACHED = 2;
+
+    struct Thread {
+        pthread_t thread;
+        Fn<void(list<any>)> func;   // Create(): called with `args`
+        list<any> args;
+        Fn<void()> run;             // Spawn(): called with no arguments
+        bool has_args;
+        int state;
+        ~Thread()
+        {
+            del func;
+            del args;
+            del run;
+        }
+    };
+
+    enum ThreadStatus {
+        Created(Thread*),
+        Joined,
+        Detached,
+        InvalidObject,
+        NoMemory,
+        Error(int),                 // the pthread error number (EAGAIN, …)
+    };
+
+    // The pthread entry point: run the thread's function, then finish its
+    // lifecycle (freeing the Thread if it was detached meanwhile).
+    static void *thread_main(void *arg)
+    {
+        Thread *thr = (Thread *)arg;
+
+        if (thr->has_args)
+            thr->func(thr->args);
+        else
+            thr->run();
+
+        if (!__sync_bool_compare_and_swap(&thr->state, RUNNING, FINISHED))
+            del thr;                // detached: nobody else will free it
+        return NULL;
+    }
+
+    static ThreadStatus start(Thread *thr)
+    {
+        thr->state = RUNNING;
+        int res = pthread_create(&thr->thread, NULL, thread_main, thr);
+        if (res != 0)
+        {
+            del thr;
+            return ThreadStatus::Error(res);
+        }
+        return ThreadStatus::Created(thr);
+    }
+
+    // Run `func(args)` on a new thread.
+    ThreadStatus Create(Fn<void(list<any>)> func, list<any> args)
+    {
+        Thread *thr = new Thread() else return ThreadStatus::NoMemory;
+        thr->func = func;
+        thr->args = args;
+        thr->has_args = true;
+        return start(thr);
+    }
+
+    // Run `func()` on a new thread — a closure carries its own state.
+    ThreadStatus Spawn(Fn<void()> func)
+    {
+        Thread *thr = new Thread() else return ThreadStatus::NoMemory;
+        thr->run = func;
+        thr->has_args = false;
+        return start(thr);
+    }
+
+    // Wait for the thread to finish, then free it.
+    ThreadStatus Join(Thread *thr)
+    {
+        if (!thr)
+            return ThreadStatus::InvalidObject;
+
+        int res = pthread_join(thr->thread, NULL);
+        if (res != 0)
+            return ThreadStatus::Error(res);
+        del thr;
+        return ThreadStatus::Joined;
+    }
+
+    // Let the thread run on its own; it frees itself when it finishes.
+    ThreadStatus Detach(Thread *thr)
+    {
+        if (!thr)
+            return ThreadStatus::InvalidObject;
+
+        int res = pthread_detach(thr->thread);
+        if (res != 0)
+            return ThreadStatus::Error(res);
+        // Already finished: its end saw no Detach, so the Thread is ours to free.
+        if (!__sync_bool_compare_and_swap(&thr->state, RUNNING, DETACHED))
+            del thr;
+        return ThreadStatus::Detached;
+    }
+
+    // An identifier of the calling thread.
+    u64 Id()
+    {
+        return (u64)pthread_self();
+    }
+
+    // Suspend the calling thread for `ms` milliseconds.
+    void Sleep(u64 ms)
+    {
+        timespec ts;
+        ts.tv_sec = (i64)(ms / 1000);
+        ts.tv_nsec = (i64)((ms % 1000) * 1000000);
+        while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
+    }
+
+    // Give up the processor to another runnable thread.
+    void Yield()
+    {
+        sched_yield();
+    }
+}

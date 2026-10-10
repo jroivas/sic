@@ -226,6 +226,91 @@ else
     bad "std-static" "static compile/link failed: $(cat err)"
 fi
 
+# std::Thread (lib/std/thread.sic): Spawn/Create/Join/Detach/Id/Sleep/Yield; eight
+# threads add to one counter atomically, a detached thread frees itself. The
+# closures cross threads, so their reference counts must be atomic.
+cat > stdthread.sic <<'EOF'
+// std::Thread: Spawn (closure), Create (closure + list<any> arguments), Join,
+// Detach, Id, Sleep, Yield. Several threads add to one counter atomically; a
+// detached thread frees itself. Returns 42.
+import std;
+
+int counter = 0;
+int detached_done = 0;
+
+int join(std::Thread::ThreadStatus st)
+{
+    match (st) {
+        std::Thread::ThreadStatus::Created(t): {
+            match (std::Thread::Join(t)) {
+                std::Thread::ThreadStatus::Joined: return 1;
+                _: return 0;
+            }
+        }
+        _: return 0;
+    }
+}
+
+int main()
+{
+    u64 main_id = std::Thread::Id();
+    int joined = 0;
+
+    // Eight closures, each capturing its own increment.
+    for (int i = 1; i <= 8; i++) {
+        int add = i;
+        joined += join(std::Thread::Spawn([add]() {
+            for (int k = 0; k < 1000; k++) __sync_fetch_and_add(&counter, add);
+            std::Thread::Yield();
+        }));
+    }
+    if (joined != 8 || counter != 36000) return 1;
+
+    // Arguments through a list<any>.
+    list<any> args;
+    args.add(40);
+    args.add(2);
+    int sum = 0;
+    int *psum = &sum;
+    u64 *other = new u64();
+    joined = join(std::Thread::Create([psum, other](list<any> a) {
+        int x = a[0];
+        int y = a[1];
+        *psum = x + y;
+        *other = std::Thread::Id();
+    }, args));
+    if (joined != 1 || sum != 42 || *other == main_id) return 2;
+    del other;
+
+    // A detached thread runs to completion on its own and frees itself.
+    match (std::Thread::Spawn([]() { std::Thread::Sleep(10); __sync_fetch_and_add(&detached_done, 1); })) {
+        std::Thread::ThreadStatus::Created(t): {
+            match (std::Thread::Detach(t)) {
+                std::Thread::ThreadStatus::Detached: {}
+                _: return 3;
+            }
+        }
+        _: return 4;
+    }
+    for (int w = 0; w < 500 && __sync_fetch_and_add(&detached_done, 0) == 0; w++) std::Thread::Sleep(2);
+    if (detached_done != 1) return 5;
+
+    match (std::Thread::Join(NULL)) {
+        std::Thread::ThreadStatus::InvalidObject: {}
+        _: return 6;
+    }
+    return 42;
+}
+EOF
+for mode in "" "-static"; do
+    if "$SIC" $mode stdthread.sic -o stdthread 2>err; then
+        ./stdthread; got=$?
+        [ "$got" -eq 42 ] && ok "std-thread$mode" || bad "std-thread$mode" "expected 42, got $got"
+    else
+        bad "std-thread$mode" "compile/link failed: $(cat err)"
+    fi
+done
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.
