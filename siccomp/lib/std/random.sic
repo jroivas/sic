@@ -1,6 +1,7 @@
 module std;
 
 #include <time.h>
+#include <sys/random.h>
 
 // Thread-safe pseudorandom number generators.
 //
@@ -17,6 +18,12 @@ module std;
 // The default is SplitMix64: fast, 64-bit state, good statistical quality.
 // For heavier-duty needs, xoshiro256++ (large state, long period) or
 // ChaCha12 (cryptographic-quality) are also provided.
+
+// -- Module-level bridge for getrandom (avoids name shadowing) --
+
+static isize Getrandom(u8 *buf, usize len) {
+    return getrandom(buf, len, 0);
+}
 
 namespace random
 {
@@ -167,62 +174,90 @@ namespace random
         }
     };
 
+    // Fill buf with len cryptographically secure random bytes.
+    // Returns bytes written (always len on success), or -1 on error.
+    // Blocks until the kernel has enough entropy (flags=0).
+    isize getrandom(u8 *buf, usize len) {
+        return Getrandom(buf, len);
+    }
+
     // ------------------------------------------------------------------
     // Factory functions
+    //
+    // Each accepts an optional seed.  seed == 0 (the default) fills the
+    // generator's state from Linux getrandom() -- cryptographically secure
+    // system entropy.  Any non-zero seed reproduces the same sequence.
     // ------------------------------------------------------------------
 
-    // System-seeded default RNG (SplitMix64).
-    // Uses CLOCK_REALTIME and stack address (ASLR) as entropy sources.
-    SplitMix64 rng() {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+    // Default RNG (SplitMix64) -- alias for splitmix64().
+    SplitMix64 rng() { return splitmix64(); }
+
+    SplitMix64 splitmix64(u64 seed = 0) {
         SplitMix64 g;
-        g.state = 0;
-        g.state ^= (u64)ts.tv_sec;
-        g.state ^= (u64)ts.tv_nsec << 12;
-        g.state ^= (u64)(void *)&g;
+        if (seed == 0) {
+            isize n = Getrandom((u8 *)&g.state, sizeof(g.state));
+            if (n != sizeof(g.state)) g.state = 0;
+        } else {
+            g.state = seed;
+        }
         g.gen64();
         return g;
     }
 
-    SplitMix64 splitmix64(u64 seed) {
-        SplitMix64 g;
-        g.state = seed;
-        g.gen64();
-        return g;
-    }
-
-    PCG32 pcg32(u64 seed) {
+    PCG32 pcg32(u64 seed = 0) {
         PCG32 g;
-        g.state = 0;
         g.inc = 0xDA3E39CB94B95BDB;
-        g.state = seed;
+        if (seed == 0) {
+            isize n = Getrandom((u8 *)&g, 16);
+            if (n != 16) { g.state = 0; g.inc = 0xDA3E39CB94B95BDB; }
+        } else {
+            g.state = seed;
+        }
         g.gen32();
         return g;
     }
 
-    Xoshiro256PP xoshiro256(u64 seed) {
-        SplitMix64 sm;
-        sm.state = seed;
+    Xoshiro256PP xoshiro256(u64 seed = 0) {
         Xoshiro256PP g;
-        g.s0 = sm.gen64();
-        g.s1 = sm.gen64();
-        g.s2 = sm.gen64();
-        g.s3 = sm.gen64();
+        if (seed == 0) {
+            isize n = Getrandom((u8 *)&g, 32);
+            if (n != 32) { g.s0 = 0; g.s1 = 0; g.s2 = 0; g.s3 = 0; }
+        } else {
+            SplitMix64 sm;
+            sm.state = seed;
+            g.s0 = sm.gen64();
+            g.s1 = sm.gen64();
+            g.s2 = sm.gen64();
+            g.s3 = sm.gen64();
+        }
         if (g.s0 == 0 && g.s1 == 0 && g.s2 == 0 && g.s3 == 0)
             g.s0 = 1;
         return g;
     }
 
-    ChaCha12 chacha12(u64 seed) {
+    ChaCha12 chacha12(u64 seed = 0) {
         ChaCha12 g;
-        SplitMix64 sm;
-        sm.state = seed;
-        sm.gen64();
-        for (int i = 0; i < 8; i += 2) {
-            u64 r = sm.gen64();
-            g.key[i]     = (u32)(r);
-            g.key[i + 1] = (u32)(r >> 32);
+        if (seed == 0) {
+            isize n = Getrandom((u8 *)g.key, 32);
+            if (n != 32) {
+                SplitMix64 sm;
+                sm.state = 0;
+                sm.gen64();
+                for (int i = 0; i < 8; i += 2) {
+                    u64 r = sm.gen64();
+                    g.key[i]     = (u32)(r);
+                    g.key[i + 1] = (u32)(r >> 32);
+                }
+            }
+        } else {
+            SplitMix64 sm;
+            sm.state = seed;
+            sm.gen64();
+            for (int i = 0; i < 8; i += 2) {
+                u64 r = sm.gen64();
+                g.key[i]     = (u32)(r);
+                g.key[i + 1] = (u32)(r >> 32);
+            }
         }
         g.ctr_lo   = 0;
         g.ctr_hi   = 0;
