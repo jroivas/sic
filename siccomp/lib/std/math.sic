@@ -66,6 +66,6 @@ namespace math
     f64 hypot(f64 x, f64 y) { return _math_hypot(x, y); }
 
     // Common mathematical constants
-    static const f64 pi  = 3.14159265358979323846;
-    static const f64 e   = 2.71828182845904523536;
+    const f64 pi = 3.14159265358979323846;
+    const f64 e  = 2.71828182845904523536;
 }
