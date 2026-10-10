@@ -32,8 +32,10 @@ mkdir -p "$SYSROOT"
 # Replace (not merge) the std sources: a file deleted from lib/std must not stay
 # behind in the sysroot and keep being compiled into libstd (it did: a removed
 # math.sic left `acos` unresolved in libstd.so, breaking sic-cpp).
-rm -f "$SYSROOT"/*.sic
+rm -f "$SYSROOT"/*.sic "$SYSROOT/module.conf"
 cp "$ROOT"/siccomp/lib/std/*.sic "$SYSROOT/"
+# The module's build settings (link flags, pkg-config packages, cflags).
+[ -f "$ROOT/siccomp/lib/std/module.conf" ] && cp "$ROOT/siccomp/lib/std/module.conf" "$SYSROOT/"
 "$SIC" --emit-module "$SYSROOT"
 
 echo ">> building + installing art (async runtime) into $SYSROOT"
