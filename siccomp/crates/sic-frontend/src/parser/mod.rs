@@ -1886,7 +1886,16 @@ impl Parser {
             return false;
         }
         if self.lang == Lang::Sic {
-            return true;
+            // A `(` after the typename is a function call or cast expression,
+            // not a declaration start (`if let` pattern).  Also exclude
+            // assignment/member operators (value context, not a declaration).
+            return !matches!(self.tokens.get(self.pos + 1).map(|t| t.kind),
+                Some(TokenKind::LParen)
+                | Some(TokenKind::Eq) | Some(TokenKind::PlusAssign) | Some(TokenKind::MinusAssign)
+                | Some(TokenKind::StarAssign) | Some(TokenKind::SlashAssign) | Some(TokenKind::PercentAssign)
+                | Some(TokenKind::AndAssign) | Some(TokenKind::OrAssign) | Some(TokenKind::XorAssign)
+                | Some(TokenKind::ShlAssign) | Some(TokenKind::ShrAssign)
+                | Some(TokenKind::Dot) | Some(TokenKind::Arrow));
         }
         // A following assignment/member operator means the name is being used as
         // a value (`vaddr &= x`, `entry->f`), so it's an expression, not a decl.
