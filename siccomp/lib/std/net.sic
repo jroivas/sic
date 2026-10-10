@@ -1,0 +1,124 @@
+module std;
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+
+// Network primitives — CamelCase API (no shadowing of C function names).
+//
+// Usage:
+//   auto s = std::net::TcpConnect("1.2.3.4", 80) else return 1;
+//   u8 buf[1024];
+//   isize n = std::net::Read(s, buf, 1024);
+//   std::net::Close(s);
+
+namespace net
+{
+    // ------------------------------------------------------------------
+    // Socket
+    // ------------------------------------------------------------------
+
+    struct Socket {
+        int fd;
+
+        ~Socket() {
+            if (fd > 0)
+                close(fd);
+        }
+    };
+
+    // -- Internal helpers (static, not exported) --
+
+    static int TcpSocket(void) {
+        return socket(AF_INET, __socket_type::SOCK_STREAM, 0);
+    }
+
+    static int BindListen(int fd, u32 addr, u16 port, int backlog) {
+        struct sockaddr_in sin;
+        sin.sin_family = AF_INET;
+        sin.sin_port = htons(port);
+        sin.sin_addr.s_addr = htonl(addr);
+        if (bind(fd, (struct sockaddr *)&sin, 16) < 0)
+            return -1;
+        if (listen(fd, backlog) < 0)
+            return -1;
+        return 0;
+    }
+
+    static int DoConnect(int fd, u32 addr, u16 port) {
+        struct sockaddr_in sin;
+        sin.sin_family = AF_INET;
+        sin.sin_port = htons(port);
+        sin.sin_addr.s_addr = htonl(addr);
+        return connect(fd, (struct sockaddr *)&sin, 16);
+    }
+
+    static u32 InetAddr(string host) {
+        return inet_addr(host.ptr);
+    }
+
+    // -- Public API --
+
+    // IPv4 TCP connect. Returns None on failure.
+    Option<Socket> TcpConnect(string host, u16 port) {
+        u32 addr = InetAddr(host);
+        if (addr == 0xFFFFFFFF) return None;
+        int fd = TcpSocket();
+        if (fd < 0) return None;
+        if (DoConnect(fd, addr, port) < 0) {
+            close(fd);
+            return None;
+        }
+        Socket s;
+        s.fd = fd;
+        return Option::Some(s);
+    }
+
+    // IPv4 TCP listen. addr "0.0.0.0" binds all interfaces.
+    // backlog is the listen queue depth (default 5).
+    Option<Socket> TcpListen(string addr, u16 port, int backlog = 5) {
+        u32 a = InetAddr(addr);
+        if (a == 0xFFFFFFFF) return None;
+        int fd = TcpSocket();
+        if (fd < 0) return None;
+        if (BindListen(fd, a, port, backlog) < 0) {
+            close(fd);
+            return None;
+        }
+        Socket s;
+        s.fd = fd;
+        return Option::Some(s);
+    }
+
+    // Accept an incoming connection. Blocks until one arrives.
+    Option<Socket> Accept(Socket *s) {
+        if (!s) return None;
+        int cfd = accept(s->fd, NULL, NULL);
+        if (cfd < 0) return None;
+        Socket c;
+        c.fd = cfd;
+        return Option::Some(c);
+    }
+
+    // Read up to len bytes. Returns bytes read (0 on EOF), or -1.
+    isize Read(Socket *s, u8 *buf, usize len) {
+        if (!s) return -1;
+        return read(s->fd, buf, len);
+    }
+
+    // Write len bytes. Returns bytes written, or -1.
+    isize Write(Socket *s, u8 *buf, usize len) {
+        if (!s) return -1;
+        return write(s->fd, buf, len);
+    }
+
+    // Close a socket.
+    void Close(Socket *s) {
+        if (!s) return;
+        if (s->fd == -1) return;
+        close(s->fd);
+        s->fd = -1;
+    }
+}
