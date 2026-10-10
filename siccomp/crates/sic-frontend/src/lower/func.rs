@@ -2378,7 +2378,10 @@ impl<'m> FuncCtx<'m> {
             }
             Decl::TypeDef { names, .. } => {
                 for (name, ty) in names {
-                    if let Ok(ir_ty) = lower_type(ty, &self.lowerer.struct_types, self.lowerer.ptr_size) {
+                    // Scope-aware: `typedef __typeof(Vd->D(0)) T;` must see the
+                    // locals (the scope-less lowerer made every such T an `int` —
+                    // QEMU's loongarch DO_VMUH multiplied in 32 bits).
+                    if let Ok(ir_ty) = self.lower_type(ty) {
                         self.lowerer.struct_types.insert(name.clone(), ir_ty);
                     }
                 }
