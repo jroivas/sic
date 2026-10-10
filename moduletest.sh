@@ -230,7 +230,7 @@ fi
 # threads add to one counter atomically, a detached thread frees itself. The
 # closures cross threads, so their reference counts must be atomic.
 cat > stdthread.sic <<'EOF'
-// std::Thread: Spawn (closure), Create (closure + list<any> arguments), Join,
+// std::Thread: Spawn (closure), Create (closure + list arguments), Join,
 // Detach, Id, Sleep, Yield. Several threads add to one counter atomically; a
 // detached thread frees itself. Returns 42.
 import std;
@@ -238,12 +238,12 @@ import std;
 atomic int counter = 0;
 atomic int detached_done = 0;
 
-int join(std::Thread::ThreadStatus st)
+int join(std::Thread::Status st)
 {
     match (st) {
-        std::Thread::ThreadStatus::Created(t): {
+        std::Thread::Status::Created(t): {
             match (std::Thread::Join(t)) {
-                std::Thread::ThreadStatus::Joined: return 1;
+                std::Thread::Status::Joined: return 1;
                 _: return 0;
             }
         }
@@ -266,14 +266,14 @@ int main()
     }
     if (joined != 8 || counter != 36000) return 1;
 
-    // Arguments through a list<any>.
-    list<any> args;
+    // Arguments through a list.
+    list args;
     args.add(40);
     args.add(2);
     int sum = 0;
     int *psum = &sum;
     u64 *other = new u64();
-    joined = join(std::Thread::Create([psum, other](list<any> a) {
+    joined = join(std::Thread::Create([psum, other](list a) {
         int x = a[0];
         int y = a[1];
         *psum = x + y;
@@ -284,9 +284,9 @@ int main()
 
     // A detached thread runs to completion on its own and frees itself.
     match (std::Thread::Spawn([]() { std::Thread::Sleep(10); detached_done++; })) {
-        std::Thread::ThreadStatus::Created(t): {
+        std::Thread::Status::Created(t): {
             match (std::Thread::Detach(t)) {
-                std::Thread::ThreadStatus::Detached: {}
+                std::Thread::Status::Detached: {}
                 _: return 3;
             }
         }
@@ -296,7 +296,7 @@ int main()
     if (detached_done != 1) return 5;
 
     match (std::Thread::Join(NULL)) {
-        std::Thread::ThreadStatus::InvalidObject: {}
+        std::Thread::Status::InvalidObject: {}
         _: return 6;
     }
     return 42;
