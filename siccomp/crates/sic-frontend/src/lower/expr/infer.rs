@@ -1,5 +1,5 @@
 use crate::ast::{self, Expr, ExprKind, BinOpKind, UnOpKind};
-use crate::{Result, CompileError};
+use crate::Result;
 use super::super::func::{FuncCtx, LookupResult};
 #[allow(unused_imports)]
 use super::*;
@@ -348,7 +348,7 @@ impl<'m> FuncCtx<'m> {
                 let ename = if self.lowerer.enum_defs.contains_key(ename0) { ename0 }
                             else { ename0.rsplit("::").next().unwrap_or(ename0) };
                 self.lowerer.enum_defs.get(ename).map(|i| i.struct_type.clone())
-                    .ok_or_else(|| CompileError::new(format!("'{}' is not a tagged enum", enum_name)))
+                    .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
                 // sic closure call (sic.md §"Lambdas"): the result is the callable's

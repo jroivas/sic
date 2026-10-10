@@ -530,6 +530,53 @@ else
     bad "module-imports-module" "extra module build failed: $(cat err)"
 fi
 
+# ── A namespaced export named by its old, unqualified path ───────────────────
+# Paths like `geo::Area` parse as enum variants, so a missing module member used
+# to report "'geo' is not a tagged enum" (and, from type inference, with no
+# location). It must name the module, the missing symbol, and the right path.
+mkdir -p nsmod && cd nsmod
+cat > geo.sic <<'EOF'
+module geo;
+namespace Shape { int Area(int w, int h) { return w * h; } }
+EOF
+cat > call.sic <<'EOF'
+import geo;
+int main() { return geo::Area(6, 7); }
+EOF
+cat > infer.sic <<'EOF'
+import geo;
+int main() { auto a = geo::Area(6, 7); return a; }
+EOF
+cat > guard.sic <<'EOF'
+import geo;
+int main() { auto a = geo::Area(6, 7) else return 1; return a; }
+EOF
+cat > good.sic <<'EOF'
+import geo;
+int main() { auto a = geo::Shape::Area(6, 7); return a; }
+EOF
+if "$SIC" -c geo.sic -o geo.o 2>err; then
+    for c in call infer guard; do
+        if "$SIC" $c.sic geo.o -I. -o $c 2>err; then
+            bad "ns-missing-$c" "expected an error, but it compiled"
+        elif grep -qF "module 'geo' has no exported symbol 'Area' (did you mean 'geo::Shape::Area'?)" err \
+             && grep -q "^$c.sic:2:" err; then
+            ok "ns-missing-$c"
+        else
+            bad "ns-missing-$c" "wrong error: $(cat err)"
+        fi
+    done
+    if "$SIC" good.sic geo.o -I. -o good 2>err; then
+        ./good; got=$?
+        [ "$got" -eq 42 ] && ok "ns-qualified-call" || bad "ns-qualified-call" "expected 42, got $got"
+    else
+        bad "ns-qualified-call" "compile/link failed: $(cat err)"
+    fi
+else
+    bad "ns-missing-call" "module build failed: $(cat err)"
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

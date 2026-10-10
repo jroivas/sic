@@ -937,7 +937,7 @@ impl Lowerer {
                 self.qualified_only.remove(s);
             } else {
                 return Err(CompileError::at(
-                    format!("module '{}' has no exported symbol '{}'", module, s),
+                    self.module_missing_symbol(module, s),
                     span.file.clone(), span.line, span.col,
                 ));
             }
@@ -1950,6 +1950,27 @@ impl Lowerer {
     /// (mangled `__sic_m_<Struct>_<method>`) appended to the unit, and record the
     /// `(struct, method) → mangled` table so `obj.method(args)` can resolve and pass
     /// `&obj` as the explicit `self`. Constructors/destructors are handled elsewhere.
+    /// The error text for `module::sym` naming nothing `module` exports; `sym`
+    /// may be a mangled namespace path (`File__Open`, shown as `File::Open`).
+    /// Suggests exports with the same last segment — after std moved its file
+    /// API into `namespace File`, `std::Open` must now be `std::File::Open`.
+    pub(crate) fn module_missing_symbol(&self, module: &str, sym: &str) -> String {
+        let shown = sym.replace("__", "::");
+        let leaf = shown.rsplit("::").next().unwrap_or(&shown).to_string();
+        let mut cands: Vec<String> = self.imported_modules.get(module).map(|m| m.keys()
+            .map(|k| k.replace("__", "::"))
+            .filter(|k| k != &shown && k.rsplit("::").next() == Some(leaf.as_str()))
+            .map(|k| format!("'{}::{}'", module, k))
+            .collect()).unwrap_or_default();
+        cands.sort();
+        let hint = if cands.is_empty() { String::new() } else {
+            let more = if cands.len() > 3 { ", …" } else { "" };
+            cands.truncate(3);
+            format!(" (did you mean {}{}?)", cands.join(" or "), more)
+        };
+        format!("module '{}' has no exported symbol '{}'{}", module, shown, hint)
+    }
+
     /// sic namespaces (sic.md §"Namespace"): replace each `namespace N { … }` with
     /// its members flattened to mangled top-level symbols (`N__member`), recording
     /// `(N, member) → mangled` so `N::member` resolves. Nested namespaces flatten

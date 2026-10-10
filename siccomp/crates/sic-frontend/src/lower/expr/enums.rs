@@ -34,8 +34,29 @@ impl<'m> FuncCtx<'m> {
     /// `{ tag; union }` struct on the stack, store the variant's discriminant, and
     /// store the payload (if any). Returns a pointer to the temporary, like a
     /// compound literal, so the surrounding assignment/return copies it.
+    /// The error for a `path::name` that resolved to nothing. Such paths parse as
+    /// enum variants, so the old message was "'std' is not a tagged enum" even
+    /// for a missing module member — and type inference gave it no location.
+    pub(crate) fn unresolved_path_error(&self, path: &str, name: &str, sp: &crate::lexer::Span) -> CompileError {
+        let (head, rest) = match path.split_once("::") { Some((h, r)) => (h, Some(r)), None => (path, None) };
+        let leaf = path.rsplit("::").next().unwrap_or(path);
+        let msg = if self.is_sic() && self.lowerer.imported_modules.contains_key(head) {
+            let sym = match rest { Some(r) => format!("{}__{}", r.replace("::", "__"), name), None => name.to_string() };
+            self.lowerer.module_missing_symbol(head, &sym)
+        } else if self.lowerer.enum_defs.contains_key(leaf) || self.lowerer.c_enum_defs.contains_key(leaf) {
+            format!("enum '{}' has no variant '{}'", path, name)
+        } else if self.lowerer.namespace_members.keys().any(|(scope, _)| scope == path) {
+            format!("namespace '{}' has no member '{}'", path, name)
+        } else {
+            format!("'{}::{}' does not name anything: '{}' is not an imported module, a namespace or an enum",
+                path, name, path)
+        };
+        CompileError::at(msg, sp.file.clone(), sp.line, sp.col)
+    }
+
     pub(crate) fn construct_enum(&mut self, enum_name: &str, variant: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         self.gate_qualified(enum_name, sp)?;
+        let path = enum_name;
         // sic plain (payload-less) C enum: `E::VARIANT` — possibly scope-qualified
         // (`N::E::VARIANT`, `mod::E::VARIANT`) — is the variant's discriminant.
         if self.is_sic() && args.is_empty() {
@@ -52,8 +73,8 @@ impl<'m> FuncCtx<'m> {
         // resolve it to the concrete monomorph via the expected target type.
         let resolved = self.resolve_generic_ctor(enum_name, sp)?;
         let enum_name = resolved.as_deref().unwrap_or(enum_name);
-        let info = self.lowerer.enum_defs.get(enum_name).cloned().ok_or_else(|| CompileError::at(
-            format!("'{}' is not a tagged enum", enum_name), sp.file.clone(), sp.line, sp.col))?;
+        let info = self.lowerer.enum_defs.get(enum_name).cloned()
+            .ok_or_else(|| self.unresolved_path_error(path, variant, sp))?;
         let v = info.variant(variant).cloned().ok_or_else(|| CompileError::at(
             format!("enum '{}' has no variant '{}'", enum_name, variant), sp.file.clone(), sp.line, sp.col))?;
 

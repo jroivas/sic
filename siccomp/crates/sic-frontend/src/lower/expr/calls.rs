@@ -39,7 +39,7 @@ impl<'m> FuncCtx<'m> {
             .and_then(|m| m.get(sym))
             .cloned()
             .ok_or_else(|| CompileError::at(
-                format!("module '{}' has no exported symbol '{}'", module, sym),
+                self.lowerer.module_missing_symbol(module, sym),
                 sp.file.clone(), sp.line, sp.col,
             ))?;
         self.module_extern(&symbol, &ty, sp)
