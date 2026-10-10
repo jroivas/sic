@@ -1,0 +1,23 @@
+/* A string VARIABLE as a variant payload: Some(s) used the loaded descriptor
+ * as a pointer (crash in __sic_str_retain); and a view of a local char buffer
+ * escaping inside Some(...) must be copied like a returned string. Returns 42. */
+#include <string.h>
+
+Option<string> from_buf() { char buf[32]; strcpy(buf, "buf"); string s = buf; return Option::Some(s); }
+Option<string> tail(string a) { string s = a + "-t"; return Option::Some(s); }
+Result<string, int> res(int x) { string s = "ok"; if (x) return Result::Ok(s); return Result::Err(5); }
+
+int main() {
+    string s = "hello";
+    Option<string> o = Option::Some(s);
+    auto a = o else return 1;
+    if (a != "hello") return 2;
+    auto b = from_buf() else return 3;
+    char junk[64]; memset(junk, 'x', 63); junk[63] = 0;   // reuse the old frame
+    if (b != "buf") return 4;
+    auto c = tail(b) else return 5;
+    if (c != "buf-t") return 6;
+    match (res(1)) { Ok(r): if (r != "ok") return 7; Err(e): return 8; }
+    match (res(0)) { Ok(r): return 9; Err(e): if (e != 5) return 10; }
+    return 42;
+}

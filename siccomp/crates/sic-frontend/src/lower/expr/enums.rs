@@ -112,15 +112,25 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && super::super::types::is_sic_string(pty) {
                     // A `string` payload: wrap a bare `char*`/literal into a
                     // `{data,size,rc}` slice, then copy it in and retain it.
-                    let arg = self.lower_expr(&args[0])?;
-                    let vt = self.val_type(&arg);
-                    let is_str = super::super::types::is_sic_string(&vt)
-                        || matches!(&vt, Type::Pointer(inner) if super::super::types::is_sic_string(inner));
-                    let src = if is_str { arg } else { self.cstr_to_string(arg)? };
-                    let sz = pty.size_of(self.ptr_size());
-                    let al = pty.align_of(self.ptr_size());
-                    self.retain_string_at(&src)?;
-                    self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });
+                    // A `string`-typed argument (a variable, field, call…) is used by
+                    // address: `lower_expr` would yield the loaded descriptor VALUE,
+                    // which retain/memcopy then misused as a pointer (`Some(s)` with
+                    // a string local crashed in `__sic_str_retain`).
+                    let arg_is_string = self.infer_expr_type(&args[0])
+                        .map_or(false, |t| super::super::types::is_sic_string(&t));
+                    let src = if arg_is_string {
+                        self.lower_aggregate_ptr(&args[0])?
+                    } else {
+                        let arg = self.lower_expr(&args[0])?;
+                        let vt = self.val_type(&arg);
+                        let is_str = super::super::types::is_sic_string(&vt)
+                            || matches!(&vt, Type::Pointer(inner) if super::super::types::is_sic_string(inner));
+                        if is_str { arg } else { self.cstr_to_string(arg)? }
+                    };
+                    // Escapes like a `return`: a view of a local stack buffer
+                    // (`string s = buf; return Some(s);`) gets an owned copy,
+                    // anything else shares its refcount.
+                    self.emit_string_return_into(&payload_ptr.ptr, &src)?;
                 } else if matches!(pty, Type::Struct(_) | Type::Union(_)) {
                     // Other aggregate payload: copy it in.
                     let src = self.lower_aggregate_ptr(&args[0])?;
