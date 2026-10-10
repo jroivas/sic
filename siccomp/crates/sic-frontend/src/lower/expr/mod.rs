@@ -5071,6 +5071,30 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic closure (re)assignment (`obj->f = [x]() {…}`, `g = h`; sic.md
+        // §"Lambdas"): the slot takes its OWN reference — retain the new
+        // environment, release the previous one (retain first: a self-assign stays
+        // balanced). It was a plain pointer store, so a closure kept in a struct
+        // field died with the scope that created it: a thread wrapper running
+        // `t->func()` after `Create()` returned read a freed environment. The
+        // `Fn<…>` target type also boxes a captureless lambda into a closure.
+        // A LOCAL closure variable is excluded: its scope-exit release targets
+        // the value it was initialised with (a spilled copy), which a plain store
+        // keeps balanced.
+        let local_var = matches!(&lhs.kind, ExprKind::Ident(n) if matches!(self.lookup(n), Some(super::func::LookupResult::Local(..))));
+        if self.is_sic() && op.is_none() && super::types::is_closure(&lv.ty) && !local_var {
+            let prev = self.expected_ty.replace(lv.ty.clone());
+            let newv = self.lower_expr(rhs);
+            self.expected_ty = prev;
+            let newv = self.coerce(newv?, &lv.ty)?;
+            self.emit_rc_retain(newv.clone())?;
+            let old = self.alloc_val();
+            self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: Type::void_ptr() });
+            self.emit_closure_release(Val::Local(old))?;
+            self.push_instr(Instr::Store { val: newv, ptr: lv.ptr.clone() });
+            return Ok(lv.ptr);
+        }
+
         // sic refcounted container reassignment (`c = <expr>`, sic.md §"List"/
         // §"Dict"/§"Weak"): release the old handle and install the new one. The new
         // handle is RETAINED when the RHS shares an existing container — an alias

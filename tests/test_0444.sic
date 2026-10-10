@@ -1,0 +1,36 @@
+// A closure stored in a struct field (or through a pointer) takes its own
+// reference: it used to be a plain pointer store, so the closure was freed with
+// the scope that created it — std::Thread's `t->func()` would run a freed
+// environment. Reassignment releases the previous closure; a captureless lambda
+// stored into an `Fn<…>` field is boxed. Returns 42.
+#include <stdlib.h>
+#include <string.h>
+struct Holder {
+    Fn<int()> f;
+    ~Holder() { del f; }
+};
+Fn<int()> mk(int n) { return [n]() => n; }
+Holder *make(int base) {
+    Holder *h = new Holder();
+    int k = base + 2;
+    h->f = [base, k]() => base + k;          // the creating scope ends here
+    return h;
+}
+int main() {
+    Holder *h = make(20);                    // f() = 20 + 22
+    // Reuse freed heap blocks: a dangling environment would be overwritten.
+    for (int i = 0; i < 64; i++) { char *p = (char *)malloc(40); memset(p, 0x5a, 40); }
+    if (h->f() != 42) return 1;
+    h->f = mk(7);                            // releases the first closure
+    h->f = mk(8);
+    if (h->f() != 8) return 2;
+    h->f = []() => 5;                        // captureless lambda, boxed
+    if (h->f() != 5) return 3;
+    Fn<int()> a = mk(1);
+    Fn<int()> b = mk(2);
+    a = b;                                   // locals keep their own balance
+    h->f = b;
+    del h;
+    if (a() + b() != 4) return 4;
+    return 42;
+}
