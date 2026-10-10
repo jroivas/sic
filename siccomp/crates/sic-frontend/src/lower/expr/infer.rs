@@ -324,8 +324,9 @@ impl<'m> FuncCtx<'m> {
             // A tagged-enum variant path is a value of that enum's struct type.
             ExprKind::EnumVariant { enum_name, variant } => {
                 // sic `module::var` (sic.md §"Imports"): imported module global's type.
-                if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
-                    if let Some((_, ty)) = self.lowerer.imported_modules.get(enum_name).and_then(|e| e.get(variant)) {
+                let (head, sym) = super::calls::module_scoped_sym(enum_name, variant);
+                if self.is_sic() && self.lowerer.imported_modules.contains_key(head) {
+                    if let Some((_, ty)) = self.lowerer.imported_modules.get(head).and_then(|e| e.get(&sym)) {
                         if !matches!(ty, Type::Function(_)) { return Ok(ty.clone()); }
                     }
                 }

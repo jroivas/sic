@@ -736,8 +736,10 @@ impl<'m> FuncCtx<'m> {
             ExprKind::EnumVariant { enum_name, variant } => {
                 // sic (sic.md §"Imports"): `module::var` — read an imported module's
                 // exported global via the scope form (mirrors `module.var`).
-                if self.is_sic() && self.lowerer.imported_modules.contains_key(enum_name) {
-                    if let Some((g, ty)) = self.resolve_module_global(enum_name, variant) {
+                // `module::ns::var` names the export `ns__var` (std::math::pi).
+                let (head, sym) = calls::module_scoped_sym(enum_name, variant);
+                if self.is_sic() && self.lowerer.imported_modules.contains_key(head) {
+                    if let Some((g, ty)) = self.resolve_module_global(head, &sym) {
                         let lv = LValue::plain(Val::Global(g), ty);
                         if matches!(lv.ty, Type::Array { .. }) { return Ok(lv.ptr); }
                         return self.load_lvalue(&lv);

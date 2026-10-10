@@ -1938,3 +1938,13 @@ impl<'m> FuncCtx<'m> {
     }
 }
 
+
+/// `mod::ns::name` → (`mod`, `ns__name`): the module and the export key of a
+/// scope-qualified module member (`std::math::pi` → `std`, `math__pi`); a plain
+/// `mod::name` → (`mod`, `name`).
+pub(crate) fn module_scoped_sym<'a>(path: &'a str, name: &str) -> (&'a str, String) {
+    match path.split_once("::") {
+        Some((h, rest)) => (h, format!("{}__{}", rest.replace("::", "__"), name)),
+        None => (path, name.to_string()),
+    }
+}

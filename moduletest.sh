@@ -522,6 +522,33 @@ else
     bad "module-array-fields" "module build / manifest failed: $(cat err)"
 fi
 
+# ── Namespaced module variables (`mod::ns::var`) ────────────────────────────
+# `std::math::pi` was "no exported symbol": only `mod::var` resolved, and its
+# type was not inferred (a variadic/format argument saw an int).
+mkdir -p nsvmod
+cat > nsvmod/nsv.sic <<'EOF'
+module nsv;
+namespace k {
+    const f64 half = 0.5;
+    int count = 40;
+}
+EOF
+cat > nsvuse.sic <<'EOF'
+import nsv;
+f64 twice(f64 x) { return x * 2.0; }
+int main() {
+    auto h = nsv::k::half;                  // inferred f64
+    if (twice(h) != 1.0) return 1;
+    return nsv::k::count + (int)(nsv::k::half * 4.0);   // 40 + 2
+}
+EOF
+if "$SIC" --emit-module nsvmod 2>err && "$SIC" nsvuse.sic -Insvmod -o nsvuse 2>err; then
+    ./nsvuse; got=$?
+    [ "$got" -eq 42 ] && ok "module-namespaced-var" || bad "module-namespaced-var" "expected 42, got $got"
+else
+    bad "module-namespaced-var" "build failed: $(cat err)"
+fi
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.
