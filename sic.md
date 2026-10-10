@@ -1316,6 +1316,11 @@ When compiling a module in C compatiblae mode, it produces these outputs
 
 ## Match
 
+`Option<T>` and `Result<T, E>` (and `Iterator<T>`) are **native, built-in**
+generic enums — part of the language itself, not of the `std` module: they need
+no declaration and no `import`. A module may return them and its consumers can
+`match` or guard-unwrap the values.
+
 New alternative to traditional `switch` and `case`.
 Match takes an instance of `enum`. It follows largely Rust syntax.
 Old C style enums are imporoved a bit:
@@ -1883,7 +1888,7 @@ When we try to compile that example it fails. Reason is that we didn't actually 
 For that we have two options: handle it locally, or pass it forward. Here's an example to just handle it there:
 
     int readbyte(&mut std::File f) {
-        std::Result<int, string> res = f.read(1);
+        Result<int, string> res = f.read(1);
 
         match (res) {
             Ok(val): return val;
@@ -1891,9 +1896,10 @@ For that we have two options: handle it locally, or pass it forward. Here's an e
         }
     }
 
-As you can see the error in this case is actually just wrapper around an enum. In order to pass it forward one just:
+As you can see the error in this case is actually just wrapper around an enum
+(`Result` is built into the language, not part of `std`). In order to pass it forward one just:
 
-    std::Result<int, string> readbyte(&mut std::File f) {
+    Result<int, string> readbyte(&mut std::File f) {
         return f.read(1);
     }
 

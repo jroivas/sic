@@ -87,7 +87,10 @@ match (a) { Some(x): use(x); None: … }
 match (e) { Ok(v): … ; Err(m): printf("%s\n", m.ptr); }
 ```
 
-`Option` and `Result` are **built in** — you can use them without declaring them.
+`Option` and `Result` are **built into the language** (as is `Iterator<T>`) — not
+part of the `std` module: use them without declaring or importing anything.
+Values of them cross module boundaries too — a module function may return
+`Option<T>`, and the caller matches or guard-unwraps it as usual.
 `Some`/`None`/`Ok`/`Err` resolve to the right instantiation from the target type,
 so `Option<int> b = None;` and `Result::Ok(7)` just work.
 

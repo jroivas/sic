@@ -8,6 +8,10 @@ features (RTTI, `any`, `va_array`, ownership) rather than being compiler magic.
 Today `std` provides formatted output (`Fmt`, `Print`, `Println`), file I/O
 (`std::File`), byte buffers (`std::Buffer`) and threads (`std::Thread`).
 
+`Option<T>` and `Result<T, E>` are not part of `std` — they are built into the
+language ([enums & matching](enums-and-matching.md)); `std`'s functions simply
+return them where a result may be absent or fail.
+
 ## Formatting
 
 All three use `{}` placeholders, each substituted by the next argument formatted
