@@ -1,0 +1,134 @@
+module std;
+
+#include <pthread.h>
+#include <time.h>
+
+// Thread synchronization primitives.
+//
+// Usage:
+//   auto m = std::sync::CreateMutex() else return 1;
+//   std::sync::lock(m);
+//   // critical section
+//   std::sync::unlock(m);
+//
+//   auto cv = std::sync::CreateCond() else return 1;
+//   std::sync::wait(cv, m);
+//   std::sync::notify_one(cv);
+
+namespace sync
+{
+    // ------------------------------------------------------------------
+    // Mutex — wraps pthread_mutex_t (opaque storage)
+    // ------------------------------------------------------------------
+
+    // Opaque: holds a pthread_mutex_t (40 bytes on glibc x86-64).
+    // Always used through a pointer; the consumer never sees the layout.
+    struct Mutex {
+        u8 data[64];
+
+        ~Mutex() {
+            pthread_mutex_t *pm = (pthread_mutex_t *)data;
+            pthread_mutex_destroy(pm);
+        }
+    };
+
+    // Create a new mutex. Returns NULL on OOM.
+    Mutex *CreateMutex() {
+        Mutex *m = new Mutex() else return NULL;
+        pthread_mutex_t *pm = (pthread_mutex_t *)m->data;
+        pthread_mutex_init(pm, NULL);
+        return m;
+    }
+
+    // Destroy a mutex and free its allocation.
+    void DestroyMutex(Mutex *m) {
+        if (!m) return;
+        del m;
+    }
+
+    // Lock the mutex. Blocks until acquired.
+    void Lock(Mutex *m) {
+        if (!m) return;
+        pthread_mutex_lock((pthread_mutex_t *)m->data);
+    }
+
+    // Unlock the mutex.
+    void Unlock(Mutex *m) {
+        if (!m) return;
+        pthread_mutex_unlock((pthread_mutex_t *)m->data);
+    }
+
+    // Try to lock without blocking. Returns true if the lock was acquired.
+    bool TryLock(Mutex *m) {
+        if (!m) return false;
+        return pthread_mutex_trylock((pthread_mutex_t *)m->data) == 0;
+    }
+
+    // ------------------------------------------------------------------
+    // Cond — wraps pthread_cond_t (opaque storage)
+    // ------------------------------------------------------------------
+
+    struct Cond {
+        u8 data[64];
+        ~Cond() {
+            pthread_cond_t *pc = (pthread_cond_t *)data;
+            pthread_cond_destroy(pc);
+        }
+    };
+
+    // Create a new condition variable. Returns NULL on OOM.
+    Cond *CreateCond() {
+        Cond *cv = new Cond() else return NULL;
+        pthread_cond_t *pc = (pthread_cond_t *)cv->data;
+        pthread_cond_init(pc, NULL);
+        return cv;
+    }
+
+    // Destroy a condition variable and free its allocation.
+    void DestroyCond(Cond *cv) {
+        if (!cv) return;
+        del cv;
+    }
+
+    // Wait on a condition variable. Unlocks mutex, waits for signal, then
+    // re-acquires the mutex before returning.
+    void Wait(Cond *cv, Mutex *m) {
+        if (!cv || !m) return;
+        pthread_cond_wait(
+            (pthread_cond_t *)cv->data,
+            (pthread_mutex_t *)m->data
+        );
+    }
+
+    // Wait with a timeout in milliseconds. Returns true if the condition
+    // was signalled, false on timeout.
+    bool TimedWait(Cond *cv, Mutex *m, u64 ms) {
+        if (!cv || !m) return false;
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += ms / 1000;
+        ts.tv_nsec += (ms % 1000) * 1000000;
+        if (ts.tv_nsec >= 1000000000) {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1000000000;
+        }
+        int res = pthread_cond_timedwait(
+            (pthread_cond_t *)cv->data,
+            (pthread_mutex_t *)m->data,
+            &ts
+        );
+        return res == 0;
+    }
+
+    // Wake one thread waiting on this condition variable.
+    void NotifyOne(Cond *cv) {
+        if (!cv) return;
+        pthread_cond_signal((pthread_cond_t *)cv->data);
+    }
+
+    // Wake all threads waiting on this condition variable.
+    void NotifyAll(Cond *cv) {
+        if (!cv) return;
+        pthread_cond_broadcast((pthread_cond_t *)cv->data);
+    }
+}
