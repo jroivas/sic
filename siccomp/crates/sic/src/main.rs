@@ -164,6 +164,11 @@ struct Args {
     /// module-dir rpath (sic.md §"Imports").
     #[arg(skip)]
     static_link: bool,
+
+    /// `-pie` (Some(true); with `-static-pie` also `static_link`) / `-no-pie`
+    /// (Some(false)); None = the default (PIE unless static).
+    #[arg(skip)]
+    pie: Option<bool>,
 }
 
 /// The dependency-generation flags to hand to cpp. When the user didn't give a
@@ -316,6 +321,7 @@ fn main() {
     let mut pthread = false;
     let mut shared = false;
     let mut static_link = false;
+    let mut pie: Option<bool> = None;
     let mut argv: Vec<String> = Vec::new();
     // Expand `@file` response files (GCC/Clang convention): meson passes the huge
     // link command line as `@qemu-system-*.rsp`. Read and tokenize them into the
@@ -352,6 +358,14 @@ fn main() {
         } else if a == "-shared" {
             // Produce a shared object; pass through to the linker.
             shared = true;
+        } else if a == "-pie" {
+            // sic always emits position-independent code; these pick the link mode.
+            pie = Some(true);
+        } else if a == "-no-pie" || a == "-nopie" {
+            pie = Some(false);
+        } else if a == "-static-pie" {
+            static_link = true;
+            pie = Some(true);
         } else if a == "-static" {
             // Static link: pass through to the linker AND keep it in link order so
             // `cc` prefers a module's `.a` over its `.so`.
@@ -480,6 +494,7 @@ fn main() {
     args.pthread = pthread;
     args.shared = shared;
     args.static_link = static_link;
+    args.pie = pie;
     args.deps_only = deps_only;
 
     // `--large-stack`: run the compile on a thread with a 1 GiB stack so a
@@ -510,10 +525,10 @@ fn legacy_link_driver() -> Option<String> {
 }
 
 /// Build a sic-link request from driver-level link tokens.
-fn link_with_driver(output: &str, inputs: Vec<String>, shared: bool, static_link: bool, gc_sections: bool)
+fn link_with_driver(output: &str, inputs: Vec<String>, shared: bool, static_link: bool, pie: Option<bool>, gc_sections: bool)
     -> Result<(), Box<dyn std::error::Error>>
 {
-    let req = sic_link::LinkRequest { output: output.to_string(), inputs, shared, static_link, gc_sections };
+    let req = sic_link::LinkRequest { output: output.to_string(), inputs, shared, static_link, pie, gc_sections };
     sic_link::link(&req).map_err(|e| e.into())
 }
 
@@ -1026,7 +1041,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     let shared = dirp.join(format!("lib{}.so", name));
     let _ = fs::remove_file(&shared);
     if legacy_link_driver().is_none() {
-        link_with_driver(&shared.to_string_lossy(), vec![obj.path().to_string_lossy().into_owned()], true, false, false)?;
+        link_with_driver(&shared.to_string_lossy(), vec![obj.path().to_string_lossy().into_owned()], true, false, None, false)?;
     } else {
         let cc = resolve_linker();
         let status = Command::new(&cc)
@@ -1281,10 +1296,16 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             if !args.static_link { inputs.push(format!("-Wl,-rpath,{}", dir)); }
         }
         inputs.extend(module_link_flags.iter().cloned());
-        return link_with_driver(out_path, inputs, args.shared, args.static_link, !args.shared);
+        return link_with_driver(out_path, inputs, args.shared, args.static_link, args.pie, !args.shared);
     }
 
     let mut link = Command::new(&cc);
+    match args.pie {
+        Some(true) if args.static_link => { link.arg("-static-pie"); }
+        Some(true) => { link.arg("-pie"); }
+        Some(false) => { link.arg("-no-pie"); }
+        None => {}
+    }
 
     // Map each source path to the temp object it compiled to, so we can splice
     // compiled sources back into the link line at their original position.

@@ -35,6 +35,10 @@ pub struct LinkRequest {
     pub shared: bool,
     /// Link statically.
     pub static_link: bool,
+    /// Position-independent executable: `Some(true)` = `-pie` (with
+    /// `static_link`: `-static-pie`), `Some(false)` = `-no-pie`, `None` = the
+    /// default (PIE when dynamic, as gcc's default on Linux; non-PIE static).
+    pub pie: Option<bool>,
     /// Garbage-collect unreferenced sections (`--gc-sections`).
     pub gc_sections: bool,
 }
@@ -288,7 +292,7 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
         let d = tc.crt_dir.as_ref().ok_or("sic-link: no C runtime start files (crt1.o) found")?;
         Ok(d.join(name).to_string_lossy().into_owned())
     };
-    let pie = !req.shared && !req.static_link;
+    let pie = !req.shared && req.pie.unwrap_or(!req.static_link);
     let mut a: Vec<String> = Vec::new();
     a.push("--build-id".into());
     a.push("--eh-frame-hdr".into());
@@ -298,8 +302,10 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
         a.push("-shared".into());
     } else if req.static_link {
         a.push("-static".into());
+        // -static-pie: self-relocating (glibc's rcrt1.o), no ELF interpreter.
+        if pie { for f in ["-pie", "--no-dynamic-linker"] { a.push(f.into()); } }
     } else {
-        a.push("-pie".into());
+        if pie { a.push("-pie".into()); }
         let interp = tc.interp.as_ref().ok_or("sic-link: cannot determine the dynamic loader")?;
         a.push("-dynamic-linker".into());
         a.push(interp.clone());
@@ -310,7 +316,11 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
 
     // Start files.
     if !req.shared {
-        let first = if pie && tc.crt_dir.as_ref().map_or(false, |d| d.join("Scrt1.o").is_file()) { "Scrt1.o" } else { "crt1.o" };
+        let has = |f: &str| tc.crt_dir.as_ref().map_or(false, |d| d.join(f).is_file());
+        let first = if pie && req.static_link {
+            if !has("rcrt1.o") { return Err("sic-link: -static-pie needs glibc's rcrt1.o, which was not found".into()); }
+            "rcrt1.o"
+        } else if pie && has("Scrt1.o") { "Scrt1.o" } else { "crt1.o" };
         a.push(crt(first)?);
     }
     a.push(crt("crti.o")?);
