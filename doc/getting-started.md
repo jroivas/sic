@@ -43,9 +43,17 @@ int main() {
 ```
 
 The driver is a drop-in for a C compiler front end: `-c` (compile to object),
-`-o`, `-I`, `-L`, `-l`, `-g`, `-O0`..`-O3`, `-shared`, `-static`, `-D`, and the
-GCC/Clang version queries (`--version`, `-dumpversion`, `-dumpmachine`) all work.
-Preprocessing uses the system `cpp`, so `#include` and `#define` behave as in C.
+`-o`, `-I`, `-L`, `-l`, `-g`, `-O0`..`-O3`, `-shared`, `-static`, `-pie` /
+`-no-pie` / `-static-pie`, `-D`, and the GCC/Clang version queries (`--version`,
+`-dumpversion`, `-dumpmachine`) all work. Preprocessing uses sic's own `sic-cpp`
+(`sic -print-prog-name=cpp`; `SIC_CPP=cpp` selects the system one), so `#include`
+and `#define` behave as in C.
+
+Warnings use the GCC flags: `-Wall`, `-Wextra`, `-W<name>` / `-Wno-<name>`,
+`-Werror`, `-Werror=<name>` / `-Wno-error=<name>`, `-w`, `-pedantic`. sic reports
+`-Wdiv-by-zero`, `-Wshift-count-overflow`/`-negative` (C only — SIC defines those
+cases), `-Wunused-variable` (in `-Wall`) and `-Wunsupported-asm`; other warning
+names are accepted and ignored, so existing build flags keep working.
 
 ## C and SIC in one project
 
@@ -64,6 +72,12 @@ $SIC -x sic mycode.c -o mycode      # compile a .c file as SIC
 
 Because the split is per file, you adopt SIC incrementally: keep compiling your C
 as C, write new units in `.sic`, and link them together.
+
+C's GNU inline assembly is supported for the x86-64 templates real code uses
+(`rdtsc`, `cpuid`, `xgetbv`, `pause`, fences, `divq`, `shld`/`shrd`,
+`vmovdqa`/`vmovdqu`, compiler barriers, Valgrind client requests). Any other
+template is reported (`-Wunsupported-asm`) and traps if it is ever executed — it
+is never silently skipped.
 
 ## What "no flags" gets you
 

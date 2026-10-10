@@ -38,11 +38,13 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     function-pointer decay, by-value and `@`/`@mut` captures, closures, currying,
     and the `Fn<ret(params)>` closure type.
 12. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
-    `.swap`/`.cas`, and atomic pointers.
+    `.swap`/`.cas`, atomic pointers and struct fields, and the `fence;` /
+    `barrier;` memory barriers.
 13. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
-    building a module, chain-loaded dependencies, and the `.smod` manifest.
-14. [Standard library](standard-library.md) — `import std;` and
-    `Fmt`/`Print`/`Println`.
+    namespaces, building a module, chain-loaded dependencies, and the `.smod`
+    manifest.
+14. [Standard library](standard-library.md) — `import std;`,
+    `Fmt`/`Print`/`Println`, `std::File`, `std::Buffer` and `std::Thread`.
 
 ## Design goals
 

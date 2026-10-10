@@ -49,6 +49,8 @@ is stable and deletions keep the surviving order intact.
 
 ## `list<T>` — growable array
 
+`list<T>` is a growable array; bare `list` is `list<any>`:
+
 ```sic
 list<int> xs;
 xs.add(10);                   // also .push / .append

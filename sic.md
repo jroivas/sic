@@ -1962,3 +1962,8 @@ Support for namespaces like in C++
 
     if (test::a != 4) return 1;
     test::a = 5;
+
+Inside the namespace its members are also reachable by their bare names (a local
+or parameter of the same name shadows them). An enum declared in a namespace is
+scoped to it — `test::Status` outside, `Status` inside — so two namespaces can each
+define a `Status`.

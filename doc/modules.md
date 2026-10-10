@@ -93,10 +93,17 @@ int main() {
 }
 ```
 
-Functions and variables are supported; a `struct`/`enum` declared inside is visible
-at file scope. `::` is the scope operator throughout sic — **namespaces, modules,
-and enum variants all use it**; `.` is reserved for values (`obj.field`,
-`obj.method()`).
+Inside the namespace its members are reachable by their bare names too (`width`
+instead of `geo::width`); a parameter or local of the same name shadows them.
+
+An `enum` belongs to its namespace: name it `geo::Shape` from outside (or
+`mod::geo::Shape` from another module) and plain `Shape` inside, so two namespaces
+may each define their own `Status` (as `std::File::Status` and
+`std::Thread::Status` do). A `struct` declared inside is still visible at file
+scope under its bare name.
+
+`::` is the scope operator throughout sic — **namespaces, modules, and enum
+variants all use it**; `.` is reserved for values (`obj.field`, `obj.method()`).
 
 ## Exporting types
 

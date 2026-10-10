@@ -98,6 +98,24 @@ node *prev = head.swap(n);        // atomic exchange
 if (head.cas(cur, n)) { … }       // lock-free push
 ```
 
+## Memory barriers
+
+Two statements order memory accesses for code that shares plain (non-atomic)
+data between threads:
+
+```sic
+data = 40;
+fence;          // full barrier: no load/store crosses it (compiler + CPU, mfence)
+ready = 1;
+barrier;        // compiler-only: nothing is cached or moved across it, no instruction
+```
+
+`fence;` equals C11's `atomic_thread_fence(memory_order_seq_cst)`. `barrier;` is
+enough against a signal handler on the same thread, or as an acquire/release
+fence on x86-64. Both are contextual keywords — `fence` and `barrier` remain
+usable as names. In C, `__atomic_thread_fence`, `__atomic_signal_fence` and
+`__sync_synchronize` map to the same operations.
+
 ## Summary
 
 | | read / `=` | `+= -= &= |= ^=` `++ --` | `.swap` | `.cas` | `*= /= %= <<= >>=` |
