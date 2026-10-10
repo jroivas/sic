@@ -429,6 +429,52 @@ printf 'import ctr;\nint f(Counter *p) { return 0; }\nint main() { return 0; }\n
 grep -q "unknown type name 'Counter'" err || { hint_ok=0; echo "  param: $(cat err)"; }
 [ "$hint_ok" -eq 1 ] && ok "module-type-hint" || bad "module-type-hint" "see above"
 
+# ── Generic-enum instances across a module boundary ─────────────────────────
+# A module function returning `Option<Big>` / `Result<Big, i32>` exports the
+# instance's record: it used to decode as an EMPTY struct in the consumer (wrong
+# size for the by-value return) and could not be matched, guarded or named.
+# A method call on the un-unwrapped Option says to unwrap it.
+mkdir -p optmod
+cat > optmod/opt.sic <<'EOF'
+module opt;
+namespace gen {
+    struct Big { i64 a; i64 b; i64 c; i64 sum(struct Big *self) { return self->a + self->b + self->c; } };
+    Option<Big> make(i64 x) { if (x < 0) return None; Big b; b.a = x; b.b = x * 2; b.c = x * 3; return Some(b); }
+    Result<Big, i32> parse(i64 x) { if (x == 0) return Err(7); Big b; b.a = x; b.b = 0; b.c = 0; return Ok(b); }
+}
+EOF
+cat > optuse.sic <<'EOF'
+import opt;
+int main() {
+    i64 t = 0;
+    match (opt::gen::make(5)) { Some(b): t += b.sum(); None: return 1; }       // 30
+    auto b2 = opt::gen::make(1) else return 2;                                  // 6
+    t += b2.sum();
+    Option<opt::gen::Big> o = opt::gen::make(-1);
+    match (o) { Some(b): return 3; None: t += 0; }
+    match (opt::gen::parse(6)) { Ok(b): t += b.a; Err(e): return 4; }           // 6
+    match (opt::gen::parse(0)) { Ok(b): return 5; Err(e): t += e - 7; }         // 0
+    return (int)t;                                                              // 42
+}
+EOF
+if "$SIC" --emit-module optmod 2>err && grep -q "^tagenum Option<s_Big> " optmod/module_opt.smod \
+   && grep -q "^tagenum Result<s_Big,i32> " optmod/module_opt.smod; then
+    for mode in "" "-static"; do
+        if "$SIC" $mode optuse.sic -Ioptmod -o optuse 2>err; then
+            ./optuse; got=$?
+            [ "$got" -eq 42 ] && ok "module-generic-enums$mode" || bad "module-generic-enums$mode" "expected 42, got $got"
+        else
+            bad "module-generic-enums$mode" "compile/link failed: $(cat err)"
+        fi
+    done
+    printf 'import opt;\nint main() { auto g = opt::gen::make(1); return (int)g.sum(); }\n' > optbad.sic
+    "$SIC" optbad.sic -Ioptmod -o optbad 2>err && bad "module-generic-enum-hint" "compiled" \
+        || { grep -q "'Option<Big>' has no field or method 'sum'; the value is an enum — unwrap it first" err \
+             && ok "module-generic-enum-hint" || bad "module-generic-enum-hint" "wrong error: $(cat err)"; }
+else
+    bad "module-generic-enums" "module build / manifest failed: $(cat err)"
+fi
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.

@@ -420,7 +420,7 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: tagenum name missing", lineno + 1))?;
                     let mut variants = Vec::new();
                     if let Some(list) = it.next() {
-                        for spec in list.split(',') {
+                        for spec in split_top_level(list, ',') {
                             if spec.is_empty() { continue; }
                             let mut parts = spec.splitn(3, ':');
                             let v = parts.next()
@@ -641,6 +641,22 @@ fn decode_aggregate_record<'a>(
         st.layout_order = order;
         Type::Struct(st)
     })
+}
+
+/// Split on `sep` outside `<…>`: a payload token may name a generic instance
+/// whose own argument list has commas (`@Result<i32,i64>`).
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0usize);
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            c if c == sep && depth == 0 => { out.push(&s[start..i]); start = i + c.len_utf8(); }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 /// The four compiler-known sic aggregates, reconstructed with their exact

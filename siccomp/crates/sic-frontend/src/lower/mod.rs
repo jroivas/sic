@@ -467,11 +467,17 @@ impl Lowerer {
                 if self.private_types.contains(ename) || imp(ename) { continue; }
                 self.module.sic_enum_exports.push((ename.clone(), variants.clone()));
             }
-            // Public tagged enums (variant tags + payload types). Generic-enum
-            // monomorphs (`Option<i32>`) carry `<` in their name — skip those; a
-            // consumer re-instantiates built-in generics itself.
-            for (ename, info) in &self.enum_defs {
-                if ename.contains('<') || self.private_types.contains(ename) || imp(ename) { continue; }
+            // Public tagged enums (variant tags + payload types).
+            // Generic-enum instances (`Option<s_SplitMix64>`) are exported too: a
+            // consumer only sees the instance's NAME in a signature (`rng() ->
+            // @Option<s_SplitMix64>`), so without its record it decoded as an
+            // empty struct — wrong size for the by-value (sret) return, and no
+            // `match`/`else` on it. Sorted for a deterministic manifest.
+            let mut enames: Vec<&String> = self.enum_defs.keys().collect();
+            enames.sort();
+            for ename in enames {
+                let info = &self.enum_defs[ename];
+                if self.private_types.contains(ename) || imp(ename) { continue; }
                 let vs: Vec<(String, i64, Option<Type>)> = info.variants.iter()
                     .map(|v| (v.name.clone(), v.tag, v.payload.clone())).collect();
                 self.module.sic_tagenum_exports.push((ename.clone(), vs));
@@ -624,6 +630,15 @@ impl Lowerer {
             // the main pass; guarded so a failure here doesn't abort a valid unit.
             for decl in &tu.decls {
                 let _ = self.register_type_decl_early(decl);
+            }
+            // Imported modules' types too: `Option<std::random::SplitMix64>` names
+            // a module type, unknown until the import is resolved (it was "unknown
+            // type"). Only the manifest is loaded here (idempotent); selective
+            // `import m.sym` bindings are made by the main pass, as before.
+            for decl in &tu.decls {
+                if let Decl::Import { module, span, .. } = decl {
+                    self.resolve_import(module, None, None, span)?;
+                }
             }
             self.monomorphize_generics(tu)?;
         }
