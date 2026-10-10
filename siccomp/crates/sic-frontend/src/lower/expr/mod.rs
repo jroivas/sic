@@ -3884,10 +3884,12 @@ impl<'m> FuncCtx<'m> {
         let rc_ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-ps), elem_size: 1, result_ty: Type::char_ptr() });
         let rc = self.alloc_val();
-        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
         let newrc = self.alloc_val();
+        // Atomic: the count may be shared with another thread (a closure handed
+        // to std::Thread); deciding "last reference" from the value this RMW
+        // replaced means exactly one thread frees.
+        self.push_instr(Instr::AtomicRmw { dest: rc, op: AtomicOp::Sub, ptr: Val::Local(rc_ptr), val: one.clone(), ty: usize_ty.clone() });
         self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
         let is_zero = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
         self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
@@ -3944,10 +3946,12 @@ impl<'m> FuncCtx<'m> {
         let rc_ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-ps), elem_size: 1, result_ty: Type::char_ptr() });
         let rc = self.alloc_val();
-        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
         let newrc = self.alloc_val();
+        // Atomic: the count may be shared with another thread (a closure handed
+        // to std::Thread); deciding "last reference" from the value this RMW
+        // replaced means exactly one thread frees.
+        self.push_instr(Instr::AtomicRmw { dest: rc, op: AtomicOp::Sub, ptr: Val::Local(rc_ptr), val: one.clone(), ty: usize_ty.clone() });
         self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
         let is_zero = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
         self.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done_bb });
@@ -3994,11 +3998,13 @@ impl<'m> FuncCtx<'m> {
         let rc_ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc.clone(), index: Constant::int(-(self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
         let rc = self.alloc_val();
-        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
         let one = self.coerce(Constant::int(1), &usize_ty)?;
         let newrc = self.alloc_val();
+        // Atomic: the count may be shared with another thread (a closure handed
+        // to std::Thread); deciding "last reference" from the value this RMW
+        // replaced means exactly one thread frees.
+        self.push_instr(Instr::AtomicRmw { dest: rc, op: AtomicOp::Sub, ptr: Val::Local(rc_ptr), val: one.clone(), ty: usize_ty.clone() });
         self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Sub, lhs: Val::Local(rc), rhs: one, ty: usize_ty.clone() });
-        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
         let zero = self.coerce(Constant::int(0), &usize_ty)?;
         let is_zero = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(newrc), rhs: zero, ty: usize_ty });
@@ -4068,11 +4074,11 @@ impl<'m> FuncCtx<'m> {
         let rc_ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: pc, index: Constant::int(-(self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });
         let rc = self.alloc_val();
-        self.push_instr(Instr::Load { dest: rc, ptr: Val::Local(rc_ptr), ty: usize_ty.clone() });
         let one = self.coerce(Constant::int(1), &usize_ty)?;
         let newrc = self.alloc_val();
+        // Atomic, like the releases (a reference may live on another thread).
+        self.push_instr(Instr::AtomicRmw { dest: rc, op: AtomicOp::Add, ptr: Val::Local(rc_ptr), val: one.clone(), ty: usize_ty.clone() });
         self.push_instr(Instr::BinOp { dest: newrc, op: BinOp::Add, lhs: Val::Local(rc), rhs: one, ty: usize_ty });
-        self.push_instr(Instr::Store { val: Val::Local(newrc), ptr: Val::Local(rc_ptr) });
         self.set_terminator(Terminator::Jump(done_bb));
         self.switch_to_block(done_bb);
         Ok(())
