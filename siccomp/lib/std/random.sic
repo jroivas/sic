@@ -175,53 +175,66 @@ namespace random
     };
 
     // Fill buf with len cryptographically secure random bytes.
-    // Returns bytes written (always len on success), or -1 on error.
     // Blocks until the kernel has enough entropy (flags=0).
-    isize getrandom(u8 *buf, usize len) {
-        return Getrandom(buf, len);
+    Option<isize> getrandom(u8 *buf, usize len) {
+        isize n = Getrandom(buf, len);
+        if (n == len)
+            return Option::Some(n);
+        return None;
     }
 
     // ------------------------------------------------------------------
     // Factory functions
     //
-    // Each accepts an optional seed.  seed == 0 (the default) fills the
-    // generator's state from Linux getrandom() -- cryptographically secure
-    // system entropy.  Any non-zero seed reproduces the same sequence.
+    // Each returns Option<G>: Some(gen) on success, None on failure.
+    // seed == 0 (the default) fills the generator's state from Linux
+    // getrandom() -- cryptographically secure system entropy.  Any
+    // non-zero seed reproduces the same sequence.
     // ------------------------------------------------------------------
 
     // Default RNG (SplitMix64) -- alias for splitmix64().
-    SplitMix64 rng() { return splitmix64(); }
+    Option<SplitMix64> rng() { return splitmix64(); }
 
-    SplitMix64 splitmix64(u64 seed = 0) {
+    Option<SplitMix64> splitmix64(u64 seed = 0) {
         SplitMix64 g;
         if (seed == 0) {
             isize n = Getrandom((u8 *)&g.state, sizeof(g.state));
-            if (n != sizeof(g.state)) g.state = 0;
+            if (n != sizeof(g.state))
+                return None;
         } else {
             g.state = seed;
         }
         g.gen64();
-        return g;
+        return Option::Some(g);
     }
 
-    PCG32 pcg32(u64 seed = 0) {
+    Option<PCG32> pcg32(u64 seed = 0) {
         PCG32 g;
-        g.inc = 0xDA3E39CB94B95BDB;
         if (seed == 0) {
-            isize n = Getrandom((u8 *)&g, 16);
-            if (n != 16) { g.state = 0; g.inc = 0xDA3E39CB94B95BDB; }
+            isize n = Getrandom((u8 *)&g.state, sizeof(g.state));
+            if (n != sizeof(g.state)) return None;
+            n = Getrandom((u8 *)&g.inc, sizeof(g.inc));
+            if (n != sizeof(g.inc)) return None;
         } else {
             g.state = seed;
+            g.inc = 0xDA3E39CB94B95BDB;
         }
         g.gen32();
-        return g;
+        return Option::Some(g);
     }
 
-    Xoshiro256PP xoshiro256(u64 seed = 0) {
+    Option<Xoshiro256PP> xoshiro256(u64 seed = 0) {
         Xoshiro256PP g;
         if (seed == 0) {
-            isize n = Getrandom((u8 *)&g, 32);
-            if (n != 32) { g.s0 = 0; g.s1 = 0; g.s2 = 0; g.s3 = 0; }
+            isize n;
+            n = Getrandom((u8 *)&g.s0, sizeof(g.s0));
+            if (n != sizeof(g.s0)) return None;
+            n = Getrandom((u8 *)&g.s1, sizeof(g.s1));
+            if (n != sizeof(g.s1)) return None;
+            n = Getrandom((u8 *)&g.s2, sizeof(g.s2));
+            if (n != sizeof(g.s2)) return None;
+            n = Getrandom((u8 *)&g.s3, sizeof(g.s3));
+            if (n != sizeof(g.s3)) return None;
         } else {
             SplitMix64 sm;
             sm.state = seed;
@@ -232,22 +245,15 @@ namespace random
         }
         if (g.s0 == 0 && g.s1 == 0 && g.s2 == 0 && g.s3 == 0)
             g.s0 = 1;
-        return g;
+        return Option::Some(g);
     }
 
-    ChaCha12 chacha12(u64 seed = 0) {
+    Option<ChaCha12> chacha12(u64 seed = 0) {
         ChaCha12 g;
         if (seed == 0) {
-            isize n = Getrandom((u8 *)g.key, 32);
-            if (n != 32) {
-                SplitMix64 sm;
-                sm.state = 0;
-                sm.gen64();
-                for (int i = 0; i < 8; i += 2) {
-                    u64 r = sm.gen64();
-                    g.key[i]     = (u32)(r);
-                    g.key[i + 1] = (u32)(r >> 32);
-                }
+            for (int i = 0; i < 8; i++) {
+                isize n = Getrandom((u8 *)&g.key[i], sizeof(g.key[i]));
+                if (n != sizeof(g.key[i])) return None;
             }
         } else {
             SplitMix64 sm;
@@ -264,6 +270,6 @@ namespace random
         g.nonce_lo = 0;
         g.nonce_hi = 0;
         g.index    = 16;
-        return g;
+        return Option::Some(g);
     }
 }
