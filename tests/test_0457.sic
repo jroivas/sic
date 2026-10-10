@@ -1,0 +1,30 @@
+/* Move-on-return and payload ownership for structs with a destructor:
+ * `return r;` / `return Some(r);` move r (its ~R() ran in the callee, closing
+ * std::net sockets before the caller got them, and ran twice for a plain
+ * return); a guard/match binding of a call's payload owns it (~R() at its
+ * scope end); a local that is NOT returned is still destroyed. Returns 42. */
+int log[16];
+int n = 0;
+struct R { int id; ~R() { log[n++] = id; } };
+R plain(int i) { R r; r.id = i; return r; }
+Option<R> opt(int i) { R r; r.id = i; if (i < 0) return None; return Option::Some(r); }
+Option<R> other(int i) { R r; r.id = i; R q; q.id = i + 1; return Option::Some(q); }
+R copyout(R *p) { R r; r.id = p->id + 100; return r; }
+Option<R> wrap(R *p) { R c; c.id = p->id; return Option::Some(c); }
+Option<R> fwd(int i) { return opt(i); }
+int none_case() { auto x = opt(-4) else return 1; return 0; }
+
+int main() {
+    { R a = plain(1); }
+    { auto b = opt(2) else return 1; }
+    { match (opt(3)) { Some(x): if (x.id != 3) return 2; None: return 3; } }
+    if (none_case() != 1) return 4;
+    { auto c = other(5) else return 5; }
+    { R d = plain(7); R e = copyout(&d); }
+    { auto f = fwd(8) else return 6; }
+    { R g = plain(9); Option<R> o = wrap(&g); }  // o is a named enum: borrow, g dropped
+    int want[] = { 1, 2, 3, -4, 5, 6, 107, 7, 8, 9 };
+    if (n != 10) return 10 + n;
+    for (int i = 0; i < 10; i++) if (log[i] != want[i]) return 30 + i;
+    return 42;
+}

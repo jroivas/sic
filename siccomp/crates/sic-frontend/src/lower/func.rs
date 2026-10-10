@@ -239,6 +239,10 @@ pub struct FuncCtx<'m> {
     /// pairs from `__attribute__((cleanup(fn)))`. On scope exit / return / break /
     /// continue the cleanup functions are called (`fn(&var)`) in reverse order.
     pub cleanups: Vec<Vec<Cleanup>>,
+    /// sic move-on-return: the local (address, destructor) that the `return`
+    /// being lowered moves out (`return r;` / `return Some(r);`), whose `~S()`
+    /// must not run on that path — the caller now owns the value.
+    pub moved_on_return: Option<(Val, String)>,
     /// Scope depth (`cleanups.len()`) recorded per `break_stack` entry (loops and
     /// switches), so `break` runs the cleanups for the scopes it exits.
     pub break_scope_depth: Vec<usize>,
@@ -344,6 +348,7 @@ impl<'m> FuncCtx<'m> {
             last_line: 0,
             sret: None,
             cleanups: vec![Vec::new()],
+            moved_on_return: None,
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
@@ -479,6 +484,208 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// Lower `return [val]` (the value and every scope's cleanups). Split out of
+    /// `lower_stmt` so the move-on-return marker can bracket it.
+    fn lower_return_value(&mut self, val: &Option<Expr>) -> Result<()> {
+        if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
+
+            // Aggregate return: copy the value into the caller's slot.
+            if let Some(e) = val {
+                // sic: `return None;` builds the enum from its discriminant.
+                let src = if self.is_sic() && self.is_tagged_enum_struct(&agg_ty) {
+                    self.enum_value_ptr(e, &agg_ty, &e.span)?
+                } else if self.is_sic() && super::types::is_sic_string(&agg_ty)
+                    && !self.is_string_operand(e)
+                {
+                    // `return "literal";` / `return some_char_ptr;` / `return
+                    // local_char_array;` from a `string` function: wrap the C
+                    // string in a descriptor. A LOCAL stack array gets the
+                    // copy-on-escape sentinel so the move below materializes an
+                    // owned copy (it would otherwise dangle); a static/caller
+                    // pointer stays a plain view.
+                    let rc = if self.needs_copy_on_escape(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
+                    let v = self.lower_expr(e)?;
+                    self.cstr_to_string_rc(v, rc)?
+                } else {
+                    self.lower_aggregate_ptr(e)?
+                };
+                if self.is_sic() && super::types::is_sic_string(&agg_ty) {
+                    // Move the string out: materialize an owned copy iff it is
+                    // a copy-on-escape local-buffer view, else move+retain.
+                    self.emit_string_return_into(&sret_ptr, &src)?;
+                } else {
+                    let ps = self.ptr_size();
+                    let size = agg_ty.size_of(ps);
+                    let align = agg_ty.align_of(ps) as u64;
+                    self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
+                }
+            }
+            self.emit_cleanups_to(0);
+            self.set_terminator(Terminator::Ret(None));
+        } else if self.ret_ty == Type::Void {
+            // `return expr;` in a void function (GCC-ism, common in QEMU's
+            // `return qatomic_*()` void wrappers): evaluate the operand for
+            // its side effects but discard the value.
+            if let Some(e) = val {
+                let _ = self.lower_expr(e)?;
+            }
+            self.emit_cleanups_to(0);
+            self.set_terminator(Terminator::Ret(None));
+        } else if matches!(self.ret_ty, Type::Struct(_) | Type::Union(_)) {
+            // Small (register-class) aggregate return: `self.sret` is None,
+            // so hand the backend a pointer to the value; it loads the
+            // eightbytes into the return registers.
+            let ret = if let Some(e) = val {
+                if self.is_sic() && self.is_tagged_enum_struct(&self.ret_ty.clone()) {
+                    let rty = self.ret_ty.clone();
+                    Some(self.enum_value_ptr(e, &rty, &e.span)?)
+                } else {
+                    Some(self.lower_aggregate_ptr(e)?)
+                }
+            } else {
+                None
+            };
+            self.emit_cleanups_to(0);
+            self.set_terminator(Terminator::Ret(ret));
+        } else {
+            let ret = if let Some(e) = val {
+                // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
+                // enum/bitfield return type lets a bare member resolve; a
+                // plain-integer return type forbids one.
+                let owner = self.ret_enum.clone().or_else(|| self.ret_bitfield.clone());
+                let rt = self.ret_ty.clone();
+                self.bf_ctx = self.dest_ctx(owner, &rt);
+                // Expected-type context (sic.md §"Lambdas"): returning a
+                // captureless lambda as `Fn<…>` boxes it into a closure.
+                let prev_exp = self.expected_ty.replace(rt.clone());
+                let v = self.lower_expr(e);
+                self.expected_ty = prev_exp;
+                let v = v?;
+                let expected = self.ret_ty.clone();
+                let c = self.coerce(v, &expected)?;
+                // sic tuple / closure return (sic.md §"Tuples"/§"Lambdas"):
+                // retain the shared block before scope-exit releases run, so
+                // the returned pointer outlives this frame (the caller
+                // releases it). Closures are the same refcounted heap value,
+                // which is what lets a returned closure (currying) survive.
+                if self.is_sic() && (super::types::is_tuple(&expected) || super::types::is_closure(&expected)) {
+                    let pc = self.coerce(c.clone(), &Type::char_ptr())?;
+                    self.emit_rc_retain(pc)?;
+                }
+                // sic container return (sic.md §"List"/§"Dict"): a returned
+                // `list`/`dict`/`set` is retained so it survives this frame's
+                // scope-exit release; the caller owns the reference.
+                if self.is_sic() && (super::types::is_list(&expected)
+                    || super::types::is_dict(&expected) || super::types::is_set(&expected)) {
+                    self.container_retain(c.clone(), &expected)?;
+                }
+                // sic bigint/fixed return: these have value semantics (each
+                // owner frees its own block), so a returned local would be
+                // freed by scope cleanup before the caller reads it. Return
+                // an independent CLONE; the caller owns and frees it.
+                if self.is_sic() && (super::types::is_bigint(&expected) || super::types::is_fixed(&expected)) {
+                    // A `fixed` is an exact rational; clone with the matching
+                    // runtime so the returned block is a well-formed copy.
+                    let (cf, cty) = if super::types::is_fixed(&expected) {
+                        ("__sic_rat_clone", super::types::fixed_type(0, 0))
+                    } else {
+                        ("__sic_bi_clone", super::types::bigint_type())
+                    };
+                    let cl = self.emit_bigint_call(cf, vec![c], cty)?;
+                    self.flush_bigint_temps();  // free the returned expr's temps
+                    self.emit_cleanups_to(0);
+                    self.set_terminator(Terminator::Ret(Some(cl)));
+                    return Ok(());
+                }
+                Some(c)
+            } else {
+                None
+            };
+            self.flush_bigint_temps();  // free any bigint temps in the return expr
+            self.emit_cleanups_to(0);
+            self.set_terminator(Terminator::Ret(ret));
+        }
+        Ok(())
+    }
+
+    /// The variant name if `func` (a call's callee) is a tagged-enum constructor —
+    /// `E::V` / `mod::E::V` or a bare `V` — rather than a function (`N::f`,
+    /// `mod::ns::f`, or a real function/variable shadowing a variant name).
+    fn variant_ctor_name<'e>(&self, func: &'e Expr) -> Option<&'e String> {
+        match &func.kind {
+            ExprKind::EnumVariant { enum_name, variant } => {
+                if self.lowerer.namespace_members.contains_key(&(enum_name.clone(), variant.clone())) {
+                    return None;
+                }
+                let head = enum_name.split("::").next().unwrap_or("");
+                let key = self.lowerer.type_key(enum_name);
+                let is_enum = self.lowerer.enum_defs.contains_key(&key)
+                    || self.lowerer.generic_enum_defs.contains_key(&key);
+                if !is_enum && self.lowerer.imported_modules.contains_key(head) { return None; }
+                if !is_enum && !self.lowerer.variant_enum.contains_key(variant) { return None; }
+                Some(variant)
+            }
+            ExprKind::Ident(n) if self.lowerer.variant_enum.contains_key(n)
+                && !matches!(self.lookup(n), Some(LookupResult::Func(_))
+                    | Some(LookupResult::Local(..)) | Some(LookupResult::Global(..))) => Some(n),
+            _ => None,
+        }
+    }
+
+    /// Whether the enum value `e` is a fresh temporary whose payload nobody else
+    /// owns — a function call's result (not a variant constructor, which wraps a
+    /// copy of a still-live variable). A guard/match binding of such a payload
+    /// adopts it ([`Self::adopt_payload`]); a binding from a named enum variable
+    /// stays a borrow of that variable's storage.
+    fn is_owned_temporary(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
+            _ => false,
+        }
+    }
+
+    /// The binding in `slot` (type `pty`) now owns its payload: run a struct's
+    /// `~S()` / release a `string` at scope exit.
+    fn adopt_payload(&mut self, slot: ValId, pty: &Type) {
+        if !self.is_sic() { return; }
+        if let Type::Struct(st) = pty {
+            if let Some(dtor) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned() {
+                self.register_scope_exit(Cleanup::AttrFn { addr: Val::Local(slot), fn_name: dtor });
+                return;
+            }
+        }
+        if super::types::is_sic_string(pty) {
+            self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(slot) });
+        }
+    }
+
+    /// sic move-on-return: the local struct with a destructor that `return e;`
+    /// hands to the caller — `return r;` (by-value struct return) or
+    /// `return V(r);` (a tagged-enum variant wrapping it). The caller owns the
+    /// copy, so `r`'s `~S()` must not also run (it closed `std::net` sockets
+    /// before the caller saw them, and ran twice for a plain `return r;`).
+    fn return_moved_local(&self, e: &Expr) -> Option<(Val, String)> {
+        let ident = match &e.kind {
+            ExprKind::Ident(_) if matches!(self.ret_ty, Type::Struct(_)) => e,
+            ExprKind::Call { func, args } if args.len() == 1
+                && self.is_tagged_enum_struct(&self.ret_ty) => {
+                // Only a constructor of the returned enum moves its argument; an
+                // ordinary call `return f(r);` copies `r`, which still dies here.
+                let variant = self.variant_ctor_name(func)?;
+                let Type::Struct(rs) = &self.ret_ty else { return None };
+                let info = self.lowerer.enum_defs.get(rs.name.as_deref()?)?;
+                info.variant(variant)?.payload.as_ref()?;
+                &args[0]
+            }
+            _ => return None,
+        };
+        let ExprKind::Ident(name) = &ident.kind else { return None };
+        let (ty, vid) = self.locals.iter().rev().find_map(|sc| sc.get(name)).cloned()?;
+        let Type::Struct(st) = &ty else { return None };
+        let dtor = self.lowerer.struct_dtor.get(st.name.as_deref()?)?.clone();
+        Some((Val::Local(vid), dtor))
+    }
+
     /// Emit cleanup calls for every scope down to (and including) `from`,
     /// innermost first — used by `return` (`from` = 0) and `break`/`continue`
     /// (`from` = the loop's recorded scope depth). Does not modify the stack.
@@ -486,7 +693,12 @@ impl<'m> FuncCtx<'m> {
         let n = self.cleanups.len();
         for i in (from..n).rev() {
             let calls: Vec<Cleanup> = self.cleanups[i].iter().rev().cloned().collect();
-            for c in calls { self.emit_cleanup(c); }
+            for c in calls {
+                if let (Cleanup::AttrFn { addr, fn_name }, Some((ma, mf))) = (&c, &self.moved_on_return) {
+                    if addr == ma && fn_name == mf { continue; }
+                }
+                self.emit_cleanup(c);
+            }
         }
     }
 
@@ -1571,125 +1783,16 @@ impl<'m> FuncCtx<'m> {
                 // Evaluate the return value BEFORE running cleanups (the value
                 // must be computed while the about-to-be-destroyed locals are
                 // still valid), then run every enclosing scope's cleanups.
-                if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
-                    // Aggregate return: copy the value into the caller's slot.
-                    if let Some(e) = val {
-                        // sic: `return None;` builds the enum from its discriminant.
-                        let src = if self.is_sic() && self.is_tagged_enum_struct(&agg_ty) {
-                            self.enum_value_ptr(e, &agg_ty, &e.span)?
-                        } else if self.is_sic() && super::types::is_sic_string(&agg_ty)
-                            && !self.is_string_operand(e)
-                        {
-                            // `return "literal";` / `return some_char_ptr;` / `return
-                            // local_char_array;` from a `string` function: wrap the C
-                            // string in a descriptor. A LOCAL stack array gets the
-                            // copy-on-escape sentinel so the move below materializes an
-                            // owned copy (it would otherwise dangle); a static/caller
-                            // pointer stays a plain view.
-                            let rc = if self.needs_copy_on_escape(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
-                            let v = self.lower_expr(e)?;
-                            self.cstr_to_string_rc(v, rc)?
-                        } else {
-                            self.lower_aggregate_ptr(e)?
-                        };
-                        if self.is_sic() && super::types::is_sic_string(&agg_ty) {
-                            // Move the string out: materialize an owned copy iff it is
-                            // a copy-on-escape local-buffer view, else move+retain.
-                            self.emit_string_return_into(&sret_ptr, &src)?;
-                        } else {
-                            let ps = self.ptr_size();
-                            let size = agg_ty.size_of(ps);
-                            let align = agg_ty.align_of(ps) as u64;
-                            self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
-                        }
-                    }
-                    self.emit_cleanups_to(0);
-                    self.set_terminator(Terminator::Ret(None));
-                } else if self.ret_ty == Type::Void {
-                    // `return expr;` in a void function (GCC-ism, common in QEMU's
-                    // `return qatomic_*()` void wrappers): evaluate the operand for
-                    // its side effects but discard the value.
-                    if let Some(e) = val {
-                        let _ = self.lower_expr(e)?;
-                    }
-                    self.emit_cleanups_to(0);
-                    self.set_terminator(Terminator::Ret(None));
-                } else if matches!(self.ret_ty, Type::Struct(_) | Type::Union(_)) {
-                    // Small (register-class) aggregate return: `self.sret` is None,
-                    // so hand the backend a pointer to the value; it loads the
-                    // eightbytes into the return registers.
-                    let ret = if let Some(e) = val {
-                        if self.is_sic() && self.is_tagged_enum_struct(&self.ret_ty.clone()) {
-                            let rty = self.ret_ty.clone();
-                            Some(self.enum_value_ptr(e, &rty, &e.span)?)
-                        } else {
-                            Some(self.lower_aggregate_ptr(e)?)
-                        }
-                    } else {
-                        None
-                    };
-                    self.emit_cleanups_to(0);
-                    self.set_terminator(Terminator::Ret(ret));
-                } else {
-                    let ret = if let Some(e) = val {
-                        // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
-                        // enum/bitfield return type lets a bare member resolve; a
-                        // plain-integer return type forbids one.
-                        let owner = self.ret_enum.clone().or_else(|| self.ret_bitfield.clone());
-                        let rt = self.ret_ty.clone();
-                        self.bf_ctx = self.dest_ctx(owner, &rt);
-                        // Expected-type context (sic.md §"Lambdas"): returning a
-                        // captureless lambda as `Fn<…>` boxes it into a closure.
-                        let prev_exp = self.expected_ty.replace(rt.clone());
-                        let v = self.lower_expr(e);
-                        self.expected_ty = prev_exp;
-                        let v = v?;
-                        let expected = self.ret_ty.clone();
-                        let c = self.coerce(v, &expected)?;
-                        // sic tuple / closure return (sic.md §"Tuples"/§"Lambdas"):
-                        // retain the shared block before scope-exit releases run, so
-                        // the returned pointer outlives this frame (the caller
-                        // releases it). Closures are the same refcounted heap value,
-                        // which is what lets a returned closure (currying) survive.
-                        if self.is_sic() && (super::types::is_tuple(&expected) || super::types::is_closure(&expected)) {
-                            let pc = self.coerce(c.clone(), &Type::char_ptr())?;
-                            self.emit_rc_retain(pc)?;
-                        }
-                        // sic container return (sic.md §"List"/§"Dict"): a returned
-                        // `list`/`dict`/`set` is retained so it survives this frame's
-                        // scope-exit release; the caller owns the reference.
-                        if self.is_sic() && (super::types::is_list(&expected)
-                            || super::types::is_dict(&expected) || super::types::is_set(&expected)) {
-                            self.container_retain(c.clone(), &expected)?;
-                        }
-                        // sic bigint/fixed return: these have value semantics (each
-                        // owner frees its own block), so a returned local would be
-                        // freed by scope cleanup before the caller reads it. Return
-                        // an independent CLONE; the caller owns and frees it.
-                        if self.is_sic() && (super::types::is_bigint(&expected) || super::types::is_fixed(&expected)) {
-                            // A `fixed` is an exact rational; clone with the matching
-                            // runtime so the returned block is a well-formed copy.
-                            let (cf, cty) = if super::types::is_fixed(&expected) {
-                                ("__sic_rat_clone", super::types::fixed_type(0, 0))
-                            } else {
-                                ("__sic_bi_clone", super::types::bigint_type())
-                            };
-                            let cl = self.emit_bigint_call(cf, vec![c], cty)?;
-                            self.flush_bigint_temps();  // free the returned expr's temps
-                            self.emit_cleanups_to(0);
-                            self.set_terminator(Terminator::Ret(Some(cl)));
-                            return Ok(());
-                        }
-                        Some(c)
-                    } else {
-                        None
-                    };
-                    self.flush_bigint_temps();  // free any bigint temps in the return expr
-                    self.emit_cleanups_to(0);
-                    self.set_terminator(Terminator::Ret(ret));
-                }
+                self.moved_on_return = match val.as_ref() {
+                    Some(e) if self.is_sic() => self.return_moved_local(e),
+                    _ => None,
+                };
+                let r = self.lower_return_value(val);
+                self.moved_on_return = None;
+                r?;
             }
             Stmt::If { cond, then, else_, .. } => self.lower_if(cond, then, else_.as_deref())?,
+
             Stmt::While { cond, body, .. } => self.lower_while(cond, body)?,
             Stmt::DoWhile { body, cond, .. } => self.lower_do_while(body, cond)?,
             Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
@@ -4615,6 +4718,8 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::Load { dest: d, ptr: data, ty: pty.clone() });
                         self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(slot) });
                     }
+                    // `auto s = f() else …`: the binding owns the call's payload.
+                    if self.is_owned_temporary(cond) { self.adopt_payload(slot, &pty); }
                     self.set_terminator(Terminator::Jump(cont_bb));
                     self.switch_to_block(cont_bb);
                     let _ = decl_ty;
@@ -4739,6 +4844,8 @@ impl<'m> FuncCtx<'m> {
                     self.push_instr(Instr::Load { dest: d, ptr: data_lv, ty: pty.clone() });
                     self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(slot) });
                 }
+                // `match (f()) { V(x): … }`: the arm's binding owns the payload.
+                if self.is_owned_temporary(scrutinee) { self.adopt_payload(slot, &pty); }
                 self.define_local(bind.clone(), pty, slot);
             }
             self.lower_match_arm_body(&arm.body, &result)?;
