@@ -1,9 +1,10 @@
 module std;
 
 #include <time.h>
+#include <errno.h>
 #include <sys/random.h>
 
-// Thread-safe pseudorandom number generators.
+// Pseudorandom number generators.
 //
 // Usage:
 //   auto g = std::random::rng();       // system-seeded default (SplitMix64)
@@ -14,15 +15,32 @@ module std;
 //   auto x = std::random::xoshiro256(seed);
 //   auto c = std::random::chacha12(seed);
 //
-// Each RNG is a self-contained struct with no shared state -- thread safe.
+// Each RNG is a self-contained struct with no shared state: separate
+// instances may be used from separate threads freely; one instance must not
+// be shared between threads without a lock. Copying a generator copies its
+// state, so both copies then produce the same sequence.
+//
 // The default is SplitMix64: fast, 64-bit state, good statistical quality.
 // For heavier-duty needs, xoshiro256++ (large state, long period) or
-// ChaCha12 (cryptographic-quality) are also provided.
+// ChaCha12 are also provided. Only a system-seeded ChaCha12 (seed 0: a
+// 256-bit key from getrandom) is suitable for secrets; an explicit u64 seed
+// gives any generator at most 64 bits of entropy.
 
 // -- Module-level bridge for getrandom (avoids name shadowing) --
 
-static isize Getrandom(u8 *buf, usize len) {
-    return getrandom(buf, len, 0);
+// Fill buf with len bytes of system entropy, retrying short reads and
+// EINTR. False on failure.
+static bool FillRandom(u8 *buf, usize len) {
+    usize done = 0;
+    while (done < len) {
+        isize n = getrandom(buf + done, len - done, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        done += n;
+    }
+    return true;
 }
 
 namespace random
@@ -114,7 +132,7 @@ namespace random
     };
 
     // ------------------------------------------------------------------
-    // ChaCha12 -- cryptographic-quality PRNG (12 rounds)
+    // ChaCha12 -- ChaCha stream cipher with 12 rounds as a PRNG
     //   State: constants + 8-word key + 2-word counter + 2-word nonce
     //   64 bytes / block; 12 rounds = 6 double rounds of quarter rounds
     // ------------------------------------------------------------------
@@ -174,13 +192,13 @@ namespace random
         }
     };
 
-    // Fill buf with len cryptographically secure random bytes.
-    // Blocks until the kernel has enough entropy (flags=0).
+    // Fill buf with len cryptographically secure random bytes (any length:
+    // short reads are retried). Blocks until the kernel has enough entropy.
+    // Some(len) on success, None on failure.
     Option<isize> getrandom(u8 *buf, usize len) {
-        isize n = Getrandom(buf, len);
-        if (n == len)
-            return Option::Some(n);
-        return None;
+        if (!FillRandom(buf, len))
+            return None;
+        return Option::Some((isize)len);
     }
 
     // ------------------------------------------------------------------
@@ -198,8 +216,7 @@ namespace random
     Option<SplitMix64> splitmix64(u64 seed = 0) {
         SplitMix64 g;
         if (seed == 0) {
-            isize n = Getrandom((u8 *)&g.state, sizeof(g.state));
-            if (n != sizeof(g.state))
+            if (!FillRandom((u8 *)&g.state, sizeof(g.state)))
                 return None;
         } else {
             g.state = seed;
@@ -211,10 +228,10 @@ namespace random
     Option<PCG32> pcg32(u64 seed = 0) {
         PCG32 g;
         if (seed == 0) {
-            isize n = Getrandom((u8 *)&g.state, sizeof(g.state));
-            if (n != sizeof(g.state)) return None;
-            n = Getrandom((u8 *)&g.inc, sizeof(g.inc));
-            if (n != sizeof(g.inc)) return None;
+            u64 r[2];
+            if (!FillRandom((u8 *)r, sizeof(r))) return None;
+            g.state = r[0];
+            g.inc = r[1];
         } else {
             g.state = seed;
             g.inc = 0xDA3E39CB94B95BDB;
@@ -226,15 +243,12 @@ namespace random
     Option<Xoshiro256PP> xoshiro256(u64 seed = 0) {
         Xoshiro256PP g;
         if (seed == 0) {
-            isize n;
-            n = Getrandom((u8 *)&g.s0, sizeof(g.s0));
-            if (n != sizeof(g.s0)) return None;
-            n = Getrandom((u8 *)&g.s1, sizeof(g.s1));
-            if (n != sizeof(g.s1)) return None;
-            n = Getrandom((u8 *)&g.s2, sizeof(g.s2));
-            if (n != sizeof(g.s2)) return None;
-            n = Getrandom((u8 *)&g.s3, sizeof(g.s3));
-            if (n != sizeof(g.s3)) return None;
+            u64 r[4];
+            if (!FillRandom((u8 *)r, sizeof(r))) return None;
+            g.s0 = r[0];
+            g.s1 = r[1];
+            g.s2 = r[2];
+            g.s3 = r[3];
         } else {
             SplitMix64 sm;
             sm.state = seed;
@@ -251,10 +265,7 @@ namespace random
     Option<ChaCha12> chacha12(u64 seed = 0) {
         ChaCha12 g;
         if (seed == 0) {
-            for (int i = 0; i < 8; i++) {
-                isize n = Getrandom((u8 *)&g.key[i], sizeof(g.key[i]));
-                if (n != sizeof(g.key[i])) return None;
-            }
+            if (!FillRandom((u8 *)g.key, sizeof(g.key))) return None;
         } else {
             SplitMix64 sm;
             sm.state = seed;
