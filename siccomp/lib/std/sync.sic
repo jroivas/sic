@@ -7,13 +7,16 @@ module std;
 //
 // Usage:
 //   auto m = std::sync::CreateMutex() else return 1;
-//   std::sync::lock(m);
+//   std::sync::Lock(m);
 //   // critical section
-//   std::sync::unlock(m);
+//   std::sync::Unlock(m);
 //
 //   auto cv = std::sync::CreateCond() else return 1;
-//   std::sync::wait(cv, m);
-//   std::sync::notify_one(cv);
+//   std::sync::Wait(cv, m);          // with m locked
+//   std::sync::NotifyOne(cv);
+//
+//   std::sync::DestroyCond(cv);
+//   std::sync::DestroyMutex(m);
 
 namespace sync
 {
@@ -21,22 +24,26 @@ namespace sync
     // Mutex — wraps pthread_mutex_t (opaque storage)
     // ------------------------------------------------------------------
 
-    // Opaque: holds a pthread_mutex_t (40 bytes on glibc x86-64).
-    // Always used through a pointer; the consumer never sees the layout.
+    // Opaque: holds a pthread_mutex_t (40 bytes on glibc x86-64) in
+    // 8-byte-aligned storage. Always used through a pointer.
     struct Mutex {
-        u8 data[64];
+        u64 data[8];
+        bool live;                  // pthread_mutex_init succeeded
 
         ~Mutex() {
-            pthread_mutex_t *pm = (pthread_mutex_t *)data;
-            pthread_mutex_destroy(pm);
+            if (live)
+                pthread_mutex_destroy((pthread_mutex_t *)data);
         }
     };
 
-    // Create a new mutex. Returns NULL on OOM.
+    // Create a new mutex. Returns NULL on failure (out of memory/resources).
     Mutex *CreateMutex() {
         Mutex *m = new Mutex() else return NULL;
-        pthread_mutex_t *pm = (pthread_mutex_t *)m->data;
-        pthread_mutex_init(pm, NULL);
+        if (pthread_mutex_init((pthread_mutex_t *)m->data, NULL) != 0) {
+            del m;
+            return NULL;
+        }
+        m->live = true;
         return m;
     }
 
@@ -68,19 +75,35 @@ namespace sync
     // Cond — wraps pthread_cond_t (opaque storage)
     // ------------------------------------------------------------------
 
+    // Opaque: holds a pthread_cond_t (48 bytes on glibc x86-64), 8-aligned.
     struct Cond {
-        u8 data[64];
+        u64 data[8];
+        bool live;                  // pthread_cond_init succeeded
+
         ~Cond() {
-            pthread_cond_t *pc = (pthread_cond_t *)data;
-            pthread_cond_destroy(pc);
+            if (live)
+                pthread_cond_destroy((pthread_cond_t *)data);
         }
     };
 
-    // Create a new condition variable. Returns NULL on OOM.
+    // Create a new condition variable. Returns NULL on failure. Its timed
+    // waits run on CLOCK_MONOTONIC, so changing the wall clock does not
+    // stretch or cut a TimedWait.
     Cond *CreateCond() {
         Cond *cv = new Cond() else return NULL;
-        pthread_cond_t *pc = (pthread_cond_t *)cv->data;
-        pthread_cond_init(pc, NULL);
+        pthread_condattr_t attr;
+        if (pthread_condattr_init(&attr) != 0) {
+            del cv;
+            return NULL;
+        }
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+        int res = pthread_cond_init((pthread_cond_t *)cv->data, &attr);
+        pthread_condattr_destroy(&attr);
+        if (res != 0) {
+            del cv;
+            return NULL;
+        }
+        cv->live = true;
         return cv;
     }
 
@@ -100,12 +123,13 @@ namespace sync
         );
     }
 
-    // Wait with a timeout in milliseconds. Returns true if the condition
-    // was signalled, false on timeout.
+    // Wait with a timeout in milliseconds. Returns true if woken (a signal —
+    // or, as with Wait, a spurious wakeup: re-check the condition), false on
+    // timeout or error.
     bool TimedWait(Cond *cv, Mutex *m, u64 ms) {
         if (!cv || !m) return false;
         struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
         ts.tv_sec += ms / 1000;
         ts.tv_nsec += (ms % 1000) * 1000000;
         if (ts.tv_nsec >= 1000000000) {
