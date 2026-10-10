@@ -11,8 +11,11 @@ module std;
 // Usage:
 //   auto s = std::net::TcpConnect("1.2.3.4", 80) else return 1;
 //   u8 buf[1024];
-//   isize n = std::net::Read(s, buf, 1024);
-//   std::net::Close(s);
+//   isize n = std::net::Read(&s, buf, 1024);
+//   std::net::Close(&s);           // optional: s closes itself at scope end
+//
+// A Socket owns its descriptor: it is closed when the Socket goes out of
+// scope (or by Close()).
 
 namespace net
 {
@@ -23,8 +26,10 @@ namespace net
     struct Socket {
         int fd;
 
+        Socket() { fd = -1; }       // no descriptor yet (0 is a valid fd)
+
         ~Socket() {
-            if (fd > 0)
+            if (fd >= 0)
                 close(fd);
         }
     };
@@ -32,15 +37,23 @@ namespace net
     // -- Internal helpers (static, not exported) --
 
     static int TcpSocket(void) {
-        return socket(AF_INET, __socket_type::SOCK_STREAM, 0);
+        return socket(AF_INET, SOCK_STREAM, 0);
+    }
+
+    // `addr` is in network byte order (as inet_pton gives it).
+    static void FillAddr(struct sockaddr_in *sin, u32 addr, u16 port) {
+        sin->sin_family = AF_INET;
+        sin->sin_port = htons(port);
+        sin->sin_addr.s_addr = addr;
     }
 
     static int BindListen(int fd, u32 addr, u16 port, int backlog) {
+        // Allow an immediate re-bind after a restart (TIME_WAIT).
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         struct sockaddr_in sin;
-        sin.sin_family = AF_INET;
-        sin.sin_port = htons(port);
-        sin.sin_addr.s_addr = htonl(addr);
-        if (bind(fd, (struct sockaddr *)&sin, 16) < 0)
+        FillAddr(&sin, addr, port);
+        if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0)
             return -1;
         if (listen(fd, backlog) < 0)
             return -1;
@@ -49,75 +62,90 @@ namespace net
 
     static int DoConnect(int fd, u32 addr, u16 port) {
         struct sockaddr_in sin;
-        sin.sin_family = AF_INET;
-        sin.sin_port = htons(port);
-        sin.sin_addr.s_addr = htonl(addr);
-        return connect(fd, (struct sockaddr *)&sin, 16);
+        FillAddr(&sin, addr, port);
+        int res;
+        do {
+            res = connect(fd, (struct sockaddr *)&sin, sizeof(sin));
+        } while (res < 0 && errno == EINTR);
+        return res;
     }
 
-    static u32 InetAddr(string host) {
-        return inet_addr(host.ptr);
+    // Parse a dotted IPv4 address into `out` (network byte order). False if
+    // it is not one ("255.255.255.255" is valid).
+    static bool ParseAddr(string host, u32 *out) {
+        struct in_addr a;
+        if (inet_pton(AF_INET, host.ptr, &a) != 1)
+            return false;
+        *out = a.s_addr;
+        return true;
     }
 
     // -- Public API --
 
     // IPv4 TCP connect. Returns None on failure.
     Option<Socket> TcpConnect(string host, u16 port) {
-        u32 addr = InetAddr(host);
-        if (addr == 0xFFFFFFFF) return None;
-        int fd = TcpSocket();
-        if (fd < 0) return None;
-        if (DoConnect(fd, addr, port) < 0) {
-            close(fd);
-            return None;
-        }
+        u32 addr;
+        if (!ParseAddr(host, &addr)) return None;
         Socket s;
-        s.fd = fd;
+        s.fd = TcpSocket();
+        if (s.fd < 0) return None;
+        if (DoConnect(s.fd, addr, port) < 0) return None;   // s closes the fd
         return Option::Some(s);
     }
 
     // IPv4 TCP listen. addr "0.0.0.0" binds all interfaces.
     // backlog is the listen queue depth (default 5).
     Option<Socket> TcpListen(string addr, u16 port, int backlog = 5) {
-        u32 a = InetAddr(addr);
-        if (a == 0xFFFFFFFF) return None;
-        int fd = TcpSocket();
-        if (fd < 0) return None;
-        if (BindListen(fd, a, port, backlog) < 0) {
-            close(fd);
-            return None;
-        }
+        u32 a;
+        if (!ParseAddr(addr, &a)) return None;
         Socket s;
-        s.fd = fd;
+        s.fd = TcpSocket();
+        if (s.fd < 0) return None;
+        if (BindListen(s.fd, a, port, backlog) < 0) return None;
         return Option::Some(s);
     }
 
     // Accept an incoming connection. Blocks until one arrives.
     Option<Socket> Accept(Socket *s) {
-        if (!s) return None;
-        int cfd = accept(s->fd, NULL, NULL);
-        if (cfd < 0) return None;
+        if (!s || s->fd < 0) return None;
         Socket c;
-        c.fd = cfd;
+        do {
+            c.fd = accept(s->fd, NULL, NULL);
+        } while (c.fd < 0 && errno == EINTR);
+        if (c.fd < 0) return None;
         return Option::Some(c);
     }
 
     // Read up to len bytes. Returns bytes read (0 on EOF), or -1.
     isize Read(Socket *s, u8 *buf, usize len) {
-        if (!s) return -1;
-        return read(s->fd, buf, len);
+        if (!s || s->fd < 0) return -1;
+        isize n;
+        do {
+            n = read(s->fd, buf, len);
+        } while (n < 0 && errno == EINTR);
+        return n;
     }
 
-    // Write len bytes. Returns bytes written, or -1.
+    // Write all len bytes (retrying short writes). Returns len, or -1 on
+    // error (some bytes may have been sent).
     isize Write(Socket *s, u8 *buf, usize len) {
-        if (!s) return -1;
-        return write(s->fd, buf, len);
+        if (!s || s->fd < 0) return -1;
+        usize done = 0;
+        while (done < len) {
+            isize n = write(s->fd, buf + done, len - done);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return -1;
+            }
+            done += n;
+        }
+        return len;
     }
 
-    // Close a socket.
+    // Close a socket now (its destructor would otherwise do it).
     void Close(Socket *s) {
         if (!s) return;
-        if (s->fd == -1) return;
+        if (s->fd < 0) return;
         close(s->fd);
         s->fd = -1;
     }
