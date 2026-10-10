@@ -2363,10 +2363,17 @@ impl Lowerer {
                     // Payload-less named enum (a plain C enum): record its variants
                     // for `value.str` → `"vals::ONE"` (sic.md §"Match").
                     let mut vs = Vec::new();
+                    // An enum from a C header `#include`d by SIC source is still C:
+                    // its members stay plain integer constants (`SOCK_STREAM` for
+                    // socket()'s `int`), not strict SIC members needing
+                    // `__socket_type::SOCK_STREAM`.
+                    let from_c_header = e.span.file.as_deref().map_or(false, |f| !f.ends_with(".sic"));
                     for v in variants {
                         let val = *self.enum_consts.get(&v.name).unwrap();
                         vs.push((v.name.clone(), val));
-                        self.c_enum_variant.insert(v.name.clone(), ename.clone());
+                        if !from_c_header {
+                            self.c_enum_variant.insert(v.name.clone(), ename.clone());
+                        }
                     }
                     self.c_enum_defs.insert(ename.clone(), vs);
                     if e.private { self.private_types.insert(ename.clone()); }
