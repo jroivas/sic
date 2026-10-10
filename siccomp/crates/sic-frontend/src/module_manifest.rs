@@ -693,13 +693,22 @@ pub fn encode_type(ty: &Type) -> Option<String> {
         }
         // A named aggregate is referenced by `@name`; its record carries the layout.
         Type::Struct(_) | Type::Union(_) => format!("@{}", agg_name(ty)?),
-        Type::Array { .. } | Type::Function(_) => return None,
+        // A fixed-size array is `[N]elem` (`key:[8]u32`): without it a struct with
+        // an array field had no record, decoded as an EMPTY struct in a consumer,
+        // and a by-value return of it overran the caller's buffer.
+        Type::Array { elem, len } => format!("[{}]{}", len, encode_type(elem)?),
+        Type::Function(_) => return None,
     })
 }
 
 /// Decode a manifest type token back to an IR type. `registry` resolves `@name`
 /// aggregate references to their (already-decoded) type.
 pub fn decode_type(tok: &str, ptr_size: u32, registry: &std::collections::HashMap<String, Type>) -> Option<Type> {
+    if let Some(rest) = tok.strip_prefix('[') {
+        let (n, elem) = rest.split_once(']')?;
+        let len: usize = n.parse().ok()?;
+        return Some(Type::Array { elem: Box::new(decode_type(elem, ptr_size, registry)?), len });
+    }
     if let Some(rest) = tok.strip_prefix('*') {
         let inner = decode_type(rest, ptr_size, registry)?;
         return Some(Type::Pointer(Box::new(inner)));
