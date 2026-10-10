@@ -3,13 +3,13 @@ module std;
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
-#include <errno.h>
 
 // Filesystem operations.
 //
 // Usage:
 //   std::fs::MkDir("/tmp/test", 0755);
-//   for (auto name : std::fs::ReadDir("/tmp")) { ... }
+//   auto names = std::fs::ReadDir("/tmp") else return 1;
+//   for (string name : names.values) { ... }
 //   std::fs::Exists("/tmp/file");
 
 namespace fs
@@ -58,18 +58,18 @@ namespace fs
     // Directory listing — returns all entries in one shot
     // ------------------------------------------------------------------
 
-    // List all entries in a directory. Returns an empty list on error.
-    // Includes . and .. .
-    list<string> ReadDir(string path) {
+    // List all entries in a directory (including . and ..), in the order
+    // the filesystem returns them. None if the directory cannot be opened.
+    Option<list<string>> ReadDir(string path) {
         list<string> entries;
         DIR *dp = opendir(path.ptr);
-        if (!dp) return entries;
+        if (!dp) return None;
         struct dirent *de;
         while ((de = readdir(dp)) != NULL) {
             entries.add(de->d_name);
         }
         closedir(dp);
-        return entries;
+        return Option::Some(entries);
     }
 
     // ------------------------------------------------------------------
