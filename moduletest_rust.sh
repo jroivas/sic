@@ -26,6 +26,7 @@ case "$PROFILE" in release|debug) ;; *) echo "unknown profile '$PROFILE' (releas
 SIC="${SIC:-$MYDIR/siccomp/target/$PROFILE/sic}"
 if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PROFILE"; exit 2; fi
 export SIC
+echo "compiler: $SIC ($PROFILE, built $(date -r "$SIC" '+%Y-%m-%d %H:%M'), $("$SIC" --version 2>/dev/null | head -1 || echo 'version unknown'))"
 VALGRIND="${VALGRIND:-valgrind}"
 
 # Guard against testing a stale compiler: warn when any compiler source is

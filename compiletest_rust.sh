@@ -12,6 +12,8 @@ case "$PROFILE" in release|debug) ;; *) echo "unknown profile '$PROFILE' (releas
 SIC="${SIC:-$MYDIR/siccomp/target/$PROFILE/sic}"
 if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PROFILE"; exit 2; fi
 export SIC
+# Say which compiler is under test (a stale debug build passed for current is easy to miss).
+echo "compiler: $SIC ($PROFILE, built $(date -r "$SIC" '+%Y-%m-%d %H:%M'), $("$SIC" --version 2>/dev/null | head -1 || echo 'version unknown'))"
 CC="${CC:-cc}"
 CFLAGS=${CFLAGS:-}
 # FAILFAST=1: stop at the first failing test and exit non-zero immediately (used by
