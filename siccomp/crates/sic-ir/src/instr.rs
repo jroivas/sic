@@ -138,6 +138,10 @@ pub enum Instr {
     AtomicLoad { dest: ValId, ptr: Val, ty: Type },
     /// Atomic store of `val` (typed `ty`) to `ptr` (sequentially consistent).
     AtomicStore { ptr: Val, val: Val, ty: Type },
+    /// Sequentially consistent memory fence (`mfence` on x86-64): no memory
+    /// access is reordered across it, by the compiler or the CPU. SIC `fence;`,
+    /// C `__atomic_thread_fence(__ATOMIC_SEQ_CST)` / `__sync_synchronize()`.
+    Fence,
     /// Atomic read-modify-write: `dest` = old value at `ptr`; memory becomes
     /// `old <op> val`. `ty` is the value width.
     AtomicRmw { dest: ValId, op: AtomicOp, ptr: Val, val: Val, ty: Type },
@@ -171,7 +175,7 @@ impl Instr {
     pub fn for_each_val<F: FnMut(&Val)>(&self, mut f: F) {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
-            | Instr::ReturnAddress { .. } => {}
+            | Instr::ReturnAddress { .. } | Instr::Fence => {}
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
@@ -199,7 +203,7 @@ impl Instr {
     pub fn for_each_val_mut<F: FnMut(&mut Val)>(&mut self, mut f: F) {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
-            | Instr::ReturnAddress { .. } => {}
+            | Instr::ReturnAddress { .. } | Instr::Fence => {}
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
@@ -237,7 +241,7 @@ impl Instr {
             | Instr::ReturnAddress { dest } => Some(*dest),
             Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
             Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
-            | Instr::AtomicStore { .. }
+            | Instr::AtomicStore { .. } | Instr::Fence
             | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
             | Instr::DbgVar { .. } => None,
         }

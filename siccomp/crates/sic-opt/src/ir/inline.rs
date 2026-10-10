@@ -378,7 +378,7 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         Instr::DbgVar { slot, .. } => { *slot = md(*slot); }
         // No dest / no ValId field to remap (operands already handled above).
         Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
-        | Instr::AtomicStore { .. } | Instr::VaStart { .. } | Instr::VaEnd { .. }
+        | Instr::AtomicStore { .. } | Instr::Fence | Instr::VaStart { .. } | Instr::VaEnd { .. }
         | Instr::SrcLine(_) => {}
     }
     n

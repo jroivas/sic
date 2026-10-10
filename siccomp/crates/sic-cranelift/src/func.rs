@@ -399,6 +399,7 @@ fn emit_instr(
             let v = builder.ins().atomic_load(cl_ty, MemFlagsData::new(), pv);
             val_map.insert(dest.0, v);
         }
+        Instr::Fence => { builder.ins().fence(); }
         Instr::AtomicStore { ptr, val, ty } => {
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);

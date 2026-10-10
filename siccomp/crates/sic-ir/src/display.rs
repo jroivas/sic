@@ -173,6 +173,7 @@ impl fmt::Display for Instr {
             Instr::AtomicCas { dest, ptr, expected, desired, ty } =>
                 write!(f, "  %{} = atomic_cas {} {}, {}, {}", dest.0, ty, ptr, expected, desired),
             Instr::SrcLine(line) => write!(f, "  .loc {}", line),
+            Instr::Fence => write!(f, "  fence"),
             Instr::DbgVar { name, ty, slot, is_param } => write!(
                 f, "  .dbgvar {} {} %{}{}", ty, name, slot.0,
                 if *is_param { " (param)" } else { "" },

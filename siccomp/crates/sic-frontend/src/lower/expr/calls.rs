@@ -647,11 +647,10 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Val::Local(dest));
                     }
                 }
-                // void __sync_synchronize(void) — full memory barrier; no-op here.
-                "__sync_synchronize" => return Ok(Constant::zero()),
-                // Atomic read-modify-write builtins. sic has no real atomics, so
-                // these lower to a plain load / op / store (correct for a single
-                // thread, which is enough to compile and run the code).
+                // void __sync_synchronize(void) — full memory barrier.
+                "__sync_synchronize" => { self.emit_fence(5, false)?; return Ok(Constant::zero()); }
+                // Atomic read-modify-write builtins: a lock-free `AtomicRmw` for
+                // lock-free widths (see `lower_atomic_rmw`).
                 //   __atomic_fetch_OP(ptr, val, order)  -> returns OLD value
                 //   __atomic_OP_fetch(ptr, val, order)  -> returns NEW value
                 //   __sync_fetch_and_OP(ptr, val)       -> returns OLD value
@@ -662,8 +661,17 @@ impl<'m> FuncCtx<'m> {
                         return self.lower_atomic_rmw(ptr_expr, val_expr, op, ret_new);
                     }
                 }
-                // Fences / barriers: no-ops for a single thread.
-                "__atomic_thread_fence" | "__atomic_signal_fence" => return Ok(Constant::zero()),
+                // `__atomic_thread_fence(order)` / `__atomic_signal_fence(order)`
+                // (C11 atomic_thread_fence, QEMU smp_mb/smp_rmb/smp_wmb). They were
+                // no-ops — wrong for any multi-threaded program.
+                "__atomic_thread_fence" | "__atomic_signal_fence" => {
+                    // A non-constant order is treated as the strongest (seq_cst).
+                    let order = args.first()
+                        .and_then(|a| crate::lower::eval_const_expr(a, &self.lowerer.enum_consts).ok())
+                        .unwrap_or(5);
+                    self.emit_fence(order, name == "__atomic_signal_fence")?;
+                    return Ok(Constant::zero());
+                }
                 // bool __atomic_test_and_set(void *p, int order): atomically set the
                 // byte at `p` to 1 (`__GCC_ATOMIC_TEST_AND_SET_TRUEVAL`) and return
                 // whether it was already set. <stdatomic.h> passes the

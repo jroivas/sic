@@ -297,9 +297,25 @@ impl<'m> FuncCtx<'m> {
         Ok(true)
     }
 
+    /// A memory fence of GCC memory order `order` (`__ATOMIC_RELAXED` = 0 …
+    /// `__ATOMIC_SEQ_CST` = 5). `signal`: only against a signal handler on this
+    /// thread (`__atomic_signal_fence`), which never needs a CPU fence.
+    ///   relaxed                         → nothing
+    ///   consume/acquire/release/acq_rel → compiler barrier (x86-64 TSO already
+    ///                                     orders these; gcc emits no instruction)
+    ///   seq_cst                         → `fence` (mfence), also a compiler barrier
+    pub(crate) fn emit_fence(&mut self, order: i64, signal: bool) -> Result<()> {
+        match order & 0xffff { // the upper bits are x86 HLE hints
+            0 => {}
+            5 if !signal => self.push_instr(Instr::Fence),
+            _ => { self.call_asm_helper("barrier", &[], vec![], Type::Void)?; }
+        }
+        Ok(())
+    }
+
     /// Call helper `__sic_asm_<name>` (declared on first use), coercing the
     /// arguments to `params`.
-    fn call_asm_helper(&mut self, name: &str, params: &[Type], args: Vec<Val>, ret: Type) -> Result<Val> {
+    pub(crate) fn call_asm_helper(&mut self, name: &str, params: &[Type], args: Vec<Val>, ret: Type) -> Result<Val> {
         let sym = format!("{}{}", ASM_HELPER_PREFIX, name);
         let fref = match self.lowerer.module.func_ref_by_name(&sym) {
             Some(f) => f,
