@@ -645,7 +645,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// The binding in `slot` (type `pty`) now owns its payload: run a struct's
-    /// `~S()` / release a `string` at scope exit.
+    /// `~S()` / release a `string` or container at scope exit.
     fn adopt_payload(&mut self, slot: ValId, pty: &Type) {
         if !self.is_sic() { return; }
         if let Type::Struct(st) = pty {
@@ -656,6 +656,10 @@ impl<'m> FuncCtx<'m> {
         }
         if super::types::is_sic_string(pty) {
             self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(slot) });
+        } else if super::types::is_dict(pty) || super::types::is_set(pty) {
+            self.register_scope_exit(Cleanup::DictFree { slot: Val::Local(slot) });
+        } else if super::types::is_list(pty) {
+            self.register_scope_exit(Cleanup::ListFree { slot: Val::Local(slot) });
         }
     }
 

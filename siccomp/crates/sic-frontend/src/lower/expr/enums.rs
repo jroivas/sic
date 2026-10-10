@@ -150,6 +150,15 @@ impl<'m> FuncCtx<'m> {
                     // A `bigint` payload: same ownership story via `__sic_bi_clone`.
                     let val = self.eval_bigint_owned(&args[0])?;
                     self.push_instr(Instr::Store { val, ptr: payload_ptr.ptr });
+                } else if self.is_sic() && (super::super::types::is_list(pty)
+                    || super::super::types::is_dict(pty) || super::super::types::is_set(pty)) {
+                    // A container payload holds its own reference: the source (a
+                    // local released at scope exit, or a call's temporary released
+                    // at statement end) would otherwise free it under the enum —
+                    // `return Some(l);` handed the caller a freed list.
+                    let val = self.lower_expr(&args[0])?;
+                    self.container_retain(val.clone(), pty)?;
+                    self.store_lvalue(&payload_ptr, val)?;
                 } else {
                     let val = self.lower_expr(&args[0])?;
                     self.store_lvalue(&payload_ptr, val)?;

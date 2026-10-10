@@ -1,0 +1,25 @@
+/* A container (list/dict) as an Option payload: Some(l) did not retain it, so
+ * the local's scope-exit release freed it and the caller read a freed list.
+ * The payload now holds a reference; a binding of a call's payload owns it.
+ * Returns 42. */
+Option<list<string>> names(int ok) {
+    list<string> l;
+    if (!ok) return None;
+    l.add("ab"); l.add("cde");
+    return Option::Some(l);
+}
+Option<dict<string, int>> ages() {
+    dict<string, int> d;
+    d["x"] = 30;
+    return Option::Some(d);
+}
+int main() {
+    auto l = names(1) else return 1;
+    int n = 0;
+    for (string s : l.values) n += s.length;           // 5
+    match (names(1)) { Some(m): n += (int)m.length; None: return 2; }   // 2
+    match (ages()) { Some(d): n += d["x"]; None: return 3; }            // 30
+    if (names(0) != None) return 4;
+    for (int i = 0; i < 100; i++) { auto t = names(1) else return 5; n += (int)t.length - 2; }
+    return n + 5;                                        // 42
+}
