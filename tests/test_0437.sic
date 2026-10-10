@@ -1,0 +1,8 @@
+// SIC defines `x / 0` (= 0) and over-wide shifts (= 0), so -Werror does not
+// reject them as C does (-Wdiv-by-zero, -Wshift-count-overflow). Returns 42.
+int main() {
+    int x = 42;
+    int z = x / 0;
+    int s = x << 40;
+    return x + z + s;
+}

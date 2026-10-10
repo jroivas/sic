@@ -248,6 +248,8 @@ pub struct Declarator {
     /// `__attribute__((cleanup(fn)))`: call `fn(&var)` when the variable goes
     /// out of scope (glib's `g_autoptr`, QEMU's `QEMU_LOCK_GUARD`).
     pub cleanup: Option<String>,
+    /// `__attribute__((unused))` / `[[maybe_unused]]`: no -Wunused-variable.
+    pub unused: bool,
     pub span: Span,
 }
 

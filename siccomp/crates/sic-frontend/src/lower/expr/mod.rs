@@ -10,6 +10,7 @@ mod calls;
 mod lvalue;
 mod infer;
 mod asm;
+mod warnings;
 
 
 /// The result of lowering a "location" (lvalue) — a pointer to the storage.
@@ -650,10 +651,14 @@ impl<'m> FuncCtx<'m> {
                 // Re-establish the shorthand context so `lower_binop` can decide how
                 // it flows to the operands (`& | ^` and comparisons propagate it).
                 self.bf_ctx = bf_ctx;
+                self.warn_const_operand(*op, lhs, rhs, &expr.span);
                 self.lower_binop(*op, lhs, rhs)
             }
 
-            ExprKind::Assign { op, lhs, rhs } => self.lower_assign(*op, lhs, rhs),
+            ExprKind::Assign { op, lhs, rhs } => {
+                if let Some(o) = op { self.warn_const_operand(*o, lhs, rhs, &expr.span); }
+                self.lower_assign(*op, lhs, rhs)
+            }
 
             ExprKind::Swap { lhs, rhs } => self.lower_swap(lhs, rhs),
 
@@ -1448,7 +1453,7 @@ impl<'m> FuncCtx<'m> {
             fn_body.push(ast::Stmt::Decl(ast::Decl::Var {
                 base_ty: auto_qt.clone(),
                 declarators: vec![ast::Declarator {
-                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, span: span.clone(),
+                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, unused: false, span: span.clone(),
                 }],
                 weak: false, thread_local: false, span: span.clone(),
             }));

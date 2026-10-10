@@ -1,0 +1,1 @@
+-Wall -Werror -Wno-error=div-by-zero -Wno-shift-count-overflow -w

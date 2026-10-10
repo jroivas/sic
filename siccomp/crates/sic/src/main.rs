@@ -78,11 +78,15 @@ struct Args {
     #[arg(short = 'L', action = clap::ArgAction::Append, value_name = "DIR")]
     lib_dirs: Vec<String>,
 
-    /// Warning flags (`-Wall`, `-Wextra`, `-Werror`, `-Wno-...`, ...). Accepted
-    /// for gcc/clang compatibility. Most are no-ops for now (sic does not yet
-    /// emit diagnostics); `-Wl,<args>` is forwarded to the linker.
+    /// Warning flags (`-Wall`, `-Wextra`, `-Werror`, `-Werror=<w>`, `-Wno-<w>`,
+    /// …), applied in order by `sic_frontend::diag`; names sic does not
+    /// implement are accepted and ignored. `-Wl,<args>` goes to the linker.
     #[arg(short = 'W', action = clap::ArgAction::Append, value_name = "WARNING")]
     warnings: Vec<String>,
+
+    /// Inhibit all warnings
+    #[arg(short = 'w')]
+    no_warnings: bool,
 
     /// Dump AST
     #[arg(long = "ast")]
@@ -323,7 +327,12 @@ fn main() {
         argv.push(arg0);
     }
     while let Some(a) = iter.next() {
-        if a == "-pthread" || a == "-pthreads" {
+        if a == "-pedantic" || a == "-pedantic-errors" {
+            // gcc spellings of -Wpedantic (+ -Werror=pedantic); single-dash long
+            // options clap cannot parse.
+            argv.push("-Wpedantic".to_string());
+            if a == "-pedantic-errors" { argv.push("-Werror=pedantic".to_string()); }
+        } else if a == "-pthread" || a == "-pthreads" {
             // Compile with `_REENTRANT` and link the pthread library.
             pthread = true;
             link_order.push("-pthread".to_string());
@@ -873,6 +882,12 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .unwrap_or("module")
         .to_string();
     let mut ir_module = lower_tu(&tu, lang, &module_name, args)?;
+    // `-Werror` / `-Werror=<w>`: a promoted warning fails the compilation.
+    let errs = sic_frontend::diag::promoted_errors();
+    if errs > 0 {
+        return Err(format!("{} warning{} treated as error{}", errs,
+            if errs == 1 { "" } else { "s" }, if errs == 1 { "" } else { "s" }).into());
+    }
     ir_module.source_file = Some(path.to_string());
     // Record which preprocessor produced this object (`readelf -p .comment`):
     // its program name, not the full path, so objects don't encode where the
@@ -1118,6 +1133,11 @@ fn def_file_for(manifest: &sic_frontend::ModuleManifest) -> String {
 }
 
 fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Warning flags; `-Wl,`/`-Wp,`/`-Wa,` are pass-through options, not warnings.
+    let warn_flags: Vec<&String> = args.warnings.iter()
+        .filter(|w| !(w.starts_with("l,") || w.starts_with("p,") || w.starts_with("a,")))
+        .collect();
+    sic_frontend::diag::configure(&warn_flags, args.no_warnings);
     if args.debug && !args.f_options.is_empty() {
         eprintln!("-f options: {:?}", args.f_options);
     }

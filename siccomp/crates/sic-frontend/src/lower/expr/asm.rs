@@ -90,8 +90,9 @@ impl<'m> FuncCtx<'m> {
             return Ok(());
         }
         let sp = &a.span;
-        eprintln!("{}:{}:{}: warning: unsupported inline assembly \"{}\" (sic recognises only a fixed set of x86-64 templates); it traps if executed",
-            sp.file.as_deref().unwrap_or("<input>"), sp.line, sp.col, a.template.escape_debug());
+        crate::diag::warn("unsupported-asm", sp.file.as_deref(), sp.line, sp.col, &format!(
+            "unsupported inline assembly \"{}\" (sic recognises only a fixed set of x86-64 templates); it traps if executed",
+            a.template.escape_debug()));
         self.call_asm_helper("trap", &[], vec![], Type::Void)?;
         Ok(())
     }

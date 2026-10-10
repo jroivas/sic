@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 use crate::lexer::{Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
@@ -36,6 +36,11 @@ pub struct Parser {
     /// `__attribute__((cleanup(fn)))` function name seen in the most recent
     /// `skip_attributes`/`skip_decl_tail` run, applied to the next declarator.
     pending_cleanup: Option<String>,
+    /// `unused` / `maybe_unused` attribute seen (suppresses -Wunused-variable).
+    pending_unused: bool,
+    /// Locals declared in the function body being parsed, for -Wunused-variable:
+    /// `(name, span)`; deduplicated by span (speculative parses may revisit one).
+    local_decls: Vec<(String, Span)>,
     /// `__thread`/`_Thread_local` seen in the current declaration's specifiers.
     pending_thread_local: bool,
     /// `__attribute__((packed))` seen in the most recent attribute scan — used to
@@ -89,7 +94,7 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -359,7 +364,7 @@ impl Parser {
             {
                 self.parse_kr_param_decls(&mut params)?;
                 self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
-                let body = self.parse_compound_stmt_as_stmts()?;
+                let body = self.parse_function_body()?;
                 self.func_vars.clear();
                 let type_params = std::mem::take(&mut self.pending_type_params);
                 let template_src = if type_params.is_empty() { None }
@@ -373,7 +378,7 @@ impl Parser {
             if self.at(TokenKind::LBrace) {
                 // Function definition. Seed the shadow set with the parameter names.
                 self.func_vars = params.iter().filter_map(|p| p.name.clone()).collect();
-                let body = self.parse_compound_stmt_as_stmts()?;
+                let body = self.parse_function_body()?;
                 self.func_vars.clear();
                 let type_params = std::mem::take(&mut self.pending_type_params);
                 // For a generic template, capture its exact source text (from the
@@ -408,7 +413,7 @@ impl Parser {
         } else {
             None
         };
-        declarators.push(Declarator { name, ty, init, cleanup: None, span: sp.clone() });
+        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
@@ -417,7 +422,7 @@ impl Parser {
             self.skip_decl_tail();
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
-            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, span: self.span() });
+            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, span: self.span() });
         }
         self.eat(TokenKind::Semi);
 
@@ -1865,8 +1870,46 @@ impl Parser {
             | Some(TokenKind::Dot) | Some(TokenKind::Arrow))
     }
 
+    /// A function definition's `{ … }` body, then -Wunused-variable for its
+    /// locals. A local counts as used when its name appears as an identifier
+    /// anywhere in the body's (preprocessed) tokens besides its declarations —
+    /// so uses inside `sizeof`, `typeof`, asm operands and macro expansions all
+    /// count. Scopes are ignored: a shadowed name counts as used, never the
+    /// other way round (no false warnings; QEMU builds with -Wall -Werror).
+    fn parse_function_body(&mut self) -> Result<Vec<Stmt>> {
+        let saved = std::mem::take(&mut self.local_decls);
+        let start = self.pos;
+        let body = self.parse_compound_stmt_as_stmts();
+        let decls = std::mem::replace(&mut self.local_decls, saved);
+        if body.is_ok() && !decls.is_empty() && crate::diag::enabled("unused-variable") {
+            self.warn_unused_locals(start, self.pos, decls);
+        }
+        body
+    }
+
+    fn warn_unused_locals(&self, start: usize, end: usize, mut decls: Vec<(String, Span)>) {
+        decls.sort_by(|a, b| (a.1.line, a.1.col, &a.0).cmp(&(b.1.line, b.1.col, &b.0)));
+        decls.dedup_by(|a, b| a.0 == b.0 && a.1.line == b.1.line && a.1.col == b.1.col);
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for t in &self.tokens[start..end.min(self.tokens.len())] {
+            if t.kind == TokenKind::Ident { *seen.entry(t.text.as_str()).or_default() += 1; }
+        }
+        let mut declared: HashMap<&str, usize> = HashMap::new();
+        for (n, _) in &decls { *declared.entry(n.as_str()).or_default() += 1; }
+        for (name, sp) in &decls {
+            let uses = seen.get(name.as_str()).copied().unwrap_or(0)
+                .saturating_sub(declared[name.as_str()]);
+            if uses == 0 {
+                crate::diag::warn("unused-variable", sp.file.as_deref(), sp.line, sp.col,
+                    &format!("unused variable '{}'", name));
+            }
+        }
+    }
+
     fn parse_compound_stmt_as_stmts(&mut self) -> Result<Vec<Stmt>> {
         self.expect(TokenKind::LBrace)?;
+        // A stale `unused` attribute (e.g. on a parameter) must not reach a local.
+        self.pending_unused = false;
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             if self.eat(TokenKind::Semi) { continue; }
@@ -2228,6 +2271,8 @@ impl Parser {
         // the leading specifiers; it was captured by `parse_decl_specifiers` and
         // applies to the first declarator.
         let spec_cleanup = self.pending_cleanup.take();
+        // An `unused` attribute among the specifiers applies to every declarator.
+        let spec_unused = std::mem::take(&mut self.pending_unused);
         let mut declarators = Vec::new();
         let mut first = true;
         loop {
@@ -2241,6 +2286,7 @@ impl Parser {
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
             let cleanup = self.pending_cleanup.take()
                 .or_else(|| if first { spec_cleanup.clone() } else { None });
+            let unused = std::mem::take(&mut self.pending_unused) || spec_unused;
             first = false;
             if !name.is_empty() { self.func_vars.insert(name.clone()); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
@@ -2258,7 +2304,14 @@ impl Parser {
                 ));
             }
             if !name.is_empty() {
-                declarators.push(Declarator { name, ty, init, cleanup, span: dsp });
+                // -Wunused-variable candidates: not `extern`, not a function
+                // prototype, no `unused`/`cleanup` attribute (a cleanup runs code).
+                if !unused && cleanup.is_none() && !matches!(storage, Some(StorageClass::Extern))
+                    && !matches!(ty.ty, AstType::Function { .. })
+                {
+                    self.local_decls.push((name.clone(), dsp.clone()));
+                }
+                declarators.push(Declarator { name, ty, init, cleanup, unused, span: dsp });
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
@@ -3220,6 +3273,8 @@ impl Parser {
                                 self.pending_cleanup = Some(t.text.clone());
                             }
                         }
+                    } else if matches!(name, "unused" | "__unused__" | "maybe_unused" | "__maybe_unused__") {
+                        self.pending_unused = true;
                     } else if name == "packed" || name == "__packed__" {
                         self.pending_packed = true;
                     } else if name == "order_sic" || name == "__order_sic__" {
