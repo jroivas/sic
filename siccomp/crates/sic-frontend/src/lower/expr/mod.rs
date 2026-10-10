@@ -4149,7 +4149,11 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(fail_bb);
         let fref = self.lowerer.ensure_bounds_fail_fn();
         self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
-        self.set_terminator(Terminator::Jump(ok_bb)); // abort never returns
+        // The failure call never returns (it aborts). Ending the block with
+        // `Unreachable` instead of a jump back keeps every loop value from being
+        // live across the call — which made the register allocator spill the
+        // loop's variables around it (lz: `p`, `bestlen`, `buf` on the stack).
+        self.set_terminator(Terminator::Unreachable);
         self.switch_to_block(ok_bb);
         Ok(())
     }
@@ -4248,7 +4252,7 @@ impl<'m> FuncCtx<'m> {
         self.switch_to_block(fail_bb);
         let fref = self.lowerer.ensure_bounds_fail_fn();
         self.push_instr(Instr::Call { dest: None, func: fref, args: vec![], ret_ty: Type::Void });
-        self.set_terminator(Terminator::Jump(ok_bb));
+        self.set_terminator(Terminator::Unreachable); // never returns (see emit_bounds_check)
         self.switch_to_block(ok_bb);
         // byte = data[i]
         let ptr = self.alloc_val();

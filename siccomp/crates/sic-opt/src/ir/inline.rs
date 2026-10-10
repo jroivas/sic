@@ -117,7 +117,7 @@ fn is_aggregate(t: &Type) -> bool {
 fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // A declaration (no body), a variadic, or an aggregate-return function is never
     // a candidate. Scan for the disqualifiers below.
-    let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && !is_aggregate(&f.sig.ret);
+    let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && !is_aggregate(&f.sig.ret) && !f.noinline;
     let mut ret_val_count = 0;
     if eligible {
         'scan: for b in &f.blocks {

@@ -1,0 +1,22 @@
+// A failed bounds check still aborts (with its message) now that the failure
+// path is a never-returning, never-inlined call ending in `unreachable`: run the
+// out-of-range access in a child process and check it died of SIGABRT, while
+// in-range accesses in the same loop work. Returns 42.
+#include <sys/wait.h>
+#include <unistd.h>
+int sum(int n, int limit) {
+    int *a = new int[n];
+    defer del a;
+    int s = 0;
+    for (int i = 0; i < limit; i++) { a[i] = i; s += a[i]; }   // limit > n → abort
+    return s;
+}
+int main() {
+    if (sum(10, 10) != 45) return 1;
+    int pid = fork();
+    if (pid == 0) { sum(10, 11); _exit(0); }       // must not get here
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != 6) return 2;   // SIGABRT
+    return 42;
+}

@@ -1788,6 +1788,8 @@ impl Lowerer {
         });
         let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
         let mut func = Function::new("__sic_bounds_fail".to_string(), sig, vec![], Linkage::Internal);
+        // Cold: keep the failure path one argument-less call (see `Function::noinline`).
+        func.noinline = true;
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
         {
