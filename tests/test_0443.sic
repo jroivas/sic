@@ -1,0 +1,38 @@
+// Bare references to namespace members from inside the namespace resolve to
+// the namespaced symbol (std's `namespace File { File g_stdin; … &g_stdin }`
+// failed: "'g_stdin' is not an lvalue"). Parameters/locals still shadow; a
+// same-named file-level global stays distinct. Returns 42.
+int g = 1000;
+int dtor_runs = 0;
+namespace N
+{
+    struct S { int fd; };
+    S g_s = { .fd = 7 };
+    int g = 10;
+    int *gp = &g;                                    // initializer: N::g
+    int Later(int);
+    struct Box {
+        int v;
+        ~Box() { dtor_runs = dtor_runs + g; }        // method body: N::g
+    };
+    S *Get(void) { return &g_s; }                    // address of N::g_s
+    int Shadow(int g) { return g; }                  // parameter shadows
+    int Local(void) { int g = 3; return g; }         // local shadows
+    int Sibling(void) { return Later(1) + Shadow(3); }   // forward + sibling
+    int Later(int x) { return x + g; }
+    int Bump(void) { g = g + 1; return g; }
+    namespace Inner {
+        int Up(void) { return g + *gp; }             // outer member, nested ns
+    }
+}
+int main() {
+    if (N::Get()->fd != 7) return 1;
+    if (N::Shadow(5) != 5 || N::Local() != 3) return 2;
+    if (N::Sibling() != 14) return 3;                // (1 + 10) + 3
+    if (N::Inner::Up() != 20) return 4;
+    if (g != 1000 || N::g != 10) return 5;
+    { N::Box b; b.v = 1; }
+    if (dtor_runs != 10) return 6;
+    if (N::Bump() != 11 || *N::gp != 11) return 7;
+    return 42;
+}

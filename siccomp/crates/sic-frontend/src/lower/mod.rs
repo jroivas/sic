@@ -2,6 +2,7 @@ pub(crate) mod types;
 mod expr;
 mod func;
 mod borrowck;
+mod ns_resolve;
 
 use std::collections::{HashMap, HashSet};
 use crate::ast::*;
@@ -1956,20 +1957,36 @@ impl Lowerer {
     fn flatten_namespaces(&mut self, tu: &mut TranslationUnit) {
         let decls = std::mem::take(&mut tu.decls);
         let mut out = Vec::with_capacity(decls.len());
+        // (index in `out`, namespace scope) of every hoisted namespace member.
+        let mut scoped: Vec<(usize, String)> = Vec::new();
         for d in decls {
             match d {
-                Decl::Namespace { name, decls, .. } => self.flatten_ns_into(&name, decls, &mut out),
+                Decl::Namespace { name, decls, .. } => self.flatten_ns_into(&name, decls, &mut out, &mut scoped),
                 other => out.push(other),
             }
+        }
+        // Second pass, once every member of every namespace is known: a bare
+        // member name inside a namespace's own code names the mangled symbol.
+        for (idx, scope) in &scoped {
+            let members = &self.namespace_members;
+            let resolve = |name: &str| -> Option<String> {
+                let mut s = scope.as_str();
+                loop {
+                    if let Some(m) = members.get(&(s.to_string(), name.to_string())) { return Some(m.clone()); }
+                    match s.rfind("::") { Some(i) => s = &s[..i], None => return None }
+                }
+            };
+            ns_resolve::NsRenamer::new(&resolve).top_decl(&mut out[*idx]);
         }
         tu.decls = out;
     }
 
     /// `scope` is the `::`-joined path (`"A"`, `"A::B"`) used as the lookup key;
     /// symbols are mangled with `__` (`A__B__member`), a valid linker identifier.
-    fn flatten_ns_into(&mut self, scope: &str, decls: Vec<Decl>, out: &mut Vec<Decl>) {
+    fn flatten_ns_into(&mut self, scope: &str, decls: Vec<Decl>, out: &mut Vec<Decl>, scoped: &mut Vec<(usize, String)>) {
         let prefix = scope.replace("::", "__");
         for d in decls {
+            if !matches!(d, Decl::Namespace { .. }) { scoped.push((out.len(), scope.to_string())); }
             match d {
                 Decl::Func { name, ret_ty, params, variadic, type_params, template_src, body, storage, inline, constructor, is_async, span } => {
                     let mangled = format!("{}__{}", prefix, name);
@@ -1985,7 +2002,7 @@ impl Lowerer {
                     out.push(Decl::Var { base_ty, declarators, weak, thread_local, span });
                 }
                 Decl::Namespace { name: inner, decls, .. } => {
-                    self.flatten_ns_into(&format!("{}::{}", scope, inner), decls, out);
+                    self.flatten_ns_into(&format!("{}::{}", scope, inner), decls, out, scoped);
                 }
                 // Types (struct/union/enum/typedef) are hoisted to file scope as-is;
                 // qualified `N::Type` access is not supported yet.
