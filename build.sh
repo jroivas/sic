@@ -29,6 +29,10 @@ echo ">> building + installing std into $SYSROOT"
 mkdir -p "$SYSROOT"
 # Emit the module directly into the sysroot: the manifest's baked -L then points
 # at the sysroot itself, and the .smod/.a/.so all land where the compiler looks.
+# Replace (not merge) the std sources: a file deleted from lib/std must not stay
+# behind in the sysroot and keep being compiled into libstd (it did: a removed
+# math.sic left `acos` unresolved in libstd.so, breaking sic-cpp).
+rm -f "$SYSROOT"/*.sic
 cp "$ROOT"/siccomp/lib/std/*.sic "$SYSROOT/"
 "$SIC" --emit-module "$SYSROOT"
 
