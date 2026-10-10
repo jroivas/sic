@@ -1114,7 +1114,16 @@ impl Lowerer {
                 layout_order: None,
             };
             use crate::ast::StructOrder;
-            st.layout_order = match self.resolve_struct_order(&s.order) {
+            // A struct from a C header `#include`d by SIC source is still a C struct:
+            // libc fills / reads it at C offsets (`sockaddr_in`, `stat`), so the SIC
+            // reordering default must not apply to it — only an explicit attribute.
+            let from_c_header = s.span.file.as_deref().map_or(false, |f| !f.ends_with(".sic"));
+            let order = if from_c_header && matches!(s.order, StructOrder::Default) {
+                StructOrder::C
+            } else {
+                s.order.clone()
+            };
+            st.layout_order = match self.resolve_struct_order(&order) {
                 StructOrder::C => None,
                 StructOrder::Sic => st.compute_size_order(self.ptr_size),
                 StructOrder::Random(seed) =>

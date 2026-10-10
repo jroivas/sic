@@ -1,0 +1,23 @@
+/* A struct from a C header #include'd by SIC keeps C field order: libc reads
+ * it at C offsets. SIC reordering used to sort sockaddr_in by size (sin_zero
+ * first), so bind() saw sa_family=AF_UNSPEC; and stat's st_mode moved. A
+ * struct declared in SIC source is still reordered. Returns 42. */
+#include <netinet/in.h>
+#include <sys/stat.h>
+#include <stddef.h>
+
+struct Mine { u8 a; u64 b; };
+
+int main() {
+    struct sockaddr_in sin;
+    if (offsetof(struct sockaddr_in, sin_family) != 0) return 1;
+    if (offsetof(struct sockaddr_in, sin_port) != 2) return 2;
+    if (offsetof(struct sockaddr_in, sin_addr) != 4) return 3;
+    sin.sin_family = AF_INET;
+    if (*(u16 *)&sin != AF_INET) return 4;
+    struct stat sb;
+    if (stat("/", &sb) != 0) return 5;
+    if ((sb.st_mode & S_IFMT) != S_IFDIR) return 6;
+    if (offsetof(struct Mine, b) != 0) return 7;   // SIC struct: u64 first
+    return 42;
+}
