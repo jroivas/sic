@@ -78,6 +78,17 @@ impl<'m> FuncCtx<'m> {
             {
                 Ok(super::super::types::bigint_type())
             }
+            // `!x` is an int; `-x`/`~x` have the PROMOTED operand type. These fell
+            // to the `int` default: `sizeof(-x)` for a long was 4, `typeof(~0ULL)`
+            // truncated, and constant shifts of `-1ULL` looked 32-bit wide.
+            ExprKind::Unary { op: UnOpKind::Not, .. } => Ok(Type::i32()),
+            ExprKind::Unary { op: UnOpKind::Neg | UnOpKind::BitNot, expr: inner } => {
+                Ok(match self.infer_expr_type(inner)? {
+                    Type::Bool => Type::i32(),
+                    Type::Int { bits, .. } if bits < 32 => Type::i32(),
+                    t => t,
+                })
+            }
             ExprKind::Unary { op: UnOpKind::Addr, expr: inner } => {
                 let inner_ty = self.infer_expr_type(inner)?;
                 // `&container` ≡ the container handle (`dict* ≡ dict`; see lower_unary).

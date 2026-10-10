@@ -2577,8 +2577,13 @@ impl Parser {
             }
             TokenKind::Plus => {
                 self.advance();
-                // unary plus: no-op, just return inner
-                self.parse_cast()
+                let e = self.parse_cast()?;
+                // C unary plus applies the integer promotions (`sizeof(+c)` is
+                // sizeof(int) for a char): `0 + e` has exactly that type and value.
+                // sic keeps it a no-op.
+                if self.lang == Lang::Sic { return Ok(e); }
+                let zero = Expr::new(ExprKind::IntLit(0, false), sp.clone());
+                Ok(Expr::new(ExprKind::BinOp { op: BinOpKind::Add, lhs: Box::new(zero), rhs: Box::new(e) }, sp))
             }
             TokenKind::Minus => {
                 self.advance();
