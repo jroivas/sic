@@ -1473,9 +1473,30 @@ impl Parser {
                 break;
             }
             let psp = self.span();
-            let (base_ty, _) = self.parse_decl_specifiers()?;
-            // Check for abstract declarator (no name)
-            let (name, ty) = self.parse_declarator(base_ty)?;
+            // `Name *p` / `Name p` where `Name` is no type: if the parameter fails
+            // to parse, say "unknown type name" instead of "expected RParen but got
+            // Star" (only on failure, so builtin type identifiers still work).
+            let first = self.peek().clone();
+            let looks_typed = first.kind == TokenKind::Ident
+                && matches!(self.tokens.get(self.pos + 1).map(|t| t.kind), Some(TokenKind::Star) | Some(TokenKind::Ident));
+            let parsed = self.parse_decl_specifiers()
+                .and_then(|(base_ty, _)| self.parse_declarator(base_ty))
+                .and_then(|r| if looks_typed && !self.at(TokenKind::Comma) && !self.at(TokenKind::RParen)
+                    && !self.at(TokenKind::Eq) && !self.at(TokenKind::Attribute) && !self.at(TokenKind::Ellipsis)
+                    { Err(CompileError::new("")) } else { Ok(r) });
+            let (name, ty) = match parsed {
+                Ok(r) => r,
+                Err(e) if looks_typed => {
+                    let hint = if self.lang == Lang::Sic {
+                        " (a type from an imported module is named with its module path, e.g. `mod::Type`)"
+                    } else { "" };
+                    let _ = e;
+                    return Err(CompileError::at(
+                        format!("unknown type name '{}'{}", first.text, hint),
+                        first.span.file.clone(), first.span.line, first.span.col));
+                }
+                Err(e) => return Err(e),
+            };
             // Parameter attribute, e.g. `f(const T *cfg __attribute__((unused)))`.
             self.skip_attributes();
             // sic default argument (sic.md §"Default parameters"): `int b = 5`. The

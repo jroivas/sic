@@ -645,10 +645,7 @@ impl<'m> FuncCtx<'m> {
                             }
                             _ => {}
                         }
-                        Err(CompileError::at(
-                            format!("undefined name '{}'", name),
-                            expr.span.file.clone(), expr.span.line, expr.span.col,
-                        ))
+                        Err(self.undefined_name_error(name, &expr.span))
                     }
                 }
             }
@@ -1170,9 +1167,10 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::SizeofExpr(inner) => {
-                // We need the type of the expression without evaluating it.
-                // Simplified: just return a placeholder for now.
-                let ty = self.infer_expr_type(inner)?;
+                // The operand's type, without evaluating it. An unresolved name
+                // is an error — it used to infer `int`, so `sizeof(undeclared)`
+                // was silently 4.
+                let ty = self.sizeof_operand_type(inner)?;
                 let size = ty.size_of(self.ptr_size());
                 Ok(self.size_t_val(size))
             }
@@ -1195,7 +1193,7 @@ impl<'m> FuncCtx<'m> {
                 Ok(self.size_t_val(a))
             }
             ExprKind::AlignofExpr(inner) => {
-                let a = self.infer_expr_type(inner)?.align_of(self.ptr_size());
+                let a = self.sizeof_operand_type(inner)?.align_of(self.ptr_size());
                 Ok(self.size_t_val(a))
             }
 
@@ -4767,6 +4765,39 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Load { dest, ptr: Val::Local(result_ptr), ty: Type::char_ptr() });
         self.val_types.insert(dest.0, Type::char_ptr());
         Ok(Val::Local(dest))
+    }
+
+    /// "undefined name 'X'" — or, when `X` is a type exported by an imported
+    /// module, a hint to spell it with the module path: a consumer must write
+    /// `std::SplitMix64`, and the bare name otherwise surfaced as an undefined
+    /// name, a non-lvalue (`SplitMix64 *p = …` parses as a multiplication) or a
+    /// silent `sizeof` of 4.
+    pub(crate) fn undefined_name_error(&self, name: &str, sp: &crate::lexer::Span) -> CompileError {
+        let msg = match self.lowerer.imported_type_paths.get(name) {
+            Some(paths) => format!(
+                "unknown name '{}' — it is a type of an imported module; write {} \
+                 (a module's types are named with their module path)", name,
+                paths.iter().map(|p| format!("'{}'", p)).collect::<Vec<_>>().join(" or ")),
+            None => format!("undefined name '{}'", name),
+        };
+        CompileError::at(msg, sp.file.clone(), sp.line, sp.col)
+    }
+
+    /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
+    /// is a struct type registered under that bare name (a type spelled as an
+    /// expression), else an error.
+    fn sizeof_operand_type(&mut self, e: &Expr) -> Result<Type> {
+        if let ExprKind::Ident(name) = &e.kind {
+            if self.lookup(name).is_none()
+                && !matches!(name.as_str(), "__func__" | "__FUNCTION__" | "__PRETTY_FUNCTION__")
+            {
+                if let Some(t) = self.lowerer.struct_types.get(name) {
+                    if !self.lowerer.imported_type_paths.contains_key(name) { return Ok(t.clone()); }
+                }
+                return Err(self.undefined_name_error(name, &e.span));
+            }
+        }
+        self.infer_expr_type(e)
     }
 
     fn lower_logical(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {

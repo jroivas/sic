@@ -61,6 +61,14 @@ impl<'m> FuncCtx<'m> {
                 let ptr = self.lower_expr(expr)?;
                 Ok(LValue::plain(ptr, ir_ty))
             }
+            // `T *p = …` with `T` an unresolved name parses as `T * p = …`: report
+            // the unknown name (with the module-path hint for an imported type).
+            ExprKind::BinOp { op: crate::ast::BinOpKind::Mul, lhs, .. }
+                if matches!(&lhs.kind, ExprKind::Ident(n) if self.lookup(n).is_none()) =>
+            {
+                let ExprKind::Ident(n) = &lhs.kind else { unreachable!() };
+                Err(self.undefined_name_error(n, &lhs.span))
+            }
             _ => {
                 // Not a simple lvalue.
                 Err(CompileError::at(

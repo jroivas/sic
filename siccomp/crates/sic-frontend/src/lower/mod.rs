@@ -127,6 +127,10 @@ pub struct Lowerer {
     /// sic namespaced enums (sic.md §"Namespace"): `(scope, name)` → mangled
     /// registry name (`("Thread", "Status")` → `Thread__Status`).
     pub namespace_types: HashMap<(String, String), String>,
+    /// Imported module types: bare type name → its qualified spelling
+    /// (`SplitMix64` → `std::SplitMix64`, `Thread__Status` → `std::Thread::Status`),
+    /// for the "write mod::Type" hint when a consumer names one bare.
+    pub imported_type_paths: HashMap<String, Vec<String>>,
     /// sic module type export (sic.md §"Namespace"/§"Imports"): names of aggregate
     /// types *defined in this module*, in definition order, to publish in the
     /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
@@ -287,6 +291,7 @@ impl Lowerer {
             struct_methods: HashMap::new(),
             namespace_members: HashMap::new(),
             namespace_types: HashMap::new(),
+            imported_type_paths: HashMap::new(),
             module_defined_types: Vec::new(),
             imported_type_names: std::collections::HashSet::new(),
             qualified_only: HashMap::new(),
@@ -839,6 +844,15 @@ impl Lowerer {
             for (name, ty) in &manifest.types {
                 self.struct_types.entry(name.clone()).or_insert_with(|| ty.clone());
                 self.imported_type_names.insert(name.clone());
+                let path = format!("{}::{}", module, name.replace("__", "::"));
+                let e = self.imported_type_paths.entry(name.clone()).or_default();
+                if !e.contains(&path) { e.push(path); }
+            }
+            for (ename, _) in manifest.enums.iter().map(|(n, v)| (n, v.len())).chain(manifest.tagenums.iter().map(|(n, v)| (n, v.len()))) {
+                let bare = ename.rsplit("__").next().unwrap_or(ename).to_string();
+                let path = format!("{}::{}", module, ename.replace("__", "::"));
+                let e = self.imported_type_paths.entry(bare).or_default();
+                if !e.contains(&path) { e.push(path); }
             }
             // Register imported payload-less enums so `mod::Enum::Variant` (and the
             // bare variant/`Enum::Variant` forms) resolve to their discriminants.

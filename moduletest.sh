@@ -413,6 +413,22 @@ else
     bad "module-methods" "module build / manifest failed: $(cat err) $(grep ^method methmod/module_ctr.smod)"
 fi
 
+# ── A module's type named without its module path ───────────────────────────
+# `Counter *p = …` / `Counter c;` / `sizeof(Counter)` / a `Counter *` parameter
+# in a consumer must say the type needs its module path (they reported "not an
+# lvalue", "undefined name", a silent sizeof of 4, "expected RParen").
+hint_ok=1
+for body in 'auto c = ctr::counter::make(1); Counter *p = &c; return 0;' \
+            'Counter c; return 0;' 'return (int)sizeof(Counter);'; do
+    printf 'import ctr;\nint main() { %s }\n' "$body" > hint.sic
+    "$SIC" hint.sic -Imethmod -o hint 2>err && { hint_ok=0; echo "  compiled: $body"; }
+    grep -q "write 'ctr::Counter'" err || { hint_ok=0; echo "  no hint for: $body: $(cat err)"; }
+done
+printf 'import ctr;\nint f(Counter *p) { return 0; }\nint main() { return 0; }\n' > hint.sic
+"$SIC" hint.sic -Imethmod -o hint 2>err && hint_ok=0
+grep -q "unknown type name 'Counter'" err || { hint_ok=0; echo "  param: $(cat err)"; }
+[ "$hint_ok" -eq 1 ] && ok "module-type-hint" || bad "module-type-hint" "see above"
+
 # ── Producer identification (.comment) ──────────────────────────────────────
 # Every object records which preprocessor built it; the linker keeps the
 # strings (merged) in the executable — `readelf -p .comment`.
