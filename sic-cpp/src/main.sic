@@ -96,21 +96,21 @@ struct Preprocessor {
 
 // Read a regular file into a string.  Returns "" on failure.
 string read_file(string path) {
-    auto status = std::Open(path, std::OpenMode::Read);
+    auto status = std::File::Open(path, std::File::OpenMode::Read);
     match (status) {
-        std::File::FileStatus::Opened(f): {
-            auto res = std::Size(f);
+        std::File::Status::Opened(f): {
+            auto res = std::File::Size(f);
             u64 size;
-            if (!(size = std::FileStatus::Size(res)))
+            if (!(size = std::File::Status::Size(res)))
                 return "";
             if (size == 0)
                 return "";
             auto buf = std::Buffer::Create(size);
             if (!buf) { del f; return ""; }
-            auto rs = std::Read(f, size, buf);
+            auto rs = std::File::Read(f, size, buf);
             string result = "";
             match (rs) {
-                std::FileStatus::Read(cnt):
+                std::File::Status::Read(cnt):
                     result = std::Buffer::Value(buf).dup;
                 _:
                     std::Println("Could not read file"),
@@ -126,9 +126,9 @@ string read_file(string path) {
 
 // Check if a file exists (for #include search).
 i32 file_exists(string path) {
-    auto status = std::Open(path, std::OpenMode::Read);
+    auto status = std::File::Open(path, std::File::OpenMode::Read);
     match (status) {
-        std::FileStatus::Opened(f): { del f; return 1; }
+        std::File::Status::Opened(f): { del f; return 1; }
         _: return 0;
     }
 }
