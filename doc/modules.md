@@ -164,8 +164,8 @@ A function may return a built-in generic enum over a module type
 it (`auto v = mod::f() else return 1;`) or name the type (`Option<mod::T> o`).
 
 Its **methods** cross the boundary too: `obj.method(args)` on a value of an
-exported struct calls the module's method (`auto g = std::random::rng();
-g.gen64();`).
+exported struct calls the module's method (`auto g = std::random::rng() else
+return 1; g.gen64();` — `rng()` returns an `Option`, so unwrap it first).
 
 ## A module that imports modules
 
