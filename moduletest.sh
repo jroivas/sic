@@ -853,6 +853,32 @@ else
     bad "std-print-write" "compile/link failed: $(cat err)"
 fi
 
+# ── A module's payload-less enum is usable as a type in a consumer ───────────
+# (`mm::ns::Mode m`, `mm::Top t`): it was "unknown type" — only its variants
+# were imported, not the type name.
+mkdir -p enumty
+cat > enumty/m.sic <<'EOF'
+module enumty;
+namespace ns { enum Mode { A, B, C }; int Val(Mode m) { return m == Mode::C ? 7 : 1; } }
+enum Top { X, Y };
+int TopVal(Top t) { return t == Top::Y ? 5 : 0; }
+EOF
+cat > enumtyuser.sic <<'EOF'
+import enumty;
+static int f(enumty::ns::Mode m) { return enumty::ns::Val(m); }
+int main() {
+    enumty::Top t = enumty::Top::Y;
+    enumty::ns::Mode m = enumty::ns::Mode::C;
+    return f(m) * 5 + enumty::TopVal(t);      // 7 * 5 + 5
+}
+EOF
+if "$SIC" --emit-module enumty 2>err && "$SIC" enumtyuser.sic -Ienumty -o enumtyuser 2>err; then
+    ./enumtyuser; got=$?
+    [ "$got" -eq 40 ] && ok "enum-type-import" || bad "enum-type-import" "expected 40, got $got"
+else
+    bad "enum-type-import" "compile failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.

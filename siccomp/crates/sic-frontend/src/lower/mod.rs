@@ -882,6 +882,10 @@ impl Lowerer {
                 }
                 self.c_enum_defs.entry(ename.clone()).or_insert_with(|| variants.clone());
                 self.imported_type_names.insert(ename.clone());
+                // Usable as a type (`mod::Enum m`), as a local enum is: its
+                // underlying integer, which is how the manifest passes it (u32).
+                self.struct_types.entry(ename.clone())
+                    .or_insert(Type::Int { bits: 32, signed: false });
             }
             // Register imported tagged enums (rebuild their `{tag,union}` type +
             // variant table) so `mod::Enum::Variant(x)` and `match` work.
