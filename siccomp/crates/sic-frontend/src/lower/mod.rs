@@ -1083,6 +1083,13 @@ impl Lowerer {
 
     fn register_struct_type_from_def(&mut self, s: &StructDef) -> Result<()> {
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
+            // A member naming the struct itself (`Node *next;`, sic's bare tag)
+            // resolves to the struct: give the name an opaque entry while the
+            // fields are lowered (a pointer pointee is opaque anyway).
+            if self.sic && !self.struct_types.contains_key(name) {
+                self.struct_types.insert(name.clone(),
+                    Type::Struct(StructType::plain(Some(name.clone()), vec![], false)));
+            }
             let mut ir_fields = Vec::new();
             let mut bitfields = Vec::new();
             let mut field_aligns = Vec::new();
@@ -1162,6 +1169,11 @@ impl Lowerer {
 
     fn register_union_type_from_def(&mut self, u: &UnionDef) -> Result<()> {
         if let (Some(name), Some(fields)) = (&u.name, &u.fields) {
+            // A member naming the union itself resolves to it (see structs).
+            if self.sic && !self.struct_types.contains_key(name) {
+                self.struct_types.insert(name.clone(), Type::Union(sic_ir::UnionType {
+                    name: Some(name.clone()), fields: vec![], field_aligns: vec![], min_align: None }));
+            }
             let mut ir_fields = Vec::new();
             let mut field_aligns = Vec::new();
             let mut any_align = false;

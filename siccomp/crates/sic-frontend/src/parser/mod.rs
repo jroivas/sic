@@ -894,6 +894,12 @@ impl Parser {
 
         let mut methods: Vec<StructMethod> = Vec::new();
         let fields = if self.at(TokenKind::LBrace) {
+            // sic: the tag is a bare type name inside its own body too, so a
+            // self-referential member `Node *next;` names the struct (it parsed
+            // as an implicit-int `int *next`).
+            if self.lang == Lang::Sic {
+                if let Some(n) = &name { self.typedefs.insert(n.clone()); }
+            }
             self.advance();
             let mut fields = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {

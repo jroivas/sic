@@ -1,0 +1,32 @@
+/* A self-referential member written with the bare tag (`Node *next;`, SIC's
+ * C++-style name) parsed as an implicit-int `int *next`: the member had type
+ * `i32*` and the struct grew (`struct G { u64 v; G *next; }` was 24 bytes, not
+ * 16), so every `new Node` allocated more than needed. Returns 42. */
+#include <stddef.h>
+struct G { u64 v; G *next; };
+struct Tree { u32 key; Tree *left; Tree *right; };
+struct H { u32 a; u32 b; H *l; };
+union U { u64 bits; U *self; };
+int main() {
+    if (sizeof(G) != 16 || sizeof(Tree) != 24 || sizeof(H) != 16 || sizeof(U) != 8) return 1;
+    G a;
+    G b;
+    a.v = 1; a.next = &b;
+    b.v = 41; b.next = NULL;
+    if (type(a.next).name != "struct G*") return 2;
+    Tree *t = new Tree;
+    t->key = 5;
+    t->left = new Tree;
+    t->left->key = 3;
+    t->right = NULL;
+    t->left->left = NULL;
+    t->left->right = NULL;
+    u32 k = t->left->key;
+    del t->left;
+    del t;
+    if (k != 3) return 3;
+    U u;
+    u.self = &u;
+    if (u.self->self != &u) return 4;
+    return (int)(a.v + a.next->v);
+}
