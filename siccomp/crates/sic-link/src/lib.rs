@@ -335,16 +335,22 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
     if req.gc_sections { a.push("--gc-sections".into()); }
 
     // The C library, with the compiler runtime around it (libc itself may need
-    // a helper; objects need it for e.g. 128-bit division).
+    // a helper; objects need it for e.g. 128-bit division). The math library
+    // comes too, only as needed: sic calls `sin(2)` where gcc folds it, so a
+    // program gcc links without `-lm` must link here as well.
     let rt: Vec<String> = tc.rt.iter().map(|p| p.to_string_lossy().into_owned()).collect();
     if req.static_link {
         a.push("--start-group".into());
         a.extend(rt.iter().cloned());
         if let Some(eh) = &tc.rt_eh { a.push(eh.to_string_lossy().into_owned()); }
+        a.push("-lm".into());
         a.push("-lc".into());
         a.push("--end-group".into());
     } else {
         a.extend(rt.iter().cloned());
+        a.push("--as-needed".into());
+        a.push("-lm".into());
+        a.push("--no-as-needed".into());
         a.push("-lc".into());
         a.extend(rt.iter().cloned());
     }

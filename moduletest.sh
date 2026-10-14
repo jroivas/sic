@@ -1076,6 +1076,21 @@ else
     bad "std-file-readline" "compile/link failed: $(cat err)"
 fi
 
+# ── The sic driver links libm as needed: a program calling sin() links without
+# -lm, as with gcc (which folds sin(2)); a program not using it gets no libm.
+cat > usesm.c <<'EOF'
+#include <math.h>
+int main(int argc, char **argv) { return (int)(sin(argc * 1.5) * 10.0); }   /* sin(1.5)*10 = 9 */
+EOF
+printf 'int main(void) { return 0; }\n' > nolibm.c
+if "$SIC" usesm.c -o usesm 2>err && "$SIC" nolibm.c -o nolibm 2>>err && "$SIC" -static usesm.c -o usesm_s 2>>err; then
+    ./usesm; a=$?; ./usesm_s; b=$?
+    if [ "$a" -eq 9 ] && [ "$b" -eq 9 ] && ! ldd nolibm 2>/dev/null | grep -q libm; then ok "driver-libm"
+    else bad "driver-libm" "rc=$a static-rc=$b, or libm linked when unused"; fi
+else
+    bad "driver-libm" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
