@@ -13,10 +13,11 @@ module std;
 //   match (st) { std::file::Status::Opened(f): ...; _: ...; }
 //   std::file::WriteString(f, "hello\n");
 //   std::file::ReadAll(f, buf);          // whole file, growing buf
-//   while (std::file::ReadLine(f, buf) != std::file::Status::Read(0)) ...
+//   while (std::file::ReadLine(f, buf) == std::file::Status::Read && buf->size > 0) ...
 //   std::file::Close(f);
 //
-// Every call returns a std::file::Status. Read/Write move as many bytes as one
+// Every call returns a std::file::Status (`==` compares only the variant:
+// `st == std::file::Status::Read`; `match` to read the byte count). Read/Write move as many bytes as one
 // call can (Read may return fewer than asked; 0 bytes means end of file, after
 // which Eof() is true); Write and WriteString write everything or fail.
 
