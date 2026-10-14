@@ -1,71 +1,44 @@
 module std;
 
 // Standard math functions wrapping C's libm.
-// Uses module-level bridge functions to avoid name shadowing between
-// the C math functions and the SIC namespace wrappers.
 //
 // Usage:
 //   import std;
-//   std::math::sin(x);  std::math::sqrt(x);  std::math::pi;  ...
+//   std::math::Sin(x);  std::math::Sqrt(x);  std::math::Pi;  ...
 
 #include <math.h>
-
-// -- Module-level bridges (private, avoid shadowing the C functions) --
-
-static f64 _math_sin(f64 x)    { return sin(x);    }
-static f64 _math_cos(f64 x)    { return cos(x);    }
-static f64 _math_tan(f64 x)    { return tan(x);    }
-static f64 _math_asin(f64 x)   { return asin(x);   }
-static f64 _math_acos(f64 x)   { return acos(x);   }
-static f64 _math_atan(f64 x)   { return atan(x);   }
-static f64 _math_atan2(f64 y, f64 x) { return atan2(y, x); }
-static f64 _math_sinh(f64 x)   { return sinh(x);   }
-static f64 _math_cosh(f64 x)   { return cosh(x);   }
-static f64 _math_tanh(f64 x)   { return tanh(x);   }
-static f64 _math_sqrt(f64 x)   { return sqrt(x);   }
-static f64 _math_pow(f64 x, f64 y) { return pow(x, y); }
-static f64 _math_exp(f64 x)    { return exp(x);    }
-static f64 _math_log(f64 x)    { return log(x);    }
-static f64 _math_log10(f64 x)  { return log10(x);  }
-static f64 _math_log2(f64 x)   { return log2(x);   }
-static f64 _math_floor(f64 x)  { return floor(x);  }
-static f64 _math_ceil(f64 x)   { return ceil(x);   }
-static f64 _math_round(f64 x)  { return round(x);  }
-static f64 _math_fabs(f64 x)   { return fabs(x);   }
-static f64 _math_fmod(f64 x, f64 y) { return fmod(x, y); }
-static f64 _math_hypot(f64 x, f64 y) { return hypot(x, y); }
 
 namespace math
 {
     // Trigonometric
-    f64 sin(f64 x)    { return _math_sin(x);    }
-    f64 cos(f64 x)    { return _math_cos(x);    }
-    f64 tan(f64 x)    { return _math_tan(x);    }
-    f64 asin(f64 x)   { return _math_asin(x);   }
-    f64 acos(f64 x)   { return _math_acos(x);   }
-    f64 atan(f64 x)   { return _math_atan(x);   }
-    f64 atan2(f64 y, f64 x) { return _math_atan2(y, x); }
-    f64 sinh(f64 x)   { return _math_sinh(x);   }
-    f64 cosh(f64 x)   { return _math_cosh(x);   }
-    f64 tanh(f64 x)   { return _math_tanh(x);   }
+    f64 Sin(f64 x)    { return sin(x);    }
+    f64 Cos(f64 x)    { return cos(x);    }
+    f64 Tan(f64 x)    { return tan(x);    }
+    f64 Asin(f64 x)   { return asin(x);   }
+    f64 Acos(f64 x)   { return acos(x);   }
+    f64 Atan(f64 x)   { return atan(x);   }
+    f64 Atan2(f64 y, f64 x) { return atan2(y, x); }
+    f64 Sinh(f64 x)   { return sinh(x);   }
+    f64 Cosh(f64 x)   { return cosh(x);   }
+    f64 Tanh(f64 x)   { return tanh(x);   }
 
     // Exponent / power / root
-    f64 sqrt(f64 x)   { return _math_sqrt(x);   }
-    f64 pow(f64 x, f64 y) { return _math_pow(x, y); }
-    f64 exp(f64 x)    { return _math_exp(x);    }
-    f64 log(f64 x)    { return _math_log(x);    }
-    f64 log10(f64 x)  { return _math_log10(x);  }
-    f64 log2(f64 x)   { return _math_log2(x);   }
+    f64 Sqrt(f64 x)   { return sqrt(x);   }
+    f64 Pow(f64 x, f64 y) { return pow(x, y); }
+    f64 Exp(f64 x)    { return exp(x);    }
+    f64 Log(f64 x)    { return log(x);    }
+    f64 Log10(f64 x)  { return log10(x);  }
+    f64 Log2(f64 x)   { return log2(x);   }
 
     // Rounding / absolute / remainder
-    f64 floor(f64 x)  { return _math_floor(x);  }
-    f64 ceil(f64 x)   { return _math_ceil(x);   }
-    f64 round(f64 x)  { return _math_round(x);  }
-    f64 fabs(f64 x)   { return _math_fabs(x);   }
-    f64 fmod(f64 x, f64 y) { return _math_fmod(x, y); }
-    f64 hypot(f64 x, f64 y) { return _math_hypot(x, y); }
+    f64 Floor(f64 x)  { return floor(x);  }
+    f64 Ceil(f64 x)   { return ceil(x);   }
+    f64 Round(f64 x)  { return round(x);  }
+    f64 Fabs(f64 x)   { return fabs(x);   }
+    f64 Fmod(f64 x, f64 y) { return fmod(x, y); }
+    f64 Hypot(f64 x, f64 y) { return hypot(x, y); }
 
     // Common mathematical constants
-    const f64 pi = 3.14159265358979323846;
-    const f64 e  = 2.71828182845904523536;
+    const f64 Pi = 3.14159265358979323846;
+    const f64 E  = 2.71828182845904523536;
 }
