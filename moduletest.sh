@@ -899,7 +899,10 @@ int main() {
     // Write creates + truncates
     std::file::File *w = open_or_die("t.txt", std::file::OpenMode::Write);
     if (!w) return 1;
-    if (std::file::WriteString(w, "hello world\n") != std::file::Status::Wrote(12)) r |= 2;
+    match (std::file::WriteString(w, "hello world\n")) {
+        std::file::Status::Wrote(n): if (n != 12) r |= 2;
+        _: r |= 2;
+    }
     std::file::Close(w);
     // Append keeps content and writes at the end
     std::file::File *a = open_or_die("t.txt", std::file::OpenMode::Append);
@@ -932,7 +935,7 @@ int main() {
     if (!std::file::Eof(f)) r |= 1024;
     // Writing a read-only file fails; reading it again works
     std::file::Status ws = std::file::Write(f, buf);
-    if (ws == std::file::Status::Wrote(17)) r |= 2048;
+    if (ws == std::file::Status::Wrote) r |= 2048;
     std::file::Close(f);
     // Errors
     std::file::Status nf = std::file::Open("missing.txt", std::file::OpenMode::Read);
