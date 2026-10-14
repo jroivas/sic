@@ -1,0 +1,12 @@
+// sic: a shift count wider than the shifted type is clamped before narrowing,
+// so `x << (2^32 + 1)` shifts everything out (0) instead of wrapping to `x << 1`
+// (sic.md §"Rotate and shift"); a signed `>>` keeps its sign fill. Returns 42.
+int main() {
+    i32 b = -8;
+    u32 u = 0x80000000u;
+    i64 big = 4294967297;
+    if ((b >> 1u) != -4) return 1;
+    if ((b << big) != 0 || (u >> big) != 0u || (b >> big) != -1) return 2;
+    if ((5 << (i64)-1) != 5) return 3;            // a negative count: not shifted
+    return 42;
+}

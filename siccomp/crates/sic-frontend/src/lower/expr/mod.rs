@@ -3092,6 +3092,22 @@ impl<'m> FuncCtx<'m> {
         let is_int = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool);
         let shift = matches!(op, BinOpKind::Shl | BinOpKind::Shr) && is_int(&lt) && is_int(&rt);
         let common = if shift { lt.integer_promote() } else { common };
+        // sic defines any shift count (sic.md §"Rotate and shift"): a count wider
+        // than the shifted type is clamped to `width` before narrowing, so a huge
+        // count still shifts everything out instead of wrapping to a small one.
+        let r = if shift && self.is_sic()
+            && rt.integer_promote().size_of(self.ptr_size()) > common.size_of(self.ptr_size())
+        {
+            let wty = rt.integer_promote();
+            let width = Constant::int((common.size_of(self.ptr_size()) * 8) as i64);
+            let over = self.alloc_val();
+            let cmp = if wty.is_signed() { CmpOp::ISGt } else { CmpOp::IUGt };
+            self.push_instr(Instr::Cmp { dest: over, op: cmp, lhs: r.clone(), rhs: width.clone(), ty: wty.clone() });
+            let clamped = self.alloc_val();
+            self.push_instr(Instr::Select { dest: clamped, cond: Val::Local(over), on_true: width, on_false: r, ty: wty.clone() });
+            self.val_types.insert(clamped.0, wty);
+            Val::Local(clamped)
+        } else { r };
 
         let lc = self.coerce(l, &common)?;
         let rc = self.coerce(r, &common)?;

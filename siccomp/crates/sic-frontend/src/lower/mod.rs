@@ -3429,8 +3429,10 @@ impl Lowerer {
                     BinOpKind::Mul => l.wrapping_mul(r),
                     BinOpKind::Div => if r != 0 { l.wrapping_div(r) } else { 0 },
                     BinOpKind::Rem => if r != 0 { l.wrapping_rem(r) } else { 0 },
-                    BinOpKind::Shl => l.wrapping_shl(r as u32),
-                    BinOpKind::Shr => l.wrapping_shr(r as u32),
+                    // Out-of-range counts take SIC's defined results (C: UB):
+                    // a negative count shifts nothing, >= 64 shifts all out.
+                    BinOpKind::Shl => if r < 0 { l } else if r >= 64 { 0 } else { l << r },
+                    BinOpKind::Shr => if r < 0 { l } else if r >= 64 { if l < 0 { -1 } else { 0 } } else { l >> r },
                     BinOpKind::BitAnd => l & r,
                     BinOpKind::BitOr => l | r,
                     BinOpKind::BitXor => l ^ r,
@@ -3923,10 +3925,25 @@ pub(crate) fn const_binop(op: BinOpKind, a: ConstInt, b: ConstInt) -> Option<Con
     Some(match op {
         // Shifts do NOT use usual arithmetic conversion: the result type is the
         // PROMOTED left operand; a signed left shifts arithmetically.
-        BinOpKind::Shl => { let la = a.promote(); ConstInt::new(((la.v as i128) << (b.v & (la.bits as i64 - 1))) as i64, la.bits, la.signed) }
-        BinOpKind::Shr => {
-            let la = a.promote(); let sh = (b.v & (la.bits as i64 - 1)) as u32;
-            let r = if la.signed { la.v >> sh } else { (la.u128() as u64 >> sh) as i64 };
+        // An out-of-range count takes SIC's defined result (sic.md §"Rotate and
+        // shift"; in C it is UB, and gcc folds an oversized count to 0 too): a
+        // negative count shifts nothing; a count >= the width shifts everything
+        // out (a signed `>>` fills with the sign).
+        BinOpKind::Shl | BinOpKind::Shr => {
+            let la = a.promote();
+            let negative = b.signed && b.v < 0;
+            let huge = !negative && (b.u128() >= la.bits as u128);
+            let r = if negative {
+                la.v
+            } else if huge {
+                if op == BinOpKind::Shr && la.signed && la.v < 0 { -1 } else { 0 }
+            } else if op == BinOpKind::Shl {
+                ((la.v as i128) << b.v) as i64
+            } else if la.signed {
+                la.v >> b.v
+            } else {
+                (la.u128() as u64 >> b.v) as i64
+            };
             ConstInt::new(r, la.bits, la.signed)
         }
         // Equality is signedness-independent (equal normalized values); order uses
