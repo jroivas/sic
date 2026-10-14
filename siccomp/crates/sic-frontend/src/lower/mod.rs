@@ -2946,6 +2946,12 @@ impl Lowerer {
                 // `offsetof` / `alignof` against global types), so a scalar global
                 // like `const unsigned n = sizeof(arr)/sizeof(arr[0]);` gets a real
                 // value instead of being left undefined.
+                // A floating global (`double x = 100;`, `float f = 1.0 / 3;`) takes
+                // the expression's floating value — an integer constant converted,
+                // not its bit pattern stored.
+                if ir_ty.is_float() {
+                    return self.eval_const_float(e).map(Constant::Float);
+                }
                 match self.eval_const_int(e).ok_or(()) {
                     Ok(v) => Some(Constant::Int(v)),
                     Err(_) => {
@@ -3026,6 +3032,47 @@ impl Lowerer {
     /// Recursively serialize `init` for a value of `ty` into `buf[base..]`,
     /// collecting pointer relocations for embedded symbol addresses. Returns
     /// false if some component isn't a translation-time constant.
+    /// The value of a constant floating-point initializer: float/decimal
+    /// literals, integer constant expressions (C's integer arithmetic first:
+    /// `10 / 4` is 2), and `+ - * /` / unary minus / casts over them with at
+    /// least one floating operand. None if not a compile-time constant.
+    fn eval_const_float(&self, e: &Expr) -> Option<f64> {
+        match &e.kind {
+            ExprKind::FloatLit(f) => return Some(*f),
+            ExprKind::DecimalLit(t) => return t.parse().ok(),
+            _ => {}
+        }
+        if let Some(v) = self.eval_const_int(e) {
+            return Some(v as f64);
+        }
+        match &e.kind {
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_float(expr).map(|f| -f),
+            ExprKind::Cast { ty, expr } => {
+                let f = self.eval_const_float(expr)?;
+                match lower_type(ty, &self.struct_types, self.ptr_size).ok()? {
+                    Type::Float32 => Some(f as f32 as f64),
+                    Type::Float64 | Type::Float80 => Some(f),
+                    Type::Int { bits, signed } if bits <= 64 => {
+                        let t = f.trunc();
+                        Some(if signed { t as i64 as f64 } else { t as u64 as f64 })
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::BinOp { op, lhs, rhs } => {
+                let (a, b) = (self.eval_const_float(lhs)?, self.eval_const_float(rhs)?);
+                match op {
+                    BinOpKind::Add => Some(a + b),
+                    BinOpKind::Sub => Some(a - b),
+                    BinOpKind::Mul => Some(a * b),
+                    BinOpKind::Div => Some(a / b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn serialize_const(
         &mut self,
         init: &Initializer,
@@ -3392,16 +3439,6 @@ impl Lowerer {
                 len: s.len() + 1,
             }),
             _ => None,
-        }
-    }
-
-    /// Evaluate a constant floating-point expression.
-    fn eval_const_float(&self, e: &Expr) -> Option<f64> {
-        match &e.kind {
-            ExprKind::FloatLit(f) => Some(*f),
-            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_float(expr).map(|f| -f),
-            ExprKind::Cast { expr, .. } => self.eval_const_float(expr),
-            _ => eval_const_expr(e, &self.enum_consts).ok().map(|v| v as f64),
         }
     }
 
