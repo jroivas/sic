@@ -141,6 +141,7 @@ int main()
 | `Open(name, mode)` | `Status::Opened(File*)` |
 | `Read(f, size, buf)` / `ReadFrom(f, offset, size, buf)` | `Status::Read(bytes)` — up to `size` (and the buffer's capacity), replacing `buf`'s contents; `Read(0)` at end of file |
 | `ReadAll(f, buf)` | `Status::Read(bytes)` — everything to end of file, growing `buf` |
+| `ReadLine(f, buf)` | `Status::Read(bytes)` — the next line including its `\n` (a last line may have none), growing `buf`; `Read(0)` once the file is exhausted |
 | `Write(f, buf)` / `WriteTo(f, offset, buf)` | `Status::Wrote(bytes)` — all of `buf`'s contents |
 | `WriteString(f, s)` | `Status::Wrote(bytes)` |
 | `Seek(f, offset)` | `Status::Success` |
@@ -148,6 +149,18 @@ int main()
 | `Close(f)` | `Status::Success` (also frees `f`) |
 | `Eof(f)` | `bool` — the last read reached end of file |
 | `Stdin()` / `Stdout()` / `Stderr()` | the standard streams as `File*` |
+
+Reading a file line by line (lines may be any length):
+
+```sic
+std::buffer::Buffer *line = std::buffer::Create(256);
+while (std::file::ReadLine(f, line) != std::file::Status::Read(0))
+    std::Print("{}", std::buffer::Value(line));
+```
+
+`ReadLine` reads ahead in blocks; `Read`, `ReadAll`, `Seek` and the writes
+continue from the logical position (just after the last line returned), so
+the calls mix freely.
 
 Reads and writes retry after a signal (EINTR), and writes retry short writes,
 so `Wrote(n)` always means everything was written. Failures are other
