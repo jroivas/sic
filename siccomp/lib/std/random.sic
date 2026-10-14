@@ -7,22 +7,25 @@ module std;
 // Pseudorandom number generators.
 //
 // Usage:
-//   auto g = std::random::rng();       // system-seeded default (SplitMix64)
+//   auto g = std::random::Rng() else return 1;   // system-seeded SplitMix64
 //   u64 x = g.gen64();
 //   u32 y = g.gen32();
 //
-//   auto p = std::random::pcg32(seed);
-//   auto x = std::random::xoshiro256(seed);
-//   auto c = std::random::chacha12(seed);
+//   auto p = std::random::PCG32(seed) else return 1;
+//   auto x = std::random::Xoshiro256PP(seed) else return 1;
+//   auto c = std::random::ChaCha12() else return 1;   // seed 0: system entropy
+//
+// Each factory is named after its algorithm and returns Option<...Type>
+// (std::random::SplitMix64Type, PCG32Type, Xoshiro256PPType, ChaCha12Type).
 //
 // Each RNG is a self-contained struct with no shared state: separate
 // instances may be used from separate threads freely; one instance must not
 // be shared between threads without a lock. Copying a generator copies its
 // state, so both copies then produce the same sequence.
 //
-// The default is SplitMix64: fast, 64-bit state, good statistical quality.
+// The default is SplitMix64Type: fast, 64-bit state, good statistical quality.
 // For heavier-duty needs, xoshiro256++ (large state, long period) or
-// ChaCha12 are also provided. Only a system-seeded ChaCha12 (seed 0: a
+// ChaCha12Type are also provided. Only a system-seeded ChaCha12Type (seed 0: a
 // 256-bit key from getrandom) is suitable for secrets; an explicit u64 seed
 // gives any generator at most 64 bits of entropy.
 
@@ -58,15 +61,15 @@ namespace random
     }
 
     // ------------------------------------------------------------------
-    // SplitMix64 -- the default RNG (fast, 64-bit state, good quality)
+    // SplitMix64Type -- the default RNG (fast, 64-bit state, good quality)
     //   state += 0x9E3779B97F4A7C15;
     //   z = state; z = (z ^ (z >> 30)) * M1; z = (z ^ (z >> 27)) * M2; z ^= (z >> 31);
     // ------------------------------------------------------------------
 
-    struct SplitMix64 {
+    struct SplitMix64Type {
         u64 state;
 
-        u64 gen64(struct SplitMix64 *self) {
+        u64 gen64(struct SplitMix64Type *self) {
             self->state += 0x9E3779B97F4A7C15;
             u64 z = self->state;
             z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
@@ -75,22 +78,22 @@ namespace random
             return z;
         }
 
-        u32 gen32(struct SplitMix64 *self) {
+        u32 gen32(struct SplitMix64Type *self) {
             return (u32)(self->gen64());
         }
     };
 
     // ------------------------------------------------------------------
-    // PCG32 -- permuted congruential generator (32-bit output)
+    // PCG32Type -- permuted congruential generator (32-bit output)
     //   state = state * 0x5851F42D4C957F2D + (inc | 1);
     //   output = xorshifted >> rot | xorshifted << ((0-rot) & 31)
     // ------------------------------------------------------------------
 
-    struct PCG32 {
+    struct PCG32Type {
         u64 state;
         u64 inc;
 
-        u32 gen32(struct PCG32 *self) {
+        u32 gen32(struct PCG32Type *self) {
             u64 old = self->state;
             self->state = old * 0x5851F42D4C957F2D + (self->inc | 1);
             u32 xorshifted = (u32)(((old >> 18) ^ old) >> 27);
@@ -98,7 +101,7 @@ namespace random
             return (xorshifted >> rot) | (xorshifted << ((0 - rot) & 31));
         }
 
-        u64 gen64(struct PCG32 *self) {
+        u64 gen64(struct PCG32Type *self) {
             u32 lo = self->gen32();
             u32 hi = self->gen32();
             return ((u64)hi << 32) | (u64)lo;
@@ -111,10 +114,10 @@ namespace random
     //   s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45);
     // ------------------------------------------------------------------
 
-    struct Xoshiro256PP {
+    struct Xoshiro256PPType {
         u64 s0, s1, s2, s3;
 
-        u64 gen64(struct Xoshiro256PP *self) {
+        u64 gen64(struct Xoshiro256PPType *self) {
             u64 result = self->s0 + self->s3;
             u64 t = self->s1 << 17;
             self->s2 ^= self->s0;
@@ -126,18 +129,18 @@ namespace random
             return result;
         }
 
-        u32 gen32(struct Xoshiro256PP *self) {
+        u32 gen32(struct Xoshiro256PPType *self) {
             return (u32)(self->gen64());
         }
     };
 
     // ------------------------------------------------------------------
-    // ChaCha12 -- ChaCha stream cipher with 12 rounds as a PRNG
+    // ChaCha12Type -- ChaCha stream cipher with 12 rounds as a PRNG
     //   State: constants + 8-word key + 2-word counter + 2-word nonce
     //   64 bytes / block; 12 rounds = 6 double rounds of quarter rounds
     // ------------------------------------------------------------------
 
-    struct ChaCha12 {
+    struct ChaCha12Type {
         u32 key[8];
         u32 ctr_lo;
         u32 ctr_hi;
@@ -146,7 +149,7 @@ namespace random
         u32 block[16];
         u32 index;
 
-        void next_block(struct ChaCha12 *self) {
+        void next_block(struct ChaCha12Type *self) {
             u32 s[16];
             s[0] = 0x61707865; s[1] = 0x3320646e;
             s[2] = 0x79622d32; s[3] = 0x6b206574;
@@ -178,14 +181,14 @@ namespace random
             self->index = 0;
         }
 
-        u32 gen32(struct ChaCha12 *self) {
+        u32 gen32(struct ChaCha12Type *self) {
             if (self->index >= 16) self->next_block();
             u32 r = self->block[(int)self->index];
             self->index++;
             return r;
         }
 
-        u64 gen64(struct ChaCha12 *self) {
+        u64 gen64(struct ChaCha12Type *self) {
             u32 lo = self->gen32();
             u32 hi = self->gen32();
             return ((u64)hi << 32) | (u64)lo;
@@ -195,7 +198,7 @@ namespace random
     // Fill buf with len cryptographically secure random bytes (any length:
     // short reads are retried). Blocks until the kernel has enough entropy.
     // Some(len) on success, None on failure.
-    Option<isize> getrandom(u8 *buf, usize len) {
+    Option<isize> GetRandom(u8 *buf, usize len) {
         if (!FillRandom(buf, len))
             return None;
         return Option::Some((isize)len);
@@ -210,11 +213,11 @@ namespace random
     // non-zero seed reproduces the same sequence.
     // ------------------------------------------------------------------
 
-    // Default RNG (SplitMix64) -- alias for splitmix64().
-    Option<SplitMix64> rng() { return splitmix64(); }
+    // Default RNG (a SplitMix64Type) -- alias for SplitMix64().
+    Option<SplitMix64Type> Rng() { return SplitMix64(); }
 
-    Option<SplitMix64> splitmix64(u64 seed = 0) {
-        SplitMix64 g;
+    Option<SplitMix64Type> SplitMix64(u64 seed = 0) {
+        SplitMix64Type g;
         if (seed == 0) {
             if (!FillRandom((u8 *)&g.state, sizeof(g.state)))
                 return None;
@@ -225,8 +228,8 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<PCG32> pcg32(u64 seed = 0) {
-        PCG32 g;
+    Option<PCG32Type> PCG32(u64 seed = 0) {
+        PCG32Type g;
         if (seed == 0) {
             u64 r[2];
             if (!FillRandom((u8 *)r, sizeof(r))) return None;
@@ -240,8 +243,8 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<Xoshiro256PP> xoshiro256(u64 seed = 0) {
-        Xoshiro256PP g;
+    Option<Xoshiro256PPType> Xoshiro256PP(u64 seed = 0) {
+        Xoshiro256PPType g;
         if (seed == 0) {
             u64 r[4];
             if (!FillRandom((u8 *)r, sizeof(r))) return None;
@@ -250,7 +253,7 @@ namespace random
             g.s2 = r[2];
             g.s3 = r[3];
         } else {
-            SplitMix64 sm;
+            SplitMix64Type sm;
             sm.state = seed;
             g.s0 = sm.gen64();
             g.s1 = sm.gen64();
@@ -262,12 +265,12 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<ChaCha12> chacha12(u64 seed = 0) {
-        ChaCha12 g;
+    Option<ChaCha12Type> ChaCha12(u64 seed = 0) {
+        ChaCha12Type g;
         if (seed == 0) {
             if (!FillRandom((u8 *)g.key, sizeof(g.key))) return None;
         } else {
-            SplitMix64 sm;
+            SplitMix64Type sm;
             sm.state = seed;
             sm.gen64();
             for (int i = 0; i < 8; i += 2) {
