@@ -879,6 +879,95 @@ else
     bad "enum-type-import" "compile failed: $(cat err)"
 fi
 
+# ── std::file: Write creates/truncates, Append, Seek, ReadAll, Eof, errno ────
+# statuses (NotFound / IsDirectory / PermissionDenied), std streams never closed.
+mkdir -p fileio
+cat > fileio/ftest.sic <<'EOF'
+import std;
+#include <sys/stat.h>
+#include <unistd.h>
+
+static std::file::File *open_or_die(string name, std::file::OpenMode m) {
+    match (std::file::Open(name, m)) {
+        std::file::Status::Opened(f): return f;
+        _: return NULL;
+    }
+}
+
+int main() {
+    int r = 0;
+    // Write creates + truncates
+    std::file::File *w = open_or_die("t.txt", std::file::OpenMode::Write);
+    if (!w) return 1;
+    if (std::file::WriteString(w, "hello world\n") != std::file::Status::Wrote(12)) r |= 2;
+    std::file::Close(w);
+    // Append keeps content and writes at the end
+    std::file::File *a = open_or_die("t.txt", std::file::OpenMode::Append);
+    if (!a) return 3;
+    std::file::WriteString(a, "more\n");
+    std::file::Close(a);
+    // Read: Size, partial read, Eof, Seek, ReadAll
+    std::file::File *f = open_or_die("t.txt", std::file::OpenMode::Read);
+    if (!f) return 4;
+    match (std::file::Size(f)) {
+        std::file::Status::Size(n): if (n != 17) r |= 8;
+        _: r |= 8;
+    }
+    std::buffer::Buffer *buf = std::buffer::Create(5);
+    match (std::file::Read(f, 100, buf)) {
+        std::file::Status::Read(n): if (n != 5 || std::buffer::Value(buf) != "hello") r |= 16;
+        _: r |= 16;
+    }
+    if (std::file::Eof(f)) r |= 32;
+    if (std::file::Seek(f, 12) != std::file::Status::Success) r |= 64;
+    std::file::Read(f, 5, buf);
+    if (std::buffer::Value(buf) != "more\n") r |= 128;
+    std::file::Read(f, 5, buf);
+    if (!std::file::Eof(f) || buf->size != 0) r |= 256;
+    std::file::Seek(f, 0);
+    match (std::file::ReadAll(f, buf)) {
+        std::file::Status::Read(n): if (n != 17 || std::buffer::Value(buf) != "hello world\nmore\n") r |= 512;
+        _: r |= 512;
+    }
+    if (!std::file::Eof(f)) r |= 1024;
+    // Writing a read-only file fails; reading it again works
+    std::file::Status ws = std::file::Write(f, buf);
+    if (ws == std::file::Status::Wrote(17)) r |= 2048;
+    std::file::Close(f);
+    // Errors
+    std::file::Status nf = std::file::Open("missing.txt", std::file::OpenMode::Read);
+    if (nf != std::file::Status::NotFound) r |= 4096;
+    std::file::Status d = std::file::Open(".", std::file::OpenMode::Write);
+    if (d != std::file::Status::IsDirectory) r |= 8192;
+    // No permission (skipped when running as root)
+    std::file::File *ro = open_or_die("ro.txt", std::file::OpenMode::Write);
+    if (!ro) return 5;
+    std::file::Close(ro);
+    chmod("ro.txt", 0);
+    std::file::Status pd = std::file::Open("ro.txt", std::file::OpenMode::Read);
+    if (geteuid() != 0 && pd != std::file::Status::PermissionDenied) r |= 65536;
+    chmod("ro.txt", 0644);
+    // Standard streams: Close leaves them open
+    if (std::file::Close(std::file::Stdout()) != std::file::Status::Success) r |= 16384;
+    std::file::WriteString(std::file::Stdout(), "still open\n");
+    if (std::file::Seek(std::file::Stdin(), 3) != std::file::Status::InvalidOffset) r |= 32768;
+    std::Println("status {}", nf.str);
+    del buf;
+    std::Println("r={}", r);
+    return r;
+}
+EOF
+if (cd fileio && "$SIC" ftest.sic -I.. -o ftest 2>../err); then
+    out="$(cd fileio && ./ftest)"; rc=$?
+    want="still open
+status file::Status::NotFound
+r=0"
+    if [ "$rc" -eq 0 ] && [ "$out" = "$want" ]; then ok "std-file-io"
+    else bad "std-file-io" "rc=$rc got:\n$out"; fi
+else
+    bad "std-file-io" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.

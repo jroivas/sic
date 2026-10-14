@@ -3,8 +3,20 @@ module std;
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
-#include <stdio.h>
 #include <sys/stat.h>
+
+// File I/O through std::buffer.
+//
+// Usage:
+//   auto st = std::file::Open("out.txt", std::file::OpenMode::Write);
+//   match (st) { std::file::Status::Opened(f): ...; _: ...; }
+//   std::file::WriteString(f, "hello\n");
+//   std::file::ReadAll(f, buf);          // whole file, growing buf
+//   std::file::Close(f);
+//
+// Every call returns a std::file::Status. Read/Write move as many bytes as one
+// call can (Read may return fewer than asked; 0 bytes means end of file, after
+// which Eof() is true); Write and WriteString write everything or fail.
 
 namespace file
 {
@@ -12,18 +24,21 @@ namespace file
         int fd;
         string name;
         u64 offset;
-        bool stream;
+        bool stream;                // a standard stream: not seekable, never closed
+        bool eof;                   // the last read hit end of file
+        File() { fd = -1; }
         ~File()
         {
-            if (fd > 0)
+            if (fd >= 0 && !stream)
                 close(fd);
         }
     };
 
     enum OpenMode {
-        Read,
-        Write,
-        RW
+        Read,                       // read; the file must exist
+        Write,                      // write; created if missing, truncated
+        RW,                         // read and write; the file must exist
+        Append,                     // write at the end; created if missing
     };
 
     enum Status {
@@ -40,6 +55,9 @@ namespace file
         OutOfMemory,
         Size(u64),
         InvalidOffset,
+        PermissionDenied,
+        IsDirectory,
+        Error(int),                 // any other failure: the errno value
     };
 
     static File g_stdin = {
@@ -75,6 +93,26 @@ namespace file
         return &g_stderr;
     }
 
+    // An errno value as a Status; `fallback` for the generic read/write errors.
+    static file::Status errno_status(int err, file::Status fallback)
+    {
+        if (err == ENOENT || err == ENOTDIR)
+            return file::Status::NotFound;
+        if (err == EACCES || err == EPERM || err == EROFS)
+            return file::Status::PermissionDenied;
+        if (err == EISDIR)
+            return file::Status::IsDirectory;
+        if (err == EIO)
+            return file::Status::IO;
+        if (err == EBADF)
+            return file::Status::InvalidFileHandle;
+        if (err == EINVAL || err == ESPIPE)
+            return file::Status::InvalidOffset;
+        if (err == ENOMEM)
+            return file::Status::OutOfMemory;
+        return fallback;
+    }
+
     file::Status Open(string name, OpenMode mode)
     {
         File *tmp = new File() else return file::Status::OutOfMemory;
@@ -83,154 +121,199 @@ namespace file
         match (mode)
         {
             Read: flags |= O_RDONLY;
-            Write: flags |= O_WRONLY;
+            Write: flags |= O_WRONLY | O_CREAT | O_TRUNC;
             RW: flags |= O_RDWR;
+            Append: flags |= O_WRONLY | O_CREAT | O_APPEND;
         }
 
-        tmp->fd = open(name.str, flags);
+        do {
+            tmp->fd = open(name.ptr, flags | O_CLOEXEC, 0644);
+        } while (tmp->fd < 0 && errno == EINTR);
         if (tmp->fd < 0)
         {
+            int err = errno;
             del tmp;
-            return file::Status::NotFound;
+            return errno_status(err, file::Status::Error(err));
         }
         tmp->name = name;
         tmp->stream = false;
+        if (mode == OpenMode::Append)
+        {
+            i64 end = lseek(tmp->fd, 0, SEEK_END);
+            if (end > 0)
+                tmp->offset = (u64)end;
+        }
 
         return file::Status::Opened(tmp);
     }
 
+    // Close the file and free it. The standard streams are left open.
     file::Status Close(File *f)
     {
         if (!f)
             return file::Status::InvalidObject;
+        if (f == &g_stdin || f == &g_stdout || f == &g_stderr)
+            return file::Status::Success;
 
-        close(f->fd);
+        int res = close(f->fd);
+        int err = errno;
         f->fd = -1;
         del f;
+        if (res != 0 && err != EINTR)
+            return errno_status(err, file::Status::Error(err));
 
         return file::Status::Success;
     }
 
+    // Move to `offset` for the next unpositioned Read/Write. Not for streams.
+    file::Status Seek(File *f, u64 offset)
+    {
+        if (!f)
+            return file::Status::InvalidObject;
+        if (f->stream)
+            return file::Status::InvalidOffset;
+        if (lseek(f->fd, offset, SEEK_SET) < 0)
+            return errno_status(errno, file::Status::InvalidOffset);
+        f->offset = offset;
+        f->eof = false;
+        return file::Status::Success;
+    }
+
+    // Read up to `size` bytes (at most the buffer's capacity) at `offset` into
+    // `buf`, replacing its contents. Read(0) at end of file.
     file::Status ReadFrom(File *f, u64 offset, u64 size, buffer::Buffer *buf)
     {
-        ssize_t res;
-        i64 sres;
-
-        if (!f)
+        if (!f || !buf)
             return file::Status::InvalidObject;
 
         if (!f->stream && offset != f->offset)
         {
-            sres = lseek(f->fd, offset, SEEK_SET);
-            if (sres < 0)
-            {
-                res = errno;
-                /* FIXME Better error handling */
-                if (res == EIO)
-                    return file::Status::IO;
-                if (res == EBADF)
-                    return file::Status::InvalidFileHandle;
-                if (res == EINVAL)
-                    return file::Status::InvalidOffset;
-                return file::Status::ReadError;
-            }
-            f->offset = offset;
+            file::Status st = Seek(f, offset);
+            if (st != file::Status::Success)
+                return st;
         }
 
         if (size > buf->capacity)
             size = buf->capacity;
-        res = read(f->fd, buf->data, size);
+        isize res;
+        do {
+            res = read(f->fd, buf->data, size);
+        } while (res < 0 && errno == EINTR);
         if (res < 0)
-        {
-            res = errno;
-            /* FIXME Better error handling */
-            if (res == EIO)
-                return file::Status::IO;
-            if (res == EBADF)
-                return file::Status::InvalidFileHandle;
-            return file::Status::ReadError;
-        }
-        f->offset += res;
-        buf->size = res;
+            return errno_status(errno, file::Status::ReadError);
+        f->offset += (u64)res;
+        f->eof = res == 0 && size > 0;
+        buf->size = (u64)res;
 
-        return file::Status::Read(res);
+        return file::Status::Read((u64)res);
     }
 
     file::Status Read(File *f, u64 size, buffer::Buffer *buf)
     {
+        if (!f)
+            return file::Status::InvalidObject;
         return ReadFrom(f, f->offset, size, buf);
     }
 
-    file::Status WriteTo(File *f, u64 offset, buffer::Buffer *buf)
+    // Read from the current position to end of file into `buf`, growing its
+    // capacity as needed. Read(total bytes).
+    file::Status ReadAll(File *f, buffer::Buffer *buf)
     {
-        ssize_t res;
-        i64 sres;
-
-        if (!f)
+        if (!f || !buf)
             return file::Status::InvalidObject;
+        buf->size = 0;
+        while (true)
+        {
+            if (buf->size == buf->capacity)
+            {
+                u64 cap = buf->capacity < 4096 ? 4096 : buf->capacity * 2;
+                if (!buffer::SetCapacity(buf, cap))
+                    return file::Status::OutOfMemory;
+            }
+            isize res;
+            do {
+                res = read(f->fd, buf->data + buf->size, buf->capacity - buf->size);
+            } while (res < 0 && errno == EINTR);
+            if (res < 0)
+                return errno_status(errno, file::Status::ReadError);
+            if (res == 0)
+                break;
+            buf->size += (u64)res;
+            f->offset += (u64)res;
+        }
+        f->eof = true;
+        return file::Status::Read(buf->size);
+    }
 
+    // Write `n` bytes at `p`, retrying short writes. Wrote(n) or an error.
+    static file::Status write_bytes(File *f, u64 offset, u8 *p, u64 n)
+    {
         if (!f->stream && offset != f->offset)
         {
-            sres = lseek(f->fd, offset, SEEK_SET);
-            if (sres < 0)
-            {
-                res = errno;
-                /* FIXME Better error handling */
-                if (res == EIO)
-                    return file::Status::IO;
-                if (res == EBADF)
-                    return file::Status::InvalidFileHandle;
-                if (res == EINVAL)
-                    return file::Status::InvalidOffset;
-                return file::Status::WriteError;
-            }
-            f->offset = offset;
+            file::Status st = Seek(f, offset);
+            if (st != file::Status::Success)
+                return st;
         }
 
-        res = write(f->fd, buf->data, buf->size);
-        if (res < 0)
+        u64 done = 0;
+        while (done < n)
         {
-            res = errno;
-            /* FIXME Better error handling */
-            if (res == EIO)
-                return file::Status::IO;
-            if (res == EBADF)
-                return file::Status::InvalidFileHandle;
-            return file::Status::WriteError;
+            isize res = write(f->fd, p + done, n - done);
+            if (res < 0)
+            {
+                if (errno == EINTR)
+                    continue;
+                return errno_status(errno, file::Status::WriteError);
+            }
+            done += (u64)res;
+            f->offset += (u64)res;
         }
-        f->offset += res;
 
-        return file::Status::Wrote(res);
+        return file::Status::Wrote(done);
+    }
+
+    // Write the buffer's contents at `offset` (ignored by Append files).
+    file::Status WriteTo(File *f, u64 offset, buffer::Buffer *buf)
+    {
+        if (!f || !buf)
+            return file::Status::InvalidObject;
+        return write_bytes(f, offset, buf->data, buf->size);
     }
 
     file::Status Write(File *f, buffer::Buffer *buf)
     {
-        return WriteTo(f, f->offset, buf);
+        if (!f || !buf)
+            return file::Status::InvalidObject;
+        return write_bytes(f, f->offset, buf->data, buf->size);
+    }
+
+    // Write a string's bytes at the current position.
+    file::Status WriteString(File *f, string s)
+    {
+        if (!f)
+            return file::Status::InvalidObject;
+        return write_bytes(f, f->offset, (u8 *)s.ptr, s.size);
     }
 
     file::Status Size(File *f)
     {
         struct stat sb;
-        int res;
 
         if (!f)
             return file::Status::InvalidObject;
 
-        res = fstat(f->fd, &sb);
-        if (res == EBADF)
-            return file::Status::InvalidFileHandle;
-        else if (res == EIO)
-            return file::Status::IO;
-        else if (res != 0)
-            return file::Status::ReadError;
+        if (fstat(f->fd, &sb) != 0)
+            return errno_status(errno, file::Status::ReadError);
 
-        return file::Status::Size(sb.st_size);
+        return file::Status::Size((u64)sb.st_size);
     }
 
+    // True after a read reached end of file (until a Seek or a read that
+    // returns data).
     bool Eof(File *f)
     {
         if (!f)
             return true;
-        return (feof(f->fd) == 0) ? false : true;
+        return f->eof;
     }
 }
