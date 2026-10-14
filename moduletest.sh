@@ -774,6 +774,61 @@ else
     bad "std-buffer-resize" "compile/link failed: $(cat err)"
 fi
 
+# ── std::Fmt format specs: {[arg][:[[fill]align][+][#][0][width][.prec][type]]} ─
+cat > fmtspec.sic <<'EOF'
+import std;
+int main() {
+    string who = "World";
+    bigint big = 42;
+    fixed half = 0.5;
+    i8 m1 = -1;
+    i32 neg = -42;
+    u16 u = 255;
+    f64 pi = 3.14159265;
+    std::Println("Hello {}! {} {} {} {}", who, big, half, true, false);
+    std::Println("{{}} {} }} {{x", 1);
+    std::Println("[{:5}] [{:<5}] [{:>5}] [{:^5}] [{:*^6}]", 42, 42, 42, 42, 42);
+    std::Println("[{:5}] [{:>5}] [{:^7}] [{:.2}] [{:-<8.3}]", "ab", "ab", "ab", "abcdef", "abcdef");
+    std::Println("[{:x}] [{:X}] [{:#x}] [{:b}] [{:#o}] [{:#010x}]", 255, 255, 255, 5, 8, 255);
+    std::Println("[{:x}] [{:x}] [{:b}] [{}] [{:+}] [{:+}]", m1, neg, m1, neg, 7, neg);
+    std::Println("[{:05}] [{:+06}] [{:08.3}] [{:.3}] [{:e}] [{:.2e}] [{}]", neg, 42, pi, pi, pi, pi, pi);
+    std::Println("[{1}] [{0}] [{}] [{1:>4}]", "a", "b");
+    std::Println("[{name:>6}] [{n:#x}]", name = "nm", n = 255);
+    std::Println("[{:→>5}] [{:5}] [{:.1}]", 1, "äö", "äö");
+    std::Println("[{}] [{:x}] [{:08}]", u, u, big);
+    std::Println("{ unmatched");
+    std::Println("missing [{}] [{5}]", 1);
+    std::Println("[{:.0}] [{:10.4}] [{:<10.4}|]", 2.5, -pi, pi);
+    string s = std::Fmt("{:.300}", 1.0);
+    std::Println("{}", s.size);
+    return 0;
+}
+EOF
+if "$SIC" fmtspec.sic -I. -o fmtspec 2>err; then
+    out="$(./fmtspec)"
+    want="$(cat <<'EOW'
+Hello World! 42 0.500000000000000000 true false
+{} 1 } {x
+[   42] [42   ] [   42] [ 42  ] [**42**]
+[ab   ] [   ab] [  ab   ] [ab] [abc-----]
+[ff] [FF] [0xff] [101] [0o10] [0x000000ff]
+[ff] [ffffffd6] [11111111] [-42] [+7] [-42]
+[-0042] [+00042] [0003.142] [3.142] [3.141593e+00] [3.14e+00] [3.14159]
+[b] [a] [a] [   b]
+[    nm] [0xff]
+[→→→→1] [äö   ] [ä]
+[255] [ff] [00000042]
+{ unmatched
+missing [1] []
+[2] [   -3.1416] [3.1416    |]
+302
+EOW
+)"
+    if [ "$out" = "$want" ]; then ok "std-fmt-spec"; else bad "std-fmt-spec" "got:\n$out"; fi
+else
+    bad "std-fmt-spec" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.

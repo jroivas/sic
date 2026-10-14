@@ -10,57 +10,219 @@ module std;
 extern int snprintf(char *s, unsigned long n, char *fmt, ...);
 extern long write(int fd, void *buf, unsigned long n);
 extern void exit(int status);
+extern void *malloc(unsigned long n);
+extern void *realloc(void *p, unsigned long n);
+extern void free(void *p);
+extern void *memcpy(void *d, void *s, unsigned long n);
 
 void Exit(int status)
 {
     exit(status);
 }
 
-// One argument as a `string` the caller can read, dispatched on its runtime type
-// (RTTI + `any` — no hand-written kind table). A `string`/`char*` argument is
-// BORROWED — returned as a descriptor over the caller's own bytes, never copied
-// (move semantics: the wrapper travels, the contents don't). The other kinds have
-// no persistent string to borrow, so they format into a scope-local buffer and
-// return it directly: a `string` view of a buffer that dies with the frame (a
-// local array, or a bigint/fixed `.str` heap buffer) is copied automatically on
-// return — no explicit `.dup`. `int` matches any signed-int width, `float` any
-// float (category matching).
-static string arg_str(any x) {
-    match (type(x)) {
-        string:
-            return (string)x;       // borrow — no content copy
+// ---------------------------------------------------------------------------
+// Fmt — `{}` placeholders with an optional format spec
+//
+//   {[arg][:[[fill]align][+][#][0][width][.precision][type]]}
+//
+//   arg        empty (next positional), a positional index (`{0}`), or a name
+//              (`{name}`, from a `name = value` argument)
+//   fill/align `<` left, `>` right, `^` center; fill is any one character
+//              (default space). Numbers align right by default, the rest left.
+//   +          show the sign of a non-negative number too
+//   #          `0x` / `0b` / `0o` prefix for x/X, b, o
+//   0          pad a number with zeros after its sign/prefix
+//   width      minimum width in characters (code points)
+//   .precision floats: digits after the point; strings: maximum characters
+//   type       integers: x X b o (d, default: decimal; a negative value prints
+//              its two's complement at its own width); floats: e E f g
+//
+// The output grows in one heap buffer (amortized doubling), so the cost is
+// linear in the result.
+// ---------------------------------------------------------------------------
 
-        cstr: {
-            string s = (char *)x;   // borrow (view) — no content copy
+// Append `n` bytes at `p` to the output buffer, growing it as needed.
+static void out_put(char **buf, u64 *len, u64 *cap, char *p, u64 n) {
+    if (n == 0)
+        return;
+    if (*len + n > *cap) {
+        u64 c = *cap * 2;
+        if (c < *len + n)
+            c = *len + n;
+        char *nb = (char *)realloc(*buf, c);
+        if (!nb)
+            return;                       // out of memory: drop the piece
+        *buf = nb;
+        *cap = c;
+    }
+    memcpy(*buf + *len, p, n);
+    *len += n;
+}
+
+// Append `count` copies of the `n`-byte character at `p`.
+static void out_repeat(char **buf, u64 *len, u64 *cap, char *p, u64 n, u64 count) {
+    for (u64 k = 0; k < count; k++)
+        out_put(buf, len, cap, p, n);
+}
+
+// Byte length of the UTF-8 sequence whose lead byte is `b`.
+static u64 utf8_len(u8 b) {
+    if (b >= 0xF0) return 4;
+    if (b >= 0xE0) return 3;
+    if (b >= 0xC0) return 2;
+    return 1;
+}
+
+// The first `n` code points of `s` (all of it if shorter) — a view, no copy.
+static string first_chars(string s, u64 n) {
+    char *p = s.ptr;
+    u64 size = s.size;
+    u64 i = 0;
+    u64 count = 0;
+    while (i < size && count < n) {
+        i += utf8_len((u8)p[i]);
+        count++;
+    }
+    if (i > size)
+        i = size;
+    return s[0 : i];
+}
+
+// Digits of `v` in `base` (2..16), most significant first, into `out`; returns
+// the digit count. `out` needs 64 bytes.
+static u64 put_digits(u64 v, u64 base, bool upper, char *out) {
+    char tmp[64];
+    char *lower = "0123456789abcdef";
+    char *higher = "0123456789ABCDEF";
+    u64 k = 0;
+    do {
+        u64 d = v % base;
+        tmp[k] = upper ? higher[d] : lower[d];
+        k++;
+        v = v / base;
+    } while (v != 0);
+    for (u64 m = 0; m < k; m++)
+        out[m] = tmp[k - 1 - m];
+    return k;
+}
+
+// An integer: `neg`/`mag` is the value, `bits` its width (for the two's
+// complement of a negative value in x/X/b/o). `*lead` gets the sign + prefix
+// length (where zero padding goes).
+static string int_str(bool neg, u64 mag, u64 bits, bool plus, bool alt, char ty, u64 *lead) {
+    u64 base = 10;
+    bool upper = false;
+    char *prefix = "";
+    if (ty == 'x') { base = 16; prefix = "0x"; }
+    else if (ty == 'X') { base = 16; upper = true; prefix = "0x"; }
+    else if (ty == 'b') { base = 2; prefix = "0b"; }
+    else if (ty == 'o') { base = 8; prefix = "0o"; }
+    if (base != 10 && neg) {
+        mag = (u64)0 - mag;               // two's complement ...
+        if (bits < 64)
+            mag = mag & (((u64)1 << bits) - 1);   // ... at the value's width
+        neg = false;
+    }
+    char b[80];
+    u64 k = 0;
+    if (neg) { b[k] = '-'; k++; }
+    else if (plus) { b[k] = '+'; k++; }
+    if (alt && base != 10) {
+        b[k] = prefix[0]; b[k + 1] = prefix[1];
+        k += 2;
+    }
+    *lead = k;
+    k += put_digits(mag, base, upper, b + k);
+    b[k] = 0;
+    return b;
+}
+
+// A float through snprintf: %g by default, %.Nf with a precision, or the
+// explicit e/E/f/g type.
+static string float_str(double d, bool plus, bool has_prec, u64 prec, char ty, u64 *lead) {
+    char conv = has_prec ? 'f' : 'g';
+    if (ty == 'e' || ty == 'E' || ty == 'f' || ty == 'g')
+        conv = ty;
+    char cf[8];
+    u64 k = 0;
+    cf[k] = '%'; k++;
+    if (plus) { cf[k] = '+'; k++; }
+    if (has_prec) { cf[k] = '.'; cf[k + 1] = '*'; k += 2; }
+    cf[k] = conv;
+    cf[k + 1] = 0;
+    int p = prec > 100000 ? 100000 : (int)prec;
+    char b[512];
+    int n = has_prec ? snprintf(b, 512, cf, p, d) : snprintf(b, 512, cf, d);
+    *lead = (b[0] == '-' || b[0] == '+') ? 1 : 0;
+    if (n < 512)
+        return b;
+    // Too long for the stack buffer (a large precision or magnitude).
+    char *big = (char *)malloc((u64)n + 1);
+    if (!big)
+        return "<?>";
+    if (has_prec) snprintf(big, (u64)n + 1, cf, p, d);
+    else snprintf(big, (u64)n + 1, cf, d);
+    string view = big;
+    string out = view.dup;
+    free(big);
+    return out;
+}
+
+// One argument rendered per its runtime type (RTTI + `any`). `*numeric` says
+// whether it aligns/zero-pads as a number. A `string`/`char*` argument is
+// BORROWED — returned as a view over the caller's own bytes, never copied.
+static string arg_str(any x, bool plus, bool alt, bool has_prec, u64 prec, char ty,
+                      u64 *lead, bool *numeric) {
+    *lead = 0;
+    *numeric = true;
+    match (type(x)) {
+        string: {
+            *numeric = false;
+            string s = (string)x;           // borrow — no content copy
+            if (has_prec)
+                return first_chars(s, prec);
             return s;
         }
 
-        bigint:
-            return ((bigint)x).str; // `.str` freed at scope exit → copied on return
-        fixed:
-            return ((fixed)x).str;
+        cstr: {
+            *numeric = false;
+            string s = (char *)x;           // borrow (view) — no content copy
+            if (has_prec)
+                return first_chars(s, prec);
+            return s;
+        }
 
         bool: {
-            return ((bool)x) ? "true" : "false";
+            *numeric = false;
+            string s = ((bool)x) ? "true" : "false";
+            if (has_prec)
+                return first_chars(s, prec);
+            return s;
+        }
+
+        bigint: {
+            string s = ((bigint)x).str;     // `.str` freed at scope exit → copied on return
+            *lead = (s.size > 0 && s[0] == '-') ? 1 : 0;
+            return s;
+        }
+        fixed: {
+            string s = ((fixed)x).str;
+            *lead = (s.size > 0 && s[0] == '-') ? 1 : 0;
+            return s;
         }
 
         int: {
-            char b[32];
-            snprintf(b, 32, "%lld", (long long)(i64)x);
-            return b;
+            i64 v = (i64)x;
+            bool neg = v < 0;
+            u64 mag = neg ? (u64)0 - (u64)v : (u64)v;
+            return int_str(neg, mag, (u64)type(x).size * 8, plus, alt, ty, lead);
         }
 
-        uint: {
-            char b[32];
-            snprintf(b, 32, "%llu", (unsigned long long)(u64)x);
-            return b;
-        }
+        uint:
+            return int_str(false, (u64)x, (u64)type(x).size * 8, plus, alt, ty, lead);
 
-        float: {
-            char b[64];
-            snprintf(b, 64, "%g", (double)x);
-            return b;
-        }
+        float:
+            return float_str((double)x, plus, has_prec, prec, ty, lead);
 
         ptr: {
             char b[32];
@@ -68,55 +230,156 @@ static string arg_str(any x) {
             return b;
         }
 
-        _:
+        _: {
+            *numeric = false;
             return "<?>";
+        }
     }
 }
 
-// `Fmt("… {} …", a, b)` — `{}` placeholders (Python/Rust-style; `{{`/`}}` are
-// literal braces), each substituted by the next argument formatted by its type.
+// Append one rendered argument, padded to `width` with `fill` (`fn` bytes).
+static void out_arg(char **buf, u64 *len, u64 *cap, string body, u64 lead, bool numeric,
+                    char *fill, u64 fn, char align, bool zero, u64 width) {
+    char *p = body.ptr;
+    u64 size = body.size;
+    u64 w = body.length;
+    if (w >= width) {
+        out_put(buf, len, cap, p, size);
+        return;
+    }
+    u64 pad = width - w;
+    if (zero && numeric) {                // sign/prefix, zeros, digits
+        out_put(buf, len, cap, p, lead);
+        out_repeat(buf, len, cap, "0", 1, pad);
+        out_put(buf, len, cap, p + lead, size - lead);
+        return;
+    }
+    char a = align;
+    if (a == 0)
+        a = numeric ? '>' : '<';
+    u64 left = 0;
+    u64 right = 0;
+    if (a == '<') right = pad;
+    else if (a == '>') left = pad;
+    else { left = pad / 2; right = pad - left; }
+    out_repeat(buf, len, cap, fill, fn, left);
+    out_put(buf, len, cap, p, size);
+    out_repeat(buf, len, cap, fill, fn, right);
+}
+
+static bool is_align(char c) {
+    return c == '<' || c == '>' || c == '^';
+}
+
 string Fmt(string fmt, va_array args, va_dict kwargs) {
-    string result = "";
     char *f = fmt.ptr;
-    u64 n = fmt.size;   // byte length
+    u64 n = fmt.size;     // byte length
+    u64 cap = n + 64;
+    u64 len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf)
+        return "";
     u64 i = 0;
-    u64 ai = 0;
+    u64 run = 0;          // start of the pending literal text
+    u64 ai = 0;           // next implicit positional argument
     while (i < n) {
         char c = f[i];
-        if (c == 123 && i + 1 < n && f[i + 1] == 123) {         // `{{` → literal `{`
-            result = result + "{";
-            i = i + 2;
-        } else if (c == 125 && i + 1 < n && f[i + 1] == 125) {  // `}}` → literal `}`
-            result = result + "}";
-            i = i + 2;
-        } else if (c == 123) {                                   // `{ … }` placeholder
-            u64 j = i + 1;
-            while (j < n && f[j] != 125) {                       // scan to `}`
-                j = j + 1;
-            }
-            if (j < n) {
-                if (j == i + 1) {                                // `{}` → next positional
-                    if (ai < args.length) {
-                        result = result + arg_str(args[ai]);
-                        ai = ai + 1;
-                    }
-                } else {                                          // `{name}` → named arg
-                    string key = fmt[i + 1 : j];
-                    any v = kwargs[key];
-                    result = result + arg_str(v);
-                }
-                i = j + 1;
-            } else {
-                i = i + 1;                                        // unmatched `{`
-            }
-        } else {                                                // any other byte, verbatim
-            char one[2];
-            one[0] = c;
-            one[1] = 0;
-            char *op = one;
-            result = result + op;
-            i = i + 1;
+        if ((c == '{' || c == '}') && i + 1 < n && f[i + 1] == c) {   // `{{` / `}}`
+            out_put(&buf, &len, &cap, f + run, i + 1 - run);          // keeps one
+            i += 2;
+            run = i;
+            continue;
         }
+        if (c != '{') {
+            i++;
+            continue;
+        }
+        u64 j = i + 1;
+        while (j < n && f[j] != '}')
+            j++;
+        if (j >= n) {                     // unmatched `{`: literal
+            i++;
+            continue;
+        }
+        out_put(&buf, &len, &cap, f + run, i - run);
+        u64 colon = i + 1;
+        while (colon < j && f[colon] != ':')
+            colon++;
+
+        // Spec: [[fill]align][+][#][0][width][.precision][type]
+        char *fill = " ";
+        u64 fn = 1;
+        char align = 0;
+        bool plus = false;
+        bool alt = false;
+        bool zero = false;
+        u64 width = 0;
+        bool has_prec = false;
+        u64 prec = 0;
+        char ty = 0;
+        u64 s = colon + 1;
+        if (s < j) {
+            u64 cl = utf8_len((u8)f[s]);
+            if (s + cl < j && is_align(f[s + cl])) {
+                fill = f + s;
+                fn = cl;
+                align = f[s + cl];
+                s += cl + 1;
+            } else if (is_align(f[s])) {
+                align = f[s];
+                s++;
+            }
+        }
+        if (s < j && f[s] == '+') { plus = true; s++; }
+        if (s < j && f[s] == '#') { alt = true; s++; }
+        if (s < j && f[s] == '0') { zero = true; s++; }
+        while (s < j && f[s] >= '0' && f[s] <= '9') {
+            width = width * 10 + (u64)(f[s] - '0');
+            s++;
+        }
+        if (s < j && f[s] == '.') {
+            has_prec = true;
+            s++;
+            while (s < j && f[s] >= '0' && f[s] <= '9') {
+                prec = prec * 10 + (u64)(f[s] - '0');
+                s++;
+            }
+        }
+        if (s < j)
+            ty = f[s];
+
+        // Argument: `{}` next positional, `{N}` positional N, `{name}` named.
+        bool all_digits = colon > i + 1;
+        u64 idx = 0;
+        for (u64 k = i + 1; k < colon; k++) {
+            if (f[k] < '0' || f[k] > '9') { all_digits = false; break; }
+            idx = idx * 10 + (u64)(f[k] - '0');
+        }
+        u64 lead = 0;
+        bool numeric = false;
+        if (colon == i + 1) {
+            if (ai < args.length) {
+                string r = arg_str(args[ai], plus, alt, has_prec, prec, ty, &lead, &numeric);
+                out_arg(&buf, &len, &cap, r, lead, numeric, fill, fn, align, zero, width);
+            }
+            ai++;
+        } else if (all_digits) {
+            if (idx < args.length) {
+                string r = arg_str(args[idx], plus, alt, has_prec, prec, ty, &lead, &numeric);
+                out_arg(&buf, &len, &cap, r, lead, numeric, fill, fn, align, zero, width);
+            }
+        } else {
+            string key = fmt[i + 1 : colon];
+            any v = kwargs[key];
+            string r = arg_str(v, plus, alt, has_prec, prec, ty, &lead, &numeric);
+            out_arg(&buf, &len, &cap, r, lead, numeric, fill, fn, align, zero, width);
+        }
+        i = j + 1;
+        run = i;
     }
+    out_put(&buf, &len, &cap, f + run, n - run);
+    string view = string.create(buf, len);
+    string result = view.dup;
+    free(buf);
     return result;
 }
