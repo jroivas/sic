@@ -1,0 +1,18 @@
+/* A ternary of string literals where a `char*` is expected
+ * (`char *p = c ? "a" : "b";`) was lowered as a `string` aggregate and its
+ * address used as the pointer — a crash. The condition keeps `string`
+ * semantics. Returns 42. */
+#include <string.h>
+int main(int argc, char **argv) {
+    int one = argc;
+    char *p = one == 1 ? "yes" : "no";
+    if (strcmp(p, "yes") != 0) return 1;
+    p = one == 2 ? "two" : one == 1 ? "one" : "other";
+    if (strcmp(p, "one") != 0) return 2;
+    string s = "x";
+    char *q = s == "x" ? "eq" : "ne";      // `"x"` stays a string: content compare
+    if (strcmp(q, "eq") != 0) return 3;
+    string t = one == 1 ? "str" : "ing";   // a `string` target is unchanged
+    if (t != "str" || t.size != 3) return 4;
+    return 42;
+}

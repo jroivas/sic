@@ -5631,14 +5631,24 @@ impl<'m> FuncCtx<'m> {
             }
             return self.lower_expr(taken);
         }
-        let cond_val = self.lower_expr(cond)?;
-        let cond_bool = self.to_bool(cond_val)?;
+        // The expected type is for the arms, not the condition (a literal in
+        // `s == "x"` must stay a `string`).
+        let expected = self.expected_ty.take();
+        let cond_val = self.lower_expr(cond);
+        self.expected_ty = expected;
+        let cond_bool = self.to_bool(cond_val?)?;
 
         // Result type of `a ? b : c`: prefer a pointer/float/wider branch so the
         // value (and its type — needed for a following `->`, `*`, arithmetic)
         // survives. Both branches are coerced to it.
         let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
         let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+        // sic: where a `char*` is expected, a string-literal arm lowers to the raw
+        // pointer (see `ExprKind::StringLit`), so it is a `char*` arm, not a
+        // `string` aggregate.
+        let lit_ptr = self.is_sic() && self.expected_is_char_ptr();
+        let tty = if lit_ptr && is_string_lit_arm(then) { Type::char_ptr() } else { tty };
+        let ety = if lit_ptr && is_string_lit_arm(else_) { Type::char_ptr() } else { ety };
 
         // Aggregate result (`cond ? struct_a : struct_b`): each arm yields a
         // pointer to a struct/union/array; copy the selected one into a result
@@ -6718,6 +6728,15 @@ pub(crate) fn atomic_lock_free_type(ty: &Type, ptr_size: u32) -> bool {
         Type::Int { bits, .. } => matches!(bits, 8 | 16 | 32 | 64),
         Type::Bool => true,
         Type::Pointer(_) => ptr_size == 4 || ptr_size == 8,
+        _ => false,
+    }
+}
+
+/// A ternary arm that is a string literal (or a ternary of them).
+fn is_string_lit_arm(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::StringLit(_) => true,
+        ExprKind::Ternary { then, else_, .. } => is_string_lit_arm(then) && is_string_lit_arm(else_),
         _ => false,
     }
 }
