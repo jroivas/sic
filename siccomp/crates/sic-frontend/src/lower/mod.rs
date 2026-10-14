@@ -3596,6 +3596,12 @@ impl Lowerer {
                 return Some(RelocTarget::Func(fref));
             }
         }
+        // `&(struct S){ … }` at file scope: the compound literal has static
+        // storage — materialize it as a private global and take its address.
+        if let ExprKind::CompoundLiteral { ty, init } = &e.kind {
+            let gref = self.emit_compound_literal_global(ty, init)?;
+            return Some(RelocTarget::Global(gref, 0));
+        }
         let (gref, off, _) = self.base_addr(e)?;
         Some(RelocTarget::Global(gref, off))
     }
