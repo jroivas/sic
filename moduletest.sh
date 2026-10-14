@@ -777,7 +777,7 @@ fi
 cat > bufuser.sic <<'EOF'
 import std;
 int main() {
-    auto buf = std::Buffer::Create(256);
+    auto buf = std::buffer::Create(256);
     if (!buf) return 1;
     del buf;                 // runs ~Buffer() from libstd → frees buf.data
     return 0;
@@ -862,7 +862,7 @@ import extra;                 // std NOT imported directly
 int main() {
     string g = extra::Extra::greet("world");
     printf("%s|%d\n", g.ptr, extra::Extra::answer());
-    auto buf = std::Buffer::Create(64);   // std reachable via chain load
+    auto buf = std::buffer::Create(64);   // std reachable via chain load
     del buf;
     return 0;
 }

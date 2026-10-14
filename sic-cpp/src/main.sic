@@ -105,13 +105,13 @@ string read_file(string path) {
                 return "";
             if (size == 0)
                 return "";
-            auto buf = std::Buffer::Create(size);
+            auto buf = std::buffer::Create(size);
             if (!buf) { del f; return ""; }
             auto rs = std::File::Read(f, size, buf);
             string result = "";
             match (rs) {
                 std::File::Status::Read(cnt):
-                    result = std::Buffer::Value(buf).dup;
+                    result = std::buffer::Value(buf).dup;
                 _:
                     std::Println("Could not read file"),
                     result = "";

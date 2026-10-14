@@ -111,7 +111,7 @@ namespace File
         return File::Status::Success;
     }
 
-    File::Status ReadFrom(File *f, u64 offset, u64 size, Buffer::Buffer *buf)
+    File::Status ReadFrom(File *f, u64 offset, u64 size, buffer::Buffer *buf)
     {
         ssize_t res;
         i64 sres;
@@ -156,12 +156,12 @@ namespace File
         return File::Status::Read(res);
     }
 
-    File::Status Read(File *f, u64 size, Buffer::Buffer *buf)
+    File::Status Read(File *f, u64 size, buffer::Buffer *buf)
     {
         return ReadFrom(f, f->offset, size, buf);
     }
 
-    File::Status WriteTo(File *f, u64 offset, Buffer::Buffer *buf)
+    File::Status WriteTo(File *f, u64 offset, buffer::Buffer *buf)
     {
         ssize_t res;
         i64 sres;
@@ -203,7 +203,7 @@ namespace File
         return File::Status::Wrote(res);
     }
 
-    File::Status Write(File *f, Buffer::Buffer *buf)
+    File::Status Write(File *f, buffer::Buffer *buf)
     {
         return WriteTo(f, f->offset, buf);
     }

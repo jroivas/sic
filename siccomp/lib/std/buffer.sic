@@ -1,6 +1,6 @@
 module std;
 
-namespace Buffer
+namespace buffer
 {
     struct Buffer {
         u64 capacity;
