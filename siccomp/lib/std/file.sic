@@ -6,7 +6,7 @@ module std;
 #include <stdio.h>
 #include <sys/stat.h>
 
-namespace File
+namespace file
 {
     struct File {
         int fd;
@@ -42,19 +42,19 @@ namespace File
         InvalidOffset,
     };
 
-    File g_stdin = {
+    static File g_stdin = {
         .fd = 0,
         .name = "stdin",
         .stream = true,
     };
 
-    File g_stdout = {
+    static File g_stdout = {
         .fd = 1,
         .name = "stdout",
         .stream = true,
     };
 
-    File g_stderr = {
+    static File g_stderr = {
         .fd = 2,
         .name = "stderr",
         .stream = true,
@@ -75,9 +75,9 @@ namespace File
         return &g_stderr;
     }
 
-    File::Status Open(string name, OpenMode mode)
+    file::Status Open(string name, OpenMode mode)
     {
-        File *tmp = new File() else return File::Status::OutOfMemory;
+        File *tmp = new File() else return file::Status::OutOfMemory;
         int flags = 0;
 
         match (mode)
@@ -91,33 +91,33 @@ namespace File
         if (tmp->fd < 0)
         {
             del tmp;
-            return File::Status::NotFound;
+            return file::Status::NotFound;
         }
         tmp->name = name;
         tmp->stream = false;
 
-        return File::Status::Opened(tmp);
+        return file::Status::Opened(tmp);
     }
 
-    File::Status Close(File *f)
+    file::Status Close(File *f)
     {
         if (!f)
-            return File::Status::InvalidObject;
+            return file::Status::InvalidObject;
 
         close(f->fd);
         f->fd = -1;
         del f;
 
-        return File::Status::Success;
+        return file::Status::Success;
     }
 
-    File::Status ReadFrom(File *f, u64 offset, u64 size, buffer::Buffer *buf)
+    file::Status ReadFrom(File *f, u64 offset, u64 size, buffer::Buffer *buf)
     {
         ssize_t res;
         i64 sres;
 
         if (!f)
-            return File::Status::InvalidObject;
+            return file::Status::InvalidObject;
 
         if (!f->stream && offset != f->offset)
         {
@@ -127,12 +127,12 @@ namespace File
                 res = errno;
                 /* FIXME Better error handling */
                 if (res == EIO)
-                    return File::Status::IO;
+                    return file::Status::IO;
                 if (res == EBADF)
-                    return File::Status::InvalidFileHandle;
+                    return file::Status::InvalidFileHandle;
                 if (res == EINVAL)
-                    return File::Status::InvalidOffset;
-                return File::Status::ReadError;
+                    return file::Status::InvalidOffset;
+                return file::Status::ReadError;
             }
             f->offset = offset;
         }
@@ -145,29 +145,29 @@ namespace File
             res = errno;
             /* FIXME Better error handling */
             if (res == EIO)
-                return File::Status::IO;
+                return file::Status::IO;
             if (res == EBADF)
-                return File::Status::InvalidFileHandle;
-            return File::Status::ReadError;
+                return file::Status::InvalidFileHandle;
+            return file::Status::ReadError;
         }
         f->offset += res;
         buf->size = res;
 
-        return File::Status::Read(res);
+        return file::Status::Read(res);
     }
 
-    File::Status Read(File *f, u64 size, buffer::Buffer *buf)
+    file::Status Read(File *f, u64 size, buffer::Buffer *buf)
     {
         return ReadFrom(f, f->offset, size, buf);
     }
 
-    File::Status WriteTo(File *f, u64 offset, buffer::Buffer *buf)
+    file::Status WriteTo(File *f, u64 offset, buffer::Buffer *buf)
     {
         ssize_t res;
         i64 sres;
 
         if (!f)
-            return File::Status::InvalidObject;
+            return file::Status::InvalidObject;
 
         if (!f->stream && offset != f->offset)
         {
@@ -177,12 +177,12 @@ namespace File
                 res = errno;
                 /* FIXME Better error handling */
                 if (res == EIO)
-                    return File::Status::IO;
+                    return file::Status::IO;
                 if (res == EBADF)
-                    return File::Status::InvalidFileHandle;
+                    return file::Status::InvalidFileHandle;
                 if (res == EINVAL)
-                    return File::Status::InvalidOffset;
-                return File::Status::WriteError;
+                    return file::Status::InvalidOffset;
+                return file::Status::WriteError;
             }
             f->offset = offset;
         }
@@ -193,38 +193,38 @@ namespace File
             res = errno;
             /* FIXME Better error handling */
             if (res == EIO)
-                return File::Status::IO;
+                return file::Status::IO;
             if (res == EBADF)
-                return File::Status::InvalidFileHandle;
-            return File::Status::WriteError;
+                return file::Status::InvalidFileHandle;
+            return file::Status::WriteError;
         }
         f->offset += res;
 
-        return File::Status::Wrote(res);
+        return file::Status::Wrote(res);
     }
 
-    File::Status Write(File *f, buffer::Buffer *buf)
+    file::Status Write(File *f, buffer::Buffer *buf)
     {
         return WriteTo(f, f->offset, buf);
     }
 
-    File::Status Size(File *f)
+    file::Status Size(File *f)
     {
         struct stat sb;
         int res;
 
         if (!f)
-            return File::Status::InvalidObject;
+            return file::Status::InvalidObject;
 
         res = fstat(f->fd, &sb);
         if (res == EBADF)
-            return File::Status::InvalidFileHandle;
+            return file::Status::InvalidFileHandle;
         else if (res == EIO)
-            return File::Status::IO;
+            return file::Status::IO;
         else if (res != 0)
-            return File::Status::ReadError;
+            return file::Status::ReadError;
 
-        return File::Status::Size(sb.st_size);
+        return file::Status::Size(sb.st_size);
     }
 
     bool Eof(File *f)
