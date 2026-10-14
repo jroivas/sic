@@ -2154,6 +2154,18 @@ impl<'m> FuncCtx<'m> {
                         Self::check_atomic_type(&ity, &d.span)?;
                         self.atomic_locals.insert(d.name.clone());
                     }
+                    // A block-scope function declaration `int f(char *);` declares
+                    // the file-scope function, not a local: no stack slot (a call
+                    // through the uninitialized slot crashed). Declare it as an
+                    // extern unless the unit already knows the function.
+                    if matches!(d.ty.ty, AstType::Function { .. }) {
+                        if self.lowerer.module.func_ref_by_name(&d.name).is_none() {
+                            if let Type::Function(sig) = self.lower_type(&d.ty)? {
+                                self.lowerer.module.add_extern(ExternFunc { name: d.name.clone(), sig: *sig });
+                            }
+                        }
+                        continue;
+                    }
                     // A block-scope `extern T x;` refers to the file-scope/other-TU
                     // global, NOT a new local: register it as a global (import if
                     // needed) and bind the name to that global, rather than a stack
