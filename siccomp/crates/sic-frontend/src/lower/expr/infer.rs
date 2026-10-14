@@ -242,6 +242,8 @@ impl<'m> FuncCtx<'m> {
                 let base_ty = self.infer_expr_type(base)?;
                 let struct_ty = match base_ty {
                     Type::Pointer(t) => *t,
+                    // `arr->f`: the array decays to a pointer to its first element.
+                    Type::Array { elem, .. } => *elem,
                     other => other,
                 };
                 if let Some((_, fty, _)) = resolve_field_access(&struct_ty, name, self.ptr_size(), &self.lowerer.struct_types) {
