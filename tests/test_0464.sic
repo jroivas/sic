@@ -1,0 +1,16 @@
+/* A global struct with a `string` member initialized from a literal was
+ * zero-filled whole (the string field failed constant serialization), so
+ * std::file's Stdout() had fd 0. Returns 42. */
+struct F { int fd; string name; bool stream; };
+F b = { .fd = 2, .name = "bee", .stream = true };
+static F s = { .fd = 30, .name = "s" };
+F arr[2] = { { .fd = 1, .name = "x" }, { .fd = 2, .name = "yy" } };
+namespace ns { static F d = { .fd = 4, .name = "dd" }; F *pd() { return &d; } }
+int main() {
+    if (b.fd != 2 || b.name != "bee" || !b.stream) return 1;
+    if (s.fd != 30 || s.name.length != 1) return 2;
+    if (arr[1].name != "yy" || arr[0].fd != 1) return 3;
+    string t = b.name + "!";
+    if (t != "bee!") return 4;
+    return ns::pd()->fd + s.fd + (int)ns::pd()->name.length + 6;   // 4 + 30 + 2 + 6
+}

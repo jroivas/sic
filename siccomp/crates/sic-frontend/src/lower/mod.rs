@@ -104,6 +104,9 @@ pub struct Lowerer {
     pub c_enum_defs: HashMap<String, Vec<(String, i64)>>,
     /// Reverse index for a bare enum constant: variant name → owning payload-less
     /// enum name (so `ONE.str` knows it is a `vals`).
+    /// Set by `build_global_init` when an aggregate initializer could not be
+    /// serialized and was zero-filled ([`Lowerer::check_global_init`]).
+    pub global_init_unserializable: bool,
     pub c_enum_variant: HashMap<String, String>,
     /// sic strict enum typing (sic.md §"Enums"): `(function, param index)` → the
     /// param's payload-less enum name, so a call site can reject a plain `int` or a
@@ -283,6 +286,7 @@ impl Lowerer {
             enum_defs: HashMap::new(),
             variant_enum: HashMap::new(),
             c_enum_defs: HashMap::new(),
+            global_init_unserializable: false,
             c_enum_variant: HashMap::new(),
             c_enum_param: HashMap::new(),
             bitfield_param: HashMap::new(),
@@ -2638,7 +2642,9 @@ impl Lowerer {
             let gref = self.module.add_global(g);
             self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
         }
+        self.global_init_unserializable = false;
         let init = self.build_global_init(d, &mut ir_ty);
+        self.check_global_init(d)?;
         // A `const` integer global with a folded constant value is itself a usable
         // compile-time constant: record name→value so a LATER constant initializer
         // or constant context can reference it (`const u32 SIZE = 1<<24; const u32
@@ -2723,7 +2729,9 @@ impl Lowerer {
     /// as file-scope globals; the caller binds the local name to this global.
     fn add_static_local_global(&mut self, name: String, d: &Declarator, _base_ty: &QualType) -> Result<(Type, GlobalRef)> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        self.global_init_unserializable = false;
         let init = self.build_global_init(d, &mut ir_ty);
+        self.check_global_init(d)?;
         let ty_for_map = ir_ty.clone();
         let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false };
         let gref = self.module.add_global(g);
@@ -2822,6 +2830,20 @@ impl Lowerer {
     /// Serialize a variable's constant initializer to an IR `Constant`, adjusting
     /// `ir_ty` for inferred array lengths. Shared by file-scope globals and
     /// function-scope `static` locals.
+    /// sic: a global/static initializer that could not be serialized as a
+    /// constant is an error, not a silently zero-filled object. (C keeps the
+    /// lenient zero-fill.)
+    fn check_global_init(&mut self, d: &Declarator) -> Result<()> {
+        if self.sic && std::mem::take(&mut self.global_init_unserializable) {
+            return Err(CompileError::at(
+                format!("initializer of `{}` is not a compile-time constant (a global is \
+                         initialized at load time; set non-constant parts at run time)", d.name),
+                d.span.file.clone(), d.span.line, d.span.col));
+        }
+        self.global_init_unserializable = false;
+        Ok(())
+    }
+
     fn build_global_init(&mut self, d: &Declarator, ir_ty: &mut Type) -> Option<Constant> {
         // `char a[] = { "str" }` — a brace list wrapping a single string literal —
         // is equivalent to `char a[] = "str"` (C11 6.7.9p14). Rewrite to the bare
@@ -2963,7 +2985,9 @@ impl Lowerer {
                     }
                 } else {
                     // Couldn't fully serialize as a constant; zero-fill rather
-                    // than emit garbage.
+                    // than emit garbage. SIC reports it (the caller errors): a
+                    // silently zeroed global hid std::file's stdout fd.
+                    self.global_init_unserializable = true;
                     Some(Constant::Zeroinit)
                 }
             }
@@ -2983,6 +3007,31 @@ impl Lowerer {
         relocs: &mut Vec<(usize, RelocTarget)>,
     ) -> bool {
         let ty = types::resolve_aggregate(ty, &self.struct_types);
+        // sic `string` member from a literal (`{ .name = "stdout" }`): the same
+        // `{ data, size, rc=NULL }` descriptor as a file-scope `string g = "…"`.
+        // It used to fail serialization, and the WHOLE aggregate was zero-filled
+        // (std::file's Stdout() came out with fd 0).
+        if types::is_sic_string(&ty) {
+            let lit = match init {
+                Initializer::Expr(e) => Some(e),
+                Initializer::List(items) => match items.first() {
+                    Some(InitItem { init: Initializer::Expr(e), .. }) if items.len() == 1 => Some(e),
+                    _ => None,
+                },
+            };
+            let Some(ExprKind::StringLit(sv)) = lit.map(|e| &e.kind) else { return false };
+            let ps = self.ptr_size as usize;
+            if base + ps * 3 > buf.len() { return false; }
+            let mut bytes = sv.clone().into_bytes();
+            let len = bytes.len();
+            bytes.push(0);
+            let gref = self.add_cstring_global(bytes);
+            buf[base..base + ps * 3].fill(0);
+            let size_le = (len as u64).to_le_bytes();
+            buf[base + ps..base + ps * 2].copy_from_slice(&size_le[..ps]);
+            relocs.push((base, RelocTarget::Global(gref, 0)));
+            return true;
+        }
         match &ty {
             Type::Struct(_) | Type::Union(_) | Type::Array { .. } => {
                 // `char arr[] = "..."` inside a larger aggregate.

@@ -1,0 +1,6 @@
+/* A SIC global whose aggregate initializer is not a compile-time constant is an
+ * error — it was silently zero-filled (see test_0464). */
+struct F { int fd; int k; };
+int f() { return 3; }
+F b = { .fd = 1, .k = f() };
+int main() { return b.fd; }
