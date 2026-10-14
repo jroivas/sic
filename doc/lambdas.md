@@ -130,7 +130,7 @@ make()();                                // 42
 A closure stored in a struct field (`obj->f = [x]() {…}`) takes its own
 reference, so it outlives the scope that created it; release it in the struct's
 destructor (`~S() { del f; }`). The reference count is atomic, so a closure may be
-handed to another thread (see `std::Thread`).
+handed to another thread (see `std::thread`).
 
 The exceptions are borrows that alias non-refcounted storage — a plain (C) struct
 `[x]`, or an explicit `@`/`@mut` capture — which point at the original and so must

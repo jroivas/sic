@@ -44,7 +44,7 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     namespaces, building a module, chain-loaded dependencies, and the `.smod`
     manifest.
 14. [Standard library](standard-library.md) — `import std;`,
-    `Fmt`/`Print`/`Println`, `std::File`, `std::Buffer` and `std::Thread`.
+    `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
 
 ## Design goals
 

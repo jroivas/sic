@@ -6,7 +6,14 @@ in the sysroot, so no flags are needed — and it demonstrates the language's ow
 features (RTTI, `any`, `va_array`, ownership) rather than being compiler magic.
 
 Today `std` provides formatted output (`Fmt`, `Print`, `Println`), file I/O
-(`std::File`), byte buffers (`std::Buffer`) and threads (`std::Thread`).
+(`std::file`), byte buffers (`std::buffer`), threads (`std::thread`) and
+synchronization (`std::sync`), math (`std::math`), random numbers
+(`std::random`), filesystem operations (`std::fs`) and TCP sockets (`std::net`).
+
+**Naming:** namespaces are lowercase; everything they export — functions,
+types, enums, constants — is CamelCase (`std::file::Open`, `std::file::File`,
+`std::math::Pi`, `std::random::Rng`). Struct methods stay lowercase, like the
+built-in ones (`g.gen64()`, `s.trim()`, `l.add(x)`).
 
 `Option<T>` and `Result<T, E>` are not part of `std` — they are built into the
 language ([enums & matching](enums-and-matching.md)); `std`'s functions simply
@@ -58,25 +65,25 @@ std::Println("mix {} and {k}", 7, k = "named");            // mix 7 and named
 
 ## File I/O
 
-The file API lives in `std::File`. Every call returns a `std::File::Status`
-tagged enum instead of an error code, and data moves through a `std::Buffer`:
+The file API lives in `std::file`. Every call returns a `std::file::Status`
+tagged enum instead of an error code, and data moves through a `std::buffer`:
 
 ```sic
 import std;
 
 int main()
 {
-    match (std::File::Open("hello.txt", std::File::OpenMode::Read)) {
-        std::File::Status::Opened(f): {
-            std::Buffer::Buffer *buf = std::Buffer::Create(4096);
-            match (std::File::Read(f, 4096, buf)) {
-                std::File::Status::Read(n): std::Println("read {} bytes", n);
+    match (std::file::Open("hello.txt", std::file::OpenMode::Read)) {
+        std::file::Status::Opened(f): {
+            std::buffer::Buffer *buf = std::buffer::Create(4096);
+            match (std::file::Read(f, 4096, buf)) {
+                std::file::Status::Read(n): std::Println("read {} bytes", n);
                 _: std::Println("read failed");
             }
             del buf;
-            std::File::Close(f);
+            std::file::Close(f);
         }
-        std::File::Status::NotFound: { std::Println("no such file"); return 1; }
+        std::file::Status::NotFound: { std::Println("no such file"); return 1; }
         _: return 1;
     }
     return 0;
@@ -100,7 +107,7 @@ exit) across the module boundary.
 
 ## Threads
 
-`std::Thread` runs a closure on a new POSIX thread:
+`std::thread` runs a closure on a new POSIX thread:
 
 ```sic
 import std;
@@ -109,21 +116,21 @@ atomic int total = 0;
 
 int main()
 {
-    std::Thread::Thread *workers[4];
+    std::thread::Thread *workers[4];
     for (int i = 0; i < 4; i++) {
         int n = i + 1;
-        match (std::Thread::Spawn([n]() { for (int k = 0; k < 1000; k++) total += n; })) {
-            std::Thread::Status::Created(t): workers[i] = t;
+        match (std::thread::Spawn([n]() { for (int k = 0; k < 1000; k++) total += n; })) {
+            std::thread::Status::Created(t): workers[i] = t;
             _: return 1;
         }
     }
-    for (int i = 0; i < 4; i++) std::Thread::Join(workers[i]);
+    for (int i = 0; i < 4; i++) std::thread::Join(workers[i]);
 
     list args;
     args.add("sum");
     args.add(32);
-    match (std::Thread::Create([](list a) { string s = a[0]; int v = a[1]; std::Println("{} = {}", s, v); }, args)) {
-        std::Thread::Status::Created(t): std::Thread::Join(t);
+    match (std::thread::Create([](list a) { string s = a[0]; int v = a[1]; std::Println("{} = {}", s, v); }, args)) {
+        std::thread::Status::Created(t): std::thread::Join(t);
         _: return 1;
     }
     std::Println("total = {}", total);         // 10000
@@ -145,6 +152,87 @@ reference count is atomic, so handing one to a thread is safe; strings and
 containers still use plain counts — hand them over to the thread rather than
 using them from both threads at once. Share counters through
 [atomics](atomics.md).
+
+## Synchronization
+
+`std::sync` wraps POSIX mutexes and condition variables (used through pointers):
+
+```sic
+auto m = std::sync::CreateMutex() else return 1;
+auto cv = std::sync::CreateCond() else return 1;
+std::sync::Lock(m);
+while (!ready) std::sync::Wait(cv, m);              // or TimedWait(cv, m, ms)
+std::sync::Unlock(m);
+std::sync::NotifyOne(cv);                           // NotifyAll(cv)
+std::sync::DestroyCond(cv);
+std::sync::DestroyMutex(m);
+```
+
+`TryLock(m)` returns whether it got the lock. `TimedWait` waits on the
+monotonic clock and returns `false` on timeout.
+
+## Math
+
+`std::math` wraps libm: `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`,
+`Atan2(y, x)`, `Sinh`, `Cosh`, `Tanh`, `Sqrt`, `Pow`, `Exp`, `Log`, `Log10`,
+`Log2`, `Floor`, `Ceil`, `Round`, `Fabs`, `Fmod`, `Hypot`, and the constants
+`Pi` and `E` (all `f64`).
+
+```sic
+f64 r = std::math::Hypot(3.0, 4.0);                 // 5
+f64 one = std::math::Sin(std::math::Pi / 2.0);
+```
+
+## Random numbers
+
+`std::random` has four generators. Each factory returns an `Option` of its
+generator struct; seed `0` (the default) seeds it from the system's entropy,
+any other seed reproduces the same sequence.
+
+| Factory | Generator struct | Notes |
+|---|---|---|
+| `Rng()` | `SplitMix64Type` | system-seeded default |
+| `SplitMix64(seed)` | `SplitMix64Type` | fast, 64-bit state |
+| `PCG32(seed)` | `PCG32Type` | 32-bit output |
+| `Xoshiro256PP(seed)` | `Xoshiro256PPType` | 256-bit state, long period |
+| `ChaCha12(seed)` | `ChaCha12Type` | system-seeded: fit for secrets |
+
+```sic
+auto g = std::random::Rng() else return 1;
+u64 x = g.gen64();                                  // also g.gen32()
+u8 key[32];
+auto n = std::random::GetRandom(key, 32) else return 1;   // system entropy
+```
+
+A generator is a plain value: separate instances are independent (use one per
+thread), and copying one duplicates its sequence. An explicit `u64` seed gives
+at most 64 bits of entropy.
+
+## Filesystem
+
+`std::fs`: `MkDir(path, mode = 0755)`, `RmDir`, `Unlink`, `Rename(from, to)`,
+`ChDir`, `Exists`, `IsFile`, `IsDir` (all `bool`), `GetCwd()` (`Option<string>`)
+and `ReadDir(path)` (`Option<list<string>>`, `None` if it cannot be opened):
+
+```sic
+auto names = std::fs::ReadDir(".") else return 1;
+for (string name : names.values) std::Println("{}", name);
+```
+
+## Networking
+
+`std::net` provides IPv4 TCP sockets. A `Socket` owns its descriptor and
+closes it when it goes out of scope (or on `Close(&s)`):
+
+```sic
+auto l = std::net::TcpListen("127.0.0.1", 8080) else return 1;
+auto c = std::net::TcpConnect("127.0.0.1", 8080) else return 1;
+auto a = std::net::Accept(&l) else return 1;
+u8 msg[6] = "hello";
+std::net::Write(&c, msg, 6);                        // writes all bytes or -1
+u8 buf[64];
+isize n = std::net::Read(&a, buf, 64);              // 0 at EOF
+```
 
 ## What it can format
 

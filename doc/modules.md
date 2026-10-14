@@ -125,8 +125,8 @@ instead of `geo::width`); a parameter or local of the same name shadows them.
 
 An `enum` belongs to its namespace: name it `geo::Shape` from outside (or
 `mod::geo::Shape` from another module) and plain `Shape` inside, so two namespaces
-may each define their own `Status` (as `std::File::Status` and
-`std::Thread::Status` do). A `struct` declared inside is still visible at file
+may each define their own `Status` (as `std::file::Status` and
+`std::thread::Status` do). A `struct` declared inside is still visible at file
 scope under its bare name.
 
 `::` is the scope operator throughout sic — **namespaces, modules, and enum
@@ -157,14 +157,14 @@ private struct Impl { … };     // not exported
 A module's exported struct may carry a **constructor and destructor**, and they
 run across the module boundary: a consumer's `new mod::S()` / `del`, and ordinary
 scope exit for a `mod::S` value, call the module's `S()` / `~S()`. So a type like
-`std::Buffer` cleans itself up in your code exactly as it does inside `std`.
+`std::buffer` cleans itself up in your code exactly as it does inside `std`.
 
 A function may return a built-in generic enum over a module type
 (`Option<mod::T>`, `Result<mod::T, E>`); the consumer can `match` it, guard-unwrap
 it (`auto v = mod::f() else return 1;`) or name the type (`Option<mod::T> o`).
 
 Its **methods** cross the boundary too: `obj.method(args)` on a value of an
-exported struct calls the module's method (`auto g = std::random::rng() else
+exported struct calls the module's method (`auto g = std::random::Rng() else
 return 1; g.gen64();` — `rng()` returns an `Option`, so unwrap it first).
 
 ## A module that imports modules
