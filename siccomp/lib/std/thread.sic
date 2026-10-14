@@ -7,9 +7,9 @@ module std;
 
 // Threads: run a closure on a new POSIX thread.
 //
-//     auto st = std::Thread::Spawn([n]() { work(n); });
+//     auto st = std::thread::Spawn([n]() { work(n); });
 //     match (st) {
-//         std::Thread::Status::Created(t): std::Thread::Join(t);
+//         std::thread::Status::Created(t): std::thread::Join(t);
 //         _: return 1;
 //     }
 //
@@ -21,7 +21,7 @@ module std;
 // thread is safe. Strings and containers (list/dict/set) still use plain counts:
 // hand those over to the thread rather than using them from both threads at
 // once. Scalars captured by value are always safe.
-namespace Thread
+namespace thread
 {
     // Lifecycle of a Thread (its `atomic int state`), changed only by `.cas` so
     // that exactly one side frees it: the thread ending (Running → Finished) or

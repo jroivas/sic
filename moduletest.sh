@@ -239,12 +239,12 @@ import std;
 atomic int counter = 0;
 atomic int detached_done = 0;
 
-int join(std::Thread::Status st)
+int join(std::thread::Status st)
 {
     match (st) {
-        std::Thread::Status::Created(t): {
-            match (std::Thread::Join(t)) {
-                std::Thread::Status::Joined: return 1;
+        std::thread::Status::Created(t): {
+            match (std::thread::Join(t)) {
+                std::thread::Status::Joined: return 1;
                 _: return 0;
             }
         }
@@ -254,15 +254,15 @@ int join(std::Thread::Status st)
 
 int main()
 {
-    u64 main_id = std::Thread::Id();
+    u64 main_id = std::thread::Id();
     int joined = 0;
 
     // Eight closures, each capturing its own increment.
     for (int i = 1; i <= 8; i++) {
         int add = i;
-        joined += join(std::Thread::Spawn([add]() {
+        joined += join(std::thread::Spawn([add]() {
             for (int k = 0; k < 1000; k++) counter += add;
-            std::Thread::Yield();
+            std::thread::Yield();
         }));
     }
     if (joined != 8 || counter != 36000) return 1;
@@ -274,30 +274,30 @@ int main()
     int sum = 0;
     int *psum = &sum;
     u64 *other = new u64();
-    joined = join(std::Thread::Create([psum, other](list a) {
+    joined = join(std::thread::Create([psum, other](list a) {
         int x = a[0];
         int y = a[1];
         *psum = x + y;
-        *other = std::Thread::Id();
+        *other = std::thread::Id();
     }, args));
     if (joined != 1 || sum != 42 || *other == main_id) return 2;
     del other;
 
     // A detached thread runs to completion on its own and frees itself.
-    match (std::Thread::Spawn([]() { std::Thread::Sleep(10); detached_done++; })) {
-        std::Thread::Status::Created(t): {
-            match (std::Thread::Detach(t)) {
-                std::Thread::Status::Detached: {}
+    match (std::thread::Spawn([]() { std::thread::Sleep(10); detached_done++; })) {
+        std::thread::Status::Created(t): {
+            match (std::thread::Detach(t)) {
+                std::thread::Status::Detached: {}
                 _: return 3;
             }
         }
         _: return 4;
     }
-    for (int w = 0; w < 500 && detached_done == 0; w++) std::Thread::Sleep(2);
+    for (int w = 0; w < 500 && detached_done == 0; w++) std::thread::Sleep(2);
     if (detached_done != 1) return 5;
 
-    match (std::Thread::Join(NULL)) {
-        std::Thread::Status::InvalidObject: {}
+    match (std::thread::Join(NULL)) {
+        std::thread::Status::InvalidObject: {}
         _: return 6;
     }
     return 42;
