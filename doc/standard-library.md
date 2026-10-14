@@ -154,9 +154,13 @@ Reading a file line by line (lines may be any length):
 
 ```sic
 std::buffer::Buffer *line = std::buffer::Create(256);
-while (std::file::ReadLine(f, line) != std::file::Status::Read(0))
+while (std::file::ReadLine(f, line) == std::file::Status::Read && line->size > 0)
     std::Print("{}", std::buffer::Value(line));
 ```
+
+(`==` on a `Status` compares only the variant, so `== Status::Read` is any
+successful read; the empty buffer marks the end. `match` to get the byte
+count.)
 
 `ReadLine` reads ahead in blocks; `Read`, `ReadAll`, `Seek` and the writes
 continue from the logical position (just after the last line returned), so
