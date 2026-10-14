@@ -220,6 +220,82 @@ impl<'m> FuncCtx<'m> {
         Ok(true)
     }
 
+    /// What a tagged-enum payload of type `pty` owns (sic.md §"Memory safety"):
+    /// a refcounted `string`, a `list`/`dict`/`set` handle, or a managed struct
+    /// (one with a `~S()`, named by its destructor). `None`: plain data.
+    pub(crate) fn payload_ownership(&self, pty: &Type) -> Option<PayloadOwn> {
+        if super::super::types::is_sic_string(pty) { return Some(PayloadOwn::Str); }
+        if super::super::types::is_list(pty) || super::super::types::is_dict(pty)
+            || super::super::types::is_set(pty) {
+            return Some(PayloadOwn::Container);
+        }
+        if let Type::Struct(st) = pty {
+            if let Some(d) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)) {
+                return Some(PayloadOwn::Managed(d.clone()));
+            }
+        }
+        None
+    }
+
+    /// The variants of tagged enum `ety` whose payload owns something, with the
+    /// payload type and its ownership kind. Empty: the enum needs no cleanup.
+    pub(crate) fn managed_variants(&self, ety: &Type) -> Vec<(i64, Type, PayloadOwn)> {
+        let Type::Struct(st) = ety else { return Vec::new() };
+        let Some(info) = st.name.as_deref().and_then(|n| self.lowerer.enum_defs.get(n)) else { return Vec::new() };
+        info.variants.iter().filter_map(|v| {
+            let pty = v.payload.clone()?;
+            let own = self.payload_ownership(&pty)?;
+            Some((v.tag, pty, own))
+        }).collect()
+    }
+
+    /// Whether values of `ety` (a tagged enum) own payload resources.
+    pub(crate) fn enum_is_managed(&self, ety: &Type) -> bool {
+        self.is_sic() && !self.managed_variants(ety).is_empty()
+    }
+
+    /// Retain (`retain`) or release the payload of the tagged-enum value at `ptr`,
+    /// for whichever variant it currently holds. `structs_only` limits it to a
+    /// managed-struct payload (a constructor already retained a string/container).
+    pub(crate) fn enum_payload_op(&mut self, ptr: Val, ety: &Type, retain: bool, structs_only: bool) -> Result<()> {
+        let vars: Vec<(i64, Type, PayloadOwn)> = self.managed_variants(ety).into_iter()
+            .filter(|(_, _, o)| !structs_only || matches!(o, PayloadOwn::Managed(_)))
+            .collect();
+        if vars.is_empty() { return Ok(()); }
+        let sp = crate::lexer::Span::default();
+        let tag = self.load_enum_tag(ptr.clone(), ety, &sp)?;
+        let data = self.enum_data_ptr(ptr, ety, &sp)?;
+        let join = self.new_block_after_current();
+        for (vtag, pty, own) in vars {
+            let hit = self.new_block_after_current();
+            let next = self.new_block_after_current();
+            let eq = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: tag.clone(), rhs: Constant::int(vtag), ty: Type::i32() });
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(eq), then_bb: hit, else_bb: next });
+            self.switch_to_block(hit);
+            match own {
+                PayloadOwn::Str => {
+                    if retain { self.retain_string_at(&data)?; } else { self.release_string_at(&data)?; }
+                }
+                PayloadOwn::Container => {
+                    let h = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: h, ptr: data.clone(), ty: pty.clone() });
+                    if retain { self.container_retain(Val::Local(h), &pty)?; }
+                    else { self.container_release(Val::Local(h), &pty)?; }
+                }
+                PayloadOwn::Managed(dtor) => {
+                    if retain { self.retain_struct_owned_fields(data.clone(), &pty)?; }
+                    else { self.emit_cleanup_call(data.clone(), &dtor); }
+                }
+            }
+            self.set_terminator(Terminator::Jump(join));
+            self.switch_to_block(next);
+        }
+        self.set_terminator(Terminator::Jump(join));
+        self.switch_to_block(join);
+        Ok(())
+    }
+
     /// True if `t` is any tagged-enum representation struct.
     pub(crate) fn is_tagged_enum_struct(&self, t: &Type) -> bool {
         matches!(t, Type::Struct(st) if st.name.as_deref()
@@ -314,4 +390,15 @@ impl<'m> FuncCtx<'m> {
             Ok(Val::Local(d))
         }
     }
+}
+
+/// What a tagged-enum payload owns ([`FuncCtx::payload_ownership`]).
+#[derive(Debug, Clone)]
+pub(crate) enum PayloadOwn {
+    /// A refcounted `string`.
+    Str,
+    /// A `list`/`dict`/`set` handle.
+    Container,
+    /// A struct with a destructor (its name).
+    Managed(String),
 }

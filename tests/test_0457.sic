@@ -22,9 +22,9 @@ int main() {
     { auto c = other(5) else return 5; }
     { R d = plain(7); R e = copyout(&d); }
     { auto f = fwd(8) else return 6; }
-    { R g = plain(9); Option<R> o = wrap(&g); }  // o is a named enum: borrow, g dropped
-    int want[] = { 1, 2, 3, -4, 5, 6, 107, 7, 8, 9 };
-    if (n != 10) return 10 + n;
-    for (int i = 0; i < 10; i++) if (log[i] != want[i]) return 30 + i;
+    { R g = plain(9); Option<R> o = wrap(&g); }  // o owns its copy: both dropped
+    int want[] = { 1, 2, 3, -4, 5, 6, 107, 7, 8, 9, 9 };
+    if (n != 11) return 10 + n;
+    for (int i = 0; i < 11; i++) if (log[i] != want[i]) return 30 + i;
     return 42;
 }

@@ -47,6 +47,9 @@ pub enum Cleanup {
     /// at scope exit (`is_dict` picks the dict vs list runtime). Frees the handle
     /// struct only if it was the last weak ref and the container is already dead.
     WeakRelease { slot: Val, is_dict: bool },
+    /// sic tagged-enum local whose payload owns resources (`Option<string>`,
+    /// `Result<Socket, E>`, …): release the held variant's payload at scope exit.
+    EnumRelease { addr: Val, ty: Type },
 }
 
 /// sic strict enum typing (sic.md §"Enums"): the nominal identity of an
@@ -243,6 +246,14 @@ pub struct FuncCtx<'m> {
     /// being lowered moves out (`return r;` / `return Some(r);`), whose `~S()`
     /// must not run on that path — the caller now owns the value.
     pub moved_on_return: Option<(Val, String)>,
+    /// The owned tagged-enum local a `return` moves out (`return o;`): its
+    /// `EnumRelease` is skipped on that path.
+    pub moved_enum_on_return: Option<Val>,
+    /// Retain the returned enum's payload (`Some(structs_only)`): the value is a
+    /// copy of something this frame does not own (a parameter, a field).
+    pub ret_enum_retain: Option<bool>,
+    /// Tagged-enum locals that own their payload (registered `EnumRelease`).
+    pub owned_enum_locals: std::collections::HashSet<ValId>,
     /// Scope depth (`cleanups.len()`) recorded per `break_stack` entry (loops and
     /// switches), so `break` runs the cleanups for the scopes it exits.
     pub break_scope_depth: Vec<usize>,
@@ -349,6 +360,9 @@ impl<'m> FuncCtx<'m> {
             sret: None,
             cleanups: vec![Vec::new()],
             moved_on_return: None,
+            moved_enum_on_return: None,
+            ret_enum_retain: None,
+            owned_enum_locals: std::collections::HashSet::new(),
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
@@ -509,6 +523,9 @@ impl<'m> FuncCtx<'m> {
                 } else {
                     self.lower_aggregate_ptr(e)?
                 };
+                if let Some(structs_only) = self.ret_enum_retain {
+                    self.enum_payload_op(src.clone(), &agg_ty, true, structs_only)?;
+                }
                 if self.is_sic() && super::types::is_sic_string(&agg_ty) {
                     // Move the string out: materialize an owned copy iff it is
                     // a copy-on-escape local-buffer view, else move+retain.
@@ -538,7 +555,11 @@ impl<'m> FuncCtx<'m> {
             let ret = if let Some(e) = val {
                 if self.is_sic() && self.is_tagged_enum_struct(&self.ret_ty.clone()) {
                     let rty = self.ret_ty.clone();
-                    Some(self.enum_value_ptr(e, &rty, &e.span)?)
+                    let p = self.enum_value_ptr(e, &rty, &e.span)?;
+                    if let Some(structs_only) = self.ret_enum_retain {
+                        self.enum_payload_op(p.clone(), &rty, true, structs_only)?;
+                    }
+                    Some(p)
                 } else {
                     Some(self.lower_aggregate_ptr(e)?)
                 }
@@ -611,7 +632,7 @@ impl<'m> FuncCtx<'m> {
     /// The variant name if `func` (a call's callee) is a tagged-enum constructor —
     /// `E::V` / `mod::E::V` or a bare `V` — rather than a function (`N::f`,
     /// `mod::ns::f`, or a real function/variable shadowing a variant name).
-    fn variant_ctor_name<'e>(&self, func: &'e Expr) -> Option<&'e String> {
+    pub(crate) fn variant_ctor_name<'e>(&self, func: &'e Expr) -> Option<&'e String> {
         match &func.kind {
             ExprKind::EnumVariant { enum_name, variant } => {
                 if self.lowerer.namespace_members.contains_key(&(enum_name.clone(), variant.clone())) {
@@ -663,6 +684,100 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// A managed-enum local declared without an initializer starts as its first
+    /// payload-less variant (`None`), not as a zeroed payload variant whose
+    /// "resources" (a zero fd, a NULL handle) its scope-exit release would touch.
+    fn init_enum_empty(&mut self, ptr: Val, ty: &Type) -> Result<()> {
+        let Type::Struct(st) = ty else { return Ok(()) };
+        let empty = st.name.as_deref().and_then(|n| self.lowerer.enum_defs.get(n))
+            .and_then(|info| info.variants.iter().find(|v| v.payload.is_none()).map(|v| v.tag));
+        if let Some(tag) = empty {
+            self.build_enum_from_tag(&ptr, ty, Constant::int(tag), &crate::lexer::Span::default())?;
+        }
+        Ok(())
+    }
+
+    /// An owning enum slot is taking the value of `e` (its bytes already at, or
+    /// about to be copied from, `ptr`): balance the payload's ownership.
+    /// * a function call's result is fresh — taken as is;
+    /// * a constructor already retained a `string`/container payload; a managed
+    ///   struct payload from a local declared in THIS scope is MOVED (the local's
+    ///   `~S()` is dropped), otherwise copied (its owned fields retained);
+    /// * a bare variant (`None`) owns nothing;
+    /// * anything else (a variable, field, parameter) is a copy — retained.
+    pub(crate) fn acquire_enum_value(&mut self, ptr: Val, ty: &Type, e: &Expr) -> Result<()> {
+        // A generic constructor (`Option::Some(r)`) resolves against the target.
+        let prev = self.expected_ty.replace(ty.clone());
+        let et = self.infer_expr_type(e);
+        self.expected_ty = prev;
+        if !matches!(et, Ok(t) if &t == ty) { return Ok(()); }    // a bare variant (`None`)
+        match &e.kind {
+            ExprKind::Call { func, args } => {
+                let Some(variant) = self.variant_ctor_name(func).cloned() else { return Ok(()) };
+                let Type::Struct(st) = ty else { return Ok(()) };
+                let pty = st.name.as_deref().and_then(|n| self.lowerer.enum_defs.get(n))
+                    .and_then(|i| i.variant(&variant)).and_then(|v| v.payload.clone());
+                let Some(pty) = pty else { return Ok(()) };
+                if !matches!(self.payload_ownership(&pty), Some(super::expr::PayloadOwn::Managed(_))) {
+                    return Ok(());
+                }
+                match args.first().map(|a| &a.kind) {
+                    Some(ExprKind::Call { .. }) => Ok(()),          // a fresh struct: moved in
+                    Some(ExprKind::Ident(n)) if self.take_scope_dtor(n) => Ok(()),
+                    _ => self.enum_payload_op(ptr, ty, true, true),
+                }
+            }
+            _ => self.enum_payload_op(ptr, ty, true, false),
+        }
+    }
+
+    /// Drop local `name`'s destructor cleanup if it is registered in the CURRENT
+    /// scope (so every later exit sees the move; earlier exits already ran it).
+    fn take_scope_dtor(&mut self, name: &str) -> bool {
+        let Some((Type::Struct(st), vid)) = self.locals.last().and_then(|sc| sc.get(name)).cloned() else { return false };
+        let Some(dtor) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned() else { return false };
+        let Some(scope) = self.cleanups.last_mut() else { return false };
+        let addr = Val::Local(vid);
+        match scope.iter().position(|c| matches!(c, Cleanup::AttrFn { addr: a, fn_name } if *a == addr && *fn_name == dtor)) {
+            Some(i) => { scope.remove(i); true }
+            None => false,
+        }
+    }
+
+    /// Whether `lhs` names a tagged-enum local that owns its payload.
+    pub(crate) fn is_owned_enum_lvalue(&self, lhs: &Expr) -> bool {
+        let ExprKind::Ident(n) = &lhs.kind else { return false };
+        matches!(self.lookup(n), Some(LookupResult::Local(_, vid)) if self.owned_enum_locals.contains(&vid))
+    }
+
+    /// How `return e;` from a managed-enum function hands the payload over: an
+    /// owning local is moved (its release skipped); a call or constructor result
+    /// is already the caller's (a constructor of a non-local struct payload
+    /// retains it); any other value is a copy and is retained.
+    fn classify_enum_return(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                if let Some(LookupResult::Local(_, vid)) = self.lookup(n) {
+                    if self.owned_enum_locals.contains(&vid) {
+                        self.moved_enum_on_return = Some(Val::Local(vid));
+                        return;
+                    }
+                }
+                self.ret_enum_retain = Some(false);
+            }
+            ExprKind::Call { func, args } => {
+                if self.variant_ctor_name(func).is_some() {
+                    // `return Some(r)` with r a local moves r (return_moved_local);
+                    // a fresh struct moves in; a field/deref copy is retained.
+                    if !matches!(args.first().map(|a| &a.kind), Some(ExprKind::Ident(_) | ExprKind::Call { .. }) | None) {
+                        self.ret_enum_retain = Some(true);
+                    }
+                }
+            }
+            _ => self.ret_enum_retain = Some(false),
+        }
+    }
+
     /// sic move-on-return: the local struct with a destructor that `return e;`
     /// hands to the caller — `return r;` (by-value struct return) or
     /// `return V(r);` (a tagged-enum variant wrapping it). The caller owns the
@@ -700,6 +815,9 @@ impl<'m> FuncCtx<'m> {
             for c in calls {
                 if let (Cleanup::AttrFn { addr, fn_name }, Some((ma, mf))) = (&c, &self.moved_on_return) {
                     if addr == ma && fn_name == mf { continue; }
+                }
+                if let (Cleanup::EnumRelease { addr, .. }, Some(ma)) = (&c, &self.moved_enum_on_return) {
+                    if addr == ma { continue; }
                 }
                 self.emit_cleanup(c);
             }
@@ -754,6 +872,7 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
                 let _ = self.emit_closure_release(Val::Local(p));
             }
+            Cleanup::EnumRelease { addr, ty } => { let _ = self.enum_payload_op(addr, &ty, false, false); }
             Cleanup::WeakRelease { slot, is_dict } => {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
@@ -1745,7 +1864,14 @@ impl<'m> FuncCtx<'m> {
             // sic `del <expr>;` (sic.md §"Scopes and automatic release").
             Stmt::Delete(e, _) => { self.lower_delete(e)?; }
             Stmt::Expr(e, _) => {
-                self.lower_expr(e)?;
+                let v = self.lower_expr(e)?;
+                // `f();` discarding an owning enum result (`Option<string>`):
+                // release its payload, nobody else will.
+                if self.is_sic() && !self.is_terminated() && self.is_owned_temporary(e) {
+                    if let Ok(t) = self.infer_expr_type(e) {
+                        if self.enum_is_managed(&t) { self.enum_payload_op(v, &t, false, false)?; }
+                    }
+                }
                 // Free any bigint temporaries this statement created (sic.md
                 // §"Integer sizes") — per statement, so loop bodies don't leak.
                 if !self.is_terminated() { self.flush_bigint_temps(); }
@@ -1796,8 +1922,14 @@ impl<'m> FuncCtx<'m> {
                     Some(e) if self.is_sic() => self.return_moved_local(e),
                     _ => None,
                 };
+                let rt = self.ret_ty.clone();
+                if let Some(e) = val.as_ref().filter(|_| self.enum_is_managed(&rt)) {
+                    self.classify_enum_return(e);
+                }
                 let r = self.lower_return_value(val);
                 self.moved_on_return = None;
+                self.moved_enum_on_return = None;
+                self.ret_enum_retain = None;
                 r?;
             }
             Stmt::If { cond, then, else_, .. } => self.lower_if(cond, then, else_.as_deref())?,
@@ -2324,6 +2456,22 @@ impl<'m> FuncCtx<'m> {
                                 });
                             }
                         }
+                    }
+                    // sic tagged-enum local whose payload owns resources
+                    // (`Option<string>`, `Result<Socket, E>`): the variable owns its
+                    // payload — acquire it per the initializer, release it at scope
+                    // exit (it leaked: nothing ever released an enum's payload).
+                    if self.is_sic() && self.enum_is_managed(&ty) {
+                        match &d.init {
+                            None => self.init_enum_empty(Val::Local(vid), &ty)?,
+                            Some(Initializer::Expr(e)) => {
+                                let e = e.clone();
+                                self.acquire_enum_value(Val::Local(vid), &ty, &e)?;
+                            }
+                            Some(_) => {}
+                        }
+                        self.owned_enum_locals.insert(vid);
+                        self.register_scope_exit(Cleanup::EnumRelease { addr: Val::Local(vid), ty: ty.clone() });
                     }
                     // sic `dict` local (sic.md §"Dict"): a bare `dict d;` is a fresh
                     // empty map, so auto-initialize the handle to `__sic_dict_new()`
@@ -4726,8 +4874,11 @@ impl<'m> FuncCtx<'m> {
                     self.define_local(name.clone(), pty.clone(), slot);
                     let bind_bb = self.new_block_after_current();
                     self.set_terminator(Terminator::CondJump { cond: Val::Local(is_present), then_bb: bind_bb, else_bb });
-                    // Absent → the else must diverge.
+                    // Absent → the else must diverge. A call's result is owned
+                    // here: release the absent variant's payload (`Err(msg)`).
+                    let owned = self.is_owned_temporary(cond);
                     self.switch_to_block(else_bb);
+                    if owned { self.enum_payload_op(ptr.clone(), &cty, false, false)?; }
                     self.enter_scope();
                     self.lower_stmt(else_body)?;
                     self.exit_scope();
@@ -4749,7 +4900,7 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::Store { val: Val::Local(d), ptr: Val::Local(slot) });
                     }
                     // `auto s = f() else …`: the binding owns the call's payload.
-                    if self.is_owned_temporary(cond) { self.adopt_payload(slot, &pty); }
+                    if owned { self.adopt_payload(slot, &pty); }
                     self.set_terminator(Terminator::Jump(cont_bb));
                     self.switch_to_block(cont_bb);
                     let _ = decl_ty;
@@ -4858,6 +5009,11 @@ impl<'m> FuncCtx<'m> {
 
             self.switch_to_block(arm_bb);
             self.enter_scope();
+            // `match (f()) { V: … }` with no binding: nobody takes the call's
+            // payload, so release it here (a payload-less variant: a no-op).
+            if arm.binding.is_none() && self.is_owned_temporary(scrutinee) {
+                self.enum_payload_op(ptr.clone(), &sty, false, false)?;
+            }
             if let Some(bind) = &arm.binding {
                 let pty = v.payload.clone().ok_or_else(|| CompileError::at(
                     format!("variant '{}::{}' has no payload to bind", ename, vname), sp.file.clone(), sp.line, sp.col))?;
@@ -4886,6 +5042,9 @@ impl<'m> FuncCtx<'m> {
 
         // Fallback: `_` arm, or a runtime abort on an unmatched variant.
         if let Some(w) = wildcard {
+            if self.is_owned_temporary(scrutinee) {
+                self.enum_payload_op(ptr.clone(), &sty, false, false)?;
+            }
             self.enter_scope();
             self.lower_match_arm_body(&w.body, &result)?;
             self.exit_scope();

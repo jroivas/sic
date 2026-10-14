@@ -1,0 +1,58 @@
+/* A named Option/Result variable owns its payload (it was never released: a
+ * leak). Pinned: destructor runs for each ownership path, and no heap growth
+ * for string/list payloads through init/copy/assign/return/match/guard/discard.
+ * Returns 42. */
+#include <malloc.h>
+int log[64];
+int n = 0;
+struct R { int id; ~R() { log[n++] = id; } };
+Option<R> mk(int i) { R r; r.id = i; return Option::Some(r); }
+Option<R> keep(int i) { Option<R> o = mk(i); return o; }
+
+Option<string> ms(int i) { if (i < 0) return None; string s = "v"; return Option::Some(s + "x"); }
+Option<string> pass(Option<string> o) { return o; }
+Result<int, string> res(int i) { if (i) return Result::Ok(i); string m = "e"; return Result::Err(m + "!"); }
+Option<list<int>> ml() { list<int> l; l.add(1); return Option::Some(l); }
+
+int churn() {
+    int k = 0;
+    Option<string> a = ms(1);
+    string s = "lo"; string t = s + "cal";
+    Option<string> b = Option::Some(t);
+    Option<string> c = a;
+    c = ms(2); c = None; c = b;
+    auto e = pass(a) else return -1;
+    ms(4);
+    match (ms(5)) { Some: k++; None: k--; }
+    match (ms(6)) { _: k++; }
+    Option<list<int>> o = ml(); Option<list<int>> p = o; p = ml();
+    auto x = ml() else return -2;
+    ml();
+    return k + (int)x.length;                                   // 3
+}
+int guard_err() { auto r = res(0) else return 1; return 0; }
+
+int main() {
+    { Option<R> o = mk(1); }
+    { R r; r.id = 2; Option<R> o = Option::Some(r); }           // moved: once
+    { R r; r.id = 3; { Option<R> o = Option::Some(r); } }       // copied: twice
+    { Option<R> a = mk(4); Option<R> b = a; }                    // copy: twice
+    { Option<R> a = mk(5); a = mk(6); }
+    { Option<R> a = mk(7); a = None; }
+    { mk(8); }
+    { match (mk(9)) { Some: n += 0; None: n += 0; } }
+    { auto k = keep(10) else return 1; }
+    { Option<R> u; }                                             // starts as None
+    int want[] = { 1, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10 };
+    if (n != 12) return 10 + n;
+    for (int i = 0; i < 12; i++) if (log[i] != want[i]) return 30 + i;
+
+    for (int i = 0; i < 20; i++) { churn(); guard_err(); }
+    usize before = mallinfo2().uordblks;
+    int t = 0;
+    for (int i = 0; i < 2000; i++) { t += churn(); t += guard_err(); }
+    usize after = mallinfo2().uordblks;
+    if (t != 2000 * 4) return 2;
+    if (after - before > 4096) return 3;                        // leaked
+    return 42;
+}

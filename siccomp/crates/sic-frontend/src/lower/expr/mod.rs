@@ -6,6 +6,7 @@ use super::func::{FuncCtx, LookupResult};
 mod numeric;
 mod simd;
 mod enums;
+pub(crate) use enums::PayloadOwn;
 mod calls;
 mod lvalue;
 mod infer;
@@ -5080,6 +5081,27 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Load { dest: old, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
             self.emit_bigint_call("__sic_rat_free", vec![Val::Local(old)], Type::Void)?;
             self.push_instr(Instr::Store { val: newv, ptr: lv.ptr.clone() });
+            return Ok(lv.ptr);
+        }
+
+        // sic owning enum variable (`Option<string> o; o = …`): release the payload
+        // it held, acquire the new one (retain a copy, move a same-scope struct,
+        // take a call's result). Acquire before release keeps `o = o2` balanced.
+        if self.is_sic() && op.is_none() && self.is_owned_enum_lvalue(lhs) && self.enum_is_managed(&lv.ty) {
+            let same = matches!(self.infer_expr_type(rhs), Ok(t) if t == lv.ty);
+            if !same {
+                let tag = self.lower_expr(rhs)?;
+                self.enum_payload_op(lv.ptr.clone(), &lv.ty, false, false)?;
+                self.build_enum_from_tag(&lv.ptr, &lv.ty, tag, &rhs.span)?;
+                return Ok(lv.ptr);
+            }
+            let src = self.lower_aggregate_ptr(rhs)?;
+            if src == lv.ptr { return Ok(lv.ptr); }               // `o = o`
+            self.acquire_enum_value(src.clone(), &lv.ty, rhs)?;
+            self.enum_payload_op(lv.ptr.clone(), &lv.ty, false, false)?;
+            let size = lv.ty.size_of(self.ptr_size());
+            let align = lv.ty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
             return Ok(lv.ptr);
         }
 
