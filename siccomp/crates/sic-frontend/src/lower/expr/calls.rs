@@ -989,7 +989,11 @@ impl<'m> FuncCtx<'m> {
                 Some(pt) => self.dest_ctx(None, pt),
                 None => super::super::func::BfCtx::Any,
             };
-            let mut v = self.lower_arg(a)?;
+            // sic `any` parameter given a non-`any` value: box it, as `any a = x` does.
+            let box_to_any = self.is_sic()
+                && matches!(param_types.get(i), Some(pt) if super::super::types::is_any(pt))
+                && !matches!(self.infer_expr_type(a), Ok(t) if super::super::types::is_any(&t));
+            let mut v = if box_to_any { self.box_any(a)? } else { self.lower_arg(a)? };
             self.expected_ty = prev;
             // sic (sic.md §"Strings"): a `string` reaching a C variadic (`printf("%s",
             // s)`) decays to its `char*` — printf reads a pointer, not a descriptor.

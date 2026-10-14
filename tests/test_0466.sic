@@ -1,0 +1,22 @@
+/* A non-`any` value passed to an `any` parameter was not boxed: the raw scalar
+ * was used as the `any` pointer (Cranelift verifier error / crash). Returns 42. */
+static int size_of(any x) { return type(x).size; }
+static int classify(any x) {
+    match (type(x)) {
+        int: return (int)x;
+        float: return 100;
+        string: return 200;
+        _: return 0;
+    }
+}
+int main() {
+    i8 a = -3;
+    i32 b = 7;
+    u16 c = 9;
+    f64 d = 1.5;
+    any boxed = b;
+    if (size_of(a) != 1 || size_of(b) != 4 || size_of(c) != 2 || size_of(d) != 8) return 1;
+    if (classify(a) != -3 || classify(b) != 7 || classify(d) != 100) return 2;
+    if (classify("s") != 200 || classify(boxed) != 7 || size_of(boxed) != 4) return 3;
+    return classify(35) + classify(b);
+}
