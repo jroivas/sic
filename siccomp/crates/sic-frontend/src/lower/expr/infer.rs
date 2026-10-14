@@ -132,6 +132,15 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
                 let base_ty = self.infer_expr_type(base)?;
+                // sic RTTI accessors: the types `emit_type_info_field` loads.
+                if self.is_sic() && super::super::types::is_type_info(&base_ty) {
+                    match name.as_str() {
+                        "str" | "name" => return Ok(Type::char_ptr()),
+                        "id" => return Ok(Type::u64()),
+                        "size" | "kind" => return Ok(Type::u32()),
+                        _ => {}
+                    }
+                }
                 // sic native-string computed accessors: `.ptr` (and its alias
                 // `.str`) is a `char*`, `.length` is a `usize` (sic.md §"Built-in
                 // string").

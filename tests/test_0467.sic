@@ -1,0 +1,18 @@
+/* `type(x).name` / `.str` were inferred as an integer, so an `any`-boxing site
+ * (a va_array argument, `any v = ...`) tagged the `char*` as an int. Returns 42. */
+#include <string.h>
+static int tagged_str(any v) { match (type(v)) { cstr: return 1; int: return 2; _: return 3; } }
+int main() {
+    i32 b = 2;
+    any x = b;
+    any n = type(x).name;
+    if (tagged_str(n) != 1) return 1;
+    if (tagged_str(type(b).str) != 1) return 2;
+    char *p = type(x).name;
+    if (strcmp(p, "i32") != 0) return 3;
+    any sz = type(b).size;
+    if (type(sz).size != 4) return 4;      // `.size` is a u32
+    any id = type(b).id;
+    if (type(id).size != 8) return 5;      // `.id` is a u64
+    return 42;
+}
