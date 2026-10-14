@@ -36,6 +36,9 @@ pub enum TokenKind {
     IntLit,
     FloatLit,
     StringLit,
+    /// `L"…"` / `u"…"` / `U"…"`: text is the prefix then the code units in hex,
+    /// comma-separated (`L68,65`).
+    WideStringLit,
     CharLit,
     BoolLit,     // sic: `true`/`false` typed as `bool` (text "1"/"0")
 

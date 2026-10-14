@@ -143,6 +143,10 @@ impl<'a> InitNorm<'a> {
             Type::Array { elem, .. }
                 if matches!(elem.as_ref(), Type::Int { bits: 8, .. })
                     && matches!(&e.kind, ExprKind::StringLit(_)) => true,
+            // `wchar_t s[N]` from a wide string literal.
+            Type::Array { elem, .. }
+                if matches!(elem.as_ref(), Type::Int { bits: 16 | 32, .. })
+                    && matches!(&e.kind, ExprKind::WideStringLit(..)) => true,
             _ => (self.is_aggregate_value)(e, ty),
         }
     }

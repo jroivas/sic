@@ -2365,6 +2365,7 @@ impl<'m> FuncCtx<'m> {
                                 _ => items.len(),
                             },
                             Some(Initializer::Expr(e)) => match &e.kind {
+                                ExprKind::WideStringLit(units, _) => units.len() + 1,
                                 ExprKind::StringLit(s) => s.len() + 1, // + NUL terminator
                                 _ => 0,
                             },
@@ -2723,6 +2724,19 @@ impl<'m> FuncCtx<'m> {
             }
         }
         match init {
+            // `wchar_t buf[] = L"..."` (and `u"…"`/`U"…"`): copy the units (and
+            // terminator) from a constant; zero-fill any remaining space.
+            Initializer::Expr(Expr { kind: ExprKind::WideStringLit(units, p), .. })
+                if matches!(ty, Type::Array { .. }) =>
+            {
+                let Type::Array { len, .. } = ty else { unreachable!() };
+                let w: u64 = if *p == 'u' { 2 } else { 4 };
+                let gref = self.lowerer.add_wide_string_global(units, *p);
+                let copy = (units.len() as u64 + 1).min((*len).max(1) as u64) * w;
+                let total = (*len as u64 * w).max(copy);
+                self.push_instr(Instr::MemSet { dst: ptr.clone(), val: Constant::zero(), size: total, align: 1 });
+                self.push_instr(Instr::MemCopy { dst: ptr, src: Val::Global(gref), size: copy, align: 1 });
+            }
             // `char buf[] = "..."` / `char buf[N] = "..."`: copy the string bytes
             // into the array (not the pointer). Zero-fill any remaining space.
             Initializer::Expr(e)

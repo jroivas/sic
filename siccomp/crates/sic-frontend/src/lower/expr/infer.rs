@@ -47,6 +47,10 @@ impl<'m> FuncCtx<'m> {
             // sic (sic.md §"Strings"): a string literal is a native `string` (a view
             // over the static bytes) by default; it decays to `char*` only where a
             // `char*` is expected. C keeps it a `char*`.
+            ExprKind::WideStringLit(units, p) => Ok(Type::Array {
+                elem: Box::new(super::super::types::wide_char_type(*p)),
+                len: units.len() + 1,
+            }),
             ExprKind::StringLit(_) => Ok(if self.is_sic() {
                 super::super::types::sic_string_type(self.ptr_size())
             } else {

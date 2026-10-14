@@ -1,19 +1,21 @@
-// Wide / Unicode string & char literal prefixes (QEMU hw/usb uses L"..."):
-// L"..", u"..", U"..", u8"..", and L'x'. sic treats them as narrow literals —
-// enough to parse and compile.
+// Wide / Unicode string & char literal prefixes (QEMU hw/usb passes L"..." to
+// wcslen()): L".." is wchar_t[], u".." char16_t[], U".." char32_t[], u8".."
+// a narrow (UTF-8) string, and L'x' a wide char constant.
 #include <stdio.h>
 #include <string.h>
+#include <wchar.h>
 
 int main(void){
     setvbuf(stdout,0,_IONBF,0);
     int ok = 1;
 
-    const char *a = L"Label";      // wide string prefix
-    const char *b = u"hi";
-    const char *c = U"yo";
+    const wchar_t *a = L"Label";       // wide string prefix
+    const unsigned short *b = u"hi";
+    const unsigned int *c = U"yo";
     const char *d = u8"utf8";
     if (!a || !b || !c || !d) ok=0;
-    if (strcmp(a, "Label") != 0) ok=0;     // content preserved (narrow)
+    if (wcslen(a) != 5 || wcscmp(a, L"Label") != 0) ok=0;   // wide content
+    if (b[0] != 'h' || b[2] != 0 || c[1] != 'o' || c[2] != 0) ok=0;
     if (strcmp(d, "utf8") != 0) ok=0;
 
     int wc = L'A';                 // wide char prefix

@@ -1341,3 +1341,24 @@ pub(crate) fn scoped_type_key(path: &str, known: impl Fn(&str) -> bool) -> Strin
     }
     segs[segs.len() - 1].to_string()
 }
+
+/// The element type of a wide string literal: `L` → wchar_t (`int` on
+/// x86-64 Linux), `u` → char16_t, `U` → char32_t.
+pub(crate) fn wide_char_type(prefix: char) -> Type {
+    match prefix {
+        'u' => Type::Int { bits: 16, signed: false },
+        'U' => Type::Int { bits: 32, signed: false },
+        _ => Type::Int { bits: 32, signed: true },
+    }
+}
+
+/// A wide string literal's bytes for `len` elements: the units, then zeros
+/// (the terminator and any padding); truncated when `len` is shorter.
+pub(crate) fn wide_string_bytes(units: &[u32], prefix: char, len: usize) -> Vec<u8> {
+    let w = if prefix == 'u' { 2 } else { 4 };
+    let mut out = vec![0u8; len * w];
+    for (i, u) in units.iter().take(len).enumerate() {
+        out[i * w..(i + 1) * w].copy_from_slice(&u.to_le_bytes()[..w]);
+    }
+    out
+}

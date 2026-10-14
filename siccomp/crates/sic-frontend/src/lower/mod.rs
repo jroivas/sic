@@ -1199,6 +1199,22 @@ impl Lowerer {
 
     /// Emit `bytes` (already NUL-terminated) as a private, constant global and
     /// return a reference to it. Used for string-literal pointer initializers.
+    /// A private constant global holding a wide string literal's units plus
+    /// the terminator (`L"…"` → `int[]`, `u"…"` → `u16[]`, `U"…"` → `u32[]`).
+    pub(crate) fn add_wide_string_global(&mut self, units: &[u32], prefix: char) -> GlobalRef {
+        let elem = types::wide_char_type(prefix);
+        let name = format!(".wstr.{}", self.module.globals.len());
+        let g = Global {
+            name,
+            ty: Type::Array { elem: Box::new(elem.clone()), len: units.len() + 1 },
+            init: Some(Constant::Bytes(types::wide_string_bytes(units, prefix, units.len() + 1))),
+            linkage: Linkage::Private,
+            constant: true,
+            thread_local: false,
+        };
+        self.module.add_global(g)
+    }
+
     fn add_cstring_global(&mut self, bytes: Vec<u8>) -> GlobalRef {
         let name = format!(".str.{}", self.module.globals.len());
         let len = bytes.len();
@@ -2931,6 +2947,19 @@ impl Lowerer {
                 b[ps..ps * 2].copy_from_slice(&size_le[..ps]);
                 Some(Constant::Aggregate { bytes: b, relocs: vec![(0, RelocTarget::Global(gref, 0))] })
             }
+            // `wchar_t arr[] = L"..."` / `wchar_t *p = L"..."`.
+            Some(Initializer::Expr(Expr { kind: ExprKind::WideStringLit(units, p), .. })) => {
+                match &mut *ir_ty {
+                    Type::Array { len, .. } => {
+                        if *len == 0 { *len = units.len() + 1; }
+                        Some(Constant::Bytes(types::wide_string_bytes(units, *p, *len)))
+                    }
+                    _ => {
+                        let gref = self.add_wide_string_global(units, *p);
+                        Some(Constant::GlobalAddr(gref))
+                    }
+                }
+            }
             // `char arr[] = "..."` / `char *p = "..."`.
             Some(Initializer::Expr(e)) if matches!(&e.kind, ExprKind::StringLit(_)) => {
                 let ExprKind::StringLit(s) = &e.kind else { unreachable!() };
@@ -3188,6 +3217,13 @@ impl Lowerer {
         }
         match &ty {
             Type::Struct(_) | Type::Union(_) | Type::Array { .. } => {
+                // `wchar_t arr[N] = L"..."` inside a larger aggregate.
+                if let (Type::Array { len, .. }, Initializer::Expr(Expr { kind: ExprKind::WideStringLit(units, p), .. })) = (&ty, init) {
+                    let bytes = types::wide_string_bytes(units, *p, *len);
+                    let n = bytes.len().min(buf.len().saturating_sub(base));
+                    buf[base..base + n].copy_from_slice(&bytes[..n]);
+                    return true;
+                }
                 // `char arr[] = "..."` inside a larger aggregate.
                 if let (Type::Array { elem, .. }, Initializer::Expr(e)) = (&ty, init) {
                     if let ExprKind::StringLit(s) = &e.kind {
@@ -3519,6 +3555,10 @@ impl Lowerer {
                 elem: Box::new(Type::Int { bits: 8, signed: true }),
                 len: s.len() + 1,
             }),
+            ExprKind::WideStringLit(units, p) => Some(Type::Array {
+                elem: Box::new(types::wide_char_type(*p)),
+                len: units.len() + 1,
+            }),
             _ => None,
         }
     }
@@ -3540,6 +3580,10 @@ impl Lowerer {
                 let mut bytes = s.clone().into_bytes();
                 bytes.push(0);
                 let g = self.add_cstring_global(bytes);
+                Some(RelocTarget::Global(g, 0))
+            }
+            ExprKind::WideStringLit(units, p) => {
+                let g = self.add_wide_string_global(units, *p);
                 Some(RelocTarget::Global(g, 0))
             }
             ExprKind::Unary { op: UnOpKind::Addr, expr } => self.addr_of_reloc(expr),
@@ -4815,7 +4859,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         OptField { base, .. } => collect_expr_names(base, out),
         // `typeid(e)` inspects only the type — `e` is never evaluated.
         TypeId(_) => {}
-        IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
+        IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | WideStringLit(..) | CharLit(_) | Nullptr
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeIdOf(_) => {}
     }
 }

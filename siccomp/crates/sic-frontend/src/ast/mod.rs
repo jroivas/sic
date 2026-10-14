@@ -512,6 +512,9 @@ pub enum ExprKind {
     Guard { kind: GuardKind, body: Vec<Stmt> },
     FloatLit(f64),
     StringLit(String),
+    /// A wide string literal: its code units (no terminator) and the prefix,
+    /// `'L'` (wchar_t = int), `'u'` (char16_t) or `'U'` (char32_t).
+    WideStringLit(Vec<u32>, char),
     CharLit(i32),
     Ident(String),
     Nullptr,           // C23 null pointer constant

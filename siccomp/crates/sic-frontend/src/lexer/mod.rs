@@ -164,7 +164,7 @@ impl Lexer {
         // ordinary (narrow) literals — enough to parse and compile.
         if matches!(c, 'L' | 'u' | 'U') {
             let n1 = self.peek2();
-            if n1 == '"' { self.advance(); return self.scan_string_literal(sp); }
+            if n1 == '"' { self.advance(); return self.scan_wide_string_literal(sp, c); }
             if n1 == '\'' { self.advance(); return self.scan_char_literal(sp); }
             if c == 'u' && n1 == '8' && self.src.get(self.pos + 2) == Some(&'"') {
                 self.advance(); self.advance();
@@ -373,6 +373,35 @@ impl Lexer {
         // Adjacent string literal concatenation is handled by the parser.
         let s = unsafe { String::from_utf8_unchecked(bytes) };
         Ok(Token::new(TokenKind::StringLit, s, sp))
+    }
+
+    /// A wide string literal `L"…"` (wchar_t, 32-bit), `u"…"` (char16_t, UTF-16)
+    /// or `U"…"` (char32_t): its code units, from source characters (UTF-16
+    /// encoded with surrogates for `u`) and escapes (one unit each).
+    fn scan_wide_string_literal(&mut self, sp: Span, prefix: char) -> Result<Token> {
+        self.advance(); // opening "
+        let mut units: Vec<u32> = Vec::new();
+        let mask: u32 = if prefix == 'u' { 0xFFFF } else { 0xFFFF_FFFF };
+        loop {
+            if self.pos >= self.src.len() {
+                return Err(CompileError::at("unterminated string literal", sp.file.clone(), sp.line, sp.col));
+            }
+            let c = self.advance();
+            if c == '"' { break; }
+            if c == '\\' {
+                if self.pos >= self.src.len() {
+                    return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
+                }
+                units.push(self.read_escape_value() & mask);
+            } else if prefix == 'u' {
+                let mut buf = [0u16; 2];
+                units.extend(c.encode_utf16(&mut buf).iter().map(|&u| u as u32));
+            } else {
+                units.push(c as u32);
+            }
+        }
+        let hex: Vec<String> = units.iter().map(|u| format!("{:x}", u)).collect();
+        Ok(Token::new(TokenKind::WideStringLit, format!("{}{}", prefix, hex.join(",")), sp))
     }
 
     /// Scan a sic triple-quoted string (sic.md §"Multine strings"). The optional

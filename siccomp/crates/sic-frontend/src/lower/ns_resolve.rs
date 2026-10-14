@@ -320,7 +320,7 @@ impl<'a> NsRenamer<'a> {
             ExprKind::VaEnd { list } => self.expr(list),
             ExprKind::VaCopy { dst, src } => { self.expr(dst); self.expr(src); }
             ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::BoolLit(_) | ExprKind::BigIntLit(_)
-            | ExprKind::DecimalLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_)
+            | ExprKind::DecimalLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_) | ExprKind::WideStringLit(..)
             | ExprKind::CharLit(_) | ExprKind::Nullptr => {}
             // `Status::Joined` inside the namespace that defines `Status`.
             ExprKind::EnumVariant { enum_name, .. } => self.rename_type(enum_name),

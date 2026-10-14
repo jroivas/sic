@@ -534,6 +534,18 @@ impl<'m> FuncCtx<'m> {
             // `0` on clean completion, `1` if the exception fired.
             ExprKind::Guard { kind, body } => self.lower_guard(*kind, body),
             ExprKind::CharLit(v) => Ok(Constant::int(*v as i64)),
+            // A wide string literal decays to a pointer to its first unit.
+            ExprKind::WideStringLit(units, p) => {
+                let elem = super::types::wide_char_type(*p);
+                let gref = self.lowerer.add_wide_string_global(units, *p);
+                let dest = self.alloc_val();
+                self.push_instr(Instr::GetElemPtr {
+                    dest, base: Val::Global(gref), index: Constant::zero(),
+                    elem_size: 1, result_ty: Type::Pointer(Box::new(elem.clone())),
+                });
+                self.val_types.insert(dest.0, Type::Pointer(Box::new(elem)));
+                Ok(Val::Local(dest))
+            }
             ExprKind::StringLit(s) => {
                 let data = self.emit_cstring(s);
                 // sic (sic.md §"Strings"): a string literal is a native `string` view

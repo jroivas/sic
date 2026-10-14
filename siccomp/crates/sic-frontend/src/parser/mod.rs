@@ -869,6 +869,47 @@ impl Parser {
         Ok(Expr::new(ExprKind::EnumVariant { enum_name, variant }, sp))
     }
 
+    /// The run of adjacent string literals starting here holds a wide one.
+    fn string_run_is_wide(&self) -> bool {
+        let mut i = self.pos;
+        while let Some(t) = self.tokens.get(i) {
+            match t.kind {
+                TokenKind::WideStringLit => return true,
+                TokenKind::StringLit => i += 1,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Adjacent string literals of which at least one is wide (`L"a" "b"`): one
+    /// wide literal of the first wide prefix; a narrow piece contributes its
+    /// characters as code units.
+    fn parse_wide_string_run(&mut self, sp: crate::lexer::Span) -> Result<Expr> {
+        let mut units: Vec<u32> = Vec::new();
+        let mut prefix: Option<char> = None;
+        let mut narrow: Vec<String> = Vec::new();
+        while self.at(TokenKind::StringLit) || self.at(TokenKind::WideStringLit) {
+            let t = self.advance().clone();
+            if t.kind == TokenKind::WideStringLit {
+                let mut chars = t.text.chars();
+                let p = chars.next().unwrap_or('L');
+                let p = *prefix.get_or_insert(p);
+                for piece in std::mem::take(&mut narrow) { push_units(&mut units, &piece, p); }
+                let rest: String = chars.collect();
+                units.extend(rest.split(',').filter(|h| !h.is_empty())
+                    .map(|h| u32::from_str_radix(h, 16).unwrap_or(0)));
+            } else if let Some(p) = prefix {
+                push_units(&mut units, &t.text, p);
+            } else {
+                narrow.push(t.text.clone());
+            }
+        }
+        let p = prefix.unwrap_or('L');
+        for piece in narrow { push_units(&mut units, &piece, p); }
+        Ok(Expr::new(ExprKind::WideStringLit(units, p), sp))
+    }
+
     fn parse_struct_or_union(&mut self, is_union: bool) -> Result<AstType> {
         let sp = self.span();
         self.advance(); // consume 'struct'/'union'
@@ -3055,6 +3096,8 @@ impl Parser {
                 let v = parse_c_float(body);
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))
             }
+            TokenKind::StringLit | TokenKind::WideStringLit
+                if self.string_run_is_wide() => self.parse_wide_string_run(sp),
             TokenKind::StringLit => {
                 let mut s = self.advance().text.clone();
                 // Concatenate adjacent string literals. The token text holds raw
@@ -3795,5 +3838,17 @@ fn scan_generic_fns(tokens: &[Token], fns: &mut HashSet<String>, params: &mut Ha
             }
         }
         i += 1;
+    }
+}
+
+/// Append the characters of a narrow literal piece as wide code units.
+fn push_units(units: &mut Vec<u32>, piece: &str, prefix: char) {
+    for c in String::from_utf8_lossy(piece.as_bytes()).chars() {
+        if prefix == 'u' {
+            let mut buf = [0u16; 2];
+            units.extend(c.encode_utf16(&mut buf).iter().map(|&u| u as u32));
+        } else {
+            units.push(c as u32);
+        }
     }
 }
