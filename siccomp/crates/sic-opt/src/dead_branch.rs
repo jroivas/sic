@@ -87,6 +87,13 @@ fn exits_loop(body: &mut Stmt) -> bool {
 impl DeadBranch {
     fn fold_stmt(&mut self, s: &mut Stmt) {
         let repl: Option<Stmt> = match s {
+            // A dropped branch holding a jump target (`if (0) label: …` reached by
+            // a goto, a `case` of the enclosing switch) is reachable: keep it.
+            Stmt::If { cond, then, else_, .. } if match as_bool(cond) {
+                Some(true) => else_.as_deref().map_or(false, may_be_entered),
+                Some(false) => may_be_entered(then),
+                None => false,
+            } => None,
             Stmt::If { cond, then, else_, span } => as_bool(cond).map(|b| {
                 // Keep a scope boundary around the surviving branch so a bare
                 // declaration in it can't leak into the parent scope.
@@ -98,7 +105,7 @@ impl DeadBranch {
                 Stmt::Block(vec![taken], span.clone())
             }),
             // `while (0) body` never runs.
-            Stmt::While { cond, span, .. } if as_bool(cond) == Some(false) =>
+            Stmt::While { cond, body, span } if as_bool(cond) == Some(false) && !may_be_entered(body) =>
                 Some(Stmt::Null(span.clone())),
             // `do body while (0)` runs the body exactly once — unless the body
             // leaves THIS loop with `break`/`continue` (QEMU's

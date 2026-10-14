@@ -691,3 +691,62 @@ pub struct TranslationUnit {
     pub decls: Vec<Decl>,
     pub source_file: String,
 }
+
+// ─── Reachability helpers (jump targets inside statements) ────────────────────
+
+/// The statements directly nested in `s` (not through expressions).
+fn child_stmts(s: &Stmt) -> Vec<&Stmt> {
+    match s {
+        Stmt::Block(v, _) | Stmt::Unsafe(v, _) => v.iter().collect(),
+        Stmt::If { then, else_, .. } => {
+            let mut v = vec![then.as_ref()];
+            if let Some(e) = else_ { v.push(e.as_ref()); }
+            v
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
+        | Stmt::ForEach { body, .. } | Stmt::Switch { body, .. } => vec![body.as_ref()],
+        Stmt::Label(_, b, _) | Stmt::Case(_, b, _) | Stmt::CaseRange(_, _, b, _)
+        | Stmt::Default(b, _) | Stmt::Defer(b, _) => vec![b.as_ref()],
+        Stmt::Guard { else_body, .. } => vec![else_body.as_ref()],
+        Stmt::Match { arms, .. } => arms.iter().map(|a| a.body.as_ref()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Count every `goto L` in `s`, per label.
+pub fn count_gotos(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
+    if let Stmt::Goto(l, _) = s { *out.entry(l.clone()).or_insert(0) += 1; }
+    for c in child_stmts(s) { count_gotos(c, out); }
+}
+
+/// Whether control can enter `s` other than by falling into its start: it holds
+/// a `case`/`default` of the enclosing switch (not inside a nested `switch`), or
+/// a label that a goto OUTSIDE `s` targets (`total` counts the function's gotos).
+/// A constant-false branch for which this holds must not be dropped.
+pub fn reachable_from_outside(s: &Stmt, total: &std::collections::HashMap<String, usize>) -> bool {
+    fn walk(s: &Stmt, in_switch: bool, labels: &mut Vec<String>, inner: &mut std::collections::HashMap<String, usize>, case: &mut bool) {
+        match s {
+            Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) if !in_switch => *case = true,
+            Stmt::Label(l, _, _) => labels.push(l.clone()),
+            Stmt::Goto(l, _) => *inner.entry(l.clone()).or_insert(0) += 1,
+            _ => {}
+        }
+        let nested = in_switch || matches!(s, Stmt::Switch { .. });
+        for c in child_stmts(s) { walk(c, nested, labels, inner, case); }
+    }
+    let (mut labels, mut inner, mut case) = (Vec::new(), std::collections::HashMap::new(), false);
+    walk(s, false, &mut labels, &mut inner, &mut case);
+    case || labels.iter().any(|l| total.get(l).copied().unwrap_or(0) > inner.get(l).copied().unwrap_or(0))
+}
+
+/// Whether `s` holds any jump target control could enter it by — a `case` of
+/// the enclosing switch or any label — without knowing where the gotos are.
+pub fn may_be_entered(s: &Stmt) -> bool {
+    let mut labels = std::collections::HashMap::new();
+    fn collect(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
+        if let Stmt::Label(l, _, _) = s { out.insert(l.clone(), usize::MAX); }
+        for c in child_stmts(s) { collect(c, out); }
+    }
+    collect(s, &mut labels);
+    reachable_from_outside(s, &labels)
+}

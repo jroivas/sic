@@ -215,6 +215,9 @@ pub struct FuncCtx<'m> {
     pub ret_ty: Type,
     /// Label name → BlockId mapping (for goto)
     pub labels: HashMap<String, BlockId>,
+    /// How many `goto L` the function body holds per label — a constant-false
+    /// `if` branch defining `L` is still reachable when a goto outside it exists.
+    pub goto_counts: HashMap<String, usize>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
     /// Stack of `break` targets for *both* loops and switches, in nesting order.
@@ -350,6 +353,7 @@ impl<'m> FuncCtx<'m> {
             current_bb: entry_id,
             ret_ty,
             labels: HashMap::new(),
+            goto_counts: HashMap::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
@@ -1807,6 +1811,7 @@ impl<'m> Lowerer {
 
         // Lower body. Statements after a terminator are dead code, except
         // labels / case / default, which are jump targets that begin new blocks.
+        for stmt in body { crate::ast::count_gotos(stmt, &mut fc.goto_counts); }
         for stmt in body {
             if fc.is_terminated() && !stmt_is_jump_target(stmt) { continue; }
             fc.lower_stmt(stmt)?;
@@ -3182,13 +3187,19 @@ impl<'m> FuncCtx<'m> {
         // that are never compiled/linked (`whpx_*`/`hvf_*`) → undefined symbols.
         // `eval_const_expr` only succeeds for genuine constant expressions (no
         // calls/side effects), so dropping the other branch is safe.
+        // A dropped branch that is still reachable — it holds a `case` of the
+        // enclosing switch, or a label some goto outside it targets (`if (0)
+        // label: …; goto label;`) — is lowered normally instead.
         if let Ok(v) = crate::lower::eval_const_expr(cond, &self.lowerer.enum_consts) {
-            if v != 0 {
-                return self.lower_stmt(then);
-            } else if let Some(e) = else_ {
-                return self.lower_stmt(e);
+            let dropped = if v != 0 { else_ } else { Some(then) };
+            if !dropped.map_or(false, |d| crate::ast::reachable_from_outside(d, &self.goto_counts)) {
+                if v != 0 {
+                    return self.lower_stmt(then);
+                } else if let Some(e) = else_ {
+                    return self.lower_stmt(e);
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         let then_bb = self.new_block_after_current();
         let merge_bb = self.new_block_after_current();
