@@ -986,6 +986,93 @@ for c in "loc_stmt:3:5" "loc_param:1:1" "loc_global:4:1" "loc_field:1:1" "loc_mo
     fi
 done
 
+# ── std::file::ReadLine: lines of any length, last line without '\\n', Read(0)
+# at the end; Read/ReadAll/Write after it continue from the logical position.
+mkdir -p readline
+cat > readline/rl.sic <<'EOF'
+import std;
+
+static std::file::File *open_or_die(string name, std::file::OpenMode m) {
+    match (std::file::Open(name, m)) {
+        std::file::Status::Opened(f): return f;
+        _: return NULL;
+    }
+}
+
+static u64 line(std::file::File *f, std::buffer::Buffer *b) {
+    match (std::file::ReadLine(f, b)) {
+        std::file::Status::Read(n): return n;
+        _: return 999999;
+    }
+}
+
+int main() {
+    int r = 0;
+    std::file::File *w = open_or_die("lines.txt", std::file::OpenMode::Write);
+    if (!w) return 1;
+    string longl = "";
+    for (int i = 0; i < 1000; i++) longl = longl + "0123456789";   // 10000 bytes
+    std::file::WriteString(w, "first\n\nthird line\n" + longl + "\nlast");
+    std::file::Close(w);
+
+    std::file::File *f = open_or_die("lines.txt", std::file::OpenMode::Read);
+    if (!f) return 2;
+    std::buffer::Buffer *b = std::buffer::Create(4);
+    if (line(f, b) != 6 || std::buffer::Value(b) != "first\n") r |= 1;
+    if (line(f, b) != 1 || std::buffer::Value(b) != "\n") r |= 2;
+    if (line(f, b) != 11 || std::buffer::Value(b) != "third line\n") r |= 4;
+    if (line(f, b) != 10001 || std::buffer::Value(b) != longl + "\n") r |= 8;
+    if (std::file::Eof(f)) r |= 16;
+    if (line(f, b) != 4 || std::buffer::Value(b) != "last") r |= 32;
+    if (!std::file::Eof(f)) r |= 64;
+    if (line(f, b) != 0 || b->size != 0) r |= 128;
+    // Seek back; ReadLine then Read continue from the logical position
+    std::file::Seek(f, 0);
+    line(f, b);                                        // "first\n"
+    std::buffer::Buffer *c = std::buffer::Create(3);
+    std::file::Read(f, 3, c);
+    if (std::buffer::Value(c) != "\nth") r |= 256;
+    if (line(f, b) != 9 || std::buffer::Value(b) != "ird line\n") r |= 512;
+    // ReadAll after ReadLine gets the rest
+    match (std::file::ReadAll(f, c)) {
+        std::file::Status::Read(n): if (n != 10005 || std::buffer::Value(c) != longl + "\nlast") r |= 1024;
+        _: r |= 1024;
+    }
+    std::file::Close(f);
+    // RW: a write after ReadLine lands at the logical position
+    std::file::File *rw = open_or_die("lines.txt", std::file::OpenMode::RW);
+    line(rw, b);                                       // "first\n"
+    std::file::WriteString(rw, "X");
+    std::file::Seek(rw, 0);
+    line(rw, b); line(rw, b);
+    if (std::buffer::Value(b) != "Xthird line\n") r |= 2048;   // "X" replaced the empty line's '\n'
+    std::file::Close(rw);
+    // stdin through a pipe
+    u64 total = 0;
+    int count = 0;
+    while (true) {
+        u64 n = line(std::file::Stdin(), b);
+        if (n == 0 || n == 999999) break;
+        total += n;
+        count++;
+    }
+    std::Println("stdin {} lines {} bytes", count, total);
+    del b;
+    del c;
+    std::Println("r={}", r);
+    return r;
+}
+EOF
+if (cd readline && "$SIC" rl.sic -I.. -o rl 2>../err); then
+    out="$(cd readline && printf 'a\nbb\nccc' | ./rl)"; rc=$?
+    want="stdin 3 lines 8 bytes
+r=0"
+    if [ "$rc" -eq 0 ] && [ "$out" = "$want" ]; then ok "std-file-readline"
+    else bad "std-file-readline" "rc=$rc got:\n$out"; fi
+else
+    bad "std-file-readline" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.

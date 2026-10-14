@@ -4,6 +4,7 @@ module std;
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <string.h>
 
 // File I/O through std::buffer.
 //
@@ -12,6 +13,7 @@ module std;
 //   match (st) { std::file::Status::Opened(f): ...; _: ...; }
 //   std::file::WriteString(f, "hello\n");
 //   std::file::ReadAll(f, buf);          // whole file, growing buf
+//   while (std::file::ReadLine(f, buf) != std::file::Status::Read(0)) ...
 //   std::file::Close(f);
 //
 // Every call returns a std::file::Status. Read/Write move as many bytes as one
@@ -26,11 +28,15 @@ namespace file
         u64 offset;
         bool stream;                // a standard stream: not seekable, never closed
         bool eof;                   // the last read hit end of file
+        u8 *rbuf;                   // ReadLine read-ahead (allocated on first use)
+        u64 rpos;                   // next unconsumed byte in rbuf
+        u64 rlen;                   // bytes in rbuf
         File() { fd = -1; }
         ~File()
         {
             if (fd >= 0 && !stream)
                 close(fd);
+            del rbuf;
         }
     };
 
@@ -113,6 +119,26 @@ namespace file
         return fallback;
     }
 
+    static const u64 RBUF_SIZE = 4096;
+
+    // Append `n` bytes at `p` to `buf`'s contents, doubling its capacity as
+    // needed. False if out of memory.
+    static bool append(buffer::Buffer *buf, u8 *p, u64 n)
+    {
+        if (buf->size + n > buf->capacity)
+        {
+            u64 cap = buf->capacity < 128 ? 128 : buf->capacity;
+            while (cap < buf->size + n)
+                cap *= 2;
+            if (!buffer::SetCapacity(buf, cap))
+                return false;
+        }
+        if (n > 0)
+            memcpy(buf->data + buf->size, p, n);
+        buf->size += n;
+        return true;
+    }
+
     file::Status Open(string name, OpenMode mode)
     {
         File *tmp = new File() else return file::Status::OutOfMemory;
@@ -176,6 +202,8 @@ namespace file
             return errno_status(errno, file::Status::InvalidOffset);
         f->offset = offset;
         f->eof = false;
+        f->rpos = 0;                // drop the read-ahead
+        f->rlen = 0;
         return file::Status::Success;
     }
 
@@ -195,6 +223,18 @@ namespace file
 
         if (size > buf->capacity)
             size = buf->capacity;
+        if (f->rpos < f->rlen)      // bytes ReadLine read ahead come first
+        {
+            u64 n = f->rlen - f->rpos;
+            if (n > size)
+                n = size;
+            memcpy(buf->data, f->rbuf + f->rpos, n);
+            f->rpos += n;
+            f->offset += n;
+            f->eof = false;
+            buf->size = n;
+            return file::Status::Read(n);
+        }
         isize res;
         do {
             res = read(f->fd, buf->data, size);
@@ -222,6 +262,13 @@ namespace file
         if (!f || !buf)
             return file::Status::InvalidObject;
         buf->size = 0;
+        if (f->rpos < f->rlen)      // the read-ahead first
+        {
+            if (!append(buf, f->rbuf + f->rpos, f->rlen - f->rpos))
+                return file::Status::OutOfMemory;
+            f->offset += f->rlen - f->rpos;
+            f->rpos = f->rlen;
+        }
         while (true)
         {
             if (buf->size == buf->capacity)
@@ -245,9 +292,73 @@ namespace file
         return file::Status::Read(buf->size);
     }
 
+    // Read one line into `buf` (growing it): the bytes up to and including the
+    // next '\n', or to end of file for a last line without one. Read(bytes);
+    // Read(0) once the file is exhausted. Lines may be any length.
+    file::Status ReadLine(File *f, buffer::Buffer *buf)
+    {
+        if (!f || !buf)
+            return file::Status::InvalidObject;
+        if (!f->rbuf)
+        {
+            f->rbuf = new u8(RBUF_SIZE);
+            if (!f->rbuf)
+                return file::Status::OutOfMemory;
+        }
+        buf->size = 0;
+        f->eof = false;
+        while (true)
+        {
+            if (f->rpos == f->rlen)
+            {
+                isize res;
+                do {
+                    res = read(f->fd, f->rbuf, RBUF_SIZE);
+                } while (res < 0 && errno == EINTR);
+                if (res < 0)
+                    return errno_status(errno, file::Status::ReadError);
+                f->rpos = 0;
+                f->rlen = (u64)res;
+                if (res == 0)
+                {
+                    f->eof = true;
+                    break;
+                }
+            }
+            u64 end = f->rpos;
+            bool newline = false;
+            while (end < f->rlen)
+            {
+                u8 c = f->rbuf[end];
+                end++;
+                if (c == 10)        // '\n'
+                {
+                    newline = true;
+                    break;
+                }
+            }
+            u64 n = end - f->rpos;
+            if (!append(buf, f->rbuf + f->rpos, n))
+                return file::Status::OutOfMemory;
+            f->rpos = end;
+            f->offset += n;
+            if (newline)
+                break;
+        }
+        return file::Status::Read(buf->size);
+    }
+
     // Write `n` bytes at `p`, retrying short writes. Wrote(n) or an error.
     static file::Status write_bytes(File *f, u64 offset, u8 *p, u64 n)
     {
+        // A ReadLine read-ahead left the descriptor past the logical position:
+        // move it back (dropping the read-ahead) before writing.
+        if (!f->stream && f->rpos < f->rlen && offset == f->offset)
+        {
+            file::Status st = Seek(f, offset);
+            if (st != file::Status::Success)
+                return st;
+        }
         if (!f->stream && offset != f->offset)
         {
             file::Status st = Seek(f, offset);
