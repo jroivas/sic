@@ -829,6 +829,30 @@ else
     bad "std-fmt-spec" "compile/link failed: $(cat err)"
 fi
 
+# ── std::Print/Println: all bytes written (short writes retried); -1 on error ─
+cat > printbig.sic <<'EOF'
+import std;
+int main() {
+    string big = "";
+    for (int i = 0; i < 20000; i++) big = big + "0123456789";
+    if (std::Println("{}", big) != 0) return 1;
+    return 0;
+}
+EOF
+cat > printclosed.sic <<'EOF'
+import std;
+int main() { return std::Println("x") == -1 ? 42 : 1; }
+EOF
+if "$SIC" printbig.sic -I. -o printbig 2>err && "$SIC" printclosed.sic -I. -o printclosed 2>>err; then
+    ./printbig > big.out; rc=$?
+    ./printclosed >&-; crc=$?
+    sz=$(wc -c < big.out)
+    if [ "$rc" -eq 0 ] && [ "$sz" -eq 200001 ] && [ "$crc" -eq 42 ]; then ok "std-print-write"
+    else bad "std-print-write" "rc=$rc size=$sz closed-rc=$crc"; fi
+else
+    bad "std-print-write" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
