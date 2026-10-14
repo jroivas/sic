@@ -631,6 +631,9 @@ impl<'m> FuncCtx<'m> {
                             _ => Ok(self.arith_result_type(op, lt, rt)),
                         }
                     }
+                    // A shift has its promoted left operand's type (C 6.5.7p3).
+                    Shl | Shr if matches!(lt, Type::Int { .. } | Type::Bool)
+                        && matches!(rt, Type::Int { .. } | Type::Bool) => Ok(lt.integer_promote()),
                     // Arithmetic: pointer/array ± integer keeps the pointer type
                     // (pointer arithmetic; arrays decay to pointer-to-element).
                     // `ptr - ptr` is ptrdiff_t. Otherwise pick the "richer" operand

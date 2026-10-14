@@ -113,8 +113,10 @@ fn fold_int(op: BinOpKind, l: i64, r: i64, w: bool) -> Option<ExprKind> {
         BitAnd => arith(l & r),
         BitOr => arith(l | r),
         BitXor => arith(l ^ r),
-        Shl => arith(l.wrapping_shl((r & 63) as u32)),
-        Shr => arith(l.wrapping_shr((r & 63) as u32)),
+        // Shifts are NOT folded here either: the result type is the promoted
+        // LEFT operand's (not the wider operand's), and an out-of-range count is
+        // language-defined (sic.md §"Rotate and shift") — the typed `ir-fold`
+        // pass folds them at the resolved type.
         Eq => boolean(l == r),
         Ne => boolean(l != r),
         Lt => boolean(l < r),
@@ -149,8 +151,10 @@ fn fold_uint(op: BinOpKind, l: u64, r: u64, w: bool) -> Option<ExprKind> {
         BitAnd => arith(l & r),
         BitOr => arith(l | r),
         BitXor => arith(l ^ r),
-        Shl => arith(l.wrapping_shl((r & 63) as u32)),
-        Shr => arith(l.wrapping_shr((r & 63) as u32)),
+        // Shifts are NOT folded here either: the result type is the promoted
+        // LEFT operand's (not the wider operand's), and an out-of-range count is
+        // language-defined (sic.md §"Rotate and shift") — the typed `ir-fold`
+        // pass folds them at the resolved type.
         Eq => boolean(l == r),
         Ne => boolean(l != r),
         Lt => boolean(l < r),

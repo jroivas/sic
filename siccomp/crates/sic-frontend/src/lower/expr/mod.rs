@@ -3086,6 +3086,12 @@ impl<'m> FuncCtx<'m> {
         }
 
         let common = usual_arith_conv(&lt, &rt);
+        // A shift's type is its promoted LEFT operand's (C 6.5.7p3) — the count
+        // does not take part in the usual conversions: `(short)1 << 1L` is an
+        // int, and `-8 >> 1u` is an arithmetic (signed) shift, not logical.
+        let is_int = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool);
+        let shift = matches!(op, BinOpKind::Shl | BinOpKind::Shr) && is_int(&lt) && is_int(&rt);
+        let common = if shift { lt.integer_promote() } else { common };
 
         let lc = self.coerce(l, &common)?;
         let rc = self.coerce(r, &common)?;
