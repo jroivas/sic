@@ -1,5 +1,15 @@
 module std;
 
+#include <string.h>
+
+// Byte buffers: `capacity` bytes of storage, of which the first `size` are the
+// contents (0 <= size <= capacity always holds).
+//
+// Resizing keeps that invariant, so growing is capacity first, then size; and
+// shrinking is size first, then capacity:
+//   std::buffer::SetCapacity(b, 8192);   std::buffer::SetSize(b, 6000);
+//   std::buffer::SetSize(b, 100);        std::buffer::SetCapacity(b, 100);
+
 namespace buffer
 {
     struct Buffer {
@@ -25,6 +35,39 @@ namespace buffer
         buf->size = 0;
 
         return buf;
+    }
+
+    // Change the storage to `capacity` bytes, keeping the contents. Fails (false,
+    // buffer unchanged) for a NULL buffer, a capacity below the current size, or
+    // when the new storage cannot be allocated. New storage past `size` is zeroed.
+    bool SetCapacity(Buffer *b, u64 capacity)
+    {
+        if (b == NULL || capacity < b->size)
+            return false;
+        if (capacity == b->capacity)
+            return true;
+        u8 *data = new u8(capacity > 0 ? capacity : 1);
+        if (!data)
+            return false;
+        if (b->size > 0)
+            memcpy(data, b->data, b->size);
+        if (capacity > b->size)
+            memset(data + b->size, 0, capacity - b->size);
+        del b->data;
+        b->data = data;
+        b->capacity = capacity;
+        return true;
+    }
+
+    // Set how many bytes of the storage are contents (e.g. after writing into
+    // `b->data` directly). Fails (false, buffer unchanged) for a NULL buffer or a
+    // size above the capacity. Growing exposes the bytes already in storage.
+    bool SetSize(Buffer *b, u64 size)
+    {
+        if (b == NULL || size > b->capacity)
+            return false;
+        b->size = size;
+        return true;
     }
 
     // The buffer's bytes as a `string` — a non-owning VIEW over `b->data` with the

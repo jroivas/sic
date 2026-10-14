@@ -738,6 +738,42 @@ else
     bad "std-named-args" "compile/link failed: $(cat err)"
 fi
 
+# ── std::buffer::SetCapacity / SetSize: size <= capacity is kept ─────────────
+# Grow = capacity then size; shrink = size then capacity. A size above the
+# capacity or a capacity below the size fails and leaves the buffer unchanged.
+cat > bufresize.sic <<'EOF'
+import std;
+int main()
+{
+    std::buffer::Buffer *b = std::buffer::Create(4);
+    int r = 0;
+    b->data[0] = 'a'; b->data[1] = 'b';
+    if (!std::buffer::SetSize(b, 2)) r |= 1;
+    if (std::buffer::SetSize(b, 5)) r |= 2;            // size > capacity
+    if (!std::buffer::SetCapacity(b, 16)) r |= 4;      // grow
+    if (b->capacity != 16 || b->size != 2) r |= 8;
+    if (b->data[0] != 'a' || b->data[1] != 'b' || b->data[15] != 0) r |= 16;
+    if (!std::buffer::SetSize(b, 10)) r |= 32;
+    if (std::buffer::SetCapacity(b, 9)) r |= 64;       // capacity < size
+    if (b->capacity != 16) r |= 128;
+    if (!std::buffer::SetSize(b, 1)) r |= 256;
+    if (!std::buffer::SetCapacity(b, 1)) r |= 512;     // shrink
+    if (b->capacity != 1 || b->data[0] != 'a') r |= 1024;
+    if (!std::buffer::SetSize(b, 0) || !std::buffer::SetCapacity(b, 0)) r |= 2048;
+    if (!std::buffer::SetCapacity(b, 3) || b->data[2] != 0) r |= 4096;
+    if (std::buffer::SetSize(NULL, 0) || std::buffer::SetCapacity(NULL, 0)) r |= 8192;
+    std::Println("{}", r);
+    del b;
+    return r;
+}
+EOF
+if "$SIC" bufresize.sic -I. -o bufresize 2>err; then
+    out="$(./bufresize)"
+    [ "$out" = "0" ] && ok "std-buffer-resize" || bad "std-buffer-resize" "failed checks mask: $out"
+else
+    bad "std-buffer-resize" "compile/link failed: $(cat err)"
+fi
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
