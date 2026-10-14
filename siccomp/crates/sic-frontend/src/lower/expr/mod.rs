@@ -3449,7 +3449,13 @@ impl<'m> FuncCtx<'m> {
     /// A native `string` view over the static literal `s` (rc = NULL; safe to
     /// return — the bytes are static).
     pub(crate) fn enum_str_literal(&mut self, s: &str) -> Result<Val> {
-        let data = self.emit_cstring(s);
+        // `s` is "Enum::Variant"; a namespaced enum's internal name is flattened
+        // as `ns__Enum` — show it as written (`ns::Enum::Variant`).
+        let shown = match s.rfind("::") {
+            Some(p) => format!("{}{}", s[..p].replace("__", "::"), &s[p..]),
+            None => s.to_string(),
+        };
+        let data = self.emit_cstring(&shown);
         self.cstr_to_string(data)
     }
 

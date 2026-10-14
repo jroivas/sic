@@ -1,0 +1,21 @@
+/* `.str` of an enum declared in a namespace showed the internal flattened name
+ * (`file__Status::Opened`) instead of `file::Status::Opened`. Returns 42. */
+namespace file {
+    enum Status { Opened(int), NotFound };
+    enum Mode { Read, Write };
+    namespace deep { enum Kind { A, B }; }
+}
+enum Top { X, Y };
+int main() {
+    file::Status s = file::Status::Opened(3);
+    if (s.str != "file::Status::Opened") return 1;
+    file::Status n = file::Status::NotFound;
+    if (n.str != "file::Status::NotFound") return 2;
+    file::Mode m = file::Mode::Write;
+    if (m.str != "file::Mode::Write") return 3;
+    file::deep::Kind k = file::deep::Kind::B;
+    if (k.str != "file::deep::Kind::B") return 4;
+    Top t = Top::Y;
+    if (t.str != "Top::Y") return 5;
+    return 42;
+}
