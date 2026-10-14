@@ -5357,7 +5357,12 @@ impl<'m> FuncCtx<'m> {
                 Ok(lv.ptr)
             }
             UnOpKind::Deref => {
-                let ptr = self.lower_expr(inner)?;
+                let mut ptr = self.lower_expr(inner)?;
+                // `*arr` on an array object: the array decays to a pointer to its
+                // first element, so this reads `arr[0]` (it yielded the address).
+                if let Ok(Type::Array { elem, .. }) = self.infer_expr_type(inner) {
+                    ptr = self.coerce(ptr, &Type::Pointer(elem))?;
+                }
                 // Determine pointee type
                 let ptr_ty = self.val_type(&ptr);
                 // `*container` ≡ the container handle (the `dict* ≡ dict` collapse):
