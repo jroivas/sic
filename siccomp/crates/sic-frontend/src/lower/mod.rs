@@ -2672,8 +2672,17 @@ impl Lowerer {
             self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
         }
         self.global_init_unserializable = false;
+        let declared_ty = ir_ty.clone();
         let init = self.build_global_init(d, &mut ir_ty);
         self.check_global_init(d)?;
+        // A struct whose flexible array member is initialized gets larger
+        // STORAGE (`ir_ty`), but the object's type — what `sizeof` and member
+        // access see — stays the declared struct (C 6.7.2.1p18).
+        let map_ty = if matches!(declared_ty, Type::Struct(_)) && declared_ty != ir_ty {
+            declared_ty.clone()
+        } else {
+            ir_ty.clone()
+        };
         // A `const` integer global with a folded constant value is itself a usable
         // compile-time constant: record name→value so a LATER constant initializer
         // or constant context can reference it (`const u32 SIZE = 1<<24; const u32
@@ -2729,7 +2738,8 @@ impl Lowerer {
                 g.init = init;
                 g.linkage = new_linkage;
                 g.constant = constant;
-                self.globals_map.insert(d.name.clone(), (ir_ty, gref));
+                let map_ty = if matches!(ir_ty, Type::Array { .. }) { ir_ty } else { map_ty };
+                self.globals_map.insert(d.name.clone(), (map_ty, gref));
             }
             return Ok(());
         }
@@ -2746,7 +2756,7 @@ impl Lowerer {
             Some(StorageClass::Extern) => Linkage::External,
             _ => Linkage::External,
         };
-        let ty_for_map = ir_ty.clone();
+        let ty_for_map = map_ty;
         let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty), thread_local };
         let gref = self.module.add_global(g);
         self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
@@ -2759,9 +2769,18 @@ impl Lowerer {
     fn add_static_local_global(&mut self, name: String, d: &Declarator, _base_ty: &QualType) -> Result<(Type, GlobalRef)> {
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         self.global_init_unserializable = false;
+        let declared_ty = ir_ty.clone();
         let init = self.build_global_init(d, &mut ir_ty);
         self.check_global_init(d)?;
-        let ty_for_map = ir_ty.clone();
+        // A struct whose flexible array member is initialized gets larger
+        // STORAGE (`ir_ty`), but the object's type — what `sizeof` and member
+        // access see — stays the declared struct (C 6.7.2.1p18).
+        let map_ty = if matches!(declared_ty, Type::Struct(_)) && declared_ty != ir_ty {
+            declared_ty.clone()
+        } else {
+            ir_ty.clone()
+        };
+        let ty_for_map = map_ty;
         let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false };
         let gref = self.module.add_global(g);
         Ok((ty_for_map, gref))
