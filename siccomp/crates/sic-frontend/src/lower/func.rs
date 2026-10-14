@@ -1848,6 +1848,13 @@ impl<'m> Lowerer {
 
 impl<'m> FuncCtx<'m> {
     pub fn lower_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        // An error raised without a location (e.g. "unknown type" from type
+        // lowering) gets the innermost failing statement's.
+        let (file, line, col) = stmt_loc(stmt);
+        self.lower_stmt_inner(stmt).map_err(|e| super::locate_error(e, file, line, col))
+    }
+
+    fn lower_stmt_inner(&mut self, stmt: &Stmt) -> Result<()> {
         self.mark_line(stmt_line(stmt));
         match stmt {
             Stmt::Null(_) => {}
@@ -5989,6 +5996,24 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
         | Stmt::ForEach { span, .. } | Stmt::Guard { span, .. } => span.line,
     }
+}
+
+/// The source location of a statement: (file, line, column).
+fn stmt_loc(stmt: &Stmt) -> (Option<String>, u32, u32) {
+    let s = match stmt {
+        Stmt::Decl(d) => return super::decl_loc(d),
+        Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
+        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
+        | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
+        | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
+        | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s,
+        Stmt::Asm(a) => &a.span,
+        Stmt::Fence { span, .. } => span,
+        Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
+        | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
+        | Stmt::ForEach { span, .. } | Stmt::Guard { span, .. } => span,
+    };
+    (s.file.clone(), s.line, s.col)
 }
 
 fn decl_line(d: &Decl) -> u32 {

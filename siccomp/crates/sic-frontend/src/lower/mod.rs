@@ -647,128 +647,135 @@ impl Lowerer {
             self.monomorphize_generics(tu)?;
         }
         for decl in &tu.decls {
-            // Record file-scope variable types (with array lengths inferred from
-            // their initializers) so `sizeof(global_array)` in a later enum value
-            // resolves. Processed in source order, matching C's scope rules.
-            if let Decl::Var { base_ty: _, declarators, .. } = decl {
-                for d in declarators {
-                    if let Ok(mut ty) = lower_type(&d.ty, &self.struct_types, self.ptr_size) {
-                        if let Type::Array { len, .. } = &mut ty {
-                            if *len == 0 {
-                                if let Some(Initializer::List(items)) = &d.init {
-                                    *len = self.infer_array_len(items);
-                                }
+            let (file, line, col) = decl_loc(decl);
+            self.collect_declaration(decl).map_err(|e| locate_error(e, file, line, col))?;
+        }
+        Ok(())
+    }
+
+    /// One top-level declaration of `collect_declarations`.
+    fn collect_declaration(&mut self, decl: &Decl) -> Result<()> {
+        // Record file-scope variable types (with array lengths inferred from
+        // their initializers) so `sizeof(global_array)` in a later enum value
+        // resolves. Processed in source order, matching C's scope rules.
+        if let Decl::Var { base_ty: _, declarators, .. } = decl {
+            for d in declarators {
+                if let Ok(mut ty) = lower_type(&d.ty, &self.struct_types, self.ptr_size) {
+                    if let Type::Array { len, .. } = &mut ty {
+                        if *len == 0 {
+                            if let Some(Initializer::List(items)) = &d.init {
+                                *len = self.infer_array_len(items);
                             }
                         }
-                        // Prefer a complete array type over an incomplete one: a
-                        // header's `extern T a[];` (len 0) may precede the sized
-                        // definition `T a[N] = {...}`, and `sizeof(a)` must fold to
-                        // the real length (QEMU's keymap
-                        // `qemu_input_map_*_len = sizeof(map)/sizeof(map[0])`).
-                        let new_complete = matches!(&ty, Type::Array { len, .. } if *len > 0);
-                        if new_complete || !self.global_types.contains_key(&d.name) {
-                            self.global_types.insert(d.name.clone(), ty);
-                        }
+                    }
+                    // Prefer a complete array type over an incomplete one: a
+                    // header's `extern T a[];` (len 0) may precede the sized
+                    // definition `T a[N] = {...}`, and `sizeof(a)` must fold to
+                    // the real length (QEMU's keymap
+                    // `qemu_input_map_*_len = sizeof(map)/sizeof(map[0])`).
+                    let new_complete = matches!(&ty, Type::Array { len, .. } if *len > 0);
+                    if new_complete || !self.global_types.contains_key(&d.name) {
+                        self.global_types.insert(d.name.clone(), ty);
                     }
                 }
             }
-            match decl {
-                Decl::Func { name, ret_ty, params, variadic, body: None, is_async, .. } => {
-                    // Forward declaration / extern. A struct/union/enum *defined*
-                    // in the return type or a parameter (`struct S {..} *f(void)`)
-                    // must be registered so its fields resolve later.
-                    self.register_nested_struct_defs(&ret_ty.ty)?;
-                    for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
-                    let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
-                    if *is_async { ir_ret = types::task_type(&ir_ret); }
-                    let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-                        lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
-                    }).collect();
-                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
-                    if self.module.func_ref_by_name(name).is_none() {
-                        self.module.add_extern(ExternFunc { name: name.clone(), sig });
-                    }
+        }
+        match decl {
+            Decl::Func { name, ret_ty, params, variadic, body: None, is_async, .. } => {
+                // Forward declaration / extern. A struct/union/enum *defined*
+                // in the return type or a parameter (`struct S {..} *f(void)`)
+                // must be registered so its fields resolve later.
+                self.register_nested_struct_defs(&ret_ty.ty)?;
+                for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
+                let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                if *is_async { ir_ret = types::task_type(&ir_ret); }
+                let ir_params: Result<Vec<_>> = params.iter().map(|p| {
+                    lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
+                }).collect();
+                let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                if self.module.func_ref_by_name(name).is_none() {
+                    self.module.add_extern(ExternFunc { name: name.clone(), sig });
                 }
-                Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, is_async, .. } => {
-                    // sic generic template: not emitted directly; instantiated per call.
-                    if !type_params.is_empty() { continue; }
-                    // Skip unreferenced inline definitions (see `emit_inline`).
-                    if *inline && !self.emit_inline.contains(name) { continue; }
-                    // Register any struct/union/enum defined in the return type or
-                    // parameters before lowering them.
-                    self.register_nested_struct_defs(&ret_ty.ty)?;
-                    for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
-                    // Function definition — pre-register with empty body for stable FuncRef
-                    let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
-                    // sic async: the signature returns `Task<ret>` (sic.md §"Async").
-                    if *is_async { ir_ret = types::task_type(&ir_ret); }
-                    let ir_params: Result<Vec<_>> = params.iter().map(|p| {
-                        lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
-                    }).collect();
-                    let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
-                    // Register the DEFINED function even when a prior forward
-                    // declaration only produced an extern (e.g. `static void f();`
-                    // then `static void f() {...}` in QEMU's qht.c). Otherwise a
-                    // caller lowered before the definition resolves to the extern,
-                    // and the real (uncalled) definition is dropped as dead → the
-                    // extern reference is left undefined.
-                    let already_defined = self.module.functions.iter().any(|f| f.name == *name);
-                    if !already_defined {
-                        let linkage = fn_linkage(storage, *inline, self.static_funcs.contains(name));
-                        self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
-                    }
-                }
-                Decl::TypeDef { names, .. } => {
-                    for (name, ty) in names {
-                        // Register any enums/tagged structs nested in the type body
-                        // (e.g. `typedef struct { enum { A, B } k; } T;`) so their
-                        // constants and tags resolve.
-                        self.register_nested_struct_defs(&ty.ty)?;
-                        if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
-                            // Also register named struct/union by their own name
-                            match &ty.ty {
-                                AstType::Struct(s) if s.name.is_some() && s.fields.is_some() => {
-                                    self.struct_types.insert(s.name.clone().unwrap(), ir_ty.clone());
-                                }
-                                AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
-                                    self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
-                                }
-                                AstType::Enum(e) => {
-                                    self.register_enum(e)?;
-                                    // sic strict enum typing (sic.md §"Enums"): link
-                                    // this typedef alias to the payload-less enum so
-                                    // `typedef enum {…} E;` is checked like `enum E`.
-                                    self.register_c_enum_typedef(name, e);
-                                }
-                                _ => {}
-                            }
-                            self.register_type_name(name.clone(), ir_ty);
-                        }
-                    }
-                }
-                Decl::StructDecl(s) | Decl::Var { base_ty: QualType { ty: AstType::Struct(s), .. }, .. } => {
-                    self.register_struct_type_from_def(s)?;
-                }
-                Decl::UnionDecl(u) | Decl::Var { base_ty: QualType { ty: AstType::Union(u), .. }, .. } => {
-                    self.register_union_type_from_def(u)?;
-                }
-                Decl::EnumDecl(e)
-                | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => {
-                    self.register_enum(e)?;
-                }
-                // sic bitfield (sic.md §"Bitfields"): `bitfield B {…};`.
-                Decl::Var { base_ty: QualType { ty: AstType::Bitfield(b), .. }, .. } => {
-                    self.register_bitfield(b)?;
-                }
-                // sic `module x;` — this unit's exports get mangled `x_sym`.
-                Decl::Module(name, _) => { self.current_module = Some(name.clone()); }
-                // sic `import x;` / `import x.sym [as alias];` — resolve the
-                // module's manifest and register its exports.
-                Decl::Import { module, sym, alias, span } => {
-                    self.resolve_import(module, sym.as_deref(), alias.as_deref(), span)?;
-                }
-                _ => {}
             }
+            Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, is_async, .. } => {
+                // sic generic template: not emitted directly; instantiated per call.
+                if !type_params.is_empty() { return Ok(()); }
+                // Skip unreferenced inline definitions (see `emit_inline`).
+                if *inline && !self.emit_inline.contains(name) { return Ok(()); }
+                // Register any struct/union/enum defined in the return type or
+                // parameters before lowering them.
+                self.register_nested_struct_defs(&ret_ty.ty)?;
+                for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
+                // Function definition — pre-register with empty body for stable FuncRef
+                let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+                // sic async: the signature returns `Task<ret>` (sic.md §"Async").
+                if *is_async { ir_ret = types::task_type(&ir_ret); }
+                let ir_params: Result<Vec<_>> = params.iter().map(|p| {
+                    lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
+                }).collect();
+                let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                // Register the DEFINED function even when a prior forward
+                // declaration only produced an extern (e.g. `static void f();`
+                // then `static void f() {...}` in QEMU's qht.c). Otherwise a
+                // caller lowered before the definition resolves to the extern,
+                // and the real (uncalled) definition is dropped as dead → the
+                // extern reference is left undefined.
+                let already_defined = self.module.functions.iter().any(|f| f.name == *name);
+                if !already_defined {
+                    let linkage = fn_linkage(storage, *inline, self.static_funcs.contains(name));
+                    self.module.add_function(Function::new(name.clone(), sig, vec![], linkage));
+                }
+            }
+            Decl::TypeDef { names, .. } => {
+                for (name, ty) in names {
+                    // Register any enums/tagged structs nested in the type body
+                    // (e.g. `typedef struct { enum { A, B } k; } T;`) so their
+                    // constants and tags resolve.
+                    self.register_nested_struct_defs(&ty.ty)?;
+                    if let Ok(ir_ty) = lower_type(ty, &self.struct_types, self.ptr_size) {
+                        // Also register named struct/union by their own name
+                        match &ty.ty {
+                            AstType::Struct(s) if s.name.is_some() && s.fields.is_some() => {
+                                self.struct_types.insert(s.name.clone().unwrap(), ir_ty.clone());
+                            }
+                            AstType::Union(u) if u.name.is_some() && u.fields.is_some() => {
+                                self.struct_types.insert(u.name.clone().unwrap(), ir_ty.clone());
+                            }
+                            AstType::Enum(e) => {
+                                self.register_enum(e)?;
+                                // sic strict enum typing (sic.md §"Enums"): link
+                                // this typedef alias to the payload-less enum so
+                                // `typedef enum {…} E;` is checked like `enum E`.
+                                self.register_c_enum_typedef(name, e);
+                            }
+                            _ => {}
+                        }
+                        self.register_type_name(name.clone(), ir_ty);
+                    }
+                }
+            }
+            Decl::StructDecl(s) | Decl::Var { base_ty: QualType { ty: AstType::Struct(s), .. }, .. } => {
+                self.register_struct_type_from_def(s)?;
+            }
+            Decl::UnionDecl(u) | Decl::Var { base_ty: QualType { ty: AstType::Union(u), .. }, .. } => {
+                self.register_union_type_from_def(u)?;
+            }
+            Decl::EnumDecl(e)
+            | Decl::Var { base_ty: QualType { ty: AstType::Enum(e), .. }, .. } => {
+                self.register_enum(e)?;
+            }
+            // sic bitfield (sic.md §"Bitfields"): `bitfield B {…};`.
+            Decl::Var { base_ty: QualType { ty: AstType::Bitfield(b), .. }, .. } => {
+                self.register_bitfield(b)?;
+            }
+            // sic `module x;` — this unit's exports get mangled `x_sym`.
+            Decl::Module(name, _) => { self.current_module = Some(name.clone()); }
+            // sic `import x;` / `import x.sym [as alias];` — resolve the
+            // module's manifest and register its exports.
+            Decl::Import { module, sym, alias, span } => {
+                self.resolve_import(module, sym.as_deref(), alias.as_deref(), span)?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -2523,6 +2530,11 @@ impl Lowerer {
     }
 
     fn lower_global_decl(&mut self, decl: &Decl) -> Result<()> {
+        let (file, line, col) = decl_loc(decl);
+        self.lower_global_decl_inner(decl).map_err(|e| locate_error(e, file, line, col))
+    }
+
+    fn lower_global_decl_inner(&mut self, decl: &Decl) -> Result<()> {
         match decl {
             Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, type_params, is_async, .. } => {
                 // sic generic template: instantiated per concrete call, not here.
@@ -4654,5 +4666,28 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         TypeId(_) => {}
         IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | CharLit(_) | Nullptr
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeIdOf(_) => {}
+    }
+}
+
+/// Give an error raised without a location (e.g. "unknown type" from type
+/// lowering) the location of the statement/declaration being lowered. An error
+/// that already has one keeps it.
+pub(crate) fn locate_error(mut e: CompileError, file: Option<String>, line: u32, col: u32) -> CompileError {
+    if e.file.is_none() && e.line == 0 && line > 0 {
+        e.file = file;
+        e.line = line;
+        e.col = col;
+    }
+    e
+}
+
+/// The source location of a declaration, where its span records one:
+/// (file, line, column).
+pub(crate) fn decl_loc(d: &Decl) -> (Option<String>, u32, u32) {
+    match d {
+        Decl::Var { span, .. } | Decl::Func { span, .. } | Decl::TypeDef { span, .. }
+        | Decl::ExprStmt(_, span) | Decl::Import { span, .. } | Decl::Namespace { span, .. } =>
+            (span.file.clone(), span.line, span.col),
+        _ => (None, 0, 0),
     }
 }

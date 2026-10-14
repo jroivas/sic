@@ -968,6 +968,24 @@ else
     bad "std-file-io" "compile/link failed: $(cat err)"
 fi
 
+# ── An error raised without a location ("unknown type") gets the location of
+# the statement / declaration being lowered (it printed a bare `error: …`).
+printf 'int main() {\n    int a = 1;\n    nope::T x;\n    return a;\n}\n' > loc_stmt.sic
+printf 'static int f(nope::T m) { return 1; }\nint main() { return 0; }\n' > loc_param.sic
+printf 'int main() {\n    return 0;\n}\nnope::T g;\n' > loc_global.sic
+printf 'struct S { int a;\n    nope::T b; };\nint main() { return 0; }\n' > loc_field.sic
+printf 'import std;\nint main() {\n    if (1) {\n        std::file::Nope f;\n    }\n    return 0;\n}\n' > loc_module.sic
+for c in "loc_stmt:3:5" "loc_param:1:1" "loc_global:4:1" "loc_field:1:1" "loc_module:4:9"; do
+    f="${c%%:*}"; at="${c#*:}"
+    if "$SIC" $f.sic -I. -o $f 2>err; then
+        bad "error-location-$f" "expected an error, but it compiled"
+    elif grep -q "^$f.sic:$at: error: unknown type" err; then
+        ok "error-location-$f"
+    else
+        bad "error-location-$f" "wrong location (want $f.sic:$at): $(cat err)"
+    fi
+done
+
 # ── art (async runtime module): cooperative coroutines (sic.md §"Async") ────
 # Build art into its own module dir, then a consumer spawns two coroutines that
 # interleave via yield — proving the executor lives entirely in the module.
