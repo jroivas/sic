@@ -1,0 +1,25 @@
+/* Assigning a string literal to an existing `char*` (`p = "0x";`, not an
+ * initializer) stored the address of a `string` descriptor, so `p` read
+ * garbage. Returns 42. */
+#include <string.h>
+static char *pick(int k) {
+    char *p = "";
+    if (k == 1) p = "one";
+    else if (k == 2) p = "two";
+    return p;
+}
+struct H { char *name; };
+int main(int argc, char **argv) {
+    char *p;
+    p = "0x";
+    if (p[0] != '0' || p[1] != 'x' || p[2] != 0) return 1;
+    if (strcmp(pick(1), "one") != 0 || strcmp(pick(2), "two") != 0) return 2;
+    if (pick(0)[0] != 0) return 3;
+    struct H h;
+    h.name = "field";
+    if (strcmp(h.name, "field") != 0) return 4;
+    char *arr[2];
+    arr[1] = "elem";
+    if (strcmp(arr[1], "elem") != 0) return 5;
+    return 42;
+}

@@ -5273,7 +5273,14 @@ impl<'m> FuncCtx<'m> {
             None if self.is_definite_plain_scalar(lhs) => super::func::BfCtx::Forbid,
             None => super::func::BfCtx::Any,
         };
-        let rhs_val = self.lower_expr(rhs)?;
+        // A pointer target is the expected type, as in an initializer, so a string
+        // literal assigned to a `char*` (`p = "x";`) stays the raw pointer instead
+        // of becoming a `string` descriptor whose address is stored.
+        let ptr_target = self.is_sic() && op.is_none() && matches!(lv.ty, Type::Pointer(_));
+        let prev = if ptr_target { self.expected_ty.replace(lv.ty.clone()) } else { None };
+        let rhs_val = self.lower_expr(rhs);
+        if ptr_target { self.expected_ty = prev; }
+        let rhs_val = rhs_val?;
 
         let store_val = if let Some(bin_op) = op {
             // Load current value (bit-field aware), apply op, store result.
