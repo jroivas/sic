@@ -41,8 +41,12 @@ int main() {
 | function | signature | effect |
 |----------|-----------|--------|
 | `Fmt`     | `Fmt(string fmt, …) -> string`  | build a formatted string |
-| `Print`   | `Print(string fmt, …)`          | format and write to stdout |
-| `Println` | `Println(string fmt, …)`        | `Print` plus a trailing newline |
+| `Print`   | `Print(string fmt, …) -> int`   | format and write to stdout |
+| `Println` | `Println(string fmt, …) -> int` | `Print` plus a trailing newline |
+
+`Print`/`Println` write the whole result (retrying short writes) and return 0,
+or -1 if the write fails. `target = fd` writes to another descriptor:
+`std::Println("oops", target = 2)` goes to stderr.
 
 The trailing arguments are collected as a [`va_array`](rtti-and-dynamic.md), so
 you pass as many as the format needs. To print a single value with no formatting,
@@ -63,6 +67,41 @@ std::Print("{name}={val}\n", val = 42, name = "answer");   // answer=42
 std::Println("mix {} and {k}", 7, k = "named");            // mix 7 and named
 ```
 
+`{0}`, `{1}`, … pick a positional argument by index; they don't move the
+counter that plain `{}` uses.
+
+### Format specs
+
+After the argument part, a `:` starts a format spec (Rust/Python style):
+
+```text
+{[arg][:[[fill]align][+][#][0][width][.precision][type]]}
+```
+
+| part | meaning |
+|------|---------|
+| `fill` `align` | `<` left, `>` right, `^` center, padded with `fill` (any one character, default space). Numbers align right by default, everything else left |
+| `+` | show the sign of a non-negative number too |
+| `#` | `0x` / `0b` / `0o` prefix with `x`/`X`, `b`, `o` |
+| `0` | pad a number with zeros after its sign/prefix |
+| `width` | minimum width in characters (code points, not bytes) |
+| `.precision` | floats: digits after the point; strings: at most this many characters |
+| `type` | integers: `x` `X` `b` `o` (a negative value prints its two's complement at its own width); floats: `e` `E` `f` `g` |
+
+```sic
+std::Println("[{:>6}] [{:<6}] [{:^6}] [{:*^7}]", 42, "ab", "ab", 1);
+                                        // [    42] [ab    ] [  ab  ] [***1***]
+std::Println("{:x} {:#X} {:#b} {:#010x}", 255, 255, 5, 255);
+                                        // ff 0xFF 0b101 0x000000ff
+std::Println("{:.3} {:08.2} {:+} {:.2e}", 3.14159, -2.5, 7, 1234.5);
+                                        // 3.142 -0002.50 +7 1.23e+03
+std::Println("{:.3} {name:>5}", "abcdef", name = "x");   // abc     x
+```
+
+Without a spec a float prints as `%g` (`3.14159`), an integer in decimal. An
+unknown type letter is ignored. The output is built in one growing buffer, so
+`Fmt` is linear in the length of its result.
+
 ## File I/O
 
 The file API lives in `std::file`. Every call returns a `std::file::Status`
@@ -76,7 +115,7 @@ int main()
     match (std::file::Open("hello.txt", std::file::OpenMode::Read)) {
         std::file::Status::Opened(f): {
             std::buffer::Buffer *buf = std::buffer::Create(4096);
-            match (std::file::Read(f, 4096, buf)) {
+            match (std::file::ReadAll(f, buf)) {
                 std::file::Status::Read(n): std::Println("read {} bytes", n);
                 _: std::Println("read failed");
             }
@@ -90,20 +129,59 @@ int main()
 }
 ```
 
+| Mode | Opens |
+|---|---|
+| `OpenMode::Read` | for reading; the file must exist |
+| `OpenMode::Write` | for writing; created (mode 0644) if missing, truncated if not |
+| `OpenMode::RW` | for reading and writing; the file must exist |
+| `OpenMode::Append` | for writing at the end; created if missing |
+
 | Call | Result on success |
 |---|---|
-| `Open(name, OpenMode::Read / Write / RW)` | `Status::Opened(File*)` |
-| `Read(f, size, buf)` / `ReadFrom(f, offset, size, buf)` | `Status::Read(bytes)` |
-| `Write(f, buf)` / `WriteTo(f, offset, buf)` | `Status::Wrote(bytes)` |
+| `Open(name, mode)` | `Status::Opened(File*)` |
+| `Read(f, size, buf)` / `ReadFrom(f, offset, size, buf)` | `Status::Read(bytes)` — up to `size` (and the buffer's capacity), replacing `buf`'s contents; `Read(0)` at end of file |
+| `ReadAll(f, buf)` | `Status::Read(bytes)` — everything to end of file, growing `buf` |
+| `Write(f, buf)` / `WriteTo(f, offset, buf)` | `Status::Wrote(bytes)` — all of `buf`'s contents |
+| `WriteString(f, s)` | `Status::Wrote(bytes)` |
+| `Seek(f, offset)` | `Status::Success` |
 | `Size(f)` | `Status::Size(bytes)` |
 | `Close(f)` | `Status::Success` (also frees `f`) |
-| `Eof(f)` | `bool` |
+| `Eof(f)` | `bool` — the last read reached end of file |
 | `Stdin()` / `Stdout()` / `Stderr()` | the standard streams as `File*` |
 
-Failures are other `Status` variants: `NotFound`, `InvalidObject`, `IO`,
-`InvalidFileHandle`, `ReadError`, `WriteError`, `OutOfMemory`, `InvalidOffset`.
-`File` and `Buffer` are managed structs that release themselves (`del`/scope
-exit) across the module boundary.
+Reads and writes retry after a signal (EINTR), and writes retry short writes,
+so `Wrote(n)` always means everything was written. Failures are other
+`Status` variants: `NotFound`, `PermissionDenied`, `IsDirectory`,
+`InvalidObject` (a NULL file or buffer), `IO`, `InvalidFileHandle`,
+`ReadError`, `WriteError`, `OutOfMemory`, `InvalidOffset` (also: seeking a
+stream), and `Error(errno)` for anything else. The standard streams are never
+closed or freed: `Close(Stdout())` is a no-op. `File` and `Buffer` are managed
+structs that release themselves (`del`/scope exit) across the module boundary.
+
+### Byte buffers
+
+A `std::buffer::Buffer` has `capacity` bytes of storage, of which the first
+`size` are its contents; `size <= capacity` always holds.
+
+| Call | Effect |
+|---|---|
+| `Create(capacity)` | a new empty buffer (`NULL` if out of memory) |
+| `SetCapacity(b, capacity)` | reallocate the storage, keeping the contents; `false` if `capacity < size` |
+| `SetSize(b, size)` | set how many bytes are contents; `false` if `size > capacity` |
+| `Value(b)` | the contents as a `string` view (valid while `b` lives) |
+| `Data(b)` | the raw bytes |
+
+Because of the invariant, growing is capacity first, then size; shrinking is
+size first, then capacity. A failing call leaves the buffer unchanged:
+
+```sic
+std::buffer::Buffer *b = std::buffer::Create(16);
+std::buffer::SetCapacity(b, 8192);     // 1. grow the storage
+std::buffer::SetSize(b, 6000);         //    then the contents
+std::buffer::SetSize(b, 100);          // 2. shrink the contents
+std::buffer::SetCapacity(b, 100);      //    then the storage
+std::buffer::SetCapacity(b, 50);       // false: below the size
+```
 
 ## Threads
 
@@ -239,11 +317,15 @@ isize n = std::net::Read(&a, buf, 64);              // 0 at EOF
 Any type carries enough runtime type information for `std` to render it:
 
 - `string`, `char*` — the text
-- `int` / `uint` of any width, `bool` (`true`/`false`)
+- `int` / `uint` of any width (decimal, hex, binary, octal), `bool` (`true`/`false`)
 - `f32`/`f64`/`f80`
 - `bigint` — full decimal
 - `fixed` — exact decimal
 - pointers — address
+
+Width, fill and alignment apply to all of them; zero padding to the numbers.
+An enum prints its variant name through `.str` (`std::Println("{}", st.str)`
+→ `file::Status::NotFound`).
 
 This works because `std` dispatches on each argument's type with
 [`match (type(x))`](rtti-and-dynamic.md#match-typex--dispatch-by-kind) — the same
@@ -251,23 +333,26 @@ mechanism available to your own code.
 
 ## How it's written
 
-The whole library is about 130 lines of SIC (`siccomp/lib/std/std.sic`). Its core
-is a `match (type(x))` that turns one boxed argument into a `string`, borrowing
-string/`char*` arguments (no copy) and formatting the rest into a local buffer
-(copied out on return automatically — see
+`Fmt` is plain SIC (`siccomp/lib/std/std.sic`). Its core is a
+`match (type(x))` that renders one boxed argument, borrowing string/`char*`
+arguments (no copy) and formatting the rest into a local buffer (copied out on
+return automatically — see
 [copy-on-escape](memory-and-ownership.md#copy-on-escape)):
 
 ```sic
-static string arg_str(any x) {
+static string arg_str(any x, bool plus, bool alt, bool has_prec, u64 prec, char ty,
+                      u64 *lead, bool *numeric) {
     match (type(x)) {
-        string: return (string)x;                    // borrow — no content copy
-        cstr:   { string s = (char *)x; return s; }
-        bigint: return ((bigint)x).str;
-        fixed:  return ((fixed)x).str;
-        bool:   { if ((bool)x) return "true"; return "false"; }
-        int:  { char b[32]; snprintf(b, 32, "%lld", (long long)(i64)x); return b; }
-        // … uint, float, ptr …
-        _:      return "<?>";
+        string: { … return (string)x; }                 // borrow — no content copy
+        bigint: { string s = ((bigint)x).str; … return s; }
+        int: {
+            i64 v = (i64)x;
+            …
+            return int_str(neg, mag, (u64)type(x).size * 8, plus, alt, ty, lead);
+        }
+        float:  return float_str((double)x, plus, has_prec, prec, ty, lead);
+        // … cstr, bool, fixed, uint, ptr …
+        _: { *numeric = false; return "<?>"; }
     }
 }
 ```
