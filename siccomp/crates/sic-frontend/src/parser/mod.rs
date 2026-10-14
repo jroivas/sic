@@ -1876,6 +1876,33 @@ impl Parser {
 
     /// Whether the current `TypeName`/typedef token begins a declaration rather
     /// than being a variable that shadows the type (see `starts_decl_specifier`).
+    /// At `at`: `( *… name )` or `( *… name [`, whose closing `)` is followed by
+    /// `(`, `[`, `=`, `;` or `,` — the parenthesized declarator of a function
+    /// pointer / pointer to array, as in `u32 (*fns[4])(u32, u32) = {…};`.
+    fn paren_ptr_declarator_at(&self, at: usize) -> bool {
+        let kind = |i: usize| self.tokens.get(i).map(|t| t.kind);
+        if kind(at) != Some(TokenKind::LParen) { return false; }
+        let mut i = at + 1;
+        if kind(i) != Some(TokenKind::Star) { return false; }
+        while kind(i) == Some(TokenKind::Star) { i += 1; }
+        if kind(i) != Some(TokenKind::Ident) { return false; }
+        i += 1;
+        if !matches!(kind(i), Some(TokenKind::RParen) | Some(TokenKind::LBracket)) { return false; }
+        // Skip to the `)` matching the opening one.
+        let mut depth = 1usize;
+        while depth > 0 {
+            match kind(i) {
+                Some(TokenKind::LParen) => depth += 1,
+                Some(TokenKind::RParen) => depth -= 1,
+                None => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        matches!(kind(i), Some(TokenKind::LParen) | Some(TokenKind::LBracket)
+            | Some(TokenKind::Eq) | Some(TokenKind::Semi) | Some(TokenKind::Comma))
+    }
+
     fn typename_starts_decl(&self) -> bool {
         let is_typename = self.peek_kind() == TokenKind::TypeName
             || (self.peek_kind() == TokenKind::Ident
@@ -1890,6 +1917,11 @@ impl Parser {
             return false;
         }
         if self.lang == Lang::Sic {
+            // `T (*name)(…)` / `T (*name[N])(…)`: a parenthesized pointer
+            // declarator (function pointer, pointer to array) declares.
+            if self.paren_ptr_declarator_at(self.pos + 1) {
+                return true;
+            }
             // A `(` after the typename is a function call or cast expression,
             // not a declaration start (`if let` pattern).  Also exclude
             // assignment/member operators (value context, not a declaration).

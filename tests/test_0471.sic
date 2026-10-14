@@ -1,0 +1,21 @@
+/* After a SIC type name (`u32`), `(` was always taken as a call/cast
+ * expression, so a parenthesized pointer declarator — a function pointer or an
+ * array of them — failed to parse ("unexpected token LBrace"). Returns 42. */
+u32 add(u32 a, u32 b) { return a + b; }
+u32 sub(u32 a, u32 b) { return a - b; }
+u32 (*pick(int k))(u32, u32) { return k ? add : sub; }
+int main() {
+    u32 (*fns[2])(u32, u32) = {add, sub};
+    u32 (*fp)(u32, u32) = add;
+    u32 (*later)(u32, u32);
+    later = sub;
+    u32 (**pp)(u32, u32) = &fp;
+    i32 (*arr)[3];
+    i32 three[3] = {1, 2, 3};
+    arr = &three;
+    if (fns[1](10, 4) != 6 || fp(1, 2) != 3 || later(5, 1) != 4) return 1;
+    if ((*pp)(20, 20) != 40 || (*arr)[2] != 3) return 2;
+    if (pick(1)(1, 1) != 2) return 3;
+    u32 v = 7;
+    return (int)fns[0](v, 35);
+}
