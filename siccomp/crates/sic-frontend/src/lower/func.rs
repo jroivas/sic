@@ -6138,6 +6138,15 @@ fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut S
         }
         Stmt::Label(_, inner, _) => collect_cases_in(inner, enum_consts, out, group),
         Stmt::Default(inner, _)  => collect_cases_in(inner, enum_consts, out, group),
+        // A label may sit inside any nested statement of the switch body, not
+        // only at its top (Duff's device: cases inside a `do … while`). A nested
+        // `switch` owns its own labels, so it is not entered.
+        Stmt::If { then, else_, .. } => {
+            collect_cases_in(then, enum_consts, out, group);
+            if let Some(e) = else_ { collect_cases_in(e, enum_consts, out, group); }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } =>
+            collect_cases_in(body, enum_consts, out, group),
         _ => {}
     }
 }
