@@ -698,7 +698,7 @@ pub struct TranslationUnit {
 /// body is its own function and is not entered).
 fn expr_stmts<'a>(e: &'a Expr, out: &mut Vec<&'a Stmt>) {
     use ExprKind::*;
-    let mut go = |x: &'a Expr, out: &mut Vec<&'a Stmt>| expr_stmts(x, out);
+    let go = |x: &'a Expr, out: &mut Vec<&'a Stmt>| expr_stmts(x, out);
     match &e.kind {
         StmtExpr(v) | Guard { body: v, .. } => out.extend(v.iter()),
         BinOp { lhs, rhs, .. } | Assign { lhs, rhs, .. } | Swap { lhs, rhs } | Comma(lhs, rhs)

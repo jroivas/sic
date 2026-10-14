@@ -1048,6 +1048,18 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::Cast { ty, expr: inner } => {
                 let target = self.lower_type(ty)?;
+                // `(struct S)s` on a value of that same struct/union type (a GNU
+                // extension): the value itself (aggregates flow by address). It
+                // was treated as a scalar conversion and crashed.
+                if matches!(target, Type::Struct(_) | Type::Union(_)) {
+                    let rt = super::types::resolve_aggregate(&target, &self.lowerer.struct_types);
+                    if let Ok(src) = self.infer_expr_type(inner) {
+                        let rs = super::types::resolve_aggregate(&src, &self.lowerer.struct_types);
+                        if rs == rt {
+                            return self.lower_aggregate_ptr(inner);
+                        }
+                    }
+                }
                 // sic shorthand context (sic.md §"Bitfields", §"Enums"): a cast TO a
                 // bitfield/enum anchors that type for a bare member operand
                 // (`(Perm)x` / `(enum Color)y`); a cast to anything else clears it,
