@@ -2886,6 +2886,14 @@ impl Lowerer {
                 return self.build_global_init(&d2, ir_ty);
             }
         }
+        // `struct S g = (struct S){1, 2};` (parens or not): initialized as by the
+        // literal's own brace list.
+        if matches!(&*ir_ty, Type::Struct(_) | Type::Union(_)) && !types::is_sic_string(ir_ty) {
+            if let Some(Initializer::Expr(Expr { kind: ExprKind::CompoundLiteral { init: items, .. }, .. })) = &d.init {
+                let d2 = Declarator { init: Some(Initializer::List(items.clone())), ..d.clone() };
+                return self.build_global_init(&d2, ir_ty);
+            }
+        }
         match &d.init {
             // sic `string g = "..."` at file scope: a `{ data, size }` slice
             // descriptor — pointer reloc to the cstring + the byte length.
@@ -3148,6 +3156,16 @@ impl Lowerer {
             buf[base + ps..base + ps * 2].copy_from_slice(&size_le[..ps]);
             relocs.push((base, RelocTarget::Global(gref, 0)));
             return true;
+        }
+        // An aggregate initialized by a compound literal of its type
+        // (`struct S g = (struct S){1, 2};`, a `(struct S){…}` member value):
+        // a constant when its own brace list is.
+        if let Initializer::Expr(Expr { kind: ExprKind::CompoundLiteral { init: items, .. }, .. }) = init {
+            if matches!(&ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+                let braced = self.brace_init(&ty, &Initializer::List(items.clone()),
+                    &|e, t| self.global_aggregate_value(e, t));
+                return self.serialize_const(&braced, &ty, buf, base, relocs);
+            }
         }
         match &ty {
             Type::Struct(_) | Type::Union(_) | Type::Array { .. } => {
