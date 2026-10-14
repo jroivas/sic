@@ -694,8 +694,75 @@ pub struct TranslationUnit {
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────
 
-/// The statements directly nested in `s` (not through expressions).
+/// The statements of GNU statement expressions `({ … })` inside `e` (a lambda
+/// body is its own function and is not entered).
+fn expr_stmts<'a>(e: &'a Expr, out: &mut Vec<&'a Stmt>) {
+    use ExprKind::*;
+    let mut go = |x: &'a Expr, out: &mut Vec<&'a Stmt>| expr_stmts(x, out);
+    match &e.kind {
+        StmtExpr(v) | Guard { body: v, .. } => out.extend(v.iter()),
+        BinOp { lhs, rhs, .. } | Assign { lhs, rhs, .. } | Swap { lhs, rhs } | Comma(lhs, rhs)
+        | Index { base: lhs, index: rhs } | VaStart { list: lhs, last: rhs } => { go(lhs, out); go(rhs, out); }
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } => {
+            go(cond, out); go(then, out); go(else_, out);
+        }
+        Elvis { cond, else_ } => { go(cond, out); go(else_, out); }
+        Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. } | Ref { expr, .. }
+        | Cast { expr, .. } | SizeofExpr(expr) | AlignofExpr(expr) | Await(expr) | TypeId(expr)
+        | Field { base: expr, .. } | Arrow { base: expr, .. } | OptField { base: expr, .. }
+        | NamedArg { value: expr, .. } | VaArg { list: expr, .. } | VaEnd { list: expr } => go(expr, out),
+        Call { func, args } => { go(func, out); for a in args { go(a, out); } }
+        New { args, .. } | TupleExpr(args) => { for a in args { go(a, out); } }
+        Slice { base, lo, hi } => {
+            go(base, out);
+            if let Some(x) = lo { go(x, out); }
+            if let Some(x) = hi { go(x, out); }
+        }
+        Match { scrutinee, arms } => { go(scrutinee, out); out.extend(arms.iter().map(|a| a.body.as_ref())); }
+        Generic { controlling, assocs } => { go(controlling, out); for (_, a) in assocs { go(a, out); } }
+        CompoundLiteral { init, .. } => { for it in init { init_stmts(&it.init, out); } }
+        _ => {}
+    }
+}
+
+fn init_stmts<'a>(i: &'a Initializer, out: &mut Vec<&'a Stmt>) {
+    match i {
+        Initializer::Expr(e) => expr_stmts(e, out),
+        Initializer::List(items) => { for it in items { init_stmts(&it.init, out); } }
+    }
+}
+
+/// The statements nested in `s`: directly, and inside its expressions'
+/// statement expressions.
 fn child_stmts(s: &Stmt) -> Vec<&Stmt> {
+    let mut v = direct_child_stmts(s);
+    let mut ex: Vec<&Expr> = Vec::new();
+    match s {
+        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => ex.push(e),
+        Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. }
+        | Stmt::Guard { cond, .. } => ex.push(cond),
+        Stmt::Switch { val, .. } => ex.push(val),
+        Stmt::Match { scrutinee, .. } => ex.push(scrutinee),
+        Stmt::ForEach { iterable, .. } => ex.push(iterable),
+        Stmt::For { init, cond, post, .. } => {
+            if let Some(ForInit::Expr(e)) = init { ex.push(e); }
+            if let Some(Some(ForInit::Decl(Decl::Var { declarators, .. }))) = Some(init) {
+                for d in declarators { if let Some(i) = &d.init { init_stmts(i, &mut v); } }
+            }
+            if let Some(e) = cond { ex.push(e); }
+            if let Some(e) = post { ex.push(e); }
+        }
+        Stmt::Decl(Decl::Var { declarators, .. }) => {
+            for d in declarators { if let Some(i) = &d.init { init_stmts(i, &mut v); } }
+        }
+        _ => {}
+    }
+    for e in ex { expr_stmts(e, &mut v); }
+    v
+}
+
+/// The statements directly nested in `s` (not through expressions).
+fn direct_child_stmts(s: &Stmt) -> Vec<&Stmt> {
     match s {
         Stmt::Block(v, _) | Stmt::Unsafe(v, _) => v.iter().collect(),
         Stmt::If { then, else_, .. } => {
