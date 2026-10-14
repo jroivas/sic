@@ -1,0 +1,16 @@
+/* A function definition whose return type is scope-qualified (`box::Status
+ * run(…) { … }`) was parsed as a top-level expression ("unexpected token '{' at
+ * top level" / "expected RParen") — at file scope and in a namespace body.
+ * Returns 42. */
+namespace box {
+    enum Mode { A, B };
+    enum Status { Ok, Bad(int) };
+    box::Status run(Mode m) { if (m == Mode::A) return box::Status::Ok; return box::Status::Bad(40); }
+    box::Status *none(void) { return NULL; }
+}
+box::Status twice(box::Mode m) { return box::run(m); }
+int main() {
+    if (box::none() != NULL) return 1;
+    box::Status s = twice(box::Mode::B);
+    match (s) { box::Status::Bad(x): return x + 2; _: return 2; }
+}

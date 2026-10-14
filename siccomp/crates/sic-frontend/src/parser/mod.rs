@@ -450,6 +450,10 @@ impl Parser {
         if self.peek_kind() == TokenKind::Ident && self.typedefs.contains(self.peek().text.as_str()) {
             return false;
         }
+        // sic scope-qualified type then a declarator name — `ns::Status run(…)`,
+        // `std::file::Status *p;` — is a declaration (a function definition with a
+        // qualified return type was parsed as a top-level expression).
+        if self.qualified_scope_decl() { return false; }
         // sic `private struct/union/enum` is a declaration (sic.md §"Namespace").
         if self.lang == Lang::Sic && self.peek_kind() == TokenKind::Ident
             && self.peek().text == "private"
