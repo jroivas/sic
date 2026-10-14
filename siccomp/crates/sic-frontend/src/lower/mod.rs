@@ -3,6 +3,7 @@ mod expr;
 mod func;
 mod borrowck;
 mod ns_resolve;
+mod init_norm;
 
 use std::collections::{HashMap, HashSet};
 use crate::ast::*;
@@ -2992,7 +2993,11 @@ impl Lowerer {
                     }
                 }
             }
-            Some(Initializer::List(items)) => {
+            Some(Initializer::List(_)) => {
+                // C brace elision: work on the fully braced form.
+                let braced = self.brace_init(ir_ty, d.init.as_ref().unwrap(),
+                    &|e, t| self.global_aggregate_value(e, t));
+                let Initializer::List(items) = &braced else { unreachable!() };
                 // Infer an unspecified top-level array length from the brace list.
                 // Designated initializers (`[i] = ...`) can place elements past the
                 // positional count, so the length is the highest index reached, not
@@ -3007,7 +3012,7 @@ impl Lowerer {
                 self.size_flexible_array_member(ir_ty, items);
                 let total = ir_ty.size_of(self.ptr_size) as usize;
                 let ty_snapshot = ir_ty.clone();
-                let init = d.init.as_ref().unwrap();
+                let init = &braced;
                 let mut buf = vec![0u8; total.max(1)];
                 let mut relocs = Vec::new();
                 if self.serialize_const(init, &ty_snapshot, &mut buf, 0, &mut relocs) {
@@ -3029,9 +3034,6 @@ impl Lowerer {
         }
     }
 
-    /// Recursively serialize `init` for a value of `ty` into `buf[base..]`,
-    /// collecting pointer relocations for embedded symbol addresses. Returns
-    /// false if some component isn't a translation-time constant.
     /// The value of a constant floating-point initializer: float/decimal
     /// literals, integer constant expressions (C's integer arithmetic first:
     /// `10 / 4` is 2), and `+ - * /` / unary minus / casts over them with at
@@ -3073,6 +3075,46 @@ impl Lowerer {
         }
     }
 
+    /// `t` takes part in C brace elision: an array, or a C struct/union — not a
+    /// sic built-in carried as a struct (`string`, `any`, a tagged enum, …).
+    pub(crate) fn plain_aggregate(&self, t: &Type) -> bool {
+        match t {
+            Type::Array { .. } | Type::Union(_) => true,
+            Type::Struct(st) => !(types::is_sic_string(t) || types::is_any(t) || types::is_va_array(t)
+                || types::is_fixed(t) || types::is_type_info(t) || types::is_task(t)
+                || types::is_tuple(t) || types::is_closure(t) || types::is_weak_ref(t)
+                || st.name.as_ref().map_or(false, |n| self.enum_defs.contains_key(n))),
+            _ => false,
+        }
+    }
+
+    /// Fully brace an initializer for `ty` (C brace elision); `is_aggregate_value`
+    /// says whether an expression is a whole aggregate value for its slot.
+    pub(crate) fn brace_init(&self, ty: &Type, init: &Initializer,
+                             is_aggregate_value: &dyn Fn(&Expr, &Type) -> bool) -> Initializer {
+        let Initializer::List(items) = init else { return init.clone() };
+        let plain = |t: &Type| self.plain_aggregate(t);
+        let n = init_norm::InitNorm {
+            named: &self.struct_types, enum_consts: &self.enum_consts,
+            plain_aggregate: &plain, is_aggregate_value,
+        };
+        Initializer::List(n.braced(ty, items))
+    }
+
+    /// A global initializer's whole-aggregate values: a compound literal or a
+    /// global aggregate variable.
+    fn global_aggregate_value(&self, e: &Expr, _ty: &Type) -> bool {
+        match &e.kind {
+            ExprKind::CompoundLiteral { .. } => true,
+            ExprKind::Ident(n) => self.globals_map.get(n)
+                .map_or(false, |(t, _)| matches!(t, Type::Struct(_) | Type::Union(_) | Type::Array { .. })),
+            _ => false,
+        }
+    }
+
+    /// Recursively serialize `init` for a value of `ty` into `buf[base..]`,
+    /// collecting pointer relocations for embedded symbol addresses. Returns
+    /// false if some component isn't a translation-time constant.
     fn serialize_const(
         &mut self,
         init: &Initializer,

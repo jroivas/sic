@@ -2341,7 +2341,12 @@ impl<'m> FuncCtx<'m> {
                             {
                                 super::string_brace_len(items).unwrap()
                             }
-                            Some(Initializer::List(items)) => items.len(),
+                            Some(init @ Initializer::List(items)) => match self.brace_init(&ty, init) {
+                                // Brace elision: count the braced elements
+                                // (`int a[][2] = {1, 2, 3, 4}` has 2).
+                                Some(Initializer::List(b)) => self.lowerer.infer_array_len(&b),
+                                _ => items.len(),
+                            },
                             Some(Initializer::Expr(e)) => match &e.kind {
                                 ExprKind::StringLit(s) => s.len() + 1, // + NUL terminator
                                 _ => 0,
@@ -2661,12 +2666,31 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_initializer(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
+        // C brace elision: lower the fully braced form.
+        let braced = self.brace_init(ty, init);
+        let init = braced.as_ref().unwrap_or(init);
         // Expose the target type so a generic constructor on the RHS
         // (`Option<int> x = Option::Some(5)`) resolves to its monomorph.
         let prev = self.expected_ty.replace(ty.clone());
         let r = self.lower_initializer_inner(init, ptr, ty);
         self.expected_ty = prev;
         r
+    }
+
+    /// The fully braced form of a brace list for an aggregate `ty` (C brace
+    /// elision), or None when there is nothing to rewrite.
+    pub(crate) fn brace_init(&self, ty: &Type, init: &Initializer) -> Option<Initializer> {
+        if !matches!(init, Initializer::List(_)) { return None; }
+        let rty = super::types::resolve_aggregate(ty, &self.lowerer.struct_types);
+        if !self.lowerer.plain_aggregate(&rty) { return None; }
+        // A whole aggregate value for its slot: a struct/union/array expression
+        // (a string literal is a `char[]` source only, decided by the slot).
+        let aggregate_value = |e: &Expr, _t: &Type| {
+            !matches!(&e.kind, ExprKind::StringLit(_))
+                && matches!(self.infer_expr_type(e),
+                    Ok(Type::Struct(_) | Type::Union(_) | Type::Array { .. }))
+        };
+        Some(self.lowerer.brace_init(&rty, init, &aggregate_value))
     }
 
     fn lower_initializer_inner(&mut self, init: &Initializer, ptr: Val, ty: &Type) -> Result<()> {
