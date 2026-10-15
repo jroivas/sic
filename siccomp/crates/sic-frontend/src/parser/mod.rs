@@ -62,6 +62,9 @@ pub struct Parser {
     /// parenthesized variable, not a cast — QEMU's `vaddr`/`entry`/… parameters
     /// shadow the `typedef uintptr_t vaddr;` etc.
     func_vars: HashSet<String>,
+    /// Further declarations from one external declaration (`int f(int), g(int),
+    /// a;` declares two functions and a variable): returned after it.
+    pending_decls: Vec<Decl>,
 }
 
 impl Parser {
@@ -94,7 +97,7 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new() }
+        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new() }
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -207,6 +210,7 @@ impl Parser {
             let before = self.pos;
             let d = self.parse_external_decl()?;
             decls.push(d);
+            decls.append(&mut self.pending_decls);
             // Never spin: a top-level declaration that consumed no tokens would
             // otherwise loop forever (e.g. an unparseable construct that yields an
             // empty expression-statement). Fail with a diagnostic instead.
@@ -256,6 +260,7 @@ impl Parser {
                 if self.eat(TokenKind::Semi) { continue; }
                 let before = self.pos;
                 decls.push(self.parse_external_decl()?);
+                decls.append(&mut self.pending_decls);
                 if self.pos == before {
                     let t = self.peek().clone();
                     return Err(CompileError::at(
@@ -390,7 +395,12 @@ impl Parser {
                     body: Some(body), storage, inline: is_inline, constructor: ctor, is_async: std::mem::take(&mut self.pending_async), span: sp,
                 });
             } else {
-                // Prototype
+                // Prototype — possibly the first of several declarators sharing
+                // the specifiers (`int f(int a), g(int a), a;`).
+                while self.eat(TokenKind::Comma) {
+                    let more = self.parse_more_declarator(&base_ty, &storage, is_inline, sp.clone())?;
+                    self.pending_decls.push(more);
+                }
                 self.eat(TokenKind::Semi);
                 self.pending_type_params.clear();
                 return Ok(Decl::Func {
@@ -867,6 +877,28 @@ impl Parser {
         let variant = segs.pop().unwrap();
         let enum_name = segs.join("::");
         Ok(Expr::new(ExprKind::EnumVariant { enum_name, variant }, sp))
+    }
+
+    /// One further declarator after a function prototype in the same
+    /// declaration: another prototype, or a variable (with an initializer).
+    fn parse_more_declarator(&mut self, base_ty: &QualType, storage: &Option<StorageClass>,
+                             is_inline: bool, sp: crate::lexer::Span) -> Result<Decl> {
+        self.skip_attributes();
+        let (name, ty) = self.parse_declarator(base_ty.clone())?;
+        self.skip_decl_tail();
+        if let AstType::Function { params, variadic, ret } = ty.ty.clone() {
+            return Ok(Decl::Func {
+                name, ret_ty: *ret, params, variadic,
+                type_params: Vec::new(), template_src: None,
+                body: None, storage: storage.clone(), inline: is_inline, constructor: None, is_async: false, span: sp,
+            });
+        }
+        let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
+        Ok(Decl::Var {
+            base_ty: base_ty.clone(),
+            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, span: sp.clone() }],
+            weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp,
+        })
     }
 
     /// The run of adjacent string literals starting here holds a wide one.
