@@ -1,0 +1,11 @@
+// The end of a `##` paste result is a padding boundary: a pasted token
+// followed by the next token of the same replacement list must not lex as one
+// (c-testsuite 00202: `Q(+,)3` is `+ +3`, not `++3`).
+#define Q(A,B) A ## B+
+#define CAT(a,b) a##b
+#define F(x) [x]
+jim = 60 Q(+,)3;
+CAT(-,-)
+CAT(<,<)=
+CAT(1,e)+5
+CAT(F,)(3)

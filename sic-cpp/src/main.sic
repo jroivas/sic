@@ -1172,6 +1172,7 @@ list<string> paste_tokens(list<string> t) {
         if (t[i] == "##") { i++; continue; }          // stray leading `##`
         string acc = t[i];
         i32 j = i + 1;
+        i32 pasted = 0;
         while (true) {
             i32 k = j;
             while (k < t.length && t[k] == " ") k++;
@@ -1186,8 +1187,13 @@ list<string> paste_tokens(list<string> t) {
                 k++;
             }
             j = k;
+            pasted = 1;
         }
         if (acc != "\x06") out.add(acc);   // a placemarker leaves nothing behind
+        // The end of a paste result is a padding boundary, as in gcc: in
+        // `Q(+,)3` with `Q(A,B) A##B+`, the pasted `+` and the body's `+` must
+        // stay two tokens (`+ +3`), not lex as `++`.
+        if (pasted) out.add("\x03");
         i = j;
     }
     return out;
