@@ -30,20 +30,35 @@
 //!    as a null-pointer crash whenever inlining into a function with fat-pointer
 //!    bounds checks. See `do_inline` step 5/6.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use sic_ir::{Module, Function, BasicBlock, Instr, Terminator, Val, ValId, BlockId, Type};
 use super::pass::IrPass;
 
 pub struct Inline {
     threshold: usize,
     aggressive: bool,
+    /// Self-recursive functions already expanded into themselves (by name): the
+    /// pass manager reruns passes to a fixpoint, and each rerun would otherwise
+    /// unroll the recursion one level deeper.
+    self_done: HashSet<String>,
 }
 
 impl Inline {
     pub fn new(threshold: usize, aggressive: bool) -> Self {
-        Inline { threshold, aggressive }
+        Inline { threshold, aggressive, self_done: HashSet::new() }
     }
 }
+
+/// Self-inlining of a small, directly self-recursive function (gcc does the
+/// same to fib): splice copies of its ORIGINAL body into its own recursive call
+/// sites, up to this many copies, each call level saved being a frame.
+const SELF_INLINE_COPIES: usize = 14;
+/// Breadth-first expansion rounds (each expands every site present before it).
+const SELF_INLINE_ROUNDS: usize = 3;
+/// Only for a function this small (post-mem2reg cost), and while the expanded
+/// body stays under this size.
+const SELF_INLINE_MAX_COST: usize = 40;
+const SELF_INLINE_MAX_GROWN: usize = 800;
 
 /// Per-function inlinability summary, computed once per pass run.
 struct FnInfo {
@@ -54,6 +69,8 @@ struct FnInfo {
     size: usize,
     /// Number of `Ret(Some(_))` — a value-returning call needs at least one.
     ret_val_count: usize,
+    /// Directly self-recursive, and otherwise eligible (self-inlining candidate).
+    self_recursive: bool,
 }
 
 /// The parameter-value sentinel base used by the frontend: parameter `i` of a
@@ -119,6 +136,7 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // a candidate. Scan for the disqualifiers below.
     let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && !is_aggregate(&f.sig.ret) && !f.noinline;
     let mut ret_val_count = 0;
+    let mut self_rec = false;
     if eligible {
         'scan: for b in &f.blocks {
             for ins in &b.instrs {
@@ -130,7 +148,7 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
                     // Directly self-recursive: inlining it into itself never
                     // terminates (and into others it just re-expands to the caps).
                     Instr::Call { func, .. } if !func.is_extern() && func.index() == self_idx => {
-                        eligible = false; break 'scan;
+                        self_rec = true;
                     }
                     _ => {}
                 }
@@ -138,7 +156,12 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
             if let Terminator::Ret(Some(_)) = &b.terminator { ret_val_count += 1; }
         }
     }
-    FnInfo { eligible, size: inline_cost(f), ret_val_count }
+    // Directly self-recursive: inlining it into itself never terminates (and into
+    // others it just re-expands to the caps) — only the bounded self-inlining
+    // step expands it.
+    let self_recursive = eligible && self_rec;
+    if self_rec { eligible = false; }
+    FnInfo { eligible, size: inline_cost(f), ret_val_count, self_recursive }
 }
 
 impl IrPass for Inline {
@@ -150,6 +173,9 @@ impl IrPass for Inline {
         let mut changed = false;
         for caller in 0..n {
             changed |= self.inline_into(m, caller, &info);
+        }
+        for f in 0..n {
+            changed |= self.self_inline(m, f, &info);
         }
         changed
     }
@@ -192,15 +218,67 @@ impl Inline {
         changed
     }
 
+    /// Expand a small self-recursive function into itself: splice its original
+    /// body at its own call sites, a bounded number of times, once per function.
+    fn self_inline(&mut self, m: &mut Module, f: usize, info: &[FnInfo]) -> bool {
+        let fi = &info[f];
+        if !fi.self_recursive || fi.size > SELF_INLINE_MAX_COST || fi.ret_val_count == 0 { return false; }
+        if !self.self_done.insert(m.functions[f].name.clone()) { return false; }
+        let snapshot = m.functions[f].clone();
+        // The recursive call sites of the current body, by result value.
+        let sites = |func: &Function| -> Vec<ValId> {
+            let mut v = Vec::new();
+            for b in &func.blocks {
+                for ins in &b.instrs {
+                    if let Instr::Call { dest: Some(d), func: callee, args, .. } = ins {
+                        if !callee.is_extern() && callee.index() == f && args.len() == snapshot.params.len() {
+                            v.push(*d);
+                        }
+                    }
+                }
+            }
+            v
+        };
+        // Breadth-first: each round expands the sites that existed before it, so
+        // the recursion tree is unrolled evenly (fib's two calls both get a copy)
+        // rather than down one spine.
+        let mut copies = 0;
+        'rounds: for _ in 0..SELF_INLINE_ROUNDS {
+            let round = sites(&m.functions[f]);
+            if round.is_empty() { break; }
+            for d in round {
+                if copies >= SELF_INLINE_COPIES || func_size(&m.functions[f]) > SELF_INLINE_MAX_GROWN {
+                    break 'rounds;
+                }
+                let pos = m.functions[f].blocks.iter().enumerate().find_map(|(bi, b)| {
+                    b.instrs.iter().position(|ins| matches!(ins, Instr::Call { dest: Some(x), .. } if *x == d))
+                        .map(|ii| (bi, ii))
+                });
+                let Some((bi, ii)) = pos else { continue };
+                self.splice_body(m, f, bi, ii, &snapshot);
+                copies += 1;
+            }
+        }
+        copies > 0
+    }
+
     /// Splice the callee body in at `caller.blocks[bi].instrs[ii]` (a `Call`).
     fn do_inline(&self, m: &mut Module, caller_idx: usize, bi: usize, ii: usize) {
-        // Snapshot the call, then clone the callee body (avoids aliasing the two
-        // `&mut` borrows; callee != caller).
-        let (dest, callee_idx, args, ret_ty) = match &m.functions[caller_idx].blocks[bi].instrs[ii] {
-            Instr::Call { dest, func, args, ret_ty } => (*dest, func.index(), args.clone(), ret_ty.clone()),
+        let callee_idx = match &m.functions[caller_idx].blocks[bi].instrs[ii] {
+            Instr::Call { func, .. } => func.index(),
             _ => return,
         };
+        // Clone the callee body (avoids aliasing the two `&mut` borrows).
         let callee = m.functions[callee_idx].clone();
+        self.splice_body(m, caller_idx, bi, ii, &callee);
+    }
+
+    /// Splice `callee` (a body snapshot) in at the call `caller.blocks[bi].instrs[ii]`.
+    fn splice_body(&self, m: &mut Module, caller_idx: usize, bi: usize, ii: usize, callee: &Function) {
+        let (dest, args, ret_ty) = match &m.functions[caller_idx].blocks[bi].instrs[ii] {
+            Instr::Call { dest, args, ret_ty, .. } => (*dest, args.clone(), ret_ty.clone()),
+            _ => return,
+        };
         let caller = &mut m.functions[caller_idx];
 
         // --- 1. Build the ValId remap for the callee. -----------------------------
