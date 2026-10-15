@@ -79,6 +79,41 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// An array index as an i64. In C, `x ± c` with `x` a signed integer
+    /// narrower than 64 bits is computed as `sext(x) ± c`: equal to the
+    /// sign-extended `int` result because signed overflow is undefined, and it
+    /// lets codegen share one `sext(x)` across `a[j]`, `a[j-1]`, `b[j-1]` and fold
+    /// `c` into the address (it was a `sub` + `movslq` per access). SIC defines
+    /// wrap-around, so it keeps the exact form.
+    fn lower_index_i64(&mut self, index: &Expr) -> Result<Val> {
+        use crate::ast::BinOpKind as B;
+        if !self.is_sic() {
+            if let ExprKind::BinOp { op: op @ (B::Add | B::Sub), lhs, rhs } = &index.kind {
+                let narrow_signed = |t: &Type| matches!(t, Type::Int { bits, signed: true } if *bits < 64);
+                let konst = |e: &Expr| super::super::eval_const_expr(e, &self.lowerer.enum_consts).ok()
+                    .filter(|c| c.abs() < (1 << 20));
+                let (var, c, negate) = match (konst(rhs), konst(lhs)) {
+                    (Some(c), _) => (lhs.as_ref(), c, *op == B::Sub),
+                    (None, Some(c)) if *op == B::Add => (rhs.as_ref(), c, false),
+                    _ => (index, 0, false),
+                };
+                if !std::ptr::eq(var, index)
+                    && matches!(self.infer_expr_type(var), Ok(t) if narrow_signed(&t))
+                {
+                    let v = self.lower_expr(var)?;
+                    let v64 = self.coerce(v, &Type::i64())?;
+                    let dest = self.alloc_val();
+                    let op = if negate { BinOp::Sub } else { BinOp::Add };
+                    self.push_instr(Instr::BinOp { dest, op, lhs: v64, rhs: Constant::int(c), ty: Type::i64() });
+                    self.val_types.insert(dest.0, Type::i64());
+                    return Ok(Val::Local(dest));
+                }
+            }
+        }
+        let idx_val = self.lower_expr(index)?;
+        self.coerce(idx_val, &Type::i64())
+    }
+
     pub(crate) fn lower_lvalue_index(&mut self, base: &Expr, index: &Expr) -> Result<LValue> {
         // C subscript is commutative: `a[b]` == `*(a + b)` == `b[a]`. When the
         // "base" is a plain integer and the "index" is the pointer/array (`3[arr]`,
@@ -133,8 +168,7 @@ impl<'m> FuncCtx<'m> {
             }
         }
         let base_val = self.lower_expr(base)?;
-        let idx_val = self.lower_expr(index)?;
-        let idx_i64 = self.coerce(idx_val, &Type::i64())?;
+        let idx_i64 = self.lower_index_i64(index)?;
 
         let base_ty = self.val_type(&base_val);
 
