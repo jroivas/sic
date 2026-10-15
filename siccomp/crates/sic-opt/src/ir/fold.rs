@@ -27,6 +27,18 @@ impl IrPass for IrFold {
                 for ins in &b.instrs {
                     if let (Some(dest), Some(c)) = (ins.dest(), fold_instr(ins)) {
                         repl.insert(dest, Val::Const(c));
+                    } else if let Instr::Select { dest, cond, on_true, on_false, .. } = ins {
+                        // A `select` with a constant condition (or equal arms) is
+                        // the chosen operand — which need not be a constant (SIC's
+                        // `x % 2` ÷0-guard `select(2 == 0, 0, srem)` is the srem).
+                        let pick = match konst(cond).and_then(as_int) {
+                            Some(c) => Some(if c != 0 { on_true } else { on_false }),
+                            None if on_true == on_false => Some(on_true),
+                            None => None,
+                        };
+                        if let Some(v) = pick {
+                            if *v != Val::Local(*dest) { repl.insert(*dest, v.clone()); }
+                        }
                     }
                 }
             }
