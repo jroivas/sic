@@ -1,0 +1,25 @@
+// `new` zero-initializes, like every SIC variable (sic.md "Initialized
+// variables"). It was zeroed only for types with managed fields, so `new P` and
+// `new i32[n]` returned malloc garbage — visible after reusing a freed block.
+// Returns 42.
+struct P { i32 x; P *next; f64 d; };
+int main() {
+    i32 n = 64;
+    for (i32 round = 0; round < 4; round++) {
+        u8 *dirty = new u8[n * 4];
+        for (i32 i = 0; i < n * 4; i++) dirty[i] = 0xAB;
+        del dirty;
+        i32 *a = new i32[n];                 // likely reuses `dirty`'s block
+        for (i32 i = 0; i < n; i++) if (a[i] != 0) return 1;
+        for (i32 i = 0; i < n; i++) a[i] = -1;
+        del a;
+        P *p = new P;
+        if (p->x != 0 || p->next != NULL || p->d != 0.0) return 2;
+        p->x = 7;
+        del p;
+        P *q = new P;
+        if (q->x != 0) return 3;
+        del q;
+    }
+    return 42;
+}

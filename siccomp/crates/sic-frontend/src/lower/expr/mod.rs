@@ -3424,6 +3424,23 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// Emit `calloc(1, n)` → `char*` (zeroed storage).
+    fn emit_calloc(&mut self, n: Val) -> Result<Val> {
+        let voidp = Type::void_ptr();
+        let fref = self.lowerer.module.func_ref_by_name("calloc").unwrap_or_else(|| {
+            self.lowerer.module.add_extern(ExternFunc {
+                name: "calloc".to_string(),
+                sig: FunctionType { ret: voidp.clone(), params: vec![Type::u64(), Type::u64()], variadic: false },
+            })
+        });
+        let sz = self.coerce(n, &Type::u64())?;
+        let one = self.coerce(Constant::int(1), &Type::u64())?;
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![one, sz], ret_ty: voidp });
+        self.val_types.insert(dest.0, Type::char_ptr());
+        Ok(Val::Local(dest))
+    }
+
     /// Emit `strlen(s)` → `usize`.
     fn emit_strlen(&mut self, s: Val) -> Result<Val> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
@@ -3759,7 +3776,11 @@ impl<'m> FuncCtx<'m> {
         let header_c = self.coerce(Constant::int(header), &usize_ty)?;
         let total = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: Val::Local(data_size), rhs: header_c, ty: usize_ty.clone() });
-        let block = self.emit_malloc(Val::Local(total))?; // char*
+        // Zeroed: like every SIC variable, a `new` object starts as 0 (sic.md
+        // §"Initialized variables") — pointers NULL, counts 0, managed fields
+        // empty. It was zeroed only for types with managed fields, so `new P`
+        // held garbage. `calloc` costs nothing for large blocks (fresh pages).
+        let block = self.emit_calloc(Val::Local(total))?; // char*
 
         // header[0] = data_size ; header[1] (at +ptr_size) = refcount = 1
         self.push_instr(Instr::Store { val: Val::Local(data_size), ptr: block.clone() });
@@ -3773,12 +3794,8 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
         self.val_types.insert(data.0, ptr_ty);
 
-        // Zero the fresh object and run the constructor `__sic_ctor_<S>(data, args…)`.
+        // Run the constructor `__sic_ctor_<S>(data, args…)` on the zeroed object.
         if let Some(ctor) = ctor {
-            let osz = elem_ty.size_of(self.ptr_size());
-            if osz > 0 {
-                self.push_instr(Instr::MemSet { dst: Val::Local(data), val: Constant::zero(), size: osz, align: elem_ty.align_of(self.ptr_size()) });
-            }
             let fref = self.lowerer.module.func_ref_by_name(&ctor).ok_or_else(|| CompileError::new(
                 format!("internal: constructor '{}' not lowered", ctor)))?;
             let params = self.lowerer.module.func_sig(fref).params.clone();
@@ -3792,62 +3809,8 @@ impl<'m> FuncCtx<'m> {
                 cargs.push(v);
             }
             self.push_instr(Instr::Call { dest: None, func: fref, args: cargs, ret_ty: Type::Void });
-        } else if self.is_sic() && self.new_needs_zero(&elem_ty) {
-            // A managed object (one with owned string/container/struct fields) must
-            // be zero-initialized: the fresh block is uninitialized, and the first
-            // assignment to a managed field RELEASES the old (garbage) value before
-            // storing (sic-lang-ownership) — releasing an uninitialized string/handle
-            // crashes. Non-managed allocations (`new u8[N]`) are left untouched so a
-            // scratch buffer pays no memset. Uses a runtime memset so array forms
-            // (`new T[n]`) with a runtime count are covered too.
-            self.emit_memset_zero(Val::Local(data), Val::Local(data_size))?;
         }
         Ok(Val::Local(data))
-    }
-
-    /// Does `new T` need its storage zeroed? True when `T` (a struct/union/array,
-    /// recursively) contains an owned/managed field — a `string`, `list`/`dict`/
-    /// `set`, tuple, `fixed`/`bigint`, or a struct with a destructor / owned or weak
-    /// fields — whose first assignment would otherwise release uninitialized memory.
-    /// Pointer fields are borrowed (not managed) and are not recursed into, so a
-    /// self-referential node struct (`T* left`) with only scalar/pointer fields does
-    /// NOT get zeroed.
-    fn new_needs_zero(&self, t: &Type) -> bool {
-        use super::types as ty;
-        let rt = ty::resolve_aggregate(t, &self.lowerer.struct_types);
-        if ty::is_sic_string(&rt) || ty::is_list(&rt) || ty::is_dict(&rt) || ty::is_set(&rt)
-            || ty::is_tuple(&rt) || ty::is_fixed(&rt) || ty::is_bigint(&rt) { return true; }
-        match &rt {
-            Type::Struct(st) => {
-                if let Some(n) = &st.name {
-                    if self.lowerer.struct_dtor.contains_key(n) { return true; }
-                    if self.lowerer.struct_owned_fields.get(n).map_or(false, |v| !v.is_empty()) { return true; }
-                    if self.lowerer.struct_weak_fields.get(n).map_or(false, |v| !v.is_empty()) { return true; }
-                }
-                st.fields.iter().any(|(_, ft)| self.new_needs_zero(ft))
-            }
-            Type::Union(_) => true, // conservative: a union may hold a managed member
-            Type::Array { elem, .. } => self.new_needs_zero(elem),
-            _ => false,
-        }
-    }
-
-    /// Emit a runtime `memset(dst, 0, size)` (libc) — used to zero a managed `new`
-    /// allocation whose size may be a runtime value.
-    fn emit_memset_zero(&mut self, dst: Val, size: Val) -> Result<()> {
-        let voidp = Type::void_ptr();
-        let fref = self.lowerer.module.func_ref_by_name("memset").unwrap_or_else(|| {
-            self.lowerer.module.add_extern(ExternFunc {
-                name: "memset".to_string(),
-                sig: FunctionType { ret: voidp.clone(), params: vec![voidp.clone(), Type::i32(), Type::u64()], variadic: false },
-            })
-        });
-        let d = self.coerce(dst, &voidp)?;
-        let z = self.coerce(Constant::int(0), &Type::i32())?;
-        let n = self.coerce(size, &Type::u64())?;
-        let r = self.alloc_val();
-        self.push_instr(Instr::Call { dest: Some(r), func: fref, args: vec![d, z, n], ret_ty: voidp });
-        Ok(())
     }
 
     /// sic `del p;` — decrement the header refcount of a `new`-allocated pointer
