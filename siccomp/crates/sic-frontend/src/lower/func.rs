@@ -444,6 +444,23 @@ impl<'m> FuncCtx<'m> {
         id
     }
 
+    /// Move blocks to the end of the layout, in order. A loop's bottom test and
+    /// exit are created before its body is lowered (they are jump targets), so
+    /// they would sit in front of the body's blocks; placed after them, the body
+    /// falls through into the test (one taken branch per iteration instead of a
+    /// jump back plus the test's branch), and the layout stays topological (the
+    /// exit after every `break` that targets it).
+    pub fn move_blocks_to_end(&mut self, ids: &[BlockId]) {
+        let blocks = &mut self.func_mut().blocks;
+        for id in ids {
+            if let Some(pos) = blocks.iter().position(|b| b.id == *id) {
+                if pos == 0 { continue; } // the entry block stays first
+                let b = blocks.remove(pos);
+                blocks.push(b);
+            }
+        }
+    }
+
     pub fn switch_to_block(&mut self, id: BlockId) {
         self.current_bb = id;
     }
@@ -3290,6 +3307,7 @@ impl<'m> FuncCtx<'m> {
         self.loop_stack.pop();
 
         // The bottom test (also the `continue` target).
+        self.move_blocks_to_end(&[cond_bb, end_bb]);
         self.switch_to_block(cond_bb);
         self.lower_cond_branch(cond, body_bb, end_bb)?;
 
@@ -3323,6 +3341,7 @@ impl<'m> FuncCtx<'m> {
         self.break_stack.pop();
         self.loop_stack.pop();
 
+        self.move_blocks_to_end(&[cond_bb, end_bb]);
         self.switch_to_block(cond_bb);
         self.lower_cond_branch(cond, body_bb, end_bb)?;
 
@@ -3433,6 +3452,7 @@ impl<'m> FuncCtx<'m> {
         self.break_stack.pop();
         self.loop_stack.pop();
 
+        self.move_blocks_to_end(&[post_bb, end_bb]);
         self.switch_to_block(post_bb);
         if let Some(p) = post { self.lower_expr(p)?; }
         if !self.is_terminated() {
