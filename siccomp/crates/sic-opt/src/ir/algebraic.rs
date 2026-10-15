@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use sic_ir::{Module, Function, Val, ValId, Instr, Constant, Type, BinOp, CmpOp};
+use sic_ir::{Module, Function, Val, ValId, Instr, Constant, Type, BinOp, CmpOp, CastOp};
 use crate::ir::pass::IrPass;
 use crate::ir::fold::{as_int, as_uint, as_float, wrap_int};
 use crate::ir::{apply_replacements, prune_defs};
@@ -38,6 +38,7 @@ impl IrPass for Algebraic {
                 }
             }
             if srem_zero_test(func) { changed = true; }
+            if exact_div_select(func) { changed = true; }
             // Step B: identity/annihilator substitutions.
             let mut repl: HashMap<ValId, Val> = HashMap::new();
             for b in &func.blocks {
@@ -133,6 +134,100 @@ fn identity(op: BinOp, lhs: &Val, rhs: &Val, ty: &Type) -> Option<Val> {
 }
 
 // ─── strength reduction ─────────────────────────────────────────────────────
+
+/// `select(x % 2^k == 0, x / 2^k, other)` (signed): the division is only chosen
+/// when x is a multiple of 2^k, and then it is exact — an arithmetic shift, not
+/// the biased divide sequence (collatz's `n % 2 == 0 ? n / 2 : 3*n + 1`). The
+/// SDiv must have no other use (its value is then irrelevant whenever the
+/// select does not pick it). The condition may come wrapped in `!= 0` / zext.
+fn exact_div_select(func: &mut Function) -> bool {
+    let mut defs: HashMap<ValId, Instr> = HashMap::new();
+    let mut uses: HashMap<ValId, usize> = HashMap::new();
+    // Loads of the same slot in one block with no store/call between them read
+    // the same value (the IR re-loads a variable at each use): key = (ptr,
+    // block index, memory epoch).
+    let mut load_key: HashMap<ValId, (Val, usize, usize)> = HashMap::new();
+    for (bi, b) in func.blocks.iter().enumerate() {
+        let mut epoch = 0usize;
+        for ins in &b.instrs {
+            match ins {
+                Instr::Load { dest, ptr, .. } => { load_key.insert(*dest, (ptr.clone(), bi, epoch)); }
+                // Pure instructions keep the epoch; anything else may write memory.
+                Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. } | Instr::Cast { .. }
+                | Instr::Select { .. } | Instr::GetElemPtr { .. } | Instr::Alloca { .. }
+                | Instr::SrcLine(_) | Instr::DbgVar { .. } => {}
+                _ => epoch += 1,
+            }
+        }
+    }
+    let same = |a: &Val, b: &Val| -> bool {
+        if a == b { return true; }
+        match (a, b) {
+            (Val::Local(x), Val::Local(y)) => matches!((load_key.get(x), load_key.get(y)), (Some(p), Some(q)) if p == q),
+            _ => false,
+        }
+    };
+    for b in &func.blocks {
+        for ins in &b.instrs {
+            if let Some(d) = ins.dest() { defs.insert(d, ins.clone()); }
+            ins.for_each_val(|v| if let Val::Local(id) = v { *uses.entry(*id).or_insert(0) += 1; });
+        }
+        b.terminator.for_each_val(|v| if let Val::Local(id) = v { *uses.entry(*id).or_insert(0) += 1; });
+    }
+    // Peel `ine c, 0` and `zext c` wrappers off a boolean.
+    let peel = |mut v: Val| -> Val {
+        for _ in 0..8 {
+            let Val::Local(id) = &v else { break };
+            match defs.get(id) {
+                Some(Instr::Cmp { op: CmpOp::INe, lhs, rhs, .. }) if is_int_zero(rhs) => v = lhs.clone(),
+                Some(Instr::Cast { op: CastOp::ZExt, val, .. }) => v = val.clone(),
+                _ => break,
+            }
+        }
+        v
+    };
+    // `x` and `k` when `c` is `(x & (2^k-1)) == 0` or `x % 2^k == 0`.
+    let multiple_of = |c: &Val| -> Option<(Val, u32)> {
+        let Val::Local(id) = peel(c.clone()) else { return None };
+        let Some(Instr::Cmp { op: CmpOp::IEq, lhs, rhs, ty, .. }) = defs.get(&id) else { return None };
+        let r = if is_int_zero(rhs) { lhs } else if is_int_zero(lhs) { rhs } else { return None };
+        let Val::Local(rid) = r else { return None };
+        match defs.get(rid) {
+            Some(Instr::BinOp { op: BinOp::And, lhs: x, rhs: m, .. }) => {
+                let mask = cint(m)?;
+                if mask <= 0 || (mask + 1) & mask != 0 { return None; }
+                Some((x.clone(), (mask + 1).trailing_zeros()))
+            }
+            Some(Instr::BinOp { op: BinOp::SRem, lhs: x, rhs: d, .. }) =>
+                pow2_exp(d, ty).map(|k| (x.clone(), k)),
+            _ => None,
+        }
+    };
+    let mut rewrite: Vec<(ValId, u32)> = Vec::new();
+    for b in &func.blocks {
+        for ins in &b.instrs {
+            let Instr::Select { cond, on_true: Val::Local(t), .. } = ins else { continue };
+            let Some(Instr::BinOp { op: BinOp::SDiv, lhs: x, rhs: d, ty, .. }) = defs.get(t) else { continue };
+            if uses.get(t) != Some(&1) { continue; }
+            let Some(k) = pow2_exp(d, ty) else { continue };
+            if let Some((cx, ck)) = multiple_of(cond) {
+                if same(&cx, x) && ck == k { rewrite.push((*t, k)); }
+            }
+        }
+    }
+    let changed = !rewrite.is_empty();
+    for b in &mut func.blocks {
+        for ins in &mut b.instrs {
+            if let Instr::BinOp { dest, op, rhs, .. } = ins {
+                if let Some((_, k)) = rewrite.iter().find(|(d, _)| d == dest) {
+                    *op = BinOp::AShr;
+                    *rhs = Val::Const(Constant::Int(*k as i64));
+                }
+            }
+        }
+    }
+    changed
+}
 
 /// `x % 2^k` (signed) whose every use is `== 0` / `!= 0` becomes `x & (2^k-1)`:
 /// a signed remainder by a power of two is zero exactly when those low bits
