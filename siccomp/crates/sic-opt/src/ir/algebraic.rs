@@ -13,7 +13,8 @@
 //! differs from a shift).
 
 use std::collections::HashMap;
-use sic_ir::{Module, Val, ValId, Instr, Constant, Type, BinOp};
+use std::collections::HashSet;
+use sic_ir::{Module, Function, Val, ValId, Instr, Constant, Type, BinOp, CmpOp};
 use crate::ir::pass::IrPass;
 use crate::ir::fold::{as_int, as_uint, as_float, wrap_int};
 use crate::ir::{apply_replacements, prune_defs};
@@ -36,6 +37,7 @@ impl IrPass for Algebraic {
                     if strength_reduce(ins) { changed = true; }
                 }
             }
+            if srem_zero_test(func) { changed = true; }
             // Step B: identity/annihilator substitutions.
             let mut repl: HashMap<ValId, Val> = HashMap::new();
             for b in &func.blocks {
@@ -131,6 +133,44 @@ fn identity(op: BinOp, lhs: &Val, rhs: &Val, ty: &Type) -> Option<Val> {
 }
 
 // ─── strength reduction ─────────────────────────────────────────────────────
+
+/// `x % 2^k` (signed) whose every use is `== 0` / `!= 0` becomes `x & (2^k-1)`:
+/// a signed remainder by a power of two is zero exactly when those low bits
+/// are, whatever the sign (`-6 % 4 == -2`, `-6 & 3 == 2`: both non-zero). Its
+/// value differs for a negative `x`, hence the all-uses-are-zero-tests guard.
+fn srem_zero_test(func: &mut Function) -> bool {
+    let mut uses: HashMap<ValId, usize> = HashMap::new();
+    let mut zero_tests: HashMap<ValId, usize> = HashMap::new();
+    for b in &func.blocks {
+        for ins in &b.instrs {
+            ins.for_each_val(|v| if let Val::Local(id) = v { *uses.entry(*id).or_insert(0) += 1; });
+            if let Instr::Cmp { op: CmpOp::IEq | CmpOp::INe, lhs, rhs, .. } = ins {
+                for (a, z) in [(lhs, rhs), (rhs, lhs)] {
+                    if let (Val::Local(id), true) = (a, is_int_zero(z)) {
+                        *zero_tests.entry(*id).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        b.terminator.for_each_val(|v| if let Val::Local(id) = v { *uses.entry(*id).or_insert(0) += 1; });
+    }
+    let only_zero_tested: HashSet<ValId> = zero_tests.iter()
+        .filter(|(id, n)| uses.get(id) == Some(n)).map(|(id, _)| *id).collect();
+    let mut changed = false;
+    for b in &mut func.blocks {
+        for ins in &mut b.instrs {
+            if let Instr::BinOp { dest, op: op @ BinOp::SRem, rhs, ty, .. } = ins {
+                if !ty.is_int() || !only_zero_tested.contains(dest) { continue; }
+                if let Some(k) = pow2_exp(rhs, ty) {
+                    *op = BinOp::And;
+                    *rhs = const_of(ty, (1i128 << k) - 1);
+                    changed = true;
+                }
+            }
+        }
+    }
+    changed
+}
 
 fn strength_reduce(ins: &mut Instr) -> bool {
     let Instr::BinOp { op, lhs, rhs, ty, .. } = ins else { return false };
