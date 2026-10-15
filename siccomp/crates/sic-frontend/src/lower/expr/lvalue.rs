@@ -79,39 +79,54 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
-    /// An array index as an i64. In C, `x ± c` with `x` a signed integer
-    /// narrower than 64 bits is computed as `sext(x) ± c`: equal to the
-    /// sign-extended `int` result because signed overflow is undefined, and it
-    /// lets codegen share one `sext(x)` across `a[j]`, `a[j-1]`, `b[j-1]` and fold
-    /// `c` into the address (it was a `sub` + `movslq` per access). SIC defines
-    /// wrap-around, so it keeps the exact form.
+    /// An array index as an i64. In C, a `+ - *` tree over signed integers
+    /// narrower than 64 bits (and constants) is evaluated directly in 64 bits:
+    /// equal to sign-extending the `int` result, because signed overflow is
+    /// undefined. Codegen then shares one `sext` per variable across `a[j]`,
+    /// `a[j-1]`, `b[y*W + x]` and folds constants into the address (it was a
+    /// 32-bit op + `movslq` per access). SIC defines wrap-around, so it keeps the
+    /// exact form.
     fn lower_index_i64(&mut self, index: &Expr) -> Result<Val> {
-        use crate::ast::BinOpKind as B;
-        if !self.is_sic() {
-            if let ExprKind::BinOp { op: op @ (B::Add | B::Sub), lhs, rhs } = &index.kind {
-                let narrow_signed = |t: &Type| matches!(t, Type::Int { bits, signed: true } if *bits < 64);
-                let konst = |e: &Expr| super::super::eval_const_expr(e, &self.lowerer.enum_consts).ok()
-                    .filter(|c| c.abs() < (1 << 20));
-                let (var, c, negate) = match (konst(rhs), konst(lhs)) {
-                    (Some(c), _) => (lhs.as_ref(), c, *op == B::Sub),
-                    (None, Some(c)) if *op == B::Add => (rhs.as_ref(), c, false),
-                    _ => (index, 0, false),
-                };
-                if !std::ptr::eq(var, index)
-                    && matches!(self.infer_expr_type(var), Ok(t) if narrow_signed(&t))
-                {
-                    let v = self.lower_expr(var)?;
-                    let v64 = self.coerce(v, &Type::i64())?;
-                    let dest = self.alloc_val();
-                    let op = if negate { BinOp::Sub } else { BinOp::Add };
-                    self.push_instr(Instr::BinOp { dest, op, lhs: v64, rhs: Constant::int(c), ty: Type::i64() });
-                    self.val_types.insert(dest.0, Type::i64());
-                    return Ok(Val::Local(dest));
-                }
-            }
+        if !self.is_sic() && matches!(&index.kind, ExprKind::BinOp { .. }) && self.widenable(index, 0) {
+            return self.lower_widened(index);
         }
         let idx_val = self.lower_expr(index)?;
         self.coerce(idx_val, &Type::i64())
+    }
+
+    /// `e` is a `+ - *` tree whose operators work on signed narrow integers, with
+    /// leaves that are such values or small constants (see `lower_index_i64`).
+    fn widenable(&self, e: &Expr, depth: usize) -> bool {
+        use crate::ast::BinOpKind as B;
+        if depth > 8 { return false; }
+        let narrow_signed = |t: &Type| matches!(t, Type::Int { bits, signed: true } if *bits < 64);
+        match &e.kind {
+            ExprKind::BinOp { op: B::Add | B::Sub | B::Mul, lhs, rhs } =>
+                matches!(self.infer_expr_type(e), Ok(t) if narrow_signed(&t))
+                    && self.widenable(lhs, depth + 1) && self.widenable(rhs, depth + 1),
+            _ => match super::super::eval_const_expr(e, &self.lowerer.enum_consts) {
+                Ok(c) => c.abs() < (1 << 20),
+                Err(_) => matches!(self.infer_expr_type(e), Ok(t) if narrow_signed(&t)),
+            },
+        }
+    }
+
+    fn lower_widened(&mut self, e: &Expr) -> Result<Val> {
+        use crate::ast::BinOpKind as B;
+        if let ExprKind::BinOp { op: op @ (B::Add | B::Sub | B::Mul), lhs, rhs } = &e.kind {
+            let l = self.lower_widened(lhs)?;
+            let r = self.lower_widened(rhs)?;
+            let dest = self.alloc_val();
+            let op = match op { B::Add => BinOp::Add, B::Sub => BinOp::Sub, _ => BinOp::Mul };
+            self.push_instr(Instr::BinOp { dest, op, lhs: l, rhs: r, ty: Type::i64() });
+            self.val_types.insert(dest.0, Type::i64());
+            return Ok(Val::Local(dest));
+        }
+        if let Ok(c) = super::super::eval_const_expr(e, &self.lowerer.enum_consts) {
+            return Ok(Constant::int(c));
+        }
+        let v = self.lower_expr(e)?;
+        self.coerce(v, &Type::i64())
     }
 
     pub(crate) fn lower_lvalue_index(&mut self, base: &Expr, index: &Expr) -> Result<LValue> {
