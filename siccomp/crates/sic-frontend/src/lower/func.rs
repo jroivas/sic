@@ -2675,6 +2675,9 @@ impl<'m> FuncCtx<'m> {
             }
             Decl::TypeDef { names, .. } => {
                 for (name, ty) in names {
+                    // A block-scope `typedef enum { e, f } h;` (or a struct with an
+                    // inline enum member) defines its constants here too.
+                    self.lowerer.register_nested_struct_defs(&ty.ty)?;
                     // Scope-aware: `typedef __typeof(Vd->D(0)) T;` must see the
                     // locals (the scope-less lowerer made every such T an `int` —
                     // QEMU's loongarch DO_VMUH multiplied in 32 bits).
