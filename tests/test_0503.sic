@@ -1,0 +1,24 @@
+// Compound assignment and ++/-- on a list or dict element (`l[0] += 40`,
+// `d[k]++`) went through the plain lvalue path: an element has no stable address
+// (it is reached through get/set), so the list case aborted with an invalid free
+// and the dict case hung. They are now a get, the op, and a set. Returns 42.
+int main() {
+    list<i32> l;
+    l.add(1);
+    l[0] += 40;
+    l[0]++;
+    i32 pre = ++l[0];
+    i32 post = l[0]--;
+    dict<i32, i32> d;
+    d[1]++;
+    d[1] += 9;
+    dict<string, i32> c;
+    string k = "apple";
+    c[k] += 1;
+    c["apple"] *= 5;
+    i32 r = 0;
+    if (l[0] != 42 || pre != 43 || post != 43) r |= 1;
+    if (d[1] != 10) r |= 2;
+    if (c["apple"] != 5) r |= 4;
+    return r ? r : 42;
+}

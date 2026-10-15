@@ -4995,6 +4995,13 @@ impl<'m> FuncCtx<'m> {
                 return self.lower_opt_field_assign(base, name, op, rhs, &lhs.span);
             }
         }
+        // `list[i] op= v` / `dict[k] op= v`: a get, the op, a set.
+        if let Some(bop) = op {
+            if self.container_elem(lhs).is_some() {
+                self.container_rmw(lhs, bop, rhs.clone())?;
+                return Ok(Constant::zero());
+            }
+        }
         // sic `list[i] = value` (sic.md §"List") / `dict[key] = value` (sic.md §"Dict").
         if op.is_none() && self.is_sic() {
             if let ExprKind::Index { base, index } = &lhs.kind {
@@ -5580,7 +5587,43 @@ impl<'m> FuncCtx<'m> {
         Ok(val)
     }
 
+    /// `Some(is_dict)` when `e` is `c[k]` on a sic `list` or `dict`.
+    fn container_elem(&self, e: &Expr) -> Option<bool> {
+        if !self.is_sic() { return None; }
+        let ExprKind::Index { base, .. } = &e.kind else { return None };
+        let t = self.infer_expr_type(base).ok()?;
+        let inner = match &t { Type::Pointer(i) => i.as_ref().clone(), _ => t.clone() };
+        if super::types::is_dict(&t) || super::types::is_dict(&inner) { return Some(true); }
+        if super::types::is_list(&t) || super::types::is_list(&inner) { return Some(false); }
+        None
+    }
+
+    /// `c[k] op= v` / `c[k]++` on a list or dict element, as `c[k] = c[k] op v`
+    /// (an element is reached through get/set, not a stable address — the plain
+    /// lvalue path wrote through a bogus pointer and crashed or hung). `c` and
+    /// `k` are evaluated twice, so they must be side-effect-free.
+    fn container_rmw(&mut self, lhs: &Expr, op: BinOpKind, rhs: Expr) -> Result<()> {
+        let ExprKind::Index { base, index } = &lhs.kind else { unreachable!() };
+        if !side_effect_free(base) || !side_effect_free(index) {
+            return Err(CompileError::at(
+                "compound assignment to a list/dict element needs a side-effect-free container and key \
+                 — store the key in a local first".to_string(),
+                lhs.span.file.clone(), lhs.span.line, lhs.span.col));
+        }
+        let combined = Expr::new(ExprKind::BinOp { op, lhs: Box::new(lhs.clone()), rhs: Box::new(rhs) }, lhs.span.clone());
+        if self.container_elem(lhs) == Some(true) {
+            self.lower_dict_set(base, index, &combined, &lhs.span)
+        } else {
+            self.lower_list_set(base, index, &combined, &lhs.span)
+        }
+    }
+
     fn lower_pre_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
+        if self.container_elem(inner).is_some() {
+            let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+            self.container_rmw(inner, op, Expr::new(ExprKind::IntLit(1, false), inner.span.clone()))?;
+            return self.lower_expr(inner);
+        }
         let lv = self.lower_lvalue(inner)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
         // sic atomic `++a`/`--a` (sic.md §"Atomics"): one atomic RMW; yields the
@@ -5595,6 +5638,12 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_post_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
+        if self.container_elem(inner).is_some() {
+            let old = self.lower_expr(inner)?;
+            let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
+            self.container_rmw(inner, op, Expr::new(ExprKind::IntLit(1, false), inner.span.clone()))?;
+            return Ok(old);
+        }
         let lv = self.lower_lvalue(inner)?;
         let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
         // sic atomic `a++`/`a--`: one atomic RMW; yields the old value.
@@ -6806,5 +6855,22 @@ pub(crate) fn ternary_array_result(tty: &Type, ety: &Type) -> Option<Type> {
         (Type::Array { .. }, _) if tty == ety => Some(tty.clone()),
         (Type::Array { elem, .. }, _) | (_, Type::Array { elem, .. }) => Some(Type::Pointer(elem.clone())),
         _ => None,
+    }
+}
+
+/// `e` can be evaluated twice with the same result and no side effects: names,
+/// literals, member access, casts and arithmetic over those (no calls,
+/// assignments or increments).
+fn side_effect_free(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) | ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::CharLit(_)
+        | ExprKind::StringLit(_) | ExprKind::BoolLit(_) | ExprKind::FloatLit(_)
+        | ExprKind::DecimalLit(_) | ExprKind::EnumVariant { .. } => true,
+        ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } => side_effect_free(base),
+        ExprKind::Cast { expr, .. } => side_effect_free(expr),
+        ExprKind::Unary { expr, .. } => side_effect_free(expr),
+        ExprKind::BinOp { lhs, rhs, .. } | ExprKind::Index { base: lhs, index: rhs } =>
+            side_effect_free(lhs) && side_effect_free(rhs),
+        _ => false,
     }
 }
