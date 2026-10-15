@@ -4053,7 +4053,13 @@ impl<'m> FuncCtx<'m> {
             let inc = self.alloc_val();
             self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(lanes as i64), ty: jty.clone() });
             self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
-            self.set_terminator(Terminator::Jump(vcond));
+            // Bottom test, back to the body itself: one branch per vector step
+            // (jumping back up to `vcond` cost a second, taken branch).
+            let jb = self.emit_load(&jslot, &jty);
+            let jb64 = self.coerce(jb, &i64t)?;
+            let lt2 = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: lt2, op: CmpOp::ISLt, lhs: jb64, rhs: vend.clone(), ty: i64t.clone() });
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(lt2), then_bb: vbody, else_bb: rem });
         }
 
         // ---- scalar remainder: while (j < HI) { <original body>; j++ } ----
@@ -4305,7 +4311,13 @@ impl<'m> FuncCtx<'m> {
             let inc = self.alloc_val();
             self.push_instr(Instr::BinOp { dest: inc, op: BinOp::Add, lhs: jn, rhs: Constant::int(lanes as i64), ty: jty.clone() });
             self.push_instr(Instr::Store { val: Val::Local(inc), ptr: jslot.clone() });
-            self.set_terminator(Terminator::Jump(vcond));
+            // Bottom test, back to the body itself: one branch per vector step
+            // (jumping back up to `vcond` cost a second, taken branch).
+            let jb = self.emit_load(&jslot, &jty);
+            let jb64 = self.coerce(jb, &i64t)?;
+            let lt2 = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: lt2, op: CmpOp::ISLt, lhs: jb64, rhs: vend.clone(), ty: i64t.clone() });
+            self.set_terminator(Terminator::CondJump { cond: Val::Local(lt2), then_bb: vbody, else_bb: rem });
         }
 
         // ---- scalar remainder: while (j < HI) { <original body>; j++ } ----
