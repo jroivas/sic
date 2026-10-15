@@ -1087,6 +1087,14 @@ impl Lowerer {
     }
 
     fn register_struct_type_from_def(&mut self, s: &StructDef) -> Result<()> {
+        // An anonymous struct is not registered itself, but what its members
+        // define is (`struct { enum { X } x; } s;` makes `X` a constant).
+        if s.name.is_none() {
+            if let Some(fields) = &s.fields {
+                for f in fields { self.register_nested_struct_defs(&f.ty.ty)?; }
+            }
+            return Ok(());
+        }
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
             // A member naming the struct itself (`Node *next;`, sic's bare tag)
             // resolves to the struct: give the name an opaque entry while the
@@ -1173,6 +1181,12 @@ impl Lowerer {
     }
 
     fn register_union_type_from_def(&mut self, u: &UnionDef) -> Result<()> {
+        if u.name.is_none() {
+            if let Some(fields) = &u.fields {
+                for f in fields { self.register_nested_struct_defs(&f.ty.ty)?; }
+            }
+            return Ok(());
+        }
         if let (Some(name), Some(fields)) = (&u.name, &u.fields) {
             // A member naming the union itself resolves to it (see structs).
             if self.sic && !self.struct_types.contains_key(name) {
