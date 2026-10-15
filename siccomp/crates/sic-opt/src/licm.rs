@@ -31,7 +31,15 @@
 //!                 for (; cond; post) … _licm0 … } }
 //! ```
 //!
-//! In C mode there are no `new[]` locals, so the pass finds nothing.
+//! C has the same guarantee for an ARRAY declared in the function (a local or a
+//! function-`static` `T a[N]`) whose name is only ever an index base: nothing
+//! else can name or point to it. Two extra conditions cover what C allows:
+//!   * every call in the loop is to a function of this unit that makes no calls
+//!     itself — it cannot re-enter this function (the only other code that could
+//!     name a `static` local), and without a pointer it cannot reach the array;
+//!   * only reads executed on EVERY iteration are hoisted (top-level statements
+//!     of the body, outside `?:`/`&&`/`||`): a C array read is not
+//!     bounds-checked, so a read the body might skip must not be speculated.
 
 use std::collections::{HashMap, HashSet};
 use sic_frontend::ast::*;
@@ -46,6 +54,15 @@ impl AstPass for Licm {
     fn name(&self) -> &'static str { "licm" }
     fn run(&mut self, tu: &mut TranslationUnit) -> bool {
         self.changed = false;
+        // Functions of this unit whose bodies make no calls.
+        let mut leaf_fns: HashSet<String> = HashSet::new();
+        for d in &mut tu.decls {
+            if let Decl::Func { name, body: Some(stmts), .. } = d {
+                let mut cf = CallFinder::default();
+                for s in stmts.iter_mut() { cf.visit_stmt(s); }
+                if !cf.any { leaf_fns.insert(name.clone()); }
+            }
+        }
         for d in &mut tu.decls {
             if let Decl::Func { params, body: Some(stmts), .. } = d {
                 // Whole-function facts: non-escaping `new[]` locals + declared
@@ -55,9 +72,12 @@ impl AstPass for Licm {
                 for s in stmts.iter_mut() { fs.visit_stmt(s); }
                 let safe_arrays: HashSet<String> =
                     fs.new_arrays.difference(&fs.disq).cloned().collect();
-                if safe_arrays.is_empty() { continue; }
+                let c_arrays: HashSet<String> =
+                    fs.local_arrays.difference(&fs.disq).cloned().collect();
+                if safe_arrays.is_empty() && c_arrays.is_empty() { continue; }
                 let mut h = Hoister {
-                    safe_arrays, locals: fs.locals, addr_taken: fs.addr_taken,
+                    safe_arrays, c_arrays, leaf_fns: leaf_fns.clone(),
+                    locals: fs.locals, addr_taken: fs.addr_taken,
                     counter: 0, changed: false,
                 };
                 for s in stmts.iter_mut() { h.visit_stmt(s); }
@@ -73,6 +93,7 @@ impl AstPass for Licm {
 #[derive(Default)]
 struct FnScan {
     new_arrays: HashSet<String>,
+    local_arrays: HashSet<String>, // `T a[N]` declared in the function (C arrays)
     disq: HashSet<String>,       // names whose pointer escapes (can't be proven unaliased)
     addr_taken: HashSet<String>,
     locals: HashSet<String>,     // declared locals + params
@@ -97,6 +118,10 @@ impl MutVisitor for FnScan {
                     if matches!(&e.kind, ExprKind::New { array: true, .. }) {
                         self.new_arrays.insert(de.name.clone());
                     }
+                }
+                let ext = matches!(de.ty.storage, Some(StorageClass::Extern));
+                if matches!(de.ty.ty, AstType::Array { .. }) && !ext {
+                    self.local_arrays.insert(de.name.clone());
                 }
             }
         }
@@ -217,6 +242,8 @@ impl MutVisitor for Replacer {
 
 struct Hoister {
     safe_arrays: HashSet<String>,
+    c_arrays: HashSet<String>,
+    leaf_fns: HashSet<String>,
     locals: HashSet<String>,
     addr_taken: HashSet<String>,
     counter: usize,
@@ -249,6 +276,32 @@ impl Hoister {
         // Collect candidate `arr[E]` reads over the body.
         let mut cs = CandScan { safe_arrays: &self.safe_arrays, out: Vec::new() };
         { let mut b = body.clone(); cs.visit_stmt(&mut b); }
+        // C arrays: only when every call in the loop is to a leaf function of the
+        // unit, and only reads executed on every iteration.
+        if !self.c_arrays.is_empty() {
+            let mut cf = CallFinder { leaf_fns: Some(&self.leaf_fns), ..Default::default() };
+            { let mut b = body.clone(); cf.visit_stmt(&mut b); let mut pe = post.clone(); cf.visit_expr(&mut pe); }
+            if !cf.non_leaf {
+                let mut cc = CandScan { safe_arrays: &self.c_arrays, out: Vec::new() };
+                let stmts: Vec<Stmt> = match body.as_ref() {
+                    Stmt::Block(v, _) => v.clone(),
+                    other => vec![other.clone()],
+                };
+                for st in stmts {
+                    match st {
+                        Stmt::Expr(mut e, _) => { unconditional_reads(&mut e, &mut cc); }
+                        Stmt::Decl(Decl::Var { declarators, .. }) => {
+                            for d in declarators {
+                                if let Some(Initializer::Expr(mut e)) = d.init { unconditional_reads(&mut e, &mut cc); }
+                            }
+                        }
+                        // Past any other statement, later reads may be skipped.
+                        _ => break,
+                    }
+                }
+                cs.out.extend(cc.out);
+            }
+        }
         if cs.out.is_empty() { return None; }
 
         // Filter to genuinely invariant, non-aliased reads and assign temp names.
@@ -304,6 +357,53 @@ impl Hoister {
             else_: None, span: span.clone(),
         };
         Some(Stmt::Block(vec![init_stmt, guard], span.clone()))
+    }
+}
+
+// ---- calls in a loop / unconditional reads -------------------------------------
+
+#[derive(Default)]
+struct CallFinder<'a> {
+    any: bool,
+    non_leaf: bool,
+    leaf_fns: Option<&'a HashSet<String>>,
+}
+impl<'a> MutVisitor for CallFinder<'a> {
+    fn visit_expr(&mut self, e: &mut Expr) {
+        if let ExprKind::Call { func, .. } = &e.kind {
+            self.any = true;
+            let leaf = matches!((&func.kind, self.leaf_fns), (ExprKind::Ident(n), Some(l)) if l.contains(n));
+            if !leaf { self.non_leaf = true; }
+        }
+        walk_expr(self, e);
+    }
+}
+
+/// Feed `cc` the `arr[E]` reads of `e` that always execute when `e` does: not
+/// under the conditional operators (`?:`, `&&`, `||`, `?:` elvis) and not in a
+/// statement expression or lambda.
+fn unconditional_reads(e: &mut Expr, cc: &mut CandScan) {
+    match &mut e.kind {
+        ExprKind::Ternary { cond, .. } => unconditional_reads(cond, cc),
+        ExprKind::Elvis { cond, .. } => unconditional_reads(cond, cc),
+        ExprKind::BinOp { op: BinOpKind::LogAnd | BinOpKind::LogOr, lhs, .. } => unconditional_reads(lhs, cc),
+        ExprKind::StmtExpr(_) | ExprKind::Lambda { .. } => {}
+        ExprKind::Index { base, index } => {
+            if let ExprKind::Ident(arr) = &base.kind {
+                if cc.safe_arrays.contains(arr) {
+                    if let Some(k) = pure_scalar_key(index) { cc.out.push((arr.clone(), k, e.clone())); }
+                }
+            }
+            if let ExprKind::Index { index, .. } = &mut e.kind { unconditional_reads(index, cc); }
+        }
+        _ => {
+            // Every other operand is evaluated: recurse one level via a visitor.
+            struct Sub<'b, 'c> { cc: &'b mut CandScan<'c> }
+            impl<'b, 'c> MutVisitor for Sub<'b, 'c> {
+                fn visit_expr(&mut self, x: &mut Expr) { unconditional_reads(x, self.cc); }
+            }
+            walk_expr(&mut Sub { cc }, e);
+        }
     }
 }
 
