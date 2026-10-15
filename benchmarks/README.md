@@ -47,6 +47,22 @@ any timing, so a miscompile shows up as a checksum mismatch rather than a wrong 
 | `crc32`      | table-driven hashing: CRC32 (16 MB ×8)                  | `3210205936`     |
 | `raster`     | software 3D renderer: Gouraud-shaded sphere (240 frames) | `2791669399382346646` |
 | `inputlat`   | input latency simulation: event pipeline (20× 1M events)| `1524205649`     |
+| `fannkuch`   | permutations + small-array flips: fannkuch-redux (n=10) ¹ | `73196038`      |
+| `spectralnorm` | FP divide/multiply, O(n²) mat-vec: spectral-norm (n=3000) ¹ | `1274224152` |
+| `binarytrees` | allocation + recursion: binary-trees (depth 16) ¹       | `14985902`       |
+| `fasta`      | LCG + cumulative-table lookup + byte output (n=2.5 M) ¹  | `586453446`      |
+
+¹ Adapted from [the Computer Language Benchmarks Game](https://benchmarksgame-team.pages.debian.net/benchmarksgame/)
+(revised BSD licence): [fannkuch-redux](https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/fannkuchredux.html),
+[spectral-norm](https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/spectralnorm.html),
+[binary-trees](https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/binarytrees.html),
+[fasta](https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/fasta.html).
+The algorithms follow the games' single-threaded reference programs; the adaptations
+are single-threaded, plain (no SIMD intrinsics, no thread pools, no crates, no
+memory pools), sized to run well under a second, and print one checksum instead of
+the full report (`fannkuch`: checksum×1000 + max flips; `spectralnorm`: norm×10⁹;
+`binarytrees`: sum of all tree checks; `fasta`: FNV-1a of the would-be output).
+Its `n-body` and `mandelbrot` are covered by this suite's own `nbody`/`mandelbrot`.
 
 `fib` reads its argument through a `volatile` / `black_box` so no compiler can fold
 the recursion to a constant; `sieve`, `matmul`, `quicksort`, `bst`, `hashmap`,

@@ -1,0 +1,56 @@
+// spectral-norm (n = 3000) in idiomatic SIC — the Computer Language Benchmarks Game.
+// Source: https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/spectralnorm.html
+// (algorithm as in the single-threaded programs there; revised BSD licence).
+// Adapted: single-threaded, no SIMD, fixed n; prints the norm scaled by 1e9.
+//
+// SIC idioms: `new f64[N]` heap vectors released with `defer del`, native f64/i32,
+// and small helper functions split like the reference programs.
+#include <stdio.h>
+#include <math.h>
+
+const i32 N = 3000;
+
+f64 eval_a(i32 i, i32 j) { return 1.0 / (f64)((i + j) * (i + j + 1) / 2 + i + 1); }
+
+void mul_av(f64 *v, f64 *av) {
+    for (i32 i = 0; i < N; i++) {
+        f64 s = 0.0;
+        for (i32 j = 0; j < N; j++) s += eval_a(i, j) * v[j];
+        av[i] = s;
+    }
+}
+
+void mul_atv(f64 *v, f64 *atv) {
+    for (i32 i = 0; i < N; i++) {
+        f64 s = 0.0;
+        for (i32 j = 0; j < N; j++) s += eval_a(j, i) * v[j];
+        atv[i] = s;
+    }
+}
+
+void mul_atav(f64 *v, f64 *out, f64 *tmp) {
+    mul_av(v, tmp);
+    mul_atv(tmp, out);
+}
+
+int main() {
+    f64 *u = new f64[N];
+    f64 *v = new f64[N];
+    f64 *tmp = new f64[N];
+    defer del u;
+    defer del v;
+    defer del tmp;
+    for (i32 i = 0; i < N; i++) u[i] = 1.0;
+    for (i32 i = 0; i < 10; i++) {
+        mul_atav(u, v, tmp);
+        mul_atav(v, u, tmp);
+    }
+    f64 vbv = 0.0;
+    f64 vv = 0.0;
+    for (i32 i = 0; i < N; i++) {
+        vbv += u[i] * v[i];
+        vv += v[i] * v[i];
+    }
+    printf("%lld\n", (i64)(sqrt(vbv / vv) * 1e9));
+    return 0;
+}

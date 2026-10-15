@@ -1,0 +1,59 @@
+// binary-trees (max depth 16) in idiomatic SIC — the Computer Language Benchmarks Game.
+// Source: https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/binarytrees.html
+// (algorithm as in the single-threaded programs there; revised BSD licence).
+// Adapted: single-threaded, `new`-allocated nodes (no arena), fixed depth; prints
+// the sum of every tree check.
+//
+// SIC idioms: a struct with a destructor owns its subtrees, so `del root` frees the
+// whole tree (no hand-written release walk); `new` memory is zero-initialized,
+// so a leaf's children are already NULL.
+#include <stdio.h>
+
+struct Node {
+    Node *left;
+    Node *right;
+    ~Node() {
+        del left;            // del NULL is a no-op
+        del right;
+    }
+};
+
+Node *bottom_up(i32 depth) {
+    Node *n = new Node;
+    if (depth > 0) {
+        n->left = bottom_up(depth - 1);
+        n->right = bottom_up(depth - 1);
+    }
+    return n;
+}
+
+i64 check(Node *n) {
+    if (n->left == NULL) return 1;
+    return 1 + check(n->left) + check(n->right);
+}
+
+int main() {
+    const i32 min_depth = 4;
+    const i32 max_depth = 16;
+    i64 total = 0;
+
+    Node *stretch = bottom_up(max_depth + 1);
+    total += check(stretch);
+    del stretch;
+
+    Node *long_lived = bottom_up(max_depth);
+    defer del long_lived;
+    for (i32 d = min_depth; d <= max_depth; d += 2) {
+        i32 iterations = 1 << (max_depth - d + min_depth);
+        i64 c = 0;
+        for (i32 i = 0; i < iterations; i++) {
+            Node *t = bottom_up(d);
+            c += check(t);
+            del t;
+        }
+        total += c;
+    }
+    total += check(long_lived);
+    printf("%ld\n", total);
+    return 0;
+}

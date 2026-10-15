@@ -58,7 +58,7 @@ for name in "${benches[@]}"; do
 
     # --- build all four ---
     fail=0
-    "$CC" -O2 "$dir/main.c" -o "$BUILD/$name.gcc" 2>"$BUILD/e" \
+    "$CC" -O2 "$dir/main.c" -o "$BUILD/$name.gcc" -lm 2>"$BUILD/e" \
         || { echo "  gcc: BUILD FAILED"; sed 's/^/    /' "$BUILD/e"; fail=1; }
     "$RUSTC" -O "$dir/main.rs" -o "$BUILD/$name.rustc" 2>"$BUILD/e" \
         || { echo "  rustc: BUILD FAILED"; sed 's/^/    /' "$BUILD/e"; fail=1; }

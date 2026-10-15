@@ -1,0 +1,54 @@
+// fannkuch-redux (n = 10) in idiomatic SIC — the Computer Language Benchmarks Game.
+// Source: https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/fannkuchredux.html
+// (algorithm as in the single-threaded programs there; revised BSD licence).
+// Adapted: single-threaded, fixed n, prints checksum*1000 + maxflips.
+//
+// SIC idioms: fixed-size i32 arrays (zero-initialized), the `<>` swap operator for
+// the pancake flip, array `.length`, and a `bool` loop flag instead of a goto.
+#include <stdio.h>
+
+const i32 N = 10;
+
+// Flip the first k+1 pancakes until the top one is 0; return the flip count.
+i32 count_flips(i32 *src) {
+    i32 perm[10];
+    for (i32 i = 0; i < N; i++) perm[i] = src[i];
+    i32 flips = 0;
+    i32 k = perm[0];
+    while (k != 0) {
+        for (i32 i = 0, j = k; i < j; i++, j--) perm[i] <> perm[j];
+        flips++;
+        k = perm[0];
+    }
+    return flips;
+}
+
+int main() {
+    i32 perm1[10];
+    i32 count[10];
+    for (i32 i = 0; i < perm1.length; i++) perm1[i] = i;
+    i32 maxflips = 0;
+    i32 checksum = 0;
+    i32 permcount = 0;
+    i32 r = N;
+    bool more = true;
+    while (more) {
+        while (r != 1) { count[r - 1] = r; r--; }
+        i32 flips = count_flips(perm1);
+        if (flips > maxflips) maxflips = flips;
+        checksum += permcount % 2 == 0 ? flips : -flips;
+        // Next permutation: rotate the first r+1 elements (odometer `count`).
+        while (true) {
+            if (r == N) { more = false; break; }
+            i32 perm0 = perm1[0];
+            for (i32 i = 0; i < r; i++) perm1[i] = perm1[i + 1];
+            perm1[r] = perm0;
+            count[r]--;
+            if (count[r] > 0) break;
+            r++;
+        }
+        permcount++;
+    }
+    printf("%d\n", checksum * 1000 + maxflips);
+    return 0;
+}

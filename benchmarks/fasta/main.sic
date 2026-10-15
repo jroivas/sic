@@ -1,0 +1,104 @@
+// fasta (n = 2500000) in idiomatic SIC — the Computer Language Benchmarks Game.
+// Source: https://benchmarksgame-team.pages.debian.net/benchmarksgame/description/fasta.html
+// (algorithm as in the single-threaded programs there; revised BSD licence).
+// Adapted: single-threaded; every output byte (incl. line breaks, no headers) is
+// folded into an FNV-1a hash instead of being written; prints the hash.
+//
+// SIC idioms: the ALU sequence is a native `string` (indexed by byte, `.size`), the
+// generator and the output sink are structs with methods (`rng.gen(1.0)`,
+// `out.put(c)`), and the frequency tables are arrays of structs.
+#include <stdio.h>
+
+const u32 IM = 139968;
+const u32 IA = 3877;
+const u32 IC = 29573;
+const i64 LINE = 60;
+
+string ALU = "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG"
+             "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA"
+             "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT"
+             "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA"
+             "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG"
+             "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC"
+             "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA";
+
+struct Acid {
+    u8 c;
+    f64 p;
+};
+
+// FNV-1a over everything that would be printed.
+struct Out {
+    u32 hash;
+    void put(Out *self, u8 c) {
+        self->hash ^= c;
+        self->hash *= 16777619;
+    }
+};
+
+struct Rng {
+    u32 last;
+    f64 gen(Rng *self, f64 max) {
+        self->last = (self->last * IA + IC) % IM;
+        return max * (f64)self->last / (f64)IM;
+    }
+};
+
+void make_cumulative(Acid *t, i32 n) {
+    f64 p = 0.0;
+    for (i32 i = 0; i < n; i++) {
+        p += t[i].p;
+        t[i].p = p;
+    }
+}
+
+void repeat_fasta(Out *out, string s, i64 n) {
+    i64 pos = 0;
+    for (i64 done = 0; done < n; ) {
+        i64 line = n - done < LINE ? n - done : LINE;
+        for (i64 i = 0; i < line; i++) {
+            out->put((u8)s[pos]);
+            pos++;
+            if (pos == s.size) pos = 0;
+        }
+        out->put('\n');
+        done += line;
+    }
+}
+
+void random_fasta(Out *out, Rng *rng, Acid *t, i32 ntab, i64 n) {
+    for (i64 done = 0; done < n; ) {
+        i64 line = n - done < LINE ? n - done : LINE;
+        for (i64 i = 0; i < line; i++) {
+            f64 r = rng->gen(1.0);
+            i32 k = 0;
+            while (k < ntab - 1 && r >= t[k].p) k++;
+            out->put(t[k].c);
+        }
+        out->put('\n');
+        done += line;
+    }
+}
+
+int main() {
+    const i64 n = 2500000;
+    Acid iub[15] = {
+        {'a', 0.27}, {'c', 0.12}, {'g', 0.12}, {'t', 0.27},
+        {'B', 0.02}, {'D', 0.02}, {'H', 0.02}, {'K', 0.02}, {'M', 0.02},
+        {'N', 0.02}, {'R', 0.02}, {'S', 0.02}, {'V', 0.02}, {'W', 0.02}, {'Y', 0.02},
+    };
+    Acid homosapiens[4] = {
+        {'a', 0.3029549426680}, {'c', 0.1979883004921},
+        {'g', 0.1975473066391}, {'t', 0.3015094502008},
+    };
+    make_cumulative(iub, iub.length);
+    make_cumulative(homosapiens, homosapiens.length);
+
+    Out out = {2166136261};
+    Rng rng = {42};
+    repeat_fasta(&out, ALU, 2 * n);
+    random_fasta(&out, &rng, iub, iub.length, 3 * n);
+    random_fasta(&out, &rng, homosapiens, homosapiens.length, 5 * n);
+    printf("%u\n", out.hash);
+    return 0;
+}
