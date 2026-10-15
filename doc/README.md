@@ -45,6 +45,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     manifest.
 14. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
+15. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
+    conversion guide with ✗/✓ examples.
 
 ## Design goals
 
