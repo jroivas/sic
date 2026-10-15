@@ -221,6 +221,9 @@ pub struct FuncCtx<'m> {
     /// Declared (AST) types of the function's parameters and locals by name
     /// (the latest declaration wins) — see `Lowerer::global_qtypes`.
     pub decl_qtypes: HashMap<String, QualType>,
+    /// Names whose address has been taken (`&x`) so far in the function. A
+    /// local outside this set cannot be changed by a call (loop-BCE).
+    pub addr_taken: std::collections::HashSet<String>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
     /// Stack of `break` targets for *both* loops and switches, in nesting order.
@@ -358,6 +361,7 @@ impl<'m> FuncCtx<'m> {
             labels: HashMap::new(),
             goto_counts: HashMap::new(),
             decl_qtypes: HashMap::new(),
+            addr_taken: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
@@ -3697,6 +3701,22 @@ impl<'m> FuncCtx<'m> {
         let mut accesses: Vec<(String, Expr, Option<Expr>)> = Vec::new(); // (arr, index-expr, X)
         if !self.bce_scan(body, &ivar, &mut mods, &mut accesses) { return Ok(()); }
         if accesses.is_empty() { return Ok(()); }
+        // A call in the body could change any global or address-taken local. The
+        // checks stay valid when every name they depend on is a constant (an enum
+        // value or a folded `const` global) or a local whose address was never
+        // taken (none inside the body either: `&x` there is in `mods`).
+        let has_call = mods.contains(BCE_CALL);
+        let call_safe = |me: &Self, n: &str| -> bool {
+            match me.lookup(n) {
+                Some(LookupResult::Local(..)) => !me.addr_taken.contains(n),
+                Some(LookupResult::EnumConst(_)) => true,
+                Some(LookupResult::Global(_, g)) => me.lowerer.const_global_vals.contains_key(&g.0),
+                _ => false,
+            }
+        };
+        if has_call && (!call_safe(self, &ivar) || !hi_ids.iter().all(|n| call_safe(self, n))) {
+            return Ok(());
+        }
 
         // -- invariance: the induction var, the bound's vars, and each candidate's X
         //    vars must NOT be modified in the body; the array must not be modified. --
@@ -3706,10 +3726,12 @@ impl<'m> FuncCtx<'m> {
         let mut safe: Vec<(String, Expr, Option<Expr>)> = Vec::new();
         for (arr, idx, x) in accesses {
             if mods.contains(&arr) { continue; }
+            if has_call && !call_safe(self, &arr) { continue; }
             let x_ok = match &x {
                 None => true,
                 Some(xe) => match simple_expr_idents(xe) {
-                    Some(xi) => !xi.contains(&ivar) && !xi.iter().any(|n| mods.contains(n)),
+                    Some(xi) => !xi.contains(&ivar) && !xi.iter().any(|n| mods.contains(n))
+                        && (!has_call || xi.iter().all(|n| call_safe(self, n))),
                     None => false,
                 },
             };
@@ -4594,7 +4616,14 @@ impl<'m> FuncCtx<'m> {
             E::Field { base, .. } | E::Arrow { base, .. } => self.bce_scan_expr(base, ivar, mods, out),
             E::Comma(lhs, rhs) =>
                 self.bce_scan_expr(lhs, ivar, mods, out) && self.bce_scan_expr(rhs, ivar, mods, out),
-            _ => false, // Call, New, Lambda, … — bail (conservative)
+            // A call: noted (the caller then requires every name its checks depend
+            // on to be call-proof), its callee and arguments scanned.
+            E::Call { func, args } => {
+                mods.insert(BCE_CALL.to_string());
+                self.bce_scan_expr(func, ivar, mods, out)
+                    && args.iter().all(|a| self.bce_scan_expr(a, ivar, mods, out))
+            }
+            _ => false, // New, Lambda, … — bail (conservative)
         }
     }
 
@@ -6052,6 +6081,9 @@ fn stmt_is_jump_target(s: &Stmt) -> bool {
 }
 
 /// Source line a statement begins on (for DWARF line markers). 0 = unknown.
+/// Marker in loop-BCE's modified-names set: the loop body makes a call.
+const BCE_CALL: &str = "\u{0}call";
+
 fn stmt_line(stmt: &Stmt) -> u32 {
     match stmt {
         Stmt::Decl(d) => decl_line(d),

@@ -5399,6 +5399,8 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // Remember the escape: a call may now change this variable.
+                if let ExprKind::Ident(n) = &inner.kind { self.addr_taken.insert(n.clone()); }
                 let lv = self.lower_lvalue(inner)?;
                 Ok(lv.ptr)
             }

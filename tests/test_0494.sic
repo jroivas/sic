@@ -1,0 +1,14 @@
+// Loop-BCE with a call in the loop body: the call grows the GLOBAL loop bound,
+// so a check hoisted for the initial range would miss the out-of-bounds writes.
+// The bound is not call-proof, so the per-access check stays and aborts (134).
+i64 g_n = 2;
+void grow() { g_n = 10; }
+int main() {
+    i32 *a = new i32[4];
+    for (i64 i = 0; i < g_n; i++) {
+        a[i] = 1;
+        grow();
+    }
+    del a;
+    return 0;
+}
