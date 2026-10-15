@@ -3647,15 +3647,36 @@ impl Lowerer {
     /// initializers): compare the controlling expression's type against each
     /// association type, falling back to the `default` association. Returns the
     /// chosen association index.
+    /// The type of a `_Generic` controlling expression that names a function
+    /// (`foo` or `&foo`): a pointer to its function type (C 6.3.2.1p4).
+    pub(crate) fn generic_fn_ctrl_type(&self, e: &Expr) -> Option<Type> {
+        let name = match &e.kind {
+            ExprKind::Ident(n) => n,
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => match &expr.kind {
+                ExprKind::Ident(n) => n,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if self.globals_map.contains_key(name) { return None; }
+        let f = self.module.func_ref_by_name(name)?;
+        Some(Type::Pointer(Box::new(Type::Function(Box::new(self.module.func_sig(f).clone())))))
+    }
+
     fn select_generic_const(&self, controlling: &Expr, assocs: &[(Option<QualType>, Box<Expr>)]) -> Option<usize> {
         fn decay(t: Type) -> Type {
             match t {
                 Type::Array { elem, .. } => Type::Pointer(elem),
-                Type::Function(_) => Type::void_ptr(),
+                // A function designator decays to a pointer to that function
+                // type (C 6.3.2.1p4), so it matches a function-pointer type.
+                f @ Type::Function(_) => Type::Pointer(Box::new(f)),
                 other => other,
             }
         }
-        let ctrl = decay(self.const_expr_type(controlling)?);
+        let ctrl = match self.generic_fn_ctrl_type(controlling) {
+            Some(t) => t,
+            None => decay(self.const_expr_type(controlling)?),
+        };
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {

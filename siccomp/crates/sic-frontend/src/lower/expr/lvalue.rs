@@ -368,11 +368,18 @@ impl<'m> FuncCtx<'m> {
         fn decay(t: Type) -> Type {
             match t {
                 Type::Array { elem, .. } => Type::Pointer(elem),
-                Type::Function(_) => Type::void_ptr(),
+                // A function designator decays to a pointer to that function
+                // type (C 6.3.2.1p4), so it matches a function-pointer type.
+                f @ Type::Function(_) => Type::Pointer(Box::new(f)),
                 other => other,
             }
         }
-        let ctrl_ty = decay(self.infer_expr_type(controlling)?);
+        // A function name (`foo` / `&foo`) has its function-pointer type here:
+        // plain inference reports functions as `void*`.
+        let ctrl_ty = match self.lowerer.generic_fn_ctrl_type(controlling) {
+            Some(t) => t,
+            None => decay(self.infer_expr_type(controlling)?),
+        };
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {
