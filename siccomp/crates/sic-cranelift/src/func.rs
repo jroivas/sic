@@ -277,6 +277,18 @@ pub fn compile_function(
         }
     }
 
+    // Seal each block as soon as all its predecessors have been emitted (only a
+    // terminator can branch to an IR block, so the edges are known up front).
+    // Sealing everything only at the end left the SSA builder chains of loop-
+    // header params for loop-INVARIANT promoted variables — redundant together,
+    // not one by one, so they survived — and regalloc shuffled them between
+    // registers on every back edge (`mov; mov; jmp`).
+    let mut pending: HashMap<u32, usize> = HashMap::new();
+    for bb in &f.blocks {
+        for s in terminator_successors(&bb.terminator) { *pending.entry(s.0).or_insert(0) += 1; }
+    }
+    if !pending.contains_key(&f.blocks[0].id.0) { builder.seal_block(entry_cl); }
+
     for (bi, bb) in f.blocks.iter().enumerate() {
         if bi > 0 {
             let cl_bb = bb_map[&bb.id.0];
@@ -290,11 +302,35 @@ pub fn compile_function(
             );
         }
         emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref());
+        for s in terminator_successors(&bb.terminator) {
+            if let Some(n) = pending.get_mut(&s.0) {
+                *n -= 1;
+                if *n == 0 { builder.seal_block(bb_map[&s.0]); }
+            }
+        }
     }
 
+    // Blocks no edge reaches (and any not sealed above).
     builder.seal_all_blocks();
     builder.finalize(target_config);
+    // Debugging aid: `SIC_DUMP_CLIF=<function>` prints that function's Cranelift
+    // IR (after SSA construction, before Cranelift's own optimization) to stderr.
+    if std::env::var("SIC_DUMP_CLIF").map_or(false, |v| v == f.name) { eprintln!("{}", cl_func.display()); }
     Ok(())
+}
+
+/// The IR blocks a terminator can branch to, one entry per edge.
+fn terminator_successors(t: &Terminator) -> Vec<sic_ir::BlockId> {
+    match t {
+        Terminator::Jump(b) => vec![*b],
+        Terminator::CondJump { then_bb, else_bb, .. } => vec![*then_bb, *else_bb],
+        Terminator::Switch { default, arms, .. } => {
+            let mut v: Vec<_> = arms.iter().map(|(_, b)| *b).collect();
+            v.push(*default);
+            v
+        }
+        Terminator::Ret(_) | Terminator::Unreachable => Vec::new(),
+    }
 }
 
 // ── Instruction emission ──────────────────────────────────────────────────────
