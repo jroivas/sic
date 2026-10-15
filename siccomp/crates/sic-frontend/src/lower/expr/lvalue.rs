@@ -380,13 +380,25 @@ impl<'m> FuncCtx<'m> {
             Some(t) => t,
             None => decay(self.infer_expr_type(controlling)?),
         };
+        // A plain variable's declared pointee qualifiers take part too
+        // (`const int *` is not `int *`); top-level qualifiers are dropped.
+        let ctrl_quals = match &controlling.kind {
+            ExprKind::Ident(n) => self.decl_qtypes.get(n)
+                .or_else(|| self.lowerer.global_qtypes.get(n))
+                .and_then(super::super::pointee_quals),
+            _ => None,
+        };
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {
                 None => default_idx = Some(i),
                 Some(qt) => {
                     if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty) {
-                        return Ok(i);
+                        let quals_match = match (&ctrl_quals, super::super::pointee_quals(qt)) {
+                            (Some(c), Some(a)) => *c == a,
+                            _ => true,
+                        };
+                        if quals_match { return Ok(i); }
                     }
                 }
             }

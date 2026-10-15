@@ -17,6 +17,9 @@ pub struct Lowerer {
     pub module: Module,
     /// Maps name → (type, value pointing to storage)
     pub globals_map: HashMap<String, (Type, GlobalRef)>,
+    /// Each file-scope variable's declared (AST) type, qualifiers included —
+    /// `_Generic` tells `const int *` from `int *`, which IR types do not.
+    pub global_qtypes: HashMap<String, QualType>,
     /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
     pub atomic_globals: std::collections::HashSet<String>,
     /// Value of each foldable `const` integer global, by global index (see
@@ -262,6 +265,7 @@ impl Lowerer {
         Lowerer {
             module: Module::new(name),
             globals_map: HashMap::new(),
+            global_qtypes: HashMap::new(),
             atomic_globals: std::collections::HashSet::new(),
             const_global_vals: HashMap::new(),
             atomic_fields: std::collections::HashSet::new(),
@@ -2619,6 +2623,7 @@ impl Lowerer {
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
+        self.global_qtypes.insert(d.name.clone(), d.ty.clone());
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         // sic module-level lambda (sic.md §"Lambdas"): a captureless lambda at file
         // scope initializes a function pointer with the lifted function's address.
@@ -4905,5 +4910,25 @@ pub(crate) fn decl_loc(d: &Decl) -> (Option<String>, u32, u32) {
         | Decl::ExprStmt(_, span) | Decl::Import { span, .. } | Decl::Namespace { span, .. } =>
             (span.file.clone(), span.line, span.col),
         _ => (None, 0, 0),
+    }
+}
+
+/// The qualifiers (const, volatile) of each pointee level of a pointer or
+/// array type, outermost first: `const int * const p` → [(const)]. None when
+/// a level is a typedef name (its qualifiers are not visible here).
+pub(crate) fn pointee_quals(qt: &QualType) -> Option<Vec<(bool, bool)>> {
+    let mut out = Vec::new();
+    let mut cur = qt;
+    loop {
+        match &cur.ty {
+            AstType::Pointer { base, .. } | AstType::Array { base, .. } => {
+                out.push((base.is_const(), base.qualifiers.contains(&TypeQual::Volatile)));
+                cur = base;
+            }
+            // A typedef name hides its own qualifiers: unknown at the top, and
+            // the levels above it are all that is known below a pointer.
+            AstType::Named(_) => return if out.is_empty() { None } else { Some(out) },
+            _ => return Some(out),
+        }
     }
 }

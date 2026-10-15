@@ -218,6 +218,9 @@ pub struct FuncCtx<'m> {
     /// How many `goto L` the function body holds per label — a constant-false
     /// `if` branch defining `L` is still reachable when a goto outside it exists.
     pub goto_counts: HashMap<String, usize>,
+    /// Declared (AST) types of the function's parameters and locals by name
+    /// (the latest declaration wins) — see `Lowerer::global_qtypes`.
+    pub decl_qtypes: HashMap<String, QualType>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
     /// Stack of `break` targets for *both* loops and switches, in nesting order.
@@ -354,6 +357,7 @@ impl<'m> FuncCtx<'m> {
             ret_ty,
             labels: HashMap::new(),
             goto_counts: HashMap::new(),
+            decl_qtypes: HashMap::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
@@ -1748,6 +1752,7 @@ impl<'m> Lowerer {
         }
         for (i, p) in params.iter().enumerate() {
             if let Some(pname) = &p.name {
+                fc.decl_qtypes.insert(pname.clone(), p.ty.clone());
                 // A never-moved `@`-reference param is a checkable fat pointer.
                 if fc.is_sic()
                     && p.ty.qualifiers.iter().any(|q| matches!(q, crate::ast::TypeQual::Reference { .. }))
@@ -2150,6 +2155,7 @@ impl<'m> FuncCtx<'m> {
                 let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
                 let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
+                    self.decl_qtypes.insert(d.name.clone(), d.ty.clone());
                     // sic `atomic` (sic.md §"Atomics"): a top-level atomic-qualified
                     // declarator becomes an atomic local. `d.ty.qualifiers` is the
                     // TOP-level type, so `atomic int a` is atomic but `atomic int *p`
