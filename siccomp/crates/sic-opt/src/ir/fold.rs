@@ -219,7 +219,16 @@ fn fold_cast(op: CastOp, v: &Constant, to_ty: &Type) -> Option<Constant> {
         // u32` — reach the algebraic pass. int↔float / pointer bitcasts: skip.
         BitCast if matches!(to_ty, Type::Int { .. } | Type::Bool) && vi.map_or(false, |x| x >= 0) =>
             wrap_int(vi?, to_ty),
-        // SExt / ZExt (need source width) and pointer casts: leave to codegen.
+        // SExt / ZExt of a small non-negative constant: its high bit is clear at
+        // any source width from 8 bits up (and a signed constant is normalized
+        // into its type's range), so both extensions keep the value. Lowering
+        // wraps every literal this way (`SExt 2 to i64` before `x % 2`); folding
+        // it lets the divide guards and the algebraic rewrites see the constant.
+        // Not a `Bool` (sign-extending `true` is -1) and not a UInt under SExt.
+        SExt if matches!(v, Constant::Int(x) if (0..=127).contains(x)) => wrap_int(vi?, to_ty),
+        ZExt if matches!(v, Constant::Int(x) if (0..=127).contains(x))
+            || matches!(v, Constant::UInt(x) if *x <= 127) => wrap_int(vi?, to_ty),
+        // Other SExt / ZExt (need source width) and pointer casts: leave to codegen.
         SExt | ZExt | IntToPtr | PtrToInt | BitCast => return None,
     })
 }
@@ -227,6 +236,18 @@ fn fold_cast(op: CastOp, v: &Constant, to_ty: &Type) -> Option<Constant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folds_small_extensions_only() {
+        assert_eq!(fold_cast(CastOp::SExt, &Constant::Int(2), &Type::i64()), Some(Constant::Int(2)));
+        assert_eq!(fold_cast(CastOp::ZExt, &Constant::Int(0), &Type::i64()), Some(Constant::Int(0)));
+        assert_eq!(fold_cast(CastOp::ZExt, &Constant::UInt(7), &Type::u64()), Some(Constant::UInt(7)));
+        // Width-ambiguous: left alone.
+        assert_eq!(fold_cast(CastOp::SExt, &Constant::Int(200), &Type::i64()), None);
+        assert_eq!(fold_cast(CastOp::SExt, &Constant::Int(-1), &Type::i64()), None);
+        assert_eq!(fold_cast(CastOp::SExt, &Constant::Bool(true), &Type::i64()), None);
+        assert_eq!(fold_cast(CastOp::SExt, &Constant::UInt(3), &Type::i64()), None);
+    }
 
     #[test]
     fn folds_int_arithmetic_at_width() {
