@@ -4080,23 +4080,80 @@ impl<'m> FuncCtx<'m> {
         let owned: Vec<String> = sname.as_ref()
             .and_then(|n| self.lowerer.struct_owned_fields.get(n).cloned())
             .unwrap_or_default();
+        // Plus every managed by-value field (string, closure, container, nested
+        // managed struct): the member destructor releases those for each copy.
+        let weak: Vec<(String, Type)> = sname.as_ref()
+            .and_then(|n| self.lowerer.struct_weak_fields.get(n).cloned())
+            .unwrap_or_default();
         for (fname, fty) in fieldtys {
-            let is_owned = owned.iter().any(|o| o == &fname);
-            let nested = matches!(super::types::resolve_aggregate(&fty, &self.lowerer.struct_types), Type::Struct(_))
-                && self.lowerer.struct_dtor.contains_key(match &super::types::resolve_aggregate(&fty, &self.lowerer.struct_types) { Type::Struct(st) => st.name.as_deref().unwrap_or(""), _ => "" });
-            if !is_owned && !nested { continue; }
+            if fname.is_empty() { continue; }
+            if weak.iter().any(|(w, _)| w == &fname) {
+                // A copied weak field holds its own weak reference.
+                let flv = self.field_ptr_from(LValue::plain(ptr.clone(), resolved.clone()), &fname, false, &crate::lexer::Span::default())?;
+                let h = self.load_lvalue(&flv)?;
+                self.container_weak_op(h, &fty, true)?;
+                continue;
+            }
+            let managed = self.lowerer.managed_value_type(&fty);
+            let owned_ptr = matches!(&fty, Type::Pointer(_)) && !managed && owned.iter().any(|o| o == &fname);
+            if !managed && !owned_ptr { continue; }
             let flv = self.field_ptr_from(LValue::plain(ptr.clone(), resolved.clone()), &fname, false, &crate::lexer::Span::default())?;
-            if super::types::is_sic_string(&fty) {
-                self.retain_string_at(&flv.ptr)?;
-            } else if matches!(&fty, Type::Pointer(_)) {
+            if managed {
+                self.retain_managed_at(flv.ptr, &fty)?;
+            } else {
                 let v = self.load_lvalue(&flv)?;
                 self.emit_rc_retain(v)?;
-            } else if nested {
-                // A nested managed struct held by value: retain its own owned fields.
-                self.retain_struct_owned_fields(flv.ptr, &fty)?;
             }
         }
         Ok(())
+    }
+
+    /// Release the managed value (`Lowerer::managed_value_type`) stored at `ptr`.
+    pub(crate) fn release_managed_at(&mut self, ptr: Val, ty: &Type) -> Result<()> {
+        self.managed_op_at(ptr, ty, false)
+    }
+
+    /// Retain the managed value stored at `ptr` (it was just copied).
+    pub(crate) fn retain_managed_at(&mut self, ptr: Val, ty: &Type) -> Result<()> {
+        self.managed_op_at(ptr, ty, true)
+    }
+
+    fn managed_op_at(&mut self, ptr: Val, ty: &Type, retain: bool) -> Result<()> {
+        use super::types as ty_;
+        let rt = ty_::resolve_aggregate(ty, &self.lowerer.struct_types);
+        if ty_::is_sic_string(&rt) {
+            return if retain { self.retain_string_at(&ptr) } else { self.release_string_at(&ptr) };
+        }
+        if ty_::is_closure(&rt) {
+            let h = self.alloc_val();
+            self.push_instr(Instr::Load { dest: h, ptr, ty: Type::void_ptr() });
+            return if retain { self.emit_rc_retain(Val::Local(h)) } else { self.emit_closure_release(Val::Local(h)) };
+        }
+        if ty_::is_list(&rt) || ty_::is_dict(&rt) || ty_::is_set(&rt) {
+            let h = self.alloc_val();
+            self.push_instr(Instr::Load { dest: h, ptr, ty: Type::void_ptr() });
+            return if retain { self.container_retain(Val::Local(h), &rt) } else { self.container_release(Val::Local(h), &rt) };
+        }
+        match &rt {
+            Type::Struct(st) => {
+                if retain { return self.retain_struct_owned_fields(ptr, &rt); }
+                if let Some(d) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned() {
+                    self.emit_cleanup_call(ptr, &d);
+                }
+                Ok(())
+            }
+            Type::Array { elem, len } if *len <= super::MANAGED_ARRAY_MAX => {
+                let esz = elem.size_of(self.ptr_size());
+                for i in 0..*len {
+                    let ep = self.alloc_val();
+                    self.push_instr(Instr::GetElemPtr { dest: ep, base: ptr.clone(), index: Constant::int(i as i64),
+                        elem_size: esz, result_ty: Type::Pointer(elem.clone()) });
+                    self.managed_op_at(Val::Local(ep), elem, retain)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn emit_rc_retain(&mut self, p: Val) -> Result<()> {

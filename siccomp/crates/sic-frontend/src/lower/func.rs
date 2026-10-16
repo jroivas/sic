@@ -575,6 +575,9 @@ impl<'m> FuncCtx<'m> {
                     let size = agg_ty.size_of(ps);
                     let align = agg_ty.align_of(ps) as u64;
                     self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
+                    if self.returns_managed_copy(e, &agg_ty) {
+                        self.retain_struct_owned_fields(sret_ptr.clone(), &agg_ty)?;
+                    }
                 }
             }
             self.emit_cleanups_to(0);
@@ -601,7 +604,12 @@ impl<'m> FuncCtx<'m> {
                     }
                     Some(p)
                 } else {
-                    Some(self.lower_aggregate_ptr(e)?)
+                    let p = self.lower_aggregate_ptr(e)?;
+                    let rty = self.ret_ty.clone();
+                    if self.returns_managed_copy(e, &rty) {
+                        self.retain_struct_owned_fields(p.clone(), &rty)?;
+                    }
+                    Some(p)
                 }
             } else {
                 None
@@ -703,6 +711,13 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
             _ => false,
         }
+    }
+
+    /// `return e;` of a managed struct copies an object that stays alive (`*p`,
+    /// `p->s`, a global) rather than moving a local out: the caller's copy needs
+    /// its own references, or the original's destructor frees what it returned.
+    fn returns_managed_copy(&self, e: &Expr, ty: &Type) -> bool {
+        self.is_sic() && self.struct_has_dtor(ty) && self.moved_on_return.is_none() && is_place_expr(e)
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).
@@ -1837,6 +1852,17 @@ impl<'m> Lowerer {
                 // released at scope exit. Untouched params stay zero-cost borrows.
                 let owned_string_param = fc.is_sic() && super::types::is_sic_string(&pty)
                     && fc.moved_names.contains(pname);
+                // A managed struct passed by value is the callee's own copy: retain
+                // its fields on entry and destroy it on exit. As a borrow, assigning
+                // one of its fields (`h.name = …`) released the CALLER's value.
+                if fc.is_sic() && fc.struct_has_dtor(&pty) {
+                    fc.retain_struct_owned_fields(Val::Local(ptr_vid), &pty)?;
+                    if let Type::Struct(st) = &pty {
+                        if let Some(d) = st.name.as_deref().and_then(|n| fc.lowerer.struct_dtor.get(n)).cloned() {
+                            fc.register_scope_exit(Cleanup::AttrFn { addr: Val::Local(ptr_vid), fn_name: d });
+                        }
+                    }
+                }
                 fc.define_local(pname.clone(), pty, ptr_vid);
                 if owned_string_param {
                     fc.retain_string_at(&Val::Local(ptr_vid))?;
@@ -1848,6 +1874,19 @@ impl<'m> Lowerer {
                 if let Some(bf) = fc.bitfield_name_of(&p.ty.ty) {
                     fc.bitfield_locals.insert(pname.clone(), bf);
                 }
+            }
+        }
+
+        // A user `~S()` destroys the struct's managed fields after its body (C++
+        // member destruction): register the member destructor on `self` as the
+        // function's outermost scope-exit action.
+        if fc.is_sic() && fc.lowerer.user_dtor_syms.contains(name) {
+            let mdtor = fc.lowerer.struct_dtor.iter().find(|(_, d)| d.as_str() == name)
+                .and_then(|(s, _)| fc.lowerer.member_dtor.get(s).cloned().flatten());
+            if let (Some(mdtor), Some((_, slot))) = (mdtor, fc.locals.last().and_then(|sc| sc.get("self")).cloned()) {
+                let sp = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: sp, ptr: Val::Local(slot), ty: Type::void_ptr() });
+                fc.register_scope_exit(Cleanup::AttrFn { addr: Val::Local(sp), fn_name: mdtor });
             }
         }
 
@@ -2646,7 +2685,8 @@ impl<'m> FuncCtx<'m> {
                         // containers (a zero handle crashes on first use). Runs
                         // before the ctor so a `S()` can further populate them.
                         if matches!(&ty, Type::Struct(_)) && d.init.is_none() {
-                            self.init_struct_container_fields(&Val::Local(vid), &ty)?;
+                            let owned_by_dtor = self.struct_has_dtor(&ty);
+                            self.init_struct_container_fields(&Val::Local(vid), &ty, owned_by_dtor)?;
                         }
                         if let Type::Struct(st) = &ty {
                             if let Some(sn) = st.name.clone() {
@@ -3038,7 +3078,9 @@ impl<'m> FuncCtx<'m> {
     /// struct's direct fields, install a fresh empty container in each container
     /// field, and register its free at scope exit. Recurses into nested `struct`
     /// fields; skips `union`s (only one member is live, so auto-init is unsound).
-    fn init_struct_container_fields(&mut self, base: &Val, sty: &Type) -> Result<()> {
+    /// `owned_by_dtor`: the struct's destructor releases these fields (its
+    /// member destructor), so no separate scope-exit release is registered.
+    fn init_struct_container_fields(&mut self, base: &Val, sty: &Type, owned_by_dtor: bool) -> Result<()> {
         let resolved = super::types::resolve_aggregate(sty, &self.lowerer.struct_types);
         let Type::Struct(st) = &resolved else { return Ok(()); };
         let st = st.clone();
@@ -3054,22 +3096,22 @@ impl<'m> FuncCtx<'m> {
                 let fp = self.gep_offset(base, off, fty);
                 let z = self.coerce(Constant::zero(), &Type::void_ptr())?;
                 self.push_instr(Instr::Store { ptr: fp.clone(), val: z });
-                self.register_scope_exit(Cleanup::WeakRelease { slot: fp, is_dict });
+                if !owned_by_dtor { self.register_scope_exit(Cleanup::WeakRelease { slot: fp, is_dict }); }
                 continue;
             }
             if super::types::is_list(fty) {
                 let fp = self.gep_offset(base, off, fty);
                 let handle = self.lower_list_new(fty)?;
                 self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
-                self.register_scope_exit(Cleanup::ListFree { slot: fp });
+                if !owned_by_dtor { self.register_scope_exit(Cleanup::ListFree { slot: fp }); }
             } else if super::types::is_dict(fty) {
                 let fp = self.gep_offset(base, off, fty);
                 let handle = self.lower_dict_new(fty, &crate::lexer::Span::default())?;
                 self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
-                self.register_scope_exit(Cleanup::DictFree { slot: fp });
+                if !owned_by_dtor { self.register_scope_exit(Cleanup::DictFree { slot: fp }); }
             } else if matches!(super::types::resolve_aggregate(fty, &self.lowerer.struct_types), Type::Struct(_)) {
                 let fp = self.gep_offset(base, off, fty);
-                self.init_struct_container_fields(&fp, fty)?;
+                self.init_struct_container_fields(&fp, fty, owned_by_dtor)?;
             }
         }
         Ok(())

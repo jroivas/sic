@@ -13,6 +13,10 @@ use sic_ir::*;
 pub use types::{lower_type, lower_param_type};
 
 /// State shared across the lowering of one module.
+/// Largest by-value array of managed elements a member destructor releases
+/// element by element (unrolled); a larger one is left alone.
+pub(crate) const MANAGED_ARRAY_MAX: usize = 64;
+
 pub struct Lowerer {
     pub module: Module,
     /// Maps name → (type, value pointing to storage)
@@ -168,6 +172,13 @@ pub struct Lowerer {
     /// `del`s (its OWNED, refcounted fields). A managed-struct copy (`v = other`)
     /// retains exactly these — never a borrowed pointer field the dtor leaves alone.
     pub struct_owned_fields: HashMap<String, Vec<String>>,
+    /// sic member destructors: struct name → `void(S*)` releasing the struct's
+    /// managed by-value fields (see `synthesize_member_dtors`); `None` = the
+    /// struct has none. A struct with no `~S()` uses it as its destructor; a
+    /// user `~S()` calls it after its own body.
+    pub member_dtor: HashMap<String, Option<String>>,
+    /// The user-written destructor symbols (before implicit ones are added).
+    pub user_dtor_syms: std::collections::HashSet<String>,
     /// sic weak references (sic.md §"Weak"): struct name → its `weak<T>` fields as
     /// `(field name, container IR type)`. Such a field is a non-owning reference —
     /// not auto-initialized or owned; weak-retained on assignment and weak-released
@@ -309,6 +320,8 @@ impl Lowerer {
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             struct_owned_fields: HashMap::new(),
+            member_dtor: HashMap::new(),
+            user_dtor_syms: std::collections::HashSet::new(),
             struct_weak_fields: HashMap::new(),
             notes: Vec::new(),
             tuple_param_types: HashMap::new(),
@@ -415,6 +428,7 @@ impl Lowerer {
         let t1 = std::time::Instant::now();
         self.collect_declarations(tu)?;
         if dbg { eprintln!("[timing] collect_declarations: {:?}", t1.elapsed()); }
+        if self.sic { self.synthesize_member_dtors(); }
 
         // Build sic's native-string helpers up front (outside any function's
         // lowering) so their FuncRefs are stable and callers never construct
@@ -1698,6 +1712,104 @@ impl Lowerer {
             fc.set_terminator(Terminator::Ret(None));
         }
         Some(self.module.add_function(func))
+    }
+
+    /// A by-value field type that owns a resource: a `string`, closure,
+    /// `list`/`dict`/`set` handle, a struct with a destructor, or a small array
+    /// of those. Such a field is released when its struct is destroyed and
+    /// retained when the struct is copied.
+    pub(crate) fn managed_value_type(&self, t: &Type) -> bool {
+        let rt = types::resolve_aggregate(t, &self.struct_types);
+        if types::is_sic_string(&rt) || types::is_closure(&rt)
+            || types::is_list(&rt) || types::is_dict(&rt) || types::is_set(&rt) { return true; }
+        match &rt {
+            Type::Struct(st) => st.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n)),
+            Type::Array { elem, len } => *len > 0 && *len <= MANAGED_ARRAY_MAX && self.managed_value_type(elem),
+            _ => false,
+        }
+    }
+
+    /// sic member destruction: every struct with managed by-value fields
+    /// (`managed_value_type`) gets `void __sic_mdtor_<S>(S*)` releasing them. It
+    /// becomes the struct's destructor when it has no `~S()` (so `string`/
+    /// container fields no longer leak with their struct), and runs after a user
+    /// `~S()`'s body otherwise (C++ member destruction). Nested structs first, so
+    /// a struct holding a managed struct by value is itself managed.
+    fn synthesize_member_dtors(&mut self) {
+        self.user_dtor_syms = self.struct_dtor.values().cloned().collect();
+        let mut names: Vec<String> = self.struct_types.values()
+            .filter_map(|t| match t { Type::Struct(st) => st.name.clone(), _ => None }).collect();
+        names.sort();
+        names.dedup();
+        for n in names { self.ensure_member_dtor(&n, 0); }
+    }
+
+    fn ensure_member_dtor(&mut self, name: &str, depth: usize) -> Option<String> {
+        if let Some(m) = self.member_dtor.get(name) { return m.clone(); }
+        if depth > 64 || name.starts_with("__sic") || self.enum_defs.contains_key(name) { return None; }
+        let Some(Type::Struct(st)) = self.struct_types.values()
+            .find(|t| matches!(t, Type::Struct(s) if s.name.as_deref() == Some(name))).cloned() else { return None };
+        if st.fields.is_empty() { return None; }
+        let sty = Type::Struct(st.clone());
+        if types::is_sic_string(&sty) || types::is_list(&sty) || types::is_dict(&sty) || types::is_set(&sty)
+            || types::is_tuple(&sty) { return None; }
+        // Nested by-value structs (and arrays of them) first.
+        for (_, ft) in &st.fields {
+            let mut t = types::resolve_aggregate(ft, &self.struct_types);
+            while let Type::Array { elem, .. } = t { t = types::resolve_aggregate(&elem, &self.struct_types); }
+            if let Type::Struct(inner) = &t {
+                if let Some(iname) = inner.name.clone() {
+                    if iname != name { self.ensure_member_dtor(&iname, depth + 1); }
+                }
+            }
+        }
+        // `weak<T>` fields are non-owning: weak-released, never strong-released.
+        let weak: Vec<(String, Type)> = self.struct_weak_fields.get(name).cloned().unwrap_or_default();
+        let managed: Vec<(String, Type)> = st.fields.iter()
+            .filter(|(n, t)| !n.is_empty() && !weak.iter().any(|(w, _)| w == n) && self.managed_value_type(t))
+            .cloned().collect();
+        if managed.is_empty() && weak.is_empty() {
+            self.member_dtor.insert(name.to_string(), None);
+            return None;
+        }
+        // A module's member destructor is exported (a consumer's scope exit /
+        // `del` calls it); a plain build keeps it unit-local.
+        let (sym, linkage) = match &self.current_module {
+            Some(md) => (format!("{}_{}__mdtor", md, name), Linkage::External),
+            None => (format!("__sic_mdtor_{}", name), Linkage::Internal),
+        };
+        let voidp = Type::void_ptr();
+        let sig = build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
+        let params = vec![sic_ir::Param { name: "self".to_string(), ty: voidp }];
+        let mut func = Function::new(sym.clone(), sig, params, linkage);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        let sp = crate::lexer::Span::default();
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            let self_arg = Val::Local(ValId(0x10000));
+            let pty = Type::Pointer(Box::new(sty.clone()));
+            let selfp = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: selfp, op: CastOp::BitCast, val: self_arg, to_ty: pty.clone() });
+            fc.val_types.insert(selfp.0, pty);
+            // Reverse declaration order, like C++ member destruction.
+            for (fname, fty) in st.fields.iter().rev() {
+                let is_weak = weak.iter().any(|(w, _)| w == fname);
+                if !is_weak && !managed.iter().any(|(m, _)| m == fname) { continue; }
+                if let Ok(flv) = fc.field_ptr_from(crate::lower::expr::LValue::plain(Val::Local(selfp), sty.clone()), fname, false, &sp) {
+                    if is_weak {
+                        if let Ok(h) = fc.load_lvalue(&flv) { let _ = fc.container_weak_op(h, fty, false); }
+                    } else {
+                        let _ = fc.release_managed_at(flv.ptr, fty);
+                    }
+                }
+            }
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func);
+        self.struct_dtor.entry(name.to_string()).or_insert_with(|| sym.clone());
+        self.member_dtor.insert(name.to_string(), Some(sym.clone()));
+        Some(sym)
     }
 
     /// Synthesize a tuple's per-layout element destructor (sic.md §"Tuples"): a

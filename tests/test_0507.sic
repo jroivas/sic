@@ -1,0 +1,47 @@
+// Member destruction: a struct's managed by-value fields (string, list/dict,
+// closure, nested managed struct) are released when the struct is destroyed —
+// with or without a user `~S()` (which runs first). They leaked: only a struct
+// with a destructor released anything, and only what that destructor `del`ed.
+// Copies retain the fields; a by-value struct parameter is the callee's own
+// copy (assigning its field freed the caller's string); `return *p` retains.
+// Checked through glibc's in-use heap bytes. Returns 42.
+#include <malloc.h>
+#include <stdlib.h>
+struct Name { string first; string last; };
+struct Rec { Name n; list<i32> xs; i32 id; ~Rec() { id = -1; } };
+struct Obs { weak<list<i32>> w; string tag; };
+
+i32 bump(Name n) { n.first = "changed" + "!"; return n.first.size; }
+Name get(Name *p) { return *p; }
+
+void round(i32 i) {
+    Name a;
+    a.first = "first-" + "name";
+    a.last = "last-" + "name";
+    Name b = a;
+    Name c;
+    c = b;
+    if (bump(a) != 8 || a.first != "first-name") { exit(1); }
+    Name d = get(&a);
+    if (d.last != "last-name") { exit(2); }
+    Rec r;
+    r.n = a;
+    r.xs.add(i);
+    Rec *h = new Rec;
+    h->n.first = "heap" + "-rec";
+    del h;
+    list<i32> data;
+    data.add(1);
+    Obs o;
+    o.w = data;
+    o.tag = "obs" + "-tag";
+}
+
+int main() {
+    round(0);
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 2000; i++) round(i);
+    usize after = mallinfo2().uordblks;
+    if (after > before + 4096) return 3;     // ~11 leaked blocks per round before
+    return 42;
+}
