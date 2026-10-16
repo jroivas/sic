@@ -13,9 +13,9 @@ use sic_ir::*;
 pub use types::{lower_type, lower_param_type};
 
 /// State shared across the lowering of one module.
-/// Largest by-value array of managed elements a member destructor releases
-/// element by element (unrolled); a larger one is left alone.
-pub(crate) const MANAGED_ARRAY_MAX: usize = 64;
+/// Arrays of managed elements up to this length are retained/released with
+/// unrolled per-element code; longer ones with a loop.
+pub(crate) const MANAGED_ARRAY_UNROLL: usize = 4;
 
 pub struct Lowerer {
     pub module: Module,
@@ -1715,8 +1715,8 @@ impl Lowerer {
     }
 
     /// A by-value field type that owns a resource: a `string`, closure,
-    /// `list`/`dict`/`set` handle, a struct with a destructor, or a small array
-    /// of those. Such a field is released when its struct is destroyed and
+    /// `list`/`dict`/`set` handle, a struct with a destructor, or an array of
+    /// those. Such a field is released when its struct is destroyed and
     /// retained when the struct is copied.
     pub(crate) fn managed_value_type(&self, t: &Type) -> bool {
         let rt = types::resolve_aggregate(t, &self.struct_types);
@@ -1724,7 +1724,7 @@ impl Lowerer {
             || types::is_list(&rt) || types::is_dict(&rt) || types::is_set(&rt) { return true; }
         match &rt {
             Type::Struct(st) => st.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n)),
-            Type::Array { elem, len } => *len > 0 && *len <= MANAGED_ARRAY_MAX && self.managed_value_type(elem),
+            Type::Array { elem, len } => *len > 0 && self.managed_value_type(elem),
             _ => false,
         }
     }

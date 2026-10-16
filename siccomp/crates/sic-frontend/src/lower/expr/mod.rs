@@ -4142,7 +4142,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 Ok(())
             }
-            Type::Array { elem, len } if *len <= super::MANAGED_ARRAY_MAX => {
+            Type::Array { elem, len } if *len <= super::MANAGED_ARRAY_UNROLL => {
                 let esz = elem.size_of(self.ptr_size());
                 for i in 0..*len {
                     let ep = self.alloc_val();
@@ -4150,6 +4150,36 @@ impl<'m> FuncCtx<'m> {
                         elem_size: esz, result_ty: Type::Pointer(elem.clone()) });
                     self.managed_op_at(Val::Local(ep), elem, retain)?;
                 }
+                Ok(())
+            }
+            Type::Array { elem, len } => {
+                // for (i = 0; i < len; i++) op(&ptr[i])
+                let esz = elem.size_of(self.ptr_size());
+                let i64t = Type::i64();
+                let ctr = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: ctr, ty: i64t.clone(), align: None });
+                let zero = self.coerce(Constant::int(0), &i64t)?;
+                self.push_instr(Instr::Store { val: zero, ptr: Val::Local(ctr) });
+                let head = self.new_block_after_current();
+                let body = self.new_block_after_current();
+                let done = self.new_block_after_current();
+                self.set_terminator(Terminator::Jump(head));
+                self.switch_to_block(head);
+                let iv = self.alloc_val();
+                self.push_instr(Instr::Load { dest: iv, ptr: Val::Local(ctr), ty: i64t.clone() });
+                let lt = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: Val::Local(iv), rhs: Constant::int(*len as i64), ty: i64t.clone() });
+                self.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: body, else_bb: done });
+                self.switch_to_block(body);
+                let ep = self.alloc_val();
+                self.push_instr(Instr::GetElemPtr { dest: ep, base: ptr.clone(), index: Val::Local(iv),
+                    elem_size: esz, result_ty: Type::Pointer(elem.clone()) });
+                self.managed_op_at(Val::Local(ep), elem, retain)?;
+                let nx = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: nx, op: BinOp::Add, lhs: Val::Local(iv), rhs: Constant::int(1), ty: i64t.clone() });
+                self.push_instr(Instr::Store { val: Val::Local(nx), ptr: Val::Local(ctr) });
+                self.set_terminator(Terminator::Jump(head));
+                self.switch_to_block(done);
                 Ok(())
             }
             _ => Ok(()),

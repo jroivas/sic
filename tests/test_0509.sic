@@ -1,0 +1,39 @@
+// Arrays of managed values release their elements: a local `string a[N]` /
+// `H a[N]` (H holding a string) at scope exit, and an array field when its
+// struct is destroyed; copies retain each element. They leaked — nothing
+// released an array's elements. Long arrays use a loop (here 100 elements).
+// `static` locals are never released. Returns 42.
+#include <malloc.h>
+#include <stdlib.h>
+struct H { string name; };
+struct B { H hs[10]; string tags[3]; };
+
+i32 keep(i32 k) {
+    static string s[2];
+    if (k == 0) { s[0] = "kept" + "!"; return 0; }
+    return s[0] == "kept!" ? 0 : 1;
+}
+
+void round(i32 c) {
+    string a[100];
+    for (i32 i = 0; i < 100; i++) a[i] = "x" + "y";
+    H h[3];
+    h[c % 3].name = "h" + "!";
+    B b;
+    for (i32 i = 0; i < 10; i++) b.hs[i].name = "b" + "!";
+    b.tags[2] = "t" + "!";
+    B copy = b;
+    if (copy.hs[9].name != "b!" || copy.tags[2] != "t!" || a[99] != "xy") exit(1);
+    string init[2] = {a[0] + "z", "lit"};
+    if (init[0] != "xyz") exit(2);
+}
+
+int main() {
+    keep(0);
+    round(0);
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 500; i++) round(i);
+    usize after = mallinfo2().uordblks;
+    if (after > before + 4096) return 3;
+    return keep(1) == 0 ? 42 : 4;
+}

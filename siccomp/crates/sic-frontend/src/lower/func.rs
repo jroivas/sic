@@ -15,6 +15,9 @@ pub enum Cleanup {
     Defer(Box<Stmt>),
     /// sic refcounted `string` local: release its `rc` on scope exit.
     StringRelease { addr: Val },
+    /// sic array local of managed values (`string a[3]`, `S a[2]` with `S`
+    /// managed): release each element at scope exit.
+    ManagedRelease { addr: Val, ty: Type },
     /// sic transient `string.ptr` C-string copy: `free` the pointer held in
     /// `slot` (a `char*` slot, NULL when `.ptr` needed no copy) at scope exit.
     FreePtr { slot: Val },
@@ -963,6 +966,7 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::Call { dest: None, func: f, args: vec![Val::Local(p)], ret_ty: Type::Void });
             }
             Cleanup::AnyRelease { addr } => { let _ = self.any_refcount_at(addr, false); }
+            Cleanup::ManagedRelease { addr, ty } => { let _ = self.release_managed_at(addr, &ty); }
             Cleanup::ClosureRelease { slot } => {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
@@ -2731,6 +2735,11 @@ impl<'m> FuncCtx<'m> {
                     // zero-inits `rc` to NULL, and releasing NULL is a no-op.
                     if self.is_sic() && super::types::is_sic_string(&ty) {
                         self.register_scope_exit(Cleanup::StringRelease { addr: Val::Local(vid) });
+                    }
+                    // An array of managed values releases each element. (Elements
+                    // are zero-initialized, so unassigned ones release nothing.)
+                    if self.is_sic() && matches!(ty, Type::Array { .. }) && self.lowerer.managed_value_type(&ty) {
+                        self.register_scope_exit(Cleanup::ManagedRelease { addr: Val::Local(vid), ty: ty.clone() });
                     }
                     // sic `any` local: if it wraps a refcounted `string` (e.g. read
                     // from a container), share ownership — retain on bind, release at
