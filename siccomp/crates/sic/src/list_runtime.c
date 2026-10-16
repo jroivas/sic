@@ -31,7 +31,9 @@ __attribute__((weak)) void __sic_tuple_release(void *data) {
      1 = a plain owned heap block (a deep-copied struct) — raw free;
      2 = a refcounted `string` block — `vslot` is the descriptor and its rc field
          (word 2) is the block base, so decrement the rc and free only at 0 (a
-         reader that copied the descriptor and retained keeps it alive).
+         reader that copied the descriptor and retained keeps it alive);
+     3/4 = a nested list / dict handle, 5/6 = a weak one, 7 = a tuple;
+     8 = a deep-copied managed struct: its destructor runs before the free.
    A borrowed value (vowned 0) is left alone. */
 __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     if (vowned == 1) {
@@ -55,6 +57,13 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     } else if (vowned == 7) {
         /* a `tuple` element — release one reference (runs its element dtor at 0) */
         __sic_tuple_release((void *)vslot);
+    } else if (vowned == 8) {
+        /* a deep-copied MANAGED struct (one with a destructor): the block is
+           [dtor | pad | data…] with `vslot` = data; destroy, then free the block */
+        void **hdr = (void **)vslot - 2;
+        void (*dtor)(void *) = (void (*)(void *))hdr[0];
+        if (dtor) dtor((void *)vslot);
+        free(hdr);
     }
 }
 

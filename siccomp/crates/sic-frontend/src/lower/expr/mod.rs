@@ -2227,11 +2227,49 @@ impl<'m> FuncCtx<'m> {
         let is_owned_string = super::types::is_sic_string(v) || super::types::is_sic_string(&ety);
         let is_owned_struct = !is_owned_string && !super::types::is_any(v)
             && matches!(v, Type::Struct(_) | Type::Union(_));
+        let managed_dtor = match v {
+            Type::Struct(st) if self.is_sic() => st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned(),
+            _ => None,
+        };
         let vslot_word = if is_owned_string {
             let (data, size) = self.string_operand_parts(val)?;
             let owned = self.emit_dict_owned_string(data, size)?;
             let w = self.alloc_val();
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: owned, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            Val::Local(w)
+        } else if let (true, Some(dtor)) = (is_owned_struct, managed_dtor.clone()) {
+            // A managed struct element owns its copy: retain the copied fields
+            // (or move a call's temporary in) and box it with its destructor in a
+            // header, which the runtime runs before freeing (`vowned` 8). It was a
+            // raw copy freed with `free`, left dangling once the source died.
+            let src = self.lower_aggregate_ptr(val)?;
+            let bytes = v.size_of(self.ptr_size()).max(1) as i64;
+            let total = self.coerce(Constant::int(bytes + 16), &Type::i64())?;
+            let block = self.emit_malloc(total)?;
+            let fref = match self.lowerer.module.func_ref_by_name(&dtor) {
+                Some(f) => f,
+                None => {
+                    let sig = FunctionType { params: vec![Type::void_ptr()], ret: Type::Void, variadic: false };
+                    self.lowerer.module.add_extern(ExternFunc { name: dtor.clone(), sig })
+                }
+            };
+            let hp = self.coerce(block.clone(), &Type::Pointer(Box::new(Type::void_ptr())))?;
+            self.push_instr(Instr::Store { val: Val::Func(fref), ptr: hp });
+            let data = self.alloc_val();
+            self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(16), elem_size: 1,
+                result_ty: Type::Pointer(Box::new(v.clone())) });
+            let n = self.coerce(Constant::int(bytes), &Type::i64())?;
+            self.emit_memcpy(Val::Local(data), src.clone(), n)?;
+            if super::func::is_place_expr(val) {
+                self.retain_struct_owned_fields(Val::Local(data), v)?;
+            } else if super::func::is_fresh_struct_expr(val) {
+                self.take_struct_temp(&src);
+            } else {
+                self.retain_struct_owned_fields(Val::Local(data), v)?;
+            }
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: Val::Local(data), to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
         } else if is_owned_struct {
@@ -2261,6 +2299,7 @@ impl<'m> FuncCtx<'m> {
         // (release: decrement its rc, free only at 0 — so a reader that copied the
         // descriptor and retained keeps it alive past an overwrite/remove).
         let vowned = if is_owned_string { Constant::int(2) }
+            else if is_owned_struct && managed_dtor.is_some() { Constant::int(8) }
             else if is_owned_struct { Constant::int(1) }
             else { Constant::int(0) };
         Ok((vty_word, vslot_word, vowned))

@@ -1,0 +1,42 @@
+// A managed struct stored in a list/dict owns its copy: the element retains
+// the struct's fields (or takes a call's temporary) and the container runs the
+// struct's destructor when the element is replaced, removed or freed. It held
+// a raw byte copy freed with `free`, so it dangled once the source struct was
+// destroyed (and leaked the fields otherwise). Returns 42.
+#include <malloc.h>
+#include <stdlib.h>
+struct H { string name; };
+H mk(string s) { H a; a.name = s + "!"; return a; }
+
+list<H> build() {
+    list<H> l;
+    for (i32 i = 0; i < 5; i++) { H h = mk("q"); l.add(h); }
+    return l;
+}
+
+void round(i32 c) {
+    list<H> l;
+    { H h = mk("a"); l.add(h); l.add(h); }       // source destroyed here
+    string junk = "################" + "################";
+    if (l[0].name != "a!" || l[1].name != "a!") exit(1);
+    l[0] = mk("c");                                // replaced element destroyed
+    H x = l[1];
+    if (x.name != "a!" || l[0].name != "c!") exit(2);
+    dict<string, H> d;
+    { H h = mk("v"); d["k"] = h; }
+    d["k2"] = mk("w");
+    del d["k2"];
+    H g = d["k"];
+    if (g.name != "v!") exit(3);
+    list<H> b = build();
+    if (b[4].name != "q!") exit(4);
+}
+
+int main() {
+    round(0);
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 1000; i++) round(i);
+    usize after = mallinfo2().uordblks;
+    if (after > before + 4096) return 5;
+    return 42;
+}
