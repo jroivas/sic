@@ -2771,9 +2771,20 @@ impl<'m> FuncCtx<'m> {
                         // Auto-init any `list`/`dict`/`set` fields to fresh empty
                         // containers (a zero handle crashes on first use). Runs
                         // before the ctor so a `S()` can further populate them.
-                        if matches!(&ty, Type::Struct(_)) && d.init.is_none() {
+                        if matches!(&ty, Type::Struct(_)) && !self.is_tagged_enum_struct(&ty) && self.holds_container(&ty) {
+                            // A brace-initialized struct keeps the handles its
+                            // initializer stored and gets fresh ones elsewhere.
                             let owned_by_dtor = self.struct_has_dtor(&ty);
-                            self.init_struct_container_fields(&Val::Local(vid), &ty, owned_by_dtor)?;
+                            let only_null = d.init.is_some();
+                            self.init_containers_at(&Val::Local(vid), &ty, owned_by_dtor, only_null)?;
+                        }
+                        // An array of structs holding containers (`H a[3];`): each
+                        // element's, released with the array (its ManagedRelease).
+                        if let Type::Array { elem, .. } = &ty {
+                            if matches!(elem.as_ref(), Type::Struct(_)) && self.holds_container(&ty) {
+                                let only_null = d.init.is_some();
+                                self.init_containers_at(&Val::Local(vid), &ty, true, only_null)?;
+                            }
                         }
                         if let Type::Struct(st) = &ty {
                             if let Some(sn) = st.name.clone() {
@@ -3180,48 +3191,125 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    /// sic: a `struct` local whose fields include `list`/`dict`/`set` handles must
-    /// have those fields initialized to fresh empty containers — a zero handle
-    /// crashes on first use (`b.items.add(x)` dereferences NULL). Walk the resolved
-    /// struct's direct fields, install a fresh empty container in each container
-    /// field, and register its free at scope exit. Recurses into nested `struct`
-    /// fields; skips `union`s (only one member is live, so auto-init is unsound).
-    /// `owned_by_dtor`: the struct's destructor releases these fields (its
-    /// member destructor), so no separate scope-exit release is registered.
-    fn init_struct_container_fields(&mut self, base: &Val, sty: &Type, owned_by_dtor: bool) -> Result<()> {
-        let resolved = super::types::resolve_aggregate(sty, &self.lowerer.struct_types);
-        let Type::Struct(st) = &resolved else { return Ok(()); };
-        let st = st.clone();
-        let weak = st.name.as_ref()
-            .and_then(|n| self.lowerer.struct_weak_fields.get(n).cloned())
-            .unwrap_or_default();
-        for (i, (name, fty)) in st.fields.iter().enumerate() {
-            let off = st.field_offset(i, self.ptr_size());
-            // sic `weak<T>` field (sic.md §"Weak"): a non-owning reference — null it
-            // (not a fresh container), and weak-release it at scope exit.
-            if weak.iter().any(|(wn, _)| wn == name) {
-                let is_dict = super::types::is_dict(fty) || super::types::is_set(fty);
-                let fp = self.gep_offset(base, off, fty);
-                let z = self.coerce(Constant::zero(), &Type::void_ptr())?;
-                self.push_instr(Instr::Store { ptr: fp.clone(), val: z });
-                if !owned_by_dtor { self.register_scope_exit(Cleanup::WeakRelease { slot: fp, is_dict }); }
-                continue;
-            }
-            if super::types::is_list(fty) {
-                let fp = self.gep_offset(base, off, fty);
-                let handle = self.lower_list_new(fty)?;
-                self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
-                if !owned_by_dtor { self.register_scope_exit(Cleanup::ListFree { slot: fp }); }
-            } else if super::types::is_dict(fty) {
-                let fp = self.gep_offset(base, off, fty);
-                let handle = self.lower_dict_new(fty, &crate::lexer::Span::default())?;
-                self.push_instr(Instr::Store { ptr: fp.clone(), val: handle });
-                if !owned_by_dtor { self.register_scope_exit(Cleanup::DictFree { slot: fp }); }
-            } else if matches!(super::types::resolve_aggregate(fty, &self.lowerer.struct_types), Type::Struct(_)) {
-                let fp = self.gep_offset(base, off, fty);
-                self.init_struct_container_fields(&fp, fty, owned_by_dtor)?;
-            }
+    /// `t` (by value) holds a `list`/`dict`/`set` handle somewhere: itself, a
+    /// struct field, or an array element (recursively; unions are skipped — only
+    /// one member is live).
+    pub(crate) fn holds_container(&self, t: &Type) -> bool {
+        let rt = super::types::resolve_aggregate(t, &self.lowerer.struct_types);
+        if super::types::is_list(&rt) || super::types::is_dict(&rt) || super::types::is_set(&rt) { return true; }
+        match &rt {
+            Type::Struct(st) if !self.is_tagged_enum_struct(&rt) => st.fields.iter().any(|(_, ft)| self.holds_container(ft)),
+            Type::Array { elem, .. } => self.holds_container(elem),
+            _ => false,
         }
+    }
+
+    /// Install fresh empty containers in every `list`/`dict`/`set` slot of the
+    /// object of type `ty` at `base` — struct fields, nested structs and array
+    /// elements alike — as a declaration does (a zero handle meant one never
+    /// created: copies of it shared nothing). `only_null` keeps a handle an
+    /// initializer already stored. A `weak<T>` field stays null (non-owning).
+    /// `owned_by_dtor`: the object's destructor releases these (no separate
+    /// scope-exit release).
+    pub(crate) fn init_containers_at(&mut self, base: &Val, ty: &Type, owned_by_dtor: bool, only_null: bool) -> Result<()> {
+        let rt = super::types::resolve_aggregate(ty, &self.lowerer.struct_types);
+        let is_dict = super::types::is_dict(&rt) || super::types::is_set(&rt);
+        if is_dict || super::types::is_list(&rt) {
+            let done = if only_null {
+                let h = self.alloc_val();
+                self.push_instr(Instr::Load { dest: h, ptr: base.clone(), ty: Type::void_ptr() });
+                let is_null = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(h), rhs: Constant::zero(), ty: Type::void_ptr() });
+                let create = self.new_block_after_current();
+                let done = self.new_block_after_current();
+                self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: create, else_bb: done });
+                self.switch_to_block(create);
+                Some(done)
+            } else { None };
+            let handle = if is_dict { self.lower_dict_new(&rt, &crate::lexer::Span::default())? } else { self.lower_list_new(&rt)? };
+            let handle = self.coerce(handle, &Type::void_ptr())?;
+            self.push_instr(Instr::Store { ptr: base.clone(), val: handle });
+            if let Some(done) = done {
+                self.set_terminator(Terminator::Jump(done));
+                self.switch_to_block(done);
+            }
+            if !owned_by_dtor {
+                self.register_scope_exit(if is_dict { Cleanup::DictFree { slot: base.clone() } } else { Cleanup::ListFree { slot: base.clone() } });
+            }
+            return Ok(());
+        }
+        match &rt {
+            Type::Struct(st) if !self.is_tagged_enum_struct(&rt) => {
+                let st = st.clone();
+                let weak = st.name.as_ref()
+                    .and_then(|n| self.lowerer.struct_weak_fields.get(n).cloned())
+                    .unwrap_or_default();
+                for (i, (name, fty)) in st.fields.iter().enumerate() {
+                    let off = st.field_offset(i, self.ptr_size());
+                    // sic `weak<T>` field (sic.md §"Weak"): a non-owning reference —
+                    // null (zeroed already), weak-released at scope exit.
+                    if weak.iter().any(|(wn, _)| wn == name) {
+                        if !owned_by_dtor && !only_null {
+                            let is_dict = super::types::is_dict(fty) || super::types::is_set(fty);
+                            let fp = self.gep_offset(base, off, fty);
+                            self.register_scope_exit(Cleanup::WeakRelease { slot: fp, is_dict });
+                        }
+                        continue;
+                    }
+                    if !self.holds_container(fty) { continue; }
+                    let fp = self.gep_offset(base, off, fty);
+                    self.init_containers_at(&fp, fty, owned_by_dtor, only_null)?;
+                }
+                Ok(())
+            }
+            Type::Array { elem, len } if self.holds_container(elem) => {
+                let elem = (**elem).clone();
+                let esz = elem.size_of(self.ptr_size());
+                if *len <= super::MANAGED_ARRAY_UNROLL {
+                    for i in 0..*len {
+                        let ep = self.gep_offset(base, i as u64 * esz, &elem);
+                        self.init_containers_at(&ep, &elem, owned_by_dtor, only_null)?;
+                    }
+                    return Ok(());
+                }
+                // A loop's per-element release cannot be registered per element:
+                // the array's owner (its `ManagedRelease`) releases them.
+                self.emit_elem_loop(base, &elem, Constant::int(*len as i64), |fc, ep, et| fc.init_containers_at(ep, et, true, only_null))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// `for (i = 0; i < n; i++) f(&base[i])` over elements of type `elem`.
+    pub(crate) fn emit_elem_loop(&mut self, base: &Val, elem: &Type, n: Val,
+        mut f: impl FnMut(&mut Self, &Val, &Type) -> Result<()>) -> Result<()> {
+        let i64t = Type::i64();
+        let esz = elem.size_of(self.ptr_size()) as i64;
+        let ctr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: ctr, ty: i64t.clone(), align: None });
+        let zero = self.coerce(Constant::int(0), &i64t)?;
+        self.push_instr(Instr::Store { val: zero, ptr: Val::Local(ctr) });
+        let head = self.new_block_after_current();
+        let body = self.new_block_after_current();
+        let done = self.new_block_after_current();
+        self.set_terminator(Terminator::Jump(head));
+        self.switch_to_block(head);
+        let iv = self.alloc_val();
+        self.push_instr(Instr::Load { dest: iv, ptr: Val::Local(ctr), ty: i64t.clone() });
+        let lt = self.alloc_val();
+        let n = self.coerce(n, &i64t)?;
+        self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: Val::Local(iv), rhs: n, ty: i64t.clone() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: body, else_bb: done });
+        self.switch_to_block(body);
+        let ep = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: ep, base: base.clone(), index: Val::Local(iv), elem_size: esz as u64,
+            result_ty: Type::Pointer(Box::new(elem.clone())) });
+        f(self, &Val::Local(ep), elem)?;
+        let nx = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: nx, op: BinOp::Add, lhs: Val::Local(iv), rhs: Constant::int(1), ty: i64t.clone() });
+        self.push_instr(Instr::Store { val: Val::Local(nx), ptr: Val::Local(ctr) });
+        self.set_terminator(Terminator::Jump(head));
+        self.switch_to_block(done);
         Ok(())
     }
 

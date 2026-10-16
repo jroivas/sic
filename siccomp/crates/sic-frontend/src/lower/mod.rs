@@ -458,6 +458,7 @@ impl Lowerer {
         if self.module.func_ref_by_name("main").is_none() {
             self.synthesize_fake_main(tu)?;
         }
+        if self.sic { self.synthesize_global_container_init(); }
 
         // sic module export mangling: rename this unit's exported (external,
         // defined) top-level symbols to `<module>_<name>` (sic.md §"Imports").
@@ -1728,6 +1729,37 @@ impl Lowerer {
             Type::Array { elem, len } => *len > 0 && self.managed_value_type(elem),
             _ => false,
         }
+    }
+
+    /// A global `list`/`dict`/`set` — or a global struct/array holding one —
+    /// starts as a fresh container, as a local does: a startup constructor
+    /// installs them before `main`. A zero handle crashed on first write and,
+    /// once created lazily, was not shared by a copy taken before that write.
+    fn synthesize_global_container_init(&mut self) {
+        let globals: Vec<(usize, Type)> = self.module.globals.iter().enumerate()
+            .filter(|(_, g)| g.linkage != Linkage::Import && !g.thread_local)
+            .map(|(i, g)| (i, g.ty.clone())).collect();
+        if globals.is_empty() { return; }
+        let sig = build_fn_sig(Type::Void, vec![], false, self.ptr_size);
+        let name = match &self.current_module {
+            Some(md) => format!("__sic_ginit_{}", md),
+            None => "__sic_ginit".to_string(),
+        };
+        let mut func = Function::new(name, sig, vec![], Linkage::Internal);
+        func.constructor = Some(65535);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        let mut any = false;
+        {
+            let mut fc = func::FuncCtx::new_with_func(self, &mut func);
+            for (i, ty) in globals {
+                if !fc.holds_container(&ty) { continue; }
+                any = true;
+                let _ = fc.init_containers_at(&Val::Global(GlobalRef(i as u32)), &ty, true, true);
+            }
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        if any { self.module.add_function(func); }
     }
 
     /// A tagged enum some variant of which owns its payload (a `string`, a

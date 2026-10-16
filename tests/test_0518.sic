@@ -1,0 +1,46 @@
+// Every `list`/`dict`/`set` starts as a real (empty) container, not only a
+// declared local: a global, a field of a global/`new`ed/array-element/
+// brace-initialized struct. They held a NULL handle — the first write crashed
+// (`list<i32> g; g.add(1);`, `H a[2]; a[1].xs.add(5);`), and a copy taken
+// before it shared nothing. A NULL handle that still turns up (zeroed C memory)
+// is created on first write. Returns 42.
+#include <stdlib.h>
+struct H { string name; list<i32> xs; set<string> tags; };
+list<i32> g;
+dict<string, i32> gd;
+H gh;
+H garr[6];
+i32 shared() {
+    list<i32> a = g;
+    a.add(1);                       // the same list as g
+    H c = gh;
+    c.xs.add(2);
+    H e = garr[5];
+    e.xs.add(3);
+    return g.length + gh.xs.length + garr[5].xs.length;
+}
+int main() {
+    if (shared() != 3) return 1;
+    gd["k"] = 4;
+    gh.tags.add("t");
+    if (gd["k"] != 4 || !gh.tags.contains("t")) return 2;
+    H loc[3];
+    H copy = loc[2];
+    copy.xs.add(7);
+    if (loc[2].xs.length != 1) return 3;
+    H big[10];
+    big[9].xs.add(1);
+    H brace = {.name = "b"};
+    brace.xs.add(1);
+    H *p = new H;
+    H q = *p;
+    q.xs.add(5);
+    if (p->xs.length != 1 || brace.xs.length != 1 || big[9].xs.length != 1) return 4;
+    del p;
+    H *z = (H *)calloc(1, sizeof(H));   // zeroed memory: created on first write
+    z->xs.add(9);
+    i32 zl = z->xs.length;
+    del z->xs;
+    free(z);
+    return zl == 1 ? 42 : 5;
+}

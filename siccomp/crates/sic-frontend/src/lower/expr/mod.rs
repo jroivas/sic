@@ -1957,6 +1957,33 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// The `list` handle from a base that is a list or a pointer to one.
+    /// A `list`/`dict`/`set` that no declaration created — a global, a field of
+    /// a `new`ed / array-element / brace-initialized struct, zeroed memory — holds
+    /// a NULL handle. Reads treat it as empty (the runtime is NULL-safe); a write
+    /// creates the container in place first. Writing through it crashed
+    /// (`list<i32> g; g.add(1);`, `H a[2]; a[1].xs.add(5);`).
+    fn ensure_container_created(&mut self, base: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        if !self.is_sic() || !side_effect_free(base) { return Ok(()); }
+        let Ok(lv) = self.lower_lvalue(base) else { return Ok(()) };
+        let ty = lv.ty.clone();
+        let is_dict = super::types::is_dict(&ty) || super::types::is_set(&ty);
+        if !is_dict && !super::types::is_list(&ty) { return Ok(()); }
+        let h = self.alloc_val();
+        self.push_instr(Instr::Load { dest: h, ptr: lv.ptr.clone(), ty: Type::void_ptr() });
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: Val::Local(h), rhs: Constant::zero(), ty: Type::void_ptr() });
+        let create_bb = self.new_block_after_current();
+        let done_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: create_bb, else_bb: done_bb });
+        self.switch_to_block(create_bb);
+        let fresh = if is_dict { self.lower_dict_new(&ty, sp)? } else { self.lower_list_new(&ty)? };
+        let fresh = self.coerce(fresh, &Type::void_ptr())?;
+        self.push_instr(Instr::Store { val: fresh, ptr: lv.ptr });
+        self.set_terminator(Terminator::Jump(done_bb));
+        self.switch_to_block(done_bb);
+        Ok(())
+    }
+
     fn list_handle(&mut self, base: &Expr) -> Result<Val> {
         let v = self.lower_expr(base)?;
         let ty = self.val_type(&v);
@@ -1991,6 +2018,7 @@ impl<'m> FuncCtx<'m> {
             }
         }
         let elem = self.list_elem_of(base);
+        self.ensure_container_created(base, _sp)?;
         let l = self.list_handle(base)?;
         let (vty, vslot, vowned) = self.container_box_value(val, &elem)?;
         let f = self.list_runtime_fn("__sic_list_push");
@@ -2180,6 +2208,7 @@ impl<'m> FuncCtx<'m> {
             }
         }
         let (_k, v) = self.dict_kv_of(base);
+        self.ensure_container_created(base, sp)?;
         let d = self.dict_handle(base)?;
         let (kind, a, b) = self.dict_key_box(key, sp)?;
         let (vty_word, vslot_word, vowned) = self.container_box_value(val, &v)?;
@@ -3823,7 +3852,7 @@ impl<'m> FuncCtx<'m> {
         };
         let esz = self.coerce(Constant::uint(elem_size), &usize_ty)?;
         let data_size = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: data_size, op: BinOp::Mul, lhs: count_val, rhs: esz, ty: usize_ty.clone() });
+        self.push_instr(Instr::BinOp { dest: data_size, op: BinOp::Mul, lhs: count_val.clone(), rhs: esz, ty: usize_ty.clone() });
         let header_c = self.coerce(Constant::int(header), &usize_ty)?;
         let total = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: total, op: BinOp::Add, lhs: Val::Local(data_size), rhs: header_c, ty: usize_ty.clone() });
@@ -3845,6 +3874,12 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
         self.val_types.insert(data.0, ptr_ty);
 
+        // Each element's `list`/`dict`/`set` fields start as fresh containers, as
+        // a declared struct's do (released by the element's destructor on `del`).
+        if self.is_sic() && self.holds_container(&elem_ty) {
+            let et = elem_ty.clone();
+            self.emit_elem_loop(&Val::Local(data), &et, count_val.clone(), |fc, ep, t| fc.init_containers_at(ep, t, true, false))?;
+        }
         // Run the constructor `__sic_ctor_<S>(data, args…)` on the zeroed object.
         if let Some(ctor) = ctor {
             let fref = self.lowerer.module.func_ref_by_name(&ctor).ok_or_else(|| CompileError::new(
@@ -5928,6 +5963,25 @@ impl<'m> FuncCtx<'m> {
             // pointer rather than a (truncated) scalar load. Matches the runtime
             // path below and the non-folded aggregate case.
             if matches!(self.infer_expr_type(taken), Ok(Type::Struct(_) | Type::Union(_) | Type::Array { .. })) {
+                // A managed struct still yields an owned temporary, as the runtime
+                // path does: a consumer treats any ternary as fresh (moved in, not
+                // retained), so returning the taken arm's own address shared its
+                // fields without a reference — released twice later.
+                if let Ok(aty) = self.infer_expr_type(taken) {
+                    if self.is_sic() && self.struct_has_dtor(&aty) {
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: aty.clone(), align: None });
+                        self.enter_scope(); let m = self.temp_mark();
+                        let tp = self.lower_aggregate_ptr(taken)?;
+                        let size = aty.size_of(self.ptr_size());
+                        let align = aty.align_of(self.ptr_size());
+                        self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+                        self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
+                        self.flush_temps_from(m); self.exit_scope();
+                        self.register_struct_temp(&Val::Local(slot), &aty);
+                        return Ok(Val::Local(slot));
+                    }
+                }
                 return self.lower_aggregate_ptr(taken);
             }
             return self.lower_expr(taken);
