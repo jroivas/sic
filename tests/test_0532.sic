@@ -1,0 +1,11 @@
+// Assigning an `any` holding a string to a `string` variable (`s = a;`) unboxes
+// the string: the C-string path converted the `any` to a `char*` (garbage).
+// Returns 42.
+int main() {
+    any a = "x" + "yz";
+    string s;
+    s = a;
+    string t = "q";
+    t = a;
+    return s.size + t.size + 36;
+}

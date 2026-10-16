@@ -5502,6 +5502,19 @@ impl<'m> FuncCtx<'m> {
             let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
             let is_str = super::types::is_sic_string(&rt)
                 || matches!(&rt, Type::Pointer(inner) if super::types::is_sic_string(inner));
+            // An `any` holding a string: unbox it to the descriptor (checked when
+            // it is a dynamic tuple element) and assign it like a string — the
+            // C-string path converted the `any` to a `char*` instead.
+            if super::types::is_any(&rt) {
+                let a = self.lower_aggregate_ptr(rhs)?;
+                let src = self.unbox_any_val(a, &lv.ty)?;
+                let size = lv.ty.size_of(self.ptr_size());
+                let align = lv.ty.align_of(self.ptr_size());
+                self.retain_string_at(&src)?;
+                self.release_string_at(&lv.ptr)?;
+                self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
+                return Ok(lv.ptr);
+            }
             if !is_str {
                 let v = self.lower_expr(rhs)?;
                 let cp = self.coerce(v, &Type::char_ptr())?;
