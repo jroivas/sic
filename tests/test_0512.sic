@@ -1,0 +1,24 @@
+// Assigning a non-`any` value to an `any` (`v = 5;`, `obj.v = s;`) boxes it
+// like `any v = 5;` does: it was copied as if it were an `any`, reading the
+// value as an address (SIGSEGV). A wrapped string's refcount stays balanced
+// across reassignment and `any`-to-`any` copies. Returns 42.
+struct Box { any v; i32 k; };
+int main() {
+    any v;
+    v = 5;
+    i32 a = v;
+    v = 2.5;
+    f64 f = v;
+    v = "x" + "y";
+    string s = v;
+    any w;
+    w = v;
+    v = 7;
+    string s2 = w;
+    Box b;
+    b.v = s2;
+    b.v = 30;
+    i32 c = b.v;
+    if (a != 5 || f != 2.5 || s != "xy" || s2 != "xy") return 1;
+    return c + 12;
+}

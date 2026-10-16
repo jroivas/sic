@@ -824,6 +824,7 @@ impl<'m> FuncCtx<'m> {
                 if matches!(lv.ty, Type::Array { .. }) {
                     return Ok(lv.ptr);
                 }
+                if let Some(p) = self.any_by_address(&lv.ptr, &lv.ty) { return Ok(p); }
                 let dest = self.alloc_val();
                 let ty = lv.ty.clone();
                 self.push_instr(Instr::Load { dest, ptr: lv.ptr, ty });
@@ -5322,6 +5323,20 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // sic `any` (re)assignment (`v = 5;`, `obj.v = s;`): box a non-`any` value
+        // like `any v = 5;` does — it was copied as if it were an `any`, reading
+        // the value as an address — and keep a wrapped string's refcount balanced
+        // (retain the new value before releasing the old: self-assign safe).
+        if self.is_sic() && op.is_none() && super::types::is_any(&lv.ty) {
+            let src = self.box_any(rhs)?;
+            self.any_refcount_at(src.clone(), true)?;
+            self.any_refcount_at(lv.ptr.clone(), false)?;
+            let size = lv.ty.size_of(self.ptr_size());
+            let align = lv.ty.align_of(self.ptr_size());
+            self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
+            return Ok(lv.ptr);
+        }
+
         // sic closure (re)assignment (`obj->f = [x]() {…}`, `g = h`; sic.md
         // §"Lambdas"): the slot takes its OWN reference — retain the new
         // environment, release the previous one (retain first: a self-assign stays
@@ -5567,6 +5582,7 @@ impl<'m> FuncCtx<'m> {
                 if matches!(inner_ty, Type::Function(_) | Type::Array { .. }) {
                     return Ok(ptr);
                 }
+                if let Some(p) = self.any_by_address(&ptr, &inner_ty) { return Ok(p); }
                 let dest = self.alloc_val();
                 self.push_instr(Instr::Load { dest, ptr, ty: inner_ty });
                 Ok(Val::Local(dest))
@@ -5636,6 +5652,14 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Read an lvalue's value, extracting a bit-field with shifts/masking.
+    /// An `any` read at `ptr` is the box's address typed `any` (see `load_lvalue`).
+    fn any_by_address(&mut self, ptr: &Val, ty: &Type) -> Option<Val> {
+        if !self.is_sic() || !super::types::is_any(ty) { return None; }
+        let Val::Local(id) = ptr else { return None };
+        self.val_types.insert(id.0, ty.clone());
+        Some(ptr.clone())
+    }
+
     pub(crate) fn load_lvalue(&mut self, lv: &LValue) -> Result<Val> {
         if let Some(bf) = lv.bitfield {
             let ty = lv.ty.clone();
@@ -5662,6 +5686,13 @@ impl<'m> FuncCtx<'m> {
             let res = self.alloc_val();
             self.push_instr(Instr::BinOp { dest: res, op, lhs: hi, rhs: Constant::int(right as i64), ty });
             return Ok(Val::Local(res));
+        }
+        // An `any` value flows by address typed `any` (as an `any` local does), so
+        // its implicit unbox applies to a field/element/`*p` read too: a loaded
+        // struct value carried no type, and `int c = obj.v;` converted the box's
+        // address instead.
+        if !lv.atomic {
+            if let Some(p) = self.any_by_address(&lv.ptr, &lv.ty) { return Ok(p); }
         }
         let dest = self.alloc_val();
         if lv.atomic {
