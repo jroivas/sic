@@ -4895,6 +4895,30 @@ impl<'m> FuncCtx<'m> {
         let size = self.load_lvalue(&size_lv)?;
         let size = self.coerce(size, &Type::i64())?;
 
+        let result_ptr = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::char_ptr(), align: None });
+        // `owned` holds the malloc'd copy (or NULL when none) so it can be freed
+        // at scope exit — the transient C-string must not leak.
+        let owned = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: owned, ty: Type::char_ptr(), align: None });
+        let nullp = self.coerce(Constant::zero(), &Type::char_ptr())?;
+        self.push_instr(Instr::Store { val: nullp.clone(), ptr: Val::Local(owned) });
+
+        // A zero-initialized `string` (data NULL) is the empty C string: the probe
+        // below read `NULL[0]` (`string s; printf("%s", s.ptr)` / printing it
+        // through std crashed).
+        let empty_bb = self.new_block_after_current();
+        let probe_bb = self.new_block_after_current();
+        let end_bb = self.new_block_after_current();
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: data.clone(), rhs: nullp, ty: Type::char_ptr() });
+        self.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: empty_bb, else_bb: probe_bb });
+        self.switch_to_block(empty_bb);
+        let empty = self.emit_cstring("");
+        self.push_instr(Instr::Store { val: empty, ptr: Val::Local(result_ptr) });
+        self.set_terminator(Terminator::Jump(end_bb));
+        self.switch_to_block(probe_bb);
+
         // Probe data[size]; in-bounds because backing buffers are NUL-terminated.
         let last = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: last, base: data.clone(), index: size.clone(), elem_size: 1, result_ty: Type::char_ptr() });
@@ -4903,18 +4927,8 @@ impl<'m> FuncCtx<'m> {
         let is_term = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: is_term, op: CmpOp::IEq, lhs: Val::Local(byte), rhs: Constant::zero(), ty: Type::i8() });
 
-        let result_ptr = self.alloc_val();
-        self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::char_ptr(), align: None });
-        // `owned` holds the malloc'd copy (or NULL when none) so it can be freed
-        // at scope exit — the transient C-string must not leak.
-        let owned = self.alloc_val();
-        self.push_instr(Instr::Alloca { dest: owned, ty: Type::char_ptr(), align: None });
-        let nullp = self.coerce(Constant::zero(), &Type::char_ptr())?;
-        self.push_instr(Instr::Store { val: nullp, ptr: Val::Local(owned) });
-
         let copy_bb = self.new_block_after_current();
         let term_bb = self.new_block_after_current();
-        let end_bb = self.new_block_after_current();
         self.set_terminator(Terminator::CondJump { cond: Val::Local(is_term), then_bb: term_bb, else_bb: copy_bb });
 
         // Already NUL-terminated: use data directly.

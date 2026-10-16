@@ -1,0 +1,17 @@
+// `.ptr` of a zero-initialized `string` (data NULL) is the empty C string: it
+// probed `data[size]` for a terminator and read NULL[0] — so `string s;
+// printf("%s", s.ptr)`, and printing any never-assigned string (or struct
+// string field) through std's Fmt/Println, crashed. Returns 42.
+#include <stdio.h>
+#include <string.h>
+struct H { string name; i32 k; };
+int main() {
+    string s;
+    H h;
+    if (strlen(s.ptr) != 0 || strlen(h.name.ptr) != 0) return 1;
+    char buf[16];
+    snprintf(buf, sizeof buf, "[%s][%s]", s.ptr, h.name.ptr);
+    if (strcmp(buf, "[][]") != 0) return 2;
+    s = s + "ok";
+    return strcmp(s.ptr, "ok") == 0 ? 42 : 3;
+}
