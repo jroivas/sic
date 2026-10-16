@@ -23,6 +23,77 @@ struct VaInfo {
     fp_start: u32,
 }
 
+/// The module's `long double` helpers (sic_ir::f80), when it uses any.
+#[derive(Clone, Copy)]
+pub struct F80Fns { pub load: FuncId, pub store: FuncId, pub st0: FuncId, pub ret: FuncId }
+
+/// [`F80Fns`] imported into the function being compiled.
+#[derive(Clone, Copy)]
+struct F80Refs { load: cir::FuncRef, store: cir::FuncRef, st0: cir::FuncRef, ret: cir::FuncRef }
+
+impl F80Refs {
+    /// Read the x87 value at `addr` as a double.
+    fn load(&self, b: &mut FunctionBuilder<'_>, addr: cir::Value) -> cir::Value {
+        let c = b.ins().call(self.load, &[addr]);
+        b.inst_results(c)[0]
+    }
+    /// Write double `v` (any float/int value is converted first) at `addr` in x87 format.
+    fn store(&self, b: &mut FunctionBuilder<'_>, addr: cir::Value, v: cir::Value, ptr_ty: cir::Type) {
+        let v = coerce(v, ct::F64, b, ptr_ty);
+        b.ins().call(self.store, &[addr, v]);
+    }
+    /// Pop the `st(0)` result of the call just made, as a double.
+    fn st0(&self, b: &mut FunctionBuilder<'_>) -> cir::Value {
+        let c = b.ins().call(self.st0, &[]);
+        b.inst_results(c)[0]
+    }
+}
+
+/// A 16-byte, 16-aligned stack temporary for one x87 value.
+fn f80_temp(b: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
+    let slot = b.create_sized_stack_slot(cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, 16, 4));
+    b.ins().stack_addr(ptr_ty, slot, 0)
+}
+
+/// IR type of every value a function's instructions produce (allocas as
+/// pointers to their slot type), plus its parameter sentinels — the backend's
+/// view of which values are `long double`.
+fn value_types(f: &Function) -> HashMap<u32, Type> {
+    let mut m = HashMap::new();
+    for (i, p) in f.params.iter().enumerate() { m.insert(0x10000 + i as u32, p.ty.clone()); }
+    for bb in &f.blocks {
+        for instr in &bb.instrs {
+            let r = match instr {
+                Instr::Alloca { dest, ty, .. } => Some((dest, Type::Pointer(Box::new(ty.clone())))),
+                Instr::Load { dest, ty, .. } | Instr::LoadReadonly { dest, ty, .. }
+                | Instr::BinOp { dest, ty, .. } | Instr::UnaryOp { dest, ty, .. }
+                | Instr::Select { dest, ty, .. } | Instr::VaArg { dest, ty, .. } => Some((dest, ty.clone())),
+                Instr::Cast { dest, to_ty, .. } => Some((dest, to_ty.clone())),
+                Instr::Call { dest: Some(d), ret_ty, .. }
+                | Instr::CallIndirect { dest: Some(d), ret_ty, .. } => Some((d, ret_ty.clone())),
+                Instr::GetFieldPtr { dest, result_ty, .. }
+                | Instr::GetElemPtr { dest, result_ty, .. } => Some((dest, result_ty.clone())),
+                _ => None,
+            };
+            if let Some((d, t)) = r { m.insert(d.0, t); }
+        }
+    }
+    m
+}
+
+fn is_f80(vty: &HashMap<u32, Type>, v: &Val) -> bool {
+    matches!(v, Val::Local(id) if vty.get(&id.0) == Some(&Type::Float80))
+}
+
+/// A store writes a `long double` when the value is one, or when a float
+/// constant goes through a `long double *`.
+fn is_f80_store(vty: &HashMap<u32, Type>, val: &Val, ptr: &Val) -> bool {
+    if is_f80(vty, val) { return true; }
+    let to_f80 = matches!(ptr, Val::Local(id)
+        if matches!(vty.get(&id.0), Some(Type::Pointer(t)) if **t == Type::Float80));
+    to_f80 && matches!(val, Val::Const(Constant::Float(_)))
+}
+
 /// A source variable's debug info collected during codegen: its name, IR type,
 /// the Cranelift stack slot it lives in, and whether it is a formal parameter.
 // Fields are currently unread: Cranelift 0.132 dropped the `CompiledCode` frame-size
@@ -45,6 +116,7 @@ pub fn compile_function(
     cl_func: &mut cir::Function,
     ptr_size: u32,
     var_dbg: &mut Vec<VarDbg>,
+    f80_fns: Option<F80Fns>,
 ) -> Result<(), super::CraneliftError> {
     if f.blocks.is_empty() { return Ok(()); }
 
@@ -75,6 +147,13 @@ pub fn compile_function(
         let fref = obj_module.declare_func_in_func(func_id, builder.func);
         callee_refs.insert(fref_idx, fref);
     }
+    let f80: Option<F80Refs> = f80_fns.map(|h| F80Refs {
+        load: obj_module.declare_func_in_func(h.load, builder.func),
+        store: obj_module.declare_func_in_func(h.store, builder.func),
+        st0: obj_module.declare_func_in_func(h.st0, builder.func),
+        ret: obj_module.declare_func_in_func(h.ret, builder.func),
+    });
+    let vty = if f80.is_some() { value_types(f) } else { HashMap::new() };
     let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::new();
     let mut sorted_globals: Vec<(u32, DataId)> = global_ids.iter().map(|(&k, &v)| (k, v)).collect();
     sorted_globals.sort_by_key(|(k, _)| *k);
@@ -111,10 +190,30 @@ pub fn compile_function(
         // the body — which treats every aggregate as a pointer — sees what it expects.
         // A ByValStack aggregate already arrives as a pointer (Cranelift's copy).
         let mut bp = 0usize; // entry-block param cursor
+        // 16-byte stack alignment pads (abi::stack_pads) are extra block params.
+        let passes: Vec<crate::abi::ParamPass> = f.params.iter()
+            .map(|p| crate::abi::classify_param(&p.ty, ptr_size)).collect();
+        let kinds: Vec<crate::abi::ArgKind> = passes.iter().flat_map(|p| p.kinds()).collect();
+        let (pads, named_stack) = crate::abi::stack_pads(&kinds);
+        let mut kcur = 0usize;
         for i in 0..named {
             let pty = &f.params[i].ty;
+            let nk = passes[i].kinds().len();
+            if nk > 0 && pads[kcur] { bp += 1; }
+            kcur += nk;
             match crate::abi::classify_param(pty, ptr_size) {
-                crate::abi::ParamPass::Scalar(_) | crate::abi::ParamPass::ByValStack(_) => {
+                crate::abi::ParamPass::X87 => {
+                    // Arrives as a pointer to the caller's 16-byte stack copy.
+                    if bp < params.len() {
+                        let v = match f80 {
+                            Some(h) => h.load(&mut builder, params[bp]),
+                            None => builder.ins().f64const(0.0),
+                        };
+                        val_map.insert(0x10000 + i as u32, v);
+                    }
+                    bp += 1;
+                }
+                crate::abi::ParamPass::Scalar(_) | crate::abi::ParamPass::ByValStack(..) => {
                     if bp < params.len() {
                         val_map.insert(0x10000 + i as u32, params[bp]);
                     }
@@ -148,10 +247,13 @@ pub fn compile_function(
                 cir::StackSlotKind::ExplicitSlot, 176, 4, // 16-byte aligned
             ));
             let reg_save = builder.ins().stack_addr(ptr_ty, rsa_slot, 0);
+            // The copy keeps the real overflow area's alignment mod 16 (it starts
+            // after the named stack params), so a 16-aligned vararg (`long
+            // double`) is found at the same rounded-up place by sic and glibc.
             let ovf_slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
-                cir::StackSlotKind::ExplicitSlot, (VA_OVERFLOW_SLOTS * 8) as u32, 3,
+                cir::StackSlotKind::ExplicitSlot, (VA_OVERFLOW_SLOTS * 8 + 8) as u32, 4,
             ));
-            let overflow = builder.ins().stack_addr(ptr_ty, ovf_slot, 0);
+            let overflow = builder.ins().stack_addr(ptr_ty, ovf_slot, (named_stack % 16) as i32);
 
             let n_gp_fill = VA_GP_REGS - n_gp;
             let n_fp_fill = VA_FP_REGS - n_fp;
@@ -298,10 +400,11 @@ pub fn compile_function(
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
                 ptr_ty, target_config, ptr_size, va_info,
-                &mut slot_map, var_dbg, module_ir, &promoted,
+                &mut slot_map, var_dbg, module_ir, &promoted, f80, &vty,
             );
         }
-        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref());
+        let f80_ret = if f.sig.ret == Type::Float80 { f80 } else { None };
+        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref(), f80_ret);
         for s in terminator_successors(&bb.terminator) {
             if let Some(n) = pending.get_mut(&s.0) {
                 *n -= 1;
@@ -349,6 +452,8 @@ fn emit_instr(
     var_dbg: &mut Vec<VarDbg>,
     module_ir: &sic_ir::Module,
     promoted: &HashMap<u32, (Variable, cir::Type)>,
+    f80: Option<F80Refs>,
+    vty: &HashMap<u32, Type>,
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
@@ -387,6 +492,11 @@ fn emit_instr(
                 }
             }
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            if let (Type::Float80, Some(h)) = (ty, f80) {
+                let v = h.load(builder, pv);
+                val_map.insert(dest.0, v);
+                return;
+            }
             // A vector-typed load reads a whole XMM register in one unaligned move
             // (the `new[]`/stack arrays these come from are only element-aligned).
             let cl_ty = vector_clty(ty).unwrap_or_else(|| cl_type(ty, ptr_size).unwrap_or(ct::I32));
@@ -419,6 +529,11 @@ fn emit_instr(
                 }
             }
             let pv = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            if let Some(h) = f80.filter(|_| is_f80_store(vty, val, ptr)) {
+                let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ct::F64);
+                h.store(builder, pv, sv, ptr_ty);
+                return;
+            }
             // Infer hint from existing value if available
             let hint = if let Val::Local(id) = val {
                 val_map.get(&id.0).map(|&v| builder.func.dfg.value_type(v)).unwrap_or(ct::I32)
@@ -576,9 +691,9 @@ fn emit_instr(
             let named_count = ir_sig.params.len();
             let is_variadic = ir_sig.variadic;
             let _ = &param_tys;
-            let (arg_vals, _named_cl) = marshal_args(
+            let (arg_vals, arg_abi) = marshal_args(
                 args, &ir_sig.params, named_count, is_variadic, ptr_size,
-                val_map, callee_refs, data_refs, builder, ptr_ty,
+                val_map, callee_refs, data_refs, builder, ptr_ty, f80, vty,
             );
 
             let inst = if is_variadic {
@@ -587,10 +702,7 @@ fn emit_instr(
                 let base = &builder.func.stencil.dfg.signatures[sig_ref];
                 let mut new_sig = cir::Signature::new(base.call_conv);
                 new_sig.returns = base.returns.clone();
-                for v in &arg_vals {
-                    let ty = builder.func.dfg.value_type(*v);
-                    new_sig.params.push(cir::AbiParam::new(ty));
-                }
+                new_sig.params = arg_abi.clone();
                 let new_sig_ref = builder.func.import_signature(new_sig);
                 let faddr = builder.ins().func_addr(ptr_ty, cl_fref);
                 builder.ins().call_indirect(new_sig_ref, faddr, &arg_vals)
@@ -601,38 +713,34 @@ fn emit_instr(
                 let base = &builder.func.stencil.dfg.signatures[sig_ref];
                 let mut new_sig = cir::Signature::new(base.call_conv);
                 new_sig.returns = base.returns.clone();
-                for v in &arg_vals {
-                    let ty = builder.func.dfg.value_type(*v);
-                    new_sig.params.push(cir::AbiParam::new(ty));
-                }
+                new_sig.params = arg_abi;
                 let new_sig_ref = builder.func.import_signature(new_sig);
                 let faddr = builder.ins().func_addr(ptr_ty, cl_fref);
                 builder.ins().call_indirect(new_sig_ref, faddr, &arg_vals)
             } else {
                 builder.ins().call(cl_fref, &arg_vals)
             };
-            let results = builder.inst_results(inst).to_vec();
+            let mut results = builder.inst_results(inst).to_vec();
+            if let (Type::Float80, Some(h)) = (ret_ty, f80) { results = vec![h.st0(builder)]; }
             bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
         Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
             let base_sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let (arg_vals, _named_cl) = marshal_args(
+            let (arg_vals, arg_abi) = marshal_args(
                 args, &func_ty.params, func_ty.params.len(), func_ty.variadic, ptr_size,
-                val_map, callee_refs, data_refs, builder, ptr_ty,
+                val_map, callee_refs, data_refs, builder, ptr_ty, f80, vty,
             );
             // Build the call signature from the marshalled values: base returns
             // plus the actual (ABI-expanded / variadic) argument types.
             let mut sig = cir::Signature::new(base_sig.call_conv);
             sig.returns = base_sig.returns.clone();
-            for v in &arg_vals {
-                let ty = builder.func.dfg.value_type(*v);
-                sig.params.push(cir::AbiParam::new(ty));
-            }
+            sig.params = arg_abi;
             let sig_ref = builder.func.import_signature(sig);
             let inst = builder.ins().call_indirect(sig_ref, fp, &arg_vals);
-            let results = builder.inst_results(inst).to_vec();
+            let mut results = builder.inst_results(inst).to_vec();
+            if let (Type::Float80, Some(h)) = (ret_ty, f80) { results = vec![h.st0(builder)]; }
             bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
@@ -757,6 +865,17 @@ fn emit_instr(
             // cursor advanced. No branches: addresses/offsets are chosen with
             // `select`.
             let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            if let (Type::Float80, Some(h)) = (ty, f80) {
+                // `long double` is always in the overflow area, 16-aligned.
+                let overflow = builder.ins().load(ptr_ty, MemFlagsData::new(), lp, 8);
+                let up = builder.ins().iadd_imm_s(overflow, 15);
+                let addr = builder.ins().band_imm_s(up, -16);
+                let next = builder.ins().iadd_imm_s(addr, 16);
+                builder.ins().store(MemFlagsData::new(), next, lp, 8);
+                let v = h.load(builder, addr);
+                val_map.insert(dest.0, v);
+                return;
+            }
             let cl_ty = cl_type(ty, ptr_size).unwrap_or(ct::I32);
             let is_fp = cl_ty.is_float();
             let (off_field, threshold, step): (i32, i64, i64) =
@@ -857,9 +976,11 @@ fn bind_call_result(
 /// Marshal IR call arguments into Cranelift values per the System V ABI:
 /// a small aggregate (Direct) is loaded from its pointer into one value per
 /// eightbyte; a MEMORY aggregate (ByValStack) is passed as a pointer (Cranelift
-/// copies it to the stack); scalars pass through with coercion. Arguments past
-/// `named` are variadic and get the C default promotions in their natural class.
-/// Returns the flat value list and how many values the *named* portion produced.
+/// copies it to the stack); a `long double` is written in x87 format to a
+/// temporary passed the same way; scalars pass through with coercion. Arguments
+/// past `named` are variadic and get the C default promotions in their natural
+/// class. 16-byte stack alignment pads are inserted (abi::stack_pads). Returns
+/// the flat value list and the matching `AbiParam`s.
 #[allow(clippy::too_many_arguments)]
 fn marshal_args(
     args: &[Val],
@@ -872,37 +993,80 @@ fn marshal_args(
     data_refs: &HashMap<u32, cir::GlobalValue>,
     builder: &mut FunctionBuilder<'_>,
     ptr_ty: cir::Type,
-) -> (Vec<cir::Value>, usize) {
-    let mut out: Vec<cir::Value> = Vec::with_capacity(args.len());
-    let mut named_cl = 0usize;
+    f80: Option<F80Refs>,
+    vty: &HashMap<u32, Type>,
+) -> (Vec<cir::Value>, Vec<cir::AbiParam>) {
+    use crate::abi::{ParamPass, ArgKind};
+    // One (value, AbiParam, kind) group per IR argument.
+    let mut groups: Vec<Vec<(cir::Value, cir::AbiParam, ArgKind)>> = Vec::with_capacity(args.len());
     for (i, a) in args.iter().enumerate() {
         let is_named = !is_variadic || i < named;
-        if is_named && i < ir_params.len() {
-            match crate::abi::classify_param(&ir_params[i], ptr_size) {
-                crate::abi::ParamPass::Scalar(t) => {
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, t);
-                    out.push(coerce(v, t, builder, ptr_ty));
-                }
-                crate::abi::ParamPass::ByValStack(_) => {
-                    let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-                    out.push(coerce(v, ptr_ty, builder, ptr_ty));
-                }
-                crate::abi::ParamPass::Direct(chunks) => {
-                    let base = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-                    for c in &chunks {
-                        let v = crate::abi::load_chunk(builder, base, c);
-                        out.push(v);
-                    }
+        let pass = if is_named && i < ir_params.len() {
+            Some(crate::abi::classify_param(&ir_params[i], ptr_size))
+        } else if f80.is_some() && is_f80(vty, a) {
+            Some(ParamPass::X87)
+        } else {
+            None
+        };
+        let mut g = Vec::new();
+        match pass {
+            Some(ParamPass::Scalar(t)) => {
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, t);
+                let v = coerce(v, t, builder, ptr_ty);
+                g.push((v, crate::abi::scalar_abi_param(&ir_params[i], ptr_size), ArgKind::Reg(t)));
+            }
+            Some(ParamPass::ByValStack(size, align)) => {
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                let v = coerce(v, ptr_ty, builder, ptr_ty);
+                let size = (size + 7) & !7;
+                g.push((v, cir::AbiParam::special(ptr_ty, cir::ArgumentPurpose::StructArgument(size)),
+                        ArgKind::Stack { size, align }));
+            }
+            Some(ParamPass::X87) => {
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::F64);
+                let tmp = f80_temp(builder, ptr_ty);
+                if let Some(h) = f80 { h.store(builder, tmp, v, ptr_ty); }
+                g.push((tmp, cir::AbiParam::special(ptr_ty, cir::ArgumentPurpose::StructArgument(16)),
+                        ArgKind::Stack { size: 16, align: 16 }));
+            }
+            Some(ParamPass::Direct(chunks)) => {
+                let base = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                for c in &chunks {
+                    let v = crate::abi::load_chunk(builder, base, c);
+                    let t = crate::abi::chunk_cl_type(c);
+                    g.push((v, cir::AbiParam::new(t), ArgKind::Reg(t)));
                 }
             }
-            named_cl = out.len();
-        } else {
-            // Variadic (or over-provided) argument.
-            let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
-            out.push(va_promote(v, builder));
+            None => {
+                // Variadic (or over-provided) argument.
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
+                let v = va_promote(v, builder);
+                let t = builder.func.dfg.value_type(v);
+                g.push((v, cir::AbiParam::new(t), ArgKind::Reg(t)));
+            }
+        }
+        groups.push(g);
+    }
+    let kinds: Vec<ArgKind> = groups.iter().flatten()
+        .map(|(_, _, k)| match k { ArgKind::Reg(t) => ArgKind::Reg(*t), ArgKind::Stack { size, align } => ArgKind::Stack { size: *size, align: *align } })
+        .collect();
+    let (pads, _) = crate::abi::stack_pads(&kinds);
+    let mut vals = Vec::with_capacity(kinds.len());
+    let mut abi = Vec::with_capacity(kinds.len());
+    let mut k = 0usize;
+    for g in groups {
+        for (v, p, _) in g {
+            if pads[k] {
+                let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, 8, 3));
+                vals.push(builder.ins().stack_addr(ptr_ty, slot, 0));
+                abi.push(crate::abi::pad_abi_param(ptr_ty));
+            }
+            vals.push(v);
+            abi.push(p);
+            k += 1;
         }
     }
-    (out, named_cl)
+    (vals, abi)
 }
 
 fn emit_terminator(
@@ -914,11 +1078,18 @@ fn emit_terminator(
     bb_map: &HashMap<u32, cir::Block>,
     ptr_ty: cir::Type,
     ret_chunks: Option<&[sic_ir::abi::Chunk]>,
+    f80_ret: Option<F80Refs>,
 ) {
     match term {
         Terminator::Ret(None) => { builder.ins().return_(&[]); }
         Terminator::Ret(Some(v)) => {
-            if let Some(chunks) = ret_chunks {
+            if let Some(h) = f80_ret {
+                // `long double` result: leave it in x87 `st(0)` (C convention).
+                let rv = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, ct::F64);
+                let rv = coerce(rv, ct::F64, builder, ptr_ty);
+                builder.ins().call(h.ret, &[rv]);
+                builder.ins().return_(&[]);
+            } else if let Some(chunks) = ret_chunks {
                 // Small aggregate return: `v` is a pointer to the value; load each
                 // eightbyte into its return register.
                 let base = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);

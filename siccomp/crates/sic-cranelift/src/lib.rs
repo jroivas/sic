@@ -192,6 +192,38 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         }
     }
 
+    // ── `long double` helpers (sic_ir::f80) ─────────────────────────────────
+    // Defined as module-local machine code when the module uses `long double`.
+    let f80_fns: Option<func::F80Fns> = if module_uses_f80(ir_module) {
+        if !is_x86_64 {
+            return Err(CraneliftError::Unsupported("`long double` is only supported on x86-64".into()));
+        }
+        let cc = obj_module.target_config().default_call_conv;
+        let ptr_ty = types::ptr_cl(ptr_size);
+        let mut ids = Vec::new();
+        for (name, code) in sic_ir::f80::F80_HELPERS {
+            let mut sig = cir::Signature::new(cc);
+            match *name {
+                sic_ir::f80::F80_LOAD => {
+                    sig.params.push(cir::AbiParam::new(ptr_ty));
+                    sig.returns.push(cir::AbiParam::new(cir::types::F64));
+                }
+                sic_ir::f80::F80_STORE => {
+                    sig.params.push(cir::AbiParam::new(ptr_ty));
+                    sig.params.push(cir::AbiParam::new(cir::types::F64));
+                }
+                sic_ir::f80::F80_ST0 => sig.returns.push(cir::AbiParam::new(cir::types::F64)),
+                _ => sig.params.push(cir::AbiParam::new(cir::types::F64)),
+            }
+            let fid = obj_module.declare_function(name, CLinkage::Local, &sig)?;
+            obj_module.define_function_bytes(fid, 16, code, &[])?;
+            ids.push(fid);
+        }
+        Some(func::F80Fns { load: ids[0], store: ids[1], st0: ids[2], ret: ids[3] })
+    } else {
+        None
+    };
+
     // ── Declare globals ──────────────────────────────────────────────────────
     // An `extern` (Import) global that nothing references is not emitted as an
     // undefined symbol — otherwise the linker pulls archive members to satisfy a
@@ -253,7 +285,9 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
                 desc.define(bytes.into_boxed_slice());
             }
             Some(sic_ir::Constant::Float(v)) => {
-                let bytes = if size <= 4 {
+                let bytes = if g.ty == sic_ir::Type::Float80 {
+                    sic_ir::f80::f64_to_f80_bytes(*v).to_vec()
+                } else if size <= 4 {
                     (*v as f32).to_le_bytes().to_vec()
                 } else {
                     v.to_le_bytes().to_vec()
@@ -332,7 +366,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         let mut var_dbg: Vec<func::VarDbg> = Vec::new();
         func::compile_function(
             f, ir_module, &mut obj_module, &func_ids, &global_ids, &mut ctx.func, ptr_size,
-            &mut var_dbg,
+            &mut var_dbg, f80_fns,
         )?;
         if dbg_timing {
             let e = ft.elapsed();
@@ -436,6 +470,41 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     Ok(product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
 }
 
+/// Whether `ty` is, or reaches through pointers/arrays/function types, a
+/// `long double`.
+fn mentions_f80(ty: &sic_ir::Type) -> bool {
+    match ty {
+        sic_ir::Type::Float80 => true,
+        sic_ir::Type::Pointer(t) => mentions_f80(t),
+        sic_ir::Type::Array { elem, .. } => mentions_f80(elem),
+        sic_ir::Type::Function(ft) => mentions_f80(&ft.ret) || ft.params.iter().any(mentions_f80),
+        _ => false,
+    }
+}
+
+/// Whether any function signature or instruction of the module involves
+/// `long double` (then the f80 helpers are emitted).
+fn module_uses_f80(m: &sic_ir::Module) -> bool {
+    let sig_f80 = |s: &sic_ir::FunctionType| mentions_f80(&s.ret) || s.params.iter().any(mentions_f80);
+    // Only externs actually used: headers declare many `long double` functions.
+    let used = m.used_externs();
+    if m.externs.iter().enumerate().any(|(i, e)| used.contains(&i) && sig_f80(&e.sig))
+        || m.functions.iter().any(|f| sig_f80(&f.sig))
+    {
+        return true;
+    }
+    m.functions.iter().any(|f| f.blocks.iter().any(|b| b.instrs.iter().any(|i| match i {
+        sic_ir::Instr::Alloca { ty, .. } | sic_ir::Instr::Load { ty, .. }
+        | sic_ir::Instr::VaArg { ty, .. } | sic_ir::Instr::BinOp { ty, .. }
+        | sic_ir::Instr::Select { ty, .. } => mentions_f80(ty),
+        sic_ir::Instr::Cast { to_ty, .. } => mentions_f80(to_ty),
+        sic_ir::Instr::GetFieldPtr { result_ty, .. } | sic_ir::Instr::GetElemPtr { result_ty, .. } => mentions_f80(result_ty),
+        sic_ir::Instr::Call { ret_ty, .. } => mentions_f80(ret_ty),
+        sic_ir::Instr::CallIndirect { ret_ty, func_ty, .. } => mentions_f80(ret_ty) || sig_f80(func_ty),
+        _ => false,
+    })))
+}
+
 pub fn build_cl_sig(
     sig: &sic_ir::FunctionType,
     ptr_size: u32,
@@ -444,15 +513,10 @@ pub fn build_cl_sig(
     let mut cl_sig = cir::Signature::new(call_conv);
     let ptr_ty = types::ptr_cl(ptr_size);
 
-    for p in &sig.params {
-        // System V: a small struct/union is passed in registers (one param per
-        // eightbyte), a large one by value on the stack (StructArgument); scalars
-        // and vectors keep their single-value mapping. See abi.rs / ABI.md.
-        if matches!(p, sic_ir::Type::Void) {
-            continue;
-        }
-        abi::push_param_abi(p, ptr_size, ptr_ty, &mut cl_sig.params);
-    }
+    // System V: a small struct/union is passed in registers (one param per
+    // eightbyte), a large one by value on the stack (StructArgument); scalars
+    // and vectors keep their single-value mapping. See abi.rs / ABI.md.
+    cl_sig.params = abi::params_abi(&sig.params, ptr_size, ptr_ty);
 
     // Returns: a small struct/union comes back in registers (one return value per
     // eightbyte); a MEMORY-class aggregate (and, for now, `Array`/vectors) uses the
@@ -468,7 +532,9 @@ pub fn build_cl_sig(
                 }
             }
         }
-        sic_ir::Type::Array { .. } | sic_ir::Type::Void => {}
+        // `long double` returns in x87 `st(0)`, which Cranelift cannot express:
+        // no Cranelift return value (see sic_ir::f80, `__sic_f80_st0`/`_ret`).
+        sic_ir::Type::Array { .. } | sic_ir::Type::Void | sic_ir::Type::Float80 => {}
         other => {
             if types::cl_type(other, ptr_size).is_some() {
                 // Narrow integers are zero/sign-extended to 32 bits on return
@@ -512,10 +578,19 @@ pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize,
                     if c.class == sic_ir::abi::RegClass::Sse { n_fp += 1 } else { n_gp += 1 }
                 }
             }
-            abi::ParamPass::ByValStack(_) => {}
+            abi::ParamPass::ByValStack(..) | abi::ParamPass::X87 => {}
         }
     }
     (n_gp.min(VA_GP_REGS), n_fp.min(VA_FP_REGS))
+}
+
+/// Bytes of stack the named parameters occupy (incl. alignment pads): a
+/// variadic function's first stack vararg starts there.
+pub fn named_stack_bytes(sig: &sic_ir::FunctionType, ptr_size: u32) -> u32 {
+    let kinds: Vec<abi::ArgKind> = sig.params.iter()
+        .filter(|t| !matches!(t, sic_ir::Type::Void))
+        .flat_map(|t| abi::classify_param(t, ptr_size).kinds()).collect();
+    abi::stack_pads(&kinds).1
 }
 
 /// Build the signature used to *compile* a variadic function body. Cranelift has

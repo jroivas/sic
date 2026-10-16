@@ -56,12 +56,14 @@ cases), `-Wunused-variable` (in `-Wall`), `-Wunsupported-asm` and `-Wlong-double
 other warning names are accepted and ignored, so existing build flags keep working.
 As in GCC, nothing is reported from system headers.
 
-`long double` is deprecated. It still compiles (16-byte slot, as the x86-64 ABI
-requires) but is computed as a 64-bit `double`, so it does not match C at library
-boundaries (`printf("%Lf")`, `strtold`, the `*l` libm functions, shared structs).
-Every use warns (`-Wlong-double`, on by default). It is advisory: a plain `-Werror`
-does not make it an error (library headers such as glib's declare `long double`);
-`-Werror=long-double` does.
+`long double` is deprecated. It is ABI-compatible with C: values are kept in the
+x87 80-bit format in memory (16-byte, 16-aligned slots), passed on the stack, read
+by `va_arg` and returned in `st(0)` exactly as gcc does, so structs, pointers,
+`printf("%Lf")`, `strtold` and the `*l` libm functions all interoperate. sic's own
+arithmetic on it, however, has only `double` (64-bit) precision, so results can
+differ from gcc in the last digits. Every use warns (`-Wlong-double`, on by
+default). It is advisory: a plain `-Werror` does not make it an error (library
+headers such as glib's declare `long double`); `-Werror=long-double` does.
 Use `double`, or `fixed`/`bigint` for more precision.
 
 ## C and SIC in one project

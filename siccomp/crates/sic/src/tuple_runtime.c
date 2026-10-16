@@ -75,7 +75,10 @@ __attribute__((weak)) void __sic_tuple_get_any(void *data, unsigned long i, cons
     } else if (k == 4) {                                            /* f32 → f64 bits */
         double d = *(float *)p;
         v = *(unsigned long *)&d;
-    } else if (k == 5 || k == 6 || k == 7 || k == 8 || k == 10 || k == 15 || k == 16) {
+    } else if (k == 6) {                                            /* f80 (x87 image) → f64 bits */
+        double d = (double)*(f80 *)p;
+        v = *(unsigned long *)&d;
+    } else if (k == 5 || k == 7 || k == 8 || k == 10 || k == 15 || k == 16) {
         v = *(unsigned long *)p;                         /* f64, ptr, fixed, tuple, bigint */
     } else {
         v = (unsigned long)p;                                       /* by address */

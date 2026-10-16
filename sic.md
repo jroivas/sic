@@ -212,9 +212,10 @@ For float:
 - 80 bits: f80
 - 128 bits: f128
 
-Note: `f80`/`f128` are currently stored in 16 bytes but computed as `f64`.
-C's `long double` is deprecated (warning `-Wlong-double`; an error only with `-Werror=long-double`)
-for the same reason: it is a 64-bit `double` in sic, not x87 extended precision.
+Note: `f80` is C's `long double`: stored in the x87 80-bit format (16 bytes,
+ABI-compatible with C), but computed with `f64` precision. `f128` currently maps to
+the same type (not IEEE binary128). C's `long double` is deprecated for that reason
+(warning `-Wlong-double`; an error only with `-Werror=long-double`).
 
 Fixed point precision contains two parts: integral and fraction.
 It's possible to select precision for both of them separately.

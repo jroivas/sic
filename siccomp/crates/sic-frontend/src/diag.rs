@@ -36,7 +36,7 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     ("unused-variable", Group::All, true),
     // sic: an inline-asm template sic cannot lower; it traps if executed.
     ("unsupported-asm", Group::Default, false),
-    // sic: `long double` is deprecated; it is computed as a 64-bit double.
+    // sic: `long double` is deprecated; it is computed with double precision.
     ("long-double", Group::Default, false),
 ];
 

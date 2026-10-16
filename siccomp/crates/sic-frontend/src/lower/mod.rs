@@ -3674,8 +3674,13 @@ impl Lowerer {
                 Some(f) => { buf[base..base + 4].copy_from_slice(&(f as f32).to_le_bytes()); true }
                 None => false,
             },
-            Type::Float64 | Type::Float80 => match self.eval_const_float(e) {
+            Type::Float64 => match self.eval_const_float(e) {
                 Some(f) => { buf[base..base + 8].copy_from_slice(&f.to_le_bytes()); true }
+                None => false,
+            },
+            // `long double`: the x87 80-bit image (sic_ir::f80).
+            Type::Float80 => match self.eval_const_float(e) {
+                Some(f) => { buf[base..base + 16].copy_from_slice(&sic_ir::f80::f64_to_f80_bytes(f)); true }
                 None => false,
             },
             Type::Pointer(_) => {

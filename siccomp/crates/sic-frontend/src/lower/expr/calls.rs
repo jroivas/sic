@@ -1163,7 +1163,7 @@ impl<'m> FuncCtx<'m> {
                         let c = self.coerce(pval.clone(), pty)?;
                         *pval = c;
                     } else if func_ty.variadic {
-                        let p = self.promote_vararg(pval.clone())?;
+                        let p = self.promote_vararg(pval.clone(), args.get(i))?;
                         *pval = p;
                     }
                 }
@@ -1288,7 +1288,7 @@ impl<'m> FuncCtx<'m> {
                 // small integer passed on the stack leaves its slot's high bits
                 // uninitialized — libc printf's `%02x` of a `uint8_t` MAC byte
                 // then read garbage (QEMU's default NIC MAC came out malformed).
-                let p = self.promote_vararg(pval.clone())?;
+                let p = self.promote_vararg(pval.clone(), args.get(i))?;
                 *pval = p;
             }
         }
@@ -1930,7 +1930,16 @@ impl<'m> FuncCtx<'m> {
     /// part of a variadic call: integer types narrower than `int` widen to `int`
     /// (preserving value per the source's signedness), and `float` widens to
     /// `double`. Anything already `int`-width or wider is unchanged.
-    fn promote_vararg(&mut self, v: Val) -> Result<Val> {
+    fn promote_vararg(&mut self, v: Val, arg: Option<&Expr>) -> Result<Val> {
+        // A `long double` constant (`1.5L`) is an untyped float constant: give it
+        // its type so the backend passes it in x87 format on the stack.
+        if matches!(v, Val::Const(_)) && self.val_type(&v) != Type::Float80
+            && arg.map_or(false, |e| self.infer_expr_type(e).ok() == Some(Type::Float80))
+        {
+            let dest = self.alloc_val();
+            self.push_instr(Instr::Cast { dest, op: CastOp::BitCast, val: v, to_ty: Type::Float80 });
+            return Ok(Val::Local(dest));
+        }
         match self.val_type(&v) {
             Type::Bool => self.coerce(v, &Type::i32()),
             Type::Int { bits, .. } if bits < 32 => self.coerce(v, &Type::i32()),

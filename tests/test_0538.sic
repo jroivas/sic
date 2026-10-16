@@ -1,0 +1,10 @@
+// A long double element of a dynamically typed tuple is read through the
+// tuple runtime, which must convert the x87 image (RTTI kind 6).
+long double first(tuple t) { long double v = t[0]; return v; }
+int main() {
+    long double v = 2.25;
+    long double a = first(tuple(v, 7));
+    long double b = first(tuple(v, "x", 3));
+    if (a != 2.25 || b != 2.25) return 1;
+    return 42;
+}

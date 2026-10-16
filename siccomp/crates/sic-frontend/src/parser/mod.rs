@@ -840,11 +840,11 @@ impl Parser {
         } else if long_count > 0 {
             if let Some(AstType::Double) = &base {
                 base = Some(AstType::LongDouble);
-                // Deprecated: sic computes `long double` as a plain double (no
-                // x87 80-bit support), so it does not match the C ABI.
+                // Deprecated: sic keeps the x87 80-bit format in memory and at C
+                // boundaries (sic_ir::f80) but computes with double precision.
                 let sp = long_span.clone().unwrap_or_default();
                 crate::diag::warn("long-double", sp.file.as_deref(), sp.line, sp.col,
-                    "'long double' is deprecated; sic computes it as a 64-bit 'double'");
+                    "'long double' is deprecated; sic computes it with 'double' (64-bit) precision");
             } else if let Some(AstType::Int { .. }) = &base {
                 let s = signed.unwrap_or(true);
                 base = Some(if long_count >= 2 { AstType::LongLong { signed: s } }
@@ -3151,6 +3151,12 @@ impl Parser {
                 if is_float_suffix(&text[body.len()..]) {
                     let lit = Expr::new(ExprKind::FloatLit((v as f32) as f64), sp.clone());
                     return Ok(Expr::new(ExprKind::Cast { ty: QualType::new(AstType::Float), expr: Box::new(lit) }, sp));
+                }
+                // `1.5L` is a `long double` constant (its value is still parsed at
+                // double precision: sic computes `long double` as a double).
+                if matches!(&text[body.len()..], "l" | "L") {
+                    let lit = Expr::new(ExprKind::FloatLit(v), sp.clone());
+                    return Ok(Expr::new(ExprKind::Cast { ty: QualType::new(AstType::LongDouble), expr: Box::new(lit) }, sp));
                 }
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))
             }

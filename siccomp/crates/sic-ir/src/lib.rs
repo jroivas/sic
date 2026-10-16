@@ -6,6 +6,7 @@ pub mod backend;
 pub mod display;
 pub mod abi;
 pub mod asm_helpers;
+pub mod f80;
 
 pub use types::*;
 pub use value::*;

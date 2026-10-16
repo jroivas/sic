@@ -910,7 +910,8 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 // opaque pointer to a heap block managed by the bigint runtime.
                 "bigint"          => return Ok(bigint_type()),
                 // Extended float types. sic has no true 128/80-bit float codegen,
-                // so these share `Float80` (16 bytes, computed as f64) — enough to
+                // so these share `Float80` (16-byte x87 image, computed as f64;
+                // NOT the IEEE binary128 layout of `__float128`) — enough to
                 // compile code that merely passes them around. `_Float16` is 2
                 // bytes, `_Float32`/`_Float64` map to float/double. sic's `f128`
                 // (sic.md §"Built-in fixed point") and `f80` also map here — real
