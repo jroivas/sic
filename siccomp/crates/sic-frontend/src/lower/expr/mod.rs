@@ -5016,6 +5016,23 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // A tagged-enum target is the expected type, as in an initializer, so a
+        // generic constructor on the right resolves (`a = Option::Some(4)`,
+        // `x.o = Option::Some(3)` — "cannot infer type arguments" before).
+        if op.is_none() && self.is_sic() {
+            if let Ok(lt) = self.infer_expr_type(lhs) {
+                if self.is_tagged_enum_struct(&lt) {
+                    let prev = self.expected_ty.replace(lt);
+                    let r = self.lower_assign_inner(op, lhs, rhs);
+                    self.expected_ty = prev;
+                    return r;
+                }
+            }
+        }
+        self.lower_assign_inner(op, lhs, rhs)
+    }
+
+    fn lower_assign_inner(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         // GCC vector extension `v op= w` on two vectors: the element-wise op, its
         // result copied back into `v` (the left side evaluated once). It used to
         // take the scalar path and `or` the operands' ADDRESSES (QEMU's

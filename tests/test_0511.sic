@@ -1,0 +1,17 @@
+// A generic enum used only as a struct field (`struct T { Option<i32> o; }`)
+// is instantiated: struct definitions were never scanned, so it was "used
+// before instantiation". And an assignment's target type resolves a generic
+// constructor on the right (`a = Option::Some(4)`, `x.o = Option::Some(3)`) as
+// an initializer's does — "cannot infer type arguments" before. Returns 42.
+struct T { Option<i32> o; Result<i64, i32> r; };
+int main() {
+    T x;
+    x.o = Option::Some(3);
+    x.r = Result::Err(5);
+    i32 v = x.o else return 1;
+    Option<i32> a;
+    a = Option::Some(4);
+    i32 w = a else return 2;
+    i32 e = match (x.r) { Ok(n): 0; Err(c): c; };
+    return v + w + e + 30;                  // 3 + 4 + 5 + 30
+}

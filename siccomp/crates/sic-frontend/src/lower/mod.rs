@@ -4812,6 +4812,11 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
             collect_generics_type(&ret.ty, out);
             for p in params { collect_generics_type(&p.ty.ty, out); }
         }
+        // A struct/union definition's member types (`struct T { Option<i32> o; }`):
+        // they were never scanned, so a generic used only as a field was "used
+        // before instantiation".
+        Struct(sd) => for f in sd.fields.iter().flatten() { collect_generics_type(&f.ty.ty, out); },
+        Union(ud) => for f in ud.fields.iter().flatten() { collect_generics_type(&f.ty.ty, out); },
         _ => {}
     }
 }
@@ -4845,6 +4850,7 @@ fn collect_generics_decl(d: &Decl, out: &mut Vec<(String, Vec<QualType>)>) {
             if let Some(b) = body { for s in b { collect_generics_stmt(s, out); } }
         }
         Decl::TypeDef { names, .. } => { for (_, qt) in names { collect_generics_type(&qt.ty, out); } }
+        Decl::StructDecl(sd) => collect_generics_type(&AstType::Struct(sd.clone()), out),
         _ => {}
     }
 }
