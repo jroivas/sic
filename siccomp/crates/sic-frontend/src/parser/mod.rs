@@ -3126,6 +3126,13 @@ impl Parser {
                 }
                 let body = strip_float_suffix(&text);
                 let v = parse_c_float(body);
+                // `1.5f` / `1.5F` is a `float` constant (C 6.4.4.2): its value
+                // rounded to float precision and its type `float` — it was a
+                // `double` (`sizeof(1.0f)` was 8; `double d = 0.1f;` not rounded).
+                if is_float_suffix(&text[body.len()..]) {
+                    let lit = Expr::new(ExprKind::FloatLit((v as f32) as f64), sp.clone());
+                    return Ok(Expr::new(ExprKind::Cast { ty: QualType::new(AstType::Float), expr: Box::new(lit) }, sp));
+                }
                 Ok(Expr::new(ExprKind::FloatLit(v), sp))
             }
             TokenKind::StringLit | TokenKind::WideStringLit
@@ -3796,6 +3803,11 @@ fn stmt_terminates_case(s: &Stmt) -> bool {
         }
         _ => false,
     }
+}
+
+/// The suffix makes a `float` (not `double`/`long double`) constant.
+fn is_float_suffix(suf: &str) -> bool {
+    matches!(suf, "f" | "F" | "f32" | "F32")
 }
 
 fn strip_float_suffix(text: &str) -> &str {
