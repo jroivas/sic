@@ -1804,6 +1804,19 @@ All elements in tuple may have different type.
 Types are checked when unpacking.
 Tuples are always immutable after creation.
 
+### Static and dynamic tuples
+
+`tuple<int, string>` names a tuple shape explicitly. A plain `tuple` is statically
+typed whenever the compiler can infer its shape (an initializer, assignments in
+straight-line code, agreeing call sites / returns), and **dynamically typed**
+otherwise (a struct field, a parameter called with different shapes or exported from
+a module, a local assigned different shapes under a branch or loop, a container of
+mixed shapes). Every tuple block records its shape, so static → dynamic is free; on
+a dynamic tuple `t[i]` is an `any` that converts only to the element's exact type
+(else a run-time error), unpacking checks the arity, and `tuple<…> x = t` checks the
+whole shape once. A static shape mismatch is a compile error. See
+[doc/arrays-and-tuples.md](doc/arrays-and-tuples.md#static-and-dynamic-tuples).
+
 ### Ownership of tuple elements
 
 A tuple **owns** the reference-counted values it holds (a `string`, a

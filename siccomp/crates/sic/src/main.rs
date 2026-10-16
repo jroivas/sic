@@ -8,6 +8,7 @@ mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
 mod list_runtime;
+mod tuple_runtime;
 mod module_conf;
 
 use clap::Parser as ClapParser;
@@ -725,6 +726,16 @@ fn parse_source(
     }
     let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
+
+    // sic `tuple` (sic.md §"Tuples"): the checked accessors a dynamically typed
+    // tuple uses. Scanned first, on the user's own source (the runtimes below
+    // mention `tuple` themselves).
+    if tuple_runtime::uses_tuple(&preprocessed) {
+        preprocessed = format!(
+            "{}\n#line 1 \"{}\"\n{}",
+            tuple_runtime::TUPLE_RUNTIME, path, preprocessed
+        );
+    }
 
     // sic `bigint` / `fixed` (sic.md §"Integer sizes", §"Built-in fixed point"):
     // only when the unit actually uses them, prepend the self-contained

@@ -13,9 +13,9 @@ extern __attribute__((weak)) void __sic_dict_free(void *);
 extern __attribute__((weak)) void __sic_dict_weak_release(void *);
 
 /* Release a tuple stored as a container element (sic.md §"Tuples"): mirrors the
-   compiler's `emit_tuple_release` — a 3-word header `[__dtor | count | rc]` with the
-   data pointer past it. Decrement rc; at zero run the per-layout element destructor
-   (releasing the tuple's own refcounted elements) and free the block. */
+   compiler's `emit_tuple_release` — a 4-word header `[shape | __dtor | count | rc]`
+   with the data pointer past it. Decrement rc; at zero run the per-layout element
+   destructor (releasing the tuple's own refcounted elements) and free the block. */
 __attribute__((weak)) void __sic_tuple_release(void *data) {
     if (!data) return;
     unsigned long *p = (unsigned long *)data;
@@ -23,7 +23,7 @@ __attribute__((weak)) void __sic_tuple_release(void *data) {
     if (--(*rc) != 0) return;
     void (*dtor)(void *) = *(void (**)(void *))(p - 3);  /* __dtor at data - 3 words */
     if (dtor) dtor(data);
-    free((void *)(p - 3));                      /* block base = data - 3 words */
+    free((void *)(p - 4));                      /* block base = data - 4 words */
 }
 
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the

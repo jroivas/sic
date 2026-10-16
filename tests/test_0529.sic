@@ -1,0 +1,53 @@
+// Dynamically typed tuples (sic.md "Tuples"): a plain `tuple` whose element
+// types cannot be known at compile time — a struct field, a parameter called
+// with different shapes, a local assigned different shapes in branches or a
+// loop, a container holding several shapes — is read through its runtime shape
+// (every tuple block records it). `t[i]` is then an `any` that converts only to
+// the element's exact type; unpacking checks the arity; `tuple<…> x = t`
+// checks the whole shape once. Statically known shapes stay static. Returns 42.
+struct S { tuple t; };
+i32 first(tuple t) { i32 a = t[0]; return a; }
+tuple mk(i32 c) { if (c) return tuple(1, "a"); return tuple("bb", 2); }
+i32 main_part(i32 c) {
+    i32 acc = 0;
+    acc += first(tuple(1, "x")) + first(tuple(2, 3.5));          // 3: conflicting call shapes
+    S s;
+    s.t = tuple(4, "pq");
+    S s2 = s;
+    tuple x = s2.t;
+    string str = x[1];
+    i32 four = x[0];
+    acc += four + str.size;                                         // 6 -> 9
+    tuple<i32, string> st = s.t;                                    // checked conversion
+    acc += st[0];                                                   // 4 -> 13
+    tuple a = mk(1);
+    tuple b = mk(0);
+    i32 one = a[0];
+    string bb = b[0];
+    acc += one + bb.size;                                           // 3 -> 16
+    tuple t;
+    if (c > 1000) t = tuple(9, 9); else t = tuple("abc");
+    string tt = t[0];
+    acc += tt.size;                                                 // 3 -> 19
+    list<tuple> l;
+    l.add(tuple(5, "q"));
+    l.add(tuple("w", 6));
+    i32 five = l[0][0];
+    i32 six = l[1][1];
+    acc += five + six;                                              // 11 -> 30
+    i32 i0; string i1;
+    tuple(i0, i1) = s.t;                                            // checked unpack
+    acc += i0 + i1.size + 2;                                        // 8 -> 38
+    i32 k = 1;
+    any dyn = x[k];                                                 // run-time index
+    string ds = dyn;
+    acc += ds.size;                                                 // 2 -> 40
+    tuple n = tuple(tuple(1, 1), 0);
+    S holder;
+    holder.t = n;
+    tuple inner = holder.t[0];
+    tuple<i32, i32> in2 = inner;
+    acc += in2[0] + in2[1];                                         // 2 -> 42
+    return acc;
+}
+int main() { return main_part(1); }

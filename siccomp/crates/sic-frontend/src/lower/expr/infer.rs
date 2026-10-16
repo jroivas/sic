@@ -307,6 +307,9 @@ impl<'m> FuncCtx<'m> {
                 // tuple pointer to its layout struct).
                 if self.is_sic() {
                     if let Some(Type::Struct(st)) = super::super::types::tuple_layout_of(&bt) {
+                        // A dynamically typed tuple's element is an `any` (checked
+                        // against the exact type when converted).
+                        if st.fields.is_empty() { return Ok(super::super::types::any_type()); }
                         if let Some(i) = self.const_index(index) {
                             if let Some((_, fty)) = st.fields.get(i as usize) {
                                 return Ok(fty.clone());

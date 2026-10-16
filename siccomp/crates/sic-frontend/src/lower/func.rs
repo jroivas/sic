@@ -143,6 +143,12 @@ pub(crate) fn is_place_expr(e: &Expr) -> bool {
 /// `e` yields a fresh managed-struct temporary (registered for destruction
 /// unless its consumer takes it): a call, or a ternary (whose arms copy into
 /// an owned result).
+/// A `tuple` whose element types are unknown at compile time (no static
+/// layout): read through the runtime-checked accessors (sic.md §"Tuples").
+pub(crate) fn is_dynamic_tuple(t: &Type) -> bool {
+    matches!(super::types::tuple_layout_of(t), Some(Type::Struct(st)) if st.fields.is_empty())
+}
+
 pub(crate) fn is_fresh_struct_expr(e: &Expr) -> bool {
     matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. })
 }
@@ -299,6 +305,27 @@ pub struct FuncCtx<'m> {
     pub fat_locals: std::collections::HashSet<String>,
     /// Variable-length array locals: pointer slot → slot holding the byte size.
     pub vla_sizes: HashMap<ValId, ValId>,
+    /// `any` temporaries read from a dynamically typed tuple (value id → the
+    /// element index): converting one to a concrete type checks the type exactly.
+    pub strict_anys: HashMap<u32, Val>,
+    /// Hidden locals created for dynamic tuple unpacking.
+    pub unpack_counter: u32,
+    /// The function being lowered (for per-function tuple decisions).
+    pub cur_fn: String,
+    /// Locals declared as a plain `tuple` (their shape comes from assignments).
+    pub plain_tuple_locals: std::collections::HashSet<ValId>,
+    /// Nesting of conditionally/repeatedly executed code (if/switch/match/loop
+    /// bodies, ternary arms, `&&`/`||`), and each plain tuple local's
+    /// (control depth, loop depth) at its declaration: a shape change at the
+    /// declaration's own level dominates every later use, so it stays static.
+    pub ctrl_depth: u32,
+    /// Container locals whose `tuple` element shape came from a stored tuple.
+    pub refined_tuple_containers: std::collections::HashSet<ValId>,
+    pub tuple_decl_depth: HashMap<ValId, (u32, usize)>,
+    /// Plain `tuple t;` locals whose static shape came from a later assignment:
+    /// a static element read checks the length (the binding may still be the
+    /// empty tuple on a path that skipped that assignment).
+    pub refined_bare_tuples: std::collections::HashSet<ValId>,
     /// Local closure variables that borrow a stack object (slot → its name).
     pub borrowing_closures: HashMap<ValId, String>,
     /// sic loop bounds-check elimination (sic.md §"Scopes"): `(array-name,
@@ -407,6 +434,14 @@ impl<'m> FuncCtx<'m> {
             fat_locals: std::collections::HashSet::new(),
             vla_sizes: HashMap::new(),
             borrowing_closures: HashMap::new(),
+            strict_anys: HashMap::new(),
+            unpack_counter: 0,
+            cur_fn: String::new(),
+            plain_tuple_locals: std::collections::HashSet::new(),
+            refined_bare_tuples: std::collections::HashSet::new(),
+            ctrl_depth: 0,
+            refined_tuple_containers: std::collections::HashSet::new(),
+            tuple_decl_depth: HashMap::new(),
             bce_proven: Vec::new(),
             atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
@@ -814,6 +849,42 @@ impl<'m> FuncCtx<'m> {
 
     fn has_runtime_dim(t: &Type) -> bool {
         match t { Type::Array { len: 0, .. } => true, Type::Array { elem, .. } => Self::has_runtime_dim(elem), _ => false }
+    }
+
+    /// A statically typed tuple target takes only that shape (a dynamically typed
+    /// value is checked at run time): reject a different static shape, which was
+    /// reinterpreted silently.
+    pub(crate) fn check_tuple_shape(&self, target: &Type, e: &Expr, what: &str) -> Result<()> {
+        if !self.is_sic() || !super::types::is_tuple(target) || is_dynamic_tuple(target) { return Ok(()); }
+        let Ok(et) = self.infer_expr_type(e) else { return Ok(()) };
+        if super::types::is_tuple(&et) && !is_dynamic_tuple(&et) && et != *target {
+            return Err(CompileError::at(format!(
+                "a `{}` cannot be {} `{}`", self.type_display(&et), what, self.type_display(target)),
+                e.span.file.clone(), e.span.line, e.span.col));
+        }
+        Ok(())
+    }
+
+    /// Whether plain `tuple` local `name` of this function was found to take
+    /// tuples of different shapes (it is then dynamically typed throughout).
+    pub(crate) fn tuple_local_forced_dynamic(&self, name: &str) -> bool {
+        self.lowerer.dyn_tuple_locals.get(&self.cur_fn).map_or(false, |s| s.contains(name))
+    }
+
+    /// A shape change of plain tuple local `vid` here can stay statically typed
+    /// (flow-sensitively): it is at the declaration's own control and loop level
+    /// in a function without `goto`, so it dominates every later use.
+    pub(crate) fn tuple_reshape_dominates(&self, vid: ValId) -> bool {
+        self.goto_counts.is_empty()
+            && self.tuple_decl_depth.get(&vid) == Some(&(self.ctrl_depth, self.loop_stack.len()))
+    }
+
+    /// Plain `tuple` local `name` is assigned a tuple of another shape: make it
+    /// dynamically typed and have the function lowered again.
+    pub(crate) fn force_tuple_local_dynamic(&mut self, name: &str) {
+        let f = self.cur_fn.clone();
+        self.lowerer.dyn_tuple_locals.entry(f.clone()).or_default().insert(name.to_string());
+        self.lowerer.tuple_restart.insert(f);
     }
 
     /// A fresh stack copy of the aggregate at `src` (its address).
@@ -1621,8 +1692,12 @@ impl<'m> Lowerer {
     pub(crate) fn infer_tuple_params(&mut self, tu: &crate::ast::TranslationUnit) {
         // Which functions have tuple params, and at which positions?
         let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
+        // A module's exported functions are called from units not seen here: their
+        // `tuple` parameters stay dynamically typed.
+        let in_module = tu.decls.iter().any(|d| matches!(d, Decl::Module(..)));
         for d in &tu.decls {
-            if let Decl::Func { name, params, body: Some(_), .. } = d {
+            if let Decl::Func { name, params, body: Some(_), storage, .. } = d {
+                if in_module && !matches!(storage, Some(StorageClass::Static)) && !self.static_funcs.contains(name) { continue; }
                 let pos: Vec<usize> = params.iter().enumerate()
                     .filter(|(_, p)| matches!(p.ty.ty, AstType::Tuple))
                     .map(|(i, _)| i).collect();
@@ -1649,8 +1724,16 @@ impl<'m> Lowerer {
                     }
                     infer_calls_in_stmts(&mut fc, &body, &targets, &mut found);
                 }
+                // Call sites that disagree on the shape leave the parameter
+                // dynamically typed (checked at run time) — the first shape used
+                // to win, misreading every other call's tuple.
                 for (fname, idx, ty) in found {
-                    self.tuple_param_types.entry((fname, idx)).or_insert(ty);
+                    let dynamic = super::types::tuple_type(vec![]);
+                    match self.tuple_param_types.get(&(fname.clone(), idx)) {
+                        Some(prev) if *prev != ty => { self.tuple_param_types.insert((fname, idx), dynamic); }
+                        Some(_) => {}
+                        None => { self.tuple_param_types.insert((fname, idx), ty); }
+                    }
                 }
             }
         }
@@ -1746,7 +1829,9 @@ impl<'m> Lowerer {
     /// `i32` fallback — otherwise the return layout is mis-sized and `f()[i]` reads
     /// at the wrong offset. Returns `None` if no return yields a tuple.
     fn infer_tuple_return_type(&mut self, body: &[Stmt], params: &[AstParam], ir_params: &[Type]) -> Option<Type> {
-        let ret_expr = first_return_expr(body)?;
+        let mut rets = Vec::new();
+        all_return_exprs(body, &mut rets);
+        let ret_expr = rets.first()?.clone();
         let mut dummy = Function::new("__tuple_infer".to_string(),
             FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
         let blk = dummy.alloc_block();
@@ -1770,7 +1855,14 @@ impl<'m> Lowerer {
                     }
                 }
             }
-            fc.infer_expr_type(&ret_expr).ok()
+            // Every return must agree on the shape; otherwise the function returns
+            // a dynamically typed tuple (it used to take the first one's shape).
+            let first = fc.infer_expr_type(&ret_expr).ok();
+            let agree = rets.iter().skip(1).all(|e| match fc.infer_expr_type(e) {
+                Ok(t) => Some(&t) == first.as_ref() || !super::types::is_tuple(&t),
+                Err(_) => true,
+            });
+            if agree { first } else { Some(super::types::tuple_type(vec![])) }
         };
         match ty { Some(t) if super::types::is_tuple(&t) => Some(t), _ => None }
     }
@@ -1819,6 +1911,31 @@ impl<'m> Lowerer {
     }
 
     pub fn lower_function(
+        &mut self,
+        name: &str,
+        ret_ty: &QualType,
+        params: &[AstParam],
+        variadic: bool,
+        body: &[Stmt],
+        storage: &Option<StorageClass>,
+        inline: bool,
+        constructor: Option<i32>,
+        is_async: bool,
+    ) -> Result<()> {
+        // A plain `tuple` local assigned tuples of different shapes is dynamically
+        // typed in the WHOLE function (not just after the conflicting assignment):
+        // lowering records it and asks for the function to be lowered again
+        // (sic.md §"Tuples"). Bounded — each round adds a variable.
+        for _ in 0..16 {
+            self.tuple_restart.remove(name);
+            let r = self.lower_function_once(name, ret_ty, params, variadic, body, storage, inline, constructor, is_async);
+            if !self.tuple_restart.remove(name) { return r; }
+        }
+        self.lower_function_once(name, ret_ty, params, variadic, body, storage, inline, constructor, is_async)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn lower_function_once(
         &mut self,
         name: &str,
         ret_ty: &QualType,
@@ -1932,6 +2049,7 @@ impl<'m> Lowerer {
         };
 
         let mut fc = FuncCtx::new_with_func(self, &mut func);
+        fc.cur_fn = name.to_string();
         fc.pretty_func = pretty;
         fc.async_elem = async_elem;
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
@@ -2143,6 +2261,10 @@ impl<'m> FuncCtx<'m> {
             }
             Stmt::Return(val, _) => {
                 if let Some(e) = val { self.check_closure_escape(e, "returned")?; }
+                if let Some(e) = val {
+                    let rt = self.ret_ty.clone();
+                    self.check_tuple_shape(&rt, e, "returned as")?;
+                }
                 // sic `async` (sic.md §"Async"): wrap the returned value in a
                 // `Task<elem>` (the stub runtime makes it ready) and return that.
                 if let Some(elem) = self.async_elem.clone() {
@@ -2186,15 +2308,23 @@ impl<'m> FuncCtx<'m> {
                 self.ret_enum_retain = None;
                 r?;
             }
-            Stmt::If { cond, then, else_, .. } => self.lower_if(cond, then, else_.as_deref())?,
-
-            Stmt::While { cond, body, .. } => self.lower_while(cond, body)?,
-            Stmt::DoWhile { body, cond, .. } => self.lower_do_while(body, cond)?,
-            Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body)?,
-            Stmt::ForEach { ty, name, iterable, body, span } =>
-                self.lower_foreach(ty, name, iterable, body, span)?,
-            Stmt::Switch { val, body, .. } => self.lower_switch(val, body)?,
-            Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span)?,
+            Stmt::If { .. } | Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. }
+            | Stmt::ForEach { .. } | Stmt::Switch { .. } | Stmt::Match { .. } => {
+                self.ctrl_depth += 1;
+                let r = match stmt {
+                    Stmt::If { cond, then, else_, .. } => self.lower_if(cond, then, else_.as_deref()),
+                    Stmt::While { cond, body, .. } => self.lower_while(cond, body),
+                    Stmt::DoWhile { body, cond, .. } => self.lower_do_while(body, cond),
+                    Stmt::For { init, cond, post, body, .. } => self.lower_for(init, cond, post, body),
+                    Stmt::ForEach { ty, name, iterable, body, span } =>
+                        self.lower_foreach(ty, name, iterable, body, span),
+                    Stmt::Switch { val, body, .. } => self.lower_switch(val, body),
+                    Stmt::Match { scrutinee, arms, span } => self.lower_match(scrutinee, arms, span),
+                    _ => unreachable!(),
+                };
+                self.ctrl_depth -= 1;
+                r?
+            }
             Stmt::Guard { binding, cond, else_body, span } =>
                 self.lower_guard_stmt(binding.as_ref(), cond, else_body, span)?,
             // sic `unsafe { … }` (sic.md §"Integer overflow"): raise the trapping
@@ -2499,6 +2629,23 @@ impl<'m> FuncCtx<'m> {
                     // is deferred until its first assignment.
                     if self.is_sic() && matches!(d.ty.ty, AstType::Tuple) {
                         match &d.init {
+                            // `tuple t = <any>` (a dynamically typed tuple's
+                            // element): unbox it — checked to be a tuple.
+                            Some(Initializer::Expr(e)) if matches!(self.infer_expr_type(e), Ok(t) if super::types::is_any(&t)) => {
+                                let dynty = super::types::tuple_type(vec![]);
+                                let a = self.lower_aggregate_ptr(e)?;
+                                let ptr = self.unbox_any_val(a, &dynty)?;
+                                let vid = self.alloc_val();
+                                self.push_instr(Instr::Alloca { dest: vid, ty: dynty.clone(), align: None });
+                                self.define_local(d.name.clone(), dynty.clone(), vid);
+                                self.plain_tuple_locals.insert(vid);
+                                self.tuple_decl_depth.insert(vid, (self.ctrl_depth, self.loop_stack.len()));
+                                let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
+                                self.emit_rc_retain(pc)?;
+                                self.push_instr(Instr::Store { val: ptr, ptr: Val::Local(vid) });
+                                self.register_scope_exit(Cleanup::TupleRelease { slot: Val::Local(vid) });
+                                continue;
+                            }
                             Some(Initializer::Expr(e)) => {
                                 let pty = self.infer_expr_type(e).unwrap_or(ty);
                                 // The initializer must BE a tuple. A parenthesized
@@ -2513,9 +2660,13 @@ impl<'m> FuncCtx<'m> {
                                         format!("cannot initialize tuple `{}` from a non-tuple value{}", d.name, hint),
                                         e.span.file.clone(), e.span.line, e.span.col));
                                 }
+                                // Assigned other shapes elsewhere in the function: dynamic.
+                                let pty = if self.tuple_local_forced_dynamic(&d.name) { super::types::tuple_type(vec![]) } else { pty };
                                 let vid = self.alloc_val();
                                 self.push_instr(Instr::Alloca { dest: vid, ty: pty.clone(), align: None });
                                 self.define_local(d.name.clone(), pty.clone(), vid);
+                                self.plain_tuple_locals.insert(vid);
+                                self.tuple_decl_depth.insert(vid, (self.ctrl_depth, self.loop_stack.len()));
                                 let ptr = self.lower_expr(e)?;
                                 let pc = self.coerce(ptr.clone(), &Type::char_ptr())?;
                                 self.emit_rc_retain(pc)?;
@@ -2536,6 +2687,8 @@ impl<'m> FuncCtx<'m> {
                                 let vid = self.alloc_val();
                                 self.push_instr(Instr::Alloca { dest: vid, ty: empty.clone(), align: None });
                                 self.define_local(d.name.clone(), empty.clone(), vid);
+                                self.plain_tuple_locals.insert(vid);
+                                self.tuple_decl_depth.insert(vid, (self.ctrl_depth, self.loop_stack.len()));
                                 let t = self.build_empty_tuple()?;
                                 self.push_instr(Instr::Store { val: t, ptr: Val::Local(vid) });
                                 self.register_scope_exit(Cleanup::TupleRelease { slot: Val::Local(vid) });
@@ -2715,6 +2868,7 @@ impl<'m> FuncCtx<'m> {
                         match init {
                             Initializer::Expr(e) => {
                                 if let Some(n) = self.closure_borrow(e) { self.borrowing_closures.insert(vid, n); }
+                                self.check_tuple_shape(&ty, e, "initialized as")?;
                             }
                             Initializer::List(items) => {
                                 for it in items {
@@ -5763,6 +5917,18 @@ impl<'m> FuncCtx<'m> {
             _ => {}
         }
 
+        // A dynamically typed tuple becoming a statically typed one
+        // (`tuple<int, string> h = t;`): check its whole shape once at run time.
+        if self.is_sic() && is_dynamic_tuple(&src_ty) && super::types::is_tuple(target)
+            && !is_dynamic_tuple(target) && !matches!(val, Val::Const(_))
+        {
+            let layout = super::types::tuple_layout_of(target).unwrap();
+            let shape = self.tuple_shape(&layout);
+            let data = self.coerce(val.clone(), &Type::void_ptr())?;
+            let f = self.tuple_runtime_fn("__sic_tuple_check_shape");
+            self.push_instr(Instr::Call { dest: None, func: f, args: vec![data, shape], ret_ty: Type::Void });
+        }
+
         // A tagged-enum value (a `{tag, payload}` struct, passed as a pointer) has
         // no meaningful conversion to a scalar — its bytes are not the payload. This
         // used to silently reinterpret the struct as an integer (`u64 n = Size(f);`
@@ -6620,6 +6786,24 @@ fn c_type_string(qt: &QualType) -> String {
 /// The first `return <expr>;` expression in a body (used to infer a lambda's
 /// return type when it has no explicit `-> T`). `return;` and a body with no
 /// return yield `None` (a void lambda).
+/// Every `return <expr>` value in `stmts` (nested statements included).
+fn all_return_exprs(stmts: &[Stmt], out: &mut Vec<Expr>) {
+    fn in_stmt(s: &Stmt, out: &mut Vec<Expr>) {
+        match s {
+            Stmt::Return(Some(e), _) => out.push(e.clone()),
+            Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => all_return_exprs(ss, out),
+            Stmt::If { then, else_, .. } => { in_stmt(then, out); if let Some(e) = else_ { in_stmt(e, out); } }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. }
+            | Stmt::Label(_, body, _) | Stmt::Default(body, _) | Stmt::Defer(body, _)
+            | Stmt::Case(_, body, _) | Stmt::CaseRange(_, _, body, _)
+            | Stmt::Switch { body, .. } => in_stmt(body, out),
+            Stmt::Match { arms, .. } => for a in arms { in_stmt(&a.body, out); },
+            _ => {}
+        }
+    }
+    for s in stmts { in_stmt(s, out); }
+}
+
 fn first_return_expr(stmts: &[Stmt]) -> Option<Expr> {
     fn in_stmt(s: &Stmt) -> Option<Expr> {
         match s {

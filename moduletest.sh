@@ -1327,6 +1327,32 @@ else
 fi
 cd ..
 
+# A module's exported `tuple` parameter is dynamically typed (its callers are
+# in other units): static tuples of any shape pass in, elements are checked.
+mkdir -p tmod && cd tmod
+cat > tm.sic <<'EOF'
+module tm;
+i32 first(tuple t) { i32 a = t[0]; return a; }
+tuple pair(i32 a, string b) { return tuple(a, b); }
+tuple<i32, i32> typed() { return tuple(20, 2); }
+EOF
+cat > app.sic <<'EOF'
+import tm;
+int main() {
+    tuple p = tm::pair(10, "abcd");
+    string s = p[1];
+    tuple<i32, i32> q = tm::typed();
+    return tm::first(tuple(5, "x")) + tm::first(p) + s.size + q[0] + q[1] + 1;
+}
+EOF
+if "$SIC" -c tm.sic -o tm.o 2>err && "$SIC" app.sic tm.o -I. -o app 2>err; then
+    ./app; got=$?
+    [ "$got" -eq 42 ] && ok "module-dynamic-tuple" || bad "module-dynamic-tuple" "expected 42, got $got"
+else
+    bad "module-dynamic-tuple" "compile/link failed: $(cat err)"
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

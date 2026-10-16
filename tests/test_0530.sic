@@ -1,0 +1,5 @@
+// A dynamically typed tuple element read as the wrong type aborts at run time
+// with a message ("tuple element 0 is `string`, not `i32`") — it used to read
+// the string's bytes as an int. Exits 134 (SIGABRT).
+i32 first(tuple t) { i32 a = t[0]; return a; }
+int main() { return first(tuple(1, 2)) + first(tuple("x", 2)); }

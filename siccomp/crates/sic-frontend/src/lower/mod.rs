@@ -177,6 +177,13 @@ pub struct Lowerer {
     /// struct has none. A struct with no `~S()` uses it as its destructor; a
     /// user `~S()` calls it after its own body.
     pub member_dtor: HashMap<String, Option<String>>,
+    /// Per function: plain `tuple` locals assigned tuples of different shapes
+    /// (dynamically typed — see `FuncCtx::force_tuple_local_dynamic`).
+    pub dyn_tuple_locals: HashMap<String, std::collections::HashSet<String>>,
+    /// Functions to lower again (a tuple local turned out dynamic).
+    pub tuple_restart: std::collections::HashSet<String>,
+    /// Tuple shape descriptors by shape key (see `tuple_shape_global`).
+    pub tuple_shape_globals: HashMap<String, GlobalRef>,
     /// The user-written destructor symbols (before implicit ones are added).
     pub user_dtor_syms: std::collections::HashSet<String>,
     /// sic weak references (sic.md §"Weak"): struct name → its `weak<T>` fields as
@@ -321,6 +328,9 @@ impl Lowerer {
             struct_dtor: HashMap::new(),
             struct_owned_fields: HashMap::new(),
             member_dtor: HashMap::new(),
+            tuple_shape_globals: HashMap::new(),
+            dyn_tuple_locals: HashMap::new(),
+            tuple_restart: std::collections::HashSet::new(),
             user_dtor_syms: std::collections::HashSet::new(),
             struct_weak_fields: HashMap::new(),
             notes: Vec::new(),
@@ -1713,6 +1723,67 @@ impl Lowerer {
             fc.set_terminator(Terminator::Ret(None));
         }
         Some(self.module.add_function(func))
+    }
+
+    /// The RTTI record for a type (sic.md §"RTTI"), emitted once per name:
+    /// `{ name*, id (hash of the name), size, kind }`.
+    pub(crate) fn type_info_global(&mut self, name: &str, kind: u32, size: u32) -> GlobalRef {
+        use types as t;
+        if let Some(&g) = self.type_info_globals.get(name) { return g; }
+        let mut nb = name.as_bytes().to_vec();
+        nb.push(0);
+        let name_g = {
+            let gn = format!(".str.{}", self.module.globals.len());
+            let len = nb.len();
+            self.module.add_global(Global {
+                name: gn,
+                ty: Type::Array { elem: Box::new(Type::i8()), len },
+                init: Some(Constant::Bytes(nb)),
+                linkage: Linkage::Private, constant: true, thread_local: false,
+            })
+        };
+        let id = t::type_id_hash(name);
+        let mut b = vec![0u8; t::TYPEINFO_REC_SIZE];
+        b[t::TYPEINFO_OFF_ID..t::TYPEINFO_OFF_ID + 8].copy_from_slice(&id.to_le_bytes());
+        b[t::TYPEINFO_OFF_SIZE..t::TYPEINFO_OFF_SIZE + 4].copy_from_slice(&size.to_le_bytes());
+        b[t::TYPEINFO_OFF_KIND..t::TYPEINFO_OFF_KIND + 4].copy_from_slice(&kind.to_le_bytes());
+        let g = self.module.add_global(Global {
+            name: format!(".typeinfo.{}", self.module.globals.len()),
+            ty: Type::Array { elem: Box::new(Type::i8()), len: t::TYPEINFO_REC_SIZE },
+            init: Some(Constant::Aggregate {
+                bytes: b,
+                relocs: vec![(t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0))],
+            }),
+            linkage: Linkage::Private, constant: true, thread_local: false,
+        });
+        self.type_info_globals.insert(name.to_string(), g);
+        g
+    }
+
+    /// A tuple layout's shape descriptor (one per distinct shape):
+    /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count]; }`, read by the
+    /// tuple runtime to check a dynamically typed tuple's elements.
+    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64)]) -> GlobalRef {
+        let key = elems.iter().map(|(n, _, _, o)| format!("{}@{}", n, o)).collect::<Vec<_>>().join(",");
+        if let Some(&g) = self.tuple_shape_globals.get(&key) { return g; }
+        let ps = self.ptr_size as usize;
+        let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8)];
+        bytes[0..8].copy_from_slice(&(elems.len() as u64).to_le_bytes());
+        let mut relocs = Vec::new();
+        for (i, (name, kind, size, off)) in elems.iter().enumerate() {
+            let ti = self.type_info_global(name, *kind, *size);
+            let at = 8 + i * (ps + 8);
+            relocs.push((at, RelocTarget::Global(ti, 0)));
+            bytes[at + ps..at + ps + 8].copy_from_slice(&off.to_le_bytes());
+        }
+        let g = self.module.add_global(Global {
+            name: format!(".tshape.{}", self.module.globals.len()),
+            ty: Type::Array { elem: Box::new(Type::i8()), len: bytes.len().max(8) },
+            init: Some(Constant::Aggregate { bytes, relocs }),
+            linkage: Linkage::Private, constant: true, thread_local: false,
+        });
+        self.tuple_shape_globals.insert(key, g);
+        g
     }
 
     /// A by-value field type that owns a resource: a `string`, closure,
@@ -4854,7 +4925,7 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
             for a in args { collect_generics_type(&a.ty, out); }
             // `dict<K,V>` / `Task<T>` are built-ins, not user generic enums — don't
             // try to monomorphize them as one (sic.md §"Dict", §"Async").
-            if name != "dict" && name != "Task" && name != "set" && name != "list" {
+            if name != "dict" && name != "Task" && name != "set" && name != "list" && name != "tuple" {
                 out.push((name.clone(), args.clone()));
             }
         }

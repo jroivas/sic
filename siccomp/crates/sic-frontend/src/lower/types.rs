@@ -933,6 +933,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
         // instantiation pass.
+        // sic `tuple<T0, T1, …>`: a statically typed tuple (sic.md §"Tuples").
+        AstType::Generic { name, args } if name == "tuple" => {
+            let mut elems = Vec::with_capacity(args.len());
+            for a in args { elems.push(lower_ast_type(&a.ty, named, ptr_size)?); }
+            tuple_type(elems)
+        }
         // sic `list<T>` growable array (sic.md §"List").
         AstType::Generic { name, args } if name == "list" => {
             let e = container_arg_type(args.get(0).map(|a| &a.ty), named, ptr_size)?;

@@ -1,0 +1,2 @@
+// Must NOT compile: a statically typed tuple target takes only its own shape.
+int main() { tuple<i32, string> t = tuple("x", 1); return 0; }

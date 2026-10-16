@@ -100,6 +100,41 @@ t = tuple("a", "b");           // now length 2; t[0] is a string
 This is what lets a `string`'s [`split`](strings.md#search--split) report arity
 `1` (separator absent) vs `2` (found) through `.length`.
 
+### Static and dynamic tuples
+
+A tuple's element types are **static** whenever the compiler can know them — a
+`tuple(…)` value, a local initialized or assigned in straight-line code, a parameter
+whose every call passes the same shape, a function whose every `return` agrees — and
+then `t[i]` costs nothing extra. You can also spell the shape: `tuple<int, string>`.
+
+Where the shape can't be known at compile time the tuple is **dynamically typed**:
+
+- a struct field `tuple t;`,
+- a parameter called with different shapes, or exported from a module,
+- a local assigned different shapes inside a branch or loop,
+- a `list<tuple>` / `dict<K, tuple>` holding several shapes,
+- a function whose `return`s produce different shapes.
+
+Every tuple records its shape at run time, so passing a static tuple where a dynamic
+one is expected is free. Reading a dynamic tuple is checked:
+
+```sic
+struct S { tuple t; };
+S s;
+s.t = tuple(4, "pq");
+int n = s.t[0];               // checked: element 0 must be an int
+string w = s.t[1];            // checked: element 1 must be a string
+int bad = s.t[1];             // run-time error: tuple element 1 is `string`, not `i32`
+auto v = s.t[1];              // an `any` (no check until converted)
+int a; string b;
+tuple(a, b) = s.t;            // checks the arity, then each element
+tuple<int, string> st = s.t;  // checks the whole shape once; `st[i]` is static after
+```
+
+The element must have exactly the target's type (no numeric conversion). A dynamic
+index may be a run-time value. A static shape mismatch
+(`tuple<int> x = tuple("a")`) is a compile error.
+
 ## Swap
 
 The `<>` operator swaps two same-typed lvalues, including array elements — see

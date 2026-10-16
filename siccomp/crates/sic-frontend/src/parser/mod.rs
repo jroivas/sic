@@ -686,8 +686,20 @@ impl Parser {
                 TokenKind::Tuple if base.is_none()
                     && self.tokens.get(self.pos + 1).map(|t| t.kind) != Some(TokenKind::LParen) =>
                 {
-                    base = Some(AstType::Tuple);
                     self.advance();
+                    // `tuple<T0, T1, …>`: a statically typed tuple (sic.md §"Tuples").
+                    if self.lang == Lang::Sic && self.at(TokenKind::Lt) {
+                        self.advance();
+                        let mut args = Vec::new();
+                        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Shr) && !self.at(TokenKind::RotR) && !self.at(TokenKind::Eof) {
+                            args.push(self.parse_type_name()?);
+                            if !self.eat(TokenKind::Comma) { break; }
+                        }
+                        self.eat_generic_gt()?;
+                        base = Some(AstType::Generic { name: "tuple".to_string(), args });
+                    } else {
+                        base = Some(AstType::Tuple);
+                    }
                 }
                 // `__int128` is a base integer type that combines with
                 // signed/unsigned (`unsigned __int128`, `__signed__ __int128`),

@@ -121,42 +121,7 @@ impl<'m> FuncCtx<'m> {
     /// spelling (`type_name_of`); `kind`/`size` classify the type for formatters.
     pub(crate) fn emit_type_info(&mut self, name: &str, kind: u32, size: u32) -> Val {
         use super::types as t;
-        let gref = if let Some(&g) = self.lowerer.type_info_globals.get(name) {
-            g
-        } else {
-            // The canonical name string (a private cstring the record points at).
-            let mut nb = name.as_bytes().to_vec();
-            nb.push(0);
-            let name_g = {
-                let gn = format!(".str.{}", self.lowerer.module.globals.len());
-                let len = nb.len();
-                let g = Global {
-                    name: gn,
-                    ty: Type::Array { elem: Box::new(Type::i8()), len },
-                    init: Some(Constant::Bytes(nb)),
-                    linkage: Linkage::Private, constant: true, thread_local: false,
-                };
-                self.lowerer.module.add_global(g)
-            };
-            // The record: opaque bytes with a pointer reloc for `name`.
-            let id = t::type_id_hash(name);
-            let mut b = vec![0u8; t::TYPEINFO_REC_SIZE];
-            b[t::TYPEINFO_OFF_ID..t::TYPEINFO_OFF_ID + 8].copy_from_slice(&id.to_le_bytes());
-            b[t::TYPEINFO_OFF_SIZE..t::TYPEINFO_OFF_SIZE + 4].copy_from_slice(&size.to_le_bytes());
-            b[t::TYPEINFO_OFF_KIND..t::TYPEINFO_OFF_KIND + 4].copy_from_slice(&kind.to_le_bytes());
-            let rec = Global {
-                name: format!(".typeinfo.{}", self.lowerer.module.globals.len()),
-                ty: Type::Array { elem: Box::new(Type::i8()), len: t::TYPEINFO_REC_SIZE },
-                init: Some(Constant::Aggregate {
-                    bytes: b,
-                    relocs: vec![(t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0))],
-                }),
-                linkage: Linkage::Private, constant: true, thread_local: false,
-            };
-            let g = self.lowerer.module.add_global(rec);
-            self.lowerer.type_info_globals.insert(name.to_string(), g);
-            g
-        };
+        let gref = self.lowerer.type_info_global(name, kind, size);
         let ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr {
             dest: ptr, base: Val::Global(gref), index: Constant::zero(),
@@ -366,9 +331,10 @@ impl<'m> FuncCtx<'m> {
         // pointer-typed value; `string`/tuple/struct rvalues are the STRUCT type but
         // a pointer at the machine level, so take their address via
         // `lower_aggregate_ptr` (a real pointer-typed value) before reinterpreting.
+        // A tuple is boxed as its handle (the block pointer), like any pointer.
         let is_ptr_val = super::types::is_fixed(ty) || super::types::is_bigint(ty)
             || matches!(ty, Type::Pointer(_));
-        let is_aggr = super::types::is_sic_string(ty) || super::types::is_tuple(ty)
+        let is_aggr = super::types::is_sic_string(ty)
             || matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. });
         if is_ptr_val || is_aggr {
             let v = if is_ptr_val { self.lower_expr(e)? } else { self.lower_aggregate_ptr(e)? };
@@ -408,6 +374,18 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn unbox_any_val(&mut self, any_ptr: Val, target: &Type) -> Result<Val> {
         let sp = crate::lexer::Span::default();
         let any_ty = super::types::any_type();
+        // An element of a dynamically typed tuple converts only to its exact type.
+        if let Val::Local(id) = &any_ptr {
+            if let Some(iv) = self.strict_anys.get(&id.0).cloned() {
+                let ty_lv = self.field_ptr_from(LValue::plain(any_ptr.clone(), any_ty.clone()), "ty", false, &sp)?;
+                let got = self.load_lvalue(&ty_lv)?;
+                let got = self.coerce(got, &Type::void_ptr())?;
+                let want = self.lower_type_value(target);
+                let want = self.coerce(want, &Type::void_ptr())?;
+                let f = self.tuple_runtime_fn("__sic_tuple_expect");
+                self.push_instr(Instr::Call { dest: None, func: f, args: vec![got, want, iv], ret_ty: Type::Void });
+            }
+        }
         let slot_lv = self.field_ptr_from(LValue::plain(any_ptr.clone(), any_ty.clone()), "slot", false, &sp)?;
         let slot = self.load_lvalue(&slot_lv)?; // u64
         // sic (sic.md std): NUMERIC targets convert by the `any`'s runtime kind, not
@@ -1825,6 +1803,21 @@ impl<'m> FuncCtx<'m> {
     /// not already present. The definition comes from the prepended dict runtime (when
     /// this unit uses `dict`) or from an imported module's object (e.g. `libstd`,
     /// which now uses `va_dict`) — the weak copies dedupe at link.
+    /// Resolve a `__sic_tuple_*` runtime accessor (tuple_runtime.c), declaring it.
+    pub(crate) fn tuple_runtime_fn(&mut self, name: &str) -> FuncRef {
+        if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
+        let u64t = Type::u64();
+        let ptr = Type::void_ptr();
+        let (params, ret): (Vec<Type>, Type) = match name {
+            "__sic_tuple_get_any" => (vec![ptr.clone(), u64t.clone(), ptr.clone(), ptr.clone()], Type::Void),
+            "__sic_tuple_expect" => (vec![ptr.clone(), ptr.clone(), u64t.clone()], Type::Void),
+            "__sic_tuple_arity" => (vec![ptr.clone(), u64t.clone()], Type::Void),
+            "__sic_tuple_check_shape" => (vec![ptr.clone(), ptr.clone()], Type::Void),
+            _ => (vec![ptr.clone(), u64t.clone(), ptr.clone()], ptr.clone()), // __sic_tuple_elem
+        };
+        self.lowerer.module.add_extern(ExternFunc { name: name.to_string(), sig: FunctionType { ret, params, variadic: false } })
+    }
+
     pub(crate) fn dict_runtime_fn(&mut self, name: &str) -> FuncRef {
         if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
         let u64t = Type::u64();
@@ -2000,24 +1993,45 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// `l.add(x)` / `l.push(x)` — append `x`.
+    /// A tuple stored into a `list<tuple>` / `dict<K, tuple>` (sic.md §"Tuples"):
+    /// a plain `tuple` element type of a container local takes the first stored
+    /// tuple's shape (so `l[i][j]` is statically typed); a different shape later
+    /// makes the local's elements dynamically typed (the function is lowered
+    /// again). An explicitly typed `tuple<…>` element only takes that shape.
+    fn container_tuple_shape(&mut self, base: &Expr, val: &Expr, is_dict: bool) -> Result<()> {
+        let (k, elem) = if is_dict { self.dict_kv_of(base) } else { (Type::Void, self.list_elem_of(base)) };
+        if !super::types::is_tuple(&elem) { return Ok(()); }
+        let Ok(vt) = self.infer_expr_type(val) else { return Ok(()) };
+        if !super::types::is_tuple(&vt) || vt == elem { return Ok(()); }
+        let local = match &base.kind {
+            ExprKind::Ident(n) => match self.lookup(n) {
+                Some(super::func::LookupResult::Local(_, vid)) => Some((n.clone(), vid)),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((name, vid)) = local else {
+            return self.check_tuple_shape(&elem, val, "stored as");
+        };
+        if self.tuple_local_forced_dynamic(&name) { return Ok(()); }
+        if super::func::is_dynamic_tuple(&elem) {
+            if !super::func::is_dynamic_tuple(&vt) && !self.refined_tuple_containers.contains(&vid) {
+                let refined = if is_dict { super::types::dict_type(&k, &vt) } else { super::types::list_type(&vt) };
+                self.refine_local_type(&name, refined);
+                self.refined_tuple_containers.insert(vid);
+            }
+            return Ok(());
+        }
+        if self.refined_tuple_containers.contains(&vid) {
+            self.force_tuple_local_dynamic(&name);
+            return Ok(());
+        }
+        self.check_tuple_shape(&elem, val, "stored as")
+    }
+
     pub(crate) fn lower_list_push(&mut self, base: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
         self.check_closure_escape(val, "stored in a container")?;
-        // Refine an opaque `list<tuple>` element type from the tuple being added, so a
-        // later `l[i]` (and `l[i][j]`) sees the tuple's fields. `list<tuple>` declares
-        // no element layout; the first `l.add(tuple(...))` supplies it.
-        if let ExprKind::Ident(name) = &base.kind {
-            let elem = self.list_elem_of(base);
-            let tuple_arity = |t: &Type| super::types::tuple_layout_of(t)
-                .and_then(|l| match l { Type::Struct(st) => Some(st.fields.len()), _ => None }).unwrap_or(0);
-            if super::types::is_tuple(&elem) && tuple_arity(&elem) == 0 {
-                if let Ok(vt) = self.infer_expr_type(val) {
-                    if super::types::is_tuple(&vt) && tuple_arity(&vt) > 0 {
-                        let refined = super::types::list_type(&vt);
-                        self.refine_local_type(name, refined);
-                    }
-                }
-            }
-        }
+        self.container_tuple_shape(base, val, false)?;
         let elem = self.list_elem_of(base);
         self.ensure_container_created(base, _sp)?;
         let l = self.list_handle(base)?;
@@ -2044,6 +2058,7 @@ impl<'m> FuncCtx<'m> {
     /// `l[i] = x`.
     pub(crate) fn lower_list_set(&mut self, base: &Expr, index: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
         self.check_closure_escape(val, "stored in a container")?;
+        self.container_tuple_shape(base, val, false)?;
         let elem = self.list_elem_of(base);
         let l = self.list_handle(base)?;
         let iv = self.lower_expr(index)?;
@@ -2195,21 +2210,7 @@ impl<'m> FuncCtx<'m> {
     /// `any`-valued dict (a concrete V reconstructs from its static type).
     pub(crate) fn lower_dict_set(&mut self, base: &Expr, key: &Expr, val: &Expr, sp: &crate::lexer::Span) -> Result<()> {
         self.check_closure_escape(val, "stored in a container")?;
-        // Refine an opaque `dict<K,tuple>` value type from the tuple being stored, so a
-        // later `d[k]` (and `d[k][j]`) sees the tuple's fields (mirrors list add).
-        if let ExprKind::Ident(name) = &base.kind {
-            let (k, v) = self.dict_kv_of(base);
-            let tuple_arity = |t: &Type| super::types::tuple_layout_of(t)
-                .and_then(|l| match l { Type::Struct(st) => Some(st.fields.len()), _ => None }).unwrap_or(0);
-            if super::types::is_tuple(&v) && tuple_arity(&v) == 0 {
-                if let Ok(vt) = self.infer_expr_type(val) {
-                    if super::types::is_tuple(&vt) && tuple_arity(&vt) > 0 {
-                        let refined = super::types::dict_type(&k, &vt);
-                        self.refine_local_type(name, refined);
-                    }
-                }
-            }
-        }
+        self.container_tuple_shape(base, val, true)?;
         let (_k, v) = self.dict_kv_of(base);
         self.ensure_container_created(base, sp)?;
         let d = self.dict_handle(base)?;
@@ -2437,6 +2438,16 @@ impl<'m> FuncCtx<'m> {
 
     /// Canonical sic spelling of a type (no operand context) — used by RTTI
     /// `type(x).str` and `typeid` records (sic.md §"RTTI").
+    /// A type as written in sic source, with a tuple's element types
+    /// (`tuple<i32, string>`) — for diagnostics.
+    pub(crate) fn type_display(&self, ty: &Type) -> String {
+        match super::types::tuple_layout_of(ty) {
+            Some(Type::Struct(st)) if !st.fields.is_empty() => format!("tuple<{}>",
+                st.fields.iter().map(|(_, t)| self.type_display(t)).collect::<Vec<_>>().join(", ")),
+            _ => self.type_name_of(ty),
+        }
+    }
+
     pub(crate) fn type_name_of(&self, ty: &Type) -> String {
         if let Some((i, f)) = super::types::fixed_dims(ty) {
             return format!("fixed<{},{}>", i, f);
@@ -2444,6 +2455,8 @@ impl<'m> FuncCtx<'m> {
         if super::types::is_bigint(ty) { return "bigint".to_string(); }
         if super::types::is_sic_string(ty) { return "string".to_string(); }
         if super::types::is_type_info(ty) { return "type".to_string(); }
+        // Every tuple has the RTTI type `tuple` (its shape is the block's own).
+        if super::types::is_tuple(ty) { return "tuple".to_string(); }
         match ty {
             Type::Void => "void".to_string(),
             Type::Bool => "bool".to_string(),
@@ -2583,23 +2596,30 @@ impl<'m> FuncCtx<'m> {
     fn emit_tuple_alloc(&mut self, layout: &Type, dtor: Option<FuncRef>) -> Result<Val> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let ps = self.ptr_size() as i64;
-        let header = 3 * ps;
+        let header = 4 * ps;
         let size = layout.size_of(self.ptr_size());
         let total = self.coerce(Constant::uint(size + header as u64), &usize_ty)?;
         let block = self.emit_malloc(total)?; // char*
-        // block[0] = __dtor (element destructor pointer, or null).
+        // block[0] = the layout's shape descriptor (element types + offsets): what
+        // a dynamically typed `tuple` checks at run time.
+        let shape = self.tuple_shape(layout);
+        let shape = self.coerce(shape, &Type::void_ptr())?;
+        self.push_instr(Instr::Store { val: shape, ptr: block.clone() });
+        // block[1] = __dtor (element destructor pointer, or null).
         let dtor_val = match dtor { Some(fr) => Val::Func(fr), None => Constant::zero() };
         let dtor_val = self.coerce(dtor_val, &Type::void_ptr())?;
-        self.push_instr(Instr::Store { val: dtor_val, ptr: block.clone() });
-        // block[1] (at +ptr_size) = element COUNT (a tuple's runtime `.length`).
+        let dtor_ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: dtor_ptr, base: block.clone(), index: Constant::int(ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::Store { val: dtor_val, ptr: Val::Local(dtor_ptr) });
+        // block[2] = element COUNT (a tuple's runtime `.length`).
         let nelem = match layout { Type::Struct(st) => st.fields.len(), _ => 0 };
         let cnt_ptr = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: cnt_ptr, base: block.clone(), index: Constant::int(ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: cnt_ptr, base: block.clone(), index: Constant::int(2 * ps), elem_size: 1, result_ty: Type::char_ptr() });
         let cnt = self.coerce(Constant::uint(nelem as u64), &usize_ty)?;
         self.push_instr(Instr::Store { val: cnt, ptr: Val::Local(cnt_ptr) });
-        // block[2] (at +2*ptr_size) = rc = 1.
+        // block[3] = rc = 1.
         let rc_ptr = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(2 * ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: rc_ptr, base: block.clone(), index: Constant::int(3 * ps), elem_size: 1, result_ty: Type::char_ptr() });
         let one = self.coerce(Constant::int(1), &usize_ty)?;
         self.push_instr(Instr::Store { val: one, ptr: Val::Local(rc_ptr) });
         let ptr_ty = Type::Pointer(Box::new(layout.clone()));
@@ -2607,6 +2627,20 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(header), elem_size: 1, result_ty: ptr_ty.clone() });
         self.val_types.insert(data.0, ptr_ty);
         Ok(Val::Local(data))
+    }
+
+    /// The address of `layout`'s shape descriptor `{ count; { typeinfo*, offset }[count] }`.
+    pub(crate) fn tuple_shape(&mut self, layout: &Type) -> Val {
+        let fields = match layout { Type::Struct(st) => st.fields.clone(), _ => vec![] };
+        let (offs, _, _) = match layout { Type::Struct(st) => st.layout_full(self.ptr_size()), _ => (vec![], vec![], 0) };
+        let elems: Vec<(String, u32, u32, u64)> = fields.iter().enumerate().map(|(i, (_, t))| {
+            (self.type_name_of(t), super::types::type_kind(t), t.size_of(self.ptr_size()) as u32, offs.get(i).copied().unwrap_or(0))
+        }).collect();
+        let g = self.lowerer.tuple_shape_global(&elems);
+        let ptr = self.alloc_val();
+        self.push_instr(Instr::GetElemPtr { dest: ptr, base: Val::Global(g), index: Constant::zero(), elem_size: 1, result_ty: Type::void_ptr() });
+        self.val_types.insert(ptr.0, Type::void_ptr());
+        Val::Local(ptr)
     }
 
     /// Build an empty tuple value (`tuple t;`): a refcounted block with element
@@ -2765,6 +2799,27 @@ impl<'m> FuncCtx<'m> {
         let layout = super::types::tuple_layout_of(&self.infer_expr_type(base)?)
             .ok_or_else(|| CompileError::at("not a tuple".to_string(), sp.file.clone(), sp.line, sp.col))?;
         let nfields = match &layout { Type::Struct(st) => st.fields.len(), _ => 0 };
+        // A dynamically typed tuple: box element `index` (checked against the
+        // tuple's recorded shape, so the index may be a run-time value) as an
+        // `any` whose conversion to a concrete type is exact-type checked.
+        if nfields == 0 {
+            let data = self.lower_expr(base)?;
+            let data = self.coerce(data, &Type::void_ptr())?;
+            let iv = self.lower_expr(index)?;
+            let iv = self.coerce(iv, &Type::u64())?;
+            let any_ty = super::types::any_type();
+            let tmp = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: tmp, ty: any_ty.clone(), align: None });
+            self.val_types.insert(tmp.0, any_ty.clone());
+            let tyf = self.field_ptr_from(LValue::plain(Val::Local(tmp), any_ty.clone()), "ty", false, sp)?;
+            let slotf = self.field_ptr_from(LValue::plain(Val::Local(tmp), any_ty.clone()), "slot", false, sp)?;
+            let f = self.tuple_runtime_fn("__sic_tuple_get_any");
+            let typ = self.coerce(tyf.ptr, &Type::void_ptr())?;
+            let slp = self.coerce(slotf.ptr, &Type::void_ptr())?;
+            self.push_instr(Instr::Call { dest: None, func: f, args: vec![data, iv.clone(), typ, slp], ret_ty: Type::Void });
+            self.strict_anys.insert(tmp.0, iv);
+            return Ok(LValue::plain(Val::Local(tmp), any_ty));
+        }
         let idx = self.const_index(index).ok_or_else(|| CompileError::at(
             "a tuple index must be a constant".to_string(), sp.file.clone(), sp.line, sp.col))?;
         if idx < 0 || idx as usize >= nfields {
@@ -2774,6 +2829,20 @@ impl<'m> FuncCtx<'m> {
         }
         // A tuple value is a pointer to its heap block; index off that pointer.
         let ptr = self.lower_expr(base)?;
+        // A bare `tuple t;` typed by a later assignment may still be the empty
+        // tuple here (a path that skipped the assignment): check the length.
+        if let ExprKind::Ident(n) = &base.kind {
+            if let Some(super::func::LookupResult::Local(_, vid)) = self.lookup(n) {
+                if self.refined_bare_tuples.contains(&vid) {
+                    let data = self.coerce(ptr.clone(), &Type::void_ptr())?;
+                    let iv = self.coerce(Constant::uint(idx as u64), &Type::u64())?;
+                    let nul = self.coerce(Constant::zero(), &Type::void_ptr())?;
+                    let f = self.tuple_runtime_fn("__sic_tuple_elem");
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::Call { dest: Some(d), func: f, args: vec![data, iv, nul], ret_ty: Type::void_ptr() });
+                }
+            }
+        }
         self.field_ptr_from(LValue::plain(ptr, layout), &idx.to_string(), false, sp)
     }
 
@@ -2791,6 +2860,35 @@ impl<'m> FuncCtx<'m> {
             "tuple unpack requires a tuple on the right-hand side".to_string(),
             sp.file.clone(), sp.line, sp.col))?;
         let fields = match &layout { Type::Struct(st) => st.fields.clone(), _ => vec![] };
+        // A dynamically typed tuple: check the arity at run time, then assign each
+        // `t[i]` — an exact-type-checked element — to its target.
+        if fields.is_empty() {
+            let base = match &rhs.kind {
+                ExprKind::Ident(_) => rhs.clone(),
+                _ => {
+                    // Bind the tuple to a hidden local for the element reads.
+                    let v = self.lower_expr(rhs)?;
+                    let name = format!("__sic_unpack_{}", self.unpack_counter);
+                    self.unpack_counter += 1;
+                    let slot = self.alloc_val();
+                    self.push_instr(Instr::Alloca { dest: slot, ty: rty.clone(), align: None });
+                    self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+                    self.define_local(name.clone(), rty.clone(), slot);
+                    Expr::new(ExprKind::Ident(name), rhs.span.clone())
+                }
+            };
+            let data = self.lower_expr(&base)?;
+            let data = self.coerce(data, &Type::void_ptr())?;
+            let f = self.tuple_runtime_fn("__sic_tuple_arity");
+            let n = self.coerce(Constant::uint(targets.len() as u64), &Type::u64())?;
+            self.push_instr(Instr::Call { dest: None, func: f, args: vec![data.clone(), n], ret_ty: Type::Void });
+            for (i, tgt) in targets.iter().enumerate() {
+                let elem = Expr::new(ExprKind::Index { base: Box::new(base.clone()),
+                    index: Box::new(Expr::new(ExprKind::IntLit(i as i64, false), sp.clone())) }, sp.clone());
+                self.lower_assign(None, tgt, &elem)?;
+            }
+            return Ok(data);
+        }
         if fields.len() != targets.len() {
             return Err(CompileError::at(
                 format!("tuple unpack expects {} values, got {} targets", fields.len(), targets.len()),
@@ -4130,7 +4228,7 @@ impl<'m> FuncCtx<'m> {
         // freeblk: free the block at data - 3*ptr_size.
         self.switch_to_block(freeblk_bb);
         let block = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-3 * ps), elem_size: 1, result_ty: Type::char_ptr() });
+        self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-4 * ps), elem_size: 1, result_ty: Type::char_ptr() });
         self.emit_free(Val::Local(block))?;
         self.set_terminator(Terminator::Jump(done_bb));
 
@@ -5125,6 +5223,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_logical(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        self.ctrl_depth += 1;
+        let r = self.lower_logical_inner(is_and, lhs, rhs);
+        self.ctrl_depth -= 1;
+        r
+    }
+
+    fn lower_logical_inner(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         let result_ptr = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32(), align: None });
         let zero = Constant::zero();
@@ -5383,6 +5488,10 @@ impl<'m> FuncCtx<'m> {
         // is immutable, but the *variable* may be re-pointed). Retain-before-
         // release keeps a self-assign balanced.
         if self.is_sic() && op.is_none() && super::types::is_tuple(&lv.ty) {
+            // A typed `tuple<…>` target (not a plain `tuple` local) keeps its shape.
+            let plain = matches!(&lhs.kind, ExprKind::Ident(n)
+                if matches!(self.lookup(n), Some(super::func::LookupResult::Local(_, vid)) if self.plain_tuple_locals.contains(&vid)));
+            if !plain { let t = lv.ty.clone(); self.check_tuple_shape(&t, rhs, "assigned to")?; }
             let newp = self.lower_expr(rhs)?;
             let npc = self.coerce(newp.clone(), &Type::char_ptr())?;
             self.emit_rc_retain(npc)?;
@@ -5393,10 +5502,27 @@ impl<'m> FuncCtx<'m> {
             // Refine an empty/looser `tuple t;` to the assigned tuple's element types
             // (sic.md §"Tuples"), so a later `t[i]` in the same scope is typed. The
             // stored value is a pointer either way, so the slot is unchanged.
+            // A plain `tuple` local takes ONE static shape: the first assigned to a
+            // bare `tuple t;`. Another shape makes it dynamically typed in the
+            // whole function (the function is lowered again).
             if let ExprKind::Ident(name) = &lhs.kind {
-                if let Ok(nt) = self.infer_expr_type(rhs) {
-                    if super::types::is_tuple(&nt) && nt != lv.ty {
-                        self.refine_local_type(name, nt);
+                let plain = match self.lookup(name) {
+                    Some(super::func::LookupResult::Local(_, vid)) if self.plain_tuple_locals.contains(&vid) => Some(vid),
+                    _ => None,
+                };
+                if let (Some(vid), Ok(nt)) = (plain, self.infer_expr_type(rhs)) {
+                    if super::types::is_tuple(&nt) && nt != lv.ty && !self.tuple_local_forced_dynamic(name) {
+                        let dominates = self.tuple_reshape_dominates(vid);
+                        if super::func::is_dynamic_tuple(&lv.ty) && !super::func::is_dynamic_tuple(&nt) {
+                            // A bare `tuple t;` typed by this assignment: reads it
+                            // does not dominate check the length.
+                            self.refine_local_type(name, nt);
+                            if !dominates { self.refined_bare_tuples.insert(vid); }
+                        } else if dominates && !super::func::is_dynamic_tuple(&nt) {
+                            self.refine_local_type(name, nt);     // flow-sensitive: later uses see it
+                        } else {
+                            self.force_tuple_local_dynamic(name);
+                        }
                     }
                 }
             }
@@ -6080,6 +6206,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_ternary(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
+        self.ctrl_depth += 1;
+        let r = self.lower_ternary_inner(cond, then, else_);
+        self.ctrl_depth -= 1;
+        r
+    }
+
+    fn lower_ternary_inner(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
         // Constant-fold a compile-time-constant condition to just the taken arm,
         // like gcc/clang. QEMU's `dup_const`/tcg macros nest
         // `__builtin_constant_p(x) ? <fold> : <runtime>`; sic returns 0 for
