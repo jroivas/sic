@@ -544,6 +544,7 @@ impl Parser {
         let mut signed: Option<bool> = None;
         let mut base: Option<AstType> = None;
         let mut long_count = 0u32;
+        let mut long_span: Option<Span> = None;
 
         // sic `@T` / `@mut T` reference type (sic.md §"References"): a leading `@`
         // marks the whole declared type as a scoped reference.
@@ -656,6 +657,7 @@ impl Parser {
                 }
                 TokenKind::Long     => {
                     long_count += 1;
+                    if long_span.is_none() { long_span = Some(self.span()); }
                     self.advance();
                     // Don't set base yet — may accumulate 'long long'
                 }
@@ -838,6 +840,11 @@ impl Parser {
         } else if long_count > 0 {
             if let Some(AstType::Double) = &base {
                 base = Some(AstType::LongDouble);
+                // Deprecated: sic computes `long double` as a plain double (no
+                // x87 80-bit support), so it does not match the C ABI.
+                let sp = long_span.clone().unwrap_or_default();
+                crate::diag::warn("long-double", sp.file.as_deref(), sp.line, sp.col,
+                    "'long double' is deprecated; sic computes it as a 64-bit 'double'");
             } else if let Some(AstType::Int { .. }) = &base {
                 let s = signed.unwrap_or(true);
                 base = Some(if long_count >= 2 { AstType::LongLong { signed: s } }

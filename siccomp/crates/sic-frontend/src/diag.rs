@@ -36,6 +36,8 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     ("unused-variable", Group::All, true),
     // sic: an inline-asm template sic cannot lower; it traps if executed.
     ("unsupported-asm", Group::Default, false),
+    // sic: `long double` is deprecated; it is computed as a 64-bit double.
+    ("long-double", Group::Default, false),
 ];
 
 #[derive(Default)]
@@ -59,6 +61,21 @@ struct Config {
 }
 
 static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
+
+/// Files the preprocessor marked as system headers (line-marker flag `3`):
+/// like gcc, no warnings are reported from them.
+static SYSTEM_FILES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Record that `file` is a system header (from a `# N "file" 1 3` marker).
+pub fn mark_system_file(file: &str) {
+    let mut g = SYSTEM_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashSet::new).insert(file.to_string());
+}
+
+fn is_system_file(file: &str) -> bool {
+    let g = SYSTEM_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().map_or(false, |s| s.contains(file))
+}
 
 fn with<R>(f: impl FnOnce(&mut Config) -> R) -> R {
     let mut g = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
@@ -125,6 +142,7 @@ fn is_enabled(c: &Config, name: &str) -> bool {
 pub fn warn(name: &'static str, file: Option<&str>, line: u32, col: u32, msg: &str) {
     debug_assert!(WARNINGS.iter().any(|w| w.0 == name), "unregistered warning {name}");
     let file = file.unwrap_or("<input>");
+    if is_system_file(file) { return; }
     let out = with(|c| {
         if !is_enabled(c, name) { return None; }
         if !c.seen.insert((file.to_string(), line, col, name)) { return None; }

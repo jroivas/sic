@@ -52,8 +52,15 @@ and `#define` behave as in C.
 Warnings use the GCC flags: `-Wall`, `-Wextra`, `-W<name>` / `-Wno-<name>`,
 `-Werror`, `-Werror=<name>` / `-Wno-error=<name>`, `-w`, `-pedantic`. sic reports
 `-Wdiv-by-zero`, `-Wshift-count-overflow`/`-negative` (C only — SIC defines those
-cases), `-Wunused-variable` (in `-Wall`) and `-Wunsupported-asm`; other warning
-names are accepted and ignored, so existing build flags keep working.
+cases), `-Wunused-variable` (in `-Wall`), `-Wunsupported-asm` and `-Wlong-double`;
+other warning names are accepted and ignored, so existing build flags keep working.
+As in GCC, nothing is reported from system headers.
+
+`long double` is deprecated. It still compiles (16-byte slot, as the x86-64 ABI
+requires) but is computed as a 64-bit `double`, so it does not match C at library
+boundaries (`printf("%Lf")`, `strtold`, the `*l` libm functions, shared structs).
+Every use warns (`-Wlong-double`, on by default); with `-Werror` it is an error.
+Use `double`, or `fixed`/`bigint` for more precision.
 
 ## C and SIC in one project
 

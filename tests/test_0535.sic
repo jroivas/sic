@@ -1,0 +1,7 @@
+// Without -Werror `long double` still compiles (with a warning), as a double.
+long double half(long double x) { return x / 2; }
+int main() {
+    long double v = half(84.0);
+    if (sizeof(long double) != 16) return 1;
+    return (int)v;
+}

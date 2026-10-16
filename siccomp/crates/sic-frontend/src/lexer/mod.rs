@@ -144,6 +144,11 @@ impl Lexer {
                 name.push(self.advance());
             }
             if self.pos < self.src.len() && self.src[self.pos] == '"' { self.advance(); }
+            // Trailing flags: `3` marks a system header (no warnings from it).
+            let mut p = self.pos;
+            let mut flags = String::new();
+            while p < self.src.len() && self.src[p] != '\n' { flags.push(self.src[p]); p += 1; }
+            if flags.split_whitespace().any(|f| f == "3") { crate::diag::mark_system_file(&name); }
             self.file = Some(name);
         }
         // Skip the rest of the directive line *including* its newline, then set
