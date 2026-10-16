@@ -1576,6 +1576,18 @@ The exceptions are borrows that alias non-refcounted storage — a plain (C) str
 outlive it (as with a C++ `[&]` capture). A closure capturing only scalars and
 refcounted values (strings, tuples, containers, closures) is always safe.
 
+The compiler enforces this: a closure that borrows a local — directly, or by
+capturing another such closure — may be called, kept in local `Fn` variables and
+passed down as an argument, but **returning it or storing it** in a field, a
+global, `*p`, a container, or a struct/enum value is a compile error:
+
+```sic
+Fn<int()> bad() { struct H h; return [h]() => h.k; }   // error: closure borrows local `h`
+```
+
+(Passing a borrowing closure to a function that keeps it is not detected.)
+
+
 ## Weak references
 
 Reference counting keeps shared values alive but cannot reclaim a *cycle* — two

@@ -1,0 +1,21 @@
+// A closure capturing a local plain struct (by reference, sic.md "Captures")
+// or an explicit `@` borrow stays usable inside the function: called, copied
+// into another local, passed down as an argument. Escaping is a compile error
+// (test_0526, test_0527). Value captures (ints, strings) may still escape.
+// Returns 42.
+struct H { string name; i32 k; };
+i32 apply(Fn<i32()> f) { return f(); }
+Fn<i32(i32)> adder(i32 n) { return [n](i32 x) => x + n; }
+Fn<i32()> sized(string s) { return [s]() => s.size; }
+int main() {
+    H h;
+    h.k = 40;
+    Fn<i32()> f = [h]() => h.k;
+    h.k = 41;                          // the closure sees the live struct
+    Fn<i32()> g = f;
+    i32 sum = 0;
+    Fn<i32(i32)> add = [@mut sum](i32 x) => sum += x;
+    add(1);
+    if (g() != 41 || apply([h]() => h.k) != 41 || sum != 1) return 1;
+    return adder(39)(1) + sized("ab")();  // 40 + 2
+}

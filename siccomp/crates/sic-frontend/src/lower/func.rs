@@ -299,6 +299,8 @@ pub struct FuncCtx<'m> {
     pub fat_locals: std::collections::HashSet<String>,
     /// Variable-length array locals: pointer slot → slot holding the byte size.
     pub vla_sizes: HashMap<ValId, ValId>,
+    /// Local closure variables that borrow a stack object (slot → its name).
+    pub borrowing_closures: HashMap<ValId, String>,
     /// sic loop bounds-check elimination (sic.md §"Scopes"): `(array-name,
     /// index-key)` pairs proven in-bounds for the currently-open counting loops, so
     /// `emit_bounds_check` is suppressed for them. A single check on the loop's index
@@ -404,6 +406,7 @@ impl<'m> FuncCtx<'m> {
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
             vla_sizes: HashMap::new(),
+            borrowing_closures: HashMap::new(),
             bce_proven: Vec::new(),
             atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
@@ -822,6 +825,50 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: src.clone(), size, align });
         self.val_types.insert(slot.0, ty.clone());
         Val::Local(slot)
+    }
+
+    /// If the closure value `e` borrows a local of this function — it captures a
+    /// local plain struct `[x]` (by reference, sic.md §"Captures"), takes an
+    /// explicit `[@x]`/`[@mut x]` borrow of one, or captures another borrowing
+    /// closure — the name of that local. Such a closure must not outlive it.
+    pub(crate) fn closure_borrow(&self, e: &Expr) -> Option<String> {
+        if !self.is_sic() { return None; }
+        match &e.kind {
+            ExprKind::Lambda { captures, .. } => {
+                for c in captures {
+                    if c.weak { continue; }
+                    let Some(LookupResult::Local(ty, vid)) = self.lookup(&c.name) else { continue };
+                    if let Some(n) = self.borrowing_closures.get(&vid) { return Some(n.clone()); }
+                    let scalar = matches!(ty, Type::Int { .. } | Type::Bool
+                        | Type::Float32 | Type::Float64 | Type::Float80 | Type::Pointer(_));
+                    let retained = super::types::is_sic_string(&ty) || super::types::is_tuple(&ty)
+                        || super::types::is_closure(&ty) || super::types::is_list(&ty)
+                        || super::types::is_dict(&ty) || super::types::is_set(&ty);
+                    if c.by_ref || (!scalar && !retained) { return Some(c.name.clone()); }
+                }
+                None
+            }
+            ExprKind::Ident(n) => match self.lookup(n) {
+                Some(LookupResult::Local(_, vid)) => self.borrowing_closures.get(&vid).cloned(),
+                _ => None,
+            },
+            ExprKind::Ternary { then, else_, .. } => self.closure_borrow(then).or_else(|| self.closure_borrow(else_)),
+            ExprKind::Cast { expr, .. } => self.closure_borrow(expr),
+            _ => None,
+        }
+    }
+
+    /// Reject a borrowing closure (`closure_borrow`) reaching a place that can
+    /// outlive the local it borrows; `what` names that place.
+    pub(crate) fn check_closure_escape(&self, e: &Expr, what: &str) -> Result<()> {
+        if let Some(n) = self.closure_borrow(e) {
+            return Err(CompileError::at(format!(
+                "closure borrows local `{}` (captured by reference) and must not outlive it, \
+                 but it is {} — keep the closure local, or capture a value instead \
+                 (a pointer, a refcounted type)", n, what),
+                e.span.file.clone(), e.span.line, e.span.col));
+        }
+        Ok(())
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).
@@ -2095,6 +2142,7 @@ impl<'m> FuncCtx<'m> {
                 if !self.is_terminated() { self.flush_bigint_temps(); }
             }
             Stmt::Return(val, _) => {
+                if let Some(e) = val { self.check_closure_escape(e, "returned")?; }
                 // sic `async` (sic.md §"Async"): wrap the returned value in a
                 // `Task<elem>` (the stub runtime makes it ready) and return that.
                 if let Some(elem) = self.async_elem.clone() {
@@ -2662,6 +2710,20 @@ impl<'m> FuncCtx<'m> {
                         self.bf_ctx = self.dest_ctx(owner, &ty);
                         // Expected-type context (sic.md §"Lambdas"): a `Fn<…>`-typed
                         // target boxes a captureless lambda into a closure.
+                        // A local holding a borrowing closure is tracked (it may be
+                        // called, not leaked); one stored into an aggregate is an escape.
+                        match init {
+                            Initializer::Expr(e) => {
+                                if let Some(n) = self.closure_borrow(e) { self.borrowing_closures.insert(vid, n); }
+                            }
+                            Initializer::List(items) => {
+                                for it in items {
+                                    if let Initializer::Expr(e) = &it.init {
+                                        self.check_closure_escape(e, "stored in an aggregate")?;
+                                    }
+                                }
+                            }
+                        }
                         let prev_exp = self.expected_ty.replace(ty.clone());
                         let r = self.lower_initializer(init, Val::Local(vid), &ty);
                         self.expected_ty = prev_exp;

@@ -1,0 +1,5 @@
+// Must NOT compile: the closure captures local struct `h` by reference and is
+// returned — it would read a dead stack frame (it used to compile silently).
+struct H { i32 k; };
+Fn<i32()> mk() { H h; h.k = 4; Fn<i32()> f = [h]() => h.k; return f; }
+int main() { return mk()(); }

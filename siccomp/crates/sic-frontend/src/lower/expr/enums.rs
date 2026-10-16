@@ -104,6 +104,7 @@ impl<'m> FuncCtx<'m> {
         let tag_lv = self.field_ptr_from(LValue::plain(Val::Local(slot), struct_ty.clone()), "tag", false, sp)?;
         self.store_lvalue(&tag_lv, Constant::int(v.tag))?;
 
+        if let Some(a) = args.first() { self.check_closure_escape(a, "stored in an enum value")?; }
         // Store the payload into the `data` union member (offset 0 of the union).
         match (&v.payload, args.len()) {
             (Some(pty), 1) => {

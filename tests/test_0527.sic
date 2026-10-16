@@ -1,0 +1,5 @@
+// Must NOT compile: a closure borrowing local `n` (`[@n]`), captured in turn by
+// another closure, is stored in a container that outlives the scope.
+list<Fn<i32()>> keep;
+void reg() { i32 n = 3; Fn<i32()> f = [@n]() => n; keep.add([f]() => f()); }
+int main() { reg(); return 0; }

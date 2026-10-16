@@ -2001,6 +2001,7 @@ impl<'m> FuncCtx<'m> {
 
     /// `l.add(x)` / `l.push(x)` — append `x`.
     pub(crate) fn lower_list_push(&mut self, base: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
+        self.check_closure_escape(val, "stored in a container")?;
         // Refine an opaque `list<tuple>` element type from the tuple being added, so a
         // later `l[i]` (and `l[i][j]`) sees the tuple's fields. `list<tuple>` declares
         // no element layout; the first `l.add(tuple(...))` supplies it.
@@ -2042,6 +2043,7 @@ impl<'m> FuncCtx<'m> {
 
     /// `l[i] = x`.
     pub(crate) fn lower_list_set(&mut self, base: &Expr, index: &Expr, val: &Expr, _sp: &crate::lexer::Span) -> Result<()> {
+        self.check_closure_escape(val, "stored in a container")?;
         let elem = self.list_elem_of(base);
         let l = self.list_handle(base)?;
         let iv = self.lower_expr(index)?;
@@ -2192,6 +2194,7 @@ impl<'m> FuncCtx<'m> {
     /// handles every value type); the `type-info` word is stored only for an
     /// `any`-valued dict (a concrete V reconstructs from its static type).
     pub(crate) fn lower_dict_set(&mut self, base: &Expr, key: &Expr, val: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        self.check_closure_escape(val, "stored in a container")?;
         // Refine an opaque `dict<K,tuple>` value type from the tuple being stored, so a
         // later `d[k]` (and `d[k][j]`) sees the tuple's fields (mirrors list add).
         if let ExprKind::Ident(name) = &base.kind {
@@ -5169,6 +5172,20 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // A borrowing closure may be assigned to a local closure variable (which
+        // is then tracked), never to a field, global, `*p` or element.
+        if op.is_none() {
+            if let Some(n) = self.closure_borrow(rhs) {
+                match &lhs.kind {
+                    ExprKind::Ident(name) if matches!(self.lookup(name), Some(super::func::LookupResult::Local(..))) => {
+                        if let Some(super::func::LookupResult::Local(_, vid)) = self.lookup(name) {
+                            self.borrowing_closures.insert(vid, n);
+                        }
+                    }
+                    _ => self.check_closure_escape(rhs, "stored outside the function's locals")?,
+                }
+            }
+        }
         // A tagged-enum target is the expected type, as in an initializer, so a
         // generic constructor on the right resolves (`a = Option::Some(4)`,
         // `x.o = Option::Some(3)` — "cannot infer type arguments" before).
