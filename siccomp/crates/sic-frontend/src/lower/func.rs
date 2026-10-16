@@ -602,6 +602,9 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
             }
+            // The value is in the caller's slot: free the return expression's
+            // bigint/fixed temporaries (`return Some(v / 2);` leaked `v / 2`).
+            self.flush_bigint_temps();
             self.emit_cleanups_to(0);
             self.set_terminator(Terminator::Ret(None));
         } else if self.ret_ty == Type::Void {
@@ -643,6 +646,7 @@ impl<'m> FuncCtx<'m> {
             } else {
                 None
             };
+            self.flush_bigint_temps();
             self.emit_cleanups_to(0);
             self.set_terminator(Terminator::Ret(ret));
         } else {

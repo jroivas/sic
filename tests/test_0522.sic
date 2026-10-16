@@ -1,0 +1,20 @@
+// A `bigint`/`fixed` temporary in an aggregate return value is freed:
+// `return Option::Some(v / 2);` leaked `v / 2` (the scalar return path freed
+// its temporaries; the struct/enum paths did not). Returns 42.
+#include <malloc.h>
+Option<fixed> half(fixed v) { return Option::Some(v / 2); }
+Option<bigint> twice(bigint v) { return Option::Some(v * 2); }
+int main() {
+    usize before = mallinfo2().uordblks;
+    i64 s = 0;
+    for (i32 i = 0; i < 2000; i++) {
+        Option<fixed> o = half(5.0);
+        fixed f = o else return 1;
+        Option<bigint> b = twice(21);
+        bigint w = b else return 2;
+        s += f.int + w.int;
+    }
+    usize after = mallinfo2().uordblks;
+    if (s != 2000 * 44) return 3;
+    return after > before + 4096 ? 4 : 42;
+}
