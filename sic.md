@@ -213,7 +213,7 @@ For float:
 - 128 bits: f128
 
 Note: `f80`/`f128` are currently stored in 16 bytes but computed as `f64`.
-C's `long double` is deprecated (warning `-Wlong-double`, an error under `-Werror`)
+C's `long double` is deprecated (warning `-Wlong-double`; an error only with `-Werror=long-double`)
 for the same reason: it is a 64-bit `double` in sic, not x87 extended precision.
 
 Fixed point precision contains two parts: integral and fraction.

@@ -40,6 +40,11 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     ("long-double", Group::Default, false),
 ];
 
+/// Advisory warnings that a plain `-Werror` does not promote (only an explicit
+/// `-Werror=<name>` does): `long double` appears in common library headers
+/// (glib's gtestutils.h), and builds using `-Werror` must keep working.
+const NOT_PROMOTED_BY_WERROR: &[&str] = &["long-double"];
+
 #[derive(Default)]
 struct Config {
     /// `-w`: no warnings at all.
@@ -146,7 +151,8 @@ pub fn warn(name: &'static str, file: Option<&str>, line: u32, col: u32, msg: &s
     let out = with(|c| {
         if !is_enabled(c, name) { return None; }
         if !c.seen.insert((file.to_string(), line, col, name)) { return None; }
-        let as_error = c.error.get(name).copied().unwrap_or(c.werror);
+        let as_error = c.error.get(name).copied()
+            .unwrap_or(c.werror && !NOT_PROMOTED_BY_WERROR.contains(&name));
         c.printed += 1;
         if as_error {
             c.promoted += 1;

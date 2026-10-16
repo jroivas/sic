@@ -59,7 +59,9 @@ As in GCC, nothing is reported from system headers.
 `long double` is deprecated. It still compiles (16-byte slot, as the x86-64 ABI
 requires) but is computed as a 64-bit `double`, so it does not match C at library
 boundaries (`printf("%Lf")`, `strtold`, the `*l` libm functions, shared structs).
-Every use warns (`-Wlong-double`, on by default); with `-Werror` it is an error.
+Every use warns (`-Wlong-double`, on by default). It is advisory: a plain `-Werror`
+does not make it an error (library headers such as glib's declare `long double`);
+`-Werror=long-double` does.
 Use `double`, or `fixed`/`bigint` for more precision.
 
 ## C and SIC in one project
