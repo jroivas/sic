@@ -4296,6 +4296,21 @@ impl<'m> FuncCtx<'m> {
             return if retain { self.emit_rc_retain(Val::Local(h)) } else { self.emit_tuple_release(Val::Local(h)) };
         }
         if ty_::is_any(&rt) { return self.any_refcount_at(ptr, retain); }
+        // `fixed`/`bigint` have value semantics: a copy gets its own clone (in
+        // place — retains always run on the copy), destruction frees it.
+        if ty_::is_fixed(&rt) || ty_::is_bigint(&rt) {
+            let fixed = ty_::is_fixed(&rt);
+            let h = self.alloc_val();
+            self.push_instr(Instr::Load { dest: h, ptr: ptr.clone(), ty: rt.clone() });
+            let (clone, free) = if fixed { ("__sic_rat_clone", "__sic_rat_free") } else { ("__sic_bi_clone", "__sic_bi_free") };
+            if retain {
+                let c = self.emit_bigint_call(clone, vec![Val::Local(h)], rt.clone())?;
+                self.push_instr(Instr::Store { val: c, ptr });
+            } else {
+                self.emit_bigint_call(free, vec![Val::Local(h)], Type::Void)?;
+            }
+            return Ok(());
+        }
         if self.lowerer.enum_has_managed_payload(&rt) { return self.enum_payload_op(ptr, &rt, retain, false); }
         match &rt {
             Type::Struct(st) => {

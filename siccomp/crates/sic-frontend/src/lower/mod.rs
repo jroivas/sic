@@ -1722,7 +1722,8 @@ impl Lowerer {
     pub(crate) fn managed_value_type(&self, t: &Type) -> bool {
         let rt = types::resolve_aggregate(t, &self.struct_types);
         if types::is_sic_string(&rt) || types::is_closure(&rt) || types::is_tuple(&rt) || types::is_any(&rt)
-            || types::is_list(&rt) || types::is_dict(&rt) || types::is_set(&rt) { return true; }
+            || types::is_list(&rt) || types::is_dict(&rt) || types::is_set(&rt)
+            || types::is_fixed(&rt) || types::is_bigint(&rt) { return true; }
         if self.enum_has_managed_payload(&rt) { return true; }
         match &rt {
             Type::Struct(st) => st.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n)),

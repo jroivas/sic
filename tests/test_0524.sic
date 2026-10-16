@@ -1,0 +1,28 @@
+// A struct's `fixed` / `bigint` fields are owned like its strings: freed when
+// the struct is destroyed, cloned when it is copied. They leaked, and a copy
+// shared the value — reassigning the copy's field freed the original's
+// (use-after-free). Checked through glibc's in-use heap bytes. Returns 42.
+#include <malloc.h>
+struct Item { fixed price; bigint id; string name; };
+Item mk(fixed p) { Item i; i.price = p; i.id = 1000000000000000000000; i.name = "n" + "!"; return i; }
+Item g;
+i64 round() {
+    Item a = mk(2.5);
+    Item b = a;
+    b.price = 7.0;                       // must not free a.price
+    list<Item> l;
+    l.add(a);
+    Item c = l[0];
+    g = c;
+    Item *h = new Item[3];
+    h[1].price = 4.0;
+    del h;
+    return a.price.int + b.price.int * 10 + c.price.int * 100 + g.price.int * 1000 + (i64)(a.id == c.id);
+}
+int main() {
+    if (round() != 2273) return 1;
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 1000; i++) round();
+    usize after = mallinfo2().uordblks;
+    return after > before + 4096 ? 2 : 42;
+}
