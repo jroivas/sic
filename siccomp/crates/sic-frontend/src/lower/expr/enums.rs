@@ -227,6 +227,8 @@ impl<'m> FuncCtx<'m> {
     /// (one with a `~S()`, named by its destructor). `None`: plain data.
     pub(crate) fn payload_ownership(&self, pty: &Type) -> Option<PayloadOwn> {
         if super::super::types::is_sic_string(pty) { return Some(PayloadOwn::Str); }
+        if super::super::types::is_fixed(pty) { return Some(PayloadOwn::Num(true)); }
+        if super::super::types::is_bigint(pty) { return Some(PayloadOwn::Num(false)); }
         if super::super::types::is_list(pty) || super::super::types::is_dict(pty)
             || super::super::types::is_set(pty) {
             return Some(PayloadOwn::Container);
@@ -284,6 +286,17 @@ impl<'m> FuncCtx<'m> {
                     self.push_instr(Instr::Load { dest: h, ptr: data.clone(), ty: pty.clone() });
                     if retain { self.container_retain(Val::Local(h), &pty)?; }
                     else { self.container_release(Val::Local(h), &pty)?; }
+                }
+                PayloadOwn::Num(is_fixed) => {
+                    let h = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: h, ptr: data.clone(), ty: pty.clone() });
+                    let (clone, free) = if is_fixed { ("__sic_rat_clone", "__sic_rat_free") } else { ("__sic_bi_clone", "__sic_bi_free") };
+                    if retain {
+                        let c = self.emit_bigint_call(clone, vec![Val::Local(h)], pty.clone())?;
+                        self.push_instr(Instr::Store { val: c, ptr: data.clone() });
+                    } else {
+                        self.emit_bigint_call(free, vec![Val::Local(h)], Type::Void)?;
+                    }
                 }
                 PayloadOwn::Managed(dtor) => {
                     if retain { self.retain_struct_owned_fields(data.clone(), &pty)?; }
@@ -403,4 +416,7 @@ pub(crate) enum PayloadOwn {
     Container,
     /// A struct with a destructor (its name).
     Managed(String),
+    /// A `fixed` (`true`) or `bigint` heap value: value semantics — released
+    /// with its free function, and a copy gets its own clone.
+    Num(bool),
 }

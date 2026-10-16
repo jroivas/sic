@@ -5423,6 +5423,10 @@ impl<'m> FuncCtx<'m> {
             }
             let src = self.lower_aggregate_ptr(rhs)?;
             if src == lv.ptr { return Ok(lv.ptr); }               // `o = o`
+            // Acquire on a copy (a `fixed`/`bigint` payload's acquire clones it in
+            // place — on the source it would leave both sharing one block), then
+            // release the old value and install the copy.
+            let src = self.aggregate_copy(&src, &lv.ty);
             self.acquire_enum_value(src.clone(), &lv.ty, rhs)?;
             self.enum_payload_op(lv.ptr.clone(), &lv.ty, false, false)?;
             let size = lv.ty.size_of(self.ptr_size());

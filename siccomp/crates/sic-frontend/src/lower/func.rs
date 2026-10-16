@@ -581,9 +581,10 @@ impl<'m> FuncCtx<'m> {
                     if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
                     p
                 };
-                if let Some(structs_only) = self.ret_enum_retain {
-                    self.enum_payload_op(src.clone(), &agg_ty, true, structs_only)?;
-                }
+                // A copied enum payload is retained on the caller's copy (after
+                // the copy below): a `fixed`/`bigint` payload's retain CLONES it,
+                // which on the source would leave the source and the copy sharing.
+                let enum_retain = self.ret_enum_retain;
                 if self.is_sic() && super::types::is_sic_string(&agg_ty) {
                     // Move the string out: materialize an owned copy iff it is
                     // a copy-on-escape local-buffer view, else move+retain.
@@ -593,6 +594,9 @@ impl<'m> FuncCtx<'m> {
                     let size = agg_ty.size_of(ps);
                     let align = agg_ty.align_of(ps) as u64;
                     self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
+                    if let Some(structs_only) = enum_retain {
+                        self.enum_payload_op(sret_ptr.clone(), &agg_ty, true, structs_only)?;
+                    }
                     if self.returns_managed_copy(e, &agg_ty) {
                         self.retain_struct_owned_fields(sret_ptr.clone(), &agg_ty)?;
                     }
@@ -618,17 +622,23 @@ impl<'m> FuncCtx<'m> {
                     let rty = self.ret_ty.clone();
                     let p = self.enum_value_ptr(e, &rty, &e.span)?;
                     if let Some(structs_only) = self.ret_enum_retain {
-                        self.enum_payload_op(p.clone(), &rty, true, structs_only)?;
+                        let c = self.aggregate_copy(&p, &rty);
+                        self.enum_payload_op(c.clone(), &rty, true, structs_only)?;
+                        Some(c)
+                    } else {
+                        Some(p)
                     }
-                    Some(p)
                 } else {
                     let p = self.lower_aggregate_ptr(e)?;
                     if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
                     let rty = self.ret_ty.clone();
                     if self.returns_managed_copy(e, &rty) {
-                        self.retain_struct_owned_fields(p.clone(), &rty)?;
+                        let c = self.aggregate_copy(&p, &rty);
+                        self.retain_struct_owned_fields(c.clone(), &rty)?;
+                        Some(c)
+                    } else {
+                        Some(p)
                     }
-                    Some(p)
                 }
             } else {
                 None
@@ -797,6 +807,17 @@ impl<'m> FuncCtx<'m> {
 
     fn has_runtime_dim(t: &Type) -> bool {
         match t { Type::Array { len: 0, .. } => true, Type::Array { elem, .. } => Self::has_runtime_dim(elem), _ => false }
+    }
+
+    /// A fresh stack copy of the aggregate at `src` (its address).
+    pub(crate) fn aggregate_copy(&mut self, src: &Val, ty: &Type) -> Val {
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: ty.clone(), align: None });
+        let size = ty.size_of(self.ptr_size());
+        let align = ty.align_of(self.ptr_size());
+        self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: src.clone(), size, align });
+        self.val_types.insert(slot.0, ty.clone());
+        Val::Local(slot)
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).

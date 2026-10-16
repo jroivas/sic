@@ -1769,6 +1769,7 @@ impl Lowerer {
         let Some(info) = st.name.as_deref().and_then(|n| self.enum_defs.get(n)) else { return false };
         info.variants.iter().any(|v| match &v.payload {
             Some(p) => types::is_sic_string(p) || types::is_list(p) || types::is_dict(p) || types::is_set(p)
+                || types::is_fixed(p) || types::is_bigint(p)
                 || matches!(p, Type::Struct(ps) if ps.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n))),
             None => false,
         })

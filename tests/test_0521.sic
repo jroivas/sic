@@ -1,0 +1,34 @@
+// A tagged enum owns a `fixed` / `bigint` payload like a string one: released
+// when the enum dies, and a copy (init, assignment, return of a global or
+// `*p`, a by-value parameter) gets its own clone. The payload leaked — the
+// README's `Shape::Circle(2.0)` example lost its rational. Returns 42.
+#include <malloc.h>
+enum Shape { Circle(fixed), Square(fixed) };
+enum B { Big(bigint), Nothing };
+fixed area(Shape s) { match (s) { Circle(r): return r * r; Square(w): return w; } }
+Shape g;
+Shape mk(fixed v) { Shape s = Shape::Square(v); return s; }
+Shape cp(Shape *p) { return *p; }
+i64 round() {
+    Shape a = Shape::Circle(3.0);
+    Shape b = a;
+    b = Shape::Square(1.5);
+    Shape c = mk(2.5);
+    Shape d = cp(&c);
+    g = d;
+    g = a;
+    Shape e = g;
+    a = e;
+    B x = B::Big(123456789012345678901234567890);
+    B y = x;
+    y = B::Nothing;
+    i64 big = match (x) { Big(v): v == 123456789012345678901234567890 ? 1 : 0; Nothing: 0; };
+    return area(a).int + area(b).int * 10 + area(d).int * 100 + area(e).int * 1000 + big * 10000;
+}
+int main() {
+    if (round() != 19219) return 1;
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 1000; i++) round();
+    usize after = mallinfo2().uordblks;
+    return after > before + 4096 ? 2 : 42;
+}
