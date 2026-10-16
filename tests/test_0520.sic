@@ -1,0 +1,19 @@
+// Reading a struct element that isn't there — a missing dict key, an
+// out-of-range list index — yields a zeroed struct, as a missing int reads 0;
+// it dereferenced the NULL element slot (SIGSEGV). Returns 42.
+struct P { i32 x; i32 y; };
+struct H { string name; list<i32> xs; };
+int main() {
+    dict<string, P> d;
+    d["a"] = (P){3, 4};
+    P miss = d["nope"];
+    P hit = d["a"];
+    list<P> l;
+    l.add((P){1, 2});
+    P out = l[7];
+    dict<string, H> dh;
+    H e = dh["none"];
+    if (miss.x != 0 || miss.y != 0 || out.y != 0 || e.name.size != 0 || e.xs.length != 0) return 1;
+    if (hit.x + hit.y + l[0].y != 9 || d["zz"].x != 0) return 2;
+    return 42;
+}

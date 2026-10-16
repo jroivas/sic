@@ -2381,6 +2381,23 @@ impl<'m> FuncCtx<'m> {
                 return Ok(Val::Local(sel));
             }
         }
+        // A struct element is boxed by pointer: a missing key / out-of-range
+        // index reads as a zeroed value (as a missing int reads 0) — it
+        // dereferenced the NULL slot.
+        if matches!(v, Type::Struct(_) | Type::Union(_)) && !self.is_tagged_enum_struct(v) {
+            if let Some(found) = found {
+                let z = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: z, ty: v.clone(), align: None });
+                let size = v.size_of(self.ptr_size());
+                if size > 0 {
+                    self.push_instr(Instr::MemSet { dst: Val::Local(z), val: Constant::zero(), size, align: v.align_of(self.ptr_size()) });
+                }
+                let sel = self.alloc_val();
+                self.push_instr(Instr::Select { dest: sel, cond: found, on_true: val, on_false: Val::Local(z), ty: Type::void_ptr() });
+                self.val_types.insert(sel.0, v.clone());
+                return Ok(Val::Local(sel));
+            }
+        }
         Ok(val)
     }
 
