@@ -5341,11 +5341,14 @@ impl<'m> FuncCtx<'m> {
                 let same = matches!(&src, s if *s == lv.ptr);
                 if !same {
                     self.emit_cleanup_call(lv.ptr.clone(), &dtor);
+                    let src_v = src.clone();
                     self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
                     // A copy of an existing object shares its resources; a call's
                     // result is fresh — its reference moves in (retaining it leaked).
                     if super::func::is_place_expr(rhs) {
                         self.retain_struct_owned_fields(lv.ptr.clone(), &lv.ty)?;
+                    } else if super::func::is_fresh_struct_expr(rhs) {
+                        self.take_struct_temp(&src_v);
                     }
                 }
                 return Ok(lv.ptr);
@@ -5844,6 +5847,10 @@ impl<'m> FuncCtx<'m> {
             // survives that release, and register the result for release at the
             // enclosing scope. (Plain/aggregate structs keep the simple copy.)
             let is_str = self.is_sic() && super::types::is_sic_string(&aty);
+            // A managed struct likewise: each arm's temporary (a call result) is
+            // destroyed in that arm, so the copy retains its fields and the result
+            // is a temporary of its own (moved into a binding, else destroyed).
+            let is_managed = self.is_sic() && self.struct_has_dtor(&aty);
             let then_bb  = self.new_block_after_current();
             let else_bb  = self.new_block_after_current();
             let merge_bb = self.new_block_after_current();
@@ -5854,6 +5861,11 @@ impl<'m> FuncCtx<'m> {
                 let tp = self.lower_aggregate_ptr(then)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
                 self.retain_string_at(&Val::Local(slot))?;
+                self.flush_temps_from(m); self.exit_scope();
+            } else if is_managed { self.enter_scope(); let m = self.temp_mark();
+                let tp = self.lower_aggregate_ptr(then)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+                self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
                 self.flush_temps_from(m); self.exit_scope();
             } else {
                 let tp = self.lower_aggregate_ptr(then)?;
@@ -5867,6 +5879,11 @@ impl<'m> FuncCtx<'m> {
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
                 self.retain_string_at(&Val::Local(slot))?;
                 self.flush_temps_from(m); self.exit_scope();
+            } else if is_managed { self.enter_scope(); let m = self.temp_mark();
+                let ep = self.lower_aggregate_ptr(else_)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+                self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
+                self.flush_temps_from(m); self.exit_scope();
             } else {
                 let ep = self.lower_aggregate_ptr(else_)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
@@ -5877,6 +5894,7 @@ impl<'m> FuncCtx<'m> {
             if is_str {
                 self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(slot) });
             }
+            if is_managed { self.register_struct_temp(&Val::Local(slot), &aty); }
             return Ok(Val::Local(slot));
         }
         let ty = match (&tty, &ety) {

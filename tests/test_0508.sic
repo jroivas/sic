@@ -1,0 +1,47 @@
+// Managed-struct temporaries: a call's struct result that no binding takes is
+// destroyed at scope exit (`mk();`, `mk().name`, `use(mk())` leaked it); a
+// binding, `return`, assignment or variant constructor moves it in. A ternary
+// with call arms destroys each arm's temporary in that arm and yields its own
+// (the untaken arm's uninitialized temp was destroyed — a crash once these are
+// released); a brace-list field copy of a managed struct retains it.
+// Checked through glibc's in-use heap bytes. Returns 42.
+#include <malloc.h>
+#include <stdlib.h>
+struct H { string name; };
+struct W { H h; i32 k; };
+struct L { list<i32> xs; };              // small: returned in registers
+H mk(string s) { H a; a.name = s + "!"; return a; }
+L mkl() { L l; l.xs.add(7); return l; }
+i32 use(H h) { return h.name.size; }
+H pass() { return mk("p"); }
+Option<H> opt() { return Option::Some(mk("o")); }
+
+void round(i32 c) {
+    mk("discarded");
+    if (mk("ab").name.size != 3) exit(1);
+    if (use(mk("xyz")) != 4) exit(2);
+    H a = mk("a");
+    H b = c > 1000000 ? mk("x") : mk("y");
+    H d = c > 1000000 ? mk("x") : a;
+    a = a.name.size > 0 ? mk("b") : a;
+    if (b.name != "y!" || d.name != "a!" || a.name != "b!") exit(3);
+    W w = {a, 1};
+    W w2 = {mk("w"), 2};
+    if (w.h.name != "b!" || w2.h.name != "w!") exit(4);
+    H e = pass();
+    H f = opt() else { exit(5); return; }
+    if (e.name != "p!" || f.name != "o!") exit(6);
+    L l = mkl();
+    if (mkl().xs.size != 1 || l.xs[0] != 7) exit(7);
+    i32 n = 0;
+    while (mk("ab").name.size > 2 && n < 3) n++;
+}
+
+int main() {
+    round(0);
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 2000; i++) round(i);
+    usize after = mallinfo2().uordblks;
+    if (after > before + 4096) return 8;
+    return 42;
+}

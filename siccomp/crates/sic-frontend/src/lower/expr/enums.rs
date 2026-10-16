@@ -132,8 +132,10 @@ impl<'m> FuncCtx<'m> {
                     // anything else shares its refcount.
                     self.emit_string_return_into(&payload_ptr.ptr, &src)?;
                 } else if matches!(pty, Type::Struct(_) | Type::Union(_)) {
-                    // Other aggregate payload: copy it in.
+                    // Other aggregate payload: copy it in. A call's managed-struct
+                    // result is moved in (its temporary's destructor dropped).
                     let src = self.lower_aggregate_ptr(&args[0])?;
+                    if super::super::func::is_fresh_struct_expr(&args[0]) { self.take_struct_temp(&src); }
                     let sz = pty.size_of(self.ptr_size());
                     let al = pty.align_of(self.ptr_size());
                     self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });

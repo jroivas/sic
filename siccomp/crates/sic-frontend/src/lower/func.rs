@@ -127,15 +127,21 @@ fn ptr_value_mismatch(dest: &Type, src: &Type) -> Option<String> {
 
 /// An expression-`match` arm's value expression: an `expr;` body, or the trailing
 /// expression of a `{ …; expr }` block. `None` for a diverging/valueless arm.
-/// `e` denotes an existing object (a variable, field, element or dereference —
-/// or a ternary choosing between such), so taking its value makes a copy.
+/// `e` denotes an existing object (a variable, field, element or
+/// dereference), so taking its value makes a copy.
 pub(crate) fn is_place_expr(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
         | ExprKind::Index { .. } | ExprKind::Unary { op: crate::ast::UnOpKind::Deref, .. } => true,
-        ExprKind::Ternary { then, else_, .. } => is_place_expr(then) && is_place_expr(else_),
         _ => false,
     }
+}
+
+/// `e` yields a fresh managed-struct temporary (registered for destruction
+/// unless its consumer takes it): a call, or a ternary (whose arms copy into
+/// an owned result).
+pub(crate) fn is_fresh_struct_expr(e: &Expr) -> bool {
+    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. })
 }
 
 fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
@@ -250,6 +256,8 @@ pub struct FuncCtx<'m> {
     pub pending_gotos: Vec<(String, BlockId)>,
     /// Last initialized local variable (for implicit return in sic)
     pub last_init_local: Option<(ValId, Type)>,
+    /// The most recently registered managed-struct call temporary.
+    pub last_struct_temp: Option<Val>,
     /// GCC-style signature string for __PRETTY_FUNCTION__
     pub pretty_func: String,
     /// Last source line emitted as a debug marker (avoids redundant markers).
@@ -378,6 +386,7 @@ impl<'m> FuncCtx<'m> {
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
             last_init_local: None,
+            last_struct_temp: None,
             pretty_func: String::new(),
             last_line: 0,
             sret: None,
@@ -561,7 +570,10 @@ impl<'m> FuncCtx<'m> {
                     let v = self.lower_expr(e)?;
                     self.cstr_to_string_rc(v, rc)?
                 } else {
-                    self.lower_aggregate_ptr(e)?
+                    let p = self.lower_aggregate_ptr(e)?;
+                    // `return f();` moves the call's managed-struct result out.
+                    if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
+                    p
                 };
                 if let Some(structs_only) = self.ret_enum_retain {
                     self.enum_payload_op(src.clone(), &agg_ty, true, structs_only)?;
@@ -605,6 +617,7 @@ impl<'m> FuncCtx<'m> {
                     Some(p)
                 } else {
                     let p = self.lower_aggregate_ptr(e)?;
+                    if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
                     let rty = self.ret_ty.clone();
                     if self.returns_managed_copy(e, &rty) {
                         self.retain_struct_owned_fields(p.clone(), &rty)?;
@@ -718,6 +731,29 @@ impl<'m> FuncCtx<'m> {
     /// its own references, or the original's destructor frees what it returned.
     fn returns_managed_copy(&self, e: &Expr, ty: &Type) -> bool {
         self.is_sic() && self.struct_has_dtor(ty) && self.moved_on_return.is_none() && is_place_expr(e)
+    }
+
+    /// A call's managed-struct result in `slot` is a temporary: destroy it at
+    /// scope exit unless a consumer takes it (`take_struct_temp`). An unused
+    /// result (`mk();`, `mk().name`, `use(mk())`) leaked.
+    pub(crate) fn register_struct_temp(&mut self, slot: &Val, ty: &Type) {
+        if !self.is_sic() { return; }
+        let Type::Struct(st) = ty else { return };
+        let Some(d) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned() else { return };
+        self.register_scope_exit(Cleanup::AttrFn { addr: slot.clone(), fn_name: d });
+        self.last_struct_temp = Some(slot.clone());
+    }
+
+    /// Move the managed-struct temporary at `v` into its consumer: drop its
+    /// pending destructor. False if `v` is not a pending temporary.
+    pub(crate) fn take_struct_temp(&mut self, v: &Val) -> bool {
+        for scope in self.cleanups.iter_mut().rev() {
+            if let Some(i) = scope.iter().position(|c| matches!(c, Cleanup::AttrFn { addr, .. } if addr == v)) {
+                scope.remove(i);
+                return true;
+            }
+        }
+        false
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).
@@ -2543,17 +2579,6 @@ impl<'m> FuncCtx<'m> {
                         let r = self.lower_initializer(init, Val::Local(vid), &ty);
                         self.expected_ty = prev_exp;
                         r?;
-                        // A managed struct copied from an existing object (`S b = a;`,
-                        // `S b = p->s;`) shares its owned resources, like `b = a;`
-                        // does: retain them, since both copies' destructors release.
-                        // The bytes were copied with no retain, so the second
-                        // destructor freed them again (use-after-free). A call
-                        // result is fresh — the callee handed over its reference.
-                        if let Initializer::Expr(e) = init {
-                            if self.is_sic() && self.struct_has_dtor(&ty) && is_place_expr(e) {
-                                self.retain_struct_owned_fields(Val::Local(vid), &ty)?;
-                            }
-                        }
                     } else {
                         // Zero-initialize. For a SCALAR local emit a `Store` of a
                         // width-correct zero rather than a `MemSet`: a MemSet takes
@@ -2787,9 +2812,25 @@ impl<'m> FuncCtx<'m> {
         // Expose the target type so a generic constructor on the RHS
         // (`Option<int> x = Option::Some(5)`) resolves to its monomorph.
         let prev = self.expected_ty.replace(ty.clone());
-        let r = self.lower_initializer_inner(init, ptr, ty);
+        let outer_temp = self.last_struct_temp.take();
+        let r = self.lower_initializer_inner(init, ptr.clone(), ty);
         self.expected_ty = prev;
-        r
+        r?;
+        // A managed struct initialized from an existing object (`S b = a;`, a
+        // brace-list field `{a, 1}`) shares its owned resources: retain them —
+        // both copies' destructors release. A call's (or ternary's) result is a
+        // temporary that is moved in: drop its pending destructor.
+        if let Initializer::Expr(e) = init {
+            if self.is_sic() && self.struct_has_dtor(ty) {
+                if is_place_expr(e) {
+                    self.retain_struct_owned_fields(ptr, ty)?;
+                } else if is_fresh_struct_expr(e) {
+                    if let Some(t) = self.last_struct_temp.take() { self.take_struct_temp(&t); }
+                }
+            }
+        }
+        if self.last_struct_temp.is_none() { self.last_struct_temp = outer_temp; }
+        Ok(())
     }
 
     /// The fully braced form of a brace list for an aggregate `ty` (C brace

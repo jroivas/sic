@@ -1240,6 +1240,7 @@ impl<'m> FuncCtx<'m> {
             if self.is_sic() && super::super::types::is_sic_string(&ret_ty) {
                 self.register_scope_exit(super::super::func::Cleanup::StringRelease { addr: slot.clone() });
             }
+            self.register_struct_temp(&slot, &ret_ty);
             return Ok(slot);
         }
 
@@ -1305,7 +1306,7 @@ impl<'m> FuncCtx<'m> {
             let returns_bignum = self.is_sic()
                 && (super::super::types::is_bigint(&ret_ty) || super::super::types::is_fixed(&ret_ty));
             let dest = self.alloc_val();
-            self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty });
+            self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: arg_vals, ret_ty: ret_ty.clone() });
             // sic tuple-returning call: the result carries a reference (retained by
             // the callee before return); release it at scope exit.
             if returns_tuple {
@@ -1315,6 +1316,17 @@ impl<'m> FuncCtx<'m> {
             // free it at statement end (value semantics, like any bigint temp).
             if returns_bignum {
                 self.bigint_temps.push(Val::Local(dest));
+            }
+            // A managed struct returned in registers: spill it to a slot that
+            // its scope-exit destructor can address.
+            if self.is_sic() && self.struct_has_dtor(&ret_ty) {
+                let slot = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
+                let size = ret_ty.size_of(self.ptr_size());
+                let align = ret_ty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: Val::Local(dest), size, align });
+                self.register_struct_temp(&Val::Local(slot), &ret_ty);
+                return Ok(Val::Local(slot));
             }
             Ok(Val::Local(dest))
         }
