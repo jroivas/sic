@@ -1,0 +1,6 @@
+// A tuple built directly as a call argument lowers its elements in their own
+// context: the argument's (pointer) expected type made a string-literal element
+// a raw `char*` that was then copied as a `string` descriptor (SIGSEGV).
+// Returns 42.
+i32 f(tuple t) { i32 a = t[0]; string s = t[1]; return a + s.size; }
+int main() { return f(tuple(40, "xy")); }

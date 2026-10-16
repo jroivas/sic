@@ -2479,6 +2479,16 @@ impl<'m> FuncCtx<'m> {
     /// pointer to it — the tuple value. Immutable and shared by pointer; the
     /// temporary registers a scope-exit release so a discarded tuple is freed.
     fn construct_tuple(&mut self, elems: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // The context's expected type is the tuple's, not an element's: a
+        // pointer-typed one (a tuple argument) lowered a string-literal element
+        // as a raw `char*`, then copied it as a `string` descriptor (SIGSEGV).
+        let prev = self.expected_ty.take();
+        let r = self.construct_tuple_inner(elems, sp);
+        self.expected_ty = prev;
+        r
+    }
+
+    fn construct_tuple_inner(&mut self, elems: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
         // Lower every element first, recording each value and its type.
         let mut vals: Vec<(Val, Type)> = Vec::with_capacity(elems.len());
         for e in elems {
