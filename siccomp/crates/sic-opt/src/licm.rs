@@ -162,7 +162,7 @@ impl MutVisitor for FnScan {
 #[derive(Default)]
 struct WriteScan {
     written_arrays: HashSet<String>, // arr in `arr[..] = ` / `arr[..]++`
-    mods: HashSet<String>,           // scalar names assigned / inc'd / declared
+    mods: HashSet<String>,           // names assigned / inc'd / declared in the loop
     dels: HashSet<String>,           // names appearing in a `del`
 }
 
@@ -309,6 +309,10 @@ impl Hoister {
         let mut hoists: Vec<(String, Expr)> = Vec::new(); // (tempname, arr[E])
         for (arr, k, idx_expr) in cs.out {
             if ws.written_arrays.contains(&arr) || ws.dels.contains(&arr) { continue; }
+            // An array declared inside the loop (QEMU's `static const uint32_t
+            // rcon[]` in a loop body) is not in scope at the preheader — and a
+            // non-static one is a new object every iteration.
+            if ws.mods.contains(&arr) { continue; }
             let key = (arr.clone(), k);
             if keys.contains_key(&key) { continue; }
             // E's variables must be loop-invariant locals/params, never address-taken.
