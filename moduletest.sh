@@ -1290,6 +1290,43 @@ else
 fi
 cd ..
 
+# A module struct with managed fields (string, list) has an implicit member
+# destructor, exported through the manifest: the consumer's scope exit, copy
+# and reassignment release the fields (they leaked), with no double release.
+mkdir -p mdtor && cd mdtor
+cat > people.sic <<'EOF'
+module people;
+struct Person { string name; list<i32> scores; i32 age; };
+Person make(string n, i32 age) { Person p; p.name = n + "!"; p.scores.add(age); p.age = age; return p; }
+i32 total(Person *p) { i32 t = 0; for (i32 v : p->scores.values) t += v; return t; }
+EOF
+cat > app.sic <<'EOF'
+import people;
+#include <malloc.h>
+i32 round() {
+    people::Person a = people::make("ann", 30);
+    people::Person b = a;
+    b.name = "bob" + "?";
+    people::Person c;
+    c = people::make("cy", 5);
+    return people::total(&a) + people::total(&c) + b.name.size + a.name.size;
+}
+int main() {
+    if (round() != 43) return 1;
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 1000; i++) round();
+    usize after = mallinfo2().uordblks;
+    return after > before + 4096 ? 2 : 42;
+}
+EOF
+if "$SIC" -c people.sic -o people.o 2>err && "$SIC" app.sic people.o -I. -o app 2>err; then
+    ./app; got=$?
+    [ "$got" -eq 42 ] && ok "module-member-dtor" || bad "module-member-dtor" "expected 42, got $got"
+else
+    bad "module-member-dtor" "compile/link failed: $(cat err)"
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
