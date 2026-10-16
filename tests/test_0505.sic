@@ -1,0 +1,27 @@
+// `del p` leaves p NULL, so a second `del p` (or a `defer del p` after an early
+// `del`) is a no-op. p stayed dangling: the second `del` read the freed header
+// and freed the block again — by then another allocation's — corrupting it.
+// Returns 42.
+struct Node { Node *child; ~Node() { del child; } };
+int main() {
+    i32 *p = new i32(1);
+    del p;
+    if (p != NULL) return 1;
+    i32 *q = new i32(1);            // likely reuses p's block
+    q[0] = 5;
+    del p;                          // must be a no-op, not a free of q's block
+    i32 *r = new i32(1);
+    r[0] = 9;
+    if (q[0] != 5) return 2;
+    del q;
+    del r;
+    Node *n = new Node;
+    n->child = new Node;
+    del n->child;
+    if (n->child != NULL) return 3;
+    del n;                          // destructor's `del child` sees NULL
+    i32 *d = new i32[4];
+    defer del d;
+    del d;                          // early del; the deferred one is a no-op
+    return 42;
+}

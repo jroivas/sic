@@ -3869,7 +3869,21 @@ impl<'m> FuncCtx<'m> {
             }
         } else { None };
         let p = self.lower_expr(e)?;
-        self.emit_rc_release_dtor(p, dtor)
+        self.emit_rc_release_dtor(p, dtor)?;
+        // The deleted reference becomes NULL (like `del` on a string or container
+        // above), so a second `del p` — or a `defer del p` after an early `del` —
+        // is a no-op. It stayed dangling: the second `del` read the freed block's
+        // header and freed it again. Only a side-effect-free lvalue (`p`,
+        // `n->left`, `a[i]`) is cleared, so the operand is not evaluated twice.
+        if self.is_sic() && side_effect_free(e) {
+            if let Ok(lv) = self.lower_lvalue(e) {
+                if matches!(lv.ty, Type::Pointer(_)) {
+                    let z = self.coerce(Constant::zero(), &lv.ty)?;
+                    self.store_lvalue(&lv, z)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Decrement the fat-pointer header refcount at `p - ptr_size` and `free` the
