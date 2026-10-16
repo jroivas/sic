@@ -297,6 +297,8 @@ pub struct FuncCtx<'m> {
     /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
     /// ARE reassigned / incremented (and so cannot be safely checked).
     pub fat_locals: std::collections::HashSet<String>,
+    /// Variable-length array locals: pointer slot → slot holding the byte size.
+    pub vla_sizes: HashMap<ValId, ValId>,
     /// sic loop bounds-check elimination (sic.md §"Scopes"): `(array-name,
     /// index-key)` pairs proven in-bounds for the currently-open counting loops, so
     /// `emit_bounds_check` is suppressed for them. A single check on the loop's index
@@ -401,6 +403,7 @@ impl<'m> FuncCtx<'m> {
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
             fat_locals: std::collections::HashSet::new(),
+            vla_sizes: HashMap::new(),
             bce_proven: Vec::new(),
             atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
@@ -757,6 +760,43 @@ impl<'m> FuncCtx<'m> {
             }
         }
         false
+    }
+
+    /// Declare the variable-length array `name` of `count` elements of `elem`
+    /// (see the local-declaration path): heap storage freed at scope exit, the
+    /// local a pointer to it, its byte size kept for `sizeof`.
+    fn lower_vla(&mut self, name: &str, elem: &Type, count: &Expr, sp: &crate::lexer::Span) -> Result<()> {
+        if Self::has_runtime_dim(elem) {
+            return Err(CompileError::at(
+                format!("variable-length array `{}` with a non-constant inner dimension is not supported", name),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let i64t = Type::i64();
+        let n = self.lower_expr(count)?;
+        let n = self.coerce(n, &i64t)?;
+        let esz = self.coerce(Constant::int(elem.size_of(self.ptr_size()) as i64), &i64t)?;
+        let bytes = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: bytes, op: BinOp::Mul, lhs: n, rhs: esz, ty: i64t.clone() });
+        let size_slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: size_slot, ty: i64t.clone(), align: None });
+        self.push_instr(Instr::Store { val: Val::Local(bytes), ptr: Val::Local(size_slot) });
+        let block = self.emit_calloc(Val::Local(bytes))?;
+        let pty = Type::Pointer(Box::new(elem.clone()));
+        let block = self.coerce(block, &pty)?;
+        let vid = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: vid, ty: pty.clone(), align: None });
+        self.push_instr(Instr::Store { val: block, ptr: Val::Local(vid) });
+        self.define_local(name.to_string(), pty.clone(), vid);
+        self.register_scope_exit(Cleanup::FreePtr { slot: Val::Local(vid) });
+        self.vla_sizes.insert(vid, size_slot);
+        if !name.is_empty() {
+            self.push_instr(Instr::DbgVar { name: name.to_string(), ty: pty, slot: vid, is_param: false });
+        }
+        Ok(())
+    }
+
+    fn has_runtime_dim(t: &Type) -> bool {
+        match t { Type::Array { len: 0, .. } => true, Type::Array { elem, .. } => Self::has_runtime_dim(elem), _ => false }
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).
@@ -2468,13 +2508,23 @@ impl<'m> FuncCtx<'m> {
                             continue;
                         }
                     }
-                    // Handle VLA (variable-length array): size was 0 because expr isn't constant
-                    // Try to evaluate the size expr at compile time or use a conservative fallback
+                    // An array whose size lowered to 0 because it is not a type-level
+                    // constant: an enum-constant size resolves here; otherwise it is a
+                    // variable-length array (C99 VLA). A VLA is a zeroed heap block of
+                    // `n * sizeof(T)` bytes freed at scope exit (Cranelift has no
+                    // dynamic stack allocation); the name is a pointer to its first
+                    // element and `sizeof` reads the recorded byte size. It was a FIXED
+                    // 1024-element stack array: a larger `n` overran the stack, and
+                    // `sizeof` was the constant 4096.
                     if let (Type::Array { elem: ref elem_ty, len: 0 }, AstType::Array { size: Some(sz_expr), .. }) = (&ty, &d.ty.ty) {
-                        let resolved_len = eval_const_expr(sz_expr, &self.lowerer.enum_consts)
-                            .unwrap_or(1024) as usize; // fallback: 1024 elements
-                        let resolved_len = resolved_len.max(1);
-                        ty = Type::Array { elem: elem_ty.clone(), len: resolved_len };
+                        if let Ok(n) = eval_const_expr(sz_expr, &self.lowerer.enum_consts) {
+                            ty = Type::Array { elem: elem_ty.clone(), len: (n as usize).max(1) };
+                        } else {
+                            let elem_ty = (**elem_ty).clone();
+                            self.lower_vla(&d.name, &elem_ty, sz_expr, &d.span)?;
+                            self.flush_bigint_temps();
+                            continue;
+                        }
                     }
                     // Array size inferred from its initializer: `T a[] = {...}`
                     // or `char s[] = "..."`. Without this the array would have

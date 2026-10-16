@@ -1195,6 +1195,17 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::SizeofExpr(inner) => {
+                // `sizeof vla` is its runtime byte size.
+                if let ExprKind::Ident(n) = &inner.kind {
+                    if let Some(super::func::LookupResult::Local(_, vid)) = self.lookup(n) {
+                        if let Some(slot) = self.vla_sizes.get(&vid).cloned() {
+                            let v = self.alloc_val();
+                            self.push_instr(Instr::Load { dest: v, ptr: Val::Local(slot), ty: Type::i64() });
+                            let st = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                            return self.coerce(Val::Local(v), &st);
+                        }
+                    }
+                }
                 // The operand's type, without evaluating it. An unresolved name
                 // is an error — it used to infer `int`, so `sizeof(undeclared)`
                 // was silently 4.
@@ -3465,7 +3476,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Emit `calloc(1, n)` → `char*` (zeroed storage).
-    fn emit_calloc(&mut self, n: Val) -> Result<Val> {
+    pub(crate) fn emit_calloc(&mut self, n: Val) -> Result<Val> {
         let voidp = Type::void_ptr();
         let fref = self.lowerer.module.func_ref_by_name("calloc").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
