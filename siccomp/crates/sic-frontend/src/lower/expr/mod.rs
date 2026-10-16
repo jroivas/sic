@@ -3948,14 +3948,17 @@ impl<'m> FuncCtx<'m> {
         let dtor = if self.is_sic() {
             match self.infer_expr_type(e) {
                 Ok(Type::Pointer(inner)) => match inner.as_ref() {
-                    Type::Struct(st) => st.name.as_ref().and_then(|n| self.lowerer.struct_dtor.get(n).cloned()),
+                    Type::Struct(st) => st.name.as_ref().and_then(|n| self.lowerer.struct_dtor.get(n).cloned())
+                        // (the pointee is stored opaque: resolve it for its size)
+                        .map(|d| (d, super::types::resolve_aggregate(&inner, &self.lowerer.struct_types)
+                            .size_of(self.ptr_size()).max(1))),
                     _ => None,
                 },
                 _ => None,
             }
         } else { None };
         let p = self.lower_expr(e)?;
-        self.emit_rc_release_dtor(p, dtor)?;
+        self.emit_rc_release_dtor_n(p, dtor)?;
         // The deleted reference becomes NULL (like `del` on a string or container
         // above), so a second `del p` — or a `defer del p` after an early `del` —
         // is a no-op. It stayed dangling: the second `del` read the freed block's
@@ -4106,6 +4109,14 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn emit_rc_release_dtor(&mut self, p: Val, dtor: Option<String>) -> Result<()> {
+        self.emit_rc_release_dtor_n(p, dtor.map(|d| (d, 0)))
+    }
+
+    /// As `emit_rc_release_dtor`; with an element size, the destructor runs on
+    /// EVERY element of the block (`del` of a `new S[n]`: the count is the
+    /// header's byte size / the element size — it ran on element 0 only). An
+    /// element size of 0 means one object.
+    pub(crate) fn emit_rc_release_dtor_n(&mut self, p: Val, dtor: Option<(String, u64)>) -> Result<()> {
         let pc = self.coerce(p, &Type::char_ptr())?;
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
 
@@ -4136,8 +4147,50 @@ impl<'m> FuncCtx<'m> {
         // free: run the destructor (if any) on the object, then free the block at
         // `p - 2*ptr_size`.
         self.switch_to_block(free_bb);
-        if let Some(dtor) = dtor {
-            self.emit_cleanup_call(pc.clone(), &dtor);
+        match dtor {
+            Some((dtor, 0)) => self.emit_cleanup_call(pc.clone(), &dtor),
+            Some((dtor, esz)) => {
+                // for (q = p; q < p + size; q += esz) dtor(q)
+                let i64t = Type::i64();
+                let szp = self.alloc_val();
+                self.push_instr(Instr::GetElemPtr { dest: szp, base: pc.clone(), index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::Pointer(Box::new(i64t.clone())) });
+                let size = self.alloc_val();
+                self.push_instr(Instr::Load { dest: size, ptr: Val::Local(szp), ty: i64t.clone() });
+                // One object (`new S`, the common case): a direct call.
+                let one = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: one, op: CmpOp::IEq, lhs: Val::Local(size), rhs: Constant::int(esz as i64), ty: i64t.clone() });
+                let single = self.new_block_after_current();
+                let multi = self.new_block_after_current();
+                let head = self.new_block_after_current();
+                let body = self.new_block_after_current();
+                let out = self.new_block_after_current();
+                self.set_terminator(Terminator::CondJump { cond: Val::Local(one), then_bb: single, else_bb: multi });
+                self.switch_to_block(single);
+                self.emit_cleanup_call(pc.clone(), &dtor);
+                self.set_terminator(Terminator::Jump(out));
+                self.switch_to_block(multi);
+                let off = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: off, ty: i64t.clone(), align: None });
+                let z = self.coerce(Constant::int(0), &i64t)?;
+                self.push_instr(Instr::Store { val: z, ptr: Val::Local(off) });
+                self.set_terminator(Terminator::Jump(head));
+                self.switch_to_block(head);
+                let o = self.alloc_val();
+                self.push_instr(Instr::Load { dest: o, ptr: Val::Local(off), ty: i64t.clone() });
+                let lt = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: lt, op: CmpOp::ISLt, lhs: Val::Local(o), rhs: Val::Local(size), ty: i64t.clone() });
+                self.set_terminator(Terminator::CondJump { cond: Val::Local(lt), then_bb: body, else_bb: out });
+                self.switch_to_block(body);
+                let q = self.alloc_val();
+                self.push_instr(Instr::GetElemPtr { dest: q, base: pc.clone(), index: Val::Local(o), elem_size: 1, result_ty: Type::char_ptr() });
+                self.emit_cleanup_call(Val::Local(q), &dtor);
+                let nx = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: nx, op: BinOp::Add, lhs: Val::Local(o), rhs: Constant::int(esz as i64), ty: i64t.clone() });
+                self.push_instr(Instr::Store { val: Val::Local(nx), ptr: Val::Local(off) });
+                self.set_terminator(Terminator::Jump(head));
+                self.switch_to_block(out);
+            }
+            None => {}
         }
         let block = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: block, base: pc, index: Constant::int(-(2 * self.ptr_size() as i64)), elem_size: 1, result_ty: Type::char_ptr() });

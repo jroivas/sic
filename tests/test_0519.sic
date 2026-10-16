@@ -1,0 +1,27 @@
+// `del` of a `new S[n]` array runs S's destructor on EVERY element (count = the
+// block's byte size / sizeof(S)); it ran on element 0 only, leaking what the
+// other elements owned. A single `new S` still runs it once; `new S[0]` none.
+// Checked through glibc's in-use heap bytes. Returns 42.
+#include <malloc.h>
+i32 destroyed;
+struct N { i32 *buf; ~N() { destroyed++; del buf; } };
+struct H { string name; list<i32> xs; };
+int main() {
+    usize before = mallinfo2().uordblks;
+    for (i32 r = 0; r < 200; r++) {
+        N *a = new N[4];
+        for (i32 i = 0; i < 4; i++) a[i].buf = new i32[8];
+        del a;
+        N *one = new N;
+        one->buf = new i32[2];
+        del one;
+        N *none = new N[0];
+        del none;
+        H *hs = new H[3];
+        for (i32 i = 0; i < 3; i++) { hs[i].name = "h" + "!"; hs[i].xs.add(i); }
+        del hs;
+    }
+    usize after = mallinfo2().uordblks;
+    if (destroyed != 200 * 5) return 1;
+    return after > before + 4096 ? 2 : 42;
+}
