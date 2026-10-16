@@ -24,6 +24,8 @@ pub enum Group {
     All,
     /// Enabled by `-Wextra` (`-W`).
     Extra,
+    /// Only by naming it (`-W<name>`, `-Werror=<name>`); not by -Wall/-Wextra.
+    Explicit,
 }
 
 /// Every warning sic can emit: `(name, group, also enabled by -Wunused)`.
@@ -37,13 +39,10 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     // sic: an inline-asm template sic cannot lower; it traps if executed.
     ("unsupported-asm", Group::Default, false),
     // sic: `long double` is deprecated; it is computed with double precision.
-    ("long-double", Group::Default, false),
+    // Opt-in: common library headers (glib's gtestutils.h) declare it, so it
+    // would print on nearly every file of a real project.
+    ("long-double", Group::Explicit, false),
 ];
-
-/// Advisory warnings that a plain `-Werror` does not promote (only an explicit
-/// `-Werror=<name>` does): `long double` appears in common library headers
-/// (glib's gtestutils.h), and builds using `-Werror` must keep working.
-const NOT_PROMOTED_BY_WERROR: &[&str] = &["long-double"];
 
 #[derive(Default)]
 struct Config {
@@ -137,6 +136,7 @@ fn is_enabled(c: &Config, name: &str) -> bool {
                 Group::Default => true,
                 Group::All => c.all,
                 Group::Extra => c.extra,
+                Group::Explicit => false,
             }
         }
         None => false,
@@ -151,8 +151,7 @@ pub fn warn(name: &'static str, file: Option<&str>, line: u32, col: u32, msg: &s
     let out = with(|c| {
         if !is_enabled(c, name) { return None; }
         if !c.seen.insert((file.to_string(), line, col, name)) { return None; }
-        let as_error = c.error.get(name).copied()
-            .unwrap_or(c.werror && !NOT_PROMOTED_BY_WERROR.contains(&name));
+        let as_error = c.error.get(name).copied().unwrap_or(c.werror);
         c.printed += 1;
         if as_error {
             c.promoted += 1;

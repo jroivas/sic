@@ -1,4 +1,4 @@
-// Without -Werror `long double` still compiles (with a warning), as a double.
+// `long double` compiles without any warning by default (-Wlong-double is opt-in).
 long double half(long double x) { return x / 2; }
 int main() {
     long double v = half(84.0);
