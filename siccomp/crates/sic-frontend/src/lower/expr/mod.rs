@@ -4174,6 +4174,13 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Load { dest: h, ptr, ty: Type::void_ptr() });
             return if retain { self.container_retain(Val::Local(h), &rt) } else { self.container_release(Val::Local(h), &rt) };
         }
+        if ty_::is_tuple(&rt) {
+            let h = self.alloc_val();
+            self.push_instr(Instr::Load { dest: h, ptr, ty: Type::void_ptr() });
+            return if retain { self.emit_rc_retain(Val::Local(h)) } else { self.emit_tuple_release(Val::Local(h)) };
+        }
+        if ty_::is_any(&rt) { return self.any_refcount_at(ptr, retain); }
+        if self.lowerer.enum_has_managed_payload(&rt) { return self.enum_payload_op(ptr, &rt, retain, false); }
         match &rt {
             Type::Struct(st) => {
                 if retain { return self.retain_struct_owned_fields(ptr, &rt); }
@@ -5267,7 +5274,16 @@ impl<'m> FuncCtx<'m> {
         // sic owning enum variable (`Option<string> o; o = …`): release the payload
         // it held, acquire the new one (retain a copy, move a same-scope struct,
         // take a call's result). Acquire before release keeps `o = o2` balanced.
-        if self.is_sic() && op.is_none() && self.is_owned_enum_lvalue(lhs) && self.enum_is_managed(&lv.ty) {
+        // Any lvalue owns its payload except a borrowed by-value parameter: a
+        // struct field (released by member destruction), a global, `*p`, an
+        // array element. A field assignment was a plain copy: the old payload
+        // leaked, and a copied one (`y.o = x.o`) was freed twice.
+        let owning_enum = match &lhs.kind {
+            ExprKind::Ident(n) => self.is_owned_enum_lvalue(lhs)
+                || !matches!(self.lookup(n), Some(super::func::LookupResult::Local(..))),
+            _ => true,
+        };
+        if self.is_sic() && op.is_none() && owning_enum && self.enum_is_managed(&lv.ty) {
             let same = matches!(self.infer_expr_type(rhs), Ok(t) if t == lv.ty);
             if !same {
                 let tag = self.lower_expr(rhs)?;

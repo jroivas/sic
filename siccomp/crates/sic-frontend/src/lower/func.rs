@@ -1903,6 +1903,14 @@ impl<'m> Lowerer {
                         }
                     }
                 }
+                // Likewise a managed-enum parameter the body reassigns
+                // (`o = Some(…)`): an owned copy, so the assignment's release of
+                // the old payload drops the copy's reference, not the caller's.
+                if fc.is_sic() && fc.moved_names.contains(pname) && fc.enum_is_managed(&pty) {
+                    fc.enum_payload_op(Val::Local(ptr_vid), &pty, true, false)?;
+                    fc.owned_enum_locals.insert(ptr_vid);
+                    fc.register_scope_exit(Cleanup::EnumRelease { addr: Val::Local(ptr_vid), ty: pty.clone() });
+                }
                 fc.define_local(pname.clone(), pty, ptr_vid);
                 if owned_string_param {
                     fc.retain_string_at(&Val::Local(ptr_vid))?;

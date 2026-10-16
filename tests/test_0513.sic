@@ -1,0 +1,48 @@
+// Member destruction also covers `tuple`, `any` and managed tagged-enum
+// (`Option<string>`, `Result<H, E>`) fields, and assigning such an enum field,
+// global or `*p` releases the old payload and retains a copied one: a field
+// assignment was a plain copy (old payload leaked; `y.o = x.o` freed twice). A
+// reassigned by-value `Option<string>` parameter is the callee's own copy.
+// Checked through glibc's in-use heap bytes. Returns 42.
+#include <malloc.h>
+#include <stdlib.h>
+struct H { string name; };
+struct T { tuple t; Option<string> o; any v; Option<H> h; i32 k; };
+Option<string> g;
+Option<string> mk() { return Option::Some("m" + "!"); }
+i32 param(Option<string> o) { o = Option::Some("z" + "z"); string s = o else return 0; return s.size; }
+
+void round(i32 i) {
+    tuple tt = tuple(1, "a" + "b");
+    T x;
+    x.t = tt;
+    x.o = Option::Some("a" + "b");
+    x.o = Option::Some("c" + "d");
+    x.v = "v" + "!";
+    H h;
+    h.name = "h" + "!";
+    x.h = Option::Some(h);
+    T y = x;
+    y.o = x.o;
+    T *p = &y;
+    p->o = p->o;
+    p->o = mk();
+    string s = x.o else { exit(1); return; }
+    string m = y.o else { exit(2); return; }
+    if (s != "cd" || m != "m!") exit(3);
+    g = Option::Some("g" + "!");
+    g = None;
+    Option<string> a = Option::Some("q" + "q");
+    if (param(a) != 2) exit(4);
+    string q = a else { exit(5); return; }
+    if (q != "qq") exit(6);
+}
+
+int main() {
+    round(0);
+    usize before = mallinfo2().uordblks;
+    for (i32 i = 0; i < 1000; i++) round(i);
+    usize after = mallinfo2().uordblks;
+    if (after > before + 4096) return 7;
+    return 42;
+}

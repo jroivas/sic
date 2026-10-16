@@ -1720,13 +1720,26 @@ impl Lowerer {
     /// retained when the struct is copied.
     pub(crate) fn managed_value_type(&self, t: &Type) -> bool {
         let rt = types::resolve_aggregate(t, &self.struct_types);
-        if types::is_sic_string(&rt) || types::is_closure(&rt)
+        if types::is_sic_string(&rt) || types::is_closure(&rt) || types::is_tuple(&rt) || types::is_any(&rt)
             || types::is_list(&rt) || types::is_dict(&rt) || types::is_set(&rt) { return true; }
+        if self.enum_has_managed_payload(&rt) { return true; }
         match &rt {
             Type::Struct(st) => st.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n)),
             Type::Array { elem, len } => *len > 0 && self.managed_value_type(elem),
             _ => false,
         }
+    }
+
+    /// A tagged enum some variant of which owns its payload (a `string`, a
+    /// container, or a managed struct) — `Option<string>`, `Result<H, E>`.
+    pub(crate) fn enum_has_managed_payload(&self, t: &Type) -> bool {
+        let Type::Struct(st) = t else { return false };
+        let Some(info) = st.name.as_deref().and_then(|n| self.enum_defs.get(n)) else { return false };
+        info.variants.iter().any(|v| match &v.payload {
+            Some(p) => types::is_sic_string(p) || types::is_list(p) || types::is_dict(p) || types::is_set(p)
+                || matches!(p, Type::Struct(ps) if ps.name.as_deref().map_or(false, |n| self.struct_dtor.contains_key(n))),
+            None => false,
+        })
     }
 
     /// sic member destruction: every struct with managed by-value fields
@@ -1753,14 +1766,18 @@ impl Lowerer {
         let sty = Type::Struct(st.clone());
         if types::is_sic_string(&sty) || types::is_list(&sty) || types::is_dict(&sty) || types::is_set(&sty)
             || types::is_tuple(&sty) { return None; }
-        // Nested by-value structs (and arrays of them) first.
+        // Nested by-value structs (and arrays of them, and the struct payloads
+        // of tagged-enum fields) first.
         for (_, ft) in &st.fields {
             let mut t = types::resolve_aggregate(ft, &self.struct_types);
             while let Type::Array { elem, .. } = t { t = types::resolve_aggregate(&elem, &self.struct_types); }
             if let Type::Struct(inner) = &t {
-                if let Some(iname) = inner.name.clone() {
-                    if iname != name { self.ensure_member_dtor(&iname, depth + 1); }
-                }
+                let Some(iname) = inner.name.clone() else { continue };
+                let payloads: Vec<String> = self.enum_defs.get(&iname).map(|info| info.variants.iter()
+                    .filter_map(|v| match &v.payload { Some(Type::Struct(ps)) => ps.name.clone(), _ => None })
+                    .collect()).unwrap_or_default();
+                for pn in payloads { if pn != name { self.ensure_member_dtor(&pn, depth + 1); } }
+                if iname != name { self.ensure_member_dtor(&iname, depth + 1); }
             }
         }
         // `weak<T>` fields are non-owning: weak-released, never strong-released.
