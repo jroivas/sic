@@ -127,6 +127,17 @@ fn ptr_value_mismatch(dest: &Type, src: &Type) -> Option<String> {
 
 /// An expression-`match` arm's value expression: an `expr;` body, or the trailing
 /// expression of a `{ …; expr }` block. `None` for a diverging/valueless arm.
+/// `e` denotes an existing object (a variable, field, element or dereference —
+/// or a ternary choosing between such), so taking its value makes a copy.
+pub(crate) fn is_place_expr(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
+        | ExprKind::Index { .. } | ExprKind::Unary { op: crate::ast::UnOpKind::Deref, .. } => true,
+        ExprKind::Ternary { then, else_, .. } => is_place_expr(then) && is_place_expr(else_),
+        _ => false,
+    }
+}
+
 fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
     match body {
         Stmt::Expr(e, _) => Some(e),
@@ -692,6 +703,11 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
             _ => false,
         }
+    }
+
+    /// `ty` is a sic struct with a destructor (a managed struct).
+    pub(crate) fn struct_has_dtor(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Struct(st) if st.name.as_deref().map_or(false, |n| self.lowerer.struct_dtor.contains_key(n)))
     }
 
     /// The binding in `slot` (type `pty`) now owns its payload: run a struct's
@@ -2488,6 +2504,17 @@ impl<'m> FuncCtx<'m> {
                         let r = self.lower_initializer(init, Val::Local(vid), &ty);
                         self.expected_ty = prev_exp;
                         r?;
+                        // A managed struct copied from an existing object (`S b = a;`,
+                        // `S b = p->s;`) shares its owned resources, like `b = a;`
+                        // does: retain them, since both copies' destructors release.
+                        // The bytes were copied with no retain, so the second
+                        // destructor freed them again (use-after-free). A call
+                        // result is fresh — the callee handed over its reference.
+                        if let Initializer::Expr(e) = init {
+                            if self.is_sic() && self.struct_has_dtor(&ty) && is_place_expr(e) {
+                                self.retain_struct_owned_fields(Val::Local(vid), &ty)?;
+                            }
+                        }
                     } else {
                         // Zero-initialize. For a SCALAR local emit a `Store` of a
                         // width-correct zero rather than a `MemSet`: a MemSet takes

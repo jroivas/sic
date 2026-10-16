@@ -5285,7 +5285,11 @@ impl<'m> FuncCtx<'m> {
                 if !same {
                     self.emit_cleanup_call(lv.ptr.clone(), &dtor);
                     self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
-                    self.retain_struct_owned_fields(lv.ptr.clone(), &lv.ty)?;
+                    // A copy of an existing object shares its resources; a call's
+                    // result is fresh — its reference moves in (retaining it leaked).
+                    if super::func::is_place_expr(rhs) {
+                        self.retain_struct_owned_fields(lv.ptr.clone(), &lv.ty)?;
+                    }
                 }
                 return Ok(lv.ptr);
             }

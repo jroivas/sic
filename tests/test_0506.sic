@@ -1,0 +1,30 @@
+// A struct with a destructor that is copy-initialized from another object
+// (`H b = a;`) shares its owned fields, so the copy retains them: the bytes were
+// copied with no retain and the second destructor freed the string again
+// (use-after-free). Assigning a fresh call result (`b = mk();`) moves it in: it
+// was retained as well, leaking it. Returns 42.
+struct H { string name; ~H() { del name; } };
+H mk(string s) { H a; a.name = s + "!"; return a; }
+i32 check() {
+    H a;
+    a.name = "x" + "y";
+    H b = a;                         // copy: both own a reference
+    H *p = &a;
+    H c = *p;                        // copy through a pointer
+    if (b.name != "xy" || c.name != "xy") return 1;
+    H d;
+    d = mk("go");                    // fresh: moved in
+    if (d.name != "go!") return 2;
+    d = mk("again");                 // releases the previous value
+    if (d.name != "again!") return 3;
+    return 0;
+}
+int main() {
+    for (i32 i = 0; i < 100; i++) {
+        i32 r = check();
+        if (r != 0) return r;
+        string junk = "################" + "################";   // reuse freed blocks
+        if (junk.size != 32) return 4;
+    }
+    return 42;
+}
