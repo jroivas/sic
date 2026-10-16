@@ -665,6 +665,13 @@ impl<'m> FuncCtx<'m> {
             (Type::Pointer(_), Type::Pointer(_)) if *op == BinOpKind::Sub => Type::i64(),
             (Type::Pointer(_), _) => lt,
             (_, Type::Pointer(_)) => rt,
+            // Arithmetic operands: C's usual arithmetic conversions, as the
+            // lowering applies them (integer promotion, the wider float,
+            // unsigned rules). This picked the left float (`float * double` was
+            // `float`) and skipped promotion (`sizeof(c + c)` was 1).
+            (Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80,
+             Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80) =>
+                sic_ir::types::usual_arith_conv(&lt, &rt),
             _ if lt.is_float() => lt,
             _ if rt.is_float() => rt,
             _ if rt.size_of(self.ptr_size()) > lt.size_of(self.ptr_size()) => rt,
