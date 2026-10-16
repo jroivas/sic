@@ -1227,6 +1227,12 @@ impl<'m> FuncCtx<'m> {
                         }
                         continue;
                     }
+                    // A bigint/fixed parameter, as on the non-sret path below: a
+                    // numeric argument was coerced as a scalar and passed as the
+                    // value pointer (`Big mk(fixed p)` called with `7.5` crashed).
+                    if let Some(a) = args.get(i) {
+                        if self.build_bignum_arg(pval, pty, a)? { continue; }
+                    }
                     let coerced = self.coerce(pval.clone(), pty)?;
                     *pval = coerced;
                 }

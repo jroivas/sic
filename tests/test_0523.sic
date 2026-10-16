@@ -1,0 +1,11 @@
+// A function returning a large struct (sret) with a `fixed`/`bigint`
+// parameter converts a numeric argument to the bignum value, as other calls
+// do: `mk(7.5)` passed the double as the rational pointer (SIGSEGV). Returns 42.
+struct Big { i64 a; i64 b; i64 c; };
+Big mk(fixed p, bigint q) { Big r; r.a = p.int; r.b = q.int; return r; }
+int main() {
+    Big x = mk(7.5, 30);
+    fixed f = 4.25;
+    Big y = mk(f, 1);
+    return (i32)(x.a + x.b + y.a + y.b);     // 7 + 30 + 4 + 1
+}
