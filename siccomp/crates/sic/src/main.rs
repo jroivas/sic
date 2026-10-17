@@ -727,64 +727,6 @@ fn parse_source(
     let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
-    // sic `tuple` (sic.md §"Tuples"): the checked accessors a dynamically typed
-    // tuple uses. Scanned first, on the user's own source (the runtimes below
-    // mention `tuple` themselves).
-    if tuple_runtime::uses_tuple(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            tuple_runtime::TUPLE_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `bigint` / `fixed` (sic.md §"Integer sizes", §"Built-in fixed point"):
-    // only when the unit actually uses them, prepend the self-contained
-    // arbitrary-precision runtime (no external lib; fixed builds on it). A `#line`
-    // directive restores the user's line numbering for diagnostics.
-    if bigint_runtime::uses_bignum(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            bigint_runtime::BIGINT_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `async`/`await` (sic.md §"Async"): prepend the stub task runtime only when
-    // the unit uses async support.
-    if async_runtime::uses_async(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            async_runtime::ASYNC_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `list` (sic.md §"List"): prepend the growable-array runtime when used —
-    // also whenever `dict` is used, since dict's `.keys`/`.values` enumeration
-    // (sic.md §"Iterators") builds `list` handles via the list runtime.
-    if list_runtime::uses_list(&preprocessed) || dict_runtime::uses_dict(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            list_runtime::LIST_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `dict` (sic.md §"Dict"): prepend the self-contained hash-map runtime only
-    // when the unit uses `dict`.
-    if dict_runtime::uses_dict(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            dict_runtime::DICT_RUNTIME, path, preprocessed
-        );
-    }
-
-    // sic `string.utf8` (sic.md §"Integer sizes"): prepend the UTF-8 decoder only
-    // when the unit uses `.utf8`.
-    if bigint_runtime::uses_utf8(&preprocessed) {
-        preprocessed = format!(
-            "{}\n#line 1 \"{}\"\n{}",
-            bigint_runtime::UTF8_RUNTIME, path, preprocessed
-        );
-    }
-
     // Pick the source language from the file extension: `.sic` is sic-lang (its
     // Rust-style primitive aliases `i32`/`u64`/`isize`/… are reserved types);
     // everything else is C, where those names are ordinary identifiers.
@@ -793,6 +735,70 @@ fn parse_source(
     } else {
         sic_frontend::Lang::C
     };
+    // The sic runtimes below are prepended only to SIC sources: in C those words
+    // (`tuple`, `list`, `set`, `fixed`, …) are ordinary identifiers, never the
+    // features (QEMU's qom-test.c has a `QDict *tuple` — the SIC-only tuple
+    // runtime then failed to parse in C mode). Each runtime is named in
+    // diagnostics (`<sic runtime>`) instead of a bare `line N`.
+    let is_sic = lang == sic_frontend::Lang::Sic;
+    // sic `tuple` (sic.md §"Tuples"): the checked accessors a dynamically typed
+    // tuple uses. Scanned first, on the user's own source (the runtimes below
+    // mention `tuple` themselves).
+    if is_sic && tuple_runtime::uses_tuple(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            tuple_runtime::TUPLE_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `bigint` / `fixed` (sic.md §"Integer sizes", §"Built-in fixed point"):
+    // only when the unit actually uses them, prepend the self-contained
+    // arbitrary-precision runtime (no external lib; fixed builds on it). A `#line`
+    // directive restores the user's line numbering for diagnostics.
+    if is_sic && bigint_runtime::uses_bignum(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            bigint_runtime::BIGINT_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `async`/`await` (sic.md §"Async"): prepend the stub task runtime only when
+    // the unit uses async support.
+    if is_sic && async_runtime::uses_async(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            async_runtime::ASYNC_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `list` (sic.md §"List"): prepend the growable-array runtime when used —
+    // also whenever `dict` is used, since dict's `.keys`/`.values` enumeration
+    // (sic.md §"Iterators") builds `list` handles via the list runtime.
+    if is_sic && (list_runtime::uses_list(&preprocessed) || dict_runtime::uses_dict(&preprocessed)) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            list_runtime::LIST_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `dict` (sic.md §"Dict"): prepend the self-contained hash-map runtime only
+    // when the unit uses `dict`.
+    if is_sic && dict_runtime::uses_dict(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            dict_runtime::DICT_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `string.utf8` (sic.md §"Integer sizes"): prepend the UTF-8 decoder only
+    // when the unit uses `.utf8`.
+    if is_sic && bigint_runtime::uses_utf8(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            bigint_runtime::UTF8_RUNTIME, path, preprocessed
+        );
+    }
+
     let mut lexer = Lexer::new_lang(&preprocessed, HashSet::new(), lang);
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
