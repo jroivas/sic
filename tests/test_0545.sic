@@ -1,0 +1,3 @@
+// No rule of the macro matches and no function `m` exists: an error.
+macro_rules m { [$x:expr] => ( $x ); }
+int main() { return m[1, 2]; }

@@ -152,4 +152,4 @@ Fn<int()> bad() { struct H h; return [h]() => h.k; }   // error: closure borrows
 A capturing closure cannot initialize a module-level global (it needs a runtime
 environment) — define it inside a function, or export a function.
 
-Next: [atomics](atomics.md).
+Next: [macros](macros.md).

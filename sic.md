@@ -1592,6 +1592,32 @@ Fn<int()> bad() { struct H h; return [h]() => h.k; }   // error: closure borrows
 
 (Passing a borrowing closure to a function that keeps it is not detected.)
 
+## Macros
+
+Rust-style declarative macros, `macro_rules`, invoked without `!` (full guide:
+doc/macros.md). The bracket of a rule's matcher decides when `name…` is an
+invocation, so a macro and a function can share a name:
+
+```
+int pick(int a, int b) { return a - b; }
+macro_rules pick {
+    [$($x:expr),*] => ( 100 );
+}
+pick(5, 3);   // function: the macro has no `(…)` rules
+pick[5, 3];   // macro
+```
+
+If the bracket fits but no rule matches, an earlier-declared function of that name
+is called; otherwise it is an error. Variables may not take a macro's name.
+Fragments: `expr`, `ident`, `ty`, `literal`, `block`, `stmt`, `path`, `tt`;
+repetition `$(…) sep? *|+|?`; transcriber built-ins `$str(…)`, `$file`, `$line`.
+Expansions are parsed as a whole expression (parenthesized), statements, or
+file-scope declarations; template locals are renamed (hygiene); nesting is
+limited to 128.
+
+Built-in: `assert(cond)` / `assert(cond, msg)` — always checked; prints the
+condition's text and location, then aborts. A user `assert` replaces it.
+
 
 ## Weak references
 

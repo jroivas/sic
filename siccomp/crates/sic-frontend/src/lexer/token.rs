@@ -60,6 +60,7 @@ pub enum TokenKind {
     Tuple,          // sic-only: `tuple` type / pack / unpack (sic.md §"Tuples")
     Bitfield,       // sic-only: `bitfield` flag-set type (sic.md §"Bitfields")
     FatArrow,       // sic-only: `=>` lambda expression body (sic.md §"Lambdas")
+    Dollar,         // sic-only: `$` in `macro_rules` matchers/transcribers (sic.md §"Macros")
     Typeof,   // typeof / __typeof__ (GNU / C23)
     Nullptr,  // nullptr (C23)
     Alignas,  // _Alignas / alignas (C11 / C23)

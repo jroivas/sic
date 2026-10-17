@@ -563,6 +563,7 @@ impl Lexer {
             ('~', _, _)   => (TokenKind::Tilde,    "~"),
             ('?', _, _)   => (TokenKind::Question, "?"),
             ('@', _, _)   => (TokenKind::At,       "@"),
+            ('$', _, _) if self.lang == Lang::Sic => (TokenKind::Dollar, "$"),
             (':', ':', _) if self.lang == Lang::Sic => { self.advance(); (TokenKind::ColonColon, "::") }
             (':', _, _)   => (TokenKind::Colon,    ":"),
             (';', _, _)   => (TokenKind::Semi,     ";"),

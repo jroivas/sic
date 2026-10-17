@@ -230,6 +230,20 @@ if (read_header(f) < 0) return -1;
 | `wrapping_add` | plain `+` (SIC wraps); checked: `unsafe { … }` / `overflow { … }` |
 | `println!("{} {}", a, b)` | `std::Println("{} {}", a, b)` (`import std;`) |
 
+## Checks: `assert`
+
+```c
+#include <assert.h>                                                      /* ✗ */
+assert(n > 0);       /* disabled by NDEBUG */
+```
+```sic
+assert(n > 0);                        // ✓ built in, always checked
+assert(n > 0, "n must be positive");  // optional message (any string)
+```
+
+Repetitive boilerplate can be a `macro_rules` macro (Rust syntax, no `!`):
+`macro_rules sq { ($x:expr) => ( $x * $x ); }` then `sq(a + 1)`.
+
 ## Checklist before you finish
 
 1. No `malloc`/`free`, `strcpy`/`strcat`/`strlen`/`sprintf`, `realloc`-grown arrays,

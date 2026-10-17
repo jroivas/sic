@@ -9,6 +9,7 @@ mod dict_runtime;
 mod async_runtime;
 mod list_runtime;
 mod tuple_runtime;
+mod assert_runtime;
 mod module_conf;
 
 use clap::Parser as ClapParser;
@@ -744,6 +745,13 @@ fn parse_source(
     // sic `tuple` (sic.md §"Tuples"): the checked accessors a dynamically typed
     // tuple uses. Scanned first, on the user's own source (the runtimes below
     // mention `tuple` themselves).
+    // The prelude `assert` macro's failure report (sic.md §"Macros").
+    if is_sic && assert_runtime::uses_assert(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            assert_runtime::ASSERT_RUNTIME, path, preprocessed
+        );
+    }
     if is_sic && tuple_runtime::uses_tuple(&preprocessed) {
         preprocessed = format!(
             "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",

@@ -1,0 +1,7 @@
+// The prelude `assert(cond[, msg])` reports and aborts (exit 134) on failure.
+int main() {
+    int x = 5;
+    assert(x == 5);
+    assert(x * 2 == 11, "x doubled");
+    return 0;
+}

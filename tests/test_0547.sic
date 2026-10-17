@@ -1,0 +1,3 @@
+// A self-recursive macro stops at the recursion limit (was a stack overflow).
+macro_rules m { [] => ( m[] ); }
+int main() { return m[]; }

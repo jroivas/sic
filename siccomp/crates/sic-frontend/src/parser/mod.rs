@@ -3,6 +3,9 @@ use crate::ast::*;
 use crate::lexer::{Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
 
+mod macros;
+use macros::{MacroDef, MacroPos};
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -65,6 +68,26 @@ pub struct Parser {
     /// Further declarations from one external declaration (`int f(int), g(int),
     /// a;` declares two functions and a variable): returned after it.
     pending_decls: Vec<Decl>,
+    /// sic `macro_rules` definitions seen so far (sic.md §"Macros").
+    macros: HashMap<String, MacroDef>,
+    /// Matching a fragment by speculative parsing: no expansion inside.
+    macro_matching: bool,
+    /// Expansions so far (limit against runaway recursion) / hygiene tags.
+    macro_expansions: usize,
+    macro_counter: usize,
+    /// Functions declared so far: a macro whose rules do not match falls back
+    /// to calling a like-named function.
+    declared_fns: HashSet<String>,
+    /// The statement being parsed is a block item (a statement macro may then
+    /// expand to several statements without braces).
+    stmt_block_item: bool,
+    /// Expansion nesting depth, and the macro expanded last (for diagnostics).
+    macro_depth: usize,
+    last_macro: String,
+    /// Built-in (prelude) macros not yet replaced by a user declaration.
+    prelude_macros: HashSet<String>,
+    /// `m[args]` expands to `…`, for a diagnostic inside the expansion.
+    last_expansion: String,
 }
 
 impl Parser {
@@ -97,7 +120,9 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new() }
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
+        if lang == Lang::Sic { p.load_prelude_macros(); }
+        p
     }
 
     pub fn add_typedef(&mut self, name: &str) {
@@ -208,13 +233,15 @@ impl Parser {
             // Handle GCC __extension__
             if self.at(TokenKind::Extension) { self.advance(); continue; }
             let before = self.pos;
+            let before_exp = self.macro_expansions;
             let d = self.parse_external_decl()?;
             decls.push(d);
             decls.append(&mut self.pending_decls);
             // Never spin: a top-level declaration that consumed no tokens would
             // otherwise loop forever (e.g. an unparseable construct that yields an
-            // empty expression-statement). Fail with a diagnostic instead.
-            if self.pos == before {
+            // empty expression-statement). Fail with a diagnostic instead. (A macro
+            // expansion replaces tokens in place: progress without moving.)
+            if self.pos == before && self.macro_expansions == before_exp {
                 let t = self.peek().clone();
                 return Err(CompileError::at(
                     format!("unexpected token {:?} ('{}') at top level", t.kind, t.text),
@@ -228,6 +255,19 @@ impl Parser {
     // ─── External declarations ────────────────────────────────────────────────
 
     fn parse_external_decl(&mut self) -> Result<Decl> {
+        // sic macros (sic.md §"Macros"): a definition, or an invocation that
+        // expands to declarations (parsed by the caller's next iteration).
+        let sp = self.span();
+        if self.try_macro_definition()? || self.try_expand_macro(MacroPos::Item)? {
+            return Ok(Decl::TypeDef { names: vec![], span: sp });
+        }
+        let d = self.parse_external_decl_inner()?;
+        self.note_declared_fns(&d);
+        for p in &self.pending_decls.clone() { self.note_declared_fns(p); }
+        Ok(d)
+    }
+
+    fn parse_external_decl_inner(&mut self) -> Result<Decl> {
         let sp = self.span();
 
         // Reset per-declaration attribute state, then parse a leading
@@ -259,9 +299,10 @@ impl Parser {
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 if self.eat(TokenKind::Semi) { continue; }
                 let before = self.pos;
+                let before_exp = self.macro_expansions;
                 decls.push(self.parse_external_decl()?);
                 decls.append(&mut self.pending_decls);
-                if self.pos == before {
+                if self.pos == before && self.macro_expansions == before_exp {
                     let t = self.peek().clone();
                     return Err(CompileError::at(
                         format!("unexpected token {:?} ('{}') in namespace body", t.kind, t.text),
@@ -423,6 +464,7 @@ impl Parser {
         } else {
             None
         };
+        if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &sp)?; }
         declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
@@ -432,6 +474,7 @@ impl Parser {
             self.skip_decl_tail();
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
+            if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
             declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, span: self.span() });
         }
         self.eat(TokenKind::Semi);
@@ -1599,6 +1642,7 @@ impl Parser {
                 }
                 Err(e) => return Err(e),
             };
+            if !name.is_empty() { self.check_not_macro(&name, &first.span)?; }
             // Parameter attribute, e.g. `f(const T *cfg __attribute__((unused)))`.
             self.skip_attributes();
             // sic default argument (sic.md §"Default parameters"): `int b = 5`. The
@@ -1773,6 +1817,16 @@ impl Parser {
 
     pub fn parse_stmt(&mut self) -> Result<Stmt> {
         let sp = self.span();
+        // sic macros (sic.md §"Macros"): a local definition, or a statement /
+        // expression invocation expanded in place before parsing on.
+        let block_item = std::mem::take(&mut self.stmt_block_item);
+        if self.lang == Lang::Sic {
+            if self.try_macro_definition()? { return Ok(Stmt::Null(sp)); }
+            if self.try_expand_macro(MacroPos::Stmt { block_item })? {
+                self.stmt_block_item = block_item;
+                return self.parse_expanded(|p| p.parse_stmt());
+            }
+        }
         match self.peek_kind() {
             TokenKind::Semi => { self.advance(); Ok(Stmt::Null(sp)) }
             TokenKind::LBrace => Ok(Stmt::Block(self.parse_compound_stmt_as_stmts()?, sp)),
@@ -2068,6 +2122,7 @@ impl Parser {
         let mut declared: HashMap<&str, usize> = HashMap::new();
         for (n, _) in &decls { *declared.entry(n.as_str()).or_default() += 1; }
         for (name, sp) in &decls {
+            if name.starts_with("__sicm") { continue; } // macro-hygienic local
             let uses = seen.get(name.as_str()).copied().unwrap_or(0)
                 .saturating_sub(declared[name.as_str()]);
             if uses == 0 {
@@ -2084,6 +2139,7 @@ impl Parser {
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             if self.eat(TokenKind::Semi) { continue; }
+            self.stmt_block_item = true;
             stmts.push(self.parse_stmt()?);
         }
         self.expect(TokenKind::RBrace)?;
@@ -2459,7 +2515,10 @@ impl Parser {
                 .or_else(|| if first { spec_cleanup.clone() } else { None });
             let unused = std::mem::take(&mut self.pending_unused) || spec_unused;
             first = false;
-            if !name.is_empty() { self.func_vars.insert(name.clone()); }
+            if !name.is_empty() {
+                if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &dsp)?; }
+                self.func_vars.insert(name.clone());
+            }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             // sic rejects an empty-bracket array declaration like `char test[];`
             // — the size must come from a bound or an initializer (sic.md
@@ -3080,6 +3139,8 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
+        // sic macro invocation (sic.md §"Macros"): expands to `( … )` in place.
+        if self.try_expand_macro(MacroPos::Expr)? { return self.parse_expanded(|p| p.parse_primary()); }
         let sp = self.span();
         // sic RTTI (sic.md §"RTTI"): a bare type name in value position is its
         // `type` value, so `type(x) == i64` and `switch (type(x)) { case string: }`

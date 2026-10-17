@@ -37,15 +37,17 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 11. [Lambdas](lambdas.md) — C++-style `[](params){…}` / `=> expr`, captureless
     function-pointer decay, by-value and `@`/`@mut` captures, closures, currying,
     and the `Fn<ret(params)>` closure type.
-12. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
+12. [Macros](macros.md) — Rust-style `macro_rules` without `!`: the bracket picks
+    the rules, fragments and repetition, hygiene, and the built-in `assert`.
+13. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
     `.swap`/`.cas`, atomic pointers and struct fields, and the `fence;` /
     `barrier;` memory barriers.
-13. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
+14. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
     namespaces, building a module, chain-loaded dependencies, and the `.smod`
     manifest.
-14. [Standard library](standard-library.md) — `import std;`,
+15. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
-15. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
+16. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
     conversion guide with ✗/✓ examples.
 
 ## Design goals

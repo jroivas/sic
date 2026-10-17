@@ -1,0 +1,53 @@
+// sic macro_rules (sic.md §"Macros"): Rust-style macros without `!`. The
+// bracket picks the rules; fragments, repetition, $str/$file/$line, hygiene,
+// statement/expression/item positions, function fallback, recursion.
+#include <stdio.h>
+#include <string.h>
+
+int pick(int a, int b) { return a - b; }
+macro_rules pick {
+    (first: $a:expr, $b:expr) => ( $a );
+    [$($x:expr),*] => ( 100 );
+}
+macro_rules square { ($x:expr) => ( $x * $x ); }
+macro_rules sum {
+    [] => ( 0 );
+    [$($x:expr),+ $(,)?] => ( 0 $(+ $x)+ );
+}
+macro_rules swap_vals { {$a:ident, $b:ident} => { int tmp = $a; $a = $b; $b = tmp; } }
+macro_rules twice { ($s:stmt) => { $s $s }; }
+macro_rules cast_to { [$t:ty, $v:expr] => ( ($t)($v) ); }
+macro_rules count {
+    [] => ( 0 );
+    [$h:tt $($rest:tt)*] => ( 1 + count[$($rest)*] );
+}
+macro_rules point { [$name:ident { $($f:ident),* }] => ( struct $name { $(int $f;)* }; ); }
+macro_rules getter { [$name:ident, $v:literal] => ( int $name() { return $v; } ); }
+macro_rules text { [$e:expr] => ( $str($e) ); }
+
+point[P { x, y, z }]
+getter[forty, 40]
+
+int main() {
+    int tmp = 5;
+    int a = 1, b = 2;
+    swap_vals{a, b}
+    if (a != 2 || b != 1 || tmp != 5) return 1;          // hygiene: caller's tmp kept
+    if (square(1 + 2) != 9 || square(3) * 2 != 18) return 2;  // precedence
+    if (sum[1, 2, 3,] != 6 || sum[] != 0 || sum[4] != 4) return 3;
+    if (pick(5, 3) != 2) return 4;                       // no rule matches -> function
+    if (pick(first: 7, 1) != 7 || pick[1, 2] != 100) return 5;
+    int n = 0;
+    if (n == 0) twice(n += 1;);                          // braced in a sub-statement
+    if (n != 2) return 6;
+    if (cast_to[unsigned char, 300] != 44) return 7;
+    if (count[a b c d] != 4) return 8;
+    struct P p; p.z = 3;
+    if (sizeof(p) != 12 || p.z != 3) return 9;
+    if (forty() + 2 != 42) return 10;
+    if (strcmp(text[a + b * 2], "a + b * 2") != 0) return 11;
+    macro_rules local_m { () => ( 41 ); }
+    assert(local_m() == 41, "local macro");
+    assert(a == 2);
+    return local_m() + 1;
+}
