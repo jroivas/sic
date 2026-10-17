@@ -847,7 +847,24 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    fn has_runtime_dim(t: &Type) -> bool {
+    /// Give every array dimension of `ty` (lowered from `ast`) that came out 0
+    /// its value when it is a constant expression over this scope (see
+    /// `eval_scoped_const`); others (VLAs, `T a[]`) stay 0.
+    fn resolve_scoped_dims(&mut self, ast: &AstType, ty: Type) -> Type {
+        match (ast, ty) {
+            (AstType::Array { base, size }, Type::Array { elem, len }) => {
+                let elem = self.resolve_scoped_dims(&base.ty, *elem);
+                let len = match (len, size) {
+                    (0, Some(sz)) => self.eval_scoped_const(sz).filter(|&n| n > 0).map_or(0, |n| n as usize),
+                    (l, _) => l,
+                };
+                Type::Array { elem: Box::new(elem), len }
+            }
+            (_, t) => t,
+        }
+    }
+
+    pub(crate) fn has_runtime_dim(t: &Type) -> bool {
         match t { Type::Array { len: 0, .. } => true, Type::Array { elem, .. } => Self::has_runtime_dim(elem), _ => false }
     }
 
@@ -2742,6 +2759,11 @@ impl<'m> FuncCtx<'m> {
                     // element and `sizeof` reads the recorded byte size. It was a FIXED
                     // 1024-element stack array: a larger `n` overran the stack, and
                     // `sizeof` was the constant 4096.
+                    // Dimensions that are constant but name variables through
+                    // `sizeof` (QEMU's `double res[ARRAY_SIZE(a)][ARRAY_SIZE(b)]`
+                    // over local arrays) lowered to 0 too: resolve them in scope.
+                    // An inner one left at 0 made `sizeof` 0 / was rejected as a VLA.
+                    ty = self.resolve_scoped_dims(&d.ty.ty, ty);
                     if let (Type::Array { elem: ref elem_ty, len: 0 }, AstType::Array { size: Some(sz_expr), .. }) = (&ty, &d.ty.ty) {
                         if let Ok(n) = eval_const_expr(sz_expr, &self.lowerer.enum_consts) {
                             ty = Type::Array { elem: elem_ty.clone(), len: (n as usize).max(1) };

@@ -413,6 +413,7 @@ impl Lowerer {
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
         types::clear_typedefs();
+        types::clear_global_vars();
         let dbg = std::env::var("SIC_TIMING").is_ok();
         let t0 = std::time::Instant::now();
         // sic struct methods (sic.md §"Memory safety" / §"Iterators"): hoist each
@@ -705,6 +706,7 @@ impl Lowerer {
                     // `qemu_input_map_*_len = sizeof(map)/sizeof(map[0])`).
                     let new_complete = matches!(&ty, Type::Array { len, .. } if *len > 0);
                     if new_complete || !self.global_types.contains_key(&d.name) {
+                        types::note_global_var(&d.name, &ty);
                         self.global_types.insert(d.name.clone(), ty);
                     }
                 }

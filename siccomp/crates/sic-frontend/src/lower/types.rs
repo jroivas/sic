@@ -17,6 +17,39 @@ thread_local! {
     /// cast to one: `(uint8_t)(U8 + 100)` must fold to 44, not 300 (a folded
     /// `if` condition took the wrong branch).
     static INT_TYPEDEFS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    /// File-scope variable types seen so far (source order), so a struct field
+    /// dimension like `int v[sizeof(g) / sizeof(g[0])]` (QEMU's ARRAY_SIZE of a
+    /// global) folds in the scope-less path — it came out 0, silently.
+    static GLOBAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+}
+
+/// Record file-scope variable `name`'s type for constant folding.
+pub fn note_global_var(name: &str, ty: &Type) {
+    GLOBAL_VAR_TYPES.with(|m| { m.borrow_mut().insert(name.to_string(), ty.clone()); });
+}
+
+/// Forget all recorded file-scope variables (start of a translation unit).
+pub fn clear_global_vars() {
+    GLOBAL_VAR_TYPES.with(|m| m.borrow_mut().clear());
+}
+
+/// The type of a `sizeof`/`typeof` operand built only from file-scope variables
+/// (`g`, `g[i]`, `*g`, `&g[0]`), for scope-less constant folding.
+fn global_expr_type(e: &Expr) -> Option<Type> {
+    use crate::ast::{ExprKind, UnOpKind};
+    match &e.kind {
+        ExprKind::Ident(n) => GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned()),
+        ExprKind::Index { base, .. } => match global_expr_type(base)? {
+            Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
+            _ => None,
+        },
+        ExprKind::Unary { op: UnOpKind::Deref, expr } => match global_expr_type(expr)? {
+            Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
+            _ => None,
+        },
+        ExprKind::Unary { op: UnOpKind::Addr, expr } => Some(Type::Pointer(Box::new(global_expr_type(expr)?))),
+        _ => None,
+    }
 }
 
 /// Record typedef `name` → `ty` for constant folding (an integer/bool type is
@@ -1162,6 +1195,20 @@ fn eval_const_size_typed(
         ExprKind::AlignofType(qt) => {
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
             Some(size_t(t.align_of(ptr_size) as i64))
+        }
+        ExprKind::SizeofExpr(x) => {
+            let t = global_expr_type(x)?;
+            if matches!(t, Type::Array { len: 0, .. }) { return None; }
+            Some(size_t(t.size_of(ptr_size) as i64))
+        }
+        ExprKind::AlignofExpr(x) => Some(size_t(global_expr_type(x)?.align_of(ptr_size) as i64)),
+        // `__builtin_types_compatible_p(typeof(g), typeof(&g[0]))` (QEMU_IS_ARRAY).
+        ExprKind::TypesCompatible(a, b) => {
+            let ty_of = |qt: &crate::ast::QualType| match &qt.ty {
+                AstType::Typeof(x) => global_expr_type(x),
+                other => lower_ast_type(other, named, ptr_size).ok(),
+            };
+            Some(ConstInt::new((ty_of(a)? == ty_of(b)?) as i64, 32, true))
         }
         ExprKind::OffsetOf { ty, designators } => {
             let mut cur = lower_ast_type(&ty.ty, named, ptr_size).ok()?;

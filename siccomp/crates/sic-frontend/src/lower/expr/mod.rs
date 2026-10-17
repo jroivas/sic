@@ -5205,6 +5205,63 @@ impl<'m> FuncCtx<'m> {
         CompileError::at(msg, sp.file.clone(), sp.line, sp.col)
     }
 
+    /// Fold a constant expression that names this scope's variables through
+    /// `sizeof`/`_Alignof`/`__builtin_types_compatible_p` — an array dimension
+    /// like QEMU's `ARRAY_SIZE(local_array)`. Those operands become literals and
+    /// the plain constant folder does the rest. None: not a constant (a VLA).
+    pub(crate) fn eval_scoped_const(&mut self, e: &Expr) -> Option<i64> {
+        let folded = self.subst_scoped_consts(e)?;
+        super::eval_const_expr(&folded, &self.lowerer.enum_consts).ok()
+    }
+
+    fn subst_scoped_consts(&mut self, e: &Expr) -> Option<Expr> {
+        use ExprKind::*;
+        let ps = self.ptr_size();
+        let lit = |v: u64| Some(Expr::new(UIntLit(v, true), e.span.clone()));
+        let sized = |t: &Type| if FuncCtx::has_runtime_dim(t) { None } else { Some(t.size_of(ps)) };
+        let kind = match &e.kind {
+            SizeofExpr(inner) | AlignofExpr(inner) => {
+                if let Ident(n) = &inner.kind {
+                    if let Some(LookupResult::Local(_, vid)) = self.lookup(n) {
+                        if self.vla_sizes.contains_key(&vid) { return None; }
+                    }
+                }
+                let t = self.sizeof_operand_type(inner).ok()?;
+                let sz = sized(&t)?;
+                return lit(if matches!(e.kind, SizeofExpr(_)) { sz } else { t.align_of(ps) });
+            }
+            SizeofType(qt) | AlignofType(qt) => {
+                let t = self.lower_type(qt).ok()?;
+                let sz = sized(&t)?;
+                return lit(if matches!(e.kind, SizeofType(_)) { sz } else { t.align_of(ps) });
+            }
+            TypesCompatible(t1, t2) => {
+                let compat = match (self.lower_type(t1), self.lower_type(t2)) {
+                    (Ok(a), Ok(b)) => self.types_equal(&a, &b),
+                    _ => false,
+                };
+                return lit(compat as u64);
+            }
+            BinOp { op, lhs, rhs } => BinOp {
+                op: op.clone(), lhs: Box::new(self.subst_scoped_consts(lhs)?), rhs: Box::new(self.subst_scoped_consts(rhs)?),
+            },
+            Unary { op, expr } => Unary { op: op.clone(), expr: Box::new(self.subst_scoped_consts(expr)?) },
+            Cast { ty, expr } => Cast { ty: ty.clone(), expr: Box::new(self.subst_scoped_consts(expr)?) },
+            Ternary { cond, then, else_ } => Ternary {
+                cond: Box::new(self.subst_scoped_consts(cond)?),
+                then: Box::new(self.subst_scoped_consts(then)?),
+                else_: Box::new(self.subst_scoped_consts(else_)?),
+            },
+            ChooseExpr { cond, then, else_ } => ChooseExpr {
+                cond: Box::new(self.subst_scoped_consts(cond)?),
+                then: Box::new(self.subst_scoped_consts(then)?),
+                else_: Box::new(self.subst_scoped_consts(else_)?),
+            },
+            _ => return Some(e.clone()),
+        };
+        Some(Expr::new(kind, e.span.clone()))
+    }
+
     /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
     /// is a struct type registered under that bare name (a type spelled as an
     /// expression), else an error.
