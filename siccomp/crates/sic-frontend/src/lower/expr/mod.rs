@@ -5507,6 +5507,30 @@ impl<'m> FuncCtx<'m> {
 
         let lv = self.lower_lvalue(lhs)?;
 
+        // sic `u8char` from an integer (`d = c + 1;`, `d = 'x';`) or a compound
+        // assignment (`d += 1;`): compute the code point and store it into `cp`.
+        if self.is_sic() && super::types::is_u8char(&lv.ty)
+            && (op.is_some() || !matches!(self.infer_expr_type(rhs), Ok(t) if super::types::is_u8char(&t)))
+        {
+            let cptr = self.coerce(lv.ptr.clone(), &Type::Pointer(Box::new(Self::u32_ty())))?;
+            let r = if matches!(self.infer_expr_type(rhs), Ok(t) if super::types::is_u8char(&t)) {
+                self.u8char_cp(rhs)?
+            } else {
+                self.lower_expr(rhs)?
+            };
+            let v = match op {
+                Some(bop) => {
+                    let old = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: old, ptr: cptr.clone(), ty: Self::u32_ty() });
+                    self.emit_binop(bop, Val::Local(old), r)?
+                }
+                None => r,
+            };
+            let v = self.coerce(v, &Self::u32_ty())?;
+            self.push_instr(Instr::Store { val: v, ptr: cptr });
+            return Ok(lv.ptr);
+        }
+
         // sic `atomic` (sic.md §"Atomics"): a compound assignment on an atomic
         // lvalue is a single atomic read-modify-write. Plain `a = v` falls through
         // to the normal store path (store_lvalue emits an atomic store). Only

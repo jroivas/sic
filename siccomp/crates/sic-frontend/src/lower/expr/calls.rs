@@ -1225,6 +1225,8 @@ impl<'m> FuncCtx<'m> {
                         if self.is_sic() && super::super::types::is_sic_string(pty) {
                             *pval = self.string_param_arg(pval.clone(), args.get(i))?;
                         }
+                        // An integer / char literal for a `u8char` parameter.
+                        if super::super::types::is_u8char(pty) { *pval = self.coerce(pval.clone(), pty)?; }
                         continue;
                     }
                     // A bigint/fixed parameter, as on the non-sret path below: a
@@ -1273,6 +1275,8 @@ impl<'m> FuncCtx<'m> {
                     if self.is_sic() && super::super::types::is_sic_string(pty) {
                         *pval = self.string_param_arg(pval.clone(), args.get(i))?;
                     }
+                    // An integer / char literal for a `u8char` parameter.
+                    if super::super::types::is_u8char(pty) { *pval = self.coerce(pval.clone(), pty)?; }
                     continue;
                 }
                 // sic bigint/fixed parameter: build the argument as the right
@@ -1939,6 +1943,14 @@ impl<'m> FuncCtx<'m> {
             let dest = self.alloc_val();
             self.push_instr(Instr::Cast { dest, op: CastOp::BitCast, val: v, to_ty: Type::Float80 });
             return Ok(Val::Local(dest));
+        }
+        // A sic `u8char` passes its code point (`printf("%u", c)`), not the
+        // address of its `{ cp }` struct.
+        if self.is_sic() && arg.map_or(false, |e| matches!(self.infer_expr_type(e), Ok(t) if super::super::types::is_u8char(&t))) {
+            let cptr = self.coerce(v, &Type::Pointer(Box::new(Type::Int { bits: 32, signed: false })))?;
+            let cp = self.alloc_val();
+            self.push_instr(Instr::Load { dest: cp, ptr: cptr, ty: Type::Int { bits: 32, signed: false } });
+            return Ok(Val::Local(cp));
         }
         match self.val_type(&v) {
             Type::Bool => self.coerce(v, &Type::i32()),

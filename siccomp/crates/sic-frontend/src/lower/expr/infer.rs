@@ -623,6 +623,16 @@ impl<'m> FuncCtx<'m> {
                     let (i, f) = Self::fixed_result_dims(*op, da, db);
                     return Ok(super::super::types::fixed_type(i, f));
                 }
+                // sic `u8char` arithmetic works on the code point (`lower_binop`
+                // extracts `cp`), so it yields that integer, not a `u8char`.
+                if self.is_sic() && !matches!(op, Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr)
+                    && (super::super::types::is_u8char(&lt) || super::super::types::is_u8char(&rt))
+                {
+                    let cp = Type::Int { bits: 32, signed: false };
+                    let l = if super::super::types::is_u8char(&lt) { cp.clone() } else { lt };
+                    let r = if super::super::types::is_u8char(&rt) { cp } else { rt };
+                    return Ok(self.arith_result_type(op, l, r));
+                }
                 match op {
                     // Relational/logical operators yield int.
                     Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr => Ok(Type::i32()),

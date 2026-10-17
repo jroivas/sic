@@ -1,0 +1,28 @@
+// Regression: an integer / char literal where a `u8char` is expected was not
+// converted — a call argument passed 'x' as the {cp} struct's ADDRESS (SIGSEGV),
+// `return c + 1;` / `d = c + 1;` / `d += 1;` failed the Cranelift verifier, and
+// printf("%u", c) passed garbage instead of the code point.
+#include <stdio.h>
+#include <string.h>
+
+u8char Next(u8char c) { return c + 1; }
+u8char Lit() { return 'q'; }
+
+int main() {
+    u8char c = Next('x');              // argument: int → u8char
+    if (c != 'y') return 1;
+    u8char d;
+    d = c + 1;                         // assignment from u8char arithmetic
+    if (d != 'z') return 2;
+    d += 1;                            // compound assignment
+    if (d != '{') return 3;
+    d = 'A';
+    if (d != 65) return 4;
+    if (Lit() != 'q') return 5;
+    u8char e = c + 2;                  // init from arithmetic
+    if (e != '{') return 6;
+    char buf[16];
+    snprintf(buf, 16, "%u", c);        // C variadic: the code point
+    if (strcmp(buf, "121") != 0) return 7;
+    return 42;
+}

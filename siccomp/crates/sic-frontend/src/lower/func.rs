@@ -669,6 +669,12 @@ impl<'m> FuncCtx<'m> {
                     } else {
                         Some(p)
                     }
+                } else if self.is_sic() && super::types::is_u8char(&self.ret_ty)
+                    && !matches!(self.infer_expr_type(e), Ok(t) if super::types::is_u8char(&t))
+                {
+                    // `return 'q';` / `return c + 1;` from a `u8char` function.
+                    let v = self.lower_expr(e)?;
+                    Some(self.make_u8char(v)?)
                 } else {
                     let p = self.lower_aggregate_ptr(e)?;
                     if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
@@ -5944,6 +5950,13 @@ impl<'m> FuncCtx<'m> {
         match (&src_ty, target) {
             (Type::Void, _) | (_, Type::Void) => return Ok(val),
             _ => {}
+        }
+
+        // sic `u8char` from an integer (a code point or char literal) wherever a
+        // value is coerced — an argument, a return, an assignment: build the
+        // `{ cp }` struct. An integer used as the struct's address read garbage.
+        if self.is_sic() && super::types::is_u8char(target) && matches!(src_ty, Type::Int { .. } | Type::Bool) {
+            return self.make_u8char(val);
         }
 
         // A dynamically typed tuple becoming a statically typed one
