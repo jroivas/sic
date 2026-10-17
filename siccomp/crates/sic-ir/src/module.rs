@@ -159,6 +159,9 @@ pub struct Module {
     /// / scope-exit cleanup calls the module's `S()` / `~S()`.
     pub sic_struct_ctors: Vec<(String, String)>,
     pub sic_struct_dtors: Vec<(String, String)>,
+    /// `(struct, fields its destructor `del`s)`: the owned fields a consumer's copy
+    /// of the struct must retain (written as extra tokens on the `dtor` line).
+    pub sic_struct_owned: Vec<(String, Vec<String>)>,
     /// sic module struct methods: `(struct, method, symbol)` of each exported
     /// method, so a consumer's `obj.method()` calls the module's code.
     pub sic_struct_methods: Vec<(String, String, String)>,
@@ -193,6 +196,7 @@ impl Module {
             sic_generic_fn_exports: Vec::new(),
             sic_struct_ctors: Vec::new(),
             sic_struct_dtors: Vec::new(),
+            sic_struct_owned: Vec::new(),
             sic_struct_methods: Vec::new(),
             sic_module_deps: Vec::new(),
             sic_fn_defaults: Vec::new(),

@@ -77,6 +77,9 @@ pub struct ModuleManifest {
     /// `new S()` / `del p` / scope-exit cleanup calls the module's `S()` / `~S()`.
     pub struct_ctors: Vec<(String, String)>,
     pub struct_dtors: Vec<(String, String)>,
+    /// `(struct, owned fields)`: the fields the destructor `del`s, which a copy
+    /// retains. Serialized as trailing tokens of the struct's `dtor` line.
+    pub struct_owned: Vec<(String, Vec<String>)>,
     /// sic module struct methods: `(struct, method, symbol)`; the method's
     /// signature is the `fn` export of that symbol.
     pub struct_methods: Vec<(String, String, String)>,
@@ -186,6 +189,7 @@ impl ModuleManifest {
             generic_fns: ir.sic_generic_fn_exports.clone(),
             struct_ctors: ir.sic_struct_ctors.clone(),
             struct_dtors: ir.sic_struct_dtors.clone(),
+            struct_owned: ir.sic_struct_owned.clone(),
             struct_methods,
             deps: ir.sic_module_deps.clone(),
             fn_defaults: ir.sic_fn_defaults.clone(),
@@ -259,7 +263,12 @@ impl ModuleManifest {
             s.push_str(&format!("ctor {} {}\n", name, sym));
         }
         for (name, sym) in &self.struct_dtors {
-            s.push_str(&format!("dtor {} {}\n", name, sym));
+            let mut line = format!("dtor {} {}", name, sym);
+            if let Some((_, owned)) = self.struct_owned.iter().find(|(n, _)| n == name) {
+                for f in owned { line.push(' '); line.push_str(f); }
+            }
+            s.push_str(&line);
+            s.push('\n');
         }
         // Struct methods: `method Struct name symbol`.
         for (sname, m, sym) in &self.struct_methods {
@@ -314,6 +323,7 @@ impl ModuleManifest {
         let mut generic_fns: Vec<String> = Vec::new();
         let mut struct_ctors: Vec<(String, String)> = Vec::new();
         let mut struct_dtors: Vec<(String, String)> = Vec::new();
+        let mut struct_owned: Vec<(String, Vec<String>)> = Vec::new();
         let mut struct_methods: Vec<(String, String, String)> = Vec::new();
         let mut deps: Vec<String> = Vec::new();
         let mut fn_defaults: Vec<(String, Vec<String>, Vec<Option<i64>>)> = Vec::new();
@@ -472,7 +482,11 @@ impl ModuleManifest {
                     let sym = it.next()
                         .ok_or_else(|| format!("line {}: {} symbol missing", lineno + 1, kw))?;
                     if kw == "ctor" { struct_ctors.push((name.to_string(), sym.to_string())); }
-                    else { struct_dtors.push((name.to_string(), sym.to_string())); }
+                    else {
+                        struct_dtors.push((name.to_string(), sym.to_string()));
+                        let owned: Vec<String> = it.map(|f| f.to_string()).collect();
+                        if !owned.is_empty() { struct_owned.push((name.to_string(), owned)); }
+                    }
                 }
                 "method" => {
                     let mut field = |what: &str| it.next().map(|s| s.to_string())
@@ -513,6 +527,7 @@ impl ModuleManifest {
             generic_fns,
             struct_ctors,
             struct_dtors,
+            struct_owned,
             struct_methods,
             deps,
             links,
@@ -816,6 +831,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_owned: vec![],
             struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],
@@ -848,6 +864,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_owned: vec![],
             struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],
@@ -885,6 +902,7 @@ mod tests {
             generic_fns: vec![],
             struct_ctors: vec![],
             struct_dtors: vec![],
+            struct_owned: vec![],
             struct_methods: vec![],
             deps: vec![],
             fn_defaults: vec![],

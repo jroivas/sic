@@ -1,0 +1,18 @@
+module box;
+
+// A managed struct whose destructor owns `h`: a consumer's copy must retain it
+// (the `dtor` manifest line carries the owned field), else `del h` frees twice.
+struct Inner { int v; };
+
+struct Handle {
+    Inner *h;
+    ~Handle() { del h; }
+    int get(Handle *self) { return self->h->v; }
+};
+
+Handle Make(int v) {
+    Handle r;
+    r.h = new Inner;
+    r.h->v = v;
+    return r;
+}

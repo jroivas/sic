@@ -1,0 +1,9 @@
+import box;
+
+int main() {
+    box::Handle a = box::Make(20);
+    box::Handle b = a;          // copy-init retains the owned field
+    box::Handle c;
+    c = a;                      // assignment too
+    return a.get() + b.get() + c.get() - 60;
+}

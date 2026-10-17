@@ -536,6 +536,9 @@ impl Lowerer {
             for (sname, sym) in &self.struct_dtor {
                 if self.private_types.contains(sname) || imp(sname) { continue; }
                 self.module.sic_struct_dtors.push((sname.clone(), sym.clone()));
+                if let Some(owned) = self.struct_owned_fields.get(sname).filter(|o| !o.is_empty()) {
+                    self.module.sic_struct_owned.push((sname.clone(), owned.clone()));
+                }
             }
             // sic struct methods: `(struct, method, symbol)` of public structs.
             let mut methods: Vec<(String, String, String)> = self.struct_methods.iter()
@@ -960,6 +963,10 @@ impl Lowerer {
             for (sname, sym) in &manifest.struct_dtors {
                 self.struct_dtor.entry(sname.clone()).or_insert_with(|| sym.clone());
                 self.imported_type_names.insert(sname.clone());
+            }
+            // The fields each destructor owns, so a consumer's copy retains them.
+            for (sname, owned) in &manifest.struct_owned {
+                self.struct_owned_fields.entry(sname.clone()).or_insert_with(|| owned.clone());
             }
             // sic module struct methods: declare each as an extern with its exported
             // signature and route `obj.method()` to it.
