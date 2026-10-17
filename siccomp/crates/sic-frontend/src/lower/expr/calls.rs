@@ -391,7 +391,13 @@ impl<'m> FuncCtx<'m> {
                 // method of that name).
                 let scalar_field = matches!(&base.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. })
                     && matches!(self.infer_expr_type(base), Ok(Type::Int { .. } | Type::Bool | Type::Pointer(_)));
-                if matches!(&base.kind, ExprKind::Ident(_)) || scalar_field {
+                // A struct with its own `swap`/`cas` method calls that method.
+                let has_method = match self.infer_expr_type(base).ok() {
+                    Some(Type::Struct(st)) => st.name,
+                    Some(Type::Pointer(inner)) => match *inner { Type::Struct(st) => st.name, _ => None },
+                    _ => None,
+                }.map_or(false, |s| self.lowerer.struct_methods.contains_key(&(s, name.to_string())));
+                if (matches!(&base.kind, ExprKind::Ident(_)) || scalar_field) && !has_method {
                     return Err(CompileError::at(
                         format!("`.{}` is only available on an `atomic` value", name),
                         sp.file.clone(), sp.line, sp.col));

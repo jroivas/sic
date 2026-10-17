@@ -1,0 +1,16 @@
+// Regression: a struct's own `swap`/`cas` method was rejected with "`.swap` is
+// only available on an `atomic` value" (the atomic built-in shadowed it).
+struct Pair {
+    int a;
+    int b;
+    void swap(Pair *self) { int t = self->a; self->a = self->b; self->b = t; }
+    bool cas(Pair *self, int old, int nw) { if (self->a != old) return false; self->a = nw; return true; }
+};
+
+int main() {
+    Pair p;
+    p.a = 1; p.b = 40;
+    p.swap();
+    if (!p.cas(40, 41)) return 1;
+    return p.a + p.b;              // 41 + 1
+}
