@@ -425,6 +425,19 @@ impl<'m> FuncCtx<'m> {
                 {
                     let self_arg = if recv_is_ptr {
                         base.clone()
+                    } else if super::super::func::is_fresh_struct_expr(base) {
+                        // A method on a call's result (`v.pre().as_str()`): the
+                        // temporary (destroyed at scope exit like any call result)
+                        // gets a hidden name so its address can be the receiver.
+                        let rty = self.infer_expr_type(base)?;
+                        let p = self.lower_aggregate_ptr(base)?;
+                        let Val::Local(id) = p else {
+                            return Err(CompileError::new("method receiver is not addressable".to_string()));
+                        };
+                        let hidden = format!("__sic_recv{}", id.0);
+                        self.define_local(hidden.clone(), rty, id);
+                        let ident = Expr { kind: ExprKind::Ident(hidden), span: base.span.clone() };
+                        Expr { kind: ExprKind::Unary { op: crate::ast::UnOpKind::Addr, expr: Box::new(ident) }, span: base.span.clone() }
                     } else {
                         Expr { kind: ExprKind::Unary { op: crate::ast::UnOpKind::Addr, expr: Box::new(base.clone()) }, span: base.span.clone() }
                     };
@@ -432,7 +445,12 @@ impl<'m> FuncCtx<'m> {
                     new_args.push(self_arg);
                     new_args.extend_from_slice(args);
                     let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
-                    return self.lower_call(&callee, &new_args, sp);
+                    let v = self.lower_call(&callee, &new_args, sp)?;
+                    // A struct method returns a fresh container like any function
+                    // (the method-syntax exclusion in `lower_expr` is for the
+                    // built-in container methods): release it unless it is bound.
+                    self.record_container_producer(&v);
+                    return Ok(v);
                 }
             }
         }

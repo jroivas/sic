@@ -1,0 +1,17 @@
+// Regression: a container returned by a struct METHOD (`s.get().values`) leaked — method-syntax
+// call results were never recorded as statement temporaries (only plain function calls were).
+struct S { int x; list<i64> get(S *self) { list<i64> l; l.add(5); l.add(6); return l; } };
+list<i64> pass(S *s) { return s->get(); }
+i64 first(list<i64> l) { return l[0]; }
+int main() {
+    S s;
+    i64 t = 0;
+    for (i64 v : s.get().values) t += v;          // 11
+    list<i64> kept = s.get();                     // bound
+    list<i64> later;
+    later = s.get();                              // assigned
+    list<i64> p = pass(&s);                       // returned through
+    usize n = s.get().length;                     // 2
+    i64 f = first(s.get());                       // argument: 5
+    return (int)(t + kept[1] + later[0] + p[0] + n + f);   // 11+6+5+5+2+5 = 34
+}

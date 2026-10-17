@@ -1222,6 +1222,19 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Call { dest: None, func: fref, args: vec![var_addr], ret_ty: Type::Void });
     }
 
+    /// `obj.m(...)` calling a user struct method (not a built-in container
+    /// method): its result is fresh, like a function's.
+    pub(crate) fn is_struct_method_call(&self, e: &Expr) -> bool {
+        let ExprKind::Call { func, .. } = &e.kind else { return false };
+        let (ExprKind::Field { base, name } | ExprKind::Arrow { base, name }) = &func.kind else { return false };
+        let sname = match self.infer_expr_type(base).ok() {
+            Some(Type::Struct(st)) => st.name,
+            Some(Type::Pointer(inner)) => match *inner { Type::Struct(st) => st.name, _ => None },
+            _ => None,
+        };
+        sname.map_or(false, |s| self.lowerer.struct_methods.contains_key(&(s, name.clone())))
+    }
+
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
     }
@@ -2868,7 +2881,8 @@ impl<'m> FuncCtx<'m> {
                         && matches!(&d.init, Some(Initializer::Expr(e)) if matches!(&e.kind,
                             ExprKind::New { .. })
                             || matches!(&e.kind, ExprKind::Call { func, .. }
-                                if !matches!(func.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. })));
+                                if !matches!(func.kind, ExprKind::Field { .. } | ExprKind::Arrow { .. }))
+                            || self.is_struct_method_call(e));
                     if takes_projection {
                         if let Some(Initializer::Expr(e)) = &d.init {
                             let h = self.lower_expr(e)?;

@@ -1,0 +1,16 @@
+// Regression: a method call on a call's result (`mk(3).get()`) failed with
+// "expression is not an lvalue" — the temporary had no address to pass as `self`.
+struct Box {
+    int *v;
+    ~Box() { del v; }
+    int get(Box *self) { return *self->v; }
+    Box twice(Box *self) { Box b; b.v = new int; *b.v = *self->v * 2; return b; }
+};
+
+Box mk(int x) { Box b; b.v = new int; *b.v = x; return b; }
+
+int main() {
+    int a = mk(3).get();               // method on a call result
+    int b = mk(5).twice().twice().get();  // chained
+    return a + b + 19;                 // 3 + 20 + 19
+}
