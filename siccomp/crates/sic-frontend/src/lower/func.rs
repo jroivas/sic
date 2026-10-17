@@ -2241,6 +2241,13 @@ impl<'m> FuncCtx<'m> {
             Stmt::Null(_) => {}
             Stmt::Asm(a) => self.lower_asm(a)?,
             Stmt::Fence { full, .. } => self.emit_fence(if *full { 5 } else { 2 }, false)?,
+            Stmt::UnknownType(name, sp) => {
+                let mut e = self.undefined_name_error(name, sp);
+                if e.message.starts_with("undefined name") {
+                    e.message = format!("unknown type name '{}'", name);
+                }
+                return Err(e);
+            }
             // sic's explicit `fallthrough;` is a no-op: control simply continues
             // into the statements of the next case (sic.md §"Switch - case").
             Stmt::Fallthrough(_) => {}
@@ -6665,7 +6672,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s.line,
         Stmt::Asm(a) => a.span.line,
-        Stmt::Fence { span, .. } => span.line,
+        Stmt::Fence { span, .. } | Stmt::UnknownType(_, span) => span.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
         | Stmt::ForEach { span, .. } | Stmt::Guard { span, .. } => span.line,
@@ -6682,7 +6689,7 @@ fn stmt_loc(stmt: &Stmt) -> (Option<String>, u32, u32) {
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s,
         Stmt::Asm(a) => &a.span,
-        Stmt::Fence { span, .. } => span,
+        Stmt::Fence { span, .. } | Stmt::UnknownType(_, span) => span,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
         | Stmt::ForEach { span, .. } | Stmt::Guard { span, .. } => span,
@@ -6878,7 +6885,7 @@ fn infer_calls_in_stmt(
             }
         }
         Stmt::Decl(_) | Stmt::Null(_) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Goto(_, _) | Stmt::Fallthrough(_) | Stmt::Return(None, _) | Stmt::Fence { .. } => {}
+        | Stmt::Goto(_, _) | Stmt::Fallthrough(_) | Stmt::Return(None, _) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
         Stmt::Asm(a) => for o in a.outputs.iter().chain(&a.inputs) { find_tuple_calls(fc, &o.expr, targets, found); },
         Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) =>
             find_tuple_calls(fc, e, targets, found),

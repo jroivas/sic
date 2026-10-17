@@ -1,0 +1,15 @@
+// Required `;` keeps the forms that legitimately have none: guards
+// (`… else return …;`), brace-invoked statement macros, struct definitions
+// without `;`, and a last struct member without `;` (gcc accepts it too).
+Option<int> half(int a) { if (a % 2) return None; return Option::Some(a / 2); }
+macro_rules bump { {$v:ident} => { $v += 1; } }
+struct S { int a; int b }
+struct T { int c; }
+int main() {
+    int v = half(84) else return 1;
+    v > 0 else return 2;
+    bump{v}
+    struct S s; s.b = v;
+    struct T t; t.c = s.b - 1;
+    return t.c;
+}

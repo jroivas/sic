@@ -249,7 +249,7 @@ impl<'a> NsRenamer<'a> {
             }
             Stmt::Asm(a) => for o in a.outputs.iter_mut().chain(a.inputs.iter_mut()) { self.expr(&mut o.expr); },
             Stmt::Break(_) | Stmt::Continue(_) | Stmt::Fallthrough(_) | Stmt::Goto(..)
-            | Stmt::Fence { .. } | Stmt::Null(_) => {}
+            | Stmt::Fence { .. } | Stmt::UnknownType(..) | Stmt::Null(_) => {}
         }
     }
 

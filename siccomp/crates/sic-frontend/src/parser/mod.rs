@@ -181,6 +181,20 @@ impl Parser {
 
     fn at(&self, kind: TokenKind) -> bool { self.peek_kind() == kind }
 
+    /// The `;` ending `what` (C requires it; it was silently optional, so
+    /// `int x = 1` followed by `return x;` compiled). Reported just after the
+    /// previous token, like gcc's "expected ';' before …".
+    fn expect_semi(&mut self, what: &str) -> Result<()> {
+        if self.eat(TokenKind::Semi) { return Ok(()); }
+        let next = self.peek().clone();
+        let (file, line, col) = match self.pos.checked_sub(1).and_then(|p| self.tokens.get(p)) {
+            Some(prev) => (prev.span.file.clone(), prev.span.line,
+                prev.span.col + (prev.end.saturating_sub(prev.start)).max(prev.text.chars().count() as u32)),
+            None => (next.span.file.clone(), next.span.line, next.span.col),
+        };
+        Err(CompileError::at(format!("expected `;` after {}, found {}", what, tok_desc(&next)), file, line, col))
+    }
+
     /// Expect a name in an ordinary-identifier position (member/enum/label/goto
     /// name). Besides a plain identifier, this also accepts a built-in type-alias
     /// token (`u64`, `i32`, `usize`, ...): those aliases collide with common C
@@ -350,7 +364,7 @@ impl Parser {
         // treat it as an expression statement.
         if self.is_expr_start_not_decl() {
             let expr = self.parse_expr()?;
-            self.eat(TokenKind::Semi);
+            self.expect_semi("the expression")?;
             return Ok(Decl::ExprStmt(expr, sp));
         }
 
@@ -442,7 +456,7 @@ impl Parser {
                     let more = self.parse_more_declarator(&base_ty, &storage, is_inline, sp.clone())?;
                     self.pending_decls.push(more);
                 }
-                self.eat(TokenKind::Semi);
+                self.expect_semi("the declaration")?;
                 self.pending_type_params.clear();
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic,
@@ -477,7 +491,7 @@ impl Parser {
             if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
             declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, span: self.span() });
         }
-        self.eat(TokenKind::Semi);
+        self.expect_semi("the declaration")?;
 
         Ok(Decl::Var { base_ty, declarators, weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp })
     }
@@ -563,7 +577,7 @@ impl Parser {
             names.push((name, ty));
             if !self.eat(TokenKind::Comma) { break; }
         }
-        self.eat(TokenKind::Semi);
+        self.expect_semi("the typedef")?;
         Ok(Decl::TypeDef { names, span: sp })
     }
 
@@ -1049,7 +1063,7 @@ impl Parser {
                     }
                 }
                 fields.extend(self.parse_struct_field()?);
-                self.eat(TokenKind::Semi);
+                if !self.at(TokenKind::RBrace) { self.expect_semi("the member declaration")?; } // gcc: last member may omit it (warning)
                 // Safety: never spin (and allocate unboundedly) if some construct
                 // failed to consume any tokens.
                 if self.pos == before {
@@ -1763,7 +1777,7 @@ impl Parser {
                 }
                 if !self.eat(TokenKind::Comma) { break; }
             }
-            self.eat(TokenKind::Semi);
+            self.expect_semi("the parameter declarations")?;
         }
         Ok(())
     }
@@ -1835,9 +1849,9 @@ impl Parser {
             TokenKind::Do => self.parse_do_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Return => self.parse_return(),
-            TokenKind::Break => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Break(sp)) }
-            TokenKind::Continue => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Continue(sp)) }
-            TokenKind::Fallthrough => { self.advance(); self.eat(TokenKind::Semi); Ok(Stmt::Fallthrough(sp)) }
+            TokenKind::Break => { self.advance(); self.expect_semi("`break`")?; Ok(Stmt::Break(sp)) }
+            TokenKind::Continue => { self.advance(); self.expect_semi("`continue`")?; Ok(Stmt::Continue(sp)) }
+            TokenKind::Fallthrough => { self.advance(); self.expect_semi("`fallthrough`")?; Ok(Stmt::Fallthrough(sp)) }
             TokenKind::Defer => {
                 self.advance();
                 let inner = Box::new(self.parse_stmt()?);
@@ -1846,7 +1860,7 @@ impl Parser {
             TokenKind::Del => {
                 self.advance();
                 let e = self.parse_expr()?;
-                self.eat(TokenKind::Semi);
+                self.expect_semi("`del`")?;
                 Ok(Stmt::Delete(e, sp))
             }
             TokenKind::Goto => self.parse_goto(),
@@ -1894,7 +1908,14 @@ impl Parser {
             }
             _ => {
                 let e = self.parse_expr()?;
-                self.eat(TokenKind::Semi);
+                // `Counter c;` with `Counter` not a type: a declaration with an
+                // unknown type name (lowering reports it, with a module-path hint).
+                if let ExprKind::Ident(n) = &e.kind {
+                    if self.at(TokenKind::Ident) && !self.func_vars.contains(n) {
+                        return Ok(Stmt::UnknownType(n.clone(), e.span.clone()));
+                    }
+                }
+                self.expect_semi("the expression")?;
                 Ok(Stmt::Expr(e, sp))
             }
         }
@@ -2254,7 +2275,7 @@ impl Parser {
         let cond = self.parse_expr()?;
         self.reject_bare_assign_cond(&cond, wrapped)?;
         self.expect(TokenKind::RParen)?;
-        self.eat(TokenKind::Semi);
+        self.expect_semi("`do … while (…)`")?;
         Ok(Stmt::DoWhile { body, cond, span: sp })
     }
 
@@ -2291,7 +2312,7 @@ impl Parser {
             Some(ForInit::Decl(d))
         } else {
             let e = self.parse_expr()?;
-            self.eat(TokenKind::Semi);
+            self.expect_semi("the `for` initializer")?;
             Some(ForInit::Expr(e))
         };
 
@@ -2303,7 +2324,7 @@ impl Parser {
             self.reject_bare_assign_cond(&c, wrapped)?;
             Some(c)
         };
-        self.eat(TokenKind::Semi);
+        self.expect_semi("the `for` condition")?;
 
         let post = if self.at(TokenKind::RParen) { None } else { Some(self.parse_expr()?) };
         self.expect(TokenKind::RParen)?;
@@ -2316,7 +2337,7 @@ impl Parser {
         let sp = self.span();
         self.advance();
         let val = if self.at(TokenKind::Semi) { None } else { Some(self.parse_expr()?) };
-        self.eat(TokenKind::Semi);
+        self.expect_semi("`return`")?;
         Ok(Stmt::Return(val, sp))
     }
 
@@ -2324,7 +2345,7 @@ impl Parser {
         let sp = self.span();
         self.advance();
         let name = self.expect_name()?;
-        self.eat(TokenKind::Semi);
+        self.expect_semi("`goto`")?;
         Ok(Stmt::Goto(name, sp))
     }
 
@@ -2545,7 +2566,7 @@ impl Parser {
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
-        self.eat(TokenKind::Semi);
+        self.expect_semi("the declaration")?;
         Ok(Decl::Var { base_ty, declarators, weak: false, thread_local: false, span: sp })
     }
 

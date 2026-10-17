@@ -5059,7 +5059,7 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             for o in a.outputs.iter().chain(&a.inputs) { collect_expr_names(&o.expr, out); }
         }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) | Stmt::Fence { .. } => {}
+        | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
     }
 }
 

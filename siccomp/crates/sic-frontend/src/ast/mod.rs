@@ -410,6 +410,10 @@ pub enum Stmt {
     /// false`) is compiler-only — no memory access is cached or moved across it,
     /// but no instruction is emitted.
     Fence { full: bool, span: Span },
+    /// `Name name …` where `Name` is not a type: an unknown type name, reported
+    /// by lowering (which knows the imported modules' types, for the
+    /// "write `mod::Type`" hint).
+    UnknownType(String, Span),
     Null(Span),
 }
 
