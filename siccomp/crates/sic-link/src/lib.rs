@@ -134,6 +134,10 @@ fn discover() -> Toolchain {
     for d in ["/lib64", "/usr/lib64", "/lib", "/usr/lib"] { push(PathBuf::from(d)); }
 
     let (rt, rt_eh) = find_compiler_runtime(triple.as_deref());
+    // gcc's own directory (libgcc_s.so, libstdc++.so, …), which gcc also searches:
+    // a Rust static library asks for `-lgcc_s`. Last, so it never shadows the
+    // system's libraries.
+    if let Some(d) = rt.as_ref().and_then(|p| p.parent()) { push(d.to_path_buf()); }
     let emulation = match arch() {
         "x86_64" => Some("elf_x86_64"),
         "aarch64" => Some("aarch64linux"),
@@ -327,7 +331,12 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
     a.push(dso.to_string_lossy().into_owned());
 
     // Search paths: the request's own first, then the system's.
-    let (search, rest) = ld_inputs(&req.inputs);
+    let (search, mut rest) = ld_inputs(&req.inputs);
+    // There is no static libgcc_s: a static link takes the unwinder from
+    // libgcc_eh instead, as gcc's `-static` does (libgcc is always linked).
+    if req.static_link {
+        rest.retain(|t| t != "-lgcc_s");
+    }
     a.extend(search);
     for d in &tc.lib_dirs { a.push(format!("-L{}", d.display())); }
 
