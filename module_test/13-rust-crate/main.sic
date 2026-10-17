@@ -1,0 +1,59 @@
+import std;
+import rsdemo;
+
+int main() {
+    rsdemo::Counter c;                         // Counter::new() as constructor
+    if (c.name() != "anon") return 1;
+    c.add(5);
+    if (c.add(2) != 7) return 2;
+
+    rsdemo::Counter d = rsdemo::Counter::Named("d");
+    d.add(30);
+    d.merge(c);                                // &Counter parameter
+    if (d.get() != 37) return 3;
+    rsdemo::Counter e = d;                     // a copy shares the object
+    e.add(3);
+    if (d.get() != 40) return 4;
+    rsdemo::Counter q = d.split(4) else return 5;
+    std::Println("{} {}", q.name(), q.get());  // d/4 10
+    match (d.split(0)) { Some(x): return 6; None: {} }
+    if (rsdemo::Total(q, 1) != 11) return 7;
+
+    std::Println("{}", rsdemo::Greet("sic"));
+    std::Println("{}", rsdemo::Shout("loud"));
+    if (rsdemo::LenRef("four") != 4) return 8;
+    if (rsdemo::Checksum("\x01\x02\xff") != 258) return 9;
+    if (rsdemo::ReverseBytes("abc") != "cba") return 10;
+
+    list<i64> xs; xs.add(1); xs.add(2); xs.add(39);
+    if (rsdemo::Sum(xs) != 42) return 11;
+    list<i32> ys; ys.add(4); ys.add(-5);
+    rsdemo::DoubleAll(ys);                     // &mut [i32]: written back
+    if (ys[0] != 8 || ys[1] != -10) return 12;
+
+    list<string> w = rsdemo::Words("  one two  three ");
+    if (w.length != 3 || w[2] != "three") return 13;
+    list<string> parts = rsdemo::WordsRef("a,b");
+    std::Println("{}", rsdemo::Join(w, "+") + " " + parts[1]);
+    list<u64> sq = rsdemo::Squares(4);
+    if (sq.length != 4 || sq[3] != 16) return 14;
+
+    i64 n = rsdemo::ParseInt(" 123 ") else return 15;
+    if (n != 123) return 16;
+    match (rsdemo::ParseInt("x")) {
+        Ok(v): return 17;
+        Err(msg): std::Println("{}", msg);     // invalid digit found in string
+    }
+    bool ok = rsdemo::Check(true) else return 18;
+    match (rsdemo::Check(false)) { Ok(v): return 19; Err(msg): std::Println("{}", msg); }
+    i32 u = rsdemo::UnitErr(4) else return 20;
+    if (u != 40) return 21;
+    match (rsdemo::UnitErr(-1)) { Ok(v): return 22; Err(msg): std::Println("{}", msg); }
+
+    u8char ch = rsdemo::FirstChar("é!") else return 23;
+    if (ch != 233) return 24;
+    if (rsdemo::NextChar('a') != 'b') return 25;
+    match (rsdemo::FirstChar("")) { Some(x): return 26; None: {} }
+    if (rsdemo::Half(5.0) != 2.5 || !rsdemo::IsEven(10)) return 27;
+    return 0;
+}

@@ -1319,6 +1319,23 @@ When compiling a module in C compatiblae mode, it produces these outputs
 - module\_[module\_name].def
 - module\_[module\_name].sicmod
 
+### Rust crates as modules
+
+A module folder holding a `Cargo.toml` is a Rust crate. `--emit-module` binds the
+`pub fn`s, `pub struct`s and their inherent `impl`s at the root of its
+`src/lib.rs`, mapping Rust types to SIC ones:
+- `&str`/`String` → `string`;
+- `Vec<T>`/`&[T]` → `list<T>`, with byte vectors and slices → `string`;
+- `Option`/`Result` → the built-in enums, the error formatted with `Display`;
+- a struct → a refcounted handle type with methods and a destructor.
+
+It generates the `extern "C"` glue and a SIC interface module, builds the glue
+with cargo (`panic = "abort"`), and links the Rust code into the module's
+libraries. Free functions become CamelCase, associated functions live in a
+namespace named after the type, and an argument-less `new()` is also the
+constructor. The test crate `module_test/13-rust-crate/mod-rsdemo` is the
+example; see `doc/rust-crates.md`.
+
 ## Match
 
 `Option<T>` and `Result<T, E>` (and `Iterator<T>`) are **native, built-in**

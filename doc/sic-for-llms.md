@@ -229,6 +229,7 @@ if (read_header(f) < 0) return -1;
 | `x.rotate_left(k)`, `std::mem::swap` | `x <<< k`, `a <> b` |
 | `wrapping_add` | plain `+` (SIC wraps); checked: `unsafe { … }` / `overflow { … }` |
 | `println!("{} {}", a, b)` | `std::Println("{} {}", a, b)` (`import std;`) |
+| a crates.io dependency | a binding crate built with `sic --emit-module`, then `import` it ([Rust crates](rust-crates.md)) |
 
 ## Checks: `assert`
 

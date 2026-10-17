@@ -74,6 +74,12 @@ run_case() {
     local work="$outroot/$name"
     mkdir -p "$work"
     cp -r "$dir"/. "$work/"
+    # A Rust module (a mod dir with a Cargo.toml) needs cargo.
+    if ls "$work"/mod-*/Cargo.toml >/dev/null 2>&1 && ! command -v cargo >/dev/null 2>&1; then
+        echo "SKIP $name (needs cargo)"
+        success=$((success + 1))
+        return 0
+    fi
 
     # Build each module dir (mod-*), earliest-sorted first, so an earlier module is
     # importable by a later one. Each built module adds a `-I` for the rest.

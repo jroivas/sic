@@ -1,0 +1,7 @@
+# A dependency-free Rust crate bound as the sic module `rsdemo`: every type
+# mapping of the Rust layer (crates/sic/src/rust_module.rs), offline.
+[package]
+name = "rsdemo"
+version = "0.1.0"
+edition = "2021"
+publish = false

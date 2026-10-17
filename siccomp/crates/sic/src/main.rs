@@ -11,6 +11,7 @@ mod list_runtime;
 mod tuple_runtime;
 mod assert_runtime;
 mod module_conf;
+mod rust_module;
 
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
@@ -994,6 +995,21 @@ fn emit_module_manifest(
     Ok(())
 }
 
+/// Run a binutils tool, dropping the LTO plugin's complaints about rustc's LLVM
+/// bitcode sections (the archive members are ordinary ELF objects).
+fn run_binutil(mut cmd: Command, stdin: Option<&str>) -> Result<std::process::ExitStatus, Box<dyn std::error::Error>> {
+    cmd.stdin(if stdin.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    if let Some(text) = stdin { child.stdin.take().unwrap().write_all(text.as_bytes())?; }
+    let out = child.wait_with_output()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    for l in text.lines() {
+        if !l.starts_with("bfd plugin:") { eprintln!("{}", l); }
+    }
+    Ok(out.status)
+}
+
 /// Build a folder module (`--emit-module DIR`): compile every `.sic` in DIR that
 /// declares the *same* `module x;` together — so files can call one another's
 /// functions — archive them into `lib<x>.a`, and emit the portable interface
@@ -1014,12 +1030,22 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     let mut conf_links = module_link_tokens(&conf.ldflags, &absdir)?;
     if args.pthread && !conf_links.iter().any(|t| t == "-pthread") { conf_links.push("-pthread".to_string()); }
 
+    // A folder with a Cargo.toml is a Rust crate: generate its glue and sic
+    // wrapper (rust_module.rs), build the glue with cargo, and compile the wrapper
+    // as the module's only source; the Rust archive joins lib<name>.a/.so.
+    let rust = if rust_module::is_rust_module(&absdir) {
+        Some(rust_module::prepare(&absdir, args.debug)?)
+    } else { None };
+
     // Gather `.sic` files (no recursion) and parse each. A file participates iff
     // it declares a `module x;`; all participants must name the same module.
-    let mut entries: Vec<PathBuf> = fs::read_dir(&dirp)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("sic"))
-        .collect();
+    let mut entries: Vec<PathBuf> = match &rust {
+        Some(rb) => vec![rb.sic_source.clone()],
+        None => fs::read_dir(&dirp)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("sic"))
+            .collect(),
+    };
     entries.sort();
 
     let mut module_name: Option<String> = None;
@@ -1061,11 +1087,35 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     obj.write_all(&obj_bytes)?;
     let archive = dirp.join(format!("lib{}.a", name));
     let _ = fs::remove_file(&archive);
-    let status = Command::new("ar")
-        .arg("rcs").arg(&archive).arg(obj.path())
-        .status()?;
+    let status = match &rust {
+        // A Rust module's archive also carries the glue crate's objects (Rust
+        // std, the crate, the glue), so a `-static` consumer needs nothing else.
+        Some(rb) => {
+            let script = format!("create {}\naddmod {}\naddlib {}\nsave\nend\n",
+                archive.display(), obj.path().display(), rb.archive.display());
+            let mut cmd = Command::new("ar");
+            cmd.arg("-M");
+            let st = run_binutil(cmd, Some(&script))?;
+            // Rust's std ships with full debug info; without -g it is dead weight
+            // (a 4x larger archive and every static consumer with it).
+            if st.success() && !args.debug_info {
+                let mut cmd = Command::new("strip");
+                cmd.arg("--strip-debug").arg(&archive);
+                let _ = run_binutil(cmd, None);
+            }
+            st
+        }
+        None => Command::new("ar").arg("rcs").arg(&archive).arg(obj.path()).status()?,
+    };
     if !status.success() {
         return Err(format!("ar failed with exit code {:?}", status.code()).into());
+    }
+    // The Rust code links into lib<name>.so; its system libraries go there and,
+    // for `-static` consumers, into the manifest.
+    if let Some(rb) = &rust {
+        for l in &rb.native_libs {
+            if !conf_links.contains(l) { conf_links.push(l.clone()); }
+        }
     }
 
     // Also link a shared object `lib<name>.so` for dynamic linking (the default;
@@ -1078,16 +1128,25 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     // its dependencies (a std using libm needs `-lm` here: `acos` was undefined).
     if legacy_link_driver().is_none() {
         let mut inputs = vec![obj.path().to_string_lossy().into_owned()];
+        if let Some(rb) = &rust { inputs.push(rb.archive.to_string_lossy().into_owned()); }
         inputs.extend(conf_links.iter().cloned());
         link_with_driver(&shared.to_string_lossy(), inputs, true, false, None, false)?;
     } else {
         let cc = resolve_linker();
         let status = Command::new(&cc)
-            .arg("-shared").arg("-o").arg(&shared).arg(obj.path()).args(&conf_links)
+            .arg("-shared").arg("-o").arg(&shared).arg(obj.path())
+            .args(rust.as_ref().map(|rb| rb.archive.clone()))
+            .args(&conf_links)
             .status()?;
         if !status.success() {
             return Err(format!("linking {} failed with exit code {:?}", shared.display(), status.code()).into());
         }
+    }
+
+    if rust.is_some() && !args.debug_info {
+        let mut cmd = Command::new("strip");
+        cmd.arg("--strip-debug").arg(&shared);
+        let _ = run_binutil(cmd, None);
     }
 
     // Manifest link line: `-L<absdir> -Wl,-rpath,<absdir> -l<name>` makes the

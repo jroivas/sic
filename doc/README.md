@@ -45,9 +45,11 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 14. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
     namespaces, building a module, chain-loaded dependencies, and the `.smod`
     manifest.
-15. [Standard library](standard-library.md) — `import std;`,
+15. [Rust crates](rust-crates.md) — binding a Rust crate as a SIC module: the
+    binding crate, type mapping, Rust objects, panics.
+16. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
-16. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
+17. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
     conversion guide with ✗/✓ examples.
 
 ## Design goals

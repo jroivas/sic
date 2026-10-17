@@ -266,4 +266,10 @@ int main(void) { return math_sq(6); }   // 36
 cc user.c -Imath -Lmath -lmath -o user
 ```
 
-Next: [the standard library](standard-library.md).
+## Rust crates
+
+A folder holding a `Cargo.toml` is built as a module too: sic binds the crate's
+public functions and types and links the Rust code in — see
+[Rust crates](rust-crates.md).
+
+Next: [Rust crates](rust-crates.md).

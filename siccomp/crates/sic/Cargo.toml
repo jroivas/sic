@@ -16,3 +16,6 @@ sic-cranelift = { path = "../sic-cranelift" }
 sic-link      = { path = "../sic-link" }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
