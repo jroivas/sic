@@ -28,6 +28,9 @@ if [ ! -x "$SIC" ]; then echo "no compiler at $SIC — build it: ./build.sh $PRO
 export SIC
 echo "compiler: $SIC ($PROFILE, built $(date -r "$SIC" '+%Y-%m-%d %H:%M'), $("$SIC" --version 2>/dev/null | head -1 || echo 'version unknown'))"
 VALGRIND="${VALGRIND:-valgrind}"
+# `cargo sic` (a project case's sic.toml), built next to the compiler.
+CARGO_SIC="${CARGO_SIC:-$(dirname "$SIC")/cargo-sic}"
+export SIC
 
 # Guard against testing a stale compiler: warn when any compiler source is
 # newer than the binary under test (e.g. only the release build was rebuilt).
@@ -95,6 +98,23 @@ run_case() {
         incs+=("-I$mod")
     done
 
+    # A project with a sic.toml: `cargo sic build` its Rust crates into
+    # sic-deps/ (found by sic with no -I, from the project directory).
+    local cdir="$PWD"
+    if [ -f "$work/sic.toml" ]; then
+        if ! command -v cargo >/dev/null 2>&1; then
+            echo "SKIP $name (needs cargo)"
+            success=$((success + 1))
+            return 0
+        fi
+        if ! (cd "$work" && "$CARGO_SIC" build) 2>"$work/build.err"; then
+            echo "FAIL $name: cargo sic build failed"
+            sed 's/^/    /' "$work/build.err"
+            return 1
+        fi
+        cdir="$work"
+    fi
+
     if [ ! -f "$work/main.sic" ]; then
         echo "FAIL $name: no main.sic"
         return 1
@@ -115,7 +135,7 @@ run_case() {
         echo "PASS $name (expected compile error)"
         return 0
     fi
-    if ! "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main" 2>"$work/compile.err"; then
+    if ! (cd "$cdir" && "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main") 2>"$work/compile.err"; then
         echo "FAIL $name: consumer compile/link failed"
         sed 's/^/    /' "$work/compile.err"
         return 1

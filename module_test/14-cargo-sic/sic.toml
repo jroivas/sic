@@ -1,0 +1,7 @@
+# `cargo sic` project test: the local, dependency-free crate `demo`, its generic
+# types bound at concrete types.
+[dependencies]
+demo = { path = "demo", instantiate = [
+    { type = "Pair<i64>", as = "IntPair" },
+    { type = "Stack<String>", as = "StrStack" },
+] }

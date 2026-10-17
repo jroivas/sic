@@ -1,17 +1,143 @@
 # Rust crates
 
-A Rust library can be used from SIC as an ordinary [module](modules.md). You write
-a small **binding crate** whose root lists the API in plain Rust;
-`sic --emit-module` reads it, generates the glue in both directions, builds
-everything with cargo, and produces the usual `lib<name>.a` / `lib<name>.so` /
-`module_<name>.smod`. SIC code then just `import`s it.
+A Rust crate can be used from SIC as an ordinary [module](modules.md). `cargo sic`
+fetches it with cargo, reads its public API, generates the bindings in both
+directions and builds them; SIC code then just `import`s it.
 
 This needs a Rust toolchain (`cargo`; `$CARGO` overrides it).
 
+## `cargo sic`
+
+`cargo-sic` is built next to `sic` (`siccomp/target/<profile>/cargo-sic`). With it
+on your `PATH` it is a cargo subcommand:
+
+```sh
+cargo sic add semver                     # newest version from crates.io
+cargo sic add hashbrown@0.17 --instance 'StrIntMap=HashMap<String, i64>'
+cargo sic add --path ../mylib            # a local crate
+sic app.sic -o app                       # no -I: sic finds the bindings
+```
+
+```sic
+import semver;
+import hashbrown;
+
+int main() {
+    semver::Version v = semver::Version::Parse("1.4.2") else return 1;
+    semver::VersionReq r = semver::VersionReq::Parse(">=1.2, <2") else return 2;
+    hashbrown::StrIntMap m;                         // HashMap::new()
+    m.insert("apple", 3);
+    i64 n = m.get("apple") else return 3;
+    return r.matches(v) && v.major() == 1 && n == 3 ? 0 : 4;
+}
+```
+
+| command | does |
+|---|---|
+| `cargo sic add <crate>[@<ver>]` | add it to `sic.toml`, generate its binding, build it. Options: `--features a,b`, `--no-default-features`, `--module NAME`, `--instance NAME=TYPE`, `--path DIR` |
+| `cargo sic build [<crate>…]` | regenerate and build the bindings (after cloning a project, or editing one) |
+| `cargo sic update [<crate>…]` | `cargo update` the locked versions, then build |
+| `cargo sic remove <crate>` | drop it from `sic.toml` and `sic-deps/` (an edited `lib.rs` is kept aside) |
+| `cargo sic show <crate>` | print the SIC interface: everything you can call |
+| `cargo sic list` | the crates and their modules |
+
+`--global` uses `~/.local/lib/sic` instead of the project, so every program on the
+machine can import those crates. `--offline` passes through to cargo; `-v` shows
+the commands run.
+
+### The project
+
+The project is the nearest directory at or above the current one with a
+`sic.toml` (`add` creates one). It lists the crates in Cargo's `[dependencies]`
+syntax:
+
+```toml
+[dependencies]
+semver = "1.0.28"
+hashbrown = { version = "0.17.1", instantiate = [
+    { type = "HashMap<String, i64>", as = "StrIntMap" },
+    { type = "HashSet<u64>",         as = "U64Set" },
+] }
+mylib = { path = "../mylib", module = "mine" }       # `module` renames the SIC module
+```
+
+The bindings build in `sic-deps/`: one cargo workspace (a shared `Cargo.lock` and
+`target/`), with a binding crate per dependency:
+
+```
+sic-deps/
+  Cargo.toml  Cargo.lock  .gitignore  target/
+  semver/
+    src/generated.rs     # wrappers over the crate's API — regenerated every build
+    src/lib.rs           # yours to edit: hand-written wrappers, kept across builds
+    module_semver.smod   libsemver.{a,so}
+```
+
+`sic` searches `sic-deps/*` of the project (and of the global root) before `-I`,
+so `import semver;` needs no flags. Commit `sic.toml`, `sic-deps/Cargo.lock` and
+any edited `sic-deps/*/src/lib.rs`; the generated `.gitignore` covers the rest.
+
+### What is generated
+
+`cargo sic` reads the crate's public API from rustdoc's JSON output (run with
+`RUSTC_BOOTSTRAP=1` on a stable toolchain) and writes a plain-Rust wrapper for each
+item whose signature it can map. The wrappers then go through the binding crate
+mechanism below:
+
+- functions, also those in public modules (`text::words` → `demo::TextWords`)
+  and re-exports; a constant becomes a function (`LIMIT` → `demo::Limit()`);
+- types (non-generic structs and enums), with their inherent methods, the methods
+  of the crate's own traits (provided methods too), and:
+  - for public fields, a getter (`v.major()`) and, for scalars and strings, a
+    setter (`v.set_major(2)`);
+  - for enums, a constructor per payload-less variant (`demo::Color::Green()`)
+    and `variant_name()`;
+  - from `Display`, `to_string()`; `Clone` → `clone()`; `PartialEq` → `eq()`;
+    `Ord` → `cmp()` (-1/0/1); `Default` → `default()`, and `new()` when the
+    type has none (so `T x;` constructs it);
+- generic types at the concrete types `instantiate` names
+  (`HashMap<String, i64>` as `StrIntMap`): the impls that apply to them, with the
+  lookup-key generics resolved (`get(&self, k: &Q)` takes a `string`);
+- generic parameters bounded by a conversion: `T: AsRef<str>` / `impl AsRef<[u8]>`
+  / `Into<String>` take a `string`;
+- a `Result` error becomes its `Display` text (else its `Debug` text);
+- results that borrow are copied out: `&str` → `string`, `Option<&V>` →
+  `Option<V>`; an iterator becomes a `list` of its items (`m.keys()`);
+- a method that consumes `self`, or takes a type by value, clones it when the
+  type is `Clone` (a builder `with_label(self, …) -> Self` returns a new value);
+  one returning `&mut Self` (a builder chain) returns nothing.
+
+Everything else — other generics, `unsafe`/`async` functions, `&mut` results,
+iterators of tuples, deprecated items — is listed with the reason at the end of
+`generated.rs`. Wrap those by hand in `lib.rs`: it is plain Rust, and the
+generated types live in the same crate, so you can add methods to them:
+
+```rust
+// sic-deps/hashbrown/src/lib.rs
+mod generated;
+pub use generated::*;
+
+impl StrIntMap {
+    /// The entries, sorted by key.
+    pub fn sorted_keys(&self) -> Vec<String> {
+        let mut k: Vec<String> = self.0.keys().cloned().collect();
+        k.sort();
+        k
+    }
+}
+```
+
+The repository's test of all this is `module_test/14-cargo-sic` (a local,
+dependency-free crate; the repository itself holds no third-party crates).
+
 ## A binding crate
 
-A folder holding a `Cargo.toml` is a Rust module. The repository's example is the
-dependency-free test crate `module_test/13-rust-crate/mod-rsdemo`:
+`cargo sic` drives a lower-level mechanism you can also use directly:
+`sic --emit-module DIR` on a folder holding a `Cargo.toml` builds that crate as a
+module, binding what the root of its `src/lib.rs` declares (and what it
+re-exports with `pub use m::*` from a file module, as the generated binding does).
+The repository's example is the dependency-free test crate
+`module_test/13-rust-crate/mod-rsdemo`:
 
 ```toml
 # mod-rsdemo/Cargo.toml

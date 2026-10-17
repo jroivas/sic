@@ -226,7 +226,8 @@ fn target_triple() -> String {
 /// Default directories the compiler searches for installed module manifests
 /// (`module_<name>.smod`) and their `lib<name>.{so,a}` — so `import std;` works
 /// with no flags (sic.md §"Imports"). In order: every entry of `$SIC_MODULE_PATH`
-/// (`:`-separated), then the compiler's relocatable sysroot relative to its own
+/// (`:`-separated), then `cargo sic`'s Rust bindings (`<project>/sic-deps/*`,
+/// `~/.local/lib/sic/sic-deps/*`), then the compiler's relocatable sysroot relative to its own
 /// binary — `<exe_dir>/../lib/sic` and `<exe_dir>/lib/sic`. Consulted before `-I`
 /// and cwd. Only existing directories are returned.
 fn module_search_dirs() -> Vec<String> {
@@ -235,6 +236,24 @@ fn module_search_dirs() -> Vec<String> {
         for d in p.split(':').filter(|s| !s.is_empty()) {
             dirs.push(d.to_string());
         }
+    }
+    // Rust crate bindings installed by `cargo sic`: the project's (the nearest
+    // directory at or above the current one holding a `sic.toml`), then the
+    // user's global ones (`cargo sic --global`, in `~/.local/lib/sic`).
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(r) = cwd.ancestors().find(|d| d.join("sic.toml").is_file()) { roots.push(r.to_path_buf()); }
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        roots.push(PathBuf::from(home).join(".local/lib/sic"));
+    }
+    for root in roots {
+        let Ok(rd) = fs::read_dir(root.join("sic-deps")) else { continue };
+        let mut ds: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.join(format!("module_{}.smod", p.file_name().unwrap_or_default().to_string_lossy())).is_file())
+            .collect();
+        ds.sort();
+        dirs.extend(ds.into_iter().map(|d| d.to_string_lossy().into_owned()));
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin) = exe.parent() {

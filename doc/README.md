@@ -45,8 +45,9 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 14. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
     namespaces, building a module, chain-loaded dependencies, and the `.smod`
     manifest.
-15. [Rust crates](rust-crates.md) — binding a Rust crate as a SIC module: the
-    binding crate, type mapping, Rust objects, panics.
+15. [Rust crates](rust-crates.md) — `cargo sic add <crate>`: Rust crates as SIC
+    modules — the project and `sic.toml`, generated bindings, generic instances,
+    hand-written wrappers, type mapping, panics.
 16. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
 17. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC

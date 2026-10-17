@@ -1,0 +1,15 @@
+[package]
+name = "cargo-sic"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# `cargo sic …`: fetch Rust crates with cargo, generate their SIC bindings and
+# build them with `sic --emit-module` (doc/rust-crates.md).
+[[bin]]
+name = "cargo-sic"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+toml_edit = "0.22"

@@ -17,6 +17,9 @@ library (`siccomp/lib/std/std.sic`) into the compiler's module sysroot so
 cd siccomp && cargo build           # → siccomp/target/debug/sic
 ```
 
+The same build produces `cargo-sic`, which adds Rust crates to a SIC project
+(`cargo sic add <crate>`, see [Rust crates](rust-crates.md)).
+
 Add the binary to your `PATH`, or invoke it directly:
 
 ```sh

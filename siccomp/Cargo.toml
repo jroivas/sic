@@ -6,6 +6,7 @@ members = [
     "crates/sic-cranelift",
     "crates/sic-link",
     "crates/sic",
+    "crates/cargo-sic",
 ]
 resolver = "2"
 

@@ -1336,6 +1336,12 @@ namespace named after the type, and an argument-less `new()` is also the
 constructor. The test crate `module_test/13-rust-crate/mod-rsdemo` is the
 example; see `doc/rust-crates.md`.
 
+`cargo sic add <crate>` (the `cargo-sic` tool) automates this for a crates.io
+crate. It records the crate in the project's `sic.toml`, generates a binding
+crate in `sic-deps/<module>/` from the crate's rustdoc JSON, and builds it. Generic
+types are bound at the instances `sic.toml` names. `sic` finds `sic-deps/*`
+without `-I`.
+
 ## Match
 
 `Option<T>` and `Result<T, E>` (and `Iterator<T>`) are **native, built-in**
