@@ -148,7 +148,7 @@ impl Parser {
             Ok(t)
         } else {
             Err(CompileError::at(
-                format!("expected {:?} but got {:?} ('{}')", kind, t.kind, t.text),
+                format!("expected {}, found {}", kind_spelling(kind), tok_desc(&t)),
                 t.span.file.clone(), t.span.line, t.span.col,
             ))
         }
@@ -3269,8 +3269,12 @@ impl Parser {
             }
             _ => {
                 let t = self.peek().clone();
+                let after = match self.pos.checked_sub(1).and_then(|p| self.tokens.get(p)) {
+                    Some(prev) if self.pos > 0 => format!(" after {}", tok_desc(prev)),
+                    _ => String::new(),
+                };
                 Err(CompileError::at(
-                    format!("unexpected token {:?} '{}' in expression", t.kind, t.text),
+                    format!("expected an expression{}, found {}", after, tok_desc(&t)),
                     t.span.file, t.span.line, t.span.col,
                 ))
             }
@@ -3828,6 +3832,34 @@ fn stmt_terminates_case(s: &Stmt) -> bool {
         }
         _ => false,
     }
+}
+
+/// A token as a diagnostic shows it: `)`, `foo`, number `12`, end of input.
+pub(crate) fn tok_desc(t: &Token) -> String {
+    match t.kind {
+        TokenKind::Eof => "end of input".to_string(),
+        TokenKind::IntLit | TokenKind::FloatLit => format!("number `{}`", t.text),
+        TokenKind::StringLit | TokenKind::WideStringLit => "a string literal".to_string(),
+        TokenKind::CharLit => "a character literal".to_string(),
+        _ if !t.text.is_empty() => format!("`{}`", t.text),
+        k => kind_spelling(k),
+    }
+}
+
+/// How an expected token kind is written in source.
+pub(crate) fn kind_spelling(k: TokenKind) -> String {
+    use TokenKind::*;
+    let s = match k {
+        LParen => "(", RParen => ")", LBrace => "{", RBrace => "}", LBracket => "[", RBracket => "]",
+        Semi => ";", Comma => ",", Colon => ":", ColonColon => "::", Dot => ".", Arrow => "->",
+        Eq => "=", FatArrow => "=>", Lt => "<", Gt => ">", Star => "*", Question => "?",
+        Ident => return "an identifier".to_string(),
+        IntLit => return "a number".to_string(),
+        StringLit => return "a string literal".to_string(),
+        Eof => return "end of input".to_string(),
+        other => return format!("`{}`", format!("{:?}", other).to_lowercase()),
+    };
+    format!("`{}`", s)
 }
 
 /// The suffix makes a `float` (not `double`/`long double`) constant.
