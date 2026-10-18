@@ -1,0 +1,5 @@
+module m;
+namespace buf {
+    int *new(int size) { return new int[size]; }
+    int fill(int *p, int n) { for (int i = 0; i < n; i++) p[i] = i; return n; }
+}

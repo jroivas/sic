@@ -1,0 +1,5 @@
+// `new` is a keyword at file scope: a function named `new` must live in a
+// namespace (and be called as `ns::new(…)`).
+void new() {}
+
+int main() { return 0; }

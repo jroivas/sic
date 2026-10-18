@@ -1,0 +1,9 @@
+// A module namespace exports a function named `new`: called as `m::buf::new(…)`.
+import m;
+int main() {
+    int *p = m::buf::new(5);
+    m::buf::fill(p, 5);
+    int r = p[4];
+    del p;
+    return r == 4 ? 0 : 1;
+}

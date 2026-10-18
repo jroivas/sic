@@ -1,0 +1,21 @@
+// `new` names a function inside a namespace and is called as `ns::new(…)`;
+// unqualified, `new` is always the allocation keyword (even inside the namespace).
+namespace something {
+    int *new(int size) { return new int[size]; }        // the keyword, inside the fn
+    int *other() { int *a = something::new(5); a[4] = 7; return a; }
+}
+
+namespace outer {
+    namespace inner {
+        int new(int x) { return x * 2; }
+    }
+}
+
+int main() {
+    int *p = something::other();
+    int *q = something::new(3);
+    int r = p[4] + (int)sizeof(q[0]) + outer::inner::new(10);   // 7 + 4 + 20
+    del p;
+    del q;
+    return r + 11;
+}

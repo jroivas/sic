@@ -20,6 +20,10 @@ pub struct Parser {
     /// Type-parameter list captured while parsing the current function declarator,
     /// consumed when the `Decl::Func` is built.
     pending_type_params: Vec<String>,
+    /// sic: how many `namespace { … }` bodies enclose the current declaration.
+    /// Inside one, `new(` may name a function (`ns::new`); outside, `new` is
+    /// only the allocation keyword.
+    ns_depth: usize,
     /// Source characters, for recovering the exact text of a construct (a generic
     /// function template exported to a module manifest). Empty if not provided.
     src_chars: Vec<char>,
@@ -120,7 +124,7 @@ impl Parser {
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), ns_depth: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -230,6 +234,15 @@ impl Parser {
             ))
         }
     }
+    /// A name after `::`: an identifier, or `new` — `ns::new` is always the
+    /// member (the keyword never follows `::`).
+    fn expect_member_name(&mut self) -> Result<String> {
+        if self.lang == Lang::Sic && self.at(TokenKind::New) {
+            return Ok(self.advance().text.clone());
+        }
+        self.expect_name()
+    }
+
     fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) { self.advance(); true } else { false }
     }
@@ -310,6 +323,8 @@ impl Parser {
             let name = self.expect_name()?;
             self.expect(TokenKind::LBrace)?;
             let mut decls = Vec::new();
+            self.ns_depth += 1;
+            let body = (|| -> Result<()> {
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 if self.eat(TokenKind::Semi) { continue; }
                 let before = self.pos;
@@ -323,6 +338,10 @@ impl Parser {
                         t.span.file.clone(), t.span.line, t.span.col));
                 }
             }
+            Ok(())
+            })();
+            self.ns_depth -= 1;
+            body?;
             self.expect(TokenKind::RBrace)?;
             self.eat(TokenKind::Semi); // optional trailing `;`
             return Ok(Decl::Namespace { name, decls, span: sp });
@@ -948,7 +967,7 @@ impl Parser {
         let mut segs = vec![first];
         while self.at(TokenKind::ColonColon) {
             self.advance();
-            segs.push(self.expect_name()?);
+            segs.push(self.expect_member_name()?);
         }
         let variant = segs.pop().unwrap();
         let enum_name = segs.join("::");
@@ -1499,6 +1518,23 @@ impl Parser {
         }
 
         self.skip_attributes();
+
+        // sic: `new(…)` declares a function only inside a namespace (called as
+        // `ns::new(…)`); at file scope `new` is the allocation keyword.
+        if self.lang == Lang::Sic && self.at(TokenKind::New)
+            && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LParen)
+        {
+            if self.ns_depth == 0 {
+                let t = self.peek().clone();
+                return Err(CompileError::at(
+                    "`new` is a keyword: a function named `new` must be declared in a namespace \
+                     (`namespace n { … new(…) … }`) and called as `n::new(…)`".to_string(),
+                    t.span.file.clone(), t.span.line, t.span.col));
+            }
+            let name = self.advance().text.clone();
+            let ty = self.parse_declarator_suffix(new_base)?;
+            return Ok((name, ty));
+        }
 
         // Direct declarator: name, grouped, or abstract
         if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {

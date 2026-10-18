@@ -123,6 +123,19 @@ int main() {
 Inside the namespace its members are reachable by their bare names too (`width`
 instead of `geo::width`); a parameter or local of the same name shadows them.
 
+A namespace may declare a function named `new` — the conventional constructor
+name. It is always called qualified, `geo::new(…)` (or `mod::geo::new(…)` from
+another module): unqualified, `new` is the allocation keyword, even inside the
+namespace, so the two never collide. At file scope a function cannot be named
+`new`.
+
+```sic
+namespace buf {
+    int *new(int size) { return new int[size]; }   // the keyword inside
+}
+int *p = buf::new(16);                             // the function
+```
+
 An `enum` belongs to its namespace: name it `geo::Shape` from outside (or
 `mod::geo::Shape` from another module) and plain `Shape` inside, so two namespaces
 may each define their own `Status` (as `std::file::Status` and
