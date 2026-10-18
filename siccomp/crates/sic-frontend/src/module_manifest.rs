@@ -62,6 +62,8 @@ pub struct ModuleManifest {
     /// sic module type export (sic.md §"Namespace"): public aggregate types this
     /// module defines, `(name, type)`, so a consumer can name `mod::Type`.
     pub types: Vec<(String, Type)>,
+    /// `(alias, type)`: another name of an exported type (`alias Point geo__Point`).
+    pub type_aliases: Vec<(String, String)>,
     /// sic module enum export: public payload-less enums, `(name, [(variant,
     /// value)])`, so a consumer can use `mod::Enum::Variant`.
     pub enums: Vec<(String, Vec<(String, i64)>)>,
@@ -184,6 +186,7 @@ impl ModuleManifest {
             links: links.to_vec(),
             exports,
             types,
+            type_aliases: ir.sic_type_aliases.clone(),
             enums: ir.sic_enum_exports.clone(),
             tagenums: ir.sic_tagenum_exports.clone(),
             generic_fns: ir.sic_generic_fn_exports.clone(),
@@ -237,6 +240,9 @@ impl ModuleManifest {
         // Mark which records are public type exports (consumers register these).
         for (name, _) in &self.types {
             s.push_str(&format!("pubtype {}\n", name));
+        }
+        for (alias, target) in &self.type_aliases {
+            s.push_str(&format!("alias {} {}\n", alias, target));
         }
         // Public payload-less enums: `enum Name V1=0,V2=5,…`.
         for (name, variants) in &self.enums {
@@ -318,6 +324,7 @@ impl ModuleManifest {
         let mut links: Vec<String> = Vec::new();
         let mut exports = Vec::new();
         let mut types: Vec<(String, Type)> = Vec::new();
+        let mut type_aliases: Vec<(String, String)> = Vec::new();
         let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
         let mut tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)> = Vec::new();
         let mut generic_fns: Vec<String> = Vec::new();
@@ -476,6 +483,11 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: pubtype '{}' has no record", lineno + 1, name))?;
                     types.push((name.to_string(), ty));
                 }
+                "alias" => {
+                    let alias = it.next().ok_or_else(|| format!("line {}: alias name missing", lineno + 1))?;
+                    let target = it.next().ok_or_else(|| format!("line {}: alias target missing", lineno + 1))?;
+                    type_aliases.push((alias.to_string(), target.to_string()));
+                }
                 "ctor" | "dtor" => {
                     let name = it.next()
                         .ok_or_else(|| format!("line {}: {} struct name missing", lineno + 1, kw))?;
@@ -522,6 +534,7 @@ impl ModuleManifest {
             module: module.ok_or("missing 'module' line")?,
             triple: triple.ok_or("missing 'triple' line")?,
             types,
+            type_aliases,
             enums,
             tagenums,
             generic_fns,
@@ -826,6 +839,7 @@ mod tests {
                 },
             ],
             types: vec![],
+            type_aliases: vec![],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
@@ -859,6 +873,7 @@ mod tests {
                 })),
             }],
             types: vec![],
+            type_aliases: vec![],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
@@ -897,6 +912,7 @@ mod tests {
                 })),
             }],
             types: vec![],
+            type_aliases: vec![],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],

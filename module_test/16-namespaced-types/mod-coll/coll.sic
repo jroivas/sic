@@ -11,3 +11,7 @@ namespace set {
     struct Iter { int a; int b; int next(Iter *self) { self->a += self->b; return self->a; } };
     Iter start(int step) { Iter i; i.a = 0; i.b = step; return i; }
 }
+
+// A re-export: `coll::Iter` is `coll::map::Iter` (an `alias` manifest record —
+// the bare name alone is ambiguous between the two).
+typedef map::Iter Iter;

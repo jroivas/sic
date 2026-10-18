@@ -126,6 +126,9 @@ pub struct Module {
     pub externs: Vec<ExternFunc>,
     /// Named struct/union types registered in this module.
     pub type_defs: Vec<(String, Type)>,
+    /// sic module type aliases: `(alias, exported type)` for a public `typedef`
+    /// of an exported struct (`typedef geo::Point Point;` — a re-export).
+    pub sic_type_aliases: Vec<(String, String)>,
     /// Source file path this module was compiled from (for DWARF debug info).
     pub source_file: Option<String>,
     /// Producer identification written into the object: the ELF `.comment`
@@ -186,6 +189,7 @@ impl Module {
             functions: Vec::new(),
             externs: Vec::new(),
             type_defs: Vec::new(),
+            sic_type_aliases: Vec::new(),
             source_file: None,
             producer: None,
             sic_module: None,

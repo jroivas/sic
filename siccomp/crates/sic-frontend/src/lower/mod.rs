@@ -142,6 +142,9 @@ pub struct Lowerer {
     /// (`SplitMix64` → `std::SplitMix64`, `Thread__Status` → `std::Thread::Status`),
     /// for the "write mod::Type" hint when a consumer names one bare.
     pub imported_type_paths: HashMap<String, Vec<String>>,
+    /// `(typedef name, aliased struct)` of this unit's typedefs naming a struct:
+    /// the module's type re-exports (see `sic_type_aliases`).
+    pub typedef_aliases: Vec<(String, String)>,
     /// sic module type export (sic.md §"Namespace"/§"Imports"): names of aggregate
     /// types *defined in this module*, in definition order, to publish in the
     /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
@@ -319,6 +322,7 @@ impl Lowerer {
             namespace_members: HashMap::new(),
             namespace_types: HashMap::new(),
             imported_type_paths: HashMap::new(),
+            typedef_aliases: Vec::new(),
             module_defined_types: Vec::new(),
             imported_type_names: std::collections::HashSet::new(),
             qualified_only: HashMap::new(),
@@ -491,6 +495,15 @@ impl Lowerer {
                     if matches!(ty, Type::Struct(_) | Type::Union(_)) {
                         self.module.type_defs.push((name.clone(), ty.clone()));
                     }
+                }
+            }
+            // Public typedefs of exported types: other names of them.
+            for (alias, target) in std::mem::take(&mut self.typedef_aliases) {
+                if self.module.type_defs.iter().any(|(n, _)| *n == target)
+                    && !self.module.type_defs.iter().any(|(n, _)| *n == alias)
+                    && !self.module.sic_type_aliases.iter().any(|(a, _)| *a == alias)
+                {
+                    self.module.sic_type_aliases.push((alias, target));
                 }
             }
             // A module re-exports only what IT defines — not symbols pulled in from
@@ -785,6 +798,11 @@ impl Lowerer {
                             }
                             _ => {}
                         }
+                        // A typedef naming another struct (`typedef geo::Point
+                        // Point;`): a candidate re-export of the module.
+                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { name: Some(target), .. }) = &ir_ty {
+                            if target != name { self.typedef_aliases.push((name.clone(), target.clone())); }
+                        }
                         self.register_type_name(name.clone(), ir_ty);
                     }
                 }
@@ -909,6 +927,17 @@ impl Lowerer {
                 let bare = name.rsplit("__").next().unwrap_or(name).to_string();
                 let e = self.imported_type_paths.entry(bare).or_default();
                 if !e.contains(&path) { e.push(path); }
+            }
+            // Type aliases (re-exports): another name of an exported type.
+            for (alias, target) in &manifest.type_aliases {
+                if let Some(ty) = self.struct_types.get(target).cloned() {
+                    self.struct_types.entry(alias.clone()).or_insert(ty);
+                    self.imported_type_names.insert(alias.clone());
+                    let path = format!("{}::{}", module, alias.replace("__", "::"));
+                    let bare = alias.rsplit("__").next().unwrap_or(alias).to_string();
+                    let e = self.imported_type_paths.entry(bare).or_default();
+                    if !e.contains(&path) { e.push(path); }
+                }
             }
             for (ename, _) in manifest.enums.iter().map(|(n, v)| (n, v.len())).chain(manifest.tagenums.iter().map(|(n, v)| (n, v.len()))) {
                 let bare = ename.rsplit("__").next().unwrap_or(ename).to_string();
