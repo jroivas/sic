@@ -1,0 +1,12 @@
+// Regression: a struct named before its definition (`S f(void);` … `struct S`)
+// failed to parse once a missing `;` became an error (it had parsed as `S;`
+// plus an implicit-int prototype). A SIC type name is known in the whole unit.
+S make(int v);
+
+int use() { S s = make(40); return s.v + 2; }
+
+struct S { int v; };
+
+S make(int v) { S s; s.v = v; return s; }
+
+int main() { return use(); }

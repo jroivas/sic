@@ -123,6 +123,18 @@ impl Parser {
             // so `T` in the return/parameter types (written before the `<T>` list)
             // is recognized. All existing type checks consult `typedefs`.
             for p in &generic_type_params { typedefs.insert(p.clone()); }
+            // A SIC struct/union/enum names a type in the whole unit, also above
+            // its definition (`S f(void);` … `struct S { … };`), as a SIC type
+            // name needs no `struct` keyword. Only SIC sources: a C header keeps
+            // C's rules.
+            for w in tokens.windows(3) {
+                if matches!(w[0].kind, TokenKind::Struct | TokenKind::Union | TokenKind::Enum)
+                    && w[1].kind == TokenKind::Ident && w[2].kind == TokenKind::LBrace
+                    && w[1].span.file.as_deref().map_or(true, |f| f.ends_with(".sic"))
+                {
+                    typedefs.insert(w[1].text.clone());
+                }
+            }
         }
         let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), ns_depth: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
