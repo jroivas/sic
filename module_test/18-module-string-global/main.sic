@@ -1,0 +1,2 @@
+import m;
+int main() { return m::NAME.size == 6 && m::CNAME.size == 3 && m::NAME == "rsdemo" && m::len() == 6 ? 0 : 1; }

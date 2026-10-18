@@ -1,0 +1,6 @@
+// Regression: a consumer read a module's struct-typed global (`m::NAME.size` of a
+// string) by loading the struct and using it as a pointer — garbage.
+module m;
+string NAME = "rsdemo";
+const string CNAME = "abc";
+int len() { return (int)NAME.size; }

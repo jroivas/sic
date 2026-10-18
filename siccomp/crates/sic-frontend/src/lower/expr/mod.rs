@@ -732,7 +732,10 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && self.lowerer.imported_modules.contains_key(head) {
                     if let Some((g, ty)) = self.resolve_module_global(head, &sym) {
                         let lv = LValue::plain(Val::Global(g), ty);
-                        if matches!(lv.ty, Type::Array { .. }) { return Ok(lv.ptr); }
+                        // An aggregate (a `string` global too) is its address, as
+                        // every aggregate value is; loading the struct and using
+                        // that as a pointer read garbage (`m::NAME.size`).
+                        if matches!(lv.ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) { return Ok(lv.ptr); }
                         return self.load_lvalue(&lv);
                     }
                 }
