@@ -1338,8 +1338,9 @@ named after the type, and an argument-less `new()` is also the constructor. The 
 example; see `doc/rust-crates.md`.
 
 `cargo sic add <crate>` (the `cargo-sic` tool) automates this for a crates.io
-crate. It records the crate in the project's `sic.toml`, generates a binding
-crate in `sic-deps/<module>/` from the crate's rustdoc JSON, and builds it. Generic
+crate. It generates a binding crate in `sic-deps/<module>/` from the crate's
+rustdoc JSON, whose own Cargo.toml records the crate and its version (or an
+optional `sic.toml` lists it), and builds it. Generic
 types are bound at the instances `sic.toml` names. `sic` finds `sic-deps/*`
 without `-I`.
 

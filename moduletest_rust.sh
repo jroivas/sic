@@ -101,7 +101,7 @@ run_case() {
     # A project with a sic.toml: `cargo sic build` its Rust crates into
     # sic-deps/ (found by sic with no -I, from the project directory).
     local cdir="$PWD"
-    if [ -f "$work/sic.toml" ]; then
+    if [ -f "$work/sic.toml" ] || [ -d "$work/sic-deps" ]; then
         if ! command -v cargo >/dev/null 2>&1; then
             echo "SKIP $name (needs cargo)"
             success=$((success + 1))

@@ -1,0 +1,9 @@
+// A project without sic.toml: the binding's own sic-deps/tally/Cargo.toml
+// records the crate; `cargo sic build` and sic find it there (no -I).
+import tally;
+
+int main() {
+    tally::Tally t;
+    t.add("one two");
+    return t.add("three") == 3 ? 0 : 1;
+}

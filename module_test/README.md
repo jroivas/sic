@@ -14,7 +14,7 @@ Each subdirectory is one test case. Layout:
 - `no-valgrind` — marker: skip the valgrind leak/error check for this case.
 
 A `mod-<name>/` holding a `Cargo.toml` is a Rust crate (doc/rust-crates.md); such
-a case is skipped when `cargo` is not installed. A case holding a `sic.toml` is a
+a case is skipped when `cargo` is not installed. A case holding a `sic.toml` or a `sic-deps/` is a
 `cargo sic` project: the runner runs `cargo sic build` in it and compiles
 `main.sic` from there (so `sic-deps/` resolves with no `-I`). Test crates must not
 depend on third-party crates.

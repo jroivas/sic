@@ -1,0 +1,13 @@
+# The SIC binding of a Rust crate (`cargo sic`). This file records the
+# dependency: change its version or features here, then `cargo sic build`.
+[package]
+name = "sic-tally"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata.sic]
+module = "tally"
+
+[dependencies]
+"tally" = { path = "../../tally" }

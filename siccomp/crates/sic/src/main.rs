@@ -227,7 +227,7 @@ fn target_triple() -> String {
 /// (`module_<name>.smod`) and their `lib<name>.{so,a}` — so `import std;` works
 /// with no flags (sic.md §"Imports"). In order: every entry of `$SIC_MODULE_PATH`
 /// (`:`-separated), then `cargo sic`'s Rust bindings (`<project>/sic-deps/*`,
-/// `~/.local/lib/sic/sic-deps/*`), then the compiler's relocatable sysroot relative to its own
+/// `~/.sic-deps/*`), then the compiler's relocatable sysroot relative to its own
 /// binary — `<exe_dir>/../lib/sic` and `<exe_dir>/lib/sic`. Consulted before `-I`
 /// and cwd. Only existing directories are returned.
 fn module_search_dirs() -> Vec<String> {
@@ -237,18 +237,20 @@ fn module_search_dirs() -> Vec<String> {
             dirs.push(d.to_string());
         }
     }
-    // Rust crate bindings installed by `cargo sic`: the project's (the nearest
-    // directory at or above the current one holding a `sic.toml`), then the
-    // user's global ones (`cargo sic --global`, in `~/.local/lib/sic`).
-    let mut roots: Vec<PathBuf> = Vec::new();
+    // Rust crate bindings installed by `cargo sic`: the project's (`sic-deps/`
+    // of the nearest directory at or above the current one holding a sic.toml
+    // or a sic-deps/), then the user's global ones (`~/.sic-deps`).
+    let mut deps_dirs: Vec<PathBuf> = Vec::new();
     if let Ok(cwd) = std::env::current_dir() {
-        if let Some(r) = cwd.ancestors().find(|d| d.join("sic.toml").is_file()) { roots.push(r.to_path_buf()); }
+        if let Some(r) = cwd.ancestors().find(|d| d.join("sic.toml").is_file() || d.join("sic-deps").is_dir()) {
+            deps_dirs.push(r.join("sic-deps"));
+        }
     }
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
-        roots.push(PathBuf::from(home).join(".local/lib/sic"));
+        deps_dirs.push(PathBuf::from(home).join(".sic-deps"));
     }
-    for root in roots {
-        let Ok(rd) = fs::read_dir(root.join("sic-deps")) else { continue };
+    for deps in deps_dirs {
+        let Ok(rd) = fs::read_dir(&deps) else { continue };
         let mut ds: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.join(format!("module_{}.smod", p.file_name().unwrap_or_default().to_string_lossy())).is_file())
             .collect();
@@ -937,11 +939,15 @@ fn build_rust_instances(msg: &str, marker: &str, args: &Args) -> Result<(), Box<
     }
     for (dir, module, tys) in by_dir {
         let dirp = PathBuf::from(&dir);
-        let root = dirp.parent().filter(|p| p.file_name().map_or(false, |n| n == "sic-deps"))
-            .and_then(|p| p.parent())
-            .ok_or_else(|| format!("module '{}' ({}) is not a `cargo sic` binding: its generic types \
-                cannot be instantiated on demand", module, dir))?
-            .to_path_buf();
+        // `<root>/sic-deps/<module>` (a project) or `~/.sic-deps/<module>` (global).
+        let deps = dirp.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let global = deps.file_name().map_or(false, |n| n == ".sic-deps");
+        let root = if global { deps.clone() } else {
+            deps.parent().filter(|_| deps.file_name().map_or(false, |n| n == "sic-deps"))
+                .ok_or_else(|| format!("module '{}' ({}) is not a `cargo sic` binding: its generic types \
+                    cannot be instantiated on demand", module, dir))?
+                .to_path_buf()
+        };
         let file = dirp.join("instances");
         let mut have: Vec<String> = fs::read_to_string(&file).unwrap_or_default()
             .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
@@ -951,7 +957,9 @@ fn build_rust_instances(msg: &str, marker: &str, args: &Args) -> Result<(), Box<
             .filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("cargo-sic"));
         if args.debug { eprintln!("sic: building Rust instances {:?} of '{}'", tys, module); }
         eprintln!("sic: building {} for `{}`", tys.join(", "), module);
-        let st = Command::new(&cargo_sic).arg("build").arg(&module).current_dir(&root)
+        let mut cmd = Command::new(&cargo_sic);
+        if global { cmd.arg("--global"); }
+        let st = cmd.arg("build").arg(&module).current_dir(&root)
             .env("SIC", std::env::current_exe().unwrap_or_default())
             .status().map_err(|e| format!("cannot run {}: {}", cargo_sic.display(), e))?;
         if !st.success() {

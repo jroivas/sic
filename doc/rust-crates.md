@@ -34,22 +34,36 @@ int main() {
 
 | command | does |
 |---|---|
-| `cargo sic add <crate>[@<ver>]` | add it to `sic.toml`, generate its binding, build it. Options: `--features a,b`, `--no-default-features`, `--module NAME`, `--instance NAME=TYPE`, `--path DIR` |
+| `cargo sic add <crate>[@<ver>]` | record it (see [The project](#the-project)), generate its binding, build it. `@1.2.3` is that exact version (`=1.2.3`); `@^1.2` etc. a requirement; none, the newest. Options: `--features a,b`, `--no-default-features`, `--module NAME`, `--instance NAME=TYPE`, `--path DIR` |
 | `cargo sic build [<crate>…]` | regenerate and build the bindings (after cloning a project, or editing one) |
 | `cargo sic update [<crate>…]` | `cargo update` the locked versions, then build |
-| `cargo sic remove <crate>` | drop it from `sic.toml` and `sic-deps/` (an edited `lib.rs` is kept aside) |
+| `cargo sic remove <crate>` | drop it from `sic.toml` (if listed) and `sic-deps/` (an edited `lib.rs` is kept aside) |
 | `cargo sic show <crate>` | print the SIC interface: everything you can call |
 | `cargo sic list` | the crates and their modules |
 
-`--global` uses `~/.local/lib/sic` instead of the project, so every program on the
-machine can import those crates. `--offline` passes through to cargo; `-v` shows
+`--global` uses `~/.sic-deps` instead of the project, so every program on the
+machine can import those crates (a `~/.sic-deps/sic.toml` is optional, as below). `--offline` passes through to cargo; `-v` shows
 the commands run.
 
 ### The project
 
-The project is the nearest directory at or above the current one with a
-`sic.toml` (`add` creates one). It lists the crates in Cargo's `[dependencies]`
-syntax:
+The project is the nearest directory at or above the current one holding a
+`sic-deps/` or a `sic.toml` (`add` starts one in the current directory). No
+`sic.toml` is needed: each binding's own `sic-deps/<crate>/Cargo.toml` records the
+crate — `add` writes it, and you change the version or features there, then run
+`cargo sic build`:
+
+```toml
+# sic-deps/hashbrown/Cargo.toml
+[package.metadata.sic]
+module = "hashbrown"
+
+[dependencies]
+"hashbrown" = { version = "=0.17.1" }
+```
+
+Optionally a `sic.toml` lists the crates in one place, in Cargo's `[dependencies]`
+syntax; an entry there wins over a binding's own record:
 
 ```toml
 [dependencies]
@@ -72,9 +86,10 @@ sic-deps/
     module_semver.smod   libsemver.{a,so}
 ```
 
-`sic` searches `sic-deps/*` of the project (and of the global root) before `-I`,
-so `import semver;` needs no flags. Commit `sic.toml`, `sic-deps/Cargo.lock` and
-any edited `sic-deps/*/src/lib.rs`; the generated `.gitignore` covers the rest.
+`sic` searches `sic-deps/*` of the project, then `~/.sic-deps/*`, before `-I`, so
+`import semver;` needs no flags. Commit `sic-deps/Cargo.lock`, `sic-deps/*/Cargo.toml`,
+`sic-deps/*/instances`, any edited `sic-deps/*/src/lib.rs` (and `sic.toml` if you
+use one); the generated `.gitignore` covers the rest.
 
 ### What is generated
 
@@ -153,8 +168,9 @@ A type argument is a scalar (`i64`, `f64`, `bool`, …), `string` (Rust `String`
 **instance** compiled from Rust: when a program uses one its binding does not have
 yet, sic records it in `sic-deps/<crate>/instances`, runs `cargo sic build` for
 that crate, and compiles on — so only the first use is slow (commit the
-`instances` file to keep the list). `instantiate` in `sic.toml` pre-builds
-instances and can give one an extra name at the crate root (`hashbrown::StrIntMap`).
+`instances` file to keep the list). Listing an instance there (or in `sic.toml`'s
+`instantiate`) pre-builds it; `HashMap<String, i64> as StrIntMap` also gives it an
+extra name at the crate root (`hashbrown::StrIntMap`).
 
 Without the arguments in either place there is nothing to instantiate:
 

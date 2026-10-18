@@ -38,15 +38,23 @@ struct Dep {
     module: String,
     /// Generic types to bind at concrete types: (Rust type, SIC name).
     instances: Vec<(String, String)>,
+    /// Listed in sic.toml (else recorded by its binding's own Cargo.toml in
+    /// sic-deps/, whose paths are relative to that binding).
+    from_toml: bool,
 }
 
 struct Project {
+    /// Where sic.toml's relative paths start.
     root: PathBuf,
+    /// The bindings: `<root>/sic-deps`, or `~/.sic-deps` for `--global`.
+    deps: PathBuf,
 }
 
 impl Project {
-    fn manifest(&self) -> PathBuf { self.root.join(MANIFEST) }
-    fn deps_dir(&self) -> PathBuf { self.root.join(DEPS) }
+    fn manifest(&self) -> PathBuf {
+        if self.deps.file_name().map_or(false, |n| n == ".sic-deps") { self.deps.join(MANIFEST) } else { self.root.join(MANIFEST) }
+    }
+    fn deps_dir(&self) -> PathBuf { self.deps.clone() }
     fn target_dir(&self) -> PathBuf { self.deps_dir().join("target") }
 }
 
@@ -71,13 +79,15 @@ usage:
   cargo sic list
 
 options:
-  --global     use ~/.local/lib/sic instead of the project (found via sic.toml)
+  --global     use ~/.sic-deps (every program finds it) instead of the project
   --offline    do not touch the network (cargo --offline)
   -v           show cargo's warnings and the commands run
 
 The project is the nearest directory at or above the current one holding a
-sic.toml (`add` creates one in the current directory). Bindings are built in
-sic-deps/; `sic` finds them there with no -I flags."
+sic.toml or a sic-deps/ (`add` starts one in the current directory). A crate is
+listed in sic.toml when there is one, else recorded by its binding's own
+sic-deps/<crate>/Cargo.toml (its version is set there). `sic` finds the
+bindings in sic-deps/ and ~/.sic-deps with no -I flags."
 }
 
 fn main() {
@@ -117,34 +127,31 @@ fn run(args: &[String], opts: &Opts) -> Result<(), String> {
 
 // ── The project and sic.toml ─────────────────────────────────────────────────
 
-fn global_root() -> Result<PathBuf, String> {
+/// The user's global bindings: `~/.sic-deps`.
+fn global_deps() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).ok_or("HOME is not set")?;
-    Ok(PathBuf::from(home).join(".local/lib/sic"))
+    Ok(PathBuf::from(home).join(".sic-deps"))
 }
 
 /// The project: `--global`'s root, else the nearest directory with a sic.toml;
 /// `create` makes one in the current directory when there is none.
 fn find_project(opts: &Opts, create: bool) -> Result<Project, String> {
-    let root = if opts.global {
-        global_root()?
-    } else {
+    if opts.global {
+        let deps = global_deps()?;
+        if create { std::fs::create_dir_all(&deps).map_err(|e| format!("{}: {}", deps.display(), e))?; }
+        return Ok(Project { root: deps.clone(), deps });
+    }
+    let root = {
+        // The nearest directory holding a sic.toml or a sic-deps/ (bindings
+        // added without a sic.toml record themselves there).
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        match cwd.ancestors().find(|d| d.join(MANIFEST).is_file()) {
+        match cwd.ancestors().find(|d| d.join(MANIFEST).is_file() || d.join(DEPS).is_dir()) {
             Some(r) => r.to_path_buf(),
             None if create => cwd,
-            None => return Err(format!("no {} here or in any parent directory (`cargo sic add <crate>` creates one)", MANIFEST)),
+            None => return Err(format!("no {} or {}/ here or in any parent directory (`cargo sic add <crate>` makes one)", MANIFEST, DEPS)),
         }
     };
-    let p = Project { root };
-    if create && !p.manifest().is_file() {
-        std::fs::create_dir_all(&p.root).map_err(|e| format!("{}: {}", p.root.display(), e))?;
-        std::fs::write(p.manifest(),
-            "# Rust crates used from SIC; `cargo sic build` builds their bindings into sic-deps/.\n\
-             # Entries use Cargo's [dependencies] syntax, plus an optional `module = \"name\"`.\n\
-             [dependencies]\n").map_err(|e| e.to_string())?;
-        eprintln!("     Created {}", p.manifest().display());
-    }
-    Ok(p)
+    Ok(Project { deps: root.join(DEPS), root })
 }
 
 fn read_doc(p: &Project) -> Result<DocumentMut, String> {
@@ -165,13 +172,42 @@ fn valid_module(m: &str) -> bool {
         && !m.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// Every dependency: sic.toml's (when there is one), then each binding in
+/// sic-deps/ that sic.toml does not list — its own Cargo.toml records it.
+fn load_deps(p: &Project) -> Result<Vec<Dep>, String> {
+    let mut deps = if p.manifest().is_file() { read_deps(&read_doc(p)?)? } else { Vec::new() };
+    let Ok(rd) = std::fs::read_dir(p.deps_dir()) else { return Ok(deps) };
+    let mut dirs: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).filter(|d| d.join("Cargo.toml").is_file()).collect();
+    dirs.sort();
+    for dir in dirs {
+        let toml = dir.join("Cargo.toml");
+        let text = std::fs::read_to_string(&toml).map_err(|e| format!("{}: {}", toml.display(), e))?;
+        let doc = text.parse::<DocumentMut>().map_err(|e| format!("{}: {}", toml.display(), e))?;
+        let Some(module) = doc.get("package").and_then(|p| p.get("metadata")).and_then(|m| m.get("sic"))
+            .and_then(|s| s.get("module")).and_then(|m| m.as_str()) else { continue };
+        if deps.iter().any(|d| d.module == module) { continue; }
+        let Some((name, item)) = doc.get("dependencies").and_then(|t| t.as_table_like()).and_then(|t| t.iter().next()) else { continue };
+        let mut d = read_dep(name, item)?;
+        d.module = module.to_string();
+        d.from_toml = false;
+        deps.push(d);
+    }
+    Ok(deps)
+}
+
 fn read_deps(doc: &DocumentMut) -> Result<Vec<Dep>, String> {
     let mut out = Vec::new();
     let Some(tab) = doc.get("dependencies").and_then(|t| t.as_table_like()) else { return Ok(out) };
-    for (name, item) in tab.iter() {
+    for (name, item) in tab.iter() { out.push(read_dep(name, item)?); }
+    Ok(out)
+}
+
+/// One dependency entry in Cargo's syntax (a version, or a table).
+fn read_dep(name: &str, item: &Item) -> Result<Dep, String> {
+    {
         let mut d = Dep {
             name: name.to_string(), version: None, path: None, features: Vec::new(),
-            default_features: true, module: module_name(name), instances: Vec::new(),
+            default_features: true, module: module_name(name), instances: Vec::new(), from_toml: true,
         };
         match item {
             Item::Value(Value::String(s)) => d.version = Some(s.value().clone()),
@@ -202,9 +238,8 @@ fn read_deps(doc: &DocumentMut) -> Result<Vec<Dep>, String> {
         if !valid_module(&d.module) {
             return Err(format!("{}: `{}` is not a valid SIC module name (set `module = \"...\"`)", MANIFEST, d.module));
         }
-        out.push(d);
+        Ok(d)
     }
-    Ok(out)
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -242,12 +277,23 @@ fn cmd_add(args: &[String], opts: &Opts) -> Result<(), String> {
             let abs = std::fs::canonicalize(&abs).map_err(|e| format!("{}: {}", dir, e))?;
             let n = package_name(&abs)?;
             if let Some(s) = &spec { if *s != n { return Err(format!("{} is the crate `{}`, not `{}`", dir, n, s)); } }
-            // The global list keeps absolute paths (it is not moved around with a project).
-            let rel = if opts.global { abs.to_string_lossy().into_owned() } else { relative_to(&abs, &p.root) };
+            // sic.toml paths are relative to the project; a binding's own record
+            // is relative to the binding (`sic-deps/<module>`); global ones absolute.
+            let rel = if opts.global { abs.to_string_lossy().into_owned() }
+                else if p.manifest().is_file() { relative_to(&abs, &p.root) }
+                else { abs.to_string_lossy().into_owned() };
             (n, None, Some(rel))
         }
+        // `crate@1.2.3` is that version exactly (`=1.2.3`); an explicit
+        // requirement (`@^1.2`, `@~1.2`, `@>=1.2`) is kept as written.
         (Some(s), None) => match s.split_once('@') {
-            Some((n, v)) => (n.to_string(), Some(v.to_string()), None),
+            Some((n, v)) => {
+                let v = v.trim();
+                let req = if v.starts_with(|c: char| c.is_ascii_digit()) && v.matches('.').count() == 2 {
+                    format!("={}", v)
+                } else { v.to_string() };
+                (n.to_string(), Some(req), None)
+            }
             None => (s.clone(), None, None),
         },
         (None, None) => return Err("usage: cargo sic add <crate>[@<version>] | --path <dir>".into()),
@@ -258,6 +304,29 @@ fn cmd_add(args: &[String], opts: &Opts) -> Result<(), String> {
         (None, None) => Some(latest_version(&name, opts)?),
         (None, Some(_)) => None,
     };
+    // Without a sic.toml the binding records the dependency itself
+    // (`sic-deps/<module>/Cargo.toml`): written now, read back by `build`.
+    if !p.manifest().is_file() {
+        let module = module.clone().unwrap_or_else(|| module_name(&name));
+        if !valid_module(&module) { return Err(format!("`{}` is not a valid SIC module name (use --module)", module)); }
+        let dir = p.deps_dir().join(&module);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+        let path = rel_path.as_ref().map(|a| if opts.global { a.clone() } else { relative_to(Path::new(a), &dir) });
+        let d = Dep { name: name.clone(), version: version.clone(), path, features: features.clone(),
+            default_features: !no_default, module: module.clone(), instances: Vec::new(), from_toml: false };
+        write_member(&p, &d, true)?;
+        if !instances.is_empty() {
+            let file = dir.join("instances");
+            let mut have = std::fs::read_to_string(&file).unwrap_or_default();
+            for (ty, n) in &instances {
+                let line = format!("{} as {}", ty, n);
+                if !have.lines().any(|l| l.trim() == line) { have.push_str(&line); have.push('\n'); }
+            }
+            std::fs::write(&file, have).map_err(|e| format!("{}: {}", file.display(), e))?;
+        }
+        eprintln!("       Added {} {} in {}", name, version.as_deref().unwrap_or(""), dir.display());
+        return build(&p, &[name], opts, false);
+    }
     let mut doc = read_doc(&p)?;
     if doc.get("dependencies").is_none() { doc["dependencies"] = toml_edit::table(); }
     let simple = rel_path.is_none() && features.is_empty() && !no_default && module.is_none() && instances.is_empty();
@@ -299,12 +368,14 @@ fn cmd_add(args: &[String], opts: &Opts) -> Result<(), String> {
 fn cmd_remove(args: &[String], opts: &Opts) -> Result<(), String> {
     let name = args.first().ok_or("usage: cargo sic remove <crate>")?;
     let p = find_project(opts, false)?;
-    let mut doc = read_doc(&p)?;
-    let deps = read_deps(&doc)?;
+    let deps = load_deps(&p)?;
     let d = deps.iter().find(|d| d.name == *name || d.module == *name)
-        .ok_or_else(|| format!("`{}` is not in {}", name, p.manifest().display()))?.clone();
-    doc["dependencies"].as_table_like_mut().map(|t| t.remove(&d.name));
-    write_doc(&p, &doc)?;
+        .ok_or_else(|| format!("`{}` is not a dependency of {}", name, p.root.display()))?.clone();
+    if d.from_toml {
+        let mut doc = read_doc(&p)?;
+        doc["dependencies"].as_table_like_mut().map(|t| t.remove(&d.name));
+        write_doc(&p, &doc)?;
+    }
     let dir = p.deps_dir().join(&d.module);
     if dir.is_dir() {
         // Keep a hand-edited lib.rs around rather than deleting someone's work.
@@ -316,7 +387,7 @@ fn cmd_remove(args: &[String], opts: &Opts) -> Result<(), String> {
         }
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
     }
-    let remaining = read_deps(&doc)?;
+    let remaining = load_deps(&p)?;
     write_workspace(&p, &remaining)?;
     eprintln!("     Removed {}", d.name);
     Ok(())
@@ -325,9 +396,9 @@ fn cmd_remove(args: &[String], opts: &Opts) -> Result<(), String> {
 fn cmd_show(args: &[String], opts: &Opts) -> Result<(), String> {
     let name = args.first().ok_or("usage: cargo sic show <crate>")?;
     let p = find_project(opts, false)?;
-    let deps = read_deps(&read_doc(&p)?)?;
+    let deps = load_deps(&p)?;
     let d = deps.iter().find(|d| d.name == *name || d.module == *name)
-        .ok_or_else(|| format!("`{}` is not in {}", name, p.manifest().display()))?;
+        .ok_or_else(|| format!("`{}` is not a dependency of {}", name, p.root.display()))?;
     let sic = p.target_dir().join("sic-glue").join(&d.module).join(format!("{}.sic", d.module));
     let text = std::fs::read_to_string(&sic)
         .map_err(|_| format!("`{}` is not built yet (cargo sic build {})", d.name, d.name))?;
@@ -337,14 +408,15 @@ fn cmd_show(args: &[String], opts: &Opts) -> Result<(), String> {
 
 fn cmd_list(opts: &Opts) -> Result<(), String> {
     let p = find_project(opts, false)?;
-    for d in read_deps(&read_doc(&p)?)? {
+    for d in load_deps(&p)? {
         let built = p.deps_dir().join(&d.module).join(format!("module_{}.smod", d.module)).is_file();
         let src = match (&d.path, &d.version) {
             (Some(pth), _) => format!("path {}", pth),
             (None, Some(v)) => v.clone(),
             _ => "*".into(),
         };
-        println!("{:<20} {:<16} import {};{}", d.name, src, d.module, if built { "" } else { "   (not built)" });
+        let from = if d.from_toml { "sic.toml" } else { "sic-deps" };
+        println!("{:<20} {:<16} import {};  ({}){}", d.name, src, d.module, from, if built { "" } else { "   (not built)" });
     }
     Ok(())
 }
@@ -422,9 +494,9 @@ fn write_workspace(p: &Project, deps: &[Dep]) -> Result<(), String> {
         "# Generated by `cargo sic` from ../sic.toml; do not edit.\n[workspace]\nresolver = \"2\"\nmembers = [{}]\nexclude = [\"target\"]\n",
         members.join(", "));
     write_if_changed(&dir.join("Cargo.toml"), &ws)?;
-    let ignore = "# Generated by `cargo sic`. Commit Cargo.lock and your edited */src/lib.rs;\n\
-                  # everything else is rebuilt from ../sic.toml.\n\
-                  /Cargo.toml\n/target/\n/*/Cargo.toml\n/*/src/generated.rs\n/*/sic-generics\n/*/lib*.a\n/*/lib*.so\n/*/module_*\n";
+    let ignore = "# Generated by `cargo sic`. Commit Cargo.lock, */Cargo.toml, */instances and\n# your edited */src/lib.rs;\n\
+                  # everything else is rebuilt by `cargo sic build`.\n\
+                  /Cargo.toml\n/target/\n/*/src/generated.rs\n/*/sic-generics\n/*/lib*.a\n/*/lib*.so\n/*/module_*\n";
     write_if_changed(&dir.join(".gitignore"), ignore)?;
     Ok(())
 }
@@ -444,16 +516,29 @@ fn lib_template(d: &Dep) -> String {
         d.name)
 }
 
-/// The binding crate of one dependency: Cargo.toml (generated) and lib.rs (once).
-fn write_member(p: &Project, d: &Dep) -> Result<PathBuf, String> {
+const GENERATED_HEADER: &str = "# Generated by `cargo sic` from sic.toml; do not edit.\n";
+const RECORD_HEADER: &str = "# The SIC binding of a Rust crate (`cargo sic`). This file records the\n\
+    # dependency: change its version or features here, then `cargo sic build`.\n";
+
+/// The binding crate of one dependency: Cargo.toml and lib.rs (once). For a
+/// sic.toml entry the Cargo.toml is generated; otherwise it IS the record, and
+/// is written only when `record` (by `add`) or to replace an old generated one.
+fn write_member(p: &Project, d: &Dep, record: bool) -> Result<PathBuf, String> {
     let dir = p.deps_dir().join(&d.module);
     std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    let cargo = dir.join("Cargo.toml");
+    let keep = !d.from_toml && !record
+        && std::fs::read_to_string(&cargo).map_or(false, |t| !t.starts_with(GENERATED_HEADER));
     let mut spec: Vec<String> = Vec::new();
     if let Some(v) = &d.version { spec.push(format!("version = {}", quote(v))); }
     if let Some(pth) = &d.path {
-        let abs = p.root.join(pth);
-        let abs = std::fs::canonicalize(&abs).map_err(|e| format!("{}: path {}: {}", MANIFEST, pth, e))?;
-        spec.push(format!("path = {}", quote(&abs.to_string_lossy())));
+        if d.from_toml {
+            let abs = p.root.join(pth);
+            let abs = std::fs::canonicalize(&abs).map_err(|e| format!("{}: path {}: {}", MANIFEST, pth, e))?;
+            spec.push(format!("path = {}", quote(&abs.to_string_lossy())));
+        } else {
+            spec.push(format!("path = {}", quote(pth)));
+        }
     }
     if !d.features.is_empty() {
         let fs: Vec<String> = d.features.iter().map(|f| quote(f)).collect();
@@ -461,10 +546,11 @@ fn write_member(p: &Project, d: &Dep) -> Result<PathBuf, String> {
     }
     if !d.default_features { spec.push("default-features = false".into()); }
     let toml = format!(
-        "# Generated by `cargo sic` from sic.toml; do not edit.\n[package]\nname = {}\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
+        "{}[package]\nname = {}\nversion = \"0.0.0\"\nedition = \"2021\"\npublish = false\n\n\
          [package.metadata.sic]\nmodule = {}\n\n[dependencies]\n{} = {{ {} }}\n",
+        if d.from_toml { GENERATED_HEADER } else { RECORD_HEADER },
         quote(&format!("sic-{}", d.module.replace('_', "-"))), quote(&d.module), quote(&d.name), spec.join(", "));
-    write_if_changed(&dir.join("Cargo.toml"), &toml)?;
+    if !keep { write_if_changed(&cargo, &toml)?; }
     let lib = dir.join("src/lib.rs");
     if !lib.is_file() {
         std::fs::write(&lib, lib_template(d)).map_err(|e| format!("{}: {}", lib.display(), e))?;
@@ -504,10 +590,10 @@ fn lib_info(p: &Project, name: &str, opts: &Opts) -> Result<(String, String), St
 
 /// Generate and build the bindings (`only`: crate or module names; all if empty).
 fn build(p: &Project, only: &[String], opts: &Opts, update: bool) -> Result<(), String> {
-    let deps = read_deps(&read_doc(p)?)?;
+    let deps = load_deps(p)?;
     for n in only {
         if !deps.iter().any(|d| d.name == *n || d.module == *n) {
-            return Err(format!("`{}` is not in {}", n, p.manifest().display()));
+            return Err(format!("`{}` is not a dependency of {}", n, p.root.display()));
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -517,7 +603,7 @@ fn build(p: &Project, only: &[String], opts: &Opts, update: bool) -> Result<(), 
         }
     }
     write_workspace(p, &deps)?;
-    for d in &deps { write_member(p, d)?; }
+    for d in &deps { write_member(p, d, false)?; }
     let ws = p.deps_dir().join("Cargo.toml");
     if update {
         let mut cmd = Command::new(cargo());
@@ -530,7 +616,7 @@ fn build(p: &Project, only: &[String], opts: &Opts, update: bool) -> Result<(), 
     }
     let chosen: Vec<&Dep> = deps.iter().filter(|d| only.is_empty() || only.iter().any(|n| *n == d.name || *n == d.module)).collect();
     if chosen.is_empty() {
-        eprintln!("     Nothing to build ({} lists no crates)", p.manifest().display());
+        eprintln!("     Nothing to build (no crates in {} or {})", p.manifest().display(), p.deps_dir().display());
         return Ok(());
     }
     for d in chosen {
@@ -555,7 +641,13 @@ fn build(p: &Project, only: &[String], opts: &Opts, update: bool) -> Result<(), 
             .map(|(t, n)| bindgen::Instance { ty: t.clone(), name: Some(n.clone()) }).collect();
         for line in std::fs::read_to_string(dir.join("instances")).unwrap_or_default().lines() {
             let t = line.trim();
-            if !t.is_empty() && !t.starts_with('#') { insts.push(bindgen::Instance { ty: t.to_string(), name: None }); }
+            if t.is_empty() || t.starts_with('#') { continue; }
+            // `HashMap<String, i64>` or `HashMap<String, i64> as StrIntMap`.
+            match t.rsplit_once(" as ") {
+                Some((ty, n)) if n.trim().chars().all(|c| c.is_alphanumeric() || c == '_') =>
+                    insts.push(bindgen::Instance { ty: ty.trim().to_string(), name: Some(n.trim().to_string()) }),
+                _ => insts.push(bindgen::Instance { ty: t.to_string(), name: None }),
+            }
         }
         let g = bindgen::generate(&api, &lname, &d.name, &version, &insts)?;
         write_if_changed(&dir.join("src/generated.rs"), &g.code)?;
