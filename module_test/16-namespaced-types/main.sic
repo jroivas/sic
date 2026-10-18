@@ -1,0 +1,10 @@
+import coll;
+
+int main() {
+    coll::map::Iter m = coll::map::start();
+    coll::set::Iter s = coll::set::start(5);
+    m.next();                                   // 11
+    s.next(); s.next();                         // 10
+    int r = m.pos + s.a + (int)sizeof(coll::set::Iter);   // 11 + 10 + 8
+    return r == 29 ? 0 : 1;
+}

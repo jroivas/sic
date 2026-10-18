@@ -128,8 +128,16 @@ impl<'a> NsRenamer<'a> {
                 for p in params.iter_mut() { self.qual_type(&mut p.ty); }
             }
             AstType::Typeof(e) => self.expr(e),
-            AstType::Struct(sd) => self.struct_def(sd),
-            AstType::Union(ud) => self.fields(ud.fields.as_mut()),
+            AstType::Struct(sd) => {
+                // `struct S *p` names a namespace struct (a body is a definition,
+                // already renamed when hoisted).
+                if sd.fields.is_none() { if let Some(n) = &mut sd.name { self.rename_type(n); } }
+                self.struct_def(sd)
+            }
+            AstType::Union(ud) => {
+                if ud.fields.is_none() { if let Some(n) = &mut ud.name { self.rename_type(n); } }
+                self.fields(ud.fields.as_mut())
+            }
             AstType::Enum(ed) => {
                 // `enum Status x` names a namespace enum (a body is a definition,
                 // already renamed when hoisted).

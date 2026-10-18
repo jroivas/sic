@@ -1,0 +1,28 @@
+// Namespaced types: `namespace a { struct X }` and `namespace b { struct X }` are
+// distinct types `a::X` / `b::X` (the second silently replaced the first). Inside
+// its namespace a type is named bare; outside, qualified — or bare when only one
+// namespace defines that name.
+namespace a {
+    struct X { int v; int get(X *self) { return self->v; } };
+    X make(int v) { X x; x.v = v; return x; }
+}
+namespace b {
+    struct X { int w; int z; };
+    union U { int i; char c; };
+    typedef int Count;
+    Count twice(Count c) { return c * 2; }
+}
+namespace c {
+    struct Only { int q; };
+}
+
+int main() {
+    a::X p = a::make(1);
+    b::X q;
+    q.w = 2; q.z = 3;
+    b::U u; u.i = 4;
+    b::Count n = b::twice(5);       // 10
+    Only o; o.q = 22;               // unambiguous bare name
+    struct Only o2; o2.q = 0;
+    return p.get() + q.w + q.z + u.i + n + o.q + o2.q + (int)sizeof(b::X) - 8;   // 1+2+3+4+10+22+8-8
+}

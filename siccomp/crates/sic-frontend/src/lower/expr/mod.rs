@@ -5273,7 +5273,22 @@ impl<'m> FuncCtx<'m> {
                 if let Some(t) = self.lowerer.struct_types.get(name) {
                     if !self.lowerer.imported_type_paths.contains_key(name) { return Ok(t.clone()); }
                 }
+                // A namespace type named bare where it is unambiguous.
+                if let Some(k) = super::types::unique_ns_type(&self.lowerer.struct_types, name) {
+                    if !self.lowerer.imported_type_paths.contains_key(name) {
+                        return Ok(self.lowerer.struct_types[&k].clone());
+                    }
+                }
                 return Err(self.undefined_name_error(name, &e.span));
+            }
+        }
+        // `sizeof(ns::T)` / `sizeof(mod::ns::T)`: a qualified TYPE parses as a
+        // scope path (it could be `ns::var`); a path naming a type is that type.
+        if let ExprKind::EnumVariant { enum_name, variant } = &e.kind {
+            let path = format!("{}::{}", enum_name, variant);
+            let key = self.lowerer.type_key(&path);
+            if key.contains("__") {
+                if let Some(t) = self.lowerer.struct_types.get(&key) { return Ok(t.clone()); }
             }
         }
         self.infer_expr_type(e)

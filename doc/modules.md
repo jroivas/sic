@@ -136,11 +136,12 @@ namespace buf {
 int *p = buf::new(16);                             // the function
 ```
 
-An `enum` belongs to its namespace: name it `geo::Shape` from outside (or
-`mod::geo::Shape` from another module) and plain `Shape` inside, so two namespaces
-may each define their own `Status` (as `std::file::Status` and
-`std::thread::Status` do). A `struct` declared inside is still visible at file
-scope under its bare name.
+A type belongs to its namespace — an `enum`, `struct`, `union` or `typedef`
+declared inside: name it `geo::Shape` from outside (or `mod::geo::Shape` from
+another module, `sizeof(geo::Shape)` too) and plain `Shape` inside, so two
+namespaces may each define their own `Status` (as `std::file::Status` and
+`std::thread::Status` do) or `Iter`. Outside the namespace, in the same unit, the
+bare name still works when only one namespace defines it.
 
 `::` is the scope operator throughout sic — **namespaces, modules, and enum
 variants all use it**; `.` is reserved for values (`obj.field`, `obj.method()`).

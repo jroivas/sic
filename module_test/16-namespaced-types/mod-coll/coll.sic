@@ -1,0 +1,13 @@
+module coll;
+
+// Two namespaces with a type of the same name (like Rust's hash_map::Iter /
+// hash_set::Iter): distinct types for the consumer, `coll::map::Iter` and
+// `coll::set::Iter`.
+namespace map {
+    struct Iter { int pos; int next(Iter *self) { self->pos += 1; return self->pos; } };
+    Iter start() { Iter i; i.pos = 10; return i; }
+}
+namespace set {
+    struct Iter { int a; int b; int next(Iter *self) { self->a += self->b; return self->a; } };
+    Iter start(int step) { Iter i; i.a = 0; i.b = step; return i; }
+}

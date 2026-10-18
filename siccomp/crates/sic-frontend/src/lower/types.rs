@@ -960,9 +960,15 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
                 _ => {}
             }
             let key = scoped_type_key(n, |k| named.contains_key(k));
-            named.get(&key).cloned().ok_or_else(|| {
-                CompileError::new(format!("unknown type '{}'", n))
-            })?
+            match named.get(&key) {
+                Some(t) => t.clone(),
+                // A bare name outside its namespace: the one namespace type of
+                // that name (`S` for `N__S`), when it is unambiguous.
+                None => match unique_ns_type(named, &key) {
+                    Some(k) => named[&k].clone(),
+                    None => return Err(CompileError::new(format!("unknown type '{}'", n))),
+                },
+            }
         }
         // sic generic-enum instantiation `Option<int>` (sic.md §"Match"): resolves
         // to the concrete monomorph, pre-registered under a mangled name by the
@@ -1119,6 +1125,10 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         if let Some(name) = &s.name {
             if let Some(ty) = named.get(name) {
                 return Ok(ty.clone());
+            }
+            // `struct S` outside the namespace that defines it (`N__S`).
+            if let Some(k) = unique_ns_type(named, name) {
+                return Ok(named[&k].clone());
             }
         }
         // Forward declaration — use an opaque struct
@@ -1301,6 +1311,9 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
             if let Some(ty) = named.get(name) {
                 return Ok(ty.clone());
             }
+            if let Some(k) = unique_ns_type(named, name) {
+                return Ok(named[&k].clone());
+            }
         }
         return Ok(Type::Union(UnionType { name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
     }
@@ -1394,6 +1407,21 @@ pub(crate) fn scoped_type_key(path: &str, known: impl Fn(&str) -> bool) -> Strin
         if known(&key) { return key; }
     }
     segs[segs.len() - 1].to_string()
+}
+
+/// The registry key of the single namespace type whose own name is `name`
+/// (`N__S` for `S`), if exactly one exists.
+pub(crate) fn unique_ns_type(named: &HashMap<String, Type>, name: &str) -> Option<String> {
+    if name.contains("__") || name.is_empty() { return None; }
+    let suffix = format!("__{}", name);
+    let mut found: Option<&String> = None;
+    for k in named.keys() {
+        if k.ends_with(&suffix) && k.len() > suffix.len() {
+            if found.is_some() { return None; }
+            found = Some(k);
+        }
+    }
+    found.cloned()
 }
 
 /// The element type of a wide string literal: `L` → wchar_t (`int` on

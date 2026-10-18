@@ -400,7 +400,7 @@ int main() {
     return (int)(q.a + q.b * 8);      // 18 + 24 = 42
 }
 EOF
-if "$SIC" --emit-module methmod 2>err && grep -q "^method Counter skip " methmod/module_ctr.smod; then
+if "$SIC" --emit-module methmod 2>err && grep -q "^method counter__Counter skip " methmod/module_ctr.smod; then
     for mode in "" "-static"; do
         if "$SIC" $mode methuse.sic -Imethmod -o methuse 2>err; then
             ./methuse; got=$?
@@ -422,7 +422,7 @@ for body in 'auto c = ctr::counter::make(1); Counter *p = &c; return 0;' \
             'Counter c; return 0;' 'return (int)sizeof(Counter);'; do
     printf 'import ctr;\nint main() { %s }\n' "$body" > hint.sic
     "$SIC" hint.sic -Imethmod -o hint 2>err && { hint_ok=0; echo "  compiled: $body"; }
-    grep -q "write 'ctr::Counter'" err || { hint_ok=0; echo "  no hint for: $body: $(cat err)"; }
+    grep -q "write 'ctr::counter::Counter'" err || { hint_ok=0; echo "  no hint for: $body: $(cat err)"; }
 done
 printf 'import ctr;\nint f(Counter *p) { return 0; }\nint main() { return 0; }\n' > hint.sic
 "$SIC" hint.sic -Imethmod -o hint 2>err && hint_ok=0
@@ -457,8 +457,8 @@ int main() {
     return (int)t;                                                              // 42
 }
 EOF
-if "$SIC" --emit-module optmod 2>err && grep -q "^tagenum Option<s_Big> " optmod/module_opt.smod \
-   && grep -q "^tagenum Result<s_Big,i32> " optmod/module_opt.smod; then
+if "$SIC" --emit-module optmod 2>err && grep -q "^tagenum Option<s_gen__Big> " optmod/module_opt.smod \
+   && grep -q "^tagenum Result<s_gen__Big,i32> " optmod/module_opt.smod; then
     for mode in "" "-static"; do
         if "$SIC" $mode optuse.sic -Ioptmod -o optuse 2>err; then
             ./optuse; got=$?
@@ -469,7 +469,7 @@ if "$SIC" --emit-module optmod 2>err && grep -q "^tagenum Option<s_Big> " optmod
     done
     printf 'import opt;\nint main() { auto g = opt::gen::make(1); return (int)g.sum(); }\n' > optbad.sic
     "$SIC" optbad.sic -Ioptmod -o optbad 2>err && bad "module-generic-enum-hint" "compiled" \
-        || { grep -q "'Option<Big>' has no field or method 'sum'; the value is an enum — unwrap it first" err \
+        || { grep -q "'Option<gen::Big>' has no field or method 'sum'; the value is an enum — unwrap it first" err \
              && ok "module-generic-enum-hint" || bad "module-generic-enum-hint" "wrong error: $(cat err)"; }
 else
     bad "module-generic-enums" "module build / manifest failed: $(cat err)"
@@ -506,7 +506,7 @@ int main() {
     return (int)(s - 200);                        // 42
 }
 EOF
-if "$SIC" --emit-module arrmod 2>err && grep -q "^struct Blk key:\[8\]u32 " arrmod/module_arr.smod; then
+if "$SIC" --emit-module arrmod 2>err && grep -q "^struct a__Blk key:\[8\]u32 " arrmod/module_arr.smod; then
     grep -q "export 'a__odd' passes or returns a type the manifest cannot describe" err \
         && ! grep -q "^fn a__odd " arrmod/module_arr.smod \
         && ok "module-undescribable-omitted" || bad "module-undescribable-omitted" "$(cat err)"

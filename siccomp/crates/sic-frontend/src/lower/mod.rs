@@ -906,7 +906,8 @@ impl Lowerer {
                 self.struct_types.entry(name.clone()).or_insert_with(|| ty.clone());
                 self.imported_type_names.insert(name.clone());
                 let path = format!("{}::{}", module, name.replace("__", "::"));
-                let e = self.imported_type_paths.entry(name.clone()).or_default();
+                let bare = name.rsplit("__").next().unwrap_or(name).to_string();
+                let e = self.imported_type_paths.entry(bare).or_default();
                 if !e.contains(&path) { e.push(path); }
             }
             for (ename, _) in manifest.enums.iter().map(|(n, v)| (n, v.len())).chain(manifest.tagenums.iter().map(|(n, v)| (n, v.len()))) {
@@ -2418,6 +2419,12 @@ impl Lowerer {
                 Decl::Var { mut base_ty, mut declarators, weak, thread_local, span } => {
                     // `enum Status { … };` (and `enum E { … } v;`) define an enum.
                     if let AstType::Enum(ed) = &mut base_ty.ty { self.mangle_ns_enum(scope, &prefix, ed); }
+                    // `struct S { … };` / `union U { … };` define a namespace type.
+                    match &mut base_ty.ty {
+                        AstType::Struct(sd) if sd.fields.is_some() => self.mangle_ns_type(scope, &prefix, &mut sd.name),
+                        AstType::Union(ud) if ud.fields.is_some() => self.mangle_ns_type(scope, &prefix, &mut ud.name),
+                        _ => {}
+                    }
                     for de in &mut declarators {
                         let mangled = format!("{}__{}", prefix, de.name);
                         self.namespace_members.insert((scope.to_string(), de.name.clone()), mangled.clone());
@@ -2436,8 +2443,42 @@ impl Lowerer {
                     self.mangle_ns_enum(scope, &prefix, &mut ed);
                     out.push(Decl::EnumDecl(ed));
                 }
+                // Structs, unions and typedefs are namespace members too
+                // (`N::S`): two namespaces may each define an `S`.
+                Decl::StructDecl(mut sd) => {
+                    if sd.fields.is_some() { self.mangle_ns_type(scope, &prefix, &mut sd.name); }
+                    out.push(Decl::StructDecl(sd));
+                }
+                Decl::UnionDecl(mut ud) => {
+                    if ud.fields.is_some() { self.mangle_ns_type(scope, &prefix, &mut ud.name); }
+                    out.push(Decl::UnionDecl(ud));
+                }
+                Decl::TypeDef { mut names, span } => {
+                    for (n, qt) in names.iter_mut() {
+                        match &mut qt.ty {
+                            AstType::Struct(sd) if sd.fields.is_some() => self.mangle_ns_type(scope, &prefix, &mut sd.name),
+                            AstType::Union(ud) if ud.fields.is_some() => self.mangle_ns_type(scope, &prefix, &mut ud.name),
+                            _ => {}
+                        }
+                        let mut nm = Some(n.clone());
+                        self.mangle_ns_type(scope, &prefix, &mut nm);
+                        *n = nm.unwrap();
+                    }
+                    out.push(Decl::TypeDef { names, span });
+                }
                 other => out.push(other),
             }
+        }
+    }
+
+    /// Give a namespace's struct/union/typedef its mangled registry name
+    /// (`N::S` → `N__S`), registered so a bare `S` inside `N` resolves to it.
+    fn mangle_ns_type(&mut self, scope: &str, prefix: &str, name: &mut Option<String>) {
+        if let Some(n) = name.clone() {
+            if n.contains("__") && self.namespace_types.values().any(|m| *m == n) { return; }
+            let mangled = format!("{}__{}", prefix, n);
+            self.namespace_types.insert((scope.to_string(), n), mangled.clone());
+            *name = Some(mangled);
         }
     }
 
