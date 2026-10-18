@@ -1,0 +1,15 @@
+module m;
+// A module global of a managed type, set when the module loads and released at
+// exit: a consumer calls its method (`m::engine::STANDARD.get()`) and assigns
+// module globals (`m::count = …`) — both used to be "not an lvalue".
+struct Box { int *h; ~Box() { del h; } int get(Box *self) { return *self->h; } };
+namespace engine { Box STANDARD = { NULL }; }
+int count = 0;
+__attribute__((constructor)) static void up() {
+    Box b = { NULL }; b.h = new int; *b.h = 40;
+    engine::STANDARD = b;
+}
+__attribute__((destructor)) static void down() {
+    Box z = { NULL };
+    engine::STANDARD = z;
+}

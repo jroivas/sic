@@ -16,6 +16,23 @@ impl<'m> FuncCtx<'m> {
                 let mangled = self.lowerer.namespace_members[&(enum_name.clone(), variant.clone())].clone();
                 self.lower_lvalue(&Expr { kind: ExprKind::Ident(mangled), span: expr.span.clone() })
             }
+            // sic (sic.md §"Imports"): an imported module's global `m::x` /
+            // `m::ns::x` (a method receiver `m::ns::S.f()`, an assignment).
+            ExprKind::EnumVariant { enum_name, variant }
+                if self.is_sic() && {
+                    let (head, _) = super::calls::module_scoped_sym(enum_name, variant);
+                    self.lowerer.imported_modules.contains_key(head)
+                } =>
+            {
+                let (head, sym) = super::calls::module_scoped_sym(enum_name, variant);
+                let head = head.to_string();
+                match self.resolve_module_global(&head, &sym) {
+                    Some((g, ty)) => Ok(LValue::plain(Val::Global(g), ty)),
+                    None => Err(CompileError::at(
+                        format!("'{}::{}' is not an lvalue", enum_name, variant),
+                        expr.span.file.clone(), expr.span.line, expr.span.col)),
+                }
+            }
             ExprKind::Ident(name) => {
                 let atomic = self.is_atomic_name(name);
                 match self.lookup(name) {

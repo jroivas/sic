@@ -1,0 +1,7 @@
+import m;
+int main() {
+    m::count = 2;
+    m::count += 0;
+    m::Box copy = m::engine::STANDARD;     // a copy retains
+    return m::engine::STANDARD.get() + copy.get() - 40 + m::count == 42 ? 0 : 1;
+}

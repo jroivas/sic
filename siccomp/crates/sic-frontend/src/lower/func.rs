@@ -136,6 +136,9 @@ pub(crate) fn is_place_expr(e: &Expr) -> bool {
     match &e.kind {
         ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
         | ExprKind::Index { .. } | ExprKind::Unary { op: crate::ast::UnOpKind::Deref, .. } => true,
+        // `ns::g` / `mod::ns::g`: a namespace or module global (a copy of it
+        // retains; it was taken as a moved temporary, so it was freed twice).
+        ExprKind::EnumVariant { .. } => true,
         _ => false,
     }
 }

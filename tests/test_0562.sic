@@ -1,0 +1,23 @@
+// Regression: copying a managed struct from a namespace global (`Box c = g::B;`,
+// `g::C = g::B;`) did not retain its owned fields — the path was taken for a
+// moved temporary — so the shared block was freed twice.
+struct Box { int *h; ~Box() { del h; } int get(Box *self) { return *self->h; } };
+
+namespace g {
+    Box B = { NULL };
+    Box C = { NULL };
+}
+
+int main() {
+    Box b = { NULL };
+    b.h = new int;
+    *b.h = 40;
+    g::B = b;                   // assign from a local
+    Box c = g::B;               // copy-init from a namespace global
+    g::C = g::B;                // assign global from global
+    int r = c.get() + g::C.get() - 38;
+    Box z = { NULL };
+    g::B = z;
+    g::C = z;
+    return r;                   // 40 + 40 - 38
+}
