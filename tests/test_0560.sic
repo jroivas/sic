@@ -1,0 +1,3 @@
+// A keyword-named function must be a namespace (or module) member.
+int default() { return 1; }
+int main() { return 0; }

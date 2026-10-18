@@ -129,6 +129,12 @@ another module): unqualified, `new` is the allocation keyword, even inside the
 namespace, so the two never collide. At file scope a function cannot be named
 `new`.
 
+The same holds for every keyword: a namespace function, a module's top-level
+function (`mod::default()`) or a struct method (`a.union(b)`, `s.any()`) may be
+named by one, and is reached through `::` or `.`, where a keyword never stands —
+so names from other languages (Rust's `default`, `union`, `match`) carry over
+unchanged.
+
 ```sic
 namespace buf {
     int *new(int size) { return new int[size]; }   // the keyword inside

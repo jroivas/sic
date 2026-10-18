@@ -1,0 +1,24 @@
+// Keywords as member names: a struct method or a namespace function may be named
+// by a keyword (`a.union(b)`, `conv::default()`); bare, the word stays the keyword.
+struct Set {
+    int n;
+    Set union(Set *self, Set other) { Set r; r.n = self->n | other.n; return r; }
+    int default(Set *self) { return 0; }
+    bool any(Set *self) { return self->n != 0; }
+};
+namespace conv {
+    string string(int v) { return "s"; }
+    int default() { return 7; }
+    int match(int a, int b) { return a == b; }
+    list<int> list(int n) { list<int> l; for (int i = 0; i < n; i++) l.add(i); return l; }
+}
+int main() {
+    Set a; a.n = 1;
+    Set b; b.n = 4;
+    Set c = a.union(b);
+    int r = c.n + c.default() + (int)c.any();            // 5 + 0 + 1
+    r += conv::default() + conv::match(2, 2) + (int)conv::list(3).length;   // 7 + 1 + 3
+    string s = conv::string(1);
+    int *k = new int[2]; k[1] = (int)s.size; r += k[1]; del k;   // keywords still work bare
+    return r + 24;                                       // 6 + 11 + 1 + 24
+}

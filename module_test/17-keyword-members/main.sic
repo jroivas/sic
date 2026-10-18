@@ -1,0 +1,2 @@
+import m;
+int main() { return m::default() + m::ns::union(2, 0) == 42 ? 0 : 1; }

@@ -1,0 +1,4 @@
+// A module's top level is its namespace: `m::default` may be named by a keyword.
+module m;
+int default() { return 40; }
+namespace ns { int union(int a, int b) { return a | b; } }

@@ -24,6 +24,13 @@ pub struct Parser {
     /// Inside one, `new(` may name a function (`ns::new`); outside, `new` is
     /// only the allocation keyword.
     ns_depth: usize,
+    /// sic: this unit is a module (`module m;`) — its top level is the module's
+    /// namespace, so a keyword may name a function there (`m::new`).
+    in_module: bool,
+    /// sic: the next declarator may be named by a keyword followed by `(`
+    /// (`default(…)`, `union(…)`): set for a namespace/module member or a struct
+    /// method, consumed by the first declarator (parameters never see it).
+    kw_names: bool,
     /// Source characters, for recovering the exact text of a construct (a generic
     /// function template exported to a module manifest). Empty if not provided.
     src_chars: Vec<char>,
@@ -136,7 +143,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), ns_depth: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -246,10 +253,10 @@ impl Parser {
             ))
         }
     }
-    /// A name after `::`: an identifier, or `new` — `ns::new` is always the
-    /// member (the keyword never follows `::`).
+    /// A name after `::`: an identifier, or any keyword — `ns::new`,
+    /// `m::default` are always members (a keyword never follows `::`).
     fn expect_member_name(&mut self) -> Result<String> {
-        if self.lang == Lang::Sic && self.at(TokenKind::New) {
+        if self.lang == Lang::Sic && is_kw_word(self.peek()) {
             return Ok(self.advance().text.clone());
         }
         self.expect_name()
@@ -300,7 +307,10 @@ impl Parser {
         if self.try_macro_definition()? || self.try_expand_macro(MacroPos::Item)? {
             return Ok(Decl::TypeDef { names: vec![], span: sp });
         }
-        let d = self.parse_external_decl_inner()?;
+        self.kw_names = self.lang == Lang::Sic && (self.ns_depth > 0 || self.in_module);
+        let d = self.parse_external_decl_inner();
+        self.kw_names = false;
+        let d = d?;
         self.note_declared_fns(&d);
         for p in &self.pending_decls.clone() { self.note_declared_fns(p); }
         Ok(d)
@@ -362,6 +372,7 @@ impl Parser {
         // sic module system (sic.md §"Imports").
         if self.at(TokenKind::Module) {
             self.advance();
+            self.in_module = true;
             let name = self.expect_name()?;
             self.eat(TokenKind::Semi);
             return Ok(Decl::Module(name, sp));
@@ -644,6 +655,14 @@ impl Parser {
 
         loop {
             self.skip_attributes();
+            // sic member name (`Set union(…)`, `string string(…)`): once a type is
+            // seen, a keyword followed by `(` is the declarator's name, not
+            // another type specifier — where a member may be named by one.
+            if self.kw_names && base.is_some() && is_kw_word(self.peek())
+                && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LParen)
+            {
+                break;
+            }
             // sic (sic.md §"Structs"): an aggregate DEFINITION may omit its `;`.
             // Once its body has closed, a storage class or a base-type keyword
             // starts the NEXT declaration — without this, `struct S {..}` followed
@@ -876,7 +895,7 @@ impl Parser {
                     let mut segs = vec![self.advance().text.clone()];
                     while self.at(TokenKind::ColonColon) {
                         self.advance();
-                        segs.push(self.expect_name()?);
+                        segs.push(self.expect_member_name()?);
                     }
                     let last = segs.last().cloned().unwrap_or_default();
                     base = Some(if self.at(TokenKind::Lt) {
@@ -1188,8 +1207,15 @@ impl Parser {
         // Method: `Ret name( … ) { … }`. Parse a full declarator; if it is a
         // function declarator immediately followed by a `{`, it is a method body.
         let parsed = (|| -> Result<Option<StructMethod>> {
-            let (base_ty, _) = self.parse_decl_specifiers()?;
-            let (name, ty) = self.parse_declarator(base_ty)?;
+            self.kw_names = self.lang == Lang::Sic;
+            let (base_ty, _) = match self.parse_decl_specifiers() {
+                Ok(v) => v,
+                Err(e) => { self.kw_names = false; return Err(e); }
+            };
+            self.kw_names = self.lang == Lang::Sic;
+            let r = self.parse_declarator(base_ty);
+            self.kw_names = false;
+            let (name, ty) = r?;
             if let AstType::Function { params, variadic, ret } = ty.ty {
                 if self.at(TokenKind::LBrace) {
                     self.skip_attributes();
@@ -1531,16 +1557,21 @@ impl Parser {
 
         self.skip_attributes();
 
-        // sic: `new(…)` declares a function only inside a namespace (called as
-        // `ns::new(…)`); at file scope `new` is the allocation keyword.
-        if self.lang == Lang::Sic && self.at(TokenKind::New)
+        // sic: a keyword followed by `(` names a function when it is a member —
+        // of a namespace or module (`ns::new(…)`, `m::default(…)`) or a struct
+        // (`a.union(b)`) — always reached qualified, so bare it stays the
+        // keyword. At file scope `new` is only the allocation keyword.
+        let kw_ok = std::mem::replace(&mut self.kw_names, false);
+        if self.lang == Lang::Sic && is_kw_word(self.peek())
             && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LParen)
+            && (kw_ok || self.peek_kind() != TokenKind::TypeName)
+            && self.peek().span.file.as_deref().map_or(true, |f| f.ends_with(".sic"))
         {
-            if self.ns_depth == 0 {
+            if !kw_ok {
                 let t = self.peek().clone();
                 return Err(CompileError::at(
-                    "`new` is a keyword: a function named `new` must be declared in a namespace \
-                     (`namespace n { … new(…) … }`) and called as `n::new(…)`".to_string(),
+                    format!("`{0}` is a keyword: a function named `{0}` must be declared in a namespace \
+                     (`namespace n {{ … {0}(…) … }}`) and called as `n::{0}(…)`", t.text),
                     t.span.file.clone(), t.span.line, t.span.col));
             }
             let name = self.advance().text.clone();
@@ -1656,6 +1687,7 @@ impl Parser {
     }
 
     fn parse_params(&mut self) -> Result<(Vec<Param>, bool)> {
+        self.kw_names = false;
         self.expect(TokenKind::LParen)?;
         let mut params = Vec::new();
         let mut variadic = false;
@@ -2202,6 +2234,7 @@ impl Parser {
     }
 
     fn parse_compound_stmt_as_stmts(&mut self) -> Result<Vec<Stmt>> {
+        self.kw_names = false;
         self.expect(TokenKind::LBrace)?;
         // A stale `unused` attribute (e.g. on a parameter) must not reach a local.
         self.pending_unused = false;
@@ -4042,6 +4075,14 @@ fn parse_c_float(body: &str) -> f64 {
 /// The recognized shape is strict — an identifier, then `<`, then a comma-separated
 /// list of *plain identifiers* (no operators), then `>`, then `(` — so an ordinary
 /// comparison chain like `a < b > (c)` is not mistaken for a generic header.
+/// A keyword or built-in type word (`new`, `default`, `union`, `string`): a
+/// word token other than a plain identifier.
+fn is_kw_word(t: &Token) -> bool {
+    t.kind != TokenKind::Ident
+        && t.text.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && t.text.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn scan_generic_fns(tokens: &[Token], fns: &mut HashSet<String>, params: &mut HashSet<String>) {
     let mut i = 0;
     while i + 2 < tokens.len() {
