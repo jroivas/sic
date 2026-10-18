@@ -145,6 +145,20 @@ pub struct Lowerer {
     /// `(typedef name, aliased struct)` of this unit's typedefs naming a struct:
     /// the module's type re-exports (see `sic_type_aliases`).
     pub typedef_aliases: Vec<(String, String)>,
+    /// Rust generic types of imported `cargo sic` bindings: `(module, path key)`
+    /// → `(canonical key, type parameters, defaulted ones)`.
+    pub rust_generics: HashMap<(String, String), (String, usize, usize)>,
+    /// The directory of each imported module's manifest (its binding).
+    pub imported_module_dirs: HashMap<String, String>,
+    /// A Rust generic instance type → `(module, canonical generic key)`, so a
+    /// call `m::HashMap::new()` with that target type resolves to it.
+    pub rust_instance_of: HashMap<String, (String, String)>,
+    /// Instances this unit needs that its bindings lack: `(binding dir, module,
+    /// Rust type)`. The driver builds them (`cargo sic`) and compiles again.
+    pub rust_instance_requests: Vec<(String, String, String)>,
+    /// A Rust generic instance's name as written (`demo::Stack<i64>`), for
+    /// diagnostics.
+    pub rust_instance_names: HashMap<String, String>,
     /// sic module type export (sic.md §"Namespace"/§"Imports"): names of aggregate
     /// types *defined in this module*, in definition order, to publish in the
     /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
@@ -323,6 +337,11 @@ impl Lowerer {
             namespace_types: HashMap::new(),
             imported_type_paths: HashMap::new(),
             typedef_aliases: Vec::new(),
+            rust_generics: HashMap::new(),
+            imported_module_dirs: HashMap::new(),
+            rust_instance_of: HashMap::new(),
+            rust_instance_requests: Vec::new(),
+            rust_instance_names: HashMap::new(),
             module_defined_types: Vec::new(),
             imported_type_names: std::collections::HashSet::new(),
             qualified_only: HashMap::new(),
@@ -927,6 +946,13 @@ impl Lowerer {
                 let bare = name.rsplit("__").next().unwrap_or(name).to_string();
                 let e = self.imported_type_paths.entry(bare).or_default();
                 if !e.contains(&path) { e.push(path); }
+            }
+            // Rust generic types (`cargo sic` bindings): made concrete on use.
+            for (key, canon, n, d) in &manifest.rust_generics {
+                self.rust_generics.insert((module.to_string(), key.clone()), (canon.clone(), *n, *d));
+            }
+            if let Some(dir) = std::path::Path::new(&path).parent() {
+                self.imported_module_dirs.insert(module.to_string(), dir.to_string_lossy().into_owned());
             }
             // Type aliases (re-exports): another name of an exported type.
             for (alias, target) in &manifest.type_aliases {
@@ -2768,11 +2794,113 @@ impl Lowerer {
     /// all `AstType::Generic` spellings (inner args before outer, so nested
     /// `Option<Option<int>>` register in order), then monomorphizes each.
     fn monomorphize_generics(&mut self, tu: &TranslationUnit) -> Result<()> {
-        if self.generic_enum_defs.is_empty() { return Ok(()); }
+        if self.generic_enum_defs.is_empty() && self.rust_generics.is_empty() { return Ok(()); }
         let mut uses: Vec<(String, Vec<QualType>)> = Vec::new();
         for d in &tu.decls { collect_generics_decl(d, &mut uses); }
         for (name, args) in uses {
+            if name.contains("::") && self.rust_generic_of(&name).is_some() {
+                self.instantiate_rust_generic(&name, &args)?;
+                continue;
+            }
+            if self.generic_enum_defs.is_empty() { continue; }
             self.instantiate_generic_enum(&name, &args)?;
+        }
+        // The parser's hidden typedefs of explicit instances (`m::Map<i64,
+        // string>::new()` → `__sic_tyargN`) were registered before their
+        // instance existed: register them now.
+        for d in &tu.decls {
+            let Decl::TypeDef { names, .. } = d else { continue };
+            for (n, qt) in names {
+                if !n.starts_with("__sic_tyarg") { continue; }
+                if let Ok(t) = types::lower_type(qt, &self.struct_types, self.ptr_size) {
+                    self.struct_types.insert(n.clone(), t);
+                }
+            }
+        }
+        if !self.rust_instance_requests.is_empty() {
+            let mut msg = String::from(RUST_INSTANCES_MARKER);
+            for (dir, module, ty) in &self.rust_instance_requests {
+                msg.push_str(&format!("\n{}\t{}\t{}", dir, module, ty));
+            }
+            return Err(CompileError::new(msg));
+        }
+        Ok(())
+    }
+
+    /// The module and canonical key of the Rust generic a type path names
+    /// (`hashbrown::HashMap` → (`hashbrown`, `hash_map__HashMap`)).
+    pub(crate) fn rust_generic_of(&self, path: &str) -> Option<(String, String, usize, usize)> {
+        let (head, rest) = path.split_once("::")?;
+        let key = rest.replace("::", "__");
+        let (canon, n, d) = self.rust_generics.get(&(head.to_string(), key))?;
+        Some((head.to_string(), canon.clone(), *n, *d))
+    }
+
+    /// The Rust spelling of a type argument of a Rust generic (`string` →
+    /// `String`, a bound type → its crate path), or None when it has none.
+    fn rust_spelling(&self, module: &str, t: &Type) -> Option<String> {
+        Some(match t {
+            Type::Bool => "bool".into(),
+            Type::Float32 => "f32".into(),
+            Type::Float64 => "f64".into(),
+            Type::Int { bits, signed } => format!("{}{}", if *signed { "i" } else { "u" }, bits),
+            t if types::is_sic_string(t) => "String".into(),
+            t if types::is_u8char(t) => "char".into(),
+            Type::Struct(st) => {
+                let n = st.name.as_ref()?;
+                // A type of the same binding: its path in the crate.
+                if self.rust_instance_of.contains_key(n) || self.imported_type_names.contains(n) {
+                    let _ = module;
+                    n.replace("__", "::")
+                } else { return None; }
+            }
+            _ => return None,
+        })
+    }
+
+    /// `m::Generic<args…>`: the binding's instance for these arguments,
+    /// registered under the generic spelling; recorded for building if the
+    /// binding does not have it yet.
+    fn instantiate_rust_generic(&mut self, name: &str, args: &[QualType]) -> Result<()> {
+        let (module, canon, n, d) = self.rust_generic_of(name).unwrap();
+        let mut arg_tys = Vec::new();
+        for a in args { arg_tys.push(types::lower_type(a, &self.struct_types, self.ptr_size)?); }
+        let spelled = types::generic_enum_mangled(name, &arg_tys);
+        if self.struct_types.contains_key(&spelled) { return Ok(()); }
+        if args.len() + d < n || args.len() > n {
+            return Err(CompileError::new(format!(
+                "`{}` takes {} type argument(s){}, got {}", name, n - d,
+                if d > 0 { format!(" (up to {})", n) } else { String::new() }, args.len())));
+        }
+        let mut rust_args = Vec::new();
+        for t in &arg_tys {
+            match self.rust_spelling(&module, t) {
+                Some(r) => rust_args.push(r),
+                None => return Err(CompileError::new(format!(
+                    "`{}`: a type argument has no Rust equivalent (use a scalar, `string`, `u8char` or a type of `{}`)",
+                    name, module))),
+            }
+        }
+        let inst_key = format!("{}__{}", canon, rust_args_mangled(&rust_args));
+        match self.struct_types.get(&inst_key).cloned() {
+            Some(t) => {
+                self.struct_types.insert(spelled, t);
+                let shown: Vec<String> = arg_tys.iter().map(|t| {
+                    if types::is_sic_string(t) { "string".into() }
+                    else if types::is_u8char(t) { "u8char".into() }
+                    else if let Type::Struct(StructType { name: Some(n), .. }) = t { n.replace("__", "::") }
+                    else { func::type_desc(t) }
+                }).collect();
+                self.rust_instance_names.insert(inst_key.clone(), format!("{}<{}>", name, shown.join(", ")));
+                self.rust_instance_of.insert(inst_key, (module, canon));
+            }
+            None => {
+                let ty = format!("{}<{}>", canon.replace("__", "::"), rust_args.join(", "));
+                let dir = self.imported_module_dirs.get(&module).cloned().unwrap_or_default();
+                if !self.rust_instance_requests.iter().any(|(_, m, t)| *m == module && *t == ty) {
+                    self.rust_instance_requests.push((dir, module, ty));
+                }
+            }
         }
         Ok(())
     }
@@ -5002,6 +5130,24 @@ fn subst_ast_type(ty: &AstType, subst: &HashMap<String, AstType>) -> AstType {
 
 /// Collect every generic-enum instantiation `Name<args…>` in a type (inner args
 /// pushed before the outer type, so nested instantiations register in order).
+/// The first line of the error a unit returns when it needs Rust generic
+/// instances its bindings lack (one `dir\tmodule\ttype` line each follows): the
+/// driver builds them and compiles the unit again.
+pub const RUST_INSTANCES_MARKER: &str = "__sic_rust_instances__";
+
+/// A Rust generic instance's name suffix: its type arguments, each reduced to
+/// identifier characters (`i64, String` → `i64__String`, `Vec<u8>` → `Vec_u8`).
+/// `cargo sic` names the instance wrapper the same way.
+pub fn rust_args_mangled(args: &[String]) -> String {
+    args.iter().map(|a| {
+        let mut o = String::new();
+        for c in a.chars() {
+            if c.is_ascii_alphanumeric() { o.push(c); } else if !o.ends_with('_') { o.push('_'); }
+        }
+        o.trim_matches('_').to_string()
+    }).collect::<Vec<_>>().join("__")
+}
+
 fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
     use AstType::*;
     match ty {

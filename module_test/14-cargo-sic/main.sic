@@ -20,15 +20,23 @@ int main() {
     demo::Color c = demo::Color::Green();
     std::Println("{} {} {}", c.variant_name(), c.describe(), c.eq(demo::Color::Red()));
 
-    demo::IntPair p = demo::IntPair::new(3, 9);
+    demo::Pair<i64> p = demo::Pair::new(3, 9);   // a generic, from the declared type
     p.swap();
     std::Println("{} {} {} {}", p.max(), p.first(), p.a(), p.b());
 
-    demo::StrStack s;
+    demo::StrStack s;                          // sic.toml's name for Stack<String>
     s.push("x"); s.push("y"); s.push("z");
     string top = s.peek() else return 4;
     string popped = s.pop() else return 5;
     list<string> rest = s.items();
     std::Println("{} {} {} {} {}", top, popped, s.len(), rest[0], s.iter().length);
+
+    // Instances sic.toml does not list are built when first used.
+    auto q = demo::Stack<i64>::new();           // explicit type arguments
+    q.push(4); q.push(38);
+    demo::Stack<u8char> t = demo::Stack::new();
+    t.push('z');
+    demo::Pair<string> w3 = demo::Pair::new("ab", "b");
+    std::Println("{} {} {}", q.len(), t.len(), w3.max());
     return 0;
 }

@@ -122,7 +122,7 @@ run_case() {
     # `main.xfail`: the consumer MUST fail to compile (a namespacing/typing rule).
     # Any non-empty content is required to appear in the error output.
     if [ -f "$dir/main.xfail" ]; then
-        if "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main" 2>"$work/compile.err"; then
+        if (cd "$cdir" && "$SIC" "$work/main.sic" "${incs[@]+"${incs[@]}"}" -o "$work/main") 2>"$work/compile.err"; then
             echo "FAIL $name: expected a compile error but it compiled"
             return 1
         fi

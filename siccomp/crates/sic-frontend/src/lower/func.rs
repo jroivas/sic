@@ -167,6 +167,24 @@ fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
     }
 }
 
+impl<'m> FuncCtx<'m> {
+    /// sic: a struct value is made only from a value of the same struct type —
+    /// `demo::Stack<i64> a = demo::Stack<u8char>::new();` (two instances of a
+    /// generic) or `A a = make_b();` copied the bytes of another type.
+    pub(crate) fn check_struct_copy(&self, target: &Type, e: &Expr) -> Result<()> {
+        if !self.is_sic() { return Ok(()); }
+        let (Type::Struct(t), Ok(Type::Struct(s))) = (target, self.infer_expr_type(e)) else { return Ok(()) };
+        let (Some(tn), Some(sn)) = (&t.name, &s.name) else { return Ok(()) };
+        if tn == sn || tn.starts_with("__sic") || sn.starts_with("__sic") { return Ok(()); }
+        if self.is_tagged_enum_struct(target) || self.is_tagged_enum_struct(&Type::Struct(s.clone())) { return Ok(()); }
+        let show = |n: &str| self.lowerer.rust_instance_names.get(n).cloned()
+            .unwrap_or_else(|| n.replace("__", "::"));
+        Err(CompileError::at(
+            format!("type mismatch: expected `{}`, found `{}`", show(tn), show(sn)),
+            e.span.file.clone(), e.span.line, e.span.col))
+    }
+}
+
 /// A short human-readable name for a type, for type-mismatch diagnostics.
 pub(crate) fn type_desc(t: &Type) -> String {
     match t {
@@ -597,6 +615,16 @@ impl<'m> FuncCtx<'m> {
     /// Lower `return [val]` (the value and every scope's cleanups). Split out of
     /// `lower_stmt` so the move-on-return marker can bracket it.
     fn lower_return_value(&mut self, val: &Option<Expr>) -> Result<()> {
+        // The return type is the value's expected type on every path (an
+        // aggregate's too: `return m::Map::new();` resolves to the instance).
+        let rt = self.ret_ty.clone();
+        let prev = self.expected_ty.replace(rt);
+        let r = self.lower_return_value_inner(val);
+        self.expected_ty = prev;
+        r
+    }
+
+    fn lower_return_value_inner(&mut self, val: &Option<Expr>) -> Result<()> {
         if let Some((sret_ptr, agg_ty)) = self.sret.clone() {
 
             // Aggregate return: copy the value into the caller's slot.
@@ -3398,6 +3426,7 @@ impl<'m> FuncCtx<'m> {
                     _ => false,
                 };
                 if aggregate_init {
+                    self.check_struct_copy(ty, e)?;
                     // sic `struct S x = <any>`: unbox the `any` to the struct pointer
                     // it wraps, then copy (an `any` converts to the assigned aggregate
                     // without a cast). Otherwise the raw `{ty,slot}` bytes get copied.

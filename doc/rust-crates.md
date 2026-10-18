@@ -13,7 +13,7 @@ on your `PATH` it is a cargo subcommand:
 
 ```sh
 cargo sic add semver                     # newest version from crates.io
-cargo sic add hashbrown@0.17 --instance 'StrIntMap=HashMap<String, i64>'
+cargo sic add hashbrown@0.17
 cargo sic add --path ../mylib            # a local crate
 sic app.sic -o app                       # no -I: sic finds the bindings
 ```
@@ -25,7 +25,7 @@ import hashbrown;
 int main() {
     semver::Version v = semver::Version::parse("1.4.2") else return 1;
     semver::VersionReq r = semver::VersionReq::parse(">=1.2, <2") else return 2;
-    hashbrown::StrIntMap m;                         // HashMap::new()
+    hashbrown::HashMap<string, i64> m = hashbrown::HashMap::new();
     m.insert("apple", 3);
     i64 n = m.get("apple") else return 3;
     return r.matches(v) && v.major() == 1 && n == 3 ? 0 : 4;
@@ -54,9 +54,8 @@ syntax:
 ```toml
 [dependencies]
 semver = "1.0.28"
-hashbrown = { version = "0.17.1", instantiate = [
+hashbrown = { version = "0.17.1", instantiate = [         # optional: see Generics
     { type = "HashMap<String, i64>", as = "StrIntMap" },
-    { type = "HashSet<u64>",         as = "U64Set" },
 ] }
 mylib = { path = "../mylib", module = "mine" }       # `module` renames the SIC module
 ```
@@ -101,9 +100,9 @@ mechanism below:
   - from `Display`, `to_string()`; `Clone` → `clone()`; `PartialEq` → `eq()`;
     `Ord` → `cmp()` (-1/0/1); `Default` → `default()`, and `new()` when the
     type has none (so `T x;` constructs it);
-- generic types at the concrete types `instantiate` names
-  (`HashMap<String, i64>` as `StrIntMap`): the impls that apply to them, with the
-  lookup-key generics resolved (`get(&self, k: &Q)` takes a `string`);
+- generic types, at the type arguments a program uses (see [Generics](#generics)):
+  the impls that apply to each instance, with the lookup-key generics resolved
+  (`get(&self, k: &Q)` takes a `string`);
 - generic parameters bounded by a conversion: `T: AsRef<str>` / `impl AsRef<[u8]>`
   / `Into<String>` take a `string`;
 - a `Result` error becomes its `Display` text (else its `Debug` text);
@@ -127,7 +126,7 @@ generated types live in the same crate, so you can add methods to them:
 mod generated;
 pub use generated::*;
 
-impl StrIntMap {
+impl HashMap__String__i64 {        // the instance HashMap<String, i64>
     /// The entries, sorted by key.
     pub fn sorted_keys(&self) -> Vec<String> {
         let mut k: Vec<String> = self.0.keys().cloned().collect();
@@ -136,6 +135,38 @@ impl StrIntMap {
     }
 }
 ```
+
+### Generics
+
+A Rust generic type is used with its type arguments, as in Rust. They come from
+the declared type, or are written in the call:
+
+```sic
+hashbrown::HashMap<i64, string> m = hashbrown::HashMap::new();   // from the type
+auto s = hashbrown::HashSet<string>::new();                       // in the call
+usize count(hashbrown::HashSet<string> s) { return s.len(); }     // as a parameter
+hashbrown::HashSet<u8char> none() { return hashbrown::HashSet::new(); }   // the return type
+```
+
+A type argument is a scalar (`i64`, `f64`, `bool`, …), `string` (Rust `String`),
+`u8char` (`char`), or a type of the same crate. Each combination is an
+**instance** compiled from Rust: when a program uses one its binding does not have
+yet, sic records it in `sic-deps/<crate>/instances`, runs `cargo sic build` for
+that crate, and compiles on — so only the first use is slow (commit the
+`instances` file to keep the list). `instantiate` in `sic.toml` pre-builds
+instances and can give one an extra name at the crate root (`hashbrown::StrIntMap`).
+
+Without the arguments in either place there is nothing to instantiate:
+
+```text
+error: `hashbrown::HashMap::new`: the type arguments of the generic `hashbrown::HashMap`
+(2–4 of them) are not known here — give them in the type (`hashbrown::HashMap<…> x =
+hashbrown::HashMap::new(…);`) or the call (`hashbrown::HashMap<…>::new(…)`)
+```
+
+Defaulted parameters take their defaults (`HashMap<K, V>` is `HashMap<K, V,
+DefaultHashBuilder>`). Trait bounds are checked by rustc when the instance builds
+(`HashMap<f64, …>` fails there: `f64` is not `Hash`).
 
 The repository's test of all this is `module_test/14-cargo-sic` (a local,
 dependency-free crate; the repository itself holds no third-party crates).

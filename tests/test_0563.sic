@@ -1,0 +1,6 @@
+// A struct value is made only from the same struct type: `A a = mk();` with
+// `mk` returning a `B` copied B's bytes into `a`.
+struct A { int x; };
+struct B { int y; int z; };
+B mk() { B b; return b; }
+int main() { A a = mk(); return a.x; }

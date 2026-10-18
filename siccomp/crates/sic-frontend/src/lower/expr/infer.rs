@@ -370,6 +370,15 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
+                // A Rust generic's associated function resolves to its instance
+                // (`m::Map<i64, string>::new()`), as `lower_call` does.
+                if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
+                    if let Some(target) = self.rust_generic_call_target(enum_name) {
+                        let callee = Expr { kind: ExprKind::EnumVariant { enum_name: target, variant: variant.clone() }, span: func.span.clone() };
+                        let call = Expr { kind: ExprKind::Call { func: Box::new(callee), args: args.clone() }, span: expr.span.clone() };
+                        return self.infer_expr_type(&call);
+                    }
+                }
                 // sic closure call (sic.md §"Lambdas"): the result is the callable's
                 // return type — the `__code` field's function return (dropping the
                 // hidden environment parameter).

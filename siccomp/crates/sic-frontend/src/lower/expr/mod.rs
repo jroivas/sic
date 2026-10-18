@@ -5844,6 +5844,7 @@ impl<'m> FuncCtx<'m> {
             // Copy the whole object, whether the RHS is an lvalue or an aggregate
             // rvalue (e.g. a compound literal `(T){...}`, a struct return, or a
             // vector produced by an element-wise operator/intrinsic).
+            self.check_struct_copy(&lv.ty, rhs)?;
             let src = self.lower_aggregate_ptr(rhs)?;
             let size = lv.ty.size_of(self.ptr_size());
             let align = lv.ty.align_of(self.ptr_size());

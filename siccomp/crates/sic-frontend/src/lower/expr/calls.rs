@@ -144,6 +144,25 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // A Rust generic's associated function: `m::Map<i64, string>::new()`, or
+        // `m::Map::new()` where the target type is that instance — the call goes
+        // to the instance (`m::hash_map::HashMap__i64__String::new`).
+        if self.is_sic() {
+            if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
+                if let Some(target) = self.rust_generic_call_target(enum_name) {
+                    let callee = Expr { kind: ExprKind::EnumVariant { enum_name: target, variant: variant.clone() }, span: func_expr.span.clone() };
+                    return self.lower_call(&callee, args, sp);
+                }
+                // `m::Map::new()` with no target type to take `Map`'s arguments from.
+                if let Some((_, _, n, d)) = self.lowerer.rust_generic_of(enum_name) {
+                    let ps = if d > 0 { format!("{}–{}", n - d, n) } else { n.to_string() };
+                    return Err(CompileError::at(format!(
+                        "`{0}::{1}`: the type arguments of the generic `{0}` ({2} of them) are not known here — \
+                         give them in the type (`{0}<…> x = {0}::{1}(…);`) or the call (`{0}<…>::{1}(…)`)",
+                        enum_name, variant, ps), sp.file.clone(), sp.line, sp.col));
+                }
+            }
+        }
         // Canonicalize a plain module call `Module::sym(args)` (EnumVariant form) to
         // the `module.sym(args)` (Field) form FIRST, so default-argument filling and
         // named-argument handling below see one canonical callee shape and run
@@ -2013,5 +2032,35 @@ pub(crate) fn module_scoped_sym<'a>(path: &'a str, name: &str) -> (&'a str, Stri
     match path.split_once("::") {
         Some((h, rest)) => (h, format!("{}__{}", rest.replace("::", "__"), name)),
         None => (path, name.to_string()),
+    }
+}
+
+impl<'m> FuncCtx<'m> {
+    /// The instance path an associated-function call on a Rust generic resolves
+    /// to: explicitly (`m::Map<#__sic_tyargN>`, the parser's spelling of
+    /// `m::Map<i64, string>`), or from the call's target type.
+    pub(crate) fn rust_generic_call_target(&self, enum_name: &str) -> Option<String> {
+        if self.lowerer.rust_generics.is_empty() { return None; }
+        let inst_of = |ty: &Type| -> Option<(String, String, String)> {
+            let Type::Struct(st) = ty else { return None };
+            let n = st.name.as_ref()?;
+            let (m, canon) = self.lowerer.rust_instance_of.get(n)?;
+            Some((n.clone(), m.clone(), canon.clone()))
+        };
+        if let Some(i) = enum_name.find("<#") {
+            let base = &enum_name[..i];
+            let end = enum_name[i..].find('>')? + i;
+            let alias = &enum_name[i + 2..end];
+            let ty = self.lowerer.struct_types.get(alias)?;
+            let (inst, m, _) = inst_of(ty)?;
+            let _ = base;
+            return Some(format!("{}::{}", m, inst.replace("__", "::")));
+        }
+        let (m, canon, _, _) = self.lowerer.rust_generic_of(enum_name)?;
+        let (inst, im, icanon) = inst_of(self.expected_ty.as_ref()?)?;
+        if im == m && icanon == canon {
+            return Some(format!("{}::{}", m, inst.replace("__", "::")));
+        }
+        None
     }
 }

@@ -64,6 +64,11 @@ pub struct ModuleManifest {
     pub types: Vec<(String, Type)>,
     /// `(alias, type)`: another name of an exported type (`alias Point geo__Point`).
     pub type_aliases: Vec<(String, String)>,
+    /// Rust generic types of a `cargo sic` binding (`rgeneric HashMap
+    /// hash_map__HashMap 4 2`): `(path key, canonical key, type parameters,
+    /// defaulted ones)`. A consumer naming `m::HashMap<K, V>` gets the instance
+    /// `hash_map__HashMap__K__V`, built on demand.
+    pub rust_generics: Vec<(String, String, usize, usize)>,
     /// sic module enum export: public payload-less enums, `(name, [(variant,
     /// value)])`, so a consumer can use `mod::Enum::Variant`.
     pub enums: Vec<(String, Vec<(String, i64)>)>,
@@ -187,6 +192,7 @@ impl ModuleManifest {
             exports,
             types,
             type_aliases: ir.sic_type_aliases.clone(),
+            rust_generics: Vec::new(),
             enums: ir.sic_enum_exports.clone(),
             tagenums: ir.sic_tagenum_exports.clone(),
             generic_fns: ir.sic_generic_fn_exports.clone(),
@@ -243,6 +249,9 @@ impl ModuleManifest {
         }
         for (alias, target) in &self.type_aliases {
             s.push_str(&format!("alias {} {}\n", alias, target));
+        }
+        for (key, canon, n, d) in &self.rust_generics {
+            s.push_str(&format!("rgeneric {} {} {} {}\n", key, canon, n, d));
         }
         // Public payload-less enums: `enum Name V1=0,V2=5,…`.
         for (name, variants) in &self.enums {
@@ -325,6 +334,7 @@ impl ModuleManifest {
         let mut exports = Vec::new();
         let mut types: Vec<(String, Type)> = Vec::new();
         let mut type_aliases: Vec<(String, String)> = Vec::new();
+        let mut rust_generics: Vec<(String, String, usize, usize)> = Vec::new();
         let mut enums: Vec<(String, Vec<(String, i64)>)> = Vec::new();
         let mut tagenums: Vec<(String, Vec<(String, i64, Option<Type>)>)> = Vec::new();
         let mut generic_fns: Vec<String> = Vec::new();
@@ -483,6 +493,14 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: pubtype '{}' has no record", lineno + 1, name))?;
                     types.push((name.to_string(), ty));
                 }
+                "rgeneric" => {
+                    let mut f = || it.next().map(|s| s.to_string())
+                        .ok_or_else(|| format!("line {}: rgeneric record incomplete", lineno + 1));
+                    let (key, canon) = (f()?, f()?);
+                    let n = f()?.parse::<usize>().map_err(|e| format!("line {}: {}", lineno + 1, e))?;
+                    let d = f()?.parse::<usize>().map_err(|e| format!("line {}: {}", lineno + 1, e))?;
+                    rust_generics.push((key, canon, n, d));
+                }
                 "alias" => {
                     let alias = it.next().ok_or_else(|| format!("line {}: alias name missing", lineno + 1))?;
                     let target = it.next().ok_or_else(|| format!("line {}: alias target missing", lineno + 1))?;
@@ -535,6 +553,7 @@ impl ModuleManifest {
             triple: triple.ok_or("missing 'triple' line")?,
             types,
             type_aliases,
+            rust_generics,
             enums,
             tagenums,
             generic_fns,
@@ -839,7 +858,8 @@ mod tests {
                 },
             ],
             types: vec![],
-            type_aliases: vec![],
+            type_aliases: vec![("Point".into(), "geo__Point".into())],
+            rust_generics: vec![("HashMap".into(), "hash_map__HashMap".into(), 4, 2)],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
@@ -874,6 +894,7 @@ mod tests {
             }],
             types: vec![],
             type_aliases: vec![],
+            rust_generics: vec![],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],
@@ -913,6 +934,7 @@ mod tests {
             }],
             types: vec![],
             type_aliases: vec![],
+            rust_generics: vec![],
             enums: vec![],
             tagenums: vec![],
             generic_fns: vec![],

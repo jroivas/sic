@@ -907,8 +907,14 @@ impl Parser {
                         segs.push(self.expect_member_name()?);
                     }
                     let last = segs.last().cloned().unwrap_or_default();
-                    base = Some(if self.at(TokenKind::Lt) {
+                    let builtin_generic = self.generic_enums.contains(&last)
+                        || matches!(last.as_str(), "dict" | "Task" | "set" | "list");
+                    base = Some(if self.at(TokenKind::Lt) && builtin_generic {
                         self.maybe_generic_type(last)?
+                    } else if self.at(TokenKind::Lt) {
+                        // A module's generic type (a Rust `hashbrown::HashMap<K, V>`):
+                        // keep the whole path; lowering makes it concrete.
+                        AstType::Generic { name: segs.join("::"), args: self.parse_generic_args()? }
                     } else {
                         AstType::Named(segs.join("::"))
                     });
@@ -1005,12 +1011,29 @@ impl Parser {
     /// three or more = a nested namespace / module path (`std::Buffer::Create`).
     fn parse_scope_path(&mut self, first: String, sp: crate::lexer::Span) -> Result<Expr> {
         let mut segs = vec![first];
-        while self.at(TokenKind::ColonColon) {
+        // `ns::Map<i64, string>::new`: a generic type made concrete in the path.
+        let mut type_args: Option<(usize, Vec<QualType>)> = None;
+        loop {
+            if self.lang == Lang::Sic && self.at(TokenKind::Lt) && type_args.is_none() && segs.len() > 1 {
+                if let Some(args) = self.try_parse_scope_type_args() { type_args = Some((segs.len(), args)); }
+            }
+            if !self.at(TokenKind::ColonColon) { break; }
             self.advance();
             segs.push(self.expect_member_name()?);
         }
         let variant = segs.pop().unwrap();
-        let enum_name = segs.join("::");
+        let mut enum_name = segs.join("::");
+        if let Some((n, args)) = type_args {
+            // The concrete type is declared as a hidden typedef (so the unit's
+            // generic-type pass instantiates it), and the path names it:
+            // `ns::Map<#__sic_tyargN>` — lowering resolves the call on that type.
+            self.macro_counter += 1;
+            let alias = format!("__sic_tyarg{}", self.macro_counter);
+            let ty = QualType::new(AstType::Generic { name: segs[..n].join("::"), args });
+            self.pending_decls.push(Decl::TypeDef { names: vec![(alias.clone(), ty)], span: sp.clone() });
+            enum_name = format!("{}<#{}>", segs[..n].join("::"), alias);
+            if n < segs.len() { enum_name = format!("{}::{}", enum_name, segs[n..].join("::")); }
+        }
         Ok(Expr::new(ExprKind::EnumVariant { enum_name, variant }, sp))
     }
 
@@ -1377,6 +1400,43 @@ impl Parser {
             return Ok(());
         }
         self.expect(TokenKind::Gt).map(|_| ())
+    }
+
+    /// `<A, B, …>` type arguments (at the `<`).
+    fn parse_generic_args(&mut self) -> Result<Vec<QualType>> {
+        self.expect(TokenKind::Lt)?;
+        let mut args = Vec::new();
+        while !self.at(TokenKind::Gt) && !self.at(TokenKind::Shr) && !self.at(TokenKind::RotR) && !self.at(TokenKind::Eof) {
+            args.push(self.parse_type_name()?);
+            if !self.eat(TokenKind::Comma) { break; }
+        }
+        self.eat_generic_gt()?;
+        Ok(args)
+    }
+
+    /// At `<`: `<types…>` directly followed by `::` — the type arguments of a
+    /// generic type in a scope path (`ns::Map<i64, string>::new`). Restores the
+    /// position (and tokens) when it is not.
+    fn try_parse_scope_type_args(&mut self) -> Option<Vec<QualType>> {
+        let save = self.pos;
+        let toks = self.tokens.clone();
+        self.advance(); // `<`
+        let mut args = Vec::new();
+        loop {
+            if !self.starts_decl_specifier() { break; }
+            match self.parse_type_name() {
+                Ok(t) => args.push(t),
+                Err(_) => break,
+            }
+            if self.eat(TokenKind::Comma) { continue; }
+            if self.eat_generic_gt().is_ok() && self.at(TokenKind::ColonColon) && !args.is_empty() {
+                return Some(args);
+            }
+            break;
+        }
+        self.pos = save;
+        self.tokens = toks;
+        None
     }
 
     fn maybe_generic_type(&mut self, name: String) -> Result<AstType> {
@@ -2127,6 +2187,22 @@ impl Parser {
         while self.tokens.get(j).map(|t| t.kind) == Some(TokenKind::ColonColon) {
             if !is_seg(self.tokens.get(j + 1).map(|t| t.kind)) { return false; }
             j += 2;
+        }
+        // Generic type arguments (`m::Map<i64, string> x`): skip the balanced `<…>`.
+        if self.tokens.get(j).map(|t| t.kind) == Some(TokenKind::Lt) {
+            let mut depth: i32 = 0;
+            loop {
+                match self.tokens.get(j).map(|t| t.kind) {
+                    Some(TokenKind::Lt) => depth += 1,
+                    Some(TokenKind::Gt) => depth -= 1,
+                    Some(TokenKind::Shr) => depth -= 2,
+                    Some(TokenKind::Semi | TokenKind::LBrace | TokenKind::RBrace | TokenKind::Eof) | None => return false,
+                    _ => {}
+                }
+                j += 1;
+                if depth <= 0 { break; }
+            }
+            if depth < 0 { return false; }
         }
         // Past the path: skip `*` and pointer qualifiers, then require a name.
         while matches!(self.tokens.get(j).map(|t| t.kind),

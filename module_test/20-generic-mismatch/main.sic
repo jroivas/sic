@@ -1,0 +1,8 @@
+// Two instances of a Rust generic are distinct types: initializing a
+// `gen::Cell<i32>` from a `gen::Cell<u64>` is an error.
+import gen;
+int main() {
+    gen::Cell<i32> ok = gen::Cell::new();
+    gen::Cell<i32> res = gen::Cell<u64>::new();
+    return ok.get() + res.get();
+}

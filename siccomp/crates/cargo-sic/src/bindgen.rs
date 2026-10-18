@@ -27,6 +27,9 @@ pub struct Generated {
     pub code: String,
     pub bound: usize,
     pub skipped: usize,
+    /// The crate's generic types, for the manifest (`sic-generics`): one
+    /// `<path key> <canonical key> <type params> <defaulted>` line per path.
+    pub generics: String,
 }
 
 /// The rustdoc JSON format versions this generator was written against.
@@ -957,7 +960,7 @@ fn single_arg(t: &Value) -> Option<&Value> {
     if a.len() == 1 { Some(a[0]) } else { None }
 }
 
-const PRELUDE: &str = r#"#![allow(dead_code, unused_imports, unused_macros, clippy::all)]
+const PRELUDE: &str = r#"#![allow(dead_code, unused_imports, unused_macros, non_camel_case_types, non_snake_case, clippy::all)]
 
 // A `Result`'s error as text: its `Display`, else its `Debug`, else "error"
 // (picked at compile time by autoref specialization).
@@ -975,8 +978,41 @@ macro_rules! sic_err { ($e:expr) => { (&&&crate::generated::SicErr($e)).sic_msg(
 /// A generic type instance requested in sic.toml: the Rust type and the name
 /// SIC sees.
 pub struct Instance {
+    /// The Rust type (`hash_map::HashMap<i64, String>`).
     pub ty: String,
-    pub name: String,
+    /// An extra name at the crate root (sic.toml's `as`); the instance itself
+    /// is `<Generic>__<arguments>` beside its generic (`hash_map::HashMap__i64__String`).
+    pub name: Option<String>,
+}
+
+/// The top-level type arguments of `Base<A, B<C>>` (`A`, `B<C>`), trimmed.
+fn type_arg_texts(ty: &str) -> Vec<String> {
+    let Some(start) = ty.find('<') else { return Vec::new() };
+    let inner = &ty[start + 1..ty.rfind('>').unwrap_or(ty.len())];
+    let mut out = Vec::new();
+    let (mut depth, mut cur) = (0, String::new());
+    for c in inner.chars() {
+        match c {
+            '<' | '(' | '[' => { depth += 1; cur.push(c); }
+            '>' | ')' | ']' => { depth -= 1; cur.push(c); }
+            ',' if depth == 0 => { out.push(cur.trim().to_string()); cur.clear(); }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() { out.push(cur.trim().to_string()); }
+    out
+}
+
+/// An instance's name suffix — the same as sic's `rust_args_mangled`: each
+/// argument reduced to identifier characters, joined by `__`.
+pub fn rust_args_mangled(args: &[String]) -> String {
+    args.iter().map(|a| {
+        let mut o = String::new();
+        for c in a.chars() {
+            if c.is_ascii_alphanumeric() { o.push(c); } else if !o.ends_with('_') { o.push('_'); }
+        }
+        o.trim_matches('_').to_string()
+    }).collect::<Vec<_>>().join("__")
 }
 
 pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, instances: &[Instance]) -> Result<Generated, String> {
@@ -1037,6 +1073,8 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
     // Generic types made concrete in sic.toml (`HashMap<String, i64>` as
     // `StrIntMap`): (entry, kind, wrapper, Rust type, its JSON form).
     let mut inst_entries: Vec<(&Entry, &str, String, String, Value)> = Vec::new();
+    // sic.toml `as` names of instances: root re-exports.
+    let mut inst_aliases: Vec<(String, String)> = Vec::new();
     for ins in instances {
         let base = ins.ty.split('<').next().unwrap_or("").trim().to_string();
         let found = entries.iter().find(|e| {
@@ -1048,17 +1086,27 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         };
         let it = g.item(&e.id).unwrap();
         let kind = if it["inner"].get("struct").is_some() { "struct" } else { "enum" };
-        let w = wpath(&[], &ins.name);
-        if taken.contains(&w) || SIC_TYPE_RESERVED.contains(&ins.name.as_str())
-            || !ins.name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            return Err(format!("sic.toml: instance name `{}` is taken or invalid", ins.name));
+        let auto = format!("{}__{}", e.name, rust_args_mangled(&type_arg_texts(&ins.ty)));
+        let w = wpath(&e.prefix, &auto);
+        if taken.contains(&w) { continue; }   // the same instance listed twice
+        if let Some(n) = &ins.name {
+            if SIC_TYPE_RESERVED.contains(&n.as_str()) || !n.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Err(format!("sic.toml: instance name `{}` is invalid", n));
+            }
         }
-        let types_snapshot: HashMap<String, String> = g.types.iter()
-            .map(|(id, b)| (b.wrapper.rsplit("::").next().unwrap_or("").to_string(), id.clone())).collect();
+        // A type argument naming a type of the crate: by its path (`hash_map::Iter`)
+        // or, when unambiguous, its name.
+        let mut types_snapshot: HashMap<String, String> = HashMap::new();
+        for (id, b) in &g.types {
+            let path = b.wrapper.trim_start_matches("crate::").to_string();
+            let last = path.rsplit("::").next().unwrap_or("").to_string();
+            types_snapshot.insert(path, id.clone());
+            types_snapshot.entry(last).or_insert_with(|| id.clone());
+        }
         let resolve = |n: &str| -> Option<String> {
-            let last = n.rsplit("::").next().unwrap_or(n);
-            if last == base.rsplit("::").next().unwrap_or(&base) { return Some(e.id.clone()); }
-            types_snapshot.get(last).cloned()
+            if n == base || n.rsplit("::").next() == base.rsplit("::").next() && !n.contains("::") { return Some(e.id.clone()); }
+            types_snapshot.get(n).cloned()
+                .or_else(|| types_snapshot.get(n.rsplit("::").next().unwrap_or(n)).cloned())
         };
         let mut json = parse_type(&ins.ty, &resolve).map_err(|m| format!("sic.toml: instance `{}`: {}", ins.ty, m))?;
         // Defaulted parameters (`S = DefaultHashBuilder`) take their default.
@@ -1082,7 +1130,8 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         let rust = format!("{}{}", g.path_of(e), args_text);
         taken.insert(w.clone());
         if g.trait_impls(it, kind).iter().any(|t| t == "Clone" || t == "Copy") { g.cloneable.insert(w.clone()); }
-        inst_entries.push((e, kind, w, rust, json));
+        inst_entries.push((e, kind, w.clone(), rust, json));
+        if let Some(n) = &ins.name { inst_aliases.push((n.clone(), w)); }
     }
     // Functions and constants keep their Rust names, in their modules.
     let mut fn_entries: Vec<&Entry> = Vec::new();
@@ -1137,6 +1186,10 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         let shown = w.rsplit("::").next().unwrap_or(w).to_string();
         g.emit_type(it, kind, w, rust, &shown, Some(json));
         g.inst = None;
+        take(&mut g, &e.prefix);
+    }
+    for (n, w) in &inst_aliases {
+        let _ = writeln!(g.out, "pub use {} as {};", w, n);
         take(&mut g, &[]);
     }
     // Wrapper paths of the bound functions / constants, for re-exports.
@@ -1186,6 +1239,21 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         take(&mut g, &e.prefix);
     }
 
+    // The generic types (made concrete on demand by sic): every path of each.
+    let mut generics = String::new();
+    for e in entries.iter().chain(alias_entries.iter()) {
+        let Some(it) = g.item(&e.id) else { continue };
+        let kind = if it["inner"].get("struct").is_some() { "struct" }
+            else if it["inner"].get("enum").is_some() { "enum" } else { continue };
+        let params: Vec<&Value> = it["inner"][kind]["generics"]["params"].as_array().into_iter().flatten().collect();
+        if params.is_empty() || it["deprecation"].is_object() { continue; }
+        if params.iter().any(|p| p["kind"].get("type").is_none()) { continue; }   // lifetimes / consts
+        let canon = entries.iter().find(|c| c.id == e.id).unwrap();
+        let key = |x: &Entry| { let mut v = x.prefix.clone(); v.push(x.name.clone()); v.join("__") };
+        let defaults = params.iter().filter(|p| !p["kind"]["type"]["default"].is_null()).count();
+        let _ = writeln!(generics, "{} {} {} {}", key(e), key(canon), params.len(), defaults);
+    }
+
     let mut out = format!(
         "// Generated by `cargo sic` from {} {} — regenerated on every build; do not\n\
          // edit. Hand-written wrappers belong in lib.rs.\n", crate_name, version);
@@ -1205,7 +1273,7 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         out.push_str("\n// Not bound (wrap these by hand in lib.rs if you need them):\n");
         for s in &g.skipped { let _ = writeln!(out, "//   {}", s); }
     }
-    Ok(Generated { code: out, bound: g.bound, skipped: g.skipped.len() })
+    Ok(Generated { code: out, bound: g.bound, skipped: g.skipped.len(), generics })
 }
 
 /// A constant's Rust type and literal (`u32`, `10`), from rustdoc's evaluated

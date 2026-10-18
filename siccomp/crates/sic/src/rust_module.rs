@@ -52,6 +52,9 @@ use quote::ToTokens;
 
 /// What `prepare` produced for the module build.
 pub struct RustBuild {
+    /// The crate's generic types (from `cargo sic`'s `sic-generics`): manifest
+    /// `rgeneric` records.
+    pub generics: Vec<(String, String, usize, usize)>,
     /// The generated sic wrapper source.
     pub sic_source: PathBuf,
     /// The glue crate's static library (Rust std + crate + glue).
@@ -1369,7 +1372,9 @@ pub fn prepare(dir: &Path, verbose: bool) -> Result<RustBuild, String> {
     for s in &b.skipped {
         eprintln!("sic: warning: Rust module '{}': skipping {}", b.module, s);
     }
-    if b.funcs.is_empty() && b.structs.is_empty() && b.consts.is_empty() {
+    // A crate of only generic types binds nothing until an instance is used.
+    let has_generics = std::fs::read_to_string(dir.join("sic-generics")).map_or(false, |t| !t.trim().is_empty());
+    if b.funcs.is_empty() && b.structs.is_empty() && b.consts.is_empty() && !has_generics {
         return Err(format!("{}: src/lib.rs has no public fn or struct sic can bind", dir.display()));
     }
     // `cargo sic` shares one target dir between a project's bindings
@@ -1407,7 +1412,12 @@ pub fn prepare(dir: &Path, verbose: bool) -> Result<RustBuild, String> {
     if !archive.is_file() {
         return Err(format!("cargo produced no {}", archive.display()));
     }
-    Ok(RustBuild { sic_source, archive, native_libs })
+    let generics = std::fs::read_to_string(dir.join("sic-generics")).unwrap_or_default().lines().filter_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() != 4 { return None; }
+        Some((f[0].to_string(), f[1].to_string(), f[2].parse().ok()?, f[3].parse().ok()?))
+    }).collect();
+    Ok(RustBuild { generics, sic_source, archive, native_libs })
 }
 
 #[cfg(test)]

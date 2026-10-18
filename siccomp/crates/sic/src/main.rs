@@ -897,7 +897,71 @@ fn struct_order_seed(args: &Args) -> u64 {
     })
 }
 
+/// Lower a unit; when it names Rust generic instances its `cargo sic`
+/// bindings lack (`m::HashMap<i64, string>`), build them and lower it again.
 fn lower_tu(
+    tu: &sic_frontend::ast::TranslationUnit,
+    lang: sic_frontend::Lang,
+    module_name: &str,
+    args: &Args,
+) -> Result<sic_ir::Module, Box<dyn std::error::Error>> {
+    let marker = sic_frontend::lower::RUST_INSTANCES_MARKER;
+    let mut built = false;
+    loop {
+        match lower_tu_once(tu, lang, module_name, args) {
+            Err(e) if e.to_string().contains(marker) => {
+                if built {
+                    return Err(format!("Rust generic instances are still missing after building them:{}",
+                        e.to_string().split_once(marker).map(|x| x.1).unwrap_or("")).into());
+                }
+                build_rust_instances(&e.to_string(), marker, args)?;
+                built = true;
+            }
+            r => return r,
+        }
+    }
+}
+
+/// Record the requested instances in each binding's `instances` file and run
+/// `cargo sic build <module>` in its project (`<root>/sic-deps/<module>`).
+fn build_rust_instances(msg: &str, marker: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let body = msg.split_once(marker).map(|x| x.1).unwrap_or("");
+    let mut by_dir: Vec<(String, String, Vec<String>)> = Vec::new();
+    for line in body.lines() {
+        let mut f = line.splitn(3, '\t');
+        let (Some(dir), Some(module), Some(ty)) = (f.next(), f.next(), f.next()) else { continue };
+        match by_dir.iter_mut().find(|(d, _, _)| d == dir) {
+            Some((_, _, v)) => v.push(ty.to_string()),
+            None => by_dir.push((dir.to_string(), module.to_string(), vec![ty.to_string()])),
+        }
+    }
+    for (dir, module, tys) in by_dir {
+        let dirp = PathBuf::from(&dir);
+        let root = dirp.parent().filter(|p| p.file_name().map_or(false, |n| n == "sic-deps"))
+            .and_then(|p| p.parent())
+            .ok_or_else(|| format!("module '{}' ({}) is not a `cargo sic` binding: its generic types \
+                cannot be instantiated on demand", module, dir))?
+            .to_path_buf();
+        let file = dirp.join("instances");
+        let mut have: Vec<String> = fs::read_to_string(&file).unwrap_or_default()
+            .lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        for t in &tys { if !have.contains(t) { have.push(t.clone()); } }
+        fs::write(&file, have.join("\n") + "\n")?;
+        let cargo_sic = std::env::current_exe().ok().map(|e| e.with_file_name("cargo-sic"))
+            .filter(|p| p.is_file()).unwrap_or_else(|| PathBuf::from("cargo-sic"));
+        if args.debug { eprintln!("sic: building Rust instances {:?} of '{}'", tys, module); }
+        eprintln!("sic: building {} for `{}`", tys.join(", "), module);
+        let st = Command::new(&cargo_sic).arg("build").arg(&module).current_dir(&root)
+            .env("SIC", std::env::current_exe().unwrap_or_default())
+            .status().map_err(|e| format!("cannot run {}: {}", cargo_sic.display(), e))?;
+        if !st.success() {
+            return Err(format!("building Rust instances of '{}' failed", module).into());
+        }
+    }
+    Ok(())
+}
+
+fn lower_tu_once(
     tu: &sic_frontend::ast::TranslationUnit,
     lang: sic_frontend::Lang,
     module_name: &str,
@@ -1192,7 +1256,8 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         if !links.contains(l) { links.push(l.clone()); }
     }
 
-    let manifest = ModuleManifest::from_ir(&ir_module, &name, &target_triple(), &links, std::mem::size_of::<usize>() as u32);
+    let mut manifest = ModuleManifest::from_ir(&ir_module, &name, &target_triple(), &links, std::mem::size_of::<usize>() as u32);
+    if let Some(rb) = &rust { manifest.rust_generics = rb.generics.clone(); }
     fs::write(dirp.join(format!("module_{}.smod", name)), manifest.to_text())?;
     fs::write(dirp.join(format!("module_{}.h", name)), c_header_for(&manifest))?;
     fs::write(dirp.join(format!("module_{}.def", name)), def_file_for(&manifest))?;

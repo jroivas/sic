@@ -1,0 +1,115 @@
+; module: sz4
+
+@.str.0 : [i8; 38] = "\"sic: fat-pointer bounds check failed\\n\\u{0}\""
+
+extern fn free(void*) -> void
+extern fn write(i32, void*, u64) -> i64
+extern fn abort() -> void
+
+fn f(a: struct.A*) -> i32 {
+  bb0:
+  %0 = alloca struct.A*
+  store %65536, %0
+  .dbgvar struct.A* a %0 (param)
+  .loc 2
+  %1 = ZExt 24 to u64
+  %2 = Trunc %1 to i32
+  ret %2
+}
+
+fn __sic_str_length(data: i8*, size: u64) -> u64 {
+  bb0:
+  %0 = alloca i8*
+  store %65536, %0
+  %1 = alloca u64
+  store %65537, %1
+  %2 = SExt 0 to i64
+  %3 = alloca i64
+  store %2, %3
+  %4 = alloca i64
+  store %2, %4
+  jump bb1
+  bb1:
+  %5 = load i64 %4
+  %6 = load u64 %1
+  %7 = BitCast %6 to i64
+  %8 = islt i64 %5, %7
+  brif %8, bb2, bb3
+  bb2:
+  %9 = load i64 %4
+  %10 = load i8* %0
+  %11 = gep %10, %9 *1
+  %12 = load u8 %11
+  %13 = ZExt %12 to i32
+  %14 = and i32 %13, 192
+  %15 = ine i32 %14, 128
+  brif %15, bb4, bb5
+  bb3:
+  %20 = load i64 %3
+  %21 = BitCast %20 to u64
+  ret %21
+  bb4:
+  %16 = load i64 %3
+  %17 = add i64 %16, 1
+  store %17, %3
+  jump bb5
+  bb5:
+  %18 = load i64 %4
+  %19 = add i64 %18, 1
+  store %19, %4
+  jump bb1
+}
+
+fn __sic_str_retain(rc: u64*) -> void {
+  bb0:
+  %0 = alloca u64*
+  store %65536, %0
+  %1 = load u64* %0
+  %2 = iule u64* %1, 1
+  brif %2, bb2, bb1
+  bb1:
+  %3 = load u64* %0
+  %4 = load u64 %3
+  %5 = SExt 1 to u64
+  %6 = add u64 %4, %5
+  store %6, %3
+  jump bb2
+  bb2:
+  ret void
+}
+
+fn __sic_str_release(rc: u64*) -> void {
+  bb0:
+  %0 = alloca u64*
+  store %65536, %0
+  %1 = load u64* %0
+  %2 = iule u64* %1, 1
+  brif %2, bb3, bb1
+  bb1:
+  %3 = load u64* %0
+  %4 = load u64 %3
+  %5 = SExt 1 to u64
+  %6 = sub u64 %4, %5
+  store %6, %3
+  %7 = SExt 0 to u64
+  %8 = ieq u64 %6, %7
+  brif %8, bb2, bb3
+  bb2:
+  %9 = load u64* %0
+  %10 = BitCast %9 to void*
+  call void @fe0(%10)
+  jump bb3
+  bb3:
+  ret void
+}
+
+fn __sic_bounds_fail() -> void {
+  bb0:
+  %0 = gep @g0, 0 *1
+  %1 = BitCast %0 to void*
+  %2 = ZExt 37 to u64
+  call i64 @fe1(2, %1, %2)
+  call void @fe2()
+  ret void
+}
+
