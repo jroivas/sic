@@ -638,6 +638,15 @@ impl Parser {
     }
 
     fn parse_decl_specifiers(&mut self) -> Result<(QualType, Option<StorageClass>)> {
+        // A nested type (`list<u64>`, `Option<T>`) parses its own declarator,
+        // which would consume `kw_names`: keep it for this declaration's name.
+        let kw = self.kw_names;
+        let r = self.parse_decl_specifiers_inner(kw);
+        self.kw_names = kw;
+        r
+    }
+
+    fn parse_decl_specifiers_inner(&mut self, kw_names: bool) -> Result<(QualType, Option<StorageClass>)> {
         let mut storage: Option<StorageClass> = None;
         let mut quals: Vec<TypeQual> = Vec::new();
         let mut signed: Option<bool> = None;
@@ -658,7 +667,7 @@ impl Parser {
             // sic member name (`Set union(…)`, `string string(…)`): once a type is
             // seen, a keyword followed by `(` is the declarator's name, not
             // another type specifier — where a member may be named by one.
-            if self.kw_names && base.is_some() && is_kw_word(self.peek())
+            if kw_names && base.is_some() && is_kw_word(self.peek())
                 && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::LParen)
             {
                 break;
@@ -2124,7 +2133,11 @@ impl Parser {
             Some(TokenKind::Star | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict)) {
             j += 1;
         }
+        // The name — or, for a member declaration, a keyword naming a function
+        // (`geo::Point new(…)` in a namespace).
         is_seg(self.tokens.get(j).map(|t| t.kind))
+            || (self.kw_names && self.tokens.get(j).map_or(false, is_kw_word)
+                && self.tokens.get(j + 1).map(|t| t.kind) == Some(TokenKind::LParen))
     }
 
     /// Whether the current `TypeName`/typedef token begins a declaration rather
@@ -3688,6 +3701,15 @@ impl Parser {
                                 .unwrap_or(65535)
                         } else { 65535 };
                         self.pending_constructor = Some(prio);
+                    } else if name == "destructor" || name == "__destructor__" {
+                        // `destructor(N)`: run at exit (`.fini_array`); carried
+                        // in the constructor slot, offset by `DESTRUCTOR_PRIO`.
+                        let prio = if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            self.tokens.get(i + 2)
+                                .and_then(|t| t.text.parse::<i32>().ok())
+                                .unwrap_or(65535)
+                        } else { 65535 };
+                        self.pending_constructor = Some(crate::ast::DESTRUCTOR_PRIO + prio);
                     }
                 }
                 _ => {}

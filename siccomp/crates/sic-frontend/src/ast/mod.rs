@@ -276,6 +276,10 @@ pub enum Designator {
     IndexRange(Box<Expr>, Box<Expr>),
 }
 
+/// An `__attribute__((destructor(N)))` is carried in a function's
+/// `constructor` priority as `DESTRUCTOR_PRIO + N` (and runs from `.fini_array`).
+pub const DESTRUCTOR_PRIO: i32 = 0x10000;
+
 /// A top-level declaration.
 #[derive(Debug, Clone)]
 pub enum Decl {

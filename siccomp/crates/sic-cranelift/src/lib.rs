@@ -333,17 +333,20 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     for (i, f) in ir_module.functions.iter().enumerate() {
         let Some(prio) = f.constructor else { continue };
         let fid = func_ids[&(i as u32)];
-        let sym = format!(".init_array.entry.{}", f.name);
+        let sym = format!(".ctor_dtor.entry.{}", f.name);
         let did = obj_module.declare_data(&sym, CLinkage::Local, true, false)?;
         let mut desc = DataDescription::new();
         desc.set_align(ptr_size as u64);
         desc.define(vec![0u8; ptr_size as usize].into_boxed_slice());
         let fv = obj_module.declare_func_in_data(fid, &mut desc);
         desc.write_function_addr(0, fv);
+        // A destructor (priority offset by 0x10000, see sic_frontend's
+        // `DESTRUCTOR_PRIO`) runs at exit from `.fini_array`.
+        let (array, prio) = if prio >= 0x10000 { ("fini_array", prio - 0x10000) } else { ("init_array", prio) };
         let section = if prio == 65535 {
-            ".init_array".to_string()
+            format!(".{}", array)
         } else {
-            format!(".init_array.{:05}", prio)
+            format!(".{}.{:05}", array, prio)
         };
         desc.set_custom_section(&section);
         obj_module.define_data(did, &desc)?;
