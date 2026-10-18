@@ -23,8 +23,8 @@ import semver;
 import hashbrown;
 
 int main() {
-    semver::Version v = semver::Version::Parse("1.4.2") else return 1;
-    semver::VersionReq r = semver::VersionReq::Parse(">=1.2, <2") else return 2;
+    semver::Version v = semver::Version::parse("1.4.2") else return 1;
+    semver::VersionReq r = semver::VersionReq::parse(">=1.2, <2") else return 2;
     hashbrown::StrIntMap m;                         // HashMap::new()
     m.insert("apple", 3);
     i64 n = m.get("apple") else return 3;
@@ -84,8 +84,14 @@ any edited `sic-deps/*/src/lib.rs`; the generated `.gitignore` covers the rest.
 item whose signature it can map. The wrappers then go through the binding crate
 mechanism below:
 
-- functions, also those in public modules (`text::words` → `demo::TextWords`)
-  and re-exports; a constant becomes a function (`LIMIT` → `demo::Limit()`);
+- the crate's module tree, as SIC namespaces, with Rust's own names:
+  `demo::text::words(…)`, `hashbrown::hash_map::HashMap`, `semver::Version::parse(…)`.
+  A re-export (`pub use`) is the same item under its other path too
+  (`hashbrown::HashMap`, `base64::prelude::BASE64_STANDARD`);
+- functions and constants: a literal constant is a SIC constant (`demo::LIMIT`); a
+  computed one (`base64::engine::general_purpose::STANDARD`, an engine value) is a
+  module global set when the library loads, so `STANDARD.encode(data)` reads as in
+  Rust;
 - types (non-generic structs and enums), with their inherent methods, the methods
   of the crate's own traits (provided methods too), and:
   - for public fields, a getter (`v.major()`) and, for scalars and strings, a
@@ -106,6 +112,10 @@ mechanism below:
 - a method that consumes `self`, or takes a type by value, clones it when the
   type is `Clone` (a builder `with_label(self, …) -> Self` returns a new value);
   one returning `&mut Self` (a builder chain) returns nothing.
+
+Names are never changed: a Rust name that is a SIC keyword (`default`, `union`,
+`new`, `match`) is still reachable, because a member is always written after
+`::` or `.` (`hashbrown::HashMap::default()`, `a.union(b)`).
 
 Everything else — other generics, `unsafe`/`async` functions, `&mut` results,
 iterators of tuples, deprecated items — is listed with the reason at the end of
@@ -176,10 +186,10 @@ import rsdemo;
 int main() {
     rsdemo::Counter c;                               // Counter::new() as constructor
     c.add(5);
-    rsdemo::Counter d = rsdemo::Counter::Named("d");
-    std::Println("{}", rsdemo::Greet("sic"));        // hello, sic
-    list<string> w = rsdemo::Words("one two three");
-    i64 n = rsdemo::ParseInt(" 123 ") else return 1;
+    rsdemo::Counter d = rsdemo::Counter::named("d");
+    std::Println("{}", rsdemo::greet("sic"));        // hello, sic
+    list<string> w = rsdemo::words("one two three");
+    i64 n = rsdemo::parse_int(" 123 ") else return 1;
     return w.length == 3 && n == 123 ? 0 : 2;
 }
 ```
@@ -201,13 +211,14 @@ module = "base64"          # the SIC module name (default: the crate's name)
 
 sic reads the root of `src/lib.rs` and binds:
 
-- every `pub fn` → a module function, renamed to SIC's CamelCase (`greet` →
-  `rsdemo::Greet`, `parse_int` → `rsdemo::ParseInt`);
+- every `pub fn` → a module function under its Rust name (`rsdemo::greet`,
+  `rsdemo::parse_int`); an inline `pub mod m { … }` → the namespace `rsdemo::m`;
+  `pub use` → the same item at that path; a literal `pub const` → a SIC constant;
 - every `pub struct` / `pub enum` (non-generic) → a SIC type of the same name;
 - the `pub fn`s of its inherent `impl`:
   - methods (`&self` / `&mut self`) keep their Rust names: `c.add(5)`;
   - associated functions go in a namespace named after the type:
-    `Counter::named("d")` → `rsdemo::Counter::Named("d")`;
+    `Counter::named("d")` → `rsdemo::Counter::named("d")`;
   - an argument-less `new()` is also the type's **constructor**, so a plain
     declaration `rsdemo::Counter c;` holds a ready object (an initializer skips it).
 
@@ -242,8 +253,8 @@ owned by SIC and released like any other.
 `Option` and `Result` come back as SIC's built-in enums, so the usual forms apply:
 
 ```sic
-i64 n = rsdemo::ParseInt(text) else return 1;          // unwrap or bail out
-match (rsdemo::ParseInt("x")) {
+i64 n = rsdemo::parse_int(text) else return 1;          // unwrap or bail out
+match (rsdemo::parse_int("x")) {
     Ok(v):  use(v);
     Err(e): std::Println("{}", e);                     // invalid digit found in string
 }
@@ -255,7 +266,7 @@ rsdemo::Counter q = d.split(4) else return 2;          // Option<Counter>
 A bound type is a small SIC struct holding a refcounted handle to the Rust value:
 
 ```sic
-rsdemo::Counter a = rsdemo::Counter::Named("a");   // a Rust value, owned by SIC
+rsdemo::Counter a = rsdemo::Counter::named("a");   // a Rust value, owned by SIC
 rsdemo::Counter b = a;                 // copies share the same object
 a.add(3);                              // b.get() is 3 too
 // the last copy's scope exit drops the Rust value

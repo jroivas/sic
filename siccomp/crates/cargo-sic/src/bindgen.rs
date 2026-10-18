@@ -33,7 +33,7 @@ pub struct Generated {
 const FORMAT_MIN: u64 = 39;
 
 struct TypeBind {
-    /// The wrapper's name.
+    /// The wrapper's path in the binding crate (`crate::hash_map::HashMap`).
     wrapper: String,
     /// The crate path of the wrapped type (`::krate::m::Acc`).
     path: String,
@@ -47,7 +47,6 @@ struct Gen<'a> {
     out: String,
     bound: usize,
     skipped: Vec<String>,
-    used_names: HashSet<String>,
     /// Bound types (wrapper names) that implement `Clone`: a by-value use
     /// clones them.
     cloneable: HashSet<String>,
@@ -79,17 +78,6 @@ fn id_str(v: &Value) -> Option<String> {
     }
 }
 
-/// `random_range` → `RandomRange` (as the binder names SIC functions).
-fn camel(s: &str) -> String {
-    let mut out = String::new();
-    let mut up = true;
-    for c in s.chars() {
-        if c == '_' { up = true; continue; }
-        if up { out.extend(c.to_uppercase()); up = false; } else { out.push(c); }
-    }
-    out
-}
-
 /// Rust keywords a wrapper parameter may not be named.
 const RUST_KW: &[&str] = &[
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if",
@@ -116,7 +104,9 @@ impl<'a> Gen<'a> {
 
     // ── Reachable items ──────────────────────────────────────────────────────
 
-    fn collect(&self, root: &str) -> Vec<Entry> {
+    /// Every public item: its first (shallowest) path, and the other paths it
+    /// is re-exported at (`aliases`).
+    fn collect(&self, root: &str, aliases: &mut Vec<Entry>) -> Vec<Entry> {
         let mut out: Vec<Entry> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut seen_mods: HashSet<String> = HashSet::new();
@@ -145,6 +135,8 @@ impl<'a> Gen<'a> {
                         }
                     } else if seen.insert(target.clone()) {
                         out.push(Entry { id: target, prefix: prefix.clone(), name });
+                    } else {
+                        aliases.push(Entry { id: target, prefix: prefix.clone(), name });
                     }
                     continue;
                 }
@@ -155,6 +147,8 @@ impl<'a> Gen<'a> {
                     }
                 } else if seen.insert(id.clone()) {
                     out.push(Entry { id, prefix: prefix.clone(), name });
+                } else {
+                    aliases.push(Entry { id, prefix: prefix.clone(), name });
                 }
             }
         }
@@ -590,7 +584,8 @@ impl<'a> Gen<'a> {
 
     fn emit_type(&mut self, it: &Value, kind: &str, w: &str, path: &str, shown: &str, inst_ty: Option<&Value>) {
         self.doc_comment(it, "");
-        let _ = writeln!(self.out, "pub struct {}(pub {});\n\nimpl {} {{", w, path, w);
+        let wn = w.rsplit("::").next().unwrap_or(w);
+        let _ = writeln!(self.out, "pub struct {}(pub {});\n\nimpl {} {{", wn, path, wn);
         let methods = self.inherent_methods(it, kind, inst_ty);
         let mut names: HashSet<String> = HashSet::new();
         let mut has_new0 = false;
@@ -671,9 +666,9 @@ impl<'a> Gen<'a> {
                     else if vk.get("tuple").is_some() { format!("{}::{}(..)", path, vname) }
                     else { format!("{}::{} {{ .. }}", path, vname) };
                 arms.push(format!("            {} => \"{}\",", pat, vname));
-                let fname = snake(&vname);
+                let fname = vname.clone();
                 if vk.as_str() == Some("plain") && !names.contains(&fname) && !RUST_KW.contains(&fname.as_str()) {
-                    let _ = writeln!(self.out, "    /// The `{}` variant.\n    pub fn {}() -> {} {{\n        {}({}::{})\n    }}", vname, fname, w, w, path, vname);
+                    let _ = writeln!(self.out, "    /// The `{}` variant.\n    #[allow(non_snake_case)]\n    pub fn {}() -> {} {{\n        {}({}::{})\n    }}", vname, fname, w, w, path, vname);
                     names.insert(fname);
                     self.bound += 1;
                 }
@@ -715,18 +710,6 @@ impl<'a> Gen<'a> {
         let _ = writeln!(self.out, "}}\n");
         self.bound += 1;
     }
-}
-
-/// `Exact` → `exact`, `NoPadding` → `no_padding`.
-fn snake(s: &str) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 { out.push('_'); }
-            out.extend(c.to_lowercase());
-        } else { out.push(c); }
-    }
-    out
 }
 
 /// The concrete argument type a set of trait bounds allows: `AsRef<[u8]>` →
@@ -978,14 +961,14 @@ const PRELUDE: &str = r#"#![allow(dead_code, unused_imports, unused_macros, clip
 
 // A `Result`'s error as text: its `Display`, else its `Debug`, else "error"
 // (picked at compile time by autoref specialization).
-struct SicErr<T>(T);
-trait SicErrDisplay { fn sic_msg(&self) -> String; }
+pub(crate) struct SicErr<T>(pub(crate) T);
+pub(crate) trait SicErrDisplay { fn sic_msg(&self) -> String; }
 impl<T: std::fmt::Display> SicErrDisplay for &&SicErr<T> { fn sic_msg(&self) -> String { self.0.to_string() } }
-trait SicErrDebug { fn sic_msg(&self) -> String; }
+pub(crate) trait SicErrDebug { fn sic_msg(&self) -> String; }
 impl<T: std::fmt::Debug> SicErrDebug for &SicErr<T> { fn sic_msg(&self) -> String { format!("{:?}", self.0) } }
-trait SicErrAny { fn sic_msg(&self) -> String; }
+pub(crate) trait SicErrAny { fn sic_msg(&self) -> String; }
 impl<T> SicErrAny for SicErr<T> { fn sic_msg(&self) -> String { String::from("error") } }
-macro_rules! sic_err { ($e:expr) => { (&&&SicErr($e)).sic_msg() } }
+macro_rules! sic_err { ($e:expr) => { (&&&crate::generated::SicErr($e)).sic_msg() } }
 
 "#;
 
@@ -1005,42 +988,48 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
     let root = id_str(&api["root"]).ok_or("rustdoc JSON has no root")?;
     let mut g = Gen {
         index, krate: krate.to_string(), types: HashMap::new(), out: String::new(),
-        bound: 0, skipped: Vec::new(), used_names: HashSet::new(),
+        bound: 0, skipped: Vec::new(), 
         cloneable: HashSet::new(), trait_paths: HashMap::new(), subst: HashMap::new(),
         inst: None, impl_subst: HashMap::new(),
     };
-    let entries = g.collect(&root);
+    let mut alias_entries: Vec<Entry> = Vec::new();
+    let entries = g.collect(&root, &mut alias_entries);
     for e in &entries {
         if g.item(&e.id).map_or(false, |it| it["inner"].get("trait").is_some()) {
             let p = g.path_of(e);
             g.trait_paths.insert(e.id.clone(), p);
         }
     }
+    // The wrapper path of an item at `prefix::name` in the binding crate.
+    let wpath = |prefix: &[String], name: &str| -> String {
+        let mut v = vec!["crate".to_string()];
+        v.extend(prefix.iter().cloned());
+        v.push(name.to_string());
+        v.join("::")
+    };
 
-    // Types first, so signatures can refer to them.
+    // Types first, so signatures can refer to them. Each is bound under its
+    // Rust name in its module (the module tree is mirrored).
     let mut type_entries: Vec<(&Entry, &str)> = Vec::new();
-    let mut tnames: HashSet<String> = HashSet::new();
+    let mut taken: HashSet<String> = HashSet::new();     // wrapper paths in use
     for e in &entries {
         let Some(it) = g.item(&e.id) else { continue };
         let kind = if it["inner"].get("struct").is_some() { "struct" }
             else if it["inner"].get("enum").is_some() { "enum" } else { continue };
         let shown = g.display_path(e);
         if it["deprecation"].is_object() { g.skip(format!("type `{}`", shown), "deprecated"); continue; }
-        let generic = it["inner"][kind]["generics"]["params"].as_array().into_iter().flatten()
-            .any(|p| p["kind"].get("lifetime").is_none());
-        if generic || it["inner"][kind]["generics"]["params"].as_array().map_or(false, |a| !a.is_empty()) {
+        if it["inner"][kind]["generics"]["params"].as_array().map_or(false, |a| !a.is_empty()) {
             if !instances.iter().any(|i| i.ty.split('<').next().map(|b| b.trim()) == Some(e.name.as_str())) {
                 g.skip(format!("type `{}`", shown), "generic (bind an instance: `instantiate` in sic.toml) or has a lifetime");
             }
             continue;
         }
-        let mut w = e.name.clone();
-        if tnames.contains(&w) { w = format!("{}{}", e.prefix.iter().map(|p| camel(p)).collect::<String>(), e.name); }
-        if tnames.contains(&w) || SIC_TYPE_RESERVED.contains(&w.as_str()) {
+        let w = wpath(&e.prefix, &e.name);
+        if taken.contains(&w) || SIC_TYPE_RESERVED.contains(&e.name.as_str()) {
             g.skip(format!("type `{}`", shown), "its name is taken");
             continue;
         }
-        tnames.insert(w.clone());
+        taken.insert(w.clone());
         if g.trait_impls(it, kind).iter().any(|t| t == "Clone" || t == "Copy") { g.cloneable.insert(w.clone()); }
         g.types.insert(e.id.clone(), TypeBind { wrapper: w, path: g.path_of(e) });
         type_entries.push((e, kind));
@@ -1059,11 +1048,13 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         };
         let it = g.item(&e.id).unwrap();
         let kind = if it["inner"].get("struct").is_some() { "struct" } else { "enum" };
-        if tnames.contains(&ins.name) || SIC_TYPE_RESERVED.contains(&ins.name.as_str())
+        let w = wpath(&[], &ins.name);
+        if taken.contains(&w) || SIC_TYPE_RESERVED.contains(&ins.name.as_str())
             || !ins.name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err(format!("sic.toml: instance name `{}` is taken or invalid", ins.name));
         }
-        let types_snapshot: HashMap<String, String> = g.types.iter().map(|(id, b)| (b.wrapper.clone(), id.clone())).collect();
+        let types_snapshot: HashMap<String, String> = g.types.iter()
+            .map(|(id, b)| (b.wrapper.rsplit("::").next().unwrap_or("").to_string(), id.clone())).collect();
         let resolve = |n: &str| -> Option<String> {
             let last = n.rsplit("::").next().unwrap_or(n);
             if last == base.rsplit("::").next().unwrap_or(&base) { return Some(e.id.clone()); }
@@ -1089,13 +1080,13 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
         }
         let args_text = ins.ty.find('<').map(|i| ins.ty[i..].to_string()).unwrap_or_default();
         let rust = format!("{}{}", g.path_of(e), args_text);
-        tnames.insert(ins.name.clone());
-        if g.trait_impls(it, kind).iter().any(|t| t == "Clone" || t == "Copy") { g.cloneable.insert(ins.name.clone()); }
-        inst_entries.push((e, kind, ins.name.clone(), rust, json));
+        taken.insert(w.clone());
+        if g.trait_impls(it, kind).iter().any(|t| t == "Clone" || t == "Copy") { g.cloneable.insert(w.clone()); }
+        inst_entries.push((e, kind, w, rust, json));
     }
-    // Free functions' SIC names must not collide with a type (its namespace).
-    let mut fn_entries: Vec<(&Entry, String)> = Vec::new();
-    let mut const_entries: Vec<(&Entry, String)> = Vec::new();
+    // Functions and constants keep their Rust names, in their modules.
+    let mut fn_entries: Vec<&Entry> = Vec::new();
+    let mut const_entries: Vec<&Entry> = Vec::new();
     for e in &entries {
         let Some(it) = g.item(&e.id) else { continue };
         let inner = &it["inner"];
@@ -1112,73 +1103,145 @@ pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, insta
             continue;
         }
         if it["deprecation"].is_object() { g.skip(format!("`{}`", shown), "deprecated"); continue; }
-        let mut name: Vec<String> = e.prefix.clone();
-        name.push(if is_const { e.name.to_lowercase() } else { e.name.clone() });
-        let name = name.join("_");
-        if tnames.contains(&camel(&name)) || g.used_names.contains(&name) {
-            g.skip(format!("`{}`", shown), "its SIC name collides with a type or another function");
+        // A tuple-struct wrapper also names a function: the two must differ.
+        if taken.contains(&wpath(&e.prefix, &e.name)) {
+            g.skip(format!("`{}`", shown), "its name collides with a type");
             continue;
         }
-        g.used_names.insert(name.clone());
-        if is_fn { fn_entries.push((e, name)); } else { const_entries.push((e, name)); }
+        if is_fn { fn_entries.push(e); } else { const_entries.push(e); }
     }
 
-    g.out.push_str(&format!(
-        "// Generated by `cargo sic` from {} {} — regenerated on every build; do not\n\
-         // edit. Hand-written wrappers belong in lib.rs.\n", crate_name, version));
-    g.out.push_str(PRELUDE);
-
+    // Each module's code, by module path; rendered as nested `pub mod`s.
+    let mut mods: std::collections::BTreeMap<Vec<String>, String> = Default::default();
+    mods.insert(Vec::new(), String::new());
+    let mut take = |g: &mut Gen, prefix: &[String]| {
+        let code = std::mem::take(&mut g.out);
+        let mut p: Vec<String> = Vec::new();
+        for seg in prefix {
+            p.push(seg.clone());
+            mods.entry(p.clone()).or_default();
+        }
+        mods.entry(prefix.to_vec()).or_default().push_str(&code);
+    };
     for (e, kind) in &type_entries {
         let it = g.item(&e.id).unwrap();
         let tb = g.types.get(&e.id).unwrap();
         let (w, path) = (tb.wrapper.clone(), tb.path.clone());
         let shown = g.display_path(e);
         g.emit_type(it, kind, &w, &path, &shown, None);
+        take(&mut g, &e.prefix);
     }
     for (e, kind, w, rust, json) in &inst_entries {
         let it = g.item(&e.id).unwrap();
         g.inst = Some((e.id.clone(), w.clone()));
-        let shown = w.clone();
+        let shown = w.rsplit("::").next().unwrap_or(w).to_string();
         g.emit_type(it, kind, w, rust, &shown, Some(json));
         g.inst = None;
+        take(&mut g, &[]);
     }
-    for (e, name) in &fn_entries {
+    // Wrapper paths of the bound functions / constants, for re-exports.
+    let mut bound_items: HashMap<String, String> = HashMap::new();
+    for e in &fn_entries {
         let it = g.item(&e.id).unwrap();
         let path = g.path_of(e);
-        let mark = g.out.len();
-        match g.emit_fn(it, name, &path, None, "") {
-            Ok(()) => g.out.push('\n'),
-            Err(why) => { g.out.truncate(mark); let s = g.display_path(e); g.skip(format!("fn `{}`", s), &why); }
+        match g.emit_fn(it, &e.name, &path, None, "") {
+            Ok(()) => { g.out.push('\n'); bound_items.insert(e.id.clone(), wpath(&e.prefix, &e.name)); }
+            Err(why) => { g.out.clear(); let s = g.display_path(e); g.skip(format!("fn `{}`", s), &why); }
         }
+        take(&mut g, &e.prefix);
     }
-    for (e, name) in &const_entries {
+    for e in &const_entries {
         let it = g.item(&e.id).unwrap();
-        let path = g.path_of(e);
-        match g.ret_plain(&it["inner"]["constant"]["type"], None) {
-            Ok((ty, conv)) if ty != "()" => {
+        match const_literal(&it["inner"]["constant"]) {
+            Some((ty, lit)) => {
                 g.doc_comment(it, "");
-                let _ = writeln!(g.out, "pub fn {}() -> {} {{\n    {}\n}}\n", name, ty, conv(&path));
+                let _ = writeln!(g.out, "pub const {}: {} = {};\n", e.name, ty, lit);
                 g.bound += 1;
+                bound_items.insert(e.id.clone(), wpath(&e.prefix, &e.name));
             }
-            Ok(_) => {}
-            Err(why) => { let s = g.display_path(e); g.skip(format!("const `{}`", s), &why); }
+            // A computed constant (`STANDARD: GeneralPurpose = …`): a function
+            // marked `sic-static`, which the binder turns into a SIC global set
+            // when the module loads.
+            None => match g.ret_plain(&it["inner"]["constant"]["type"], None) {
+                Ok((ty, conv)) if ty != "()" => {
+                    let path = g.path_of(e);
+                    g.doc_comment(it, "");
+                    let _ = writeln!(g.out, "#[doc(alias = \"sic-static\")]\n#[allow(non_snake_case)]\npub fn {}() -> {} {{\n    {}\n}}\n", e.name, ty, conv(&path));
+                    g.bound += 1;
+                    bound_items.insert(e.id.clone(), wpath(&e.prefix, &e.name));
+                }
+                Ok(_) => {}
+                Err(why) => { let s = g.display_path(e); g.skip(format!("const `{}`", s), &why); }
+            },
+        }
+        take(&mut g, &e.prefix);
+    }
+    // Re-exports: the same item under another path (`hashbrown::HashMap` is
+    // `hashbrown::hash_map::HashMap`).
+    for e in &alias_entries {
+        let target = g.types.get(&e.id).map(|t| t.wrapper.clone()).or_else(|| bound_items.get(&e.id).cloned());
+        let Some(target) = target else { continue };
+        if target == wpath(&e.prefix, &e.name) { continue; }
+        let _ = writeln!(g.out, "pub use {} as {};", target, e.name);
+        take(&mut g, &e.prefix);
+    }
+
+    let mut out = format!(
+        "// Generated by `cargo sic` from {} {} — regenerated on every build; do not\n\
+         // edit. Hand-written wrappers belong in lib.rs.\n", crate_name, version);
+    out.push_str(PRELUDE);
+    fn render(mods: &std::collections::BTreeMap<Vec<String>, String>, prefix: &Vec<String>, out: &mut String) {
+        if let Some(code) = mods.get(prefix) { out.push_str(code); }
+        let children: Vec<&Vec<String>> = mods.keys()
+            .filter(|k| k.len() == prefix.len() + 1 && k.starts_with(prefix)).collect();
+        for c in children {
+            let _ = writeln!(out, "\npub mod {} {{\n#[allow(unused_imports)]\nuse crate::generated::{{SicErrDisplay, SicErrDebug, SicErrAny}};\n", c.last().unwrap());
+            render(mods, c, out);
+            out.push_str("}\n");
         }
     }
+    render(&mods, &Vec::new(), &mut out);
     if !g.skipped.is_empty() {
-        g.out.push_str("// Not bound (wrap these by hand in lib.rs if you need them):\n");
-        for s in &g.skipped { let _ = writeln!(g.out, "//   {}", s); }
+        out.push_str("\n// Not bound (wrap these by hand in lib.rs if you need them):\n");
+        for s in &g.skipped { let _ = writeln!(out, "//   {}", s); }
     }
-    Ok(Generated { code: g.out, bound: g.bound, skipped: g.skipped.len() })
+    Ok(Generated { code: out, bound: g.bound, skipped: g.skipped.len() })
+}
+
+/// A constant's Rust type and literal (`u32`, `10`), from rustdoc's evaluated
+/// value: scalars and `&str` only.
+fn const_literal(c: &Value) -> Option<(String, String)> {
+    let ty = &c["type"];
+    let k = &c["const"];
+    if let Some(p) = ty.get("primitive").and_then(|p| p.as_str()) {
+        if p == "str" || p == "char" || p == "never" { return None; }
+        let raw = k["value"].as_str().or_else(|| k["expr"].as_str())?.replace('_', "");
+        // The number without its type suffix (`10u32` → `10`, `2.5f64` → `2.5`).
+        let cs: Vec<char> = raw.chars().collect();
+        let mut n = 0;
+        while n < cs.len() {
+            let c = cs[n];
+            let exp = (c == 'e' || c == 'E') && cs.get(n + 1).map_or(false, |d| d.is_ascii_digit() || *d == '-' || *d == '+');
+            if c.is_ascii_digit() || c == '.' || c == '-' || (c == '+' && n > 0) || exp { n += 1; } else { break; }
+        }
+        let num: String = cs[..n].iter().collect();
+        let lit = if p == "bool" { raw.as_str() } else { num.as_str() };
+        let ok = if p == "bool" { lit == "true" || lit == "false" }
+            else { !lit.is_empty() && lit.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '.' | 'e' | 'E' | '+')) };
+        if !ok { return None; }
+        let lit = if (p == "f32" || p == "f64") && !lit.contains('.') && !lit.contains('e') { format!("{}.0", lit) } else { lit.to_string() };
+        return Some((p.to_string(), lit));
+    }
+    if ty["borrowed_ref"]["type"].get("primitive").and_then(|p| p.as_str()) == Some("str") {
+        let e = k["expr"].as_str()?;
+        if e.starts_with('"') && e.ends_with('"') && e.len() >= 2 { return Some(("&str".into(), e.to_string())); }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn camel_names() {
-        assert_eq!(camel("text_shout"), "TextShout");
-    }
 
     #[test]
     fn small_api() {
@@ -1194,11 +1257,11 @@ mod tests {
             "3": {"id":3,"name":"ident","deprecation":null,"inner":{"function":{
                   "sig":{"inputs":[["x",{"generic":"T"}]],"output":{"generic":"T"},"is_c_variadic":false},
                   "generics":{"params":[{"name":"T","kind":{"type":{}}}]},"header":{}}}},
-            "4": {"id":4,"name":"LIMIT","deprecation":null,"inner":{"constant":{"type":{"primitive":"u32"}}}}
+            "4": {"id":4,"name":"LIMIT","deprecation":null,"inner":{"constant":{"type":{"primitive":"u32"},"const":{"expr":"10","value":"10u32","is_literal":true}}}}
           }}"#).unwrap();
         let g = generate(&api, "k", "k", "0.1.0", &[]).unwrap();
         assert!(g.code.contains("/// Shout it.\npub fn shout(s: &str) -> String {\n    ::k::shout(s)\n}"), "{}", g.code);
-        assert!(g.code.contains("pub fn limit() -> u32 {\n    ::k::LIMIT\n}"), "{}", g.code);
+        assert!(g.code.contains("pub const LIMIT: u32 = 10;"), "{}", g.code);
         assert!(g.code.contains("fn `ident`: generic"), "{}", g.code);
         assert_eq!((g.bound, g.skipped), (2, 1));
     }

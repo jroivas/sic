@@ -46,6 +46,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::io::{BufRead, BufReader};
+use std::collections::HashSet;
 
 use quote::ToTokens;
 
@@ -144,16 +145,45 @@ enum Recv { None, Ref, RefMut }
 struct Func {
     /// Rust name.
     name: String,
+    /// The module path of a free function (`["text"]` for `text::words`).
+    ns: Vec<String>,
     doc: Vec<String>,
     recv: Recv,
     params: Vec<Param>,
     ret: Ty,
+    /// A computed constant (`#[doc(alias = "sic-static")]` on a no-argument
+    /// fn): a SIC global of this name, set when the module loads.
+    is_static: bool,
 }
 
 struct Struct {
+    /// The type's path in the crate (`hash_map::HashMap`, `Version`): its
+    /// identity, its SIC name (namespaces mirror the Rust modules), and
+    /// (mangled) part of its glue symbols.
+    key: String,
     name: String,
+    ns: Vec<String>,
     doc: Vec<String>,
     methods: Vec<Func>,
+}
+
+/// A `pub const` with a literal value: a SIC constant.
+struct Const {
+    name: String,
+    ns: Vec<String>,
+    doc: Vec<String>,
+    /// The SIC type and literal.
+    ty: String,
+    value: String,
+}
+
+enum AliasTarget { Type(String), Func(usize), Const(usize) }
+
+/// A `pub use` re-export: `name` in `ns` is another path of `target`.
+struct Alias {
+    name: String,
+    ns: Vec<String>,
+    target: AliasTarget,
 }
 
 struct Binding {
@@ -163,6 +193,8 @@ struct Binding {
     package: String,
     structs: Vec<Struct>,
     funcs: Vec<Func>,
+    consts: Vec<Const>,
+    aliases: Vec<Alias>,
     skipped: Vec<String>,
 }
 
@@ -232,29 +264,79 @@ fn elem_of(t: &syn::Type) -> Option<Elem> {
     None
 }
 
-/// Map a Rust type to the binding model. `self_ty` names the struct whose
-/// `impl` is being read (`Self`); `structs` are the crate's public structs.
-fn map_type(t: &syn::Type, self_ty: Option<&str>, structs: &[String]) -> Result<Ty, String> {
+/// Where a type is being read: the current module and impl, and the crate's
+/// bound types (by path).
+struct Scope<'a> {
+    ns: &'a [String],
+    self_key: Option<&'a str>,
+    types: &'a HashSet<String>,
+}
+
+/// Resolve a path to a module item (`crate::a::B`, `super::B`, `B`) from
+/// module `ns`: the absolute path, tried in `ns` first, then from the root.
+fn resolve_path(segs: &[String], ns: &[String], known: &dyn Fn(&str) -> bool) -> Option<String> {
+    let mut base: Vec<String> = ns.to_vec();
+    let mut rest = segs;
+    let mut absolute = false;
+    while let Some(first) = rest.first() {
+        match first.as_str() {
+            "crate" => { base.clear(); absolute = true; }
+            "self" => { absolute = true; }
+            "super" => { base.pop(); absolute = true; }
+            _ => break,
+        }
+        rest = &rest[1..];
+    }
+    if rest.is_empty() { return None; }
+    let join = |b: &[String]| -> String {
+        let mut v: Vec<String> = b.to_vec();
+        v.extend(rest.iter().cloned());
+        v.join("::")
+    };
+    let k = join(&base);
+    if known(&k) { return Some(k); }
+    if !absolute {
+        let k = join(&[]);
+        if known(&k) { return Some(k); }
+    }
+    None
+}
+
+fn path_segs(p: &syn::Path) -> Vec<String> {
+    p.segments.iter().map(|s| s.ident.to_string()).collect()
+}
+
+/// A bound crate type named by `p` (no generic arguments), if any.
+fn own_type(p: &syn::Path, sc: &Scope) -> Option<String> {
+    if p.segments.iter().any(|s| !s.arguments.is_empty()) { return None; }
+    let segs = path_segs(p);
+    if segs.len() == 1 && segs[0] == "Self" { return sc.self_key.map(|s| s.to_string()); }
+    resolve_path(&segs, sc.ns, &|k| sc.types.contains(k))
+}
+
+/// Map a Rust type to the binding model.
+fn map_type(t: &syn::Type, sc: &Scope) -> Result<Ty, String> {
     let bad = || Err(format!("unsupported type `{}`", spell(t)));
     match t {
         syn::Type::Tuple(tt) if tt.elems.is_empty() => Ok(Ty::Unit),
-        syn::Type::Paren(p) => map_type(&p.elem, self_ty, structs),
+        syn::Type::Paren(p) => map_type(&p.elem, sc),
         syn::Type::Reference(r) => {
             let m = r.mutability.is_some();
+            let how = if m { How::RefMut } else { How::Ref };
             match &*r.elem {
                 syn::Type::Slice(s) => {
                     if let Some(Elem::Prim(Prim::U8)) = elem_of(&s.elem) {
                         return if m { bad() } else { Ok(Ty::Bytes(How::Ref)) };
                     }
                     match elem_of(&s.elem) {
-                        Some(e) => Ok(Ty::List(e, if m { How::RefMut } else { How::Ref })),
+                        Some(e) => Ok(Ty::List(e, how)),
                         None => bad(),
                     }
                 }
                 syn::Type::Path(p) if p.qself.is_none() => {
+                    if let Some(k) = own_type(&p.path, sc) { return Ok(Ty::Obj(k, how)); }
                     let Some(seg) = p.path.segments.last() else { return bad() };
-                    let id = seg.ident.to_string();
-                    match id.as_str() {
+                    match seg.ident.to_string().as_str() {
                         "str" if !m => Ok(Ty::Str(How::Ref)),
                         "String" if !m => Ok(Ty::Str(How::RefOwned)),
                         "Vec" if !m => {
@@ -266,9 +348,6 @@ fn map_type(t: &syn::Type, self_ty: Option<&str>, structs: &[String]) -> Result<
                                 None => bad(),
                             }
                         }
-                        "Self" if self_ty.is_some() => Ok(Ty::Obj(self_ty.unwrap().to_string(), if m { How::RefMut } else { How::Ref })),
-                        _ if structs.iter().any(|s| *s == id) && p.path.segments.len() == 1 =>
-                            Ok(Ty::Obj(id, if m { How::RefMut } else { How::Ref })),
                         _ => bad(),
                     }
                 }
@@ -276,6 +355,7 @@ fn map_type(t: &syn::Type, self_ty: Option<&str>, structs: &[String]) -> Result<
             }
         }
         syn::Type::Path(p) if p.qself.is_none() => {
+            if let Some(k) = own_type(&p.path, sc) { return Ok(Ty::Obj(k, How::Owned)); }
             let Some(seg) = p.path.segments.last() else { return bad() };
             let id = seg.ident.to_string();
             if let Some(pr) = Prim::from_ident(&id) {
@@ -301,17 +381,14 @@ fn map_type(t: &syn::Type, self_ty: Option<&str>, structs: &[String]) -> Result<
                 "Option" => {
                     let a = generic_args(seg);
                     if a.len() != 1 { return bad(); }
-                    Ok(Ty::Option(Box::new(map_type(a[0], self_ty, structs)?)))
+                    Ok(Ty::Option(Box::new(map_type(a[0], sc)?)))
                 }
                 "Result" => {
                     let a = generic_args(seg);
                     if a.len() != 2 { return bad(); }
                     let unit_err = matches!(a[1], syn::Type::Tuple(tt) if tt.elems.is_empty());
-                    Ok(Ty::Result(Box::new(map_type(a[0], self_ty, structs)?), unit_err))
+                    Ok(Ty::Result(Box::new(map_type(a[0], sc)?), unit_err))
                 }
-                "Self" if self_ty.is_some() => Ok(Ty::Obj(self_ty.unwrap().to_string(), How::Owned)),
-                _ if structs.iter().any(|s| *s == id) && p.path.segments.len() == 1 && seg.arguments.is_empty() =>
-                    Ok(Ty::Obj(id, How::Owned)),
                 _ => bad(),
             }
         }
@@ -344,10 +421,8 @@ fn ret_ok(t: &Ty, nested: bool) -> Result<(), String> {
     }
 }
 
-/// Read one `fn` signature. `self_ty` is the struct of an inherent impl.
-fn read_fn(sig: &syn::Signature, attrs: &[syn::Attribute], self_ty: Option<&str>, structs: &[String])
-    -> Result<Func, String>
-{
+/// Read one `fn` signature.
+fn read_fn(sig: &syn::Signature, attrs: &[syn::Attribute], sc: &Scope) -> Result<Func, String> {
     if sig.asyncness.is_some() { return Err("an `async fn`".to_string()); }
     if sig.variadic.is_some() { return Err("a variadic fn".to_string()); }
     if sig.generics.params.iter().any(|g| !matches!(g, syn::GenericParam::Lifetime(_))) {
@@ -368,7 +443,7 @@ fn read_fn(sig: &syn::Signature, attrs: &[syn::Attribute], self_ty: Option<&str>
                     syn::Pat::Ident(pi) => pi.ident.to_string(),
                     _ => format!("arg{}", i),
                 };
-                let ty = map_type(&pt.ty, self_ty, structs)?;
+                let ty = map_type(&pt.ty, sc)?;
                 param_ok(&ty)?;
                 params.push(Param { name, ty });
             }
@@ -376,14 +451,81 @@ fn read_fn(sig: &syn::Signature, attrs: &[syn::Attribute], self_ty: Option<&str>
     }
     let ret = match &sig.output {
         syn::ReturnType::Default => Ty::Unit,
-        syn::ReturnType::Type(_, t) => map_type(t, self_ty, structs)?,
+        syn::ReturnType::Type(_, t) => map_type(t, sc)?,
     };
     ret_ok(&ret, false)?;
-    Ok(Func { name: sig.ident.to_string(), doc: doc_lines(attrs), recv, params, ret })
+    let is_static = params.is_empty() && recv == Recv::None && attrs.iter().any(|a| {
+        a.path().is_ident("doc") && a.to_token_stream().to_string().replace(' ', "").contains("alias=\"sic-static\"")
+    });
+    Ok(Func { name: sig.ident.to_string(), ns: sc.ns.to_vec(), doc: doc_lines(attrs), recv, params, ret, is_static })
 }
 
 fn is_pub(v: &syn::Visibility) -> bool {
     matches!(v, syn::Visibility::Public(_))
+}
+
+/// A `pub const`'s SIC type and literal, when its value is a literal.
+fn const_literal(ty: &syn::Type, e: &syn::Expr) -> Option<(String, String)> {
+    let (neg, lit) = match e {
+        syn::Expr::Lit(l) => (false, &l.lit),
+        syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Neg(_)) => match &*u.expr {
+            syn::Expr::Lit(l) => (true, &l.lit),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let sign = if neg { "-" } else { "" };
+    let tname = match ty {
+        syn::Type::Path(p) => p.path.segments.last()?.ident.to_string(),
+        syn::Type::Reference(r) if spell(&r.elem) == "str" => "str".to_string(),
+        _ => return None,
+    };
+    match (lit, tname.as_str()) {
+        (syn::Lit::Int(i), t) if Prim::from_ident(t).is_some() =>
+            Some((Prim::from_ident(t)?.sic().to_string(), format!("{}{}", sign, i.base10_digits()))),
+        (syn::Lit::Float(f), t @ ("f32" | "f64")) => Some((t.to_string(), format!("{}{}", sign, f.base10_digits()))),
+        (syn::Lit::Bool(b), "bool") if !neg => Some(("bool".into(), b.value.to_string())),
+        (syn::Lit::Str(s), "str") if !neg => Some(("string".into(), format!("{:?}", s.value()))),
+        _ => None,
+    }
+}
+
+/// The items of a module, with nested inline `pub mod`s (each a namespace).
+fn collect_mods<'a>(items: &'a [syn::Item], ns: Vec<String>, out: &mut Vec<(Vec<String>, &'a syn::Item)>) {
+    for it in items {
+        if let syn::Item::Mod(m) = it {
+            if let (true, Some((_, inner))) = (is_pub(&m.vis), &m.content) {
+                let mut sub = ns.clone();
+                sub.push(m.ident.to_string());
+                collect_mods(inner, sub, out);
+            }
+            continue;
+        }
+        out.push((ns.clone(), it));
+    }
+}
+
+/// `pub use` trees as (path segments, exported name); globs are left out.
+fn use_paths(t: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, String)>) {
+    match t {
+        syn::UseTree::Path(p) => {
+            prefix.push(p.ident.to_string());
+            use_paths(&p.tree, prefix, out);
+            prefix.pop();
+        }
+        syn::UseTree::Name(n) => {
+            let mut v = prefix.clone();
+            v.push(n.ident.to_string());
+            out.push((v, n.ident.to_string()));
+        }
+        syn::UseTree::Rename(r) => {
+            let mut v = prefix.clone();
+            v.push(r.ident.to_string());
+            out.push((v, r.rename.to_string()));
+        }
+        syn::UseTree::Group(g) => for t in &g.items { use_paths(t, prefix, out); },
+        syn::UseTree::Glob(_) => {}
+    }
 }
 
 fn read_binding(dir: &Path) -> Result<Binding, String> {
@@ -425,14 +567,19 @@ fn read_binding(dir: &Path) -> Result<Binding, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
         file.items.extend(parse(path, &text)?.items);
     }
+    let mut items: Vec<(Vec<String>, &syn::Item)> = Vec::new();
+    collect_mods(&file.items, Vec::new(), &mut items);
 
     let mut b = Binding {
         module, crate_ident, package,
-        structs: Vec::new(), funcs: Vec::new(), skipped: Vec::new(),
+        structs: Vec::new(), funcs: Vec::new(), consts: Vec::new(), aliases: Vec::new(), skipped: Vec::new(),
     };
-    // Public, non-generic structs and enums are bound as opaque handle types.
-    let mut names: Vec<String> = Vec::new();
-    for item in &file.items {
+    let shown = |ns: &[String], n: &str| -> String {
+        let mut v = ns.to_vec(); v.push(n.to_string()); v.join("::")
+    };
+    // Public, non-generic structs and enums are bound as handle types.
+    let mut types: HashSet<String> = HashSet::new();
+    for (ns, item) in &items {
         let (vis, ident, generics, attrs) = match item {
             syn::Item::Struct(s) => (&s.vis, &s.ident, &s.generics, &s.attrs),
             syn::Item::Enum(e) => (&e.vis, &e.ident, &e.generics, &e.attrs),
@@ -440,42 +587,69 @@ fn read_binding(dir: &Path) -> Result<Binding, String> {
         };
         if !is_pub(vis) { continue; }
         if !generics.params.is_empty() {
-            b.skipped.push(format!("type `{}`: generic types are not bound", ident));
+            b.skipped.push(format!("type `{}`: generic types are not bound", shown(ns, &ident.to_string())));
             continue;
         }
-        names.push(ident.to_string());
-        b.structs.push(Struct { name: ident.to_string(), doc: doc_lines(attrs), methods: Vec::new() });
+        let key = shown(ns, &ident.to_string());
+        types.insert(key.clone());
+        b.structs.push(Struct { key, name: ident.to_string(), ns: ns.clone(), doc: doc_lines(attrs), methods: Vec::new() });
     }
-    for item in &file.items {
+    for (ns, item) in &items {
+        let sc = Scope { ns, self_key: None, types: &types };
         match item {
             syn::Item::Fn(f) if is_pub(&f.vis) => {
-                match read_fn(&f.sig, &f.attrs, None, &names) {
+                match read_fn(&f.sig, &f.attrs, &sc) {
                     Ok(func) => b.funcs.push(func),
-                    Err(why) => b.skipped.push(format!("fn `{}`: {}", f.sig.ident, why)),
+                    Err(why) => b.skipped.push(format!("fn `{}`: {}", shown(ns, &f.sig.ident.to_string()), why)),
                 }
             }
             syn::Item::Impl(im) if im.trait_.is_none() => {
                 let syn::Type::Path(p) = &*im.self_ty else { continue };
-                let Some(id) = p.path.get_ident().map(|i| i.to_string()) else { continue };
-                let Some(si) = b.structs.iter().position(|s| s.name == id) else { continue };
+                let Some(key) = own_type(&p.path, &sc) else { continue };
+                let si = b.structs.iter().position(|s| s.key == key).unwrap();
+                let msc = Scope { ns, self_key: Some(&key), types: &types };
                 for it in &im.items {
                     let syn::ImplItem::Fn(m) = it else { continue };
                     if !is_pub(&m.vis) { continue; }
-                    match read_fn(&m.sig, &m.attrs, Some(&id), &names) {
-                        Ok(func) => b.structs[si].methods.push(func),
-                        Err(why) => b.skipped.push(format!("fn `{}::{}`: {}", id, m.sig.ident, why)),
+                    match read_fn(&m.sig, &m.attrs, &msc) {
+                        Ok(mut func) => { func.ns = Vec::new(); b.structs[si].methods.push(func) }
+                        Err(why) => b.skipped.push(format!("fn `{}::{}`: {}", key, m.sig.ident, why)),
                     }
+                }
+            }
+            syn::Item::Const(c) if is_pub(&c.vis) => {
+                match const_literal(&c.ty, &c.expr) {
+                    Some((ty, value)) => b.consts.push(Const {
+                        name: c.ident.to_string(), ns: ns.clone(), doc: doc_lines(&c.attrs), ty, value }),
+                    None => b.skipped.push(format!("const `{}`: not a literal of a SIC type", shown(ns, &c.ident.to_string()))),
                 }
             }
             _ => {}
         }
     }
-    // A free function's sic name must not collide with a type's namespace.
-    for f in &b.funcs {
-        let n = camel(&f.name);
-        if names.contains(&n) {
-            return Err(format!("{}: fn `{}` (sic `{}::{}`) collides with type `{}`; rename one",
-                lib_rs.display(), f.name, b.module, n, n));
+    // Re-exports (`pub use crate::a::X;`, `pub use self::b::f as g;`) of bound
+    // items: the same type or function under another path.
+    for (ns, item) in &items {
+        let syn::Item::Use(u) = item else { continue };
+        if !is_pub(&u.vis) { continue; }
+        let mut paths = Vec::new();
+        use_paths(&u.tree, &mut Vec::new(), &mut paths);
+        for (segs, name) in paths {
+            if let Some(k) = resolve_path(&segs, ns, &|k| types.contains(k)) {
+                if shown(ns, &name) != k { b.aliases.push(Alias { name, ns: ns.clone(), target: AliasTarget::Type(k) }); }
+                continue;
+            }
+            let fpath = |f: &Func| shown(&f.ns, &f.name);
+            if let Some(k) = resolve_path(&segs, ns, &|k| b.funcs.iter().any(|f| fpath(f) == k)) {
+                let i = b.funcs.iter().position(|f| fpath(f) == k).unwrap();
+                if shown(ns, &name) != k { b.aliases.push(Alias { name, ns: ns.clone(), target: AliasTarget::Func(i) }); }
+                continue;
+            }
+            let cpath = |c: &Const| shown(&c.ns, &c.name);
+            if let Some(k) = resolve_path(&segs, ns, &|k| b.consts.iter().any(|c| cpath(c) == k)) {
+                let i = b.consts.iter().position(|c| cpath(c) == k).unwrap();
+                if shown(ns, &name) != k { b.aliases.push(Alias { name, ns: ns.clone(), target: AliasTarget::Const(i) }); }
+            }
         }
     }
     Ok(b)
@@ -483,18 +657,9 @@ fn read_binding(dir: &Path) -> Result<Binding, String> {
 
 // ── Names ─────────────────────────────────────────────────────────────────────
 
-/// `random_range` → `RandomRange` (sic's CamelCase for module functions).
-fn camel(s: &str) -> String {
-    let mut out = String::new();
-    let mut up = true;
-    for c in s.chars() {
-        if c == '_' { up = true; continue; }
-        if up { out.extend(c.to_uppercase()); up = false; } else { out.push(c); }
-    }
-    if out.is_empty() { s.to_string() } else { out }
-}
-
-/// Words a Rust identifier may use but a sic one may not.
+/// Words a Rust identifier may use but a SIC parameter name may not (a SIC
+/// function or method may be named by any of them: it is reached through `::`
+/// or `.`).
 const SIC_RESERVED: &[&str] = &[
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum",
     "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "restrict", "return",
@@ -502,11 +667,27 @@ const SIC_RESERVED: &[&str] = &[
     "volatile", "while", "string", "bigint", "fixed", "match", "defer", "new", "del", "list", "dict",
     "set", "tuple", "any", "bool", "true", "false", "unsafe", "async", "await", "module", "import",
     "namespace", "private", "atomic", "bitfield", "weak", "overflow", "exception", "fallthrough",
-    "macro_rules", "typeid", "type", "NULL", "None", "Some", "Ok", "Err", "self", "h",
+    "macro_rules", "typeid", "type", "NULL", "None", "Some", "Ok", "Err", "self",
 ];
 
 fn sic_ident(s: &str) -> String {
     if SIC_RESERVED.contains(&s) || s.starts_with("__") { format!("{}_", s) } else { s.to_string() }
+}
+
+/// `hash_map::HashMap` → `hash_map__HashMap` (a C identifier part).
+fn mangle(key: &str) -> String {
+    key.replace("::", "__")
+}
+
+/// `body` inside the namespace `ns` (nested blocks; the root when empty).
+fn in_ns(ns: &[String], body: &str) -> String {
+    if ns.is_empty() { return body.to_string(); }
+    let mut s = String::new();
+    for n in ns { s.push_str(&format!("namespace {} {{\n", n)); }
+    s.push_str(body);
+    for _ in ns { s.push_str("}\n"); }
+    s.push('\n');
+    s
 }
 
 // ── Code generation ──────────────────────────────────────────────────────────
@@ -533,18 +714,17 @@ fn ffi_param(t: &Ty) -> (String, String) {
     }
 }
 
-/// The sic type a binding exposes.
-fn sic_ty(t: &Ty, module: &str) -> String {
-    let _ = module;
+/// The sic type a binding exposes (a bound type by its namespaced path).
+fn sic_ty(t: &Ty) -> String {
     match t {
         Ty::Unit => "void".into(),
         Ty::Prim(p) => p.sic().into(),
         Ty::Str(_) | Ty::Bytes(_) => "string".into(),
         Ty::List(e, _) => format!("list<{}>", e.sic()),
         Ty::Obj(n, _) => n.clone(),
-        Ty::Option(i) => format!("Option<{}>", sic_ty(i, module)),
+        Ty::Option(i) => format!("Option<{}>", sic_ty(i)),
         Ty::Result(i, _) => {
-            let inner = if **i == Ty::Unit { "bool".to_string() } else { sic_ty(i, module) };
+            let inner = if **i == Ty::Unit { "bool".to_string() } else { sic_ty(i) };
             format!("Result<{}, string>", inner)
         }
     }
@@ -623,17 +803,19 @@ fn rust_in(t: &Ty, n: &str, module: &str, out: &mut String) -> String {
     }
 }
 
-/// Glue symbol of a function (`struct_` for a method / associated fn).
-fn glue_sym(module: &str, owner: Option<&str>, f: &str) -> String {
+/// Glue symbol of a function: of a type's method or associated function
+/// (`owner`: the type's key), or a free function (`ns`).
+fn glue_sym(module: &str, owner: Option<&str>, f: &Func) -> String {
     match owner {
-        Some(s) => format!("__sicrs_{}_{}_{}", module, s, f),
-        None => format!("__sicrs_{}_{}", module, f),
+        Some(s) => format!("__sicrs_{}_{}_{}", module, mangle(s), f.name),
+        None if f.ns.is_empty() => format!("__sicrs_{}_{}", module, f.name),
+        None => format!("__sicrs_{}_{}__{}", module, f.ns.join("__"), f.name),
     }
 }
 
 /// Generate one glue `extern "C"` function.
 fn glue_fn(module: &str, owner: Option<&str>, f: &Func) -> String {
-    let sym = glue_sym(module, owner, &f.name);
+    let sym = glue_sym(module, owner, f);
     let fallible = matches!(f.ret, Ty::Option(_) | Ty::Result(..));
     let mut params: Vec<String> = Vec::new();
     if fallible { params.push("__ok: *mut bool".into()); }
@@ -650,9 +832,14 @@ fn glue_fn(module: &str, owner: Option<&str>, f: &Func) -> String {
                 let get = format!("__sic_obj::<__c::{s}>(__self, \"{module}::{s}\")");
                 args.push(if f.recv == Recv::RefMut { get } else { format!("&*{get}") });
             }
-            format!("__c::{}::{}", s, f.name)
+            format!("<__c::{}>::{}", s, f.name)
         }
-        None => format!("__c::{}", f.name),
+        None => {
+            let mut p = vec!["__c".to_string()];
+            p.extend(f.ns.iter().cloned());
+            p.push(f.name.clone());
+            p.join("::")
+        }
     };
     for p in &f.params {
         args.push(rust_in(&p.ty, &p.name, module, &mut body));
@@ -691,7 +878,7 @@ fn collect_elems(t: &Ty, out: &mut Vec<Elem>) {
 fn all_funcs(b: &Binding) -> Vec<(Option<&str>, &Func)> {
     let mut v: Vec<(Option<&str>, &Func)> = Vec::new();
     for s in &b.structs {
-        for m in &s.methods { v.push((Some(s.name.as_str()), m)); }
+        for m in &s.methods { v.push((Some(s.key.as_str()), m)); }
     }
     for f in &b.funcs { v.push((None, f)); }
     v
@@ -758,8 +945,8 @@ fn gen_glue(b: &Binding) -> String {
         "#[no_mangle]\npub extern \"C\" fn __sicrs_{m}_last_error() -> SicStr {{\n    __SIC_ERR.with(|c| __sic_out(c.borrow().as_bytes()))\n}}\n\n"));
     for st in &b.structs {
         s.push_str(&format!(
-            "#[no_mangle]\npub unsafe extern \"C\" fn __sicrs_{m}_{n}_drop(p: *mut c_void) {{\n    if !p.is_null() {{ drop(Box::from_raw(p as *mut __c::{n})); }}\n}}\n\n",
-            n = st.name));
+            "#[no_mangle]\npub unsafe extern \"C\" fn __sicrs_{m}_{mk}_drop(p: *mut c_void) {{\n    if !p.is_null() {{ drop(Box::from_raw(p as *mut __c::{k})); }}\n}}\n\n",
+            mk = mangle(&st.key), k = st.key));
     }
     let mut elems = Vec::new();
     for (_, f) in all_funcs(b) {
@@ -804,8 +991,13 @@ fn push_doc(out: &mut String, doc: &[String], indent: &str) {
     }
 }
 
-/// The sic wrapper of one function: its declaration and body.
-fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &str) -> String {
+/// The sic wrapper of one function: its declaration and body. `owner` is the
+/// key of the type of a method / associated function.
+fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, indent: &str) -> String {
+    sic_fn_named(b, owner, f, &f.name, indent)
+}
+
+fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: &str) -> String {
     let m = &b.module;
     let mut out = String::new();
     push_doc(&mut out, &f.doc, indent);
@@ -814,9 +1006,9 @@ fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &s
         decl.push(format!("{} *self", s));
     }
     for p in &f.params {
-        decl.push(format!("{} {}", sic_ty(&p.ty, m), sic_ident(&p.name)));
+        decl.push(format!("{} {}", sic_ty(&p.ty), sic_ident(&p.name)));
     }
-    out.push_str(&format!("{}{} {}({}) {{\n", indent, sic_ty(&f.ret, m), sic_name, decl.join(", ")));
+    out.push_str(&format!("{}{} {}({}) {{\n", indent, sic_ty(&f.ret), name, decl.join(", ")));
     let ind = format!("{}    ", indent);
     let mut pre = String::new();
     let mut post = String::new();
@@ -824,7 +1016,7 @@ fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &s
     let fallible = matches!(f.ret, Ty::Option(_) | Ty::Result(..));
     if fallible { args.push("&__ok".into()); }
     if let (Some(s), true) = (owner, f.recv != Recv::None) {
-        args.push(format!("__rs_p_{}(self->h)", s));
+        args.push(format!("__rs_p_{}(self->__rs_h)", mangle(s)));
     }
     for (i, p) in f.params.iter().enumerate() {
         let n = sic_ident(&p.name);
@@ -841,13 +1033,13 @@ fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &s
                 post.push_str(&format!("{ind}__sicrs_{m}_vec_{t}_free({v});\n"));
                 args.push(v);
             }
-            Ty::Obj(s, _) => args.push(format!("__rs_p_{}({}.h)", s, n)),
+            Ty::Obj(s, _) => args.push(format!("__rs_p_{}({}.__rs_h)", mangle(s), n)),
             _ => args.push(n),
         }
     }
     out.push_str(&pre);
     if fallible { out.push_str(&format!("{ind}bool __ok = false;\n")); }
-    let call = format!("{}({})", glue_sym(m, owner, &f.name), args.join(", "));
+    let call = format!("{}({})", glue_sym(m, owner, f), args.join(", "));
     let (_, gret) = ffi_ret(&f.ret);
     if f.ret == Ty::Unit {
         out.push_str(&format!("{ind}{};\n", call));
@@ -862,13 +1054,13 @@ fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &s
         match t {
             Ty::List(e, _) => {
                 let tg = e.tag();
-                out.push_str(&format!("{ind}{} __l;\n", sic_ty(t, m)));
+                out.push_str(&format!("{ind}{} __l;\n", sic_ty(t)));
                 out.push_str(&format!("{ind}usize __n = __sicrs_{m}_vec_{tg}_len(__r);\n"));
                 out.push_str(&format!("{ind}for (usize __i = 0; __i < __n; __i++) __l.add(__sicrs_{m}_vec_{tg}_get(__r, __i));\n"));
                 out.push_str(&format!("{ind}__sicrs_{m}_vec_{tg}_free(__r);\n"));
                 "__l".into()
             }
-            Ty::Obj(s, _) => format!("__rs_wrap_{}(__r)", s),
+            Ty::Obj(s, _) => format!("__rs_wrap_{}(__r)", mangle(s)),
             _ => "__r".into(),
         }
     };
@@ -892,6 +1084,19 @@ fn sic_fn(b: &Binding, owner: Option<&str>, f: &Func, sic_name: &str, indent: &s
     out
 }
 
+/// A forwarding function named `name` that calls `target` (a re-export).
+fn sic_forward(f: &Func, name: &str, target: &str, indent: &str) -> String {
+    let mut decl: Vec<String> = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    for p in &f.params {
+        decl.push(format!("{} {}", sic_ty(&p.ty), sic_ident(&p.name)));
+        args.push(sic_ident(&p.name));
+    }
+    let call = format!("{}({})", target, args.join(", "));
+    let body = if f.ret == Ty::Unit { format!("{};", call) } else { format!("return {};", call) };
+    format!("{}{} {}({}) {{ {} }}\n", indent, sic_ty(&f.ret), name, decl.join(", "), body)
+}
+
 /// The glue prototype of a function, in sic.
 fn sic_proto(m: &str, owner: Option<&str>, f: &Func) -> String {
     let mut ps: Vec<String> = Vec::new();
@@ -899,7 +1104,7 @@ fn sic_proto(m: &str, owner: Option<&str>, f: &Func) -> String {
     if f.recv != Recv::None { ps.push("void *__self".into()); }
     for p in &f.params { ps.push(format!("{} {}", ffi_param(&p.ty).1, sic_ident(&p.name))); }
     let ps = if ps.is_empty() { "void".to_string() } else { ps.join(", ") };
-    format!("{} {}({});\n", ffi_ret(&f.ret).1, glue_sym(m, owner, &f.name), ps)
+    format!("{} {}({});\n", ffi_ret(&f.ret).1, glue_sym(m, owner, f), ps)
 }
 
 fn gen_sic(b: &Binding) -> String {
@@ -907,11 +1112,12 @@ fn gen_sic(b: &Binding) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "// Generated by sic --emit-module from the Rust crate `{}` (src/lib.rs).\n\
-         // The sic interface of the crate; the functions call its Rust glue.\nmodule {};\n\n",
+         // The sic interface of the crate: its modules are namespaces, its names\n\
+         // are Rust's; the functions call its Rust glue.\nmodule {};\n\n",
         b.package, m));
     // Glue prototypes.
     s.push_str(&format!("string __sicrs_{m}_last_error(void);\n"));
-    for st in &b.structs { s.push_str(&format!("void __sicrs_{m}_{}_drop(void *p);\n", st.name)); }
+    for st in &b.structs { s.push_str(&format!("void __sicrs_{m}_{}_drop(void *p);\n", mangle(&st.key))); }
     let mut elems = Vec::new();
     for (_, f) in all_funcs(b) {
         collect_elems(&f.ret, &mut elems);
@@ -927,52 +1133,138 @@ fn gen_sic(b: &Binding) -> String {
     for (owner, f) in all_funcs(b) { s.push_str(&sic_proto(m, owner, f)); }
     s.push('\n');
 
-    // Every handle type is declared first, so a method may use a type that is
-    // defined after its struct.
-    for st in &b.structs { s.push_str(&format!("typedef struct {n} {n};\n", n = st.name)); }
+    // Every handle type is declared first (in its namespace), so a method may
+    // use a type defined after its struct.
+    for st in &b.structs {
+        s.push_str(&in_ns(&st.ns, &format!("typedef struct {n} {n};\n", n = st.name)));
+    }
     if !b.structs.is_empty() { s.push('\n'); }
     // Handle types: a private refcounted box owns the Rust object; the public
     // struct shares it (copies retain the box), and the last release drops it.
     for st in &b.structs {
-        let n = &st.name;
+        let (k, mk) = (&st.key, mangle(&st.key));
         s.push_str(&format!(
-            "private struct __rs_{n}_box {{\n    void *p;\n    ~__rs_{n}_box() {{ __sicrs_{m}_{n}_drop(p); }}\n}};\n\
-             static struct {n} __rs_wrap_{n}(void *p);\n\
-             static void *__rs_p_{n}(struct __rs_{n}_box *b) {{ if (b == NULL) return NULL; return b->p; }}\n\n"));
+            "private struct __rs_{mk}_box {{\n    void *p;\n    ~__rs_{mk}_box() {{ __sicrs_{m}_{mk}_drop(p); }}\n}};\n\
+             static {k} __rs_wrap_{mk}(void *p);\n\
+             static void *__rs_p_{mk}(struct __rs_{mk}_box *b) {{ if (b == NULL) return NULL; return b->p; }}\n\n"));
     }
     for st in &b.structs {
-        let n = &st.name;
-        push_doc(&mut s, &st.doc, "");
-        s.push_str(&format!("struct {n} {{\n    __rs_{n}_box *h;\n    ~{n}() {{ del h; }}\n"));
+        let (n, mk) = (&st.name, mangle(&st.key));
+        let mut body = String::new();
+        push_doc(&mut body, &st.doc, "");
+        body.push_str(&format!("struct {n} {{\n    __rs_{mk}_box *__rs_h;\n    ~{n}() {{ del __rs_h; }}\n"));
         // `new()` with no arguments is also the sic constructor, so a plain
         // `mod::S x;` declaration holds a ready object (an initializer skips it).
         if let Some(f) = st.methods.iter().find(|f| f.name == "new" && f.recv == Recv::None
-            && f.params.is_empty() && f.ret == Ty::Obj(n.clone(), How::Owned)) {
-            push_doc(&mut s, &f.doc, "    ");
-            s.push_str(&format!("    {n}() {{ h = new __rs_{n}_box; h->p = {}(); }}\n",
-                glue_sym(m, Some(n), &f.name)));
+            && f.params.is_empty() && f.ret == Ty::Obj(st.key.clone(), How::Owned)) {
+            push_doc(&mut body, &f.doc, "    ");
+            body.push_str(&format!("    {n}() {{ __rs_h = new __rs_{mk}_box; __rs_h->p = {}(); }}\n",
+                glue_sym(m, Some(&st.key), f)));
         }
         for f in st.methods.iter().filter(|f| f.recv != Recv::None) {
-            s.push('\n');
-            s.push_str(&sic_fn(b, Some(n), f, &sic_ident(&f.name), "    "));
+            body.push('\n');
+            body.push_str(&sic_fn(b, Some(&st.key), f, "    "));
         }
-        s.push_str("};\n\n");
+        body.push_str("};\n\n");
+        s.push_str(&in_ns(&st.ns, &body));
         s.push_str(&format!(
-            "static struct {n} __rs_wrap_{n}(void *p) {{\n    {n} v = {{ NULL }};\n    v.h = new __rs_{n}_box;\n    v.h->p = p;\n    return v;\n}}\n\n"));
+            "static {k} __rs_wrap_{mk}(void *p) {{\n    {k} v = {{ NULL }};\n    v.__rs_h = new __rs_{mk}_box;\n    v.__rs_h->p = p;\n    return v;\n}}\n\n",
+            k = st.key));
     }
+    // Associated functions: in a namespace named after the type (`Type::new`).
     for st in &b.structs {
         let assoc: Vec<&Func> = st.methods.iter().filter(|f| f.recv == Recv::None).collect();
         if assoc.is_empty() { continue; }
-        s.push_str(&format!("namespace {} {{\n", st.name));
+        let mut body = format!("namespace {} {{\n", st.name);
         for f in assoc {
-            s.push_str(&sic_fn(b, Some(&st.name), f, &camel(&f.name), "    "));
-            s.push('\n');
+            body.push_str(&sic_fn(b, Some(&st.key), f, "    "));
+            body.push('\n');
         }
-        s.push_str("}\n\n");
+        body.push_str("}\n");
+        s.push_str(&in_ns(&st.ns, &body));
     }
+    // Computed constants: a global per constant, set by the module's
+    // constructor (from a private getter) and released by its destructor.
+    let mut init = String::new();
+    let mut fini = String::new();
+    let zero_of = |t: &Ty, target: &str| -> String {
+        match t {
+            Ty::Obj(..) => format!("    {{ {} __z = {{ NULL }}; {} = __z; }}\n", sic_ty(t), target),
+            Ty::Str(_) | Ty::Bytes(_) => format!("    {} = \"\";\n", target),
+            Ty::List(..) => format!("    {{ {} __z; {} = __z; }}\n", sic_ty(t), target),
+            _ => String::new(),
+        }
+    };
     for f in &b.funcs {
-        s.push_str(&sic_fn(b, None, f, &camel(&f.name), ""));
+        if f.is_static {
+            let getter = format!("__rs_get_{}", glue_sym(m, None, f));
+            // The getter is private to the module: `static` on its signature line.
+            let text = sic_fn_named(b, None, f, &getter, "");
+            let at = text.lines().take_while(|l| l.starts_with("//")).map(|l| l.len() + 1).sum::<usize>();
+            s.push_str(&text[..at]);
+            s.push_str("static ");
+            s.push_str(&text[at..]);
+            let mut body = String::new();
+            push_doc(&mut body, &f.doc, "");
+            body.push_str(&format!("{} {};\n", sic_ty(&f.ret), f.name));
+            s.push_str(&in_ns(&f.ns, &body));
+            let mut p = f.ns.clone();
+            p.push(f.name.clone());
+            init.push_str(&format!("    {} = {}();\n", p.join("::"), getter));
+            fini.push_str(&zero_of(&f.ret, &p.join("::")));
+            continue;
+        }
+        s.push_str(&in_ns(&f.ns, &sic_fn(b, None, f, "")));
         s.push('\n');
+    }
+    for c in &b.consts {
+        let mut body = String::new();
+        push_doc(&mut body, &c.doc, "");
+        body.push_str(&format!("const {} {} = {};\n", c.ty, c.name, c.value));
+        s.push_str(&in_ns(&c.ns, &body));
+    }
+    // Re-exports: the same type / function / constant under another path.
+    for a in &b.aliases {
+        let mut body = String::new();
+        match &a.target {
+            AliasTarget::Type(k) => {
+                let st = b.structs.iter().find(|s| s.key == *k).unwrap();
+                body.push_str(&format!("typedef {} {};\n", k, a.name));
+                let assoc: Vec<&Func> = st.methods.iter().filter(|f| f.recv == Recv::None).collect();
+                if !assoc.is_empty() {
+                    body.push_str(&format!("namespace {} {{\n", a.name));
+                    for f in assoc {
+                        body.push_str(&sic_forward(f, &f.name, &format!("{}::{}", k, f.name), "    "));
+                    }
+                    body.push_str("}\n");
+                }
+            }
+            AliasTarget::Func(i) => {
+                let f = &b.funcs[*i];
+                let mut p = f.ns.clone();
+                p.push(f.name.clone());
+                if f.is_static {
+                    // Another name of a computed constant: its own global, a
+                    // copy of the first (sharing the Rust value).
+                    body.push_str(&format!("{} {};\n", sic_ty(&f.ret), a.name));
+                    let mut ap = a.ns.clone();
+                    ap.push(a.name.clone());
+                    init.push_str(&format!("    {} = {};\n", ap.join("::"), p.join("::")));
+                    fini.push_str(&zero_of(&f.ret, &ap.join("::")));
+                } else {
+                    body.push_str(&sic_forward(f, &a.name, &p.join("::"), ""));
+                }
+            }
+            AliasTarget::Const(i) => {
+                let c = &b.consts[*i];
+                body.push_str(&format!("const {} {} = {};\n", c.ty, a.name, c.value));
+            }
+        }
+        s.push_str(&in_ns(&a.ns, &body));
+    }
+    if !init.is_empty() {
+        s.push_str(&format!("__attribute__((constructor)) static void __rs_init_{m}() {{\n{init}}}\n\n"));
+        s.push_str(&format!("__attribute__((destructor)) static void __rs_fini_{m}() {{\n{fini}}}\n"));
     }
     s
 }
@@ -1077,7 +1369,7 @@ pub fn prepare(dir: &Path, verbose: bool) -> Result<RustBuild, String> {
     for s in &b.skipped {
         eprintln!("sic: warning: Rust module '{}': skipping {}", b.module, s);
     }
-    if b.funcs.is_empty() && b.structs.is_empty() {
+    if b.funcs.is_empty() && b.structs.is_empty() && b.consts.is_empty() {
         return Err(format!("{}: src/lib.rs has no public fn or struct sic can bind", dir.display()));
     }
     // `cargo sic` shares one target dir between a project's bindings
@@ -1123,10 +1415,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn camel_case() {
-        assert_eq!(camel("encode"), "Encode");
-        assert_eq!(camel("random_range"), "RandomRange");
-        assert_eq!(camel("next_u64"), "NextU64");
+    fn paths() {
+        let known = |k: &str| ["a::X", "Y"].contains(&k);
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(resolve_path(&s(&["crate", "a", "X"]), &s(&["b"]), &known).as_deref(), Some("a::X"));
+        assert_eq!(resolve_path(&s(&["X"]), &s(&["a"]), &known).as_deref(), Some("a::X"));
+        assert_eq!(resolve_path(&s(&["super", "Y"]), &s(&["a"]), &known).as_deref(), Some("Y"));
+        assert_eq!(resolve_path(&s(&["Y"]), &s(&["a"]), &known).as_deref(), Some("Y"));
+        assert_eq!(resolve_path(&s(&["self", "Y"]), &s(&["a"]), &known), None);
     }
 
     #[test]
@@ -1145,13 +1441,16 @@ mod tests {
 
     #[test]
     fn type_mapping() {
+        let types: HashSet<String> = HashSet::new();
+        let none = Scope { ns: &[], self_key: None, types: &types };
+        let rng = Scope { ns: &[], self_key: Some("Rng"), types: &types };
         let t: syn::Type = syn::parse_str("Result<Vec<u8>, base64::DecodeError>").unwrap();
-        assert_eq!(map_type(&t, None, &[]).unwrap(), Ty::Result(Box::new(Ty::Bytes(How::Owned)), false));
+        assert_eq!(map_type(&t, &none).unwrap(), Ty::Result(Box::new(Ty::Bytes(How::Owned)), false));
         let t: syn::Type = syn::parse_str("&mut [i64]").unwrap();
-        assert_eq!(map_type(&t, None, &[]).unwrap(), Ty::List(Elem::Prim(Prim::I64), How::RefMut));
+        assert_eq!(map_type(&t, &none).unwrap(), Ty::List(Elem::Prim(Prim::I64), How::RefMut));
         let t: syn::Type = syn::parse_str("Option<Self>").unwrap();
-        assert_eq!(map_type(&t, Some("Rng"), &[]).unwrap(), Ty::Option(Box::new(Ty::Obj("Rng".into(), How::Owned))));
+        assert_eq!(map_type(&t, &rng).unwrap(), Ty::Option(Box::new(Ty::Obj("Rng".into(), How::Owned))));
         let t: syn::Type = syn::parse_str("impl Iterator<Item = u8>").unwrap();
-        assert!(map_type(&t, None, &[]).is_err());
+        assert!(map_type(&t, &none).is_err());
     }
 }

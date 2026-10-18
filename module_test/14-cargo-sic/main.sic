@@ -2,25 +2,25 @@ import std;
 import demo;                                   // found in sic-deps/, no -I
 
 int main() {
-    std::Println("{} {} {}", demo::Shout("hi"), demo::Checksum("\x01\x02"), demo::Limit());
-    list<string> w = demo::TextWords("a bb  ccc");
-    list<u8char> l = demo::TextLetters("a1b2");
+    std::Println("{} {} {}", demo::shout("hi"), demo::checksum("\x01\x02"), demo::LIMIT);
+    list<string> w = demo::text::words("a bb  ccc");
+    list<u8char> l = demo::text::letters("a1b2");
     std::Println("{} {} {}", w.length, w[2], l.length);
 
-    demo::Version v = demo::Version::Parse("1.4") else return 1;
-    match (demo::Version::Parse("1.x")) { Ok(x): return 2; Err(e): std::Println("{}", e); }
-    match (demo::Strict("x")) { Ok(x): return 3; Err(e): std::Println("{}", e); }
+    demo::Version v = demo::Version::parse("1.4") else return 1;
+    match (demo::Version::parse("1.x")) { Ok(x): return 2; Err(e): std::Println("{}", e); }
+    match (demo::strict("x")) { Ok(x): return 3; Err(e): std::Println("{}", e); }
     demo::Version w2 = v.with_label("rc1");    // a clone; v unchanged
     v.bump();
     std::Println("{} {} {} major={}", v.to_string(), w2.to_string(), v.newer_than(w2), v.major());
     v.set_major(2);
     demo::Version d;                           // Default as the constructor
-    std::Println("{} cmp={} eq={}", v.to_string(), d.cmp(v), d.eq(demo::Version::Default()));
+    std::Println("{} cmp={} eq={}", v.to_string(), d.cmp(v), d.eq(demo::Version::default()));
 
     demo::Color c = demo::Color::Green();
     std::Println("{} {} {}", c.variant_name(), c.describe(), c.eq(demo::Color::Red()));
 
-    demo::IntPair p = demo::IntPair::New(3, 9);
+    demo::IntPair p = demo::IntPair::new(3, 9);
     p.swap();
     std::Println("{} {} {} {}", p.max(), p.first(), p.a(), p.b());
 

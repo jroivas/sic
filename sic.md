@@ -1331,9 +1331,10 @@ A module folder holding a `Cargo.toml` is a Rust crate. `--emit-module` binds th
 
 It generates the `extern "C"` glue and a SIC interface module, builds the glue
 with cargo (`panic = "abort"`), and links the Rust code into the module's
-libraries. Free functions become CamelCase, associated functions live in a
-namespace named after the type, and an argument-less `new()` is also the
-constructor. The test crate `module_test/13-rust-crate/mod-rsdemo` is the
+libraries. The crate's modules are SIC namespaces and every name is Rust's
+(`semver::Version::parse`, `hashbrown::hash_map::HashMap`); `pub use` re-exports
+are the same item at the other path; associated functions live in a namespace
+named after the type, and an argument-less `new()` is also the constructor. The test crate `module_test/13-rust-crate/mod-rsdemo` is the
 example; see `doc/rust-crates.md`.
 
 `cargo sic add <crate>` (the `cargo-sic` tool) automates this for a crates.io

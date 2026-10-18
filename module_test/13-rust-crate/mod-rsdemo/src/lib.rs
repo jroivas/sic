@@ -100,3 +100,37 @@ pub fn ident<T>(x: T) -> T {
 }
 #[allow(dead_code)]
 fn private_helper() {}
+
+/// A module: a SIC namespace (`rsdemo::geo::…`).
+pub mod geo {
+    /// A point (`rsdemo::geo::Point`, re-exported as `rsdemo::Point`).
+    pub struct Point {
+        x: i64,
+        y: i64,
+    }
+
+    impl Point {
+        pub fn new(x: i64, y: i64) -> Point {
+            Point { x, y }
+        }
+        pub fn dist2(&self) -> i64 {
+            self.x * self.x + self.y * self.y
+        }
+        pub fn add(&self, other: &Point) -> Point {
+            Point { x: self.x + other.x, y: self.y + other.y }
+        }
+    }
+
+    pub fn origin() -> Point {
+        Point { x: 0, y: 0 }
+    }
+
+    pub const DIM: u32 = 2;
+}
+
+pub use geo::origin as zero;
+pub use geo::Point;
+pub use geo::DIM;
+
+pub const NAME: &str = "rsdemo";
+pub const SCALE: f64 = -2.5;
