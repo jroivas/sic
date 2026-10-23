@@ -52,6 +52,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
 17. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
     conversion guide with ✗/✓ examples.
+18. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
+    wrapping, comments): what `sic-fmt` produces.
 
 ## Design goals
 
