@@ -1563,6 +1563,19 @@ impl Lowerer {
         self.module.add_function(func)
     }
 
+    /// The flag bit of a string block's count word that marks a foreign block
+    /// (`[count | FLAG][finalizer][…]`, made by the Rust glue): the top bit of a
+    /// `usize`. A count can never reach it — every reference is a live
+    /// descriptor of three words.
+    pub(crate) fn str_foreign_flag(&self) -> u64 {
+        1u64 << (self.ptr_size * 8 - 1)
+    }
+
+    /// All bits of a `usize`.
+    fn usize_mask(&self) -> u64 {
+        if self.ptr_size >= 8 { u64::MAX } else { (1u64 << (self.ptr_size * 8)) - 1 }
+    }
+
     /// Synthesize `void __sic_str_retain(usize* rc)` — `if (rc) (*rc)++;`
     /// (sic.md §"Built-in string" refcounting). NULL rc is a no-op.
     pub(crate) fn ensure_str_retain_fn(&mut self) -> FuncRef {
@@ -1571,6 +1584,13 @@ impl Lowerer {
         }
         let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
         let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+        let (flag, umask) = (self.str_foreign_flag(), self.usize_mask());
+        let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
+            self.module.add_extern(sic_ir::ExternFunc {
+                name: "abort".to_string(),
+                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+            })
+        });
         let sig = FunctionType { ret: Type::Void, params: vec![rcp.clone()], variadic: false };
         let params = vec![sic_ir::Param { name: "rc".to_string(), ty: rcp.clone() }];
         let mut func = Function::new("__sic_str_retain".to_string(), sig, params, Linkage::Internal);
@@ -1596,6 +1616,20 @@ impl Lowerer {
             fc.push_instr(Instr::Load { dest: r2, ptr: Val::Local(slot), ty: rcp.clone() });
             let v = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(r2), ty: usize_ty.clone() });
+            // A count at its maximum would carry into the foreign flag: abort
+            // (unreachable in a correct program — see `str_foreign_flag`).
+            let mask = fc.coerce(Constant::uint(!flag & umask), &usize_ty).unwrap();
+            let low = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: low, op: BinOp::And, lhs: Val::Local(v), rhs: mask.clone(), ty: usize_ty.clone() });
+            let full = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: full, op: CmpOp::IEq, lhs: Val::Local(low), rhs: mask, ty: usize_ty.clone() });
+            let over_bb = fc.new_block_after_current();
+            let inc_bb = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(full), then_bb: over_bb, else_bb: inc_bb });
+            fc.switch_to_block(over_bb);
+            fc.push_instr(Instr::Call { dest: None, func: abort_fref, args: vec![], ret_ty: Type::Void });
+            fc.set_terminator(Terminator::Jump(inc_bb));
+            fc.switch_to_block(inc_bb);
             let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
             let v2 = fc.alloc_val();
             fc.push_instr(Instr::BinOp { dest: v2, op: BinOp::Add, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
@@ -1615,6 +1649,7 @@ impl Lowerer {
         }
         let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
         let rcp = Type::Pointer(Box::new(usize_ty.clone()));
+        let (flag, umask, ps) = (self.str_foreign_flag(), self.usize_mask(), self.ptr_size as u64);
         let voidp = Type::void_ptr();
         let free_fref = self.module.func_ref_by_name("free").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
@@ -1652,12 +1687,38 @@ impl Lowerer {
             let n = fc.alloc_val();
             fc.push_instr(Instr::BinOp { dest: n, op: BinOp::Sub, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
             fc.push_instr(Instr::Store { val: Val::Local(n), ptr: Val::Local(r2) });
+            // The count is the low bits; the top bit (`str_foreign_flag`) marks a
+            // block made outside SIC (a Rust `String`), released by the
+            // finalizer in its second word instead of `free`.
+            let mask = fc.coerce(Constant::uint(!flag & umask), &usize_ty).unwrap();
+            let low = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: low, op: BinOp::And, lhs: Val::Local(n), rhs: mask, ty: usize_ty.clone() });
             let zero = fc.coerce(Constant::int(0), &usize_ty).unwrap();
             let is_zero = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(n), rhs: zero, ty: usize_ty.clone() });
+            fc.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::IEq, lhs: Val::Local(low), rhs: zero.clone(), ty: usize_ty.clone() });
             fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_zero), then_bb: free_bb, else_bb: done });
-            // free: free(rc)
+            // count 0: a foreign block runs its finalizer, a SIC block is freed.
             fc.switch_to_block(free_bb);
+            let flag_v = fc.coerce(Constant::uint(flag), &usize_ty).unwrap();
+            let fbit = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: fbit, op: BinOp::And, lhs: Val::Local(n), rhs: flag_v, ty: usize_ty.clone() });
+            let is_foreign = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: is_foreign, op: CmpOp::INe, lhs: Val::Local(fbit), rhs: zero, ty: usize_ty.clone() });
+            let fin_bb = fc.new_block_after_current();
+            let plain_bb = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_foreign), then_bb: fin_bb, else_bb: plain_bb });
+            fc.switch_to_block(fin_bb);
+            let r4 = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: r4, ptr: Val::Local(slot), ty: rcp.clone() });
+            let fin_ty = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+            let fin_slot = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: fin_slot, base: Val::Local(r4), index: Constant::int(1), elem_size: ps, result_ty: Type::Pointer(Box::new(voidp.clone())) });
+            let fin = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: fin, ptr: Val::Local(fin_slot), ty: voidp.clone() });
+            let blk = fc.coerce(Val::Local(r4), &voidp).unwrap();
+            fc.push_instr(Instr::CallIndirect { dest: None, fptr: Val::Local(fin), args: vec![blk], ret_ty: Type::Void, func_ty: Box::new(fin_ty) });
+            fc.set_terminator(Terminator::Jump(done));
+            fc.switch_to_block(plain_bb);
             let r3 = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r3, ptr: Val::Local(slot), ty: rcp.clone() });
             let p = fc.coerce(Val::Local(r3), &voidp).unwrap();

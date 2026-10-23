@@ -292,10 +292,13 @@ sic: warning: Rust module 'rsdemo': skipping fn `ident`: a generic fn (write a c
 | `Result<T, E>` (returned) | `Result<T, string>`, the error text from `E`'s `Display` |
 | `Result<(), E>` (returned) | `Result<bool, string>` (`Ok(true)`) |
 
-Values are converted at the boundary. A `string` argument becomes a `&str` (bytes
-that are not valid UTF-8 are replaced with U+FFFD), and a returned `String` becomes
-an owned SIC `string`. Lists and byte strings are copied too. Returned values are
-owned by SIC and released like any other.
+Values are converted at the boundary. A `string` argument becomes a `&str`
+without a copy (bytes that are not valid UTF-8 are replaced with U+FFFD). A
+returned `String` or `Vec<u8>` becomes an owned SIC `string` **without copying its
+bytes**: SIC takes over Rust's buffer, and when the last SIC reference goes Rust
+drops it (its count word carries a flag bit that tells SIC's release to call the
+binding's finalizer instead of `free`). Borrowed results (`&str`, `&[u8]`) and
+lists are copied. Returned values are owned by SIC and released like any other.
 
 `Option` and `Result` come back as SIC's built-in enums, so the usual forms apply:
 

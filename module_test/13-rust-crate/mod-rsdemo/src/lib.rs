@@ -134,3 +134,26 @@ pub use geo::DIM;
 
 pub const NAME: &str = "rsdemo";
 pub const SCALE: f64 = -2.5;
+
+// Zero-copy strings: the address of the last String returned by `made`.
+static LAST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `n` copies of `c`; remembers where its bytes live.
+pub fn made(n: usize, c: char) -> String {
+    // Spare capacity for the terminating 0 SIC keeps after the bytes (a full
+    // buffer is grown once, which may move it).
+    let mut s = String::with_capacity(n + 1);
+    s.extend(std::iter::repeat(c).take(n));
+    LAST.store(s.as_ptr() as usize, std::sync::atomic::Ordering::Relaxed);
+    s
+}
+pub fn last_made() -> usize {
+    LAST.load(std::sync::atomic::Ordering::Relaxed)
+}
+/// Where the bytes of a string SIC passes in live.
+pub fn addr(s: &str) -> usize {
+    s.as_ptr() as usize
+}
+pub fn raw(n: usize) -> Vec<u8> {
+    (0..n).map(|i| i as u8).collect()
+}

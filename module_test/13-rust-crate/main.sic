@@ -1,4 +1,5 @@
 import std;
+#include <string.h>
 import rsdemo;
 
 int main() {
@@ -62,5 +63,25 @@ int main() {
     rsdemo::Point r = rsdemo::Point::new(1, 1).add(p);   // geo::Point::new via the alias
     if (p.dist2() != 25 || o.dist2() != 0 || r.dist2() != 41) return 28;
     if (rsdemo::geo::DIM != 2 || rsdemo::DIM != 2 || rsdemo::NAME != "rsdemo" || rsdemo::SCALE != -2.5) return 29;
+
+    // A returned String reaches SIC without copying its bytes, and is shared,
+    // sliced, read through `.ptr`, and released (valgrind checks the release).
+    string big = rsdemo::made(1000, 'x');
+    if (rsdemo::addr(big) != rsdemo::last_made()) return 30;
+    string shared = big;
+    string part = big[10:20];
+    if (part.size != 10 || shared.size != 1000) return 31;
+    if (strlen(big.ptr) != 1000) return 32;
+    del big;
+    if (shared[999] != 'x') return 33;
+    list<string> ws = rsdemo::words("alpha beta");
+    dict<string, string> keep;
+    keep["w"] = ws[1];
+    del ws;
+    if (keep["w"] != "beta") return 34;
+    string bytes = rsdemo::raw(5);
+    if (bytes.size != 5 || bytes[4] != 4) return 35;
+    string none = rsdemo::made(0, 'y');
+    if (none.size != 0) return 36;
     return 0;
 }

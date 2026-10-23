@@ -771,6 +771,9 @@ fn rust_out(t: &Ty, v: &str) -> String {
         Ty::Unit => "true".into(),
         Ty::Prim(Prim::Char) => format!("({}) as u32", v),
         Ty::Prim(_) => v.into(),
+        // An owned result moves to SIC (no byte copy); a borrowed one is copied.
+        Ty::Str(How::Owned) => format!("__sic_own(String::into_bytes({}))", v),
+        Ty::Bytes(How::Owned) => format!("__sic_own({})", v),
         Ty::Str(_) => format!("__sic_out(AsRef::<str>::as_ref(&{}).as_bytes())", v),
         Ty::Bytes(_) => format!("__sic_out(AsRef::<[u8]>::as_ref(&{}))", v),
         Ty::List(e, _) => {
@@ -958,6 +961,35 @@ fn __sic_out(b: &[u8]) -> SicStr {
     }
 }
 
+/// The flag bit of a foreign string block's count word (SIC's
+/// `str_foreign_flag`): SIC releases such a block with its finalizer.
+const SIC_FOREIGN: usize = 1 << (usize::BITS - 1);
+
+/// A string block made here: SIC's count word (with the foreign flag), the
+/// finalizer SIC calls when the count reaches 0, then the owner of the bytes.
+#[repr(C)]
+struct SicForeign {
+    count: usize,
+    finalizer: unsafe extern "C" fn(*mut SicForeign),
+    bytes: Vec<u8>,
+}
+
+unsafe extern "C" fn __sic_foreign_drop(p: *mut SicForeign) {
+    drop(Box::from_raw(p));
+}
+
+/// Hand an owned buffer to SIC without copying its bytes. SIC's `.ptr` reads
+/// the byte after the end to see whether a copy is needed, so the buffer keeps
+/// a 0 there (in its spare capacity).
+fn __sic_own(mut b: Vec<u8>) -> SicStr {
+    if b.is_empty() { return SIC_EMPTY; }
+    if b.len() == b.capacity() { b.reserve_exact(1); }
+    unsafe { *b.as_mut_ptr().add(b.len()) = 0; }
+    let (data, size) = (b.as_ptr(), b.len());
+    let blk = Box::into_raw(Box::new(SicForeign { count: SIC_FOREIGN | 1, finalizer: __sic_foreign_drop, bytes: b }));
+    SicStr { data, size, rc: blk as *mut usize }
+}
+
 fn __sic_box<T>(v: T) -> *mut c_void { Box::into_raw(Box::new(v)) as *mut c_void }
 
 unsafe fn __sic_obj<'a, T>(p: *mut c_void, what: &str) -> &'a mut T {
@@ -998,8 +1030,9 @@ fn gen_glue(b: &Binding) -> String {
             Elem::Prim(Prim::Char) => "char::from_u32(x).unwrap_or('\\u{FFFD}')",
             Elem::Prim(_) => "x",
         };
+        // Each element is read once (then the vector is freed): a string moves out.
         let get_conv = match e {
-            Elem::Str => "__sic_out(v[i].as_bytes())",
+            Elem::Str => "__sic_own(std::mem::take(&mut v[i]).into_bytes())",
             Elem::Prim(Prim::Char) => "v[i] as u32",
             Elem::Prim(_) => "v[i]",
         };
@@ -1007,7 +1040,7 @@ fn gen_glue(b: &Binding) -> String {
         let (push_ty, get_sig, get_body) = match e {
             Elem::Str => ("*const SicStr".to_string(),
                 "v: *mut c_void, i: usize, out: *mut SicStr)".to_string(),
-                format!("let v = &*(v as *mut Vec<{rt}>); *out = {get_conv};")),
+                format!("let v = &mut *(v as *mut Vec<{rt}>); *out = {get_conv};")),
             _ => (ft.to_string(),
                 format!("v: *mut c_void, i: usize) -> {ft}"),
                 format!("let v = &*(v as *mut Vec<{rt}>); {get_conv}")),

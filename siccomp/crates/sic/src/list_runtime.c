@@ -26,6 +26,19 @@ __attribute__((weak)) void __sic_tuple_release(void *data) {
     free((void *)(p - 4));                      /* block base = data - 4 words */
 }
 
+/* Release one reference to a string block (the frontend's `__sic_str_release`
+   does the same): `rc` <= 1 is a non-owning view; otherwise the count is the low
+   bits of `*rc`, and its top bit marks a foreign block (`[count | FLAG][finalizer]
+   […]`, made by the Rust glue) whose finalizer — not `free` — releases it. */
+__attribute__((weak)) void __sic_str_rc_release(unsigned long *rc) {
+    if ((unsigned long)rc <= 1) return;
+    const unsigned long flag = 1UL << (sizeof(unsigned long) * 8 - 1);
+    unsigned long n = --(*rc);
+    if ((n & ~flag) != 0) return;
+    if (n & flag) ((void (*)(void *))rc[1])((void *)rc);
+    else free((void *)rc);
+}
+
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the
    list and dict runtimes; sic.md §"Dict"/§"List"):
      1 = a plain owned heap block (a deep-copied struct) — raw free;
@@ -40,8 +53,7 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
         free((void *)vslot);
     } else if (vowned == 2) {
         unsigned long *desc = (unsigned long *)vslot;
-        unsigned long *rc = (unsigned long *)desc[2];
-        if (rc && --(*rc) == 0) free((void *)rc);
+        __sic_str_rc_release((unsigned long *)desc[2]);
     } else if (vowned == 3) {
         /* a nested `list`/`set-of-list` handle — release one reference */
         __sic_list_free((struct __sic_list *)vslot);
