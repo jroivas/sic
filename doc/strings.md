@@ -139,6 +139,46 @@ do {
 The two parts are **views** into the original string (plain byte offsets, no
 copy), valid while it is — the same non-owning slice semantics as `s[lo:hi]`.
 
+`starts_with(x)` / `ends_with(x)` test a prefix / suffix, and `find(x)` gives the
+byte index of the first occurrence of `x`, or `-1` when it is absent:
+
+```sic
+string h = "hello world hello";
+h.starts_with("he");          // true
+h.ends_with("lo");            // true
+h.find("world");              // 6
+h.find("zzz");                // -1
+```
+
+An empty `x` matches everywhere (`h.find("")` is `0`, `h.starts_with("")` is true).
+
+## Trimming
+
+`trim()` removes ASCII whitespace (space, `\t`, `\n`, `\r`, `\v`, `\f`) from both
+ends; `ltrim()` only from the start, `rtrim()` only from the end. The result is a
+**view** of the same bytes (no copy), like a slice:
+
+```sic
+string line = "  key = value \n";
+line.trim();                  // "key = value"
+line.ltrim();                 // "key = value \n"
+line.rtrim();                 // "  key = value"
+```
+
+## Emptiness
+
+`is_empty()` is true when the string has no bytes. It only reads the size (a
+literal's is known at compile time), so it costs one comparison:
+
+```sic
+string name = input.trim();
+if (name.is_empty()) return 1;
+string z;                     // a zero-initialized string is empty
+z.is_empty();                 // true
+```
+
+It is the same test as `s.size == 0` (or `s == ""`).
+
 ## Accessors
 
 | accessor | meaning |

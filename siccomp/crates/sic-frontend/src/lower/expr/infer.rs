@@ -419,7 +419,7 @@ impl<'m> FuncCtx<'m> {
                         if matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t)) {
                             let s = super::super::types::sic_string_type(self.ptr_size());
                             match name.as_str() {
-                                "contains" | "starts_with" | "ends_with" => return Ok(Type::Bool),
+                                "contains" | "starts_with" | "ends_with" | "is_empty" => return Ok(Type::Bool),
                                 "find" => return Ok(Type::i64()),
                                 "trim" | "ltrim" | "rtrim" => return Ok(s),
                                 "split" | "rsplit" => return Ok(super::super::types::tuple_type(vec![s.clone(), s])),

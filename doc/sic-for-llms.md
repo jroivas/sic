@@ -84,6 +84,7 @@ string s = "hello, " + name;                   // ✓ owned, refcounted, freed f
 if (s == "hello, bob") { … }
 usize bytes = s.size;                          // .length = code points
 string head = s[0:5];                          // slice view, no copy
+if (s.trim().is_empty()) { … }                 // trim / ltrim / rtrim; starts_with / ends_with / find
 tuple parts = s.split(", ");                   // ("hello", "bob"); .length 1 if absent
 printf("%s\n", s.ptr);                         // C interop through .ptr
 string msg = std::Fmt("{} = {}", "x", 42);     // formatting (import std;)

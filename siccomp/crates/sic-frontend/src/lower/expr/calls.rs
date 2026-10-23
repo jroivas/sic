@@ -333,6 +333,28 @@ impl<'m> FuncCtx<'m> {
                         "trim"  => return self.lower_string_trim(base, true, true),
                         "ltrim" => return self.lower_string_trim(base, true, false),
                         "rtrim" => return self.lower_string_trim(base, false, true),
+                        // `s.is_empty()`: the descriptor's size is 0 — one compare,
+                        // no call and no look at the bytes.
+                        "is_empty" => {
+                            if !args.is_empty() {
+                                return Err(CompileError::at("`.is_empty()` takes no arguments".to_string(),
+                                    sp.file.clone(), sp.line, sp.col));
+                            }
+                            // A literal's size is known: a constant.
+                            if let ExprKind::StringLit(lit) = &base.kind {
+                                return Ok(Constant::bool_val(lit.is_empty()));
+                            }
+                            // Otherwise load only the `size` field of the descriptor.
+                            let sty = super::super::types::sic_string_type(self.ptr_size());
+                            let p = self.lower_aggregate_ptr(base)?;
+                            let flv = self.field_ptr_from(LValue::plain(p, sty), "size", false, sp)?;
+                            let size = self.load_lvalue(&flv)?;
+                            let uty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+                            let zero = self.coerce(Constant::int(0), &uty)?;
+                            let d = self.alloc_val();
+                            self.push_instr(Instr::Cmp { dest: d, op: CmpOp::IEq, lhs: size, rhs: zero, ty: uty });
+                            return self.coerce(Val::Local(d), &Type::Bool);
+                        }
                         _ => {}
                     }
                     // One-argument methods over another string.
