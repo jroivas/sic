@@ -8,7 +8,8 @@
 # relocatable sysroot the compiler searches by default. After this, `import std;`
 # works with no flags (dynamic by default; `-static` links `libstd.a`).
 #
-# Finally it builds sic-cpp, the preprocessor sic uses by default.
+# Finally it builds sic-cpp, the preprocessor sic uses by default, and sic-fmt,
+# the formatter.
 #
 # Usage: ./build.sh [debug|release]   (default: debug)
 set -euo pipefail
@@ -77,8 +78,11 @@ if [ -n "$BOOT_CPP" ]; then
     build_modules
 fi
 
+echo ">> building sic-fmt (the SIC formatter)"
+make -B -C "$ROOT/sic-fmt" SIC="$SIC"
+
 echo ">> done. installed:"
 ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
       "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so \
-      "$ROOT/sic-cpp/sic-cpp"
+      "$ROOT/sic-cpp/sic-cpp" "$ROOT/sic-fmt/sic-fmt"
 echo ">> preprocessor: $("$SIC" -print-prog-name=cpp)"

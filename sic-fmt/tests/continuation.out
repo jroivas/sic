@@ -1,0 +1,35 @@
+// A statement's later lines are indented one level per bracket left open; a
+// braceless body is one level in; case and match bodies under their labels.
+enum Shape { Circle(i32), Square(i32) };
+i32 h(i32 a, i32 b)
+{
+    i32 total = compute(a,
+        b);
+    bool ok = a > 0
+        && b > 0;
+    if (a)
+        if (b)
+            return 1;
+    if (a > b)
+        return a;
+    else if (b > a)
+        return b;
+    else
+        return 0;
+}
+i32 k(i32 c, Shape s)
+{
+    switch (c) {
+        case 1: c = 2; break;
+        case 2:
+            c = 3;
+            break;
+        default:
+            return c;
+    }
+    return match (s) {
+        Circle(r): 3 * r * r;
+        Square(w):
+            w * w;
+    };
+}

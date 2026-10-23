@@ -1,0 +1,2249 @@
+// sic-fmt — the SIC code formatter, in idiomatic SIC.
+//
+// Usage: sic-fmt [options] [file|dir ...]          (`sic-fmt --help` for the options)
+//   Formats each file in place (a directory: every .sic file below it) or, with no
+//   file or `-`, standard input to standard output. The layout is doc/style.md; the
+//   options come from the nearest sic-fmt.toml, as rustfmt's come from rustfmt.toml.
+//
+// It changes only whitespace and line breaks. It works on tokens, not a syntax
+// tree: each token's role (a function's brace, a generic's `<`, a unary `*`, …) is
+// read from its neighbours. Before anything is written, the result must lex to
+// exactly the input's tokens; otherwise the file is left as it is.
+
+import std;
+
+#include <string.h>
+
+// ── Tokens ─────────────────────────────────────────────────────────────────────
+
+enum Kind {
+    K_WORD,         // an identifier or keyword
+    K_NUM,
+    K_STR,          // a string literal, also """…""" and r"""…"""
+    K_CHAR,
+    K_PUNCT,
+    K_LCOMMENT,     // // …
+    K_BCOMMENT,     // /* … */
+    K_PREPROC,      // a #directive line, with its continuation lines
+    K_VERBATIM,     // kept as written: a macro_rules definition, a sic-fmt: off region
+};
+
+// What a `{` opens.
+enum Brace {
+    B_NONE,
+    B_FN,           // a function's or namespace's body: the `{` on its own line
+    B_BLOCK,        // any other block: the `{` ends the line before it
+    B_INIT,         // a brace initializer, or braces inside an expression
+};
+
+// What a block holds.
+enum Role {
+    R_CODE,         // statements
+    R_CONTAINER,    // declarations: a namespace, an extern "C" block
+    R_STRUCT,       // struct and union members and methods
+    R_ENUM,         // enum variants
+    R_MATCH,        // match arms
+    R_SWITCH,       // case labels and statements
+    R_INIT,
+};
+
+// How a `:` is spaced.
+enum Colon {
+    C_LABEL,        // `case 1:`, `Some(x):`: none before, one after
+    C_SLICE,        // `s[a:b]`: none
+    C_SPACED,       // a conditional, range-for, bit-field width, enum base: both
+};
+
+struct Tok {
+    Kind kind;
+    string text;
+    i32 start;      // byte offsets in the source
+    i32 end;
+    i32 nl;         // newlines between the previous token and this one
+    i32 gap;        // columns of blank before it on its line
+    i32 col;        // its column in the source
+    i32 line;       // its line in the source, from 1
+    i32 mate;       // the matching bracket, or -1
+    i32 up;         // the innermost bracket open around it, or -1
+    Brace brace;
+    Role role;
+    Colon colon;
+    bool pinned;    // a directive or a sic-fmt: off region: at its source column
+    bool oneline;   // a block written on one line
+    bool generic;   // a `<` opening, or a `>` `>>` closing, generic arguments
+    bool unary;     // a prefix operator
+    bool ptr;       // the `*` or `&` of a declarator: `char *p`
+    bool cast;      // the `)` ending a cast
+    bool ctrl;      // a `(` or `)` of an if/for/while/switch/match header
+    bool stmt;      // the first token of a statement
+    bool label;     // the first token of a case label or match arm
+    i32 body_of;    // the first token of a braceless body: its keyword, else -1
+    i32 else_of;    // an `else`: the `if` it belongs to, else -1
+    bool wrap;      // `(` or `{`: one element per line, to fit the width
+    bool expand;    // a one-line block that does not fit
+    bool nowrap;    // wrapping it made nothing shorter
+    i32 brk;        // before it: 0 the same line, 1 a new line, 2 a blank line first
+    i32 sp;         // spaces before it, on the same line
+    i32 oline;      // the output line it is on
+    i32 ocol;       // and its column there
+    i32 base;       // a block: the indentation of its `}`
+    i32 sbase;      // a block: the indentation of its current statement
+    bool seen;      // a switch or match block: a label has been seen
+    bool lead;      // a keyword an expression follows (`return`, `case`, …)
+    bool typew;     // a type keyword
+    bool parenkw;   // a keyword spaced from its `(`: `if (`, `return (`
+};
+
+struct Options {
+    i32 max_width;  // the preferred line width
+    i32 tab_spaces; // columns per indentation level
+    bool hard_tabs; // indent with tabs
+};
+
+struct Fmt {
+    string src;
+    Options opt;
+    list<Tok> t;
+    string error;   // why the source is left as it is
+    i32 err_line;
+    // the current rendering, one entry per output line
+    list<i32> lfirst;
+    list<i32> llast;
+    list<i32> lindent;
+    list<i32> lwidth;   // the widest physical line of its code
+    list<string> out;   // the finished lines
+    string result;
+};
+
+// A stack of token indices.
+struct Stack {
+    list<i32> v;
+    i32 n;
+};
+
+void st_push(Stack *s, i32 x)
+{
+    if (s->n < s->v.length)
+        s->v[s->n] = x;
+    else
+        s->v.add(x);
+    s->n++;
+}
+
+i32 st_pop(Stack *s)
+{
+    if (s->n == 0)
+        return -1;
+    s->n--;
+    return s->v[s->n];
+}
+
+i32 st_top(Stack *s) { return s->n > 0 ? s->v[s->n - 1] : -1; }
+
+void st_set_top(Stack *s, i32 x)
+{
+    if (s->n > 0)
+        s->v[s->n - 1] = x;
+}
+
+i32 imax(i32 a, i32 b) { return a > b ? a : b; }
+
+// ── Characters ─────────────────────────────────────────────────────────────────
+
+// The byte at `i`, or 0 past either end.
+i32 at(string s, i32 i)
+{
+    if (i < 0 || i >= s.size)
+        return 0;
+    return (i32)(u8)s[i];
+}
+
+bool is_digit(i32 c) { return c >= '0' && c <= '9'; }
+
+bool is_ident_start(i32 c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80;
+}
+
+bool is_ident_char(i32 c) { return is_ident_start(c) || is_digit(c); }
+
+bool is_blank(i32 c) { return c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v'; }
+
+// Columns `s` takes: its UTF-8 code points.
+i32 width(string s)
+{
+    i32 w = 0;
+    for (i32 i = 0; i < s.size; i++) {
+        if ((at(s, i) & 0xC0) != 0x80)
+            w++;
+    }
+    return w;
+}
+
+string g_spaces = "                                                                ";
+
+string spaces(i32 n)
+{
+    string s = "";
+    while (n > g_spaces.size) {
+        s = s + g_spaces;
+        n -= g_spaces.size;
+    }
+    return n > 0 ? s + g_spaces[0:n] : s;
+}
+
+string rstrip(string s)
+{
+    i32 e = s.size;
+    while (e > 0 && is_blank(at(s, e - 1)))
+        e--;
+    return s[0:e];
+}
+
+// Whether `w` is one of the space-separated words of `set`.
+bool in_set(string w, string set) { return w.size > 0 && set.find(" " + w + " ") >= 0; }
+
+// Type keywords: a `*` after one declares a pointer.
+bool is_type_word(string w)
+{
+    return in_set(w, " void char short int long float double signed unsigned bool string ")
+        || in_set(w, " i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 isize usize f32 f64 u8char ")
+        || in_set(w, " auto const volatile any bigint fixed struct union enum ");
+}
+
+// Keywords an expression can follow (a `-` after one is a sign, not a minus).
+bool is_lead_word(string w)
+{
+    return in_set(
+        w,
+        " return case sizeof alignof typeof del defer await else do new goto throw in "
+    );
+}
+
+// ── Lexing ─────────────────────────────────────────────────────────────────────
+
+// The length of the operator at `p`: the SIC lexer's longest match.
+i32 punct_len(string s, i32 p)
+{
+    i32 a = at(s, p), b = at(s, p + 1), c = at(s, p + 2);
+    if ((a == '<' && b == '<' && c == '<') || (a == '>' && b == '>' && c == '>'))
+        return 3;
+    if (a == '<' && b == '>')
+        return 2;
+    if ((a == '<' || a == '>') && b == a && c == '=')
+        return 3;
+    if (a == '.' && b == '.' && c == '.')
+        return 3;
+    string pairs = "<< >> ++ -- += -= *= /= %= &= |= ^= && || -> == => != <= >= ::";
+    for (i32 i = 0; i < pairs.size; i += 3) {
+        if (at(pairs, i) == a && at(pairs, i + 1) == b)
+            return 2;
+    }
+    return 1;
+}
+
+// The end of a quoted literal starting at `p`, or -1 when it does not close on its line.
+i32 scan_quoted(string s, i32 p)
+{
+    i32 q = at(s, p);
+    i32 e = p + 1;
+    while (e < s.size) {
+        i32 c = at(s, e);
+        if (c == '\\') {
+            e += 2;
+            continue;
+        }
+        if (c == q)
+            return e + 1;
+        if (c == '\n')
+            return -1;
+        e++;
+    }
+    return -1;
+}
+
+// The end of a """…""" string starting at `p`, or -1.
+i32 scan_triple(string s, i32 p, bool raw)
+{
+    i32 e = p + 3;
+    while (e < s.size) {
+        if (!raw && at(s, e) == '\\') {
+            e += 2;
+            continue;
+        }
+        if (at(s, e) == '"' && at(s, e + 1) == '"' && at(s, e + 2) == '"')
+            return e + 3;
+        e++;
+    }
+    return -1;
+}
+
+i32 scan_number(string s, i32 p)
+{
+    bool hex = at(s, p) == '0' && (at(s, p + 1) == 'x' || at(s, p + 1) == 'X');
+    i32 e = p + 1;
+    while (e < s.size) {
+        i32 c = at(s, e), b = at(s, e - 1);
+        bool exp = hex ? b == 'p' || b == 'P' : b == 'e' || b == 'E';
+        if (is_ident_char(c) || c == '.' || ((c == '+' || c == '-') && exp))
+            e++;
+        else
+            break;
+    }
+    return e;
+}
+
+// The end of the line at `p` (a backslash before the newline continues it).
+i32 line_end(string s, i32 p)
+{
+    i32 e = p;
+    while (e < s.size && !(at(s, e) == '\n' && at(s, e - 1) != '\\'))
+        e++;
+    return e;
+}
+
+// The end of the directive at `p`: its line and continuation lines, and any
+// comment that starts on them.
+i32 directive_end(string s, i32 p)
+{
+    i32 e = p;
+    while (e < s.size) {
+        i32 c = at(s, e);
+        if (c == '\n')
+            break;
+        if (c == '\\' && at(s, e + 1) == '\n') {
+            e += 2;
+            continue;
+        }
+        if (c == '/' && at(s, e + 1) == '*') {
+            i32 k = e + 2;
+            while (k + 1 < s.size && !(at(s, k) == '*' && at(s, k + 1) == '/'))
+                k++;
+            if (k + 1 >= s.size)
+                return -1;
+            e = k + 2;
+            continue;
+        }
+        if (c == '/' && at(s, e + 1) == '/')
+            return line_end(s, e);
+        if (c == '"' || c == '\'') {
+            i32 q = scan_quoted(s, e);
+            e = q < 0 ? e + 1 : q;      // an apostrophe in #error text is no literal
+            continue;
+        }
+        e++;
+    }
+    return e;
+}
+
+// The token at `p` (not blank, not a directive): its end, or -1 when a literal or
+// comment does not end.
+i32 scan_token(string s, i32 p, Kind *kind)
+{
+    i32 c = at(s, p), d = at(s, p + 1);
+    if (c == 'r' && d == '"' && at(s, p + 2) == '"' && at(s, p + 3) == '"') {
+        *kind = K_STR;
+        return scan_triple(s, p + 1, true);
+    }
+    if ((c == 'L' || c == 'u' || c == 'U') && (d == '"' || d == '\'')) {
+        *kind = d == '"' ? K_STR : K_CHAR;
+        return scan_quoted(s, p + 1);
+    }
+    if (c == 'u' && d == '8' && at(s, p + 2) == '"') {
+        *kind = K_STR;
+        return scan_quoted(s, p + 2);
+    }
+    if (is_ident_start(c)) {
+        i32 e = p + 1;
+        while (e < s.size && is_ident_char(at(s, e)))
+            e++;
+        *kind = K_WORD;
+        return e;
+    }
+    if (is_digit(c) || (c == '.' && is_digit(d))) {
+        *kind = K_NUM;
+        return scan_number(s, p);
+    }
+    if (c == '"' && d == '"' && at(s, p + 2) == '"') {
+        *kind = K_STR;
+        return scan_triple(s, p, false);
+    }
+    if (c == '"' || c == '\'') {
+        *kind = c == '"' ? K_STR : K_CHAR;
+        return scan_quoted(s, p);
+    }
+    if (c == '/' && d == '/') {
+        *kind = K_LCOMMENT;
+        return line_end(s, p);
+    }
+    if (c == '/' && d == '*') {
+        *kind = K_BCOMMENT;
+        i32 e = p + 2;
+        while (e + 1 < s.size && !(at(s, e) == '*' && at(s, e + 1) == '/'))
+            e++;
+        return e + 1 < s.size ? e + 2 : -1;
+    }
+    *kind = K_PUNCT;
+    return p + punct_len(s, p);
+}
+
+// Whether `x` followed directly by `y` would lex differently (`-` `-` → `--`).
+bool glues(string x, string y)
+{
+    Kind k;
+    return scan_token(x + y, 0, &k) != x.size;
+}
+
+// The end of the verbatim region a token at `p` starts, or -1 when it starts
+// none: `// sic-fmt: off` through `// sic-fmt: on` (or the end of the file), and
+// `macro_rules name { … }` through its closing brace.
+i32 verbatim_end(string s, i32 p, i32 e, Kind kind, bool *pinned)
+{
+    string text = s[p:e];
+    if (kind == K_LCOMMENT && text[2:].trim() == "sic-fmt: off") {
+        *pinned = true;
+        i32 q = e;
+        while (q < s.size) {
+            i32 r = s[q:].find("// sic-fmt: on");
+            if (r < 0)
+                return s.size;
+            i32 k = q + (i32)r;
+            return line_end(s, k);
+        }
+        return s.size;
+    }
+    if (kind != K_WORD || text != "macro_rules")
+        return -1;
+    i32 q = e, depth = 0;
+    while (q < s.size) {
+        i32 c = at(s, q);
+        if (is_blank(c) || c == '\n') {
+            q++;
+            continue;
+        }
+        Kind k;
+        i32 x = scan_token(s, q, &k);
+        if (x < 0)
+            return -1;
+        if (k == K_PUNCT && c == '{')
+            depth++;
+        if (k == K_PUNCT && c == '}') {
+            depth--;
+            if (depth == 0)
+                return x;
+        }
+        if (depth == 0 && k == K_PUNCT && c == ';')
+            return -1;
+        q = x;
+    }
+    return -1;
+}
+
+// Split `f->src` into tokens; false (with the reason) when it does not lex.
+bool lex(Fmt *f)
+{
+    string s = f->src;
+    i32 p = 0, line = 1, col = 0, nl = 0, gap = 0;
+    bool line_start = true;
+    while (p < s.size) {
+        i32 c = at(s, p);
+        if (c == '\n') {
+            p++;
+            line++;
+            col = 0;
+            nl++;
+            gap = 0;
+            line_start = true;
+            continue;
+        }
+        if (is_blank(c)) {
+            i32 w = c == '\t' ? 8 - col % 8 : 1;
+            col += w;
+            gap += w;
+            p++;
+            continue;
+        }
+        Tok t;
+        t.start = p;
+        t.nl = nl;
+        t.gap = gap;
+        t.col = col;
+        t.line = line;
+        t.mate = -1;
+        t.up = -1;
+        t.body_of = -1;
+        t.else_of = -1;
+        i32 e;
+        if (c == '#' && line_start) {
+            t.kind = K_PREPROC;
+            t.pinned = true;
+            e = directive_end(s, p);
+        } else {
+            e = scan_token(s, p, &t.kind);
+        }
+        if (e < 0) {
+            f->error = c == '/' ? "unterminated comment" : "unterminated literal or directive";
+            f->err_line = line;
+            return false;
+        }
+        bool pinned = false;
+        i32 v = t.kind == K_PREPROC ? -1 : verbatim_end(s, p, e, t.kind, &pinned);
+        if (v >= 0) {
+            t.kind = K_VERBATIM;
+            t.pinned = pinned;
+            e = v;
+        }
+        for (i32 i = p; i < e; i++) {
+            if (at(s, i) == '\n') {
+                line++;
+                col = 0;
+            } else {
+                col++;
+            }
+        }
+        t.end = e;
+        t.text = s[p:e];
+        if (t.kind == K_WORD) {
+            t.lead = is_lead_word(t.text);
+            t.typew = is_type_word(t.text);
+            t.parenkw = in_set(
+                t.text,
+                " if for while switch match return case del defer await else do catch "
+            );
+        }
+        if (t.kind == K_LCOMMENT || t.kind == K_PREPROC || t.kind == K_VERBATIM) {
+            string r = rstrip(t.text);
+            if (at(r, r.size - 1) != '\\')
+                t.text = r;
+        }
+        f->t.add(t);
+        p = e;
+        nl = 0;
+        gap = 0;
+        line_start = false;
+    }
+    return true;
+}
+
+// ── Structure ──────────────────────────────────────────────────────────────────
+
+bool is_comment(Fmt *f, i32 i) { return f->t[i].kind == K_LCOMMENT || f->t[i].kind == K_BCOMMENT; }
+
+// Whether token `i` is the word or punctuation `s`.
+bool tis(Fmt *f, i32 i, string s)
+{
+    if (i < 0 || i >= f->t.length)
+        return false;
+    Kind k = f->t[i].kind;
+    return (k == K_WORD || k == K_PUNCT) && f->t[i].text == s;
+}
+
+string tx(Fmt *f, i32 i) { return i >= 0 && i < f->t.length ? f->t[i].text : ""; }
+
+// The previous / next token that is code (not a comment or directive), or -1.
+i32 prev_sig(Fmt *f, i32 i)
+{
+    i32 j = i - 1;
+    while (j >= 0 && (is_comment(f, j) || f->t[j].kind == K_PREPROC))
+        j--;
+    return j;
+}
+
+i32 next_sig(Fmt *f, i32 i)
+{
+    i32 j = i + 1;
+    while (j < f->t.length && (is_comment(f, j) || f->t[j].kind == K_PREPROC))
+        j++;
+    return j < f->t.length ? j : -1;
+}
+
+bool is_opener(Fmt *f, i32 i) { return tis(f, i, "(") || tis(f, i, "[") || tis(f, i, "{"); }
+
+bool is_closer(Fmt *f, i32 i) { return tis(f, i, ")") || tis(f, i, "]") || tis(f, i, "}"); }
+
+// A `{` that opens statements or members (not an initializer).
+bool is_block(Fmt *f, i32 i)
+{
+    return tis(f, i, "{") && (f->t[i].brace == B_FN || f->t[i].brace == B_BLOCK);
+}
+
+// Pair the brackets; false (with the reason) when they do not balance.
+bool match_brackets(Fmt *f)
+{
+    Stack st;
+    for (i32 i = 0; i < f->t.length; i++) {
+        f->t[i].up = st_top(&st);
+        if (f->t[i].kind != K_PUNCT)
+            continue;
+        string x = f->t[i].text;
+        if (x == "(" || x == "[" || x == "{") {
+            st_push(&st, i);
+        } else if (x == ")" || x == "]" || x == "}") {
+            i32 o = st_pop(&st);
+            string want = tx(f, o) == "(" ? ")" : tx(f, o) == "[" ? "]" : "}";
+            if (o < 0 || x != want) {
+                f->error = std::Fmt("unbalanced '{}'", x);
+                f->err_line = f->t[i].line;
+                return false;
+            }
+            f->t[i].mate = o;
+            f->t[o].mate = i;
+            f->t[i].up = st_top(&st);
+        }
+    }
+    if (st.n > 0) {
+        f->error = std::Fmt("unclosed '{}'", tx(f, st_top(&st)));
+        f->err_line = f->t[st_top(&st)].line;
+        return false;
+    }
+    return true;
+}
+
+// Mark the `<` `>` of generic arguments: `list<i32>`, `m::Map<K, V>::new()`,
+// `T add<T>(T a)`. A `<` is generic when a matching `>` follows with only names,
+// commas, `::`, pointers and brackets between, and something says it is no
+// comparison: a type keyword inside, a capitalized or container name before it, a
+// `::` before the name, a type before the name, or `(`/`::` after the `>`.
+void mark_generics(Fmt *f)
+{
+    i32 n = f->t.length;
+    for (i32 i = 0; i < n; i++) {
+        if (!tis(f, i, "<"))
+            continue;
+        i32 p = prev_sig(f, i);
+        if (p < 0 || f->t[p].kind != K_WORD || f->t[p].lead)
+            continue;
+        i32 depth = 1, paren = 0, close = -1;
+        bool types = false;
+        for (i32 j = i + 1; j < n && j < i + 96 && close < 0; j++) {
+            Kind k = f->t[j].kind;
+            if (k == K_LCOMMENT || k == K_BCOMMENT)
+                continue;
+            string x = f->t[j].text;
+            if (k == K_WORD) {
+                if (is_type_word(x))
+                    types = true;
+                continue;
+            }
+            if (k == K_NUM)
+                continue;
+            if (k != K_PUNCT)
+                break;
+            if (x == "<") {
+                depth++;
+            } else if (x == ">" || x == ">>" || x == ">>>") {
+                i32 c = x.size;
+                if (paren > 0)
+                    break;
+                if (depth <= c)
+                    close = j;
+                depth -= c;
+            } else if (x == "(" || x == "[") {
+                paren++;
+            } else if (x == ")" || x == "]") {
+                paren--;
+                if (paren < 0)
+                    break;
+            } else if (x == "*" || x == "&") {
+                i32 q = next_sig(f, j);
+                if (tis(f, q, ",") || tis(f, q, ">") || tis(f, q, ")") || tis(f, q, ">>")
+                    || tis(f, q, "*"))
+                    types = true;
+            } else if (!(x == "," || x == "::" || x == "." || x == "...")) {
+                break;
+            }
+        }
+        if (close < 0)
+            continue;
+        string w = f->t[p].text;
+        i32 pp = prev_sig(f, p);
+        i32 after = next_sig(f, close);
+        bool ok = types
+            || in_set(w, " list dict set tuple Fn weak atomic Option Result Task fixed ")
+            || (at(w, 0) >= 'A' && at(w, 0) <= 'Z') || tis(f, pp, "::")
+            || (pp >= 0 && f->t[pp].kind == K_WORD && !f->t[pp].lead)
+            || tis(f, after, "(") || tis(f, after, "::");
+        if (ok) {
+            f->t[i].generic = true;
+            f->t[close].generic = true;
+        }
+    }
+}
+
+// Whether word `k` names something (a function, a call): not a keyword, or a
+// keyword used as a name — `ns::new(n)`, `int *new(int size)`.
+bool is_name(Fmt *f, i32 k)
+{
+    if (k < 0 || f->t[k].kind != K_WORD)
+        return false;
+    if (!f->t[k].lead)
+        return true;
+    i32 p = prev_sig(f, k);
+    if (p < 0)
+        return false;
+    return tis(f, p, "::") || tis(f, p, ".") || tis(f, p, "->") || f->t[p].ptr
+        || (f->t[p].kind == K_WORD && !f->t[p].lead)
+        || (f->t[p].generic && tx(f, p) != "<");
+}
+
+// Whether token `p` ends an operand, so that a `-` or `*` after it is binary.
+bool operand_end(Fmt *f, i32 p)
+{
+    if (p < 0)
+        return false;
+    Kind k = f->t[p].kind;
+    string x = f->t[p].text;
+    if (k == K_NUM || k == K_STR || k == K_CHAR)
+        return true;
+    if (k == K_WORD)
+        return !is_lead_word(x) && !is_type_word(x);
+    if (k != K_PUNCT)
+        return false;
+    if (x == ")")
+        return !f->t[p].cast && !f->t[p].ctrl;      // after `if (c)` a statement starts
+    if (x == "]")
+        return true;
+    if (f->t[p].generic && x != "<")
+        return true;
+    return (x == "++" || x == "--") && !f->t[p].unary;
+}
+
+// Whether the source has blank before token `i`.
+bool spaced(Fmt *f, i32 i) { return i < f->t.length && (f->t[i].gap > 0 || f->t[i].nl > 0); }
+
+// The prefix and declarator operators: `-x`, `!ok`, `*p`, `char *p`, `++i`.
+void classify_operator(Fmt *f, i32 i)
+{
+    string x = f->t[i].text;
+    if (x == "!" || x == "~" || x == "@") {
+        f->t[i].unary = true;
+        return;
+    }
+    if (!(x == "*" || x == "&" || x == "-" || x == "+" || x == "++" || x == "--"))
+        return;
+    i32 p = prev_sig(f, i);
+    bool opnd = operand_end(f, p);
+    if (x != "*" && x != "&") {
+        f->t[i].unary = !opnd;
+        return;
+    }
+    if (p >= 0 && f->t[p].kind == K_WORD && f->t[p].typew) {
+        f->t[i].ptr = true;
+        return;
+    }
+    if (tis(f, p, "*") || tis(f, p, "&")) {
+        if (f->t[p].ptr)
+            f->t[i].ptr = true;
+        else
+            f->t[i].unary = true;
+        return;
+    }
+    if (!opnd) {
+        f->t[i].unary = true;
+        return;
+    }
+    // After a name: `T *p` declares, `a * b` multiplies. A statement cannot start
+    // with a product, and a type follows `const`/`struct`; otherwise the source's
+    // spacing tells — blank on one side only means a declarator.
+    bool name = f->t[p].kind == K_WORD || (f->t[p].generic && tx(f, p) != "<");
+    if (!name)
+        return;
+    i32 q = next_sig(f, i);
+    i32 pp = prev_sig(f, p);
+    bool decl = (f->t[p].stmt && !tis(f, pp, ":") && q >= 0 && f->t[q].kind == K_WORD)
+        || (pp >= 0 && f->t[pp].kind == K_WORD && f->t[pp].typew);
+    if (decl || spaced(f, i) != spaced(f, i + 1))
+        f->t[i].ptr = true;
+}
+
+// After a `)`: is it a control header (the braceless body after it), or a cast?
+void close_paren(Fmt *f, i32 i)
+{
+    i32 o = f->t[i].mate;
+    i32 kw = prev_sig(f, o);
+    if (f->t[o].ctrl) {
+        f->t[i].ctrl = true;
+        string k = tx(f, kw);
+        i32 nx = next_sig(f, i);
+        bool loop = k == "if" || k == "for" || k == "while";
+        if (loop && nx >= 0 && !tis(f, nx, "{") && !tis(f, nx, ";"))
+            f->t[nx].body_of = kw;
+        return;
+    }
+    if (kw >= 0) {
+        string k = f->t[kw].text;
+        bool after_cast = k == ")" && f->t[kw].cast;   // `(i32)(u8)x`
+        if (is_name(f, kw) || (k == ")" && !after_cast) || k == "]"
+            || (f->t[kw].generic && k != "<"))
+            return;                     // a call or a declarator
+        if (in_set(k, " sizeof alignof typeof "))
+            return;
+    }
+    // A cast's parentheses hold a type: names, then pointer stars.
+    i32 words = 0, angle = 0;
+    bool typey = false, stars = false;
+    for (i32 j = o + 1; j < i; j++) {
+        Kind k = f->t[j].kind;
+        if (k == K_LCOMMENT || k == K_BCOMMENT)
+            continue;
+        string x = f->t[j].text;
+        if (f->t[j].generic) {
+            angle += x == "<" ? 1 : -x.size;  // `(fixed<10, 2>)x`
+            continue;
+        }
+        if (angle > 0)
+            continue;
+        if (k == K_WORD && !stars) {
+            words++;
+            if (is_type_word(x))
+                typey = true;
+        } else if (k == K_WORD && x == "const") {
+            continue;
+        } else if (k == K_PUNCT && (x == "*" || x == "&")) {
+            stars = true;
+            typey = true;
+        } else if (k == K_PUNCT && !stars && (x == "::" || f->t[j].generic)) {
+            continue;
+        } else {
+            return;
+        }
+    }
+    if (words == 0)
+        return;
+    i32 nx = next_sig(f, i);
+    if (nx < 0)
+        return;
+    Kind nk = f->t[nx].kind;
+    bool operand = nk == K_WORD || nk == K_NUM || nk == K_STR || nk == K_CHAR || tis(f, nx, "(");
+    bool tight = !spaced(f, nx) && !spaced(f, nx + 1);  // `(T)*p`, `(T)-1` as written
+    if (typey || words > 1 || operand || (tight && f->t[nx].kind == K_PUNCT && !tis(f, nx, ")")))
+        f->t[i].cast = true;
+}
+
+// The first declaration keyword of the statement from `first` to `i`.
+string decl_keyword(Fmt *f, i32 first, i32 i)
+{
+    for (i32 j = first < 0 ? i : first; j >= 0 && j < i; j++) {
+        if (f->t[j].kind != K_WORD) {
+            if (is_opener(f, j) && f->t[j].mate > j)
+                j = f->t[j].mate;
+            continue;
+        }
+        string x = f->t[j].text;
+        if (in_set(x, " namespace struct union class enum bitfield "))
+            return x;
+    }
+    return "";
+}
+
+// What the `{` at `i` opens.
+void classify_brace(Fmt *f, i32 i, i32 top, i32 first)
+{
+    Role enc = R_CONTAINER;
+    bool expr = false;      // inside parentheses, brackets or an initializer
+    if (top >= 0) {
+        if (tis(f, top, "{") && f->t[top].brace != B_INIT)
+            enc = f->t[top].role;
+        else
+            expr = true;
+    }
+    i32 p = prev_sig(f, i);
+    string px = tx(f, p);
+    Kind pk = p >= 0 ? f->t[p].kind : K_PUNCT;
+    Brace b = B_BLOCK;
+    Role r = R_CODE;
+    if (tis(f, p, ")")) {
+        i32 o = f->t[p].mate;
+        i32 kw = prev_sig(f, o);
+        // skip attributes between the parameters and the body
+        while (in_set(tx(f, kw), " __attribute__ __attribute __asm__ asm ")
+            && tis(f, prev_sig(f, kw), ")")) {
+            o = f->t[prev_sig(f, kw)].mate;
+            kw = prev_sig(f, o);
+        }
+        string k = tx(f, kw);
+        bool word = kw >= 0 && f->t[kw].kind == K_WORD;
+        if (word && in_set(k, " if for while switch match catch ")) {
+            r = k == "match" ? R_MATCH : k == "switch" ? R_SWITCH : R_CODE;
+        } else if (k == "]") {
+            r = R_CODE;                     // a lambda
+        } else if (is_name(f, kw) || (kw >= 0 && f->t[kw].generic && k != "<")) {
+            if (!expr && (enc == R_CONTAINER || enc == R_STRUCT))
+                b = B_FN;
+        } else {
+            b = B_INIT;                     // a compound literal
+            r = R_INIT;
+        }
+    } else if (pk == K_WORD || (p >= 0 && f->t[p].generic && px != "<")) {
+        if (in_set(px, " return case in ")) {
+            b = B_INIT;
+            r = R_INIT;
+        } else if (!in_set(
+            px,
+            " else do unsafe defer try catch finally overflow exception divide_by_zero "
+        )) {
+            string d = decl_keyword(f, first, i);
+            if (d == "namespace") {
+                b = B_FN;
+                r = R_CONTAINER;
+            } else if (d == "struct" || d == "union" || d == "class") {
+                r = R_STRUCT;
+            } else if (d == "enum" || d == "bitfield") {
+                r = R_ENUM;
+            } else if (expr) {
+                b = B_INIT;
+                r = R_INIT;
+            }
+        }
+    } else if (pk == K_STR && tx(f, prev_sig(f, p)) == "extern") {
+        r = R_CONTAINER;
+    } else if (px == ":") {
+        if (expr || enc == R_INIT) {
+            b = B_INIT;
+            r = R_INIT;
+        }
+    } else if (p < 0 || px == ";" || px == "}" || px == "=>" || px == "]" || (px == "{" && !expr)) {
+        r = R_CODE;                         // a block of its own, a lambda body
+    } else {
+        b = B_INIT;
+        r = R_INIT;
+    }
+    f->t[i].brace = b;
+    f->t[i].role = r;
+    i32 m = f->t[i].mate;
+    f->t[m].brace = b;
+    f->t[m].role = r;
+}
+
+bool type_body(Fmt *f, i32 o) { return f->t[o].role == R_STRUCT || f->t[o].role == R_ENUM; }
+
+// Whether a struct or enum body's `}` at `i` ends its declaration: SIC needs no
+// `;` after it, so a declaration that goes on (`} x;`) does so on the same line.
+bool type_body_ends(Fmt *f, i32 i)
+{
+    i32 nx = next_sig(f, i);
+    return nx >= 0 && !tis(f, nx, ";") && !tis(f, nx, ",") && f->t[nx].nl > 0;
+}
+
+// Read every token's role from its neighbours.
+void analyze(Fmt *f)
+{
+    Stack lv_tok, lv_stmt, lv_q, ifs, ifs_blk;
+    st_push(&lv_tok, -1);
+    st_push(&lv_stmt, -1);
+    st_push(&lv_q, 0);
+    i32 n = f->t.length;
+    for (i32 i = 0; i < n; i++) {
+        Kind k = f->t[i].kind;
+        if (k == K_LCOMMENT || k == K_BCOMMENT || k == K_PREPROC)
+            continue;
+        string x = f->t[i].text;
+        bool punct = k == K_PUNCT;
+        if (punct && (x == ")" || x == "]" || x == "}")) {
+            st_pop(&lv_tok);
+            st_pop(&lv_stmt);
+            st_pop(&lv_q);
+            if (x == ")")
+                close_paren(f, i);
+            i32 o = f->t[i].mate;
+            if (x == "}" && is_block(f, o) && (!type_body(f, o) || type_body_ends(f, i)))
+                st_set_top(&lv_stmt, -1);
+            continue;
+        }
+        i32 top = st_top(&lv_tok);
+        bool stmt_level = top < 0 || is_block(f, top);
+        if (stmt_level && st_top(&lv_stmt) == -1) {
+            f->t[i].stmt = true;
+            st_set_top(&lv_stmt, i);
+        }
+        if (k == K_VERBATIM) {
+            if (stmt_level)
+                st_set_top(&lv_stmt, -1);
+            continue;
+        }
+        if (punct && (x == "(" || x == "[" || x == "{")) {
+            if (x == "(" && in_set(tx(f, prev_sig(f, i)), " if for while switch match catch "))
+                f->t[i].ctrl = true;
+            if (x == "{")
+                classify_brace(f, i, top, st_top(&lv_stmt));
+            st_push(&lv_tok, i);
+            st_push(&lv_stmt, -1);
+            st_push(&lv_q, 0);
+            continue;
+        }
+        if (punct && x == ";") {
+            if (stmt_level)
+                st_set_top(&lv_stmt, -1);
+            st_set_top(&lv_q, 0);
+            continue;
+        }
+        if (punct && x == "," && top >= 0 && f->t[top].role == R_ENUM && stmt_level) {
+            st_set_top(&lv_stmt, -1);
+            continue;
+        }
+        if (punct && x == "?") {
+            st_set_top(&lv_q, st_top(&lv_q) + 1);
+            continue;
+        }
+        if (punct && x == ":") {
+            Role r = top >= 0 && stmt_level ? f->t[top].role : R_CONTAINER;
+            if (tis(f, top, "[")) {
+                f->t[i].colon = C_SLICE;
+            } else if (st_top(&lv_q) > 0) {
+                f->t[i].colon = C_SPACED;
+                st_set_top(&lv_q, st_top(&lv_q) - 1);
+            } else if (tis(f, top, "(")) {
+                f->t[i].colon = C_SPACED;   // range-for, asm operands
+            } else if (stmt_level && (decl_keyword(f, st_top(&lv_stmt), i) == "enum"
+                || (r == R_STRUCT && next_sig(f, i) >= 0 && f->t[next_sig(f, i)].kind == K_NUM))) {
+                f->t[i].colon = C_SPACED;
+            } else if (stmt_level && (r == R_SWITCH || r == R_MATCH || r == R_CODE)) {
+                i32 s0 = st_top(&lv_stmt);
+                if (s0 >= 0 && (r == R_SWITCH || r == R_MATCH))
+                    f->t[s0].label = true;
+                st_set_top(&lv_stmt, -1);
+            }
+            continue;
+        }
+        if (k == K_WORD && x == "if") {
+            st_push(&ifs, i);
+            st_push(&ifs_blk, top);
+        }
+        if (k == K_WORD && x == "else") {
+            i32 p = prev_sig(f, i);
+            if (tis(f, p, ";") || tis(f, p, "}")) {
+                f->t[i].stmt = false;
+                st_set_top(&lv_stmt, i);
+                for (i32 j = ifs.n - 1; j >= 0; j--) {
+                    if (ifs_blk.v[j] == top && ifs.v[j] >= 0) {
+                        f->t[i].else_of = ifs.v[j];
+                        ifs.v[j] = -1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (k == K_WORD && (x == "else" || x == "do")) {
+            i32 nx = next_sig(f, i);
+            if (nx >= 0 && !tis(f, nx, "{"))
+                f->t[nx].body_of = i;
+        }
+        if (punct)
+            classify_operator(f, i);
+    }
+    // Blocks written on one line stay on one line.
+    for (i32 i = 0; i < n; i++) {
+        if (!tis(f, i, "{"))
+            continue;
+        bool one = true;
+        for (i32 j = i + 1; j <= f->t[i].mate && one; j++)
+            one = f->t[j].nl == 0 && f->t[j].kind != K_LCOMMENT;
+        f->t[i].oneline = one;
+    }
+}
+
+// ── Layout ─────────────────────────────────────────────────────────────────────
+
+bool oneline(Fmt *f, i32 i) { return f->t[i].oneline && !f->t[i].expand; }
+
+// The break before token `b` (`a` = b - 1): 0, 1, or 2 for a blank line first.
+i32 line_break(Fmt *f, i32 a, i32 b)
+{
+    Kind ak = f->t[a].kind, bk = f->t[b].kind;
+    string x = f->t[a].text, y = f->t[b].text;
+    i32 nl = f->t[b].nl;
+    i32 keep = nl > 1 ? 2 : nl;             // as written
+    i32 keep1 = nl > 0 ? 1 : 0;             // as written, without the blank line
+    i32 r;
+    bool ap = ak == K_PUNCT, bp = bk == K_PUNCT;
+    i32 ua = f->t[a].up, ub = f->t[b].up;
+    if (ak == K_LCOMMENT || ak == K_PREPROC || bk == K_PREPROC || bk == K_VERBATIM) {
+        r = imax(1, keep);
+    } else if (ak == K_VERBATIM) {
+        r = keep > 0 || !(y == ";" || y == ",") ? imax(1, keep) : 0;
+    } else if (bk == K_LCOMMENT || bk == K_BCOMMENT || ak == K_BCOMMENT) {
+        r = keep;
+    } else if (bp && y == "{" && f->t[b].brace == B_FN) {
+        r = oneline(f, b) ? 0 : 1;
+    } else if (bp && y == "{" && f->t[b].brace == B_BLOCK) {
+        r = 0;
+    } else if (ap && x == "{" && is_block(f, a)) {
+        r = oneline(f, a) ? 0 : 1;
+    } else if (ap && x == "{") {
+        r = f->t[a].wrap ? 1 : keep1;
+    } else if (bp && y == "}" && is_block(f, f->t[b].mate)) {
+        r = oneline(f, f->t[b].mate) ? 0 : 1;
+    } else if (bp && y == "}") {
+        r = f->t[f->t[b].mate].wrap ? 1 : keep1;
+    } else if (ap && x == "}" && is_block(f, f->t[a].mate)) {
+        i32 o = f->t[a].mate;
+        i32 u = f->t[o].up;
+        if (y == ";" || y == "," || y == ")" || y == "]" || y == "else"
+            || (y == "while" && tis(f, prev_sig(f, o), "do")))
+            r = 0;
+        else if (type_body(f, o) && !type_body_ends(f, a))
+            r = 0;                          // `} name;` declares
+        else if (u >= 0 && !is_block(f, u))
+            r = keep1;                      // a lambda inside an expression
+        else if (u >= 0 && oneline(f, u))
+            r = 0;
+        else
+            r = imax(1, keep);
+    } else if (ap && x == ";") {
+        if (ua >= 0 && !is_block(f, ua))
+            r = keep1;                      // a for header, an initializer
+        else if (ua >= 0 && oneline(f, ua))
+            r = 0;
+        else if (y == "else" || (ua >= 0 && f->t[ua].role == R_SWITCH && !f->t[b].label))
+            r = keep1;                      // `case 1: x = 2; break;` stays one line
+        else
+            r = imax(1, keep);
+    } else if (x == "else" && y == "if") {
+        r = 0;
+    } else if (ap && x == "(" && f->t[a].wrap) {
+        r = 1;
+    } else if (bp && y == ")" && f->t[f->t[b].mate].wrap) {
+        r = 1;
+    } else if (ap && x == "," && ua >= 0 && f->t[ua].wrap) {
+        r = 1;
+    } else if (keep == 2 && ub >= 0 && tis(f, ub, "{")
+        && (f->t[ub].brace == B_INIT || f->t[ub].role == R_ENUM)) {
+        r = 2;                              // a blank line between initializer rows
+    } else {
+        r = keep1;
+    }
+    if (r == 2 && ((ap && x == "{") || (bp && y == "}") || y == "else"))
+        r = 1;
+    return r;
+}
+
+// The spaces between tokens `a` and `b` = a + 1 when they share a line.
+i32 space(Fmt *f, i32 a, i32 b)
+{
+    Kind ak = f->t[a].kind, bk = f->t[b].kind;
+    string x = f->t[a].text, y = f->t[b].text;
+    bool orig = spaced(f, b);
+    if (bk == K_LCOMMENT)
+        return 1;
+    if (bk == K_BCOMMENT || ak == K_BCOMMENT || ak == K_VERBATIM || bk == K_VERBATIM)
+        return orig ? 1 : 0;
+    if (bk == K_NUM && at(y, 0) == '.')
+        return orig ? 1 : 0;
+    bool aw = ak == K_WORD || ak == K_NUM || ak == K_STR || ak == K_CHAR;
+    bool bw = bk == K_WORD || bk == K_NUM || bk == K_STR || bk == K_CHAR;
+    if (aw && bw)
+        return 1;
+    if (y == "," || y == ";")
+        return 0;
+    if (x == ",")
+        return y == ")" || y == "]" ? 0 : 1;
+    if (x == ";")
+        return y == ")" ? 0 : 1;
+    if (x == "(" || x == "[")
+        return 0;
+    if (y == ")" || y == "]")
+        return 0;
+    if (x == "{")
+        return y == "}" ? 0 : 1;
+    if (y == "{" || y == "}")
+        return 1;
+    if (x == "}")
+        return y == "(" || y == "." || y == "->" ? 0 : 1;
+    if ((x == "->" || y == "->") && lambda_arrow(f, x == "->" ? a : b))
+        return 1;                           // `[](i32 x) -> i32 { … }`
+    if (y == "?" && tis(f, b + 1, "."))
+        return 0;                           // `o?.field`
+    if (x == "." || x == "->" || x == "::" || y == "." || y == "->" || y == "::")
+        return 0;
+    if (y == "<" && f->t[b].generic)
+        return 0;
+    if (x == "<" && f->t[a].generic)
+        return 0;
+    if (f->t[b].generic)
+        return 0;                           // a closing `>`
+    if (f->t[a].generic)
+        return y == "(" || y == "[" ? 0 : 1;
+    if (y == ":") {
+        Colon c = f->t[b].colon;
+        return c == C_SPACED && x != "?" ? 1 : 0;
+    }
+    if (x == ":")
+        return f->t[a].colon == C_SLICE ? 0 : 1;
+    if (f->t[a].unary || f->t[a].ptr)
+        return 0;
+    if (f->t[b].ptr)
+        return 1;
+    if ((y == "++" || y == "--") && !f->t[b].unary)
+        return 0;
+    if (f->t[b].unary)
+        return x == ")" && f->t[a].cast ? 0 : 1;
+    if (y == "(") {
+        if (ak == K_WORD) {
+            if (f->t[a].parenkw)
+                return 1;
+            return f->t[a].typew && tis(f, next_sig(f, b), "*") ? 1 : 0;   // `void (*fn)(int)`
+        }
+        return x == ")" || x == "]" || ak == K_STR ? 0 : 1;
+    }
+    if (y == "[") {
+        if (ak == K_WORD)
+            return f->t[a].lead ? 1 : 0;
+        return x == ")" || x == "]" || ak == K_STR || ak == K_CHAR ? 0 : 1;
+    }
+    if (x == ")")
+        return f->t[a].cast ? 0 : 1;
+    return 1;
+}
+
+// Whether the `->` at `i` gives a lambda's return type: it follows the `)` of a
+// parameter list after the captures `[…]`.
+bool lambda_arrow(Fmt *f, i32 i)
+{
+    i32 p = prev_sig(f, i);
+    return tis(f, p, ")") && tis(f, prev_sig(f, f->t[p].mate), "]");
+}
+
+// Every line break and space.
+void layout(Fmt *f)
+{
+    for (i32 b = 0; b < f->t.length; b++) {
+        if (b == 0) {
+            f->t[b].brk = 0;
+            f->t[b].sp = 0;
+            continue;
+        }
+        i32 k = line_break(f, b - 1, b);
+        i32 s = k > 0 ? 0 : space(f, b - 1, b);
+        if (k == 0 && s == 0 && glues(f->t[b - 1].text, f->t[b].text))
+            s = 1;
+        f->t[b].brk = k;
+        f->t[b].sp = s;
+    }
+}
+
+// ── Indentation ────────────────────────────────────────────────────────────────
+
+// How many lines the brackets st[from..to) were opened on.
+i32 open_lines(Fmt *f, Stack *st, i32 from, i32 to)
+{
+    i32 c = 0, last = -1;
+    for (i32 k = from; k < to; k++) {
+        i32 l = f->t[st->v[k]].oline;
+        if (l != last)
+            c++;
+        last = l;
+    }
+    return c;
+}
+
+// The indentation of the line from token `fi` to `la`, given what is open.
+i32 line_indent(Fmt *f, Stack *st, i32 *file_sbase, list<i32> *ind, i32 fi, i32 la)
+{
+    i32 w = f->opt.tab_spaces;
+    Kind k = f->t[fi].kind;
+    if (f->t[fi].pinned)
+        return f->t[fi].col;
+    bool comment = k == K_LCOMMENT || k == K_BCOMMENT;
+    // The closers that begin the line close their brackets first.
+    i32 eff = st->n, j = fi;
+    while (!comment && j <= la && is_closer(f, j) && eff > 0 && st->v[eff - 1] == f->t[j].mate) {
+        eff--;
+        j++;
+    }
+    i32 bi = eff - 1;
+    while (bi >= 0 && !is_block(f, st->v[bi]))
+        bi--;
+    i32 blk = bi >= 0 ? st->v[bi] : -1;
+    i32 body = blk >= 0 ? f->t[blk].base + w : 0;
+    i32 sb = blk >= 0 ? f->t[blk].sbase : *file_sbase;
+    bool arms = blk >= 0 && (f->t[blk].role == R_SWITCH || f->t[blk].role == R_MATCH);
+    bool seen = blk >= 0 && f->t[blk].seen;
+    bool at_stmt = bi == eff - 1;
+    i32 nx = comment ? next_sig(f, fi) : fi;
+    if (comment && (nx < 0 || is_closer(f, nx) || f->t[nx].kind == K_PREPROC)) {
+        // A comment before a closing bracket belongs inside it.
+        if (at_stmt)
+            return body + (arms && seen ? w : 0);
+        return sb + w * open_lines(f, st, bi + 1, eff);
+    }
+    if (!comment && j > fi && tis(f, fi, "}") && is_block(f, f->t[fi].mate))
+        return f->t[f->t[fi].mate].base;
+    i32 v;
+    bool starts = true;
+    if (is_block(f, nx)) {
+        v = sb;                             // a brace on its own line
+        starts = false;
+    } else if (at_stmt && arms && f->t[nx].label) {
+        v = body;
+        if (!comment)
+            f->t[blk].seen = true;
+    } else if (at_stmt && f->t[nx].stmt) {
+        v = body + (arms && seen ? w : 0);
+    } else if (f->t[nx].else_of >= 0) {
+        v = (*ind)[f->t[f->t[nx].else_of].oline];
+    } else if (f->t[nx].body_of >= 0) {
+        v = (*ind)[f->t[f->t[nx].body_of].oline] + w;
+    } else {
+        i32 c = open_lines(f, st, bi + 1, eff);
+        v = c > 0 ? sb + w * c : j > fi ? sb : sb + w;
+        starts = false;
+    }
+    if (starts && !comment) {
+        if (blk >= 0)
+            f->t[blk].sbase = v;
+        else
+            *file_sbase = v;
+    }
+    return v;
+}
+
+void compute_indents(Fmt *f)
+{
+    i32 w = f->opt.tab_spaces;
+    list<i32> ind;
+    Stack st;
+    i32 file_sbase = 0;
+    for (i32 L = 0; L < f->lfirst.length; L++) {
+        i32 fi = f->lfirst[L], la = f->llast[L];
+        i32 v = line_indent(f, &st, &file_sbase, &ind, fi, la);
+        ind.add(v);
+        for (i32 j = fi; j <= la; j++) {
+            if (f->t[j].kind != K_PUNCT)
+                continue;
+            if (is_opener(f, j)) {
+                if (is_block(f, j)) {
+                    i32 u = f->t[j].up;
+                    i32 cur = file_sbase;
+                    for (i32 k = st.n - 1; k >= 0; k--) {
+                        if (is_block(f, st.v[k])) {
+                            cur = f->t[st.v[k]].sbase;
+                            break;
+                        }
+                    }
+                    f->t[j].base = u < 0 || is_block(f, u) ? cur : v;
+                    f->t[j].sbase = f->t[j].base + w;
+                    f->t[j].seen = false;
+                }
+                st_push(&st, j);
+            } else if (is_closer(f, j)) {
+                st_pop(&st);
+            }
+        }
+    }
+    f->lindent = ind;
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────────────
+
+// Move the second and later lines of `text` by `delta` columns: spaces added, or
+// up to that many leading spaces removed.
+string shift_lines(string text, i32 delta)
+{
+    if (delta == 0)
+        return text;
+    string out = "";
+    i32 st = 0;
+    bool first = true;
+    for (i32 i = 0; i <= text.size; i++) {
+        if (i < text.size && at(text, i) != '\n')
+            continue;
+        string line = text[st:i];
+        if (!first) {
+            out = out + "\n";
+            if (delta > 0 && line.size > 0) {
+                line = spaces(delta) + line;
+            } else if (delta < 0) {
+                i32 k = 0;
+                while (k < -delta && at(line, k) == ' ')
+                    k++;
+                line = line[k:];
+            }
+        }
+        out = out + line;
+        first = false;
+        st = i + 1;
+    }
+    return out;
+}
+
+string indent_text(Fmt *f, i32 v)
+{
+    if (!f->opt.hard_tabs)
+        return spaces(v);
+    string s = "";
+    for (i32 i = 0; i + f->opt.tab_spaces <= v; i += f->opt.tab_spaces)
+        s = s + "\t";
+    return s + spaces(v % f->opt.tab_spaces);
+}
+
+// Lay out, indent and render every line into `f->out`.
+void render(Fmt *f)
+{
+    layout(f);
+    list<i32> first, last;
+    for (i32 i = 0; i < f->t.length; i++) {
+        if (i == 0 || f->t[i].brk > 0) {
+            first.add(i);
+            last.add(i);
+        } else {
+            last[last.length - 1] = i;
+        }
+        f->t[i].oline = first.length - 1;
+    }
+    f->lfirst = first;
+    f->llast = last;
+    compute_indents(f);
+    i32 nlines = first.length;
+    list<string> code;
+    list<i32> wide, endcol, comm;
+    for (i32 L = 0; L < nlines; L++) {
+        i32 fi = first[L], la = last[L];
+        i32 v = f->lindent[L];
+        i32 cm = la > fi && f->t[la].kind == K_LCOMMENT ? la : -1;
+        i32 end = cm >= 0 ? cm - 1 : la;
+        string s = f->t[fi].pinned ? spaces(v) : indent_text(f, v);
+        i32 col = v, wmax = 0;
+        for (i32 j = fi; j <= end; j++) {
+            if (j > fi) {
+                s = s + spaces(f->t[j].sp);
+                col += f->t[j].sp;
+            }
+            string tt = f->t[j].text;
+            Kind k = f->t[j].kind;
+            f->t[j].ocol = col;
+            if (tt.find("\n") >= 0) {
+                bool shift = k == K_BCOMMENT || k == K_LCOMMENT
+                    || (k == K_VERBATIM && !f->t[j].pinned && tt.find("\"\"\"") < 0);
+                if (shift)
+                    tt = shift_lines(tt, col - f->t[j].col);
+                i32 st = 0;
+                for (i32 i = 0; i <= tt.size; i++) {
+                    if (i < tt.size && at(tt, i) != '\n')
+                        continue;
+                    i32 wl = width(tt[st:i]);
+                    col = st == 0 ? col + wl : wl;
+                    wmax = imax(wmax, col);
+                    st = i + 1;
+                }
+            } else {
+                col += width(tt);
+            }
+            s = s + tt;
+            wmax = imax(wmax, col);
+        }
+        code.add(s);
+        wide.add(wmax);
+        endcol.add(col);
+        comm.add(cm);
+    }
+    // Trailing comments: the ones aligned in the source stay aligned.
+    list<string> out;
+    i32 L = 0;
+    while (L < nlines) {
+        if (L > 0 && f->t[first[L]].brk == 2)
+            out.add("");
+        if (comm[L] < 0) {
+            out.add(rstrip(code[L]));
+            L++;
+            continue;
+        }
+        i32 e = L + 1;
+        while (e < nlines && comm[e] >= 0 && f->t[first[e]].brk != 2
+            && f->t[comm[e]].col == f->t[comm[L]].col)
+            e++;
+        i32 target = 0;
+        for (i32 k = L; k < e; k++)
+            target = imax(target, endcol[k] + imax(1, f->t[comm[k]].gap));
+        for (i32 k = L; k < e; k++) {
+            if (k > L && f->t[first[k]].brk == 2)
+                out.add("");
+            out.add(rstrip(code[k] + spaces(target - endcol[k]) + f->t[comm[k]].text));
+        }
+        L = e;
+    }
+    f->lwidth = wide;
+    f->out = out;
+}
+
+// ── Fitting the width ──────────────────────────────────────────────────────────
+
+// Whether a one-line block encloses token `j`.
+bool in_oneline_block(Fmt *f, i32 j)
+{
+    for (i32 u = f->t[j].up; u >= 0; u = f->t[u].up) {
+        if (is_block(f, u) && oneline(f, u))
+            return true;
+    }
+    return false;
+}
+
+// Whether only closing brackets and `;` `,` `{` follow token `m` on its line `..b`.
+bool ends_line(Fmt *f, i32 m, i32 b)
+{
+    for (i32 k = m + 1; k <= b; k++) {
+        bool tail = is_closer(f, k) || tis(f, k, ";") || tis(f, k, ",") || is_block(f, k);
+        if (!tail && !is_comment(f, k))
+            return false;
+    }
+    return true;
+}
+
+// Whether the list at `j` is an operand of an operator before it on its line (`a ||
+// f(x, y)`, `c ? x : f(y)`): breaking it would split the expression.
+bool operand_of(Fmt *f, i32 a, i32 j)
+{
+    i32 dj = 0;                         // `j`'s depth from the line start
+    for (i32 k = a; k < j; k++) {
+        if (is_opener(f, k))
+            dj++;
+        else if (is_closer(f, k))
+            dj--;
+    }
+    i32 d = 0;
+    for (i32 k = a; k < j; k++) {
+        if (is_opener(f, k)) {
+            d++;
+            continue;
+        }
+        if (is_closer(f, k)) {
+            d--;
+            continue;
+        }
+        if (d > dj || f->t[k].kind != K_PUNCT || f->t[k].unary || f->t[k].ptr || f->t[k].generic)
+            continue;
+        string x = f->t[k].text;
+        if (in_set(x, " , ; . -> :: = += -= *= /= %= &= |= ^= <<= >>= "))
+            continue;
+        if (x == ":" && f->t[k].colon == C_LABEL)
+            continue;
+        return true;
+    }
+    return false;
+}
+
+// What to break on the long line `a`..`b`: its outermost one-line block, else the
+// outermost argument list or initializer with commas that ends the line (one in
+// the middle of an expression stays, as rustfmt); -1 for nothing.
+i32 pick(Fmt *f, i32 a, i32 b)
+{
+    for (i32 j = a; j <= b; j++) {
+        if (is_block(f, j) && oneline(f, j) && !f->t[j].nowrap && f->t[j].mate <= b)
+            return j;
+    }
+    i32 best = -1, best_depth = 1 << 30, depth = 0;
+    for (i32 j = a; j <= b; j++) {
+        if (is_closer(f, j)) {
+            depth--;
+            continue;
+        }
+        if (!is_opener(f, j))
+            continue;
+        string x = f->t[j].text;
+        bool attribute = in_set(tx(f, prev_sig(f, j)), " __attribute__ __attribute ");
+        bool list_like = (x == "(" && !f->t[j].ctrl && !attribute)
+            || (x == "{" && f->t[j].brace == B_INIT);
+        if (list_like && !f->t[j].wrap && !f->t[j].nowrap && f->t[j].mate <= b && depth < best_depth
+            && ends_line(f, f->t[j].mate, b) && !operand_of(f, a, j) && !in_oneline_block(f, j)) {
+            for (i32 k = j + 1; k < f->t[j].mate; k++) {
+                if (tis(f, k, ",") && f->t[k].up == j) {
+                    best = j;
+                    best_depth = depth;
+                    break;
+                }
+            }
+        }
+        depth++;
+    }
+    return best;
+}
+
+// Whether wrapping the list at `g` on line `line` cannot make it fit: an element
+// that is too wide even on a line of its own, with no list inside it to break.
+bool cannot_fit(Fmt *f, i32 g, i32 line)
+{
+    i32 max = f->opt.max_width, inner = f->lindent[line] + f->opt.tab_spaces;
+    if (f->t[g].ocol + 1 > max)
+        return true;
+    i32 m = f->t[g].mate, st = g + 1;
+    for (i32 k = g + 1; k <= m; k++) {
+        if (k < m && !(tis(f, k, ",") && f->t[k].up == g))
+            continue;
+        i32 e = k == m ? k - 1 : k;
+        if (e >= st && inner + f->t[e].ocol + width(f->t[e].text) - f->t[st].ocol > max) {
+            bool breakable = false;
+            for (i32 q = st; q <= e && !breakable; q++) {
+                if (!is_opener(f, q) || f->t[q].mate > e)
+                    continue;
+                for (i32 c = q + 1; c < f->t[q].mate && !breakable; c++)
+                    breakable = tis(f, c, ",") && f->t[c].up == q;
+            }
+            if (!breakable)
+                return true;
+        }
+        st = k + 1;
+    }
+    return false;
+}
+
+// The widest line holding a token from `a` to `b`.
+i32 range_width(Fmt *f, i32 a, i32 b)
+{
+    i32 w = 0;
+    for (i32 L = f->t[a].oline; L <= f->t[b].oline; L++)
+        w = imax(w, f->lwidth[L]);
+    return w;
+}
+
+void set_break(Fmt *f, i32 c, bool on)
+{
+    if (is_block(f, c))
+        f->t[c].expand = on;
+    else
+        f->t[c].wrap = on;
+}
+
+// What to break next on line `L`: `pick`, skipping lists that can never fit.
+i32 next_candidate(Fmt *f, i32 L)
+{
+    i32 c = pick(f, f->lfirst[L], f->llast[L]);
+    while (c >= 0 && !is_block(f, c) && cannot_fit(f, c, L)) {
+        f->t[c].nowrap = true;
+        c = pick(f, f->lfirst[L], f->llast[L]);
+    }
+    return c;
+}
+
+// Break the lines wider than max_width — but only where that makes them fit (as
+// rustfmt): a try breaks the line, then any of its new lines still too wide, and
+// is undone unless every line ends up within the width. Each round tries every
+// long line at once (they are separate statements), then finishes or undoes the
+// tries that do not fit yet one by one.
+void fit(Fmt *f)
+{
+    i32 max = f->opt.max_width;
+    render(f);
+    for (i32 round = 0; round < 1000; round++) {
+        list<i32> cands, ra, rb;
+        for (i32 L = 0; L < f->lfirst.length; L++) {
+            if (f->lwidth[L] <= max)
+                continue;
+            i32 c = next_candidate(f, L);
+            if (c < 0)
+                continue;
+            set_break(f, c, true);
+            cands.add(c);
+            ra.add(f->lfirst[L]);
+            rb.add(f->llast[L]);
+        }
+        if (cands.length == 0)
+            return;
+        render(f);
+        bool undone = false;
+        for (i32 k = 0; k < cands.length; k++) {
+            i32 a = ra[k], b = rb[k];
+            list<i32> tried;
+            tried.add(cands[k]);
+            for (i32 step = 0; step < 32 && range_width(f, a, b) > max; step++) {
+                i32 c = -1;
+                for (i32 L = f->t[a].oline; L <= f->t[b].oline && c < 0; L++) {
+                    if (f->lwidth[L] > max)
+                        c = next_candidate(f, L);
+                }
+                if (c < 0)
+                    break;
+                set_break(f, c, true);
+                tried.add(c);
+                render(f);
+            }
+            if (range_width(f, a, b) > max) {
+                for (i32 q = 0; q < tried.length; q++)
+                    set_break(f, tried[q], false);
+                f->t[cands[k]].nowrap = true;
+                undone = true;
+            }
+        }
+        if (undone)
+            render(f);
+    }
+}
+
+// ── Formatting ─────────────────────────────────────────────────────────────────
+
+// A comment or directive with its layout blanks removed, to compare.
+string normalized(string s)
+{
+    string out = "";
+    i32 st = 0;
+    for (i32 i = 0; i <= s.size; i++) {
+        if (i < s.size && at(s, i) != '\n')
+            continue;
+        out = out + s[st:i].trim() + "\n";
+        st = i + 1;
+    }
+    return out;
+}
+
+string join_lines(list<string> *lines)
+{
+    u64 total = 0;
+    for (i32 i = 0; i < lines->length; i++)
+        total += (*lines)[i].size + 1;
+    if (total == 0)
+        return "";
+    std::buffer::Buffer *b = std::buffer::Create(total);
+    if (!b)
+        return "";
+    for (i32 i = 0; i < lines->length; i++) {
+        string l = (*lines)[i];
+        memcpy(b->data + b->size, l.ptr, l.size);
+        b->size += l.size;
+        b->data[b->size] = '\n';
+        b->size++;
+    }
+    string s = std::buffer::Value(b).dup;
+    del b;
+    return s;
+}
+
+// Format `f->src` into `f->result`; false (with the reason) when it is left as is.
+bool format(Fmt *f)
+{
+    if (!lex(f) || !match_brackets(f))
+        return false;
+    mark_generics(f);
+    analyze(f);
+    fit(f);
+    f->result = join_lines(&f->out);
+    // The result must hold exactly the source's tokens.
+    Fmt g;
+    g.src = f->result;
+    bool same = lex(&g) && g.t.length == f->t.length;
+    for (i32 i = 0; same && i < f->t.length; i++) {
+        Kind k = f->t[i].kind;
+        same = g.t[i].kind == k;
+        if (same && (k == K_LCOMMENT || k == K_BCOMMENT || k == K_PREPROC || k == K_VERBATIM))
+            same = normalized(g.t[i].text) == normalized(f->t[i].text);
+        else if (same)
+            same = g.t[i].text == f->t[i].text;
+        if (!same) {
+            f->error = "internal error: the result would change the code (please report this)";
+            f->err_line = f->t[i].line;
+        }
+    }
+    if (!same && f->error.size == 0) {
+        f->error = "internal error: the result would change the code (please report this)";
+        f->err_line = 1;
+    }
+    return same;
+}
+
+// ── Options ────────────────────────────────────────────────────────────────────
+
+Options default_options()
+{
+    Options o;
+    o.max_width = 100;
+    o.tab_spaces = 4;
+    o.hard_tabs = false;
+    return o;
+}
+
+// A decimal number, or -1.
+i32 parse_number(string s)
+{
+    if (s.size == 0 || s.size > 6)
+        return -1;
+    i32 v = 0;
+    for (i32 i = 0; i < s.size; i++) {
+        if (!is_digit(at(s, i)))
+            return -1;
+        v = v * 10 + at(s, i) - '0';
+    }
+    return v;
+}
+
+// Set option `key` to `value`; an error message, or "" when it is set.
+string set_option(Options *o, string key, string value)
+{
+    if (value.size >= 2 && at(value, 0) == '"' && at(value, value.size - 1) == '"')
+        value = value[1:value.size - 1];
+    if (key == "max_width") {
+        i32 v = parse_number(value);
+        if (v < 10)
+            return "max_width takes a number of columns (at least 10)";
+        o->max_width = v;
+    } else if (key == "tab_spaces") {
+        i32 v = parse_number(value);
+        if (v < 1 || v > 16)
+            return "tab_spaces takes a number from 1 to 16";
+        o->tab_spaces = v;
+    } else if (key == "hard_tabs") {
+        if (value != "true" && value != "false")
+            return "hard_tabs takes true or false";
+        o->hard_tabs = value == "true";
+    } else {
+        return std::Fmt("unknown option '{}'", key);
+    }
+    return "";
+}
+
+// Apply `key = value` lines (TOML) to `o`; false after reporting a bad line.
+bool load_config(Options *o, string path, string text)
+{
+    i32 line = 0, st = 0;
+    for (i32 i = 0; i <= text.size; i++) {
+        if (i < text.size && at(text, i) != '\n')
+            continue;
+        string l = text[st:i];
+        st = i + 1;
+        line++;
+        i64 hash = l.find("#");
+        if (hash >= 0)
+            l = l[0:(i32)hash];
+        l = l.trim();
+        if (l.size == 0)
+            continue;
+        i64 eq = l.find("=");
+        string err = eq < 0 ? "expected `key = value`"
+            : set_option(o, l[0:(i32)eq].trim(), l[(i32)eq + 1:].trim());
+        if (err.size > 0) {
+            std::Println("sic-fmt: error: {}:{}: {}", path, line, err, target = 2);
+            return false;
+        }
+    }
+    return true;
+}
+
+// ── Files ──────────────────────────────────────────────────────────────────────
+
+// The bytes of `path`, or None when it cannot be read ("-": standard input).
+Option<string> read_file(string path)
+{
+    std::buffer::Buffer *buf = std::buffer::Create(4096);
+    if (!buf)
+        return None;
+    defer del buf;
+    if (path == "-") {
+        match (std::file::ReadAll(std::file::Stdin(), buf)) {
+            std::file::Status::Read(n): return Option::Some(std::buffer::Value(buf).dup);
+            _: return None;
+        }
+    }
+    match (std::file::Open(path, std::file::OpenMode::Read)) {
+        std::file::Status::Opened(f): {
+            defer del f;
+            match (std::file::ReadAll(f, buf)) {
+                std::file::Status::Read(n): return Option::Some(std::buffer::Value(buf).dup);
+                _: return None;
+            }
+        }
+        _: return None;
+    }
+}
+
+bool write_file(string path, string text)
+{
+    match (std::file::Open(path, std::file::OpenMode::Write)) {
+        std::file::Status::Opened(f): {
+            defer del f;
+            match (std::file::WriteString(f, text)) {
+                std::file::Status::Wrote(n): return n == text.size;
+                _: return false;
+            }
+        }
+        _: return false;
+    }
+}
+
+string dir_of(string path)
+{
+    i32 k = path.size - 1;
+    while (k >= 0 && at(path, k) != '/')
+        k--;
+    if (k < 0)
+        return ".";
+    return k == 0 ? "/" : path[0:k];
+}
+
+string absolute(string path)
+{
+    if (path.starts_with("/"))
+        return path;
+    while (path.starts_with("./"))
+        path = path[2:];
+    match (std::fs::GetCwd()) {
+        Some(cwd): return path == "." || path.size == 0 ? cwd : cwd + "/" + path;
+        _: return path;
+    }
+}
+
+// The nearest sic-fmt.toml (or .sic-fmt.toml) in `dir` or above it, or "".
+string find_config(string dir)
+{
+    string d = absolute(dir);
+    while (true) {
+        if (std::fs::IsFile(d + "/sic-fmt.toml"))
+            return d + "/sic-fmt.toml";
+        if (std::fs::IsFile(d + "/.sic-fmt.toml"))
+            return d + "/.sic-fmt.toml";
+        if (d == "/" || d.find("/") < 0)
+            return "";
+        d = dir_of(d);
+    }
+    return "";
+}
+
+void sort_strings(list<string> *l)
+{
+    for (i32 i = 1; i < l->length; i++) {
+        string x = (*l)[i];
+        i32 j = i - 1;
+        while (j >= 0 && x < (*l)[j]) {
+            (*l)[j + 1] = (*l)[j];
+            j--;
+        }
+        (*l)[j + 1] = x;
+    }
+}
+
+// ── Diffs ──────────────────────────────────────────────────────────────────────
+
+list<string> split_lines(string s)
+{
+    list<string> l;
+    i32 st = 0;
+    for (i32 i = 0; i < s.size; i++) {
+        if (at(s, i) == '\n') {
+            l.add(s[st:i]);
+            st = i + 1;
+        }
+    }
+    if (st < s.size)
+        l.add(s[st:]);
+    return l;
+}
+
+// Print what formatting changes in `path`, as rustfmt --check does: each change
+// with up to 3 lines around it.
+void print_diff(string path, string old_text, string new_text)
+{
+    list<string> a = split_lines(old_text);
+    list<string> b = split_lines(new_text);
+    i32 n = a.length, m = b.length;
+    i32 pre = 0;
+    while (pre < n && pre < m && a[pre] == b[pre])
+        pre++;
+    i32 suf = 0;
+    while (suf < n - pre && suf < m - pre && a[n - 1 - suf] == b[m - 1 - suf])
+        suf++;
+    // The edit: ' ' kept, '-' removed, '+' added, with the line of each.
+    list<i32> op, ln;
+    for (i32 i = 0; i < pre; i++) {
+        op.add(' ');
+        ln.add(i);
+    }
+    i32 N = n - pre - suf, M = m - pre - suf;
+    if ((i64)(N + 1) * (M + 1) <= 4000000) {
+        i32 *dp = new i32[(N + 1) * (M + 1)];
+        defer del dp;
+        for (i32 i = N - 1; i >= 0; i--) {
+            for (i32 j = M - 1; j >= 0; j--) {
+                if (a[pre + i] == b[pre + j])
+                    dp[i * (M + 1) + j] = dp[(i + 1) * (M + 1) + j + 1] + 1;
+                else
+                    dp[i * (M + 1) + j] = imax(dp[(i + 1) * (M + 1) + j], dp[i * (M + 1) + j + 1]);
+            }
+        }
+        i32 i = 0, j = 0;
+        while (i < N || j < M) {
+            if (i < N && j < M && a[pre + i] == b[pre + j]) {
+                op.add(' ');
+                ln.add(pre + i);
+                i++;
+                j++;
+            } else if (i < N && (j == M || dp[(i + 1) * (M + 1) + j] >= dp[i * (M + 1) + j + 1])) {
+                op.add('-');
+                ln.add(pre + i);
+                i++;
+            } else {
+                op.add('+');
+                ln.add(pre + j);
+                j++;
+            }
+        }
+    } else {
+        for (i32 i = 0; i < N; i++) {
+            op.add('-');
+            ln.add(pre + i);
+        }
+        for (i32 j = 0; j < M; j++) {
+            op.add('+');
+            ln.add(pre + j);
+        }
+    }
+    for (i32 i = 0; i < suf; i++) {
+        op.add(' ');
+        ln.add(n - suf + i);
+    }
+    i32 k = 0;
+    while (k < op.length) {
+        if (op[k] == ' ') {
+            k++;
+            continue;
+        }
+        // A hunk: this change and any within 6 lines of it, with 3 lines around.
+        i32 s = k, e = k;
+        for (i32 q = k; q < op.length && q <= e + 6; q++) {
+            if (op[q] != ' ')
+                e = q;
+        }
+        s = imax(0, s - 3);
+        i32 stop = e + 4 < op.length ? e + 4 : op.length;
+        i32 at_line = 0;
+        for (i32 q = s; q < stop; q++) {
+            if (op[q] != '+') {
+                at_line = ln[q] + 1;
+                break;
+            }
+        }
+        std::Println("Diff in {} at line {}:", path, at_line);
+        for (i32 q = s; q < stop; q++) {
+            string text = op[q] == '+' ? b[ln[q]] : a[ln[q]];
+            std::Println("{}{}", op[q] == ' ' ? " " : op[q] == '+' ? "+" : "-", text);
+        }
+        k = stop;
+    }
+}
+
+// ── Main ───────────────────────────────────────────────────────────────────────
+
+struct Run {
+    bool check;         // --check: report, do not write
+    bool to_stdout;     // --emit stdout
+    bool list_changed;  // -l
+    bool quiet;
+    bool verbose;
+    string config_path; // --config-path
+    list<string> overrides; // --config key=value
+    i32 status;
+};
+
+// The options for a file in `dir`: the defaults, then its sic-fmt.toml, then the
+// command line's.
+bool options_for(Run *r, string dir, Options *o)
+{
+    *o = default_options();
+    string path = r->config_path.size > 0 ? r->config_path : find_config(dir);
+    if (path.size > 0) {
+        string text = read_file(path) else {
+            std::Println("sic-fmt: error: cannot read {}", path, target = 2);
+            return false;
+        };
+        if (!load_config(o, path, text))
+            return false;
+    }
+    for (i32 i = 0; i < r->overrides.length; i++) {
+        string kv = r->overrides[i];
+        i64 eq = kv.find("=");
+        string err = eq < 0 ? "expected key=value"
+            : set_option(o, kv[0:(i32)eq].trim(), kv[(i32)eq + 1:].trim());
+        if (err.size > 0) {
+            std::Println("sic-fmt: error: --config {}: {}", kv, err, target = 2);
+            return false;
+        }
+    }
+    return true;
+}
+
+void format_path(Run *r, string path)
+{
+    string text = read_file(path) else {
+        std::Println("sic-fmt: error: cannot read {}", path, target = 2);
+        r->status = 1;
+        return;
+    };
+    Fmt f;
+    f.src = text;
+    if (!options_for(r, path == "-" ? "." : dir_of(path), &f.opt)) {
+        r->status = 1;
+        return;
+    }
+    string name = path == "-" ? "<stdin>" : path;
+    if (!format(&f)) {
+        std::Println(
+            "sic-fmt: error: {}:{}: {}; left as it is",
+            name,
+            f.err_line,
+            f.error,
+            target = 2
+        );
+        r->status = 1;
+        return;
+    }
+    bool changed = f.result != text;
+    if (r->check) {
+        if (changed) {
+            print_diff(name, text, f.result);
+            r->status = 1;
+        }
+        return;
+    }
+    if (changed && r->list_changed)
+        std::Println("{}", name);
+    if (path == "-" || r->to_stdout) {
+        std::file::WriteString(std::file::Stdout(), f.result);
+        return;
+    }
+    if (!changed) {
+        if (r->verbose)
+            std::Println("unchanged {}", path);
+        return;
+    }
+    if (!write_file(path, f.result)) {
+        std::Println("sic-fmt: error: cannot write {}", path, target = 2);
+        r->status = 1;
+        return;
+    }
+    if (r->verbose)
+        std::Println("formatted {}", path);
+}
+
+// Every .sic file below `dir` (not in hidden directories or `target`).
+void format_dir(Run *r, string dir)
+{
+    match (std::fs::ReadDir(dir)) {
+        Some(names): {
+            list<string> l = names;
+            sort_strings(&l);
+            for (i32 i = 0; i < l.length; i++) {
+                string name = l[i];
+                if (name.starts_with(".") || name == "target")
+                    continue;
+                string p = dir.ends_with("/") ? dir + name : dir + "/" + name;
+                if (std::fs::IsDir(p))
+                    format_dir(r, p);
+                else if (name.ends_with(".sic"))
+                    format_path(r, p);
+            }
+        }
+        _: {
+            std::Println("sic-fmt: error: cannot read directory {}", dir, target = 2);
+            r->status = 1;
+        }
+    }
+}
+
+void usage()
+{
+    std::Print(r"""Usage: sic-fmt [options] [file|dir ...]
+
+Formats SIC source in place: each file, and every .sic file below each directory.
+With no file, or `-`, formats standard input to standard output. The layout is
+doc/style.md; it changes only whitespace and line breaks.
+""");
+    std::Print(r"""Options:
+  --check                 write nothing; print the changes formatting would make,
+                          and exit 1 if there are any
+  --emit stdout           print the formatted files instead of writing them
+  -l, --files-with-diff   print the name of each file that changes
+  --config KEY=VAL[,...]  set options (max_width, tab_spaces, hard_tabs)
+  --config-path FILE      read options from FILE, not the nearest sic-fmt.toml
+  --print-config          print the options in effect and exit
+  -v, --verbose           name each file as it is formatted
+  -q, --quiet             print nothing but errors
+  -V, --version           print the version
+  -h, --help              print this help
+""");
+    std::Print(r"""Options are read from the nearest sic-fmt.toml (or .sic-fmt.toml) in the
+file's directory or above, as `key = value` lines:
+  max_width = 100    the preferred line width (longer lines stay when breaking
+                     them would not make them shorter)
+  tab_spaces = 4     columns per indentation level
+  hard_tabs = false  indent with tabs
+""");
+}
+
+int main(int argc, char **argv)
+{
+    Run r;
+    list<string> paths;
+    bool print_config = false;
+    for (i32 i = 1; i < argc; i++) {
+        string a = argv[i];
+        string val = "";
+        bool takes = a == "--emit" || a == "--config" || a == "--config-path";
+        if (takes) {
+            if (i + 1 >= argc) {
+                std::Println("sic-fmt: error: {} needs a value", a, target = 2);
+                return 1;
+            }
+            i++;
+            val = argv[i];
+        } else if (a.starts_with("--emit=") || a.starts_with("--config=")
+            || a.starts_with("--config-path=")) {
+            i64 eq = a.find("=");
+            val = a[(i32)eq + 1:];
+            a = a[0:(i32)eq];
+            takes = true;
+        }
+        if (a == "--check") {
+            r.check = true;
+        } else if (a == "--emit") {
+            if (val != "stdout" && val != "files") {
+                std::Println("sic-fmt: error: --emit takes stdout or files", target = 2);
+                return 1;
+            }
+            r.to_stdout = val == "stdout";
+        } else if (a == "--config") {
+            i32 st = 0;
+            for (i32 k = 0; k <= val.size; k++) {
+                if (k == val.size || at(val, k) == ',') {
+                    if (k > st)
+                        r.overrides.add(val[st:k]);
+                    st = k + 1;
+                }
+            }
+        } else if (a == "--config-path") {
+            r.config_path = val;
+        } else if (a == "-l" || a == "--files-with-diff") {
+            r.list_changed = true;
+        } else if (a == "--print-config") {
+            print_config = true;
+        } else if (a == "-v" || a == "--verbose") {
+            r.verbose = true;
+        } else if (a == "-q" || a == "--quiet") {
+            r.quiet = true;
+        } else if (a == "-V" || a == "--version") {
+            std::Println("sic-fmt 0.1.0");
+            return 0;
+        } else if (a == "-h" || a == "--help") {
+            usage();
+            return 0;
+        } else if (a == "-" || !a.starts_with("-")) {
+            paths.add(a);
+        } else {
+            std::Println("sic-fmt: error: unknown option '{}' (see --help)", a, target = 2);
+            return 1;
+        }
+    }
+    if (r.quiet)
+        r.verbose = false;
+    if (print_config) {
+        Options o;
+        if (!options_for(&r, paths.length > 0 ? dir_of(paths[0]) : ".", &o))
+            return 1;
+        std::Println("max_width = {}\ntab_spaces = {}\nhard_tabs = {}", o.max_width, o.tab_spaces,
+            o.hard_tabs ? "true" : "false");
+        return 0;
+    }
+    if (paths.length == 0)
+        paths.add("-");
+    for (i32 i = 0; i < paths.length; i++) {
+        string p = paths[i];
+        if (p != "-" && std::fs::IsDir(p))
+            format_dir(&r, p);
+        else
+            format_path(&r, p);
+    }
+    return r.status;
+}

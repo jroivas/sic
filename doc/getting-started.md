@@ -18,7 +18,10 @@ cd siccomp && cargo build           # → siccomp/target/debug/sic
 ```
 
 The same build produces `cargo-sic`, which adds Rust crates to a SIC project
-(`cargo sic add <crate>`, see [Rust crates](rust-crates.md)).
+(`cargo sic add <crate>`, see [Rust crates](rust-crates.md)). `build.sh` also builds
+`sic-fmt/sic-fmt`, the code formatter: `sic-fmt file.sic` lays a file out in the
+[default style](style.md), `sic-fmt --check src/` only reports (see
+[sic-fmt](../sic-fmt/README.md)).
 
 Add the binary to your `PATH`, or invoke it directly:
 

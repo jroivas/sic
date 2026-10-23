@@ -1,0 +1,10 @@
+// Lines over max_width (100) break where that makes them fit: a one-line body,
+// then the outermost argument list that ends the line. Others stay as written.
+import std;
+i32 describe(string name, i32 count, i32 price) { std::Println("{} items of {} at {} each", count, name, price); return count; }
+void report(string name, i32 count, i32 price)
+{
+    describe("a fairly long product name that is quite long", count + 1000000, price * 2000000 + 3000000);
+    bool fits = count > 0 && price > 0 && name.size > 0 && count < 1000000 && price < 1000000000 && ok;
+    std::Println("a single string argument that is far too long to fit on any line of a hundred cols");
+}

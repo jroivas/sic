@@ -1,0 +1,25 @@
+// Spaces around binary operators, none inside brackets or after unary ones; the
+// `*` of a declarator binds to the name.
+import std;
+i32 f(i32 a,i32 b,char*name,u8 **pp)
+{
+    i32 x=a+b*2-(a%b);
+    i32 y=-x+ ~a- -1;
+    bool ok=!x&&a<b||b>=a;
+    i32 *p=&x;
+    *p=*p**p;
+    char *s=(char*)name;
+    i32 n=(i32)(u8)s[0];
+    u32 r=(u32)x<<<3;
+    x<>y;
+    x++;--y;
+    list<i32> xs;dict<string,list<i32>> d;
+    Option<i32> o=Option::Some(x);
+    string head=std::Fmt("{}",x)[0:2];
+    string tail=head[1:];
+    i32 c=x>0?x:-x;
+    for(auto v:xs) n+=v;
+    std::Println("{}",n,target=2);
+    i32 z=sizeof(i32)*n;
+    return o?.x;
+}

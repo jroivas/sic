@@ -1,0 +1,41 @@
+// Functions and namespaces open on their own line; every other block on the
+// same line; one-line bodies stay one line.
+namespace shapes
+{
+    struct Point { i32 x; i32 y; };
+    struct Box {
+        Point lo;
+        Point hi;
+        ~Box() {}
+        i32 area(Box *self)
+        {
+            return (self->hi.x - self->lo.x) * (self->hi.y - self->lo.y);
+        }
+    }
+    enum Kind {
+        Small,
+        Large,
+    };
+}
+i32 sq(i32 x) { return x * x; }
+i32 walk(i32 n)
+{
+    i32 t = 0;
+    for (i32 i = 0; i < n; i++) {
+        if (i % 2 == 0) {
+            t += i;
+        } else if (i % 3 == 0) {
+            t -= 1;
+        } else {
+            t += 2;
+        }
+    }
+    do {
+        t--;
+    } while (t > 100);
+    while (t < 0) { t++; }
+    auto add = [t](i32 x) {
+        return x + t;
+    };
+    return add(t);
+}

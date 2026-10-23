@@ -1,0 +1,19 @@
+// Comments keep their place; trailing comments aligned in the source stay
+// aligned; blank lines are kept, at most one.
+i32 g(i32 a)
+{
+
+
+    i32 x = a;    // first
+    i32 long_name = a * 2;  // second, aligned with the first in the source
+    x = x + 1; // its own column
+
+
+    /* a block comment
+       on two lines */
+    if (x > 0) {
+        // before the closing brace
+    }
+        // an own-line comment
+    return x + long_name; /* trailing block */
+}

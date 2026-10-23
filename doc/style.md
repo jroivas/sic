@@ -1,8 +1,9 @@
 # SIC style
 
-The default layout of SIC code — what `sic-fmt` produces, and what the standard
-library, the docs and the tests follow. It is K&R style: a function's or namespace's
-body opens on its own line, every other block on the same line.
+The default layout of SIC code — what [`sic-fmt`](../sic-fmt/README.md) produces
+(`sic-fmt file.sic`, or `sic-fmt --check dir/` to only report). It is K&R style: a
+function's or namespace's body opens on its own line, every other block on the
+same line.
 
 ## Indentation and lines
 
@@ -10,8 +11,9 @@ body opens on its own line, every other block on the same line.
   newline at the end of the file.
 - Prefer lines of at most **100** characters. It is a preference, not a limit: a
   longer line stays when breaking it would read worse (a long string, a table-like
-  row, a URL in a comment).
-- At most one blank line in a row; one blank line between top-level items.
+  row, a URL in a comment) — see [Wrapping long lines](#wrapping-long-lines).
+- Blank lines are the author's: kept where they are, at most one in a row, never
+  right after a `{` or before a `}`.
 
 ## Braces
 
@@ -59,7 +61,9 @@ namespace file
 - `} else {`, `} else if (…) {` and `} while (…);` follow the closing brace on its
   line.
 - **One-line bodies** stay on one line when they fit: `~File() { close(fd); }`,
-  `int sq(int x) { return x * x; }`, `if (n == 0) { return 1; }`.
+  `int sq(int x) { return x * x; }`, `if (n == 0) { return 1; }`. A body that does
+  not fit opens up into the block form. (A block written over several lines is
+  not joined into one.)
 - **Braces may be omitted** around a single-statement `if`/`else`/`for`/`while`
   body, on the same line (`if (x < 0) return -1;`) or the next, indented. The
   exception is the dangling `else`: an `if` without braces whose body is itself an
@@ -88,7 +92,14 @@ if (a) {
 - A space after each comma and after the `;` of a `for` header; none just inside
   parentheses or brackets: `f(a, b)`, `xs[i]`, `for (int i = 0; i < n; i++)`.
 - Generic arguments without inner spaces at the brackets: `list<i32>`,
-  `dict<string, i64>`, `m::HashMap<i64, string>::new()`.
+  `dict<string, i64>`, `m::HashMap<i64, string>::new()`, `fixed<10, 2>`.
+- A cast is tight: `(char *)p`, `(i32)(u8)c`. Slices are tight at the `:`, the
+  bounds spaced as any expression: `s[0:5]`, `s[i:i + 1]`, `s[1:]`.
+- Brace initializers and one-line blocks have a space inside the braces:
+  `{ 1, 2, 3 }`, `{ return x; }`; empty ones none: `{}`.
+- Named arguments are spaced like assignments: `std::Println("{}", x, target = 2)`.
+- `o?.field` and `a ?: b` keep the `?` with its partner; a lambda's return type
+  is spaced: `[](i32 x) -> i32 { … }`.
 
 ## `match` and `switch`
 
@@ -108,16 +119,36 @@ i32 area(Shape s)
 ```
 
 `case` labels of a `switch` are indented one level; their statements one more.
+A short case may stay on its label's line: `case 1: x = 2; break;`.
+
+## Continuation lines
+
+Where a statement goes on to another line, the line breaks are the author's; the
+later lines are indented **one level per bracket left open from an earlier line**,
+or one level when no bracket is open (a continued expression). A line that starts
+by closing brackets goes back to their level. Break a long expression before its
+operator:
+
+```sic
+i32 total = compute(first,
+    second);
+bool ok = header.valid
+    && header.size <= limit;
+```
+
+A braceless body is one level in from its `if`/`for`/`while`/`else`; an `else`
+lines up with its `if`.
 
 ## Wrapping long lines
 
-When a line is broken, break at the outermost level first:
+A line over the width is broken where that makes it fit, as rustfmt does; a line
+that cannot be made to fit that way stays as written:
 
-- **Calls and parameter lists:** one argument per line, indented one level, the
-  closing `)` back on its own line.
-- **Binary expressions:** before the operator, the continuation indented one level.
-- **Guards** (`x = f() else …`): a guard that does not fit becomes the block form,
-  `else {` … `}`.
+- **A one-line body** opens into the block form first.
+- **Calls, parameter lists and initializers** that end the line go one element
+  per line, indented one level, the closing bracket back on its own line.
+- A list that is an operand in the middle of an expression (`a || f(x, y)`) is not
+  broken; break such a line yourself, before an operator.
 
 ```sic
 std::Println(
@@ -135,8 +166,8 @@ bool ok = header.valid
 
 - `//` followed by one space. Doc comments go on the line(s) above what they
   describe.
-- Trailing comments on consecutive lines are aligned to one column, as in the
-  docs:
+- Trailing comments on consecutive lines that are aligned stay aligned (to the
+  longest line), as in the docs; a trailing comment on its own keeps its gap:
 
 ```sic
 x <> y;            // swap
@@ -152,6 +183,8 @@ token, so it never changes what code means. In particular it leaves alone:
 - preprocessor lines (`#include`, `#define`, …) and the order of includes and
   imports;
 - braces themselves (it does not add braces to a braceless `if`, or remove any);
-- the bodies of `macro_rules` macros, apart from their indentation.
+- `macro_rules` definitions, apart from their indentation;
+- everything between a `// sic-fmt: off` comment and a `// sic-fmt: on` one.
 
-Code that does not parse is left untouched.
+Code whose brackets do not balance, or that does not lex, is reported and left
+untouched.
