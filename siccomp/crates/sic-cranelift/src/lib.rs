@@ -331,7 +331,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // runtime invokes every `.init_array` entry before `main` — this is how
     // QEMU's `type_init`/`block_init`/module-registration constructors run.
     for (i, f) in ir_module.functions.iter().enumerate() {
-        let Some(prio) = f.constructor else { continue };
+        let Some(run) = f.constructor else { continue };
         let fid = func_ids[&(i as u32)];
         let sym = format!(".ctor_dtor.entry.{}", f.name);
         let did = obj_module.declare_data(&sym, CLinkage::Local, true, false)?;
@@ -340,9 +340,12 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         desc.define(vec![0u8; ptr_size as usize].into_boxed_slice());
         let fv = obj_module.declare_func_in_data(fid, &mut desc);
         desc.write_function_addr(0, fv);
-        // A destructor (priority offset by 0x10000, see sic_frontend's
-        // `DESTRUCTOR_PRIO`) runs at exit from `.fini_array`.
-        let (array, prio) = if prio >= 0x10000 { ("fini_array", prio - 0x10000) } else { ("init_array", prio) };
+        // ELF: `.init_array` runs before `main`, `.fini_array` at exit (other
+        // object formats are not targeted by this backend yet).
+        let (array, prio) = match run {
+            sic_ir::RunAt::Startup(p) => ("init_array", p),
+            sic_ir::RunAt::Exit(p) => ("fini_array", p),
+        };
         let section = if prio == 65535 {
             format!(".{}", array)
         } else {

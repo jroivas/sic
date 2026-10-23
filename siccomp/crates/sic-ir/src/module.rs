@@ -44,6 +44,15 @@ impl BasicBlock {
 }
 
 /// A function definition.
+/// When a function runs on its own, with its priority (lower runs earlier;
+/// 65535 is GCC's default): `Startup` before `main` (`__attribute__((constructor))`),
+/// `Exit` after it returns (`__attribute__((destructor))`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAt {
+    Startup(i32),
+    Exit(i32),
+}
+
 #[derive(Debug, Clone)]
 pub struct Function {
     pub name: String,
@@ -51,9 +60,9 @@ pub struct Function {
     pub params: Vec<Param>,
     pub blocks: Vec<BasicBlock>,
     pub linkage: Linkage,
-    /// `Some(priority)` if this is an `__attribute__((constructor))` — its address
-    /// is placed in `.init_array` so the C runtime calls it before `main`.
-    pub constructor: Option<i32>,
+    /// `__attribute__((constructor[(prio)]))` / `destructor[(prio)]`: the C
+    /// runtime calls it before `main` / at exit (see `RunAt`).
+    pub constructor: Option<RunAt>,
     /// Never inline this function (a cold failure path such as
     /// `__sic_bounds_fail`: inlined, its `write` + `abort` and their constant
     /// arguments land in every hot loop, which the back end then hoists into

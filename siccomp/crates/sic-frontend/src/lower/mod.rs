@@ -1883,7 +1883,7 @@ impl Lowerer {
             None => "__sic_ginit".to_string(),
         };
         let mut func = Function::new(name, sig, vec![], Linkage::Internal);
-        func.constructor = Some(65535);
+        func.constructor = Some(sic_ir::RunAt::Startup(65535));
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
         let mut any = false;

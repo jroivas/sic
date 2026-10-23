@@ -1986,7 +1986,7 @@ impl<'m> Lowerer {
         body: &[Stmt],
         storage: &Option<StorageClass>,
         inline: bool,
-        constructor: Option<i32>,
+        constructor: Option<sic_ir::RunAt>,
         is_async: bool,
     ) -> Result<()> {
         // A plain `tuple` local assigned tuples of different shapes is dynamically
@@ -2011,7 +2011,7 @@ impl<'m> Lowerer {
         body: &[Stmt],
         storage: &Option<StorageClass>,
         inline: bool,
-        constructor: Option<i32>,
+        constructor: Option<sic_ir::RunAt>,
         is_async: bool,
     ) -> Result<()> {
         // sic tail-call optimization (sic.md §"Scopes"): rewrite a self-recursive

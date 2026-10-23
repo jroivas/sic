@@ -41,7 +41,7 @@ pub struct Parser {
     pending_vector_size: Option<u32>,
     /// `__attribute__((constructor[(prio)]))` seen while parsing the current
     /// declaration's specifiers; the function runs before `main` via `.init_array`.
-    pending_constructor: Option<i32>,
+    pending_constructor: Option<sic_ir::RunAt>,
     /// `__attribute__((weak))` seen while parsing the current declaration; the
     /// declared symbols get weak linkage so duplicate definitions merge.
     pending_weak: bool,
@@ -3776,16 +3776,15 @@ impl Parser {
                                 .and_then(|t| t.text.parse::<i32>().ok())
                                 .unwrap_or(65535)
                         } else { 65535 };
-                        self.pending_constructor = Some(prio);
+                        self.pending_constructor = Some(sic_ir::RunAt::Startup(prio));
                     } else if name == "destructor" || name == "__destructor__" {
-                        // `destructor(N)`: run at exit (`.fini_array`); carried
-                        // in the constructor slot, offset by `DESTRUCTOR_PRIO`.
+                        // `destructor(N)`: run at exit.
                         let prio = if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
                             self.tokens.get(i + 2)
                                 .and_then(|t| t.text.parse::<i32>().ok())
                                 .unwrap_or(65535)
                         } else { 65535 };
-                        self.pending_constructor = Some(crate::ast::DESTRUCTOR_PRIO + prio);
+                        self.pending_constructor = Some(sic_ir::RunAt::Exit(prio));
                     }
                 }
                 _ => {}

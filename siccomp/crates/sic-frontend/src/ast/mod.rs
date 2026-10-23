@@ -276,10 +276,6 @@ pub enum Designator {
     IndexRange(Box<Expr>, Box<Expr>),
 }
 
-/// An `__attribute__((destructor(N)))` is carried in a function's
-/// `constructor` priority as `DESTRUCTOR_PRIO + N` (and runs from `.fini_array`).
-pub const DESTRUCTOR_PRIO: i32 = 0x10000;
-
 /// A top-level declaration.
 #[derive(Debug, Clone)]
 pub enum Decl {
@@ -317,7 +313,7 @@ pub enum Decl {
         inline: bool,
         /// `__attribute__((constructor[(prio)]))`: run before `main` via
         /// `.init_array`. `Some(priority)` (lower priority runs earlier).
-        constructor: Option<i32>,
+        constructor: Option<sic_ir::RunAt>,
         /// sic `async` (sic.md §"Async"): the function is asynchronous — it returns
         /// a `Task<ret>`, and each `return v` wraps `v` into a task. `await` runs it.
         is_async: bool,
