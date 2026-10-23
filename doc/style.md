@@ -1,8 +1,8 @@
 # SIC style
 
 The default layout of SIC code — what `sic-fmt` produces, and what the standard
-library, the docs and the tests follow. It is K&R style: a function's body opens on
-its own line, every other block on the same line.
+library, the docs and the tests follow. It is K&R style: a function's or namespace's
+body opens on its own line, every other block on the same line.
 
 ## Indentation and lines
 
@@ -15,13 +15,14 @@ its own line, every other block on the same line.
 
 ## Braces
 
-A **function** (also a method, constructor or destructor) opens its body on the
-next line; **everything else** opens on the same line — namespaces, structs,
-unions, enums, `if`/`for`/`while`/`do`/`switch`, `match`, `unsafe`/`defer` blocks
-and lambdas:
+A **function** (also a method, constructor or destructor) and a **namespace** —
+the blocks that enclose larger stretches of code — open their body on the next
+line; **everything else** opens on the same line: structs, unions, enums,
+`if`/`for`/`while`/`do`/`switch`, `match`, `unsafe`/`defer` blocks and lambdas:
 
 ```sic
-namespace file {
+namespace file
+{
     struct File {
         int fd;
         string name;
