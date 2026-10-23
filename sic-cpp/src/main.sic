@@ -91,11 +91,11 @@ struct Preprocessor {
     list<string> embed_dirs;  // --embed-dir
 }
 
-
 // ── File I/O using std::File (except stdin) ────────────────────────────────
 
 // Read a regular file into a string.  Returns "" on failure.
-string read_file(string path) {
+string read_file(string path)
+{
     auto status = std::file::Open(path, std::file::OpenMode::Read);
     match (status) {
         std::file::Status::Opened(f): {
@@ -114,7 +114,7 @@ string read_file(string path) {
                     result = std::buffer::Value(buf).dup;
                 _:
                     std::Println("Could not read file"),
-                    result = "";
+                        result = "";
             }
             del buf;
             del f;
@@ -125,7 +125,8 @@ string read_file(string path) {
 }
 
 // Check if a file exists (for #include search).
-i32 file_exists(string path) {
+i32 file_exists(string path)
+{
     auto status = std::file::Open(path, std::file::OpenMode::Read);
     match (status) {
         std::file::Status::Opened(f): { del f; return 1; }
@@ -159,21 +160,23 @@ extern int glob(char *pattern, int flags, void *errfunc, GlobT *g);
 extern void globfree(GlobT *g);
 
 // Run a shell command and return its output lines (trailing whitespace trimmed).
-list<string> run_lines(string cmd) {
+list<string> run_lines(string cmd)
+{
     list<string> lines;
     void *f = popen(cmd.str, "r");
     if (!f) return lines;
     char buf[4096];
-    while (fgets(buf, 4096, f)) lines.add(((string)(char*)buf).rtrim().dup);
+    while (fgets(buf, 4096, f)) lines.add(((string)(char *)buf).rtrim().dup);
     pclose(f);
     return lines;
 }
 
 // Paths matching a glob pattern (sorted, as glob returns them).
-list<string> glob_paths(string pattern) {
+list<string> glob_paths(string pattern)
+{
     list<string> out;
     GlobT g;
-    if (glob(pattern.str, 0, (void*)0, &g) == 0) {
+    if (glob(pattern.str, 0, (void *)0, &g) == 0) {
         for (u64 i = 0; i < g.pathc; i++) out.add(((string)g.pathv[i]).dup);
         globfree(&g);
     }
@@ -181,7 +184,8 @@ list<string> glob_paths(string pattern) {
 }
 
 // Split on every `sep` character.
-list<string> split_all(string s, i32 sep) {
+list<string> split_all(string s, i32 sep)
+{
     list<string> parts;
     string rest = s;
     while (true) {
@@ -189,27 +193,33 @@ list<string> split_all(string s, i32 sep) {
         while (n < rest.size && rest[n] != sep) n++;
         parts.add(rest[0:n].dup);
         if (n >= rest.size) break;
-        rest = rest[n+1:];
+        rest = rest[n + 1:];
     }
     return parts;
 }
 
 // Compare dotted version strings numerically ("12.2.0" < "15").
-i32 ver_cmp(string a, string b) {
+i32 ver_cmp(string a, string b)
+{
     list<string> pa = split_all(a, '.');
     list<string> pb = split_all(b, '.');
     i32 n = pa.length > pb.length ? pa.length : pb.length;
     for (i32 i = 0; i < n; i++) {
         i32 x = 0, y = 0;
-        if (i < pa.length) for (i32 k = 0; k < pa[i].size && std::IsDigit(pa[i][k]); k++) x = x * 10 + (pa[i][k] - '0');
-        if (i < pb.length) for (i32 k = 0; k < pb[i].size && std::IsDigit(pb[i][k]); k++) y = y * 10 + (pb[i][k] - '0');
+        if (i < pa.length)
+            for (i32 k = 0; k < pa[i].size && std::IsDigit(pa[i][k]); k++)
+                x = x * 10 + (pa[i][k] - '0');
+        if (i < pb.length)
+            for (i32 k = 0; k < pb[i].size && std::IsDigit(pb[i][k]); k++)
+                y = y * 10 + (pb[i][k] - '0');
         if (x != y) return x < y ? -1 : 1;
     }
     return 0;
 }
 
 // Directory part of a path ("" when it has no '/').
-string dir_of(string path) {
+string dir_of(string path)
+{
     i32 i = path.size - 1;
     while (i >= 0 && path[i] != '/') i--;
     return i < 0 ? "" : path[0:i];
@@ -225,19 +235,21 @@ string RECURSION_ENV = "SIC_RECURSION";
 string INFO_ENV = "SIC_CPP_INFO";
 
 // Whether `text` is sic's info format (`include`/`define`/`has` records).
-i32 is_info(string text) {
+i32 is_info(string text)
+{
     return text.starts_with("include ") || text.starts_with("define ") || text.starts_with("has ") ? 1 : 0;
 }
 
 // sic's info text: from SIC_CPP_INFO, else from the sic on PATH or of the sic
 // repository this sic-cpp was built in. "" when no sic answers (then a host C
 // compiler / the filesystem probe is used). Exits on recursion.
-string sic_info() {
+string sic_info()
+{
     char *env = getenv(INFO_ENV.str);
     if (env) return ((string)env).dup;
     if (getenv(RECURSION_ENV.str)) {
         std::Println("sic-cpp: fatal error: {} is set but {} is not: refusing to start sic "
-                     "(sic and sic-cpp would call each other recursively)", RECURSION_ENV, INFO_ENV, target = 2);
+            "(sic and sic-cpp would call each other recursively)", RECURSION_ENV, INFO_ENV, target = 2);
         std::Exit(1);
     }
     setenv(RECURSION_ENV.str, "1", 1);
@@ -246,7 +258,7 @@ string sic_info() {
     if (onpath.length > 0) cands.add(onpath[0]);
     char buf[4096];
     if (realpath("/proc/self/exe", buf)) {
-        string root = dir_of(dir_of((string)(char*)buf));   // <repo>/sic-cpp/sic-cpp -> <repo>
+        string root = dir_of(dir_of((string)(char *)buf));   // <repo>/sic-cpp/sic-cpp -> <repo>
         cands.add(root + "/siccomp/target/release/sic");
         cands.add(root + "/siccomp/target/debug/sic");
     }
@@ -262,7 +274,8 @@ string sic_info() {
 
 // The `kind` records of an info text: `include DIR` -> "DIR", `define N V` ->
 // "N V", `has K a b` -> "K a b".
-list<string> info_records(string info, string kind) {
+list<string> info_records(string info, string kind)
+{
     list<string> out;
     list<string> lines = split_all(info, '\n');
     string pre = kind + " ";
@@ -274,18 +287,20 @@ list<string> info_records(string info, string kind) {
 }
 
 // True if the program `prog` (searched on PATH) is sic itself.
-i32 is_sic_program(string prog) {
+i32 is_sic_program(string prog)
+{
     list<string> r = run_lines("p=$(command -v " + prog + " 2>/dev/null) && readlink -f \"$p\"");
     if (r.length == 0) return 0;
     string path = r[0];
     i32 i = path.size - 1;
     while (i >= 0 && path[i] != '/') i--;
-    string base = path[i+1:];
+    string base = path[i + 1:];
     return base == "sic" || base.starts_with("sic-") ? 1 : 0;
 }
 
 // `cmd`'s program part (`CC="gcc -m32"` -> gcc), "" if it is not on PATH.
-string usable_program(string cmd) {
+string usable_program(string cmd)
+{
     string e = cmd.trim();
     i32 n = 0;
     while (n < e.size && !std::IsSpace(e[n])) n++;
@@ -296,7 +311,8 @@ string usable_program(string cmd) {
 // The host C compiler to consult when no sic answers: `$SIC_HOST_CC`, else
 // `$CC` unless that is sic, else the first of cc/gcc/clang on PATH. "" when
 // none is available (then the filesystem probe is used).
-string find_compiler() {
+string find_compiler()
+{
     char *host = getenv("SIC_HOST_CC");
     if (host && usable_program((string)host).size > 0) return ((string)host).trim().dup;
     char *env = getenv("CC");
@@ -305,16 +321,20 @@ string find_compiler() {
         if (prog.size > 0 && !is_sic_program(prog)) return ((string)env).trim().dup;
     }
     list<string> names;
-    names.add("cc"); names.add("gcc"); names.add("clang");
+    names.add("cc");
+    names.add("gcc");
+    names.add("clang");
     for (i32 i = 0; i < names.length; i++) {
         string c = names[i];
-        if (run_lines("command -v " + c + " 2>/dev/null").length > 0 && !is_sic_program(c)) return c;
+        if (run_lines("command -v " + c + " 2>/dev/null").length > 0 && !is_sic_program(c))
+            return c;
     }
     return "";
 }
 
 // 1. The compiler's own `#include <...>` search list (empty if it gave none).
-list<string> compiler_include_dirs(string cc) {
+list<string> compiler_include_dirs(string cc)
+{
     list<string> dirs;
     if (cc.size == 0) return dirs;
     list<string> out = run_lines(cc + " -xc -E -v /dev/null 2>&1");
@@ -335,7 +355,8 @@ list<string> compiler_include_dirs(string cc) {
 // The compiler's predefined macros (`-dM -E`) as `#define` lines: they describe
 // the target ABI (__x86_64__/__aarch64__, __LP64__, __SIZEOF_*__, byte order, …)
 // that system headers branch on.
-list<string> compiler_predefines(string cc) {
+list<string> compiler_predefines(string cc)
+{
     list<string> defs;
     if (cc.size == 0) return defs;
     list<string> out = run_lines(cc + " -xc -dM -E /dev/null 2>/dev/null");
@@ -344,7 +365,8 @@ list<string> compiler_predefines(string cc) {
 }
 
 // 2. Filesystem probe for systems without a usable compiler.
-list<string> probed_include_dirs() {
+list<string> probed_include_dirs()
+{
     list<string> dirs;
     list<string> um = run_lines("uname -m 2>/dev/null");
     string machine = um.length > 0 ? um[0] : "";
@@ -380,11 +402,14 @@ list<string> probed_include_dirs() {
         string triple = tdir[dir_of(tdir).size + 1:];
         i32 rank = 0;
         if (host.size > 0 && triple == host) rank = 3;
-        else if (machine.size > 0 && triple.starts_with(machine + "-") && triple.contains("linux")) rank = 2;
+        else if (machine.size > 0 && triple.starts_with(machine + "-") && triple.contains("linux"))
+            rank = 2;
         else if (machine.size > 0 && triple.starts_with(machine + "-")) rank = 1;
         if (rank == 0) continue;               // a cross toolchain for another target
         if (rank > best_rank || (rank == best_rank && ver_cmp(ver, best_ver) > 0)) {
-            best_rank = rank; best_ver = ver.dup; builtin = inc.dup;
+            best_rank = rank;
+            best_ver = ver.dup;
+            builtin = inc.dup;
         }
     }
     if (builtin.size == 0) {
@@ -397,7 +422,10 @@ list<string> probed_include_dirs() {
             string inc = dir_of(cl[i]);         // …/clang/<ver>/include
             string verdir = dir_of(inc);
             string ver = verdir[dir_of(verdir).size + 1:];
-            if (builtin.size == 0 || ver_cmp(ver, best_ver) > 0) { best_ver = ver.dup; builtin = inc.dup; }
+            if (builtin.size == 0 || ver_cmp(ver, best_ver) > 0) {
+                best_ver = ver.dup;
+                builtin = inc.dup;
+            }
         }
     }
 
@@ -410,7 +438,8 @@ list<string> probed_include_dirs() {
 
 // The host triple, from the multiarch include directory (`/usr/include/<triple>`
 // holding `bits/` or `asm/`), else "" — used only by the no-compiler fallback.
-string probed_triple() {
+string probed_triple()
+{
     list<string> um = run_lines("uname -m 2>/dev/null");
     string machine = um.length > 0 ? um[0] : "";
     list<string> cands = glob_paths("/usr/include/*-*/bits");
@@ -429,22 +458,28 @@ string probed_triple() {
 // sic-cpp's OWN types (it runs on the target), byte order from memory, and the
 // architecture/OS from the host triple (`x86_64-linux-gnu` → `__x86_64__`,
 // `__linux__`, `__gnu_linux__`, `__unix__`). Generic by construction.
-void fallback_predefines(Preprocessor *pp) {
+void fallback_predefines(Preprocessor *pp)
+{
     pp->macros["__CHAR_BIT__"] = "O|8";
     pp->macros["__SIZEOF_SHORT__"] = "O|" + std::Fmt("{}", sizeof(short));
     pp->macros["__SIZEOF_INT__"] = "O|" + std::Fmt("{}", sizeof(int));
     pp->macros["__SIZEOF_LONG__"] = "O|" + std::Fmt("{}", sizeof(long));
     pp->macros["__SIZEOF_LONG_LONG__"] = "O|" + std::Fmt("{}", sizeof(long long));
-    pp->macros["__SIZEOF_POINTER__"] = "O|" + std::Fmt("{}", sizeof(void*));
+    pp->macros["__SIZEOF_POINTER__"] = "O|" + std::Fmt("{}", sizeof(void *));
     pp->macros["__SIZEOF_FLOAT__"] = "O|4";
     pp->macros["__SIZEOF_DOUBLE__"] = "O|8";
-    if (sizeof(long) == 8 && sizeof(void*) == 8) { pp->macros["__LP64__"] = "O|1"; pp->macros["_LP64"] = "O|1"; }
-    else if (sizeof(long) == 4 && sizeof(void*) == 4) { pp->macros["__ILP32__"] = "O|1"; pp->macros["_ILP32"] = "O|1"; }
+    if (sizeof(long) == 8 && sizeof(void *) == 8) {
+        pp->macros["__LP64__"] = "O|1";
+        pp->macros["_LP64"] = "O|1";
+    } else if (sizeof(long) == 4 && sizeof(void *) == 4) {
+        pp->macros["__ILP32__"] = "O|1";
+        pp->macros["_ILP32"] = "O|1";
+    }
     pp->macros["__ORDER_LITTLE_ENDIAN__"] = "O|1234";
     pp->macros["__ORDER_BIG_ENDIAN__"] = "O|4321";
     pp->macros["__ORDER_PDP_ENDIAN__"] = "O|3412";
     u32 probe = 1;
-    u8 *pb = (u8*)&probe;
+    u8 *pb = (u8 *)&probe;
     pp->macros["__BYTE_ORDER__"] = pb[0] == 1 ? "O|__ORDER_LITTLE_ENDIAN__" : "O|__ORDER_BIG_ENDIAN__";
     pp->macros["__USER_LABEL_PREFIX__"] = "O|";
     string triple = probed_triple();
@@ -452,23 +487,39 @@ void fallback_predefines(Preprocessor *pp) {
     list<string> parts = split_all(triple, '-');
     string arch = parts[0];
     if (arch == "amd64") arch = "x86_64";
-    if (arch == "i486" || arch == "i586" || arch == "i686") { pp->macros["__" + arch + "__"] = "O|1"; arch = "i386"; }
+    if (arch == "i486" || arch == "i586" || arch == "i686") {
+        pp->macros["__" + arch + "__"] = "O|1";
+        arch = "i386";
+    }
     if (arch.starts_with("arm") && arch != "arm64") arch = "arm";
     if (arch == "arm64") arch = "aarch64";
     pp->macros["__" + arch + "__"] = "O|1";
-    if (arch == "x86_64") { pp->macros["__x86_64"] = "O|1"; pp->macros["__amd64__"] = "O|1"; pp->macros["__amd64"] = "O|1"; }
+    if (arch == "x86_64") {
+        pp->macros["__x86_64"] = "O|1";
+        pp->macros["__amd64__"] = "O|1";
+        pp->macros["__amd64"] = "O|1";
+    }
     if (arch.starts_with("riscv")) {
         pp->macros["__riscv"] = "O|1";
-        pp->macros["__riscv_xlen"] = "O|" + std::Fmt("{}", sizeof(void*) * 8);
+        pp->macros["__riscv_xlen"] = "O|" + std::Fmt("{}", sizeof(void *) * 8);
     }
     if (triple.contains("linux")) {
-        pp->macros["__linux__"] = "O|1"; pp->macros["__linux"] = "O|1";
-        pp->macros["__unix__"] = "O|1"; pp->macros["__unix"] = "O|1";
+        pp->macros["__linux__"] = "O|1";
+        pp->macros["__linux"] = "O|1";
+        pp->macros["__unix__"] = "O|1";
+        pp->macros["__unix"] = "O|1";
         pp->macros["__ELF__"] = "O|1";
         if (triple.contains("gnu")) pp->macros["__gnu_linux__"] = "O|1";
     }
-    if (triple.contains("freebsd")) { pp->macros["__FreeBSD__"] = "O|1"; pp->macros["__unix__"] = "O|1"; pp->macros["__ELF__"] = "O|1"; }
-    if (triple.contains("darwin") || triple.contains("apple")) { pp->macros["__APPLE__"] = "O|1"; pp->macros["__MACH__"] = "O|1"; }
+    if (triple.contains("freebsd")) {
+        pp->macros["__FreeBSD__"] = "O|1";
+        pp->macros["__unix__"] = "O|1";
+        pp->macros["__ELF__"] = "O|1";
+    }
+    if (triple.contains("darwin") || triple.contains("apple")) {
+        pp->macros["__APPLE__"] = "O|1";
+        pp->macros["__MACH__"] = "O|1";
+    }
 }
 
 // Which host predefines to adopt — the same policy as the sic compiler, so code
@@ -482,7 +533,8 @@ void fallback_predefines(Preprocessor *pp) {
 //    `__GCC_HAVE_*`, …), which would steer headers into code paths that assume
 //    a full GCC/Clang frontend.
 // The target set is recognised by NAME, so any arch/OS/libc is handled.
-i32 keep_predefine(string name, i32 undef, i32 strict) {
+i32 keep_predefine(string name, i32 undef, i32 strict)
+{
     // Non-reserved spellings (`linux`, `unix`, `i386`) exist only in GNU modes.
     if (strict && name.size > 0 && name[0] != '_') return 0;
     if (name == "__CHAR_BIT__" || name == "__BYTE_ORDER__" || name == "__FLOAT_WORD_ORDER__"
@@ -523,20 +575,23 @@ i32 keep_predefine(string name, i32 undef, i32 strict) {
 }
 
 // The system include list: the compiler's own if it answers, else the probe.
-list<string> system_include_dirs(string cc) {
+list<string> system_include_dirs(string cc)
+{
     list<string> dirs = compiler_include_dirs(cc);
     if (dirs.length == 0) dirs = probed_include_dirs();
     return dirs;
 }
 
 // Append `d` unless already present (gcc drops a duplicate search dir).
-void add_dir(list<string> *dirs, string d) {
+void add_dir(list<string> *dirs, string d)
+{
     for (i32 i = 0; i < dirs->length; i++) if ((*dirs)[i] == d) return;
     dirs->add(d);
 }
 
 // Append the entries of a colon-separated environment path list (CPATH etc.).
-void add_env_dirs(list<string> *dirs, string var) {
+void add_env_dirs(list<string> *dirs, string var)
+{
     char *v = getenv(var.str);
     if (!v) return;
     list<string> parts = split_all((string)v, ':');
@@ -544,7 +599,8 @@ void add_env_dirs(list<string> *dirs, string var) {
 }
 
 // `n` spaces (for output indentation / blanked-out comments).
-string spaces(i32 n) {
+string spaces(i32 n)
+{
     string blank = "                                                                ";
     string out = "";
     while (n > blank.size) { out = out + blank; n -= blank.size; }
@@ -562,21 +618,25 @@ i64 g_counter = 0;   // the next __COUNTER__ value
 i32 g_strict_iso = 0;
 
 // Whether `line` ends inside an unterminated block comment (literals skipped).
-i32 open_block_comment(string line) {
+i32 open_block_comment(string line)
+{
     i32 i = 0;
     while (i < line.size) {
         i32 c = line[i];
         if (c == '"' || c == '\'') {
-            i32 q = c; i++;
+            i32 q = c;
+            i++;
             while (i < line.size && line[i] != q) { if (line[i] == '\\') i++; i++; }
-            i++; continue;
+            i++;
+            continue;
         }
-        if (c == '/' && i + 1 < line.size && line[i+1] == '/') return 0;
-        if (c == '/' && i + 1 < line.size && line[i+1] == '*') {
+        if (c == '/' && i + 1 < line.size && line[i + 1] == '/') return 0;
+        if (c == '/' && i + 1 < line.size && line[i + 1] == '*') {
             i += 2;
-            while (i + 1 < line.size && !(line[i] == '*' && line[i+1] == '/')) i++;
+            while (i + 1 < line.size && !(line[i] == '*' && line[i + 1] == '/')) i++;
             if (i + 1 >= line.size) return 1;
-            i += 2; continue;
+            i += 2;
+            continue;
         }
         i++;
     }
@@ -585,28 +645,34 @@ i32 open_block_comment(string line) {
 
 // -CC: inside a macro body a `//` comment would swallow the rest of the line
 // the macro is expanded into, so it becomes a block comment (as gcc does).
-string line_comments_to_block(string text) {
+string line_comments_to_block(string text)
+{
     string out = "";
     i32 i = 0;
     while (i < text.size) {
         i32 c = text[i];
         if (c == '"' || c == '\'') {
-            i32 st = i; i++;
+            i32 st = i;
+            i++;
             while (i < text.size && text[i] != c) { if (text[i] == '\\') i++; i++; }
             if (i < text.size) i++;
-            out = out + text[st:i]; continue;
+            out = out + text[st:i];
+            continue;
         }
-        if (c == '/' && i + 1 < text.size && text[i+1] == '*') {
-            i32 st = i; i += 2;
-            while (i + 1 < text.size && !(text[i] == '*' && text[i+1] == '/')) i++;
+        if (c == '/' && i + 1 < text.size && text[i + 1] == '*') {
+            i32 st = i;
+            i += 2;
+            while (i + 1 < text.size && !(text[i] == '*' && text[i + 1] == '/')) i++;
             i = i + 2 <= text.size ? i + 2 : text.size;
-            out = out + text[st:i]; continue;
+            out = out + text[st:i];
+            continue;
         }
-        if (c == '/' && i + 1 < text.size && text[i+1] == '/') {
-            out = out + "/*" + text[i+2:].rtrim() + " */";
+        if (c == '/' && i + 1 < text.size && text[i + 1] == '/') {
+            out = out + "/*" + text[i + 2:].rtrim() + " */";
             return out;
         }
-        out = out + text[i:i+1]; i++;
+        out = out + text[i:i + 1];
+        i++;
     }
     return out;
 }
@@ -618,12 +684,14 @@ string line_comments_to_block(string text) {
 // `//` line comment is dropped to end of line. String and character literals are
 // copied verbatim so `"a/*b"` / `'/'` are not mistaken for comments.
 // Whether the logical line starting at s[i] is a directive (first non-blank `#`).
-i32 directive_starts(string s, i32 i) {
+i32 directive_starts(string s, i32 i)
+{
     while (i < s.size && (s[i] == ' ' || s[i] == '\t')) i++;
     return i < s.size && s[i] == '#' ? 1 : 0;
 }
 
-string strip_comments(string s) {
+string strip_comments(string s)
+{
     // Each comment is replaced by SPACES of the same width (its newlines kept),
     // so line numbers, directive boundaries and token columns all survive — gcc
     // indents `-P` output by the first token's source column, and a comment
@@ -641,16 +709,19 @@ string strip_comments(string s) {
     while (i < s.size) {
         i32 c = s[i];
         if (c == '\n') {
-            if (i == 0 || s[i-1] != '\\') dir = directive_starts(s, i + 1);
+            if (i == 0 || s[i - 1] != '\\') dir = directive_starts(s, i + 1);
             i++;
             continue;
         }
-        if (c == '/' && i + 1 < s.size && s[i+1] == '*') {
+        if (c == '/' && i + 1 < s.size && s[i + 1] == '*') {
             out = out + s[run:i];
             i32 col = i;   // start of the current blanked segment
             i += 2;
-            while (i + 1 < s.size && !(s[i] == '*' && s[i+1] == '/')) {
-                if (s[i] == '\n') { out = out + spaces(i - col) + (dir ? "\\\n" : "\n"); col = i + 1; }
+            while (i + 1 < s.size && !(s[i] == '*' && s[i + 1] == '/')) {
+                if (s[i] == '\n') {
+                    out = out + spaces(i - col) + (dir ? "\\\n" : "\n");
+                    col = i + 1;
+                }
                 i++;
             }
             i = i + 2 <= s.size ? i + 2 : s.size;   // skip the closing */
@@ -658,12 +729,12 @@ string strip_comments(string s) {
             run = i;
             continue;
         }
-        if (c == '/' && i + 1 < s.size && s[i+1] == '/') {
+        if (c == '/' && i + 1 < s.size && s[i + 1] == '/') {
             // A line comment runs to the end of the LOGICAL line: a backslash-
             // newline continues it (phase 2 splices before phase 3); each spliced
             // newline is kept so the line count survives.
             out = out + s[run:i];
-            while (i < s.size && !(s[i] == '\n' && s[i-1] != '\\')) {
+            while (i < s.size && !(s[i] == '\n' && s[i - 1] != '\\')) {
                 if (s[i] == '\n') out = out + "\n";
                 i++;
             }
@@ -672,7 +743,8 @@ string strip_comments(string s) {
         }
         if (c == '"' || c == '\'') {
             // A literal is part of the verbatim run; just skip over it.
-            i32 q = c; i++;
+            i32 q = c;
+            i++;
             while (i < s.size && s[i] != q) { if (s[i] == '\\' && i + 1 < s.size) i++; i++; }
             if (i < s.size) i++;
             continue;
@@ -696,43 +768,46 @@ string strip_comments(string s) {
 // "\x07" is a `##` that came in through a macro ARGUMENT: plain text, never the
 // paste operator (only a `##` of the replacement list itself pastes); it is
 // spelled `##` again in the output and in stringized text.
-string unpaint(string s) {
+string unpaint(string s)
+{
     if (!s.contains("\x04") && !s.contains("\x05") && !s.contains("\x07")) return s;
     string out = "";
     for (i32 i = 0; i < s.size; i++) {
         if (s[i] == 7) out = out + "##";
-        else if (s[i] != 4 && s[i] != 5) out = out + s[i:i+1];
+        else if (s[i] != 4 && s[i] != 5) out = out + s[i:i + 1];
     }
     return out;
 }
 
-list<string> tokenize(string input) {
+list<string> tokenize(string input)
+{
     list<string> tokens;
     i32 i = 0;
     while (i < input.size) {
         i32 ch = input[i];
-        if ((ch == 4 || ch == 5) && i + 1 < input.size && is_ident_start(input[i+1])) {
+        if ((ch == 4 || ch == 5) && i + 1 < input.size && is_ident_start(input[i + 1])) {
             i32 start = i;
             i++;
             while (i < input.size && is_ident(input[i])) i++;
-            tokens.add(input[start:i]); continue;
+            tokens.add(input[start:i]);
+            continue;
         }
         if (std::IsSpace(ch)) {
             tokens.add(" ");
             while (i < input.size && std::IsSpace(input[i])) i++;
             continue;
         }
-        if (ch == '/' && i + 1 < input.size && input[i+1] == '*') {
+        if (ch == '/' && i + 1 < input.size && input[i + 1] == '*') {
             i32 st = i;
             i += 2;
-            while (i + 1 < input.size && !(input[i] == '*' && input[i+1] == '/')) i++;
+            while (i + 1 < input.size && !(input[i] == '*' && input[i + 1] == '/')) i++;
             i += 2;
             if (i > input.size) i = input.size;
             // -C/-CC: the comment is output as a token; otherwise it is a space.
             if (g_keep_comments) tokens.add(input[st:i]); else tokens.add(" ");
             continue;
         }
-        if (ch == '/' && i + 1 < input.size && input[i+1] == '/') {
+        if (ch == '/' && i + 1 < input.size && input[i + 1] == '/') {
             i32 st = i;
             while (i < input.size && input[i] != '\n') i++;
             if (g_keep_comments) tokens.add(input[st:i].rtrim());
@@ -741,43 +816,99 @@ list<string> tokenize(string input) {
         if (is_ident_start(ch)) {
             i32 start = i;
             while (i < input.size && is_ident(input[i])) i++;
-            tokens.add(input[start:i]); continue;
+            tokens.add(input[start:i]);
+            continue;
         }
         if (ch >= '0' && ch <= '9') {
             i32 start = i;
-            if (ch == '0' && i+1 < input.size && (input[i+1] == 'x' || input[i+1] == 'X')) i += 2;
-            else if (ch == '0' && i+1 < input.size && (input[i+1] == 'b' || input[i+1] == 'B')) i += 2;
+            if (ch == '0' && i + 1 < input.size && (input[i + 1] == 'x' || input[i + 1] == 'X'))
+                i += 2;
+            else if (ch == '0' && i + 1 < input.size && (input[i + 1] == 'b' || input[i + 1] == 'B')) i += 2;
             while (i < input.size && (is_ident(input[i]) || input[i] == '.')) i++;
-            tokens.add(input[start:i]); continue;
+            tokens.add(input[start:i]);
+            continue;
         }
         if (ch == '"') {
-            i32 start = i; i++;
+            i32 start = i;
+            i++;
             while (i < input.size && input[i] != '"') { if (input[i] == '\\') i++; i++; }
             if (i < input.size && input[i] == '"') i++;
-            tokens.add(input[start:i]); continue;
+            tokens.add(input[start:i]);
+            continue;
         }
         if (ch == '\'') {
-            i32 start = i; i++;
+            i32 start = i;
+            i++;
             while (i < input.size && input[i] != '\'') { if (input[i] == '\\') i++; i++; }
             if (i < input.size && input[i] == '\'') i++;
-            tokens.add(input[start:i]); continue;
+            tokens.add(input[start:i]);
+            continue;
         }
         // Multi-char punctuators
-        if (ch == '<' && i+1 < input.size && input[i+1] == '<') { tokens.add("<<"); i+=2; continue; }
-        if (ch == '>' && i+1 < input.size && input[i+1] == '>') { tokens.add(">>"); i+=2; continue; }
-        if (ch == '=' && i+1 < input.size && input[i+1] == '=') { tokens.add("=="); i+=2; continue; }
-        if (ch == '!' && i+1 < input.size && input[i+1] == '=') { tokens.add("!="); i+=2; continue; }
-        if (ch == '<' && i+1 < input.size && input[i+1] == '=') { tokens.add("<="); i+=2; continue; }
-        if (ch == '>' && i+1 < input.size && input[i+1] == '=') { tokens.add(">="); i+=2; continue; }
-        if (ch == '&' && i+1 < input.size && input[i+1] == '&') { tokens.add("&&"); i+=2; continue; }
-        if (ch == '|' && i+1 < input.size && input[i+1] == '|') { tokens.add("||"); i+=2; continue; }
-        if (ch == '+' && i+1 < input.size && input[i+1] == '+') { tokens.add("++"); i+=2; continue; }
-        if (ch == '-' && i+1 < input.size && input[i+1] == '-') { tokens.add("--"); i+=2; continue; }
-        if (ch == '-' && i+1 < input.size && input[i+1] == '>') { tokens.add("->"); i+=2; continue; }
-        if (ch == '#' && i+1 < input.size && input[i+1] == '#') { tokens.add("##"); i+=2; continue; }
-        if (ch == '.' && i+1 < input.size && i+2 < input.size
-            && input[i+1] == '.' && input[i+2] == '.') { tokens.add("..."); i+=3; continue; }
-        tokens.add(input[i:i+1]); i++;
+        if (ch == '<' && i + 1 < input.size && input[i + 1] == '<') {
+            tokens.add("<<");
+            i += 2;
+            continue;
+        }
+        if (ch == '>' && i + 1 < input.size && input[i + 1] == '>') {
+            tokens.add(">>");
+            i += 2;
+            continue;
+        }
+        if (ch == '=' && i + 1 < input.size && input[i + 1] == '=') {
+            tokens.add("==");
+            i += 2;
+            continue;
+        }
+        if (ch == '!' && i + 1 < input.size && input[i + 1] == '=') {
+            tokens.add("!=");
+            i += 2;
+            continue;
+        }
+        if (ch == '<' && i + 1 < input.size && input[i + 1] == '=') {
+            tokens.add("<=");
+            i += 2;
+            continue;
+        }
+        if (ch == '>' && i + 1 < input.size && input[i + 1] == '=') {
+            tokens.add(">=");
+            i += 2;
+            continue;
+        }
+        if (ch == '&' && i + 1 < input.size && input[i + 1] == '&') {
+            tokens.add("&&");
+            i += 2;
+            continue;
+        }
+        if (ch == '|' && i + 1 < input.size && input[i + 1] == '|') {
+            tokens.add("||");
+            i += 2;
+            continue;
+        }
+        if (ch == '+' && i + 1 < input.size && input[i + 1] == '+') {
+            tokens.add("++");
+            i += 2;
+            continue;
+        }
+        if (ch == '-' && i + 1 < input.size && input[i + 1] == '-') {
+            tokens.add("--");
+            i += 2;
+            continue;
+        }
+        if (ch == '-' && i + 1 < input.size && input[i + 1] == '>') {
+            tokens.add("->");
+            i += 2;
+            continue;
+        }
+        if (ch == '#' && i + 1 < input.size && input[i + 1] == '#') {
+            tokens.add("##");
+            i += 2;
+            continue;
+        }
+        if (ch == '.' && i + 1 < input.size && i + 2 < input.size
+            && input[i + 1] == '.' && input[i + 2] == '.') { tokens.add("..."); i += 3; continue; }
+        tokens.add(input[i:i + 1]);
+        i++;
     }
     return tokens;
 }
@@ -793,7 +924,7 @@ list<string> tokenize(string input) {
 i32 is_ident_start(i32 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 i32 is_ident(i32 c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
 
-i32 peek(string r)  { return r.size > 0 ? r[0] : 0; }
+i32 peek(string r) { return r.size > 0 ? r[0] : 0; }
 i32 peek2(string r) { return r.size > 1 ? r[1] : 0; }
 void skip_ws(string *r) { *r = (*r).ltrim(); }
 
@@ -808,7 +939,8 @@ void expand_fail(string msg) { if (g_expand_error.size == 0) g_expand_error = ms
 PPV eval_expr(string *r, dict<string, string> *macros);
 
 // The token at the front of `r`, for a diagnostic (`a`, `\`, `(`, `"s"`).
-string front_token(string r) {
+string front_token(string r)
+{
     list<string> t = tokenize(r.ltrim());
     for (i32 i = 0; i < t.length; i++) if (t[i] != " ") return t[i].dup;
     return "";
@@ -829,7 +961,8 @@ i32 g_if_true_false = 0;
 // other arm of `?:`): its division by zero is no error (C11 6.5.13/14/15).
 i32 g_eval_skip = 0;
 
-PPV eval_primary(string *r, dict<string, string> *macros) {
+PPV eval_primary(string *r, dict<string, string> *macros)
+{
     skip_ws(r);
     if ((*r).size == 0) { eval_fail("expected value in expression"); return ppv(0, 0); }
 
@@ -859,7 +992,11 @@ PPV eval_primary(string *r, dict<string, string> *macros) {
         return val;
     }
     if (c == '+') { *r = (*r)[1:]; return eval_primary(r, macros); }
-    if (c == '-') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppv((i64)(0 - (u64)a.v), a.u); }
+    if (c == '-') {
+        *r = (*r)[1:];
+        PPV a = eval_primary(r, macros);
+        return ppv((i64)(0 - (u64)a.v), a.u);
+    }
     if (c == '~') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppv(~a.v, a.u); }
     if (c == '!') { *r = (*r)[1:]; PPV a = eval_primary(r, macros); return ppb(a.v == 0); }
 
@@ -926,12 +1063,13 @@ PPV eval_primary(string *r, dict<string, string> *macros) {
     // Anything else (`\`, a string, `@`, a stray operator) cannot start a value.
     string t = front_token(*r);
     eval_fail("token ‘" + t + "’ is not valid in preprocessor expressions");
-    *r = (*r)[t.size > 0 ? t.size : 1:];
+    *r = (*r)[t.size > 0 ? t.size:1:];
     return ppv(0, 0);
 }
 
 // `a op b` with the usual arithmetic conversions: unsigned if either is.
-PPV pp_arith(i32 op, PPV a, PPV b) {
+PPV pp_arith(i32 op, PPV a, PPV b)
+{
     i32 u = a.u || b.u;
     u64 x = (u64)a.v, y = (u64)b.v;
     if (op == '+') return ppv((i64)(x + y), u);
@@ -949,7 +1087,8 @@ PPV pp_arith(i32 op, PPV a, PPV b) {
 
 // `a << n` / `a >> n`: the result has the LEFT operand's type; a negative count
 // shifts the other way and a count of 64 or more leaves 0 (or -1), as gcc.
-PPV pp_shift(i32 left, PPV a, PPV n) {
+PPV pp_shift(i32 left, PPV a, PPV n)
+{
     i64 cnt = n.v;
     if (!n.u && cnt < 0) {
         left = !left;
@@ -969,16 +1108,19 @@ PPV pp_shift(i32 left, PPV a, PPV n) {
 }
 
 // `a < b` etc.: compared unsigned if either is; the result is an `int`.
-i32 pp_less(PPV a, PPV b) {
+i32 pp_less(PPV a, PPV b)
+{
     if (a.u || b.u) return (u64)a.v < (u64)b.v ? 1 : 0;
     return a.v < b.v ? 1 : 0;
 }
 
-PPV eval_mul(string *r, dict<string, string> *m) {
+PPV eval_mul(string *r, dict<string, string> *m)
+{
     PPV val = eval_primary(r, m);
     skip_ws(r);
     while (peek(*r) == '*' || peek(*r) == '/' || peek(*r) == '%') {
-        i32 op = peek(*r); *r = (*r)[1:];
+        i32 op = peek(*r);
+        *r = (*r)[1:];
         PPV rhs = eval_primary(r, m);
         val = pp_arith(op, val, rhs);
         skip_ws(r);
@@ -986,11 +1128,13 @@ PPV eval_mul(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_add(string *r, dict<string, string> *m) {
+PPV eval_add(string *r, dict<string, string> *m)
+{
     PPV val = eval_mul(r, m);
     skip_ws(r);
     while (peek(*r) == '+' || peek(*r) == '-') {
-        i32 op = peek(*r); *r = (*r)[1:];
+        i32 op = peek(*r);
+        *r = (*r)[1:];
         PPV rhs = eval_mul(r, m);
         val = pp_arith(op, val, rhs);
         skip_ws(r);
@@ -998,11 +1142,13 @@ PPV eval_add(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_shift(string *r, dict<string, string> *m) {
+PPV eval_shift(string *r, dict<string, string> *m)
+{
     PPV val = eval_add(r, m);
     skip_ws(r);
     while ((peek(*r) == '<' && peek2(*r) == '<') || (peek(*r) == '>' && peek2(*r) == '>')) {
-        i32 op = peek(*r); *r = (*r)[2:];
+        i32 op = peek(*r);
+        *r = (*r)[2:];
         PPV rhs = eval_add(r, m);
         val = pp_shift(op == '<', val, rhs);
         skip_ws(r);
@@ -1010,26 +1156,41 @@ PPV eval_shift(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_rel(string *r, dict<string, string> *m) {
+PPV eval_rel(string *r, dict<string, string> *m)
+{
     PPV val = eval_shift(r, m);
     skip_ws(r);
     while (true) {
         i32 c = peek(*r);
-        if (c == '<' && peek2(*r) == '=') { *r = (*r)[2:]; PPV b = eval_shift(r, m); val = ppb(!pp_less(b, val)); }
-        else if (c == '>' && peek2(*r) == '=') { *r = (*r)[2:]; PPV b = eval_shift(r, m); val = ppb(!pp_less(val, b)); }
-        else if (c == '<') { *r = (*r)[1:]; PPV b = eval_shift(r, m); val = ppb(pp_less(val, b)); }
-        else if (c == '>') { *r = (*r)[1:]; PPV b = eval_shift(r, m); val = ppb(pp_less(b, val)); }
-        else break;
+        if (c == '<' && peek2(*r) == '=') {
+            *r = (*r)[2:];
+            PPV b = eval_shift(r, m);
+            val = ppb(!pp_less(b, val));
+        } else if (c == '>' && peek2(*r) == '=') {
+            *r = (*r)[2:];
+            PPV b = eval_shift(r, m);
+            val = ppb(!pp_less(val, b));
+        } else if (c == '<') {
+            *r = (*r)[1:];
+            PPV b = eval_shift(r, m);
+            val = ppb(pp_less(val, b));
+        } else if (c == '>') {
+            *r = (*r)[1:];
+            PPV b = eval_shift(r, m);
+            val = ppb(pp_less(b, val));
+        } else break;
         skip_ws(r);
     }
     return val;
 }
 
-PPV eval_eq(string *r, dict<string, string> *m) {
+PPV eval_eq(string *r, dict<string, string> *m)
+{
     PPV val = eval_rel(r, m);
     skip_ws(r);
     while ((peek(*r) == '=' && peek2(*r) == '=') || (peek(*r) == '!' && peek2(*r) == '=')) {
-        i32 ne = peek(*r) == '!'; *r = (*r)[2:];
+        i32 ne = peek(*r) == '!';
+        *r = (*r)[2:];
         PPV rhs = eval_rel(r, m);
         i32 eq = val.v == rhs.v;   // same bits either way after the conversions
         val = ppb(ne ? !eq : eq);
@@ -1038,34 +1199,47 @@ PPV eval_eq(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_and(string *r, dict<string, string> *m) {
+PPV eval_and(string *r, dict<string, string> *m)
+{
     PPV val = eval_eq(r, m);
     skip_ws(r);
     while (peek(*r) == '&' && peek2(*r) != '&') {
-        *r = (*r)[1:]; PPV b = eval_eq(r, m); val = pp_arith('&', val, b);
+        *r = (*r)[1:];
+        PPV b = eval_eq(r, m);
+        val = pp_arith('&', val, b);
         skip_ws(r);
     }
     return val;
 }
 
-PPV eval_xor(string *r, dict<string, string> *m) {
+PPV eval_xor(string *r, dict<string, string> *m)
+{
     PPV val = eval_and(r, m);
     skip_ws(r);
-    while (peek(*r) == '^') { *r = (*r)[1:]; PPV b = eval_and(r, m); val = pp_arith('^', val, b); skip_ws(r); }
+    while (peek(*r) == '^') {
+        *r = (*r)[1:];
+        PPV b = eval_and(r, m);
+        val = pp_arith('^', val, b);
+        skip_ws(r);
+    }
     return val;
 }
 
-PPV eval_or(string *r, dict<string, string> *m) {
+PPV eval_or(string *r, dict<string, string> *m)
+{
     PPV val = eval_xor(r, m);
     skip_ws(r);
     while (peek(*r) == '|' && peek2(*r) != '|') {
-        *r = (*r)[1:]; PPV b = eval_xor(r, m); val = pp_arith('|', val, b);
+        *r = (*r)[1:];
+        PPV b = eval_xor(r, m);
+        val = pp_arith('|', val, b);
         skip_ws(r);
     }
     return val;
 }
 
-PPV eval_land(string *r, dict<string, string> *m) {
+PPV eval_land(string *r, dict<string, string> *m)
+{
     PPV val = eval_or(r, m);
     skip_ws(r);
     while (peek(*r) == '&' && peek2(*r) == '&') {
@@ -1082,7 +1256,8 @@ PPV eval_land(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_lor(string *r, dict<string, string> *m) {
+PPV eval_lor(string *r, dict<string, string> *m)
+{
     PPV val = eval_land(r, m);
     skip_ws(r);
     while (peek(*r) == '|' && peek2(*r) == '|') {
@@ -1097,7 +1272,8 @@ PPV eval_lor(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_ternary(string *r, dict<string, string> *m) {
+PPV eval_ternary(string *r, dict<string, string> *m)
+{
     PPV val = eval_lor(r, m);
     skip_ws(r);
     if (peek(*r) == '?') {
@@ -1122,13 +1298,15 @@ PPV eval_ternary(string *r, dict<string, string> *m) {
     return val;
 }
 
-PPV eval_expr(string *r, dict<string, string> *macros) {
+PPV eval_expr(string *r, dict<string, string> *macros)
+{
     return eval_ternary(r, macros);
 }
 
 // Evaluate a whole #if expression; errors (gcc's wording) go to g_eval_error.
 // The result is its truth value (or, for `#line N`, the number itself).
-i64 eval_if_value(string expr, dict<string, string> *macros) {
+i64 eval_if_value(string expr, dict<string, string> *macros)
+{
     g_eval_error = "";
     g_eval_skip = 0;
     if (expr.trim().size == 0) { eval_fail("with no expression"); return 0; }
@@ -1147,7 +1325,8 @@ i64 eval_if_value(string expr, dict<string, string> *macros) {
     return val.v;
 }
 
-i32 eval_if_expr(string expr, dict<string, string> *macros) {
+i32 eval_if_expr(string expr, dict<string, string> *macros)
+{
     return eval_if_value(expr, macros) != 0 ? 1 : 0;
 }
 
@@ -1156,7 +1335,8 @@ i32 eval_if_expr(string expr, dict<string, string> *macros) {
 // Is `name` already being expanded (the C "blue paint" hide set)? A macro in the
 // active set is emitted literally instead of re-expanded, so `#define A B` /
 // `#define B A` terminates (yielding `A`) instead of recursing forever.
-i32 name_active(list<string> active, string name) {
+i32 name_active(list<string> active, string name)
+{
     for (i32 i = 0; i < active.length; i++) if (active[i] == name) return 1;
     return 0;
 }
@@ -1165,7 +1345,8 @@ i32 name_active(list<string> active, string name) {
 // this happens BEFORE the replacement list is rescanned — so `J(N, 1)` with
 // `J(a,b) a##b` yields `N1` even if `N` is itself a macro. Spaces around `##` are
 // dropped; chains `a ## b ## c` fold left to right.
-list<string> paste_tokens(list<string> t) {
+list<string> paste_tokens(list<string> t)
+{
     list<string> out;
     i32 i = 0;
     while (i < t.length) {
@@ -1200,17 +1381,19 @@ list<string> paste_tokens(list<string> t) {
 }
 
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
-                         i32 cur_line, string cur_file, list<string> active);
+    i32 cur_line, string cur_file, list<string> active);
 
 // Argument `i`, fully macro-expanded (computed on first use, then cached).
 string expanded_arg(list<string> *exps, list<i32> *done, list<string> *args, i32 i,
-                    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active) {
+    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active)
+{
     if ((*done)[i]) return (*exps)[i];
     list<string> aexp = expand_tokens(tokenize((*args)[i]), macros, cur_line, cur_file, active);
     string arg_exp = "";
     for (i32 ei = 0; ei < aexp.length; ei++) {
-        if (aexp[ei] == " ") { if (arg_exp.size > 0 && arg_exp[arg_exp.size-1] != ' ') arg_exp = arg_exp + " "; }
-        else arg_exp = arg_exp + aexp[ei];
+        if (aexp[ei] == " ") {
+            if (arg_exp.size > 0 && arg_exp[arg_exp.size - 1] != ' ') arg_exp = arg_exp + " ";
+        } else arg_exp = arg_exp + aexp[ei];
     }
     (*exps)[i] = arg_exp.trim().dup;
     (*done)[i] = 1;
@@ -1225,7 +1408,8 @@ string expanded_arg(list<string> *exps, list<i32> *done, list<string> *args, i32
 // macro whose expansion it ended has been left. Returns 1 when the rest of
 // `tokens` was consumed that way.
 i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
-                dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active) {
+    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active)
+{
     // A pending name ends the expansion — bare, or with an unclosed argument
     // list. A bare one is invoked if `(` follows here, stays pending if this
     // context ends too, and is otherwise not a call; an unclosed call always
@@ -1241,7 +1425,9 @@ i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
             while (q < be.length && (be[q] == " " || be[q] == "\x03")) q++;
             if (q < be.length && be[q] == "(") {
                 i32 d = 0;
-                for (i32 t = q; t < be.length; t++) { if (be[t] == "(") d++; else if (be[t] == ")") d--; }
+                for (i32 t = q; t < be.length; t++) {
+                    if (be[t] == "(") d++; else if (be[t] == ")") d--;
+                }
                 if (d > 0) { open_call = 1; last = p; }
             }
         }
@@ -1256,8 +1442,9 @@ i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
     i32 end = splice ? last : be.length;
     out->add("\x03");   // padding: the expansion's boundaries
     for (i32 ei = 0; ei < end; ei++) {
-        if (be[ei] == " ") { if (out->length == 0 || (*out)[out->length-1] != " ") out->add(" "); }
-        else out->add(be[ei]);
+        if (be[ei] == " ") {
+            if (out->length == 0 || (*out)[out->length - 1] != " ") out->add(" ");
+        } else out->add(be[ei]);
     }
     if (!splice) { out->add("\x03"); return 0; }
     list<string> rest;
@@ -1270,7 +1457,8 @@ i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
 }
 
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
-                         i32 cur_line, string cur_file, list<string> active) {
+    i32 cur_line, string cur_file, list<string> active)
+{
     list<string> out;
     for (i32 i = 0; i < tokens.length; i++) {
         string tok = tokens[i];
@@ -1279,7 +1467,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
             // Keep a space that follows tokens which expanded to nothing (`i > 0`
             // with nothing emitted yet): gcc prints it before the first printed
             // token (`EMPTY int d;` → ` int d;`). Plain leading whitespace drops.
-            if (out.length > 0 ? out[out.length-1] != " " : i > 0) out.add(" ");
+            if (out.length > 0 ? out[out.length - 1] != " " : i > 0) out.add(" ");
             continue;
         }
         // Predefined dynamic macros
@@ -1331,14 +1519,16 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     string cur_arg = "";
                     list<string> split_args;
                     i32 adepth = 0;
-                    for (i32 ai = j+1; ai < k-1; ai++) {
-                        if (tokens[ai] == " " && arg_str.size > 0 && arg_str[arg_str.size-1] == ' ') continue;
+                    for (i32 ai = j + 1; ai < k - 1; ai++) {
+                        if (tokens[ai] == " " && arg_str.size > 0 && arg_str[arg_str.size - 1] == ' ') continue;
                         if (tokens[ai] == "\x03") continue;          // padding is not argument text
                         arg_str = arg_str + tokens[ai];
                         if (tokens[ai] == "(") adepth++;
                         else if (tokens[ai] == ")") adepth--;
-                        if (tokens[ai] == "," && adepth == 0) { split_args.add(cur_arg); cur_arg = ""; }
-                        else cur_arg = cur_arg + (tokens[ai] == "##" ? "\x07" : tokens[ai]);   // an argument's `##` is text
+                        if (tokens[ai] == "," && adepth == 0) {
+                            split_args.add(cur_arg);
+                            cur_arg = "";
+                        } else cur_arg = cur_arg + (tokens[ai] == "##" ? "\x07" : tokens[ai]);   // an argument's `##` is text
                     }
                     split_args.add(cur_arg);
                     // Parse | separated encoding: "F|params|body"
@@ -1362,7 +1552,9 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         i32 ps = pi;
                         while (pi < params_section.size && params_section[pi] != ',') pi++;
                         param_names.add(params_section[ps:pi].trim());   // `(maj, min)`: drop the space
-                        if (pi < params_section.size && params_section[pi] == ',') { if (pi+1 < params_section.size) pi++; else break; }
+                        if (pi < params_section.size && params_section[pi] == ',') {
+                            if (pi + 1 < params_section.size) pi++; else break;
+                        }
                     }
 
                     list<string> args_list;
@@ -1379,27 +1571,31 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         // gcc: a call must match the parameter count (a variadic
                         // macro may omit its variadic part, C23 / GNU).
                         i32 np = param_names.length;
-                        i32 va = np > 0 && param_names[np-1].ends_with("...");
+                        i32 va = np > 0 && param_names[np - 1].ends_with("...");
                         i32 need = va ? np - 1 : np;
                         if (!va && n_given > np)
                             expand_fail("macro ‘" + tok + "’ passed " + std::Fmt("{}", n_given) + " arguments, but takes just " + std::Fmt("{}", np));
                         else if (n_given < need)
                             expand_fail("macro ‘" + tok + "’ requires " + std::Fmt("{}", need) + " arguments, but only " + std::Fmt("{}", n_given) + " given");
                     }
-                    if (param_names.length > 0 && param_names[param_names.length-1].ends_with("...")) {
+                    if (param_names.length > 0 && param_names[param_names.length - 1].ends_with("...")) {
                         is_va = 1;
-                        string last = param_names[param_names.length-1];
-                        string vname = last == "..." ? "__VA_ARGS__" : last[0:last.size-3].trim();
+                        string last = param_names[param_names.length - 1];
+                        string vname = last == "..." ? "__VA_ARGS__" : last[0:last.size - 3].trim();
                         i32 nfixed = param_names.length - 1;
                         list<string> pn2;
                         for (i32 k = 0; k < nfixed; k++) pn2.add(param_names[k]);
                         pn2.add(vname);
                         param_names = pn2;
                         list<string> al2;
-                        for (i32 k = 0; k < nfixed && k < args_list.length; k++) al2.add(args_list[k]);
+                        for (i32 k = 0; k < nfixed && k < args_list.length; k++)
+                            al2.add(args_list[k]);
                         while (al2.length < nfixed) al2.add("");
                         string va = "";
-                        for (i32 k = nfixed; k < args_list.length; k++) { if (k > nfixed) va = va + ","; va = va + args_list[k]; }
+                        for (i32 k = nfixed; k < args_list.length; k++) {
+                            if (k > nfixed) va = va + ",";
+                            va = va + args_list[k];
+                        }
                         al2.add(va);
                         args_list = al2;
                     }
@@ -1417,30 +1613,40 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                             if (body[si] == '"' || body[si] == '\'') {
                                 i32 q = body[si], st = si;
                                 si++;
-                                while (si < body.size && body[si] != q) { if (body[si] == '\\') si++; si++; }
+                                while (si < body.size && body[si] != q) {
+                                    if (body[si] == '\\') si++;
+                                    si++;
+                                }
                                 if (si < body.size) si++;
                                 sb = sb + body[st:si];
                                 continue;
                             }
                             // Leave `##` (token paste) intact — consume both chars.
-                            if (body[si] == '#' && si + 1 < body.size && body[si+1] == '#') {
-                                sb = sb + "##"; si += 2; continue;
+                            if (body[si] == '#' && si + 1 < body.size && body[si + 1] == '#') {
+                                sb = sb + "##";
+                                si += 2;
+                                continue;
                             }
                             if (body[si] == '#') {
                                 i32 sj = si + 1;
-                                while (sj < body.size && (body[sj] == ' ' || body[sj] == '\t')) sj++;
+                                while (sj < body.size && (body[sj] == ' ' || body[sj] == '\t'))
+                                    sj++;
                                 i32 ns = sj;
                                 while (sj < body.size && is_ident(body[sj])) sj++;
                                 string nm = body[ns:sj];
                                 i32 matched = -1;
                                 for (i32 pp2 = 0; pp2 < param_names.length && pp2 < args_list.length; pp2++)
-                                    if (nm.size > 0 && param_names[pp2] == nm) { matched = pp2; break; }
+                                    if (nm.size > 0 && param_names[pp2] == nm) {
+                                        matched = pp2;
+                                        break;
+                                    }
                                 if (matched >= 0) {
                                     sb = sb + stringize_arg(args_list[matched]);
-                                    si = sj; continue;
+                                    si = sj;
+                                    continue;
                                 }
                             }
-                            sb = sb + body[si:si+1];
+                            sb = sb + body[si:si + 1];
                             si++;
                         }
                         body = sb;
@@ -1469,8 +1675,12 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         while (bi < body.size) {
                             i32 c = body[bi];
                             if (c == '"' || c == '\'') {
-                                i32 st = bi; bi++;
-                                while (bi < body.size && body[bi] != c) { if (body[bi] == '\\') bi++; bi++; }
+                                i32 st = bi;
+                                bi++;
+                                while (bi < body.size && body[bi] != c) {
+                                    if (body[bi] == '\\') bi++;
+                                    bi++;
+                                }
                                 if (bi < body.size) bi++;
                                 nb = nb + body[st:bi];
                                 continue;
@@ -1479,13 +1689,16 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                             // token: no parameter is substituted inside it (QEMU's
                             // `X86_OP_ENTRY3(op, …, 2op, …)` became `2ADD`…, so every
                             // x86 decode-table entry got a wrong operand type).
-                            if (std::IsDigit(c) || (c == '.' && bi + 1 < body.size && std::IsDigit(body[bi+1]))) {
+                            if (std::IsDigit(c) || (c == '.' && bi + 1 < body.size && std::IsDigit(body[bi + 1]))) {
                                 i32 st = bi;
                                 bi++;
                                 while (bi < body.size) {
                                     i32 d = body[bi];
-                                    if ((d == '+' || d == '-') && (body[bi-1] == 'e' || body[bi-1] == 'E'
-                                        || body[bi-1] == 'p' || body[bi-1] == 'P')) { bi++; continue; }
+                                    if ((d == '+' || d == '-') && (body[bi - 1] == 'e' || body[bi - 1] == 'E'
+                                        || body[bi - 1] == 'p' || body[bi - 1] == 'P')) {
+                                        bi++;
+                                        continue;
+                                    }
                                     if (is_ident(d) || d == '.') { bi++; continue; }
                                     break;
                                 }
@@ -1505,8 +1718,8 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 while (l >= 0 && (body[l] == ' ' || body[l] == '\t')) l--;
                                 i32 r = bi;
                                 while (r < body.size && (body[r] == ' ' || body[r] == '\t')) r++;
-                                i32 pasted = (l >= 1 && body[l] == '#' && body[l-1] == '#')
-                                          || (r + 1 < body.size && body[r] == '#' && body[r+1] == '#');
+                                i32 pasted = (l >= 1 && body[l] == '#' && body[l - 1] == '#')
+                                    || (r + 1 < body.size && body[r] == '#' && body[r + 1] == '#');
                                 // An expanded argument is fenced with padding (`\x03`):
                                 // where it meets a neighbour without whitespace, the
                                 // final join decides whether a space is needed.
@@ -1516,17 +1729,17 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 // argument OMITTED (`F(a)`; `F()` too unless strict ISO) the
                                 // comma is dropped, otherwise the comma stays and the
                                 // argument is substituted (macro-expanded) as usual.
-                                if (is_va && pidx == param_names.length - 1 && l >= 1 && body[l] == '#' && body[l-1] == '#') {
+                                if (is_va && pidx == param_names.length - 1 && l >= 1 && body[l] == '#' && body[l - 1] == '#') {
                                     i32 e = nb.size;
-                                    while (e > 0 && (nb[e-1] == ' ' || nb[e-1] == '\t')) e--;
+                                    while (e > 0 && (nb[e - 1] == ' ' || nb[e - 1] == '\t')) e--;
                                     i32 h = e - 2;                     // at the `##`
-                                    while (h > 0 && (nb[h-1] == ' ' || nb[h-1] == '\t')) h--;
-                                    if (e >= 2 && nb[e-1] == '#' && nb[e-2] == '#' && h > 0 && nb[h-1] == ',') {
+                                    while (h > 0 && (nb[h - 1] == ' ' || nb[h - 1] == '\t')) h--;
+                                    if (e >= 2 && nb[e - 1] == '#' && nb[e - 2] == '#' && h > 0 && nb[h - 1] == ',') {
                                         i32 nfixed = param_names.length - 1;
                                         i32 absent = n_given <= nfixed || (nfixed == 0 && raw.size == 0 && !g_strict_iso);
                                         if (absent) {
                                             i32 c0 = h - 1;            // drop the comma and the space before it
-                                            while (c0 > 0 && (nb[c0-1] == ' ' || nb[c0-1] == '\t')) c0--;
+                                            while (c0 > 0 && (nb[c0 - 1] == ' ' || nb[c0 - 1] == '\t')) c0--;
                                             nb = nb[0:c0].dup;
                                         } else {
                                             nb = nb[0:h].dup;          // keep the comma, drop the `##`
@@ -1543,7 +1756,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 nb = nb + "\x06";
                                 continue;
                             }
-                            nb = nb + body[bi:bi+1];
+                            nb = nb + body[bi:bi + 1];
                             bi++;
                         }
                         body = nb;
@@ -1552,21 +1765,25 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // Expand body and emit
                     list<string> bt = paste_tokens(tokenize(body));
                     list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
-                    if (emit_rescan(&out, be, tokens, k, macros, cur_line, cur_file, active)) return out;
-                i = k - 1; continue;
+                    if (emit_rescan(&out, be, tokens, k, macros, cur_line, cur_file, active))
+                        return out;
+                    i = k - 1;
+                    continue;
                 }
             } else if (enc[0] == 'O') {
                 tuple ep = enc.split("|");
                 string body = ep.length >= 2 ? ep[1] : "";
                 list<string> bt = paste_tokens(tokenize(body));
                 list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
-                if (emit_rescan(&out, be, tokens, i + 1, macros, cur_line, cur_file, active)) return out;
+                if (emit_rescan(&out, be, tokens, i + 1, macros, cur_line, cur_file, active))
+                    return out;
                 continue;
             }
         }
         // ## token pasting: if next token is ##, skip space
         if (i + 1 < tokens.length && tokens[i + 1] == "##") {
-            out.add(tok); i++;
+            out.add(tok);
+            i++;
             while (i + 1 < tokens.length && tokens[i + 1] == " ") i++;
             continue;
         }
@@ -1577,7 +1794,8 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
 
 // gcc's cpp_avoid_paste: would token `a` immediately followed by token `b`
 // lex differently (as one token, or a comment)?
-i32 avoid_paste(string a, string b) {
+i32 avoid_paste(string a, string b)
+{
     if (a.size == 0 || b.size == 0) return 0;
     i32 b0 = b[0];
     i32 b_name = is_ident_start(b0);
@@ -1608,7 +1826,8 @@ i32 avoid_paste(string a, string b) {
     return 0;
 }
 
-string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file) {
+string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file)
+{
     // ONE scan: every expansion is rescanned with the rest of the line as it is
     // produced (emit_rescan), so nothing is left for a second pass — which would
     // wrongly expand what C leaves alone (`DEFER(f)(1)` stays `f (1)`).
@@ -1626,10 +1845,11 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
         if (t == "\x03") { pad = 1; continue; }
         if (t.size > 0 && (t[0] == 4 || t[0] == 5 || t[0] == 7)) t = unpaint(t);
         if (t == " ") {
-            if (result.size > 0 && result[result.size-1] != ' ') result = result + " ";
+            if (result.size > 0 && result[result.size - 1] != ' ') result = result + " ";
             continue;
         }
-        if (pad && result.size > 0 && result[result.size-1] != ' ' && avoid_paste(prev, t)) result = result + " ";
+        if (pad && result.size > 0 && result[result.size - 1] != ' ' && avoid_paste(prev, t))
+            result = result + " ";
         pad = 0;
         result = result + t;
         prev = t;
@@ -1642,13 +1862,15 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
 
 // ── Conditionals ──────────────────────────────────────────────────────────
 
-i32 cond_active(Preprocessor *pp) {
+i32 cond_active(Preprocessor *pp)
+{
     for (i32 i = 0; i < pp->cond_depth; i++)
         if (pp->cond_stack[i] > 0) return 0;
     return 1;
 }
 
-i32 cond_any_skip(Preprocessor *pp) {
+i32 cond_any_skip(Preprocessor *pp)
+{
     for (i32 i = 0; i < pp->cond_depth; i++)
         if (pp->cond_stack[i] > 0) return 1;
     return 0;
@@ -1656,7 +1878,8 @@ i32 cond_any_skip(Preprocessor *pp) {
 
 // ── Directive handlers ────────────────────────────────────────────────────
 
-void pp_define(Preprocessor *pp, string rest) {
+void pp_define(Preprocessor *pp, string rest)
+{
     rest = rest.ltrim();
     if (rest.size == 0) return;
     i32 i = 0;
@@ -1673,7 +1896,7 @@ void pp_define(Preprocessor *pp, string rest) {
             if (rest[k] == '(') depth++; else if (rest[k] == ')') depth--;
             k++;
         }
-        string params = rest[j:k-1];
+        string params = rest[j:k - 1];
         string body = "";
         while (k < rest.size && (rest[k] == ' ' || rest[k] == '\t')) k++;
         if (k < rest.size) body = rest[k:rest.size].rtrim();   // where a comment was: not body
@@ -1692,7 +1915,8 @@ void pp_define(Preprocessor *pp, string rest) {
 // `#arg` (C11 6.10.3.2): the argument's spelling in quotes — leading/trailing
 // space dropped, each internal whitespace run collapsed to one space, and a `\`
 // placed before every `"` and `\` inside a string literal or char constant.
-string stringize_arg(string arg) {
+string stringize_arg(string arg)
+{
     string a = unpaint(arg).trim();
     string out = "\"";
     i32 i = 0;
@@ -1700,17 +1924,19 @@ string stringize_arg(string arg) {
         i32 c = a[i];
         if (c == '"' || c == '\'') {
             i32 q = c;
-            out = out + (q == '"' ? "\\\"" : "'"); i++;
+            out = out + (q == '"' ? "\\\"" : "'");
+            i++;
             while (i < a.size && a[i] != q) {
                 if (a[i] == '\\' && i + 1 < a.size) {
                     out = out + "\\\\";          // the backslash itself
                     i++;
                     if (a[i] == '"') out = out + "\\\"";
                     else if (a[i] == '\\') out = out + "\\\\";
-                    else out = out + a[i:i+1];
-                    i++; continue;
+                    else out = out + a[i:i + 1];
+                    i++;
+                    continue;
                 }
-                if (a[i] == '"') out = out + "\\\""; else out = out + a[i:i+1];
+                if (a[i] == '"') out = out + "\\\""; else out = out + a[i:i + 1];
                 i++;
             }
             if (i < a.size) { out = out + (q == '"' ? "\\\"" : "'"); i++; }
@@ -1721,7 +1947,8 @@ string stringize_arg(string arg) {
             out = out + " ";
             continue;
         }
-        out = out + a[i:i+1]; i++;
+        out = out + a[i:i + 1];
+        i++;
     }
     return out + "\"";
 }
@@ -1729,16 +1956,19 @@ string stringize_arg(string arg) {
 // `line` ends inside an open macro invocation; where in `next` (the following
 // physical line) does that invocation close? Returns the offset just after its
 // closing `)`, or -1 if it is still open at the end of `next`.
-i32 call_close_offset(Preprocessor *pp, string line, string next) {
+i32 call_close_offset(Preprocessor *pp, string line, string next)
+{
     string all = line + " " + next;
     i32 base = line.size + 1;
     i32 i = 0, depth = 0, in_call = 0;
     while (i < all.size) {
         i32 c = all[i];
         if (c == '"' || c == '\'') {
-            i32 q = c; i++;
+            i32 q = c;
+            i++;
             while (i < all.size && all[i] != q) { if (all[i] == '\\') i++; i++; }
-            i++; continue;
+            i++;
+            continue;
         }
         if (in_call) {
             if (c == '(') depth++;
@@ -1746,7 +1976,8 @@ i32 call_close_offset(Preprocessor *pp, string line, string next) {
                 depth--;
                 if (depth == 0) { in_call = 0; if (i >= base) return i + 1 - base; }
             }
-            i++; continue;
+            i++;
+            continue;
         }
         if (is_ident_start(c)) {
             i32 st = i;
@@ -1766,19 +1997,23 @@ i32 call_close_offset(Preprocessor *pp, string line, string next) {
 // Whether `line` ends inside an unclosed function-like macro invocation: a
 // name defined as a function-like macro, followed by `(`, whose parentheses are
 // not balanced by the end of the line. String/char literals are skipped.
-i32 open_macro_call(Preprocessor *pp, string line) {
+i32 open_macro_call(Preprocessor *pp, string line)
+{
     i32 i = 0, depth = 0, in_call = 0;
     while (i < line.size) {
         i32 c = line[i];
         if (c == '"' || c == '\'') {
-            i32 q = c; i++;
+            i32 q = c;
+            i++;
             while (i < line.size && line[i] != q) { if (line[i] == '\\') i++; i++; }
-            i++; continue;
+            i++;
+            continue;
         }
         if (in_call) {
             if (c == '(') depth++;
             else if (c == ')') { depth--; if (depth == 0) in_call = 0; }
-            i++; continue;
+            i++;
+            continue;
         }
         if (is_ident_start(c)) {
             i32 st = i;
@@ -1797,10 +2032,11 @@ i32 open_macro_call(Preprocessor *pp, string line) {
 }
 
 // The identifier a text ends with ("" if it does not end with one).
-string trailing_ident(string text) {
+string trailing_ident(string text)
+{
     string t = text.rtrim();
     i32 e = t.size, b = t.size;
-    while (b > 0 && is_ident(t[b-1])) b--;
+    while (b > 0 && is_ident(t[b - 1])) b--;
     if (b == e || !is_ident_start(t[b])) return "";   // `0x1F` is a number, not a name
     return t[b:e];
 }
@@ -1809,7 +2045,8 @@ string trailing_ident(string text) {
 // invoke: a function-like macro name, or an object-like macro whose expansion
 // ends with one (`#define g m`). gcc looks past the newline for the `(` —
 // QEMU's `logout\n    ("…");`.
-i32 ends_with_callable(Preprocessor *pp, string line) {
+i32 ends_with_callable(Preprocessor *pp, string line)
+{
     string name = trailing_ident(line);
     for (i32 depth = 0; depth < 16 && name.size > 0; depth++) {
         string enc = pp->macros[name];
@@ -1821,13 +2058,15 @@ i32 ends_with_callable(Preprocessor *pp, string line) {
 }
 
 // Whether the next non-blank text in `rest` is a `(`.
-i32 next_starts_paren(string rest) {
+i32 next_starts_paren(string rest)
+{
     i32 i = 0;
     while (i < rest.size && (std::IsSpace(rest[i]) || rest[i] == 2)) i++;
     return i < rest.size && rest[i] == '(' ? 1 : 0;
 }
 
-void pp_process_content(Preprocessor *pp, string content) {
+void pp_process_content(Preprocessor *pp, string content)
+{
     string rest = content;
     while (rest.size > 0) {
         string line = "";
@@ -1839,19 +2078,27 @@ void pp_process_content(Preprocessor *pp, string content) {
             i32 n = 0;
             while (n < rest.size && rest[n] != '\n') n++;
             string phys = rest[0:n];
-            rest = n < rest.size ? rest[n+1:] : rest[n:];
+            rest = n < rest.size ? rest[n + 1:] : rest[n:];
             nphys++;
             before_last = line;
             // A trailing `\` (optionally followed by `\r`) continues the line.
-            if (phys.ends_with("\\")) { line = line + phys[0:phys.size-1]; splices++; all_splices++; if (rest.size > 0) continue; }
-            else if (phys.ends_with("\\\r")) { line = line + phys[0:phys.size-2]; splices++; all_splices++; if (rest.size > 0) continue; }
-            else {
+            if (phys.ends_with("\\")) {
+                line = line + phys[0:phys.size - 1];
+                splices++;
+                all_splices++;
+                if (rest.size > 0) continue;
+            } else if (phys.ends_with("\\\r")) {
+                line = line + phys[0:phys.size - 2];
+                splices++;
+                all_splices++;
+                if (rest.size > 0) continue;
+            } else {
                 // -C with linemarkers: tokens after a comment that a splice made
                 // span lines stay on their own physical line (as gcc prints
                 // them) — push the remainder back, keeping its column.
                 if (g_keep_comments && pp->markers && all_splices > 0 && open_block_comment(before_last)) {
                     i32 k = 0;
-                    while (k + 1 < phys.size && !(phys[k] == '*' && phys[k+1] == '/')) k++;
+                    while (k + 1 < phys.size && !(phys[k] == '*' && phys[k + 1] == '/')) k++;
                     k += 2;
                     if (k < phys.size && phys[k:].trim().size > 0) {
                         line = line + phys[0:k];
@@ -1886,11 +2133,11 @@ void pp_process_content(Preprocessor *pp, string content) {
         if (cond_active(pp) && !line.ltrim().starts_with("#")) {
             i32 glue = 0;   // the previous joined line ended in a splice
             while (rest.size > 0 && (open_macro_call(pp, line)
-                                     || (ends_with_callable(pp, line) && next_starts_paren(rest)))) {
+                || (ends_with_callable(pp, line) && next_starts_paren(rest)))) {
                 i32 n = 0;
                 while (n < rest.size && rest[n] != '\n') n++;
                 string next = rest[0:n];
-                string after = n < rest.size ? rest[n+1:] : rest[n:];
+                string after = n < rest.size ? rest[n + 1:] : rest[n:];
                 if (!glue && next.ltrim().starts_with("#")) {
                     // gcc: a conditional (or #define/#undef) between a macro's
                     // arguments is processed in place and the collection goes on —
@@ -1911,8 +2158,8 @@ void pp_process_content(Preprocessor *pp, string content) {
                     while (dtext.ends_with("\\") && after.size > 0) {
                         i32 m = 0;
                         while (m < after.size && after[m] != '\n') m++;
-                        dtext = dtext[0:dtext.size-1] + after[0:m];
-                        after = m < after.size ? after[m+1:] : after[m:];
+                        dtext = dtext[0:dtext.size - 1] + after[0:m];
+                        after = m < after.size ? after[m + 1:] : after[m:];
                         nphys++;
                     }
                     pp->current_line = dir_line;
@@ -1932,8 +2179,8 @@ void pp_process_content(Preprocessor *pp, string content) {
                 // gen_semantics wrote unparsable Python).
                 string sep = glue ? "" : " ";
                 glue = 0;
-                if (next.ends_with("\\")) { next = next[0:next.size-1]; glue = 1; }
-                else if (next.ends_with("\\\r")) { next = next[0:next.size-2]; glue = 1; }
+                if (next.ends_with("\\")) { next = next[0:next.size - 1]; glue = 1; }
+                else if (next.ends_with("\\\r")) { next = next[0:next.size - 2]; glue = 1; }
                 // With linemarkers, gcc prints only the macro call at its first
                 // line; tokens after the call's closing `)` stay on THEIR source
                 // line. So cut there and push the remainder back as its own line,
@@ -1960,7 +2207,8 @@ void pp_process_content(Preprocessor *pp, string content) {
 
 // Parse the header name of `#include` / `__has_include`: `<x>` or `"x"`.
 // Returns the name ("" if malformed) and sets *quoted.
-string header_name(string rest, i32 *quoted) {
+string header_name(string rest, i32 *quoted)
+{
     string r = rest.trim();
     *quoted = 0;
     if (r.size < 2) return "";
@@ -1987,7 +2235,8 @@ i32 current_dir_index(Preprocessor *pp) { return pp->cur_dir_idx; }
 // (`#include_next` starts after the current file's directory).
 // `*dir` receives the search-list index it was found in, or -1 (an absolute
 // path, or the includer's own directory).
-string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from, i32 *dir) {
+string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from, i32 *dir)
+{
     *dir = -1;
     if (path.size == 0) return "";
     if (path[0] == '/') return file_exists(path) ? path : "";
@@ -2007,7 +2256,8 @@ string resolve_include(Preprocessor *pp, string path, i32 quoted, i32 from, i32 
     return "";
 }
 
-void pp_include(Preprocessor *pp, string rest, i32 next) {
+void pp_include(Preprocessor *pp, string rest, i32 next)
+{
     i32 quoted = 0;
     string path = header_name(rest, &quoted);
     if (path.size == 0) {
@@ -2033,10 +2283,10 @@ void pp_include(Preprocessor *pp, string rest, i32 next) {
     } else {
         // As gcc: a missing header is fatal (exit status 1).
         i32 col = 1;
-        while (col <= pp->cur_text.size && pp->cur_text[col-1] != '"' && pp->cur_text[col-1] != '<') col++;
+        while (col <= pp->cur_text.size && pp->cur_text[col - 1] != '"' && pp->cur_text[col - 1] != '<') col++;
         if (col > pp->cur_text.size) col = 1;
         std::Println("{}:{}:{}: fatal error: {}: No such file or directory",
-                     pp->current_file, pp->current_line, col, path, target = 2);
+            pp->current_file, pp->current_line, col, path, target = 2);
         std::Println("compilation terminated.", target = 2);
         flush_and_exit(pp, 1);
     }
@@ -2045,7 +2295,8 @@ void pp_include(Preprocessor *pp, string rest, i32 next) {
 // The include-guard macro of a header (`#ifndef X` / `#if !defined X` as the
 // first directive, its matching `#endif` as the last line, nothing outside but
 // blank lines), or "" when it is not guarded that way.
-string include_guard(string content) {
+string include_guard(string content)
+{
     string rest = content;
     i32 depth = 0;
     i32 closed = 0;     // the guard's #endif has been seen
@@ -2054,7 +2305,7 @@ string include_guard(string content) {
         i32 n = 0;
         while (n < rest.size && rest[n] != '\n') n++;
         string l = rest[0:n].trim();
-        rest = n < rest.size ? rest[n+1:] : rest[n:];
+        rest = n < rest.size ? rest[n + 1:] : rest[n:];
         if (l.size == 0) continue;
         if (closed) return "";                      // something after the #endif
         if (l[0] != '#') { if (depth == 0) return ""; continue; }
@@ -2068,7 +2319,7 @@ string include_guard(string content) {
                     e = e[1:].trim();
                     if (e.starts_with("defined")) {
                         e = e[7:].trim();
-                        if (e.starts_with("(") && e.ends_with(")")) e = e[1:e.size-1].trim();
+                        if (e.starts_with("(") && e.ends_with(")")) e = e[1:e.size - 1].trim();
                         name = e;
                     }
                 }
@@ -2090,20 +2341,25 @@ string include_guard(string content) {
 // Preprocess an included file in place: `# 1 "file" 1` on entry, and on return
 // `# N "includer" 2` with N = the line after the `#include`.
 // Record a dependency once (first-seen order).
-void add_dep(Preprocessor *pp, string path, i32 sys) {
+void add_dep(Preprocessor *pp, string path, i32 sys)
+{
     for (i32 i = 0; i < pp->deps.length; i++) if (pp->deps[i] == path) return;
     pp->deps.add(path.dup);
     pp->deps_sys.add(sys);
 }
 
-void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx) {
+void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx)
+{
     add_dep(pp, path, sys);
     // Guarded and already included (guard macro defined): skip entirely.
     string g = pp->guards[path];
     if (g.size > 0 && pp->macros[g].size >= 2) return;
     string content = read_file(path);
     if (!g_keep_comments) content = strip_comments(content);
-    if (g.size == 0) { string ng = include_guard(content); if (ng.size > 0) pp->guards[path] = ng.dup; }
+    if (g.size == 0) {
+        string ng = include_guard(content);
+        if (ng.size > 0) pp->guards[path] = ng.dup;
+    }
     // The reader is first brought to the `#include` line itself.
     if (pp->markers) sync_to(pp);
     string saved_file = pp->current_file;
@@ -2121,10 +2377,17 @@ void enter_file(Preprocessor *pp, string path, i32 sys, i32 dir_idx) {
     pp->cur_sys = saved_sys;
     pp->cur_dir_idx = saved_dir;
     // (Returning to the pseudo-file `<command-line>` is shown as its line 0.)
-    if (pp->markers) emit_marker(pp, saved_file == "<command-line>" ? 0 : saved_line + 1, saved_file, " 2" + sys_flags(pp));
+    if (pp->markers)
+        emit_marker(
+            pp,
+            saved_file == "<command-line>" ? 0 : saved_line + 1,
+            saved_file,
+            " 2" + sys_flags(pp)
+        );
 }
 
-i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
+i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate)
+{
     rest = rest.ltrim();
     i32 i = 0;
     while (i < rest.size && is_ident(rest[i])) i++;
@@ -2143,7 +2406,8 @@ i32 pp_ifdef(Preprocessor *pp, string rest, i32 negate) {
 // answer of the host compiler that supplied the target macros (that is what the
 // sic compiler sees, through the host cpp), asked once per distinct query and
 // cached. Only identifier-like operands (`noreturn`, `gnu::cold`) are queried.
-string host_has(Preprocessor *pp, string kind, string arg) {
+string host_has(Preprocessor *pp, string kind, string arg)
+{
     string a = arg.trim();
     if (pp->info_mode) {
         // sic lists names plainly: `__cold__`, `gnu::cold` and `__gnu__::__cold__`
@@ -2153,7 +2417,8 @@ string host_has(Preprocessor *pp, string kind, string arg) {
             if (a.starts_with("gnu::")) a = a[5:];
             else if (a.starts_with("__gnu__::")) a = a[9:];
         }
-        if (kind != "__has_builtin" && a.size > 4 && a.starts_with("__") && a.ends_with("__")) a = a[2:a.size-2];
+        if (kind != "__has_builtin" && a.size > 4 && a.starts_with("__") && a.ends_with("__"))
+            a = a[2:a.size - 2];
         string v = pp->has_cache[kind + "(" + a + ")"];
         return v.size > 0 ? v : "0";
     }
@@ -2165,7 +2430,7 @@ string host_has(Preprocessor *pp, string kind, string arg) {
     for (i32 i = 0; i < a.size; i++) if (!is_ident(a[i]) && a[i] != ':') ok = 0;
     if (ok) {
         list<string> out = run_lines("printf '#if " + key + "\\n1\\n#else\\n0\\n#endif\\n' | "
-                                     + pp->cc + " -xc -E -P - 2>/dev/null");
+            + pp->cc + " -xc -E -P - 2>/dev/null");
         for (i32 i = 0; i < out.length; i++) if (out[i].trim() == "1") ans = "1";
     }
     pp->has_cache[key] = ans.dup;
@@ -2174,7 +2439,8 @@ string host_has(Preprocessor *pp, string kind, string arg) {
 
 // The text of a balanced `( … )` group starting at rest[*i] (which must be the
 // `(`), advancing *i past the closing paren. "" if there is no group.
-string paren_group(string rest, i32 *i) {
+string paren_group(string rest, i32 *i)
+{
     while (*i < rest.size && std::IsSpace(rest[*i])) (*i)++;
     if (*i >= rest.size || rest[*i] != '(') return "";
     i32 st = *i + 1, depth = 0;
@@ -2190,19 +2456,21 @@ string paren_group(string rest, i32 *i) {
 
 // `__has_include(…)` / `__has_embed(…)` in ordinary text: an error (they belong
 // to #if), but — as in gcc — still replaced by their value.
-string has_ops_in_text(Preprocessor *pp, string line) {
+string has_ops_in_text(Preprocessor *pp, string line)
+{
     string out = "";
     i32 i = 0;
     while (i < line.size) {
         i32 c = line[i];
         if (c == '"' || c == '\'') {
-            i32 st = i; i++;
+            i32 st = i;
+            i++;
             while (i < line.size && line[i] != c) { if (line[i] == '\\') i++; i++; }
             if (i < line.size) i++;
             out = out + line[st:i];
             continue;
         }
-        if (is_ident_start(c) && (i == 0 || !is_ident(line[i-1]))) {
+        if (is_ident_start(c) && (i == 0 || !is_ident(line[i - 1]))) {
             i32 st = i;
             while (i < line.size && is_ident(line[i])) i++;
             string w = line[st:i];
@@ -2213,7 +2481,10 @@ string has_ops_in_text(Preprocessor *pp, string line) {
                 i32 quoted = 0;
                 string path = header_name(arg, &quoted);
                 i32 from = 0;
-                if (w == "__has_include_next") { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
+                if (w == "__has_include_next") {
+                    i32 ci = current_dir_index(pp);
+                    from = ci < 0 ? 0 : ci + 1;
+                }
                 i32 dummy = 0;
                 out = out + (resolve_include(pp, path, quoted, from, &dummy).size > 0 ? "1" : "0");
                 continue;
@@ -2221,7 +2492,7 @@ string has_ops_in_text(Preprocessor *pp, string line) {
             out = out + w;
             continue;
         }
-        out = out + line[i:i+1];
+        out = out + line[i:i + 1];
         i++;
     }
     return out;
@@ -2230,12 +2501,13 @@ string has_ops_in_text(Preprocessor *pp, string line) {
 // `#if` pre-pass, before macro expansion: `defined X` / `defined(X)` and the
 // `__has_*` operators are replaced by 0/1 — their operands must NOT be expanded
 // (C11 6.10.1p4: `#if defined(VER) && VER==42` must test the name `VER`).
-string substitute_defined(Preprocessor *pp, string rest) {
+string substitute_defined(Preprocessor *pp, string rest)
+{
     string out = "";
     i32 i = 0;
     while (i < rest.size) {
         i32 c = rest[i];
-        if (is_ident_start(c) && (i == 0 || !is_ident(rest[i-1]))) {
+        if (is_ident_start(c) && (i == 0 || !is_ident(rest[i - 1]))) {
             i32 st = i;
             while (i < rest.size && is_ident(rest[i])) i++;
             string word = rest[st:i];
@@ -2266,7 +2538,10 @@ string substitute_defined(Preprocessor *pp, string rest) {
                     path = header_name(ex, &quoted);
                 }
                 i32 from = 0;
-                if (word == "__has_include_next") { i32 ci = current_dir_index(pp); from = ci < 0 ? 0 : ci + 1; }
+                if (word == "__has_include_next") {
+                    i32 ci = current_dir_index(pp);
+                    from = ci < 0 ? 0 : ci + 1;
+                }
                 i32 dummy = 0;
                 out = out + (resolve_include(pp, path, quoted, from, &dummy).size > 0 ? "1" : "0");
                 continue;
@@ -2282,19 +2557,21 @@ string substitute_defined(Preprocessor *pp, string rest) {
             continue;
         }
         if (c == '"' || c == '\'') {   // literals copied verbatim
-            i32 st = i; i++;
+            i32 st = i;
+            i++;
             while (i < rest.size && rest[i] != c) { if (rest[i] == '\\') i++; i++; }
             if (i < rest.size) i++;
             out = out + rest[st:i];
             continue;
         }
-        out = out + rest[i:i+1];
+        out = out + rest[i:i + 1];
         i++;
     }
     return out;
 }
 
-i32 pp_if(Preprocessor *pp, string rest, string kw) {
+i32 pp_if(Preprocessor *pp, string rest, string kw)
+{
     string pre = substitute_defined(pp, rest);
     string expanded = expand_line(pre, &pp->macros, pp->current_line, pp->current_file);
     report_expand_error(pp);
@@ -2314,7 +2591,8 @@ i32 pp_if(Preprocessor *pp, string rest, string kw) {
 }
 
 // Report (once) a macro-call error recorded by the expander.
-void report_expand_error(Preprocessor *pp) {
+void report_expand_error(Preprocessor *pp)
+{
     if (g_expand_error.size == 0) return;
     diag(pp, "error", g_expand_error, 1);
     g_expand_error = "";
@@ -2325,15 +2603,33 @@ void report_expand_error(Preprocessor *pp) {
 //   1 = done   (a branch already matched; skip the rest of the group to #endif)
 //   2 = waiting (no branch matched yet; a later #elif/#else may activate)
 //   3 = parent-skip (an enclosing level is inactive; never activate)
-void pp_else(Preprocessor *pp) {
-    if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #else without #if", pp->current_file, pp->current_line, target = 2); return; }
+void pp_else(Preprocessor *pp)
+{
+    if (pp->cond_depth == 0) {
+        std::Println(
+            "sic-cpp: {}:{}: #else without #if",
+            pp->current_file,
+            pp->current_line,
+            target = 2
+        );
+        return;
+    }
     i32 state = pp->cond_stack[pp->cond_depth - 1];
     if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;        // was active → done
     else if (state == 2) pp->cond_stack[pp->cond_depth - 1] = 0;   // waiting → activate else
 }
 
-void pp_elif(Preprocessor *pp, string rest) {
-    if (pp->cond_depth == 0) { std::Println("sic-cpp: {}:{}: #elif without #if", pp->current_file, pp->current_line, target = 2); return; }
+void pp_elif(Preprocessor *pp, string rest)
+{
+    if (pp->cond_depth == 0) {
+        std::Println(
+            "sic-cpp: {}:{}: #elif without #if",
+            pp->current_file,
+            pp->current_line,
+            target = 2
+        );
+        return;
+    }
     i32 state = pp->cond_stack[pp->cond_depth - 1];
     if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;        // was active → done
     else if (state == 2) {                                         // still looking: test it
@@ -2343,7 +2639,8 @@ void pp_elif(Preprocessor *pp, string rest) {
 }
 
 // C23 `#elifdef X` / `#elifndef X`.
-void pp_elifdef(Preprocessor *pp, string rest, i32 negate) {
+void pp_elifdef(Preprocessor *pp, string rest, i32 negate)
+{
     if (pp->cond_depth == 0) { diag(pp, "error", "#elifdef without #if", 2); return; }
     i32 state = pp->cond_stack[pp->cond_depth - 1];
     if (state == 0) pp->cond_stack[pp->cond_depth - 1] = 1;
@@ -2351,8 +2648,17 @@ void pp_elifdef(Preprocessor *pp, string rest, i32 negate) {
 }
 
 // gcc-style diagnostic `file:line:col: kind: msg`; an error makes exit status 1.
-void diag(Preprocessor *pp, string kind, string msg, i32 col) {
-    std::Println("{}:{}:{}: {}: {}", pp->current_file, pp->current_line, col, kind, msg, target = 2);
+void diag(Preprocessor *pp, string kind, string msg, i32 col)
+{
+    std::Println(
+        "{}:{}:{}: {}: {}",
+        pp->current_file,
+        pp->current_line,
+        col,
+        kind,
+        msg,
+        target = 2
+    );
     if (kind == "error") pp->errors++;
 }
 
@@ -2364,19 +2670,35 @@ struct EmbedSpec {
     i32 name_pos;       // offset of the header-name token in the directive text
     i64 limit;          // -1 = none
     i64 offset;         // gnu::offset
-    i32 has_prefix; string prefix; i32 prefix_pos;
-    i32 has_suffix; string suffix;
-    i32 has_if_empty; string if_empty; i32 if_empty_pos;
+    i32 has_prefix;
+    string prefix;
+    i32 prefix_pos;
+    i32 has_suffix;
+    string suffix;
+    i32 has_if_empty;
+    string if_empty;
+    i32 if_empty_pos;
     string bad;         // first unknown parameter ("" = all fine)
 }
 
 // Parse `<name>`/`"name"` [parameters] of #embed / __has_embed. Standard
 // parameters may be spelled `limit` or `__limit__`; `gnu::offset` is gcc's.
-EmbedSpec embed_parse(Preprocessor *pp, string text) {
+EmbedSpec embed_parse(Preprocessor *pp, string text)
+{
     EmbedSpec e;
-    e.limit = -1; e.offset = 0; e.has_prefix = 0; e.has_suffix = 0; e.has_if_empty = 0;
-    e.bad = ""; e.name = ""; e.quoted = 0; e.prefix = ""; e.suffix = ""; e.if_empty = "";
-    e.prefix_pos = 0; e.if_empty_pos = 0;
+    e.limit = -1;
+    e.offset = 0;
+    e.has_prefix = 0;
+    e.has_suffix = 0;
+    e.has_if_empty = 0;
+    e.bad = "";
+    e.name = "";
+    e.quoted = 0;
+    e.prefix = "";
+    e.suffix = "";
+    e.if_empty = "";
+    e.prefix_pos = 0;
+    e.if_empty_pos = 0;
     i32 i = 0;
     while (i < text.size && std::IsSpace(text[i])) i++;
     e.name_pos = i;
@@ -2412,24 +2734,31 @@ EmbedSpec embed_parse(Preprocessor *pp, string text) {
         // Normalize `__x__` / `__gnu__::__x__` spellings.
         string n = pname;
         if (n.starts_with("__gnu__::")) n = "gnu::" + n[9:];
-        if (n.starts_with("gnu::__") && n.ends_with("__")) n = "gnu::" + n[7:n.size-2];
-        else if (n.starts_with("__") && n.ends_with("__") && n.size > 4) n = n[2:n.size-2];
+        if (n.starts_with("gnu::__") && n.ends_with("__")) n = "gnu::" + n[7:n.size - 2];
+        else if (n.starts_with("__") && n.ends_with("__") && n.size > 4) n = n[2:n.size - 2];
         if (n == "limit" || n == "gnu::offset") {
             string v = substitute_defined(pp, arg);
             v = expand_line(v, &pp->macros, pp->current_line, pp->current_file);
             i64 val = eval_if_expr(v, &pp->macros);
             if (n == "limit") e.limit = val; else e.offset = val;
-        } else if (n == "prefix") { e.has_prefix = 1; e.prefix = normalize_tokens(arg).dup; e.prefix_pos = arg_pos; }
-        else if (n == "suffix") { e.has_suffix = 1; e.suffix = normalize_tokens(arg).dup; }
-        else if (n == "if_empty") { e.has_if_empty = 1; e.if_empty = normalize_tokens(arg).dup; e.if_empty_pos = arg_pos; }
-        else if (e.bad.size == 0) e.bad = pname.dup;
+        } else if (n == "prefix") {
+            e.has_prefix = 1;
+            e.prefix = normalize_tokens(arg).dup;
+            e.prefix_pos = arg_pos;
+        } else if (n == "suffix") { e.has_suffix = 1; e.suffix = normalize_tokens(arg).dup; }
+        else if (n == "if_empty") {
+            e.has_if_empty = 1;
+            e.if_empty = normalize_tokens(arg).dup;
+            e.if_empty_pos = arg_pos;
+        } else if (e.bad.size == 0) e.bad = pname.dup;
     }
     return e;
 }
 
 // Locate a resource: `"x"` next to the current file, then --embed-dir dirs;
 // `<x>` only in the --embed-dir dirs.
-string embed_find(Preprocessor *pp, EmbedSpec *e) {
+string embed_find(Preprocessor *pp, EmbedSpec *e)
+{
     if (e->name.size == 0) return "";
     if (e->name[0] == '/') return file_exists(e->name) ? e->name : "";
     if (e->quoted) {
@@ -2445,7 +2774,8 @@ string embed_find(Preprocessor *pp, EmbedSpec *e) {
 }
 
 // The resource's bytes after gnu::offset and limit.
-string embed_bytes(string path, EmbedSpec *e) {
+string embed_bytes(string path, EmbedSpec *e)
+{
     string data = read_file(path);
     i64 off = e->offset < 0 ? 0 : e->offset;
     if (off > data.size) off = data.size;
@@ -2455,7 +2785,8 @@ string embed_bytes(string path, EmbedSpec *e) {
 }
 
 // `__has_embed(…)` → __STDC_EMBED_NOT_FOUND__ (0) / _FOUND__ (1) / _EMPTY__ (2).
-string has_embed(Preprocessor *pp, string arg) {
+string has_embed(Preprocessor *pp, string arg)
+{
     EmbedSpec e = embed_parse(pp, arg);
     if (e.bad.size > 0) return "0";
     string path = embed_find(pp, &e);
@@ -2467,7 +2798,8 @@ string has_embed(Preprocessor *pp, string arg) {
 // constants. (gcc hands big resources to cc1 as a base64 `#embed` extension;
 // the sic compiler reads plain C, so sic-cpp always writes the numbers —
 // 128 per output line.) Placed at the column of its first token, as gcc does.
-void pp_embed(Preprocessor *pp, string rest, i32 rest_off) {
+void pp_embed(Preprocessor *pp, string rest, i32 rest_off)
+{
     EmbedSpec e = embed_parse(pp, rest);
     if (e.bad.size > 0) {
         diag(pp, "error", "unknown embed parameter '" + e.bad + "'", rest_off + e.name_pos + 1);
@@ -2476,10 +2808,15 @@ void pp_embed(Preprocessor *pp, string rest, i32 rest_off) {
     string path = embed_find(pp, &e);
     if (path.size == 0) {
         if (!e.quoted && pp->embed_dirs.length == 0)
-            diag(pp, "error", "no include path in which to search for " + e.name, rest_off + e.name_pos + 1);
+            diag(
+                pp,
+                "error",
+                "no include path in which to search for " + e.name,
+                rest_off + e.name_pos + 1
+            );
         else {
             std::Println("{}:{}:{}: fatal error: {}: No such file or directory",
-                         pp->current_file, pp->current_line, rest_off + e.name_pos + 1, e.name, target = 2);
+                pp->current_file, pp->current_line, rest_off + e.name_pos + 1, e.name, target = 2);
             std::Println("compilation terminated.", target = 2);
             flush_and_exit(pp, 1);
         }
@@ -2512,28 +2849,40 @@ void pp_embed(Preprocessor *pp, string rest, i32 rest_off) {
 }
 
 // The `#define …` line for macro `name` as -dD/-dM print it.
-string define_text(Preprocessor *pp, string name) {
+string define_text(Preprocessor *pp, string name)
+{
     string enc = pp->macros[name];
     if (enc.starts_with("F|")) {
         tuple pb = enc[2:].split("|");
         string params = "";
         list<string> ps = split_all(pb[0], ',');
-        for (i32 i = 0; i < ps.length; i++) { if (i > 0) params = params + ","; params = params + ps[i].trim(); }
+        for (i32 i = 0; i < ps.length; i++) {
+            if (i > 0) params = params + ",";
+            params = params + ps[i].trim();
+        }
         string body = pb.length > 1 ? pb[1] : "";
         return "#define " + name + "(" + params + ") " + normalize_tokens(body);
     }
     return "#define " + name + " " + normalize_tokens(enc[2:]);
 }
 
-void pp_endif(Preprocessor *pp) {
+void pp_endif(Preprocessor *pp)
+{
     if (pp->cond_depth > 0) pp->cond_depth--;
-    else std::Println("sic-cpp: {}:{}: #endif without #if", pp->current_file, pp->current_line, target = 2);
+    else
+        std::Println(
+            "sic-cpp: {}:{}: #endif without #if",
+            pp->current_file,
+            pp->current_line,
+            target = 2
+        );
 }
 
 // ── Line processor ────────────────────────────────────────────────────────
 
 // Emit a linemarker and make it the reader's position.
-void emit_marker(Preprocessor *pp, i32 line, string file, string flags) {
+void emit_marker(Preprocessor *pp, i32 line, string file, string flags)
+{
     pp->output_lines.add("# " + std::Fmt("{}", line) + " \"" + file + "\"" + flags);
     pp->out_file = file.dup;
     pp->out_line = line;
@@ -2548,7 +2897,8 @@ string sys_flags(Preprocessor *pp) { return pp->cur_sys ? " 3 4" : ""; }
 // else (another file, going backwards, a bigger jump) gets `# N "file"`.
 // Bring the reader to the current source position (gcc's maybe_print_line):
 // fewer than 8 lines ahead in the same file → empty lines, else a marker.
-void sync_to(Preprocessor *pp) {
+void sync_to(Preprocessor *pp)
+{
     i32 line = pp->current_line;
     if (pp->force_marker || pp->out_file != pp->current_file
         || line < pp->out_line || line >= pp->out_line + 8) {
@@ -2558,7 +2908,8 @@ void sync_to(Preprocessor *pp) {
     }
 }
 
-void add_out(Preprocessor *pp, string text) {
+void add_out(Preprocessor *pp, string text)
+{
     // -imacros: the text is dropped but, as in gcc, the lines still advance.
     if (pp->discard) text = "";
     if (pp->markers) {
@@ -2589,26 +2940,28 @@ void add_out(Preprocessor *pp, string text) {
 // `#pragma …` line of its own as gcc does: the text before it ends the current
 // line (an empty line if there was none), the text after continues on a new
 // line with a leading space.
-void emit_text(Preprocessor *pp, string text) {
+void emit_text(Preprocessor *pp, string text)
+{
     string rest = text;
     while (true) {
         i32 at = -1;
         for (i32 i = 0; i + 7 <= rest.size; i++) {
             if (rest[i] == '"' || rest[i] == '\'') {        // skip literals
-                i32 q = rest[i]; i++;
+                i32 q = rest[i];
+                i++;
                 while (i < rest.size && rest[i] != q) { if (rest[i] == '\\') i++; i++; }
                 continue;
             }
             // … and comments kept by -C (`_Pragma` inside one is just text).
-            if (rest[i] == '/' && i + 1 < rest.size && rest[i+1] == '*') {
+            if (rest[i] == '/' && i + 1 < rest.size && rest[i + 1] == '*') {
                 i += 2;
-                while (i + 1 < rest.size && !(rest[i] == '*' && rest[i+1] == '/')) i++;
+                while (i + 1 < rest.size && !(rest[i] == '*' && rest[i + 1] == '/')) i++;
                 i++;
                 continue;
             }
-            if (rest[i] == '/' && i + 1 < rest.size && rest[i+1] == '/') break;
-            if (rest[i:i+7] == "_Pragma" && (i == 0 || !is_ident(rest[i-1]))
-                && (i + 7 >= rest.size || !is_ident(rest[i+7]))) { at = i; break; }
+            if (rest[i] == '/' && i + 1 < rest.size && rest[i + 1] == '/') break;
+            if (rest[i:i + 7] == "_Pragma" && (i == 0 || !is_ident(rest[i - 1]))
+                && (i + 7 >= rest.size || !is_ident(rest[i + 7]))) { at = i; break; }
         }
         if (at < 0) break;
         i32 k = at + 7;
@@ -2618,8 +2971,9 @@ void emit_text(Preprocessor *pp, string text) {
         // Destringize: drop the quotes, unescape \" and \\.
         string body = "";
         for (i32 i = 1; i < lit.size - 1; i++) {
-            if (lit[i] == '\\' && i + 1 < lit.size - 1 && (lit[i+1] == '"' || lit[i+1] == '\\')) i++;
-            body = body + lit[i:i+1];
+            if (lit[i] == '\\' && i + 1 < lit.size - 1 && (lit[i + 1] == '"' || lit[i + 1] == '\\'))
+                i++;
+            body = body + lit[i:i + 1];
         }
         add_out(pp, rest[0:at].rtrim().dup);
         add_out(pp, "#pragma " + normalize_tokens(body));
@@ -2632,11 +2986,12 @@ void emit_text(Preprocessor *pp, string text) {
 }
 
 // Tokens joined with single spaces where the source had whitespace (literals intact).
-string normalize_tokens(string text) {
+string normalize_tokens(string text)
+{
     list<string> t = tokenize(text);
     string out = "";
     for (i32 i = 0; i < t.length; i++) {
-        if (t[i] == " ") { if (out.size > 0 && out[out.size-1] != ' ') out = out + " "; }
+        if (t[i] == " ") { if (out.size > 0 && out[out.size - 1] != ' ') out = out + " "; }
         else out = out + t[i];
     }
     return out.trim().dup;
@@ -2645,7 +3000,8 @@ string normalize_tokens(string text) {
 // `#pragma`: the ones cpp itself implements are acted on and leave a line of 7
 // spaces (gcc prints exactly that); every other pragma is passed through as
 // `#pragma <normalized tokens>` for the compiler.
-void pp_pragma(Preprocessor *pp, string rest) {
+void pp_pragma(Preprocessor *pp, string rest)
+{
     string r = normalize_tokens(rest);
     list<string> w = split_all(r, ' ');
     string a = w.length > 0 ? w[0] : "";
@@ -2658,7 +3014,7 @@ void pp_pragma(Preprocessor *pp, string rest) {
         i32 q2 = q1 + 1;
         while (q2 < r.size && r[q2] != '"') q2++;
         if (q2 >= r.size) { add_out(pp, "       "); return; }
-        string name = r[q1+1:q2];
+        string name = r[q1 + 1:q2];
         if (a.starts_with("push_macro")) {
             pp->pushed_macros.add(name + "\x02" + pp->macros[name]);
         } else {
@@ -2667,7 +3023,8 @@ void pp_pragma(Preprocessor *pp, string rest) {
             i32 found = -1;
             for (i32 i = pp->pushed_macros.length - 1; i >= 0; i--)
                 if (found < 0 && pp->pushed_macros[i].starts_with(name + "\x02")) found = i;
-            for (i32 i = 0; i < pp->pushed_macros.length; i++) if (i != found) keep.add(pp->pushed_macros[i]);
+            for (i32 i = 0; i < pp->pushed_macros.length; i++)
+                if (i != found) keep.add(pp->pushed_macros[i]);
             if (found >= 0) {
                 string enc = pp->pushed_macros[found][name.size + 1:];
                 if (enc.size >= 2) pp->macros[name] = enc.dup; else del pp->macros[name];
@@ -2687,23 +3044,24 @@ void pp_pragma(Preprocessor *pp, string rest) {
     add_out(pp, "       ");
 }
 
-void pp_process_line(Preprocessor *pp, string line) {
+void pp_process_line(Preprocessor *pp, string line)
+{
     // -C/-CC: comments are still in the text. A directive never keeps them —
     // except a -CC #define, whose body keeps its comments (`//` → `/* */`).
     if (g_keep_comments && line.ltrim().starts_with("#")) {
         string st = strip_comments(line);
         string flat = "";
-        for (i32 k = 0; k < st.size; k++) flat = flat + (st[k] == '\n' ? " " : st[k:k+1]);
+        for (i32 k = 0; k < st.size; k++) flat = flat + (st[k] == '\n' ? " " : st[k:k + 1]);
         string d = flat.ltrim()[1:].ltrim();
         // (-C keeps a #pragma's comments too: it is passed through.)
         if (d.starts_with("pragma")) {
             string pc = "";
-            for (i32 k = 0; k < line.size; k++) pc = pc + (line[k] == '\n' ? " " : line[k:k+1]);
+            for (i32 k = 0; k < line.size; k++) pc = pc + (line[k] == '\n' ? " " : line[k:k + 1]);
             line = pc.dup;
         } else if (g_keep_comments == 2 && d.starts_with("define")) {
             string cc = "";
             string lc = line_comments_to_block(line);
-            for (i32 k = 0; k < lc.size; k++) cc = cc + (lc[k] == '\n' ? " " : lc[k:k+1]);
+            for (i32 k = 0; k < lc.size; k++) cc = cc + (lc[k] == '\n' ? " " : lc[k:k + 1]);
             line = cc.dup;
         } else line = flat.dup;
     }
@@ -2741,7 +3099,12 @@ void pp_process_line(Preprocessor *pp, string line) {
             // A sentinel token in front keeps the expansion's own leading space
             // (after leading tokens that vanished) from being taken for
             // indentation; it is dropped again below.
-            string ex = expand_line("\x01" + trimmed, &pp->macros, pp->current_line, pp->current_file);
+            string ex = expand_line(
+                "\x01" + trimmed,
+                &pp->macros,
+                pp->current_line,
+                pp->current_file
+            );
             report_expand_error(pp);
             ex = ex.size > 0 ? ex[1:] : ex;
             i32 lead = ex.starts_with(" ");
@@ -2756,7 +3119,8 @@ void pp_process_line(Preprocessor *pp, string line) {
             if (ex.size > 0) text = text + ((indent > 0 || lead) ? " " : "") + ex;
             emit_text(pp, text);
         }
-        pp->current_line++; return;
+        pp->current_line++;
+        return;
     }
     i32 di = 1;
     while (di < trimmed.size && (trimmed[di] == ' ' || trimmed[di] == '\t')) di++;
@@ -2778,8 +3142,7 @@ void pp_process_line(Preprocessor *pp, string line) {
                 add_out(pp, pp->dump_defines ? define_text(pp, name) : "#define " + name);
             }
         }
-    }
-    else if (kw == "undef") {
+    } else if (kw == "undef") {
         if (!skipping) {
             tuple parts = rest.trim().split(" ");
             string name = parts[0];
@@ -2791,14 +3154,17 @@ void pp_process_line(Preprocessor *pp, string line) {
             if (pp->dump_includes) add_out(pp, "#" + kw + " " + normalize_tokens(rest));
             pp_include(pp, rest, kw == "include_next");
         }
-    }
-    else if (kw == "embed") { if (!skipping) pp_embed(pp, rest, line.size - trimmed.size + kw_start); }
-    else if (kw == "elifdef") { pp_elifdef(pp, rest, 0); }
+    } else if (kw == "embed") {
+        if (!skipping) pp_embed(pp, rest, line.size - trimmed.size + kw_start);
+    } else if (kw == "elifdef") { pp_elifdef(pp, rest, 0); }
     else if (kw == "elifndef") { pp_elifdef(pp, rest, 1); }
-    else if (kw == "if") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest, "if") ? 0 : 2)); }
-    else if (kw == "ifdef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 0) ? 0 : 2)); }
-    else if (kw == "ifndef") { pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 1) ? 0 : 2)); }
-    else if (kw == "else") { pp_else(pp); }
+    else if (kw == "if") {
+        pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_if(pp, rest, "if") ? 0 : 2));
+    } else if (kw == "ifdef") {
+        pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 0) ? 0 : 2));
+    } else if (kw == "ifndef") {
+        pp->cond_stack[pp->cond_depth++] = (skipping ? 3 : (pp_ifdef(pp, rest, 1) ? 0 : 2));
+    } else if (kw == "else") { pp_else(pp); }
     else if (kw == "elif") { pp_elif(pp, rest); }
     else if (kw == "endif") { pp_endif(pp); }
     // `#error` / `#warning`: reported (gcc style, column of the directive name)
@@ -2808,8 +3174,7 @@ void pp_process_line(Preprocessor *pp, string line) {
             string msg = ("#" + kw + " " + normalize_tokens(rest)).trim() + (kw == "warning" ? " [-Wcpp]" : "");
             diag(pp, kw, msg.dup, line.size - trimmed.size + di + 1);
         }
-    }
-    else if (kw == "line") {
+    } else if (kw == "line") {
         if (!skipping) {
             string rl = rest.ltrim();
             // Not `#line DIGITS ["file"]` as written: the operands are macro-
@@ -2823,19 +3188,18 @@ void pp_process_line(Preprocessor *pp, string line) {
                 i32 fi = ni;
                 while (fi < rl.size && std::IsSpace(rl[fi])) fi++;
                 if (fi < rl.size && rl[fi] == '"') {
-                    fi++; i32 fn_start = fi;
+                    fi++;
+                    i32 fn_start = fi;
                     while (fi < rl.size && rl[fi] != '"') fi++;
                     pp->current_file = rl[fn_start:fi].dup;   // owned: rl dies with the line
                 }
                 pp->force_marker = 1;   // the reader learns the new position
             }
         }
-    }
-    else if (kw == "pragma") { if (!skipping) pp_pragma(pp, rest); }
+    } else if (kw == "pragma") { if (!skipping) pp_pragma(pp, rest); }
     // other unknown directives are silently ignored
     pp->current_line++;
 }
-
 
 // ── Output ─────────────────────────────────────────────────────────────────
 
@@ -2848,23 +3212,25 @@ i32 open_out(string path) { return open(path.str, 0x241, 420); }   // O_WRONLY|O
 
 // Make-escape a file name the way gcc's mkdeps does: `$` → `$$`, `#` → `\#`,
 // and a space/tab gets a backslash (backslashes right before it doubled).
-string make_escape(string name) {
+string make_escape(string name)
+{
     string out = "";
     for (i32 i = 0; i < name.size; i++) {
         i32 c = name[i];
         if (c == ' ' || c == '\t') {
             i32 j = i - 1;
             while (j >= 0 && name[j] == '\\') { out = out + "\\"; j--; }
-            out = out + "\\" + name[i:i+1];
+            out = out + "\\" + name[i:i + 1];
         } else if (c == '$') out = out + "$$";
         else if (c == '#') out = out + "\\#";
-        else out = out + name[i:i+1];
+        else out = out + name[i:i + 1];
     }
     return out;
 }
 
 // One word of a make rule, wrapping at `colmax` like gcc (`\` + newline + space).
-string make_word(string w, i32 *col, i32 colmax) {
+string make_word(string w, i32 *col, i32 colmax)
+{
     string out = "";
     if (*col > 0) {
         if (colmax > 0 && *col + w.size > colmax) { out = " \\\n"; *col = 0; }
@@ -2876,7 +3242,8 @@ string make_word(string w, i32 *col, i32 colmax) {
 }
 
 // The dependency rule (gcc format, 72 columns).
-string dep_rule(Preprocessor *pp) {
+string dep_rule(Preprocessor *pp)
+{
     list<string> targets;
     for (i32 i = 0; i < pp->dep_targets.length; i++) targets.add(pp->dep_targets[i]);
     if (targets.length == 0) {
@@ -2884,7 +3251,7 @@ string dep_rule(Preprocessor *pp) {
         string base = pp->input_name;
         i32 sl = base.size - 1;
         while (sl >= 0 && base[sl] != '/') sl--;
-        base = base[sl+1:];
+        base = base[sl + 1:];
         i32 dot = base.size - 1;
         while (dot > 0 && base[dot] != '.') dot--;
         if (dot > 0) base = base[0:dot];
@@ -2905,7 +3272,8 @@ string dep_rule(Preprocessor *pp) {
 }
 
 // `#define` lines for every macro (-dM).
-string macro_dump(Preprocessor *pp) {
+string macro_dump(Preprocessor *pp)
+{
     string out = "";
     for (tuple kv : pp->macros) {
         string name = kv[0];
@@ -2922,12 +3290,17 @@ string macro_dump(Preprocessor *pp) {
 
 // Write the results and exit: the preprocessed text (or -dM's macros, or -M's
 // rule) to -o / stdout, plus -MD's .d file.
-void flush_and_exit(Preprocessor *pp, i32 code) {
+void flush_and_exit(Preprocessor *pp, i32 code)
+{
     i32 fd = 1;
     if (pp->out_path.size > 0) {
         fd = open_out(pp->out_path);
         if (fd < 0) {
-            std::Println("sic-cpp: fatal error: opening output file {}: cannot write", pp->out_path, target = 2);
+            std::Println(
+                "sic-cpp: fatal error: opening output file {}: cannot write",
+                pp->out_path,
+                target = 2
+            );
             std::Exit(1);
         }
     }
@@ -2960,9 +3333,12 @@ void flush_and_exit(Preprocessor *pp, i32 code) {
 
 // ── Main ──────────────────────────────────────────────────────────────────
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
     Preprocessor pp;
-    pp.cond_depth = 0; pp.current_line = 1; pp.current_file = "";
+    pp.cond_depth = 0;
+    pp.current_line = 1;
+    pp.current_file = "";
 
     // Parse arguments — gcc `cpp` compatible: separate and attached forms of
     // -D/-U/-I/-o/-x/-include/-imacros/-iquote/-isystem/-idirafter/-MF/-MT/-MQ,
@@ -2970,11 +3346,28 @@ int main(int argc, char **argv) {
     // -g*, -E, …) are accepted and ignored.
     string input_file = "";
     i32 nostdinc = 0, verbose = 0, undef = 0, no_markers = 0, freestanding = 0;
-    pp.markers = 0; pp.out_line = 1; pp.out_file = ""; pp.cur_sys = 0; pp.user_dirs = 0; pp.force_marker = 0;
-    pp.prev_sys_tok = 0; pp.cur_dir_idx = -1;
-    pp.missing_ok = 0; pp.discard = 0; pp.out_path = ""; pp.dump_defines = 0; pp.dump_names = 0;
-    pp.dump_includes = 0; pp.errors = 0; pp.compact = 0; pp.dump_macros = 0;
-    pp.dep_only = 0; pp.dep_side = 0; pp.dep_no_sys = 0; pp.dep_phony = 0; pp.dep_file = "";
+    pp.markers = 0;
+    pp.out_line = 1;
+    pp.out_file = "";
+    pp.cur_sys = 0;
+    pp.user_dirs = 0;
+    pp.force_marker = 0;
+    pp.prev_sys_tok = 0;
+    pp.cur_dir_idx = -1;
+    pp.missing_ok = 0;
+    pp.discard = 0;
+    pp.out_path = "";
+    pp.dump_defines = 0;
+    pp.dump_names = 0;
+    pp.dump_includes = 0;
+    pp.errors = 0;
+    pp.compact = 0;
+    pp.dump_macros = 0;
+    pp.dep_only = 0;
+    pp.dep_side = 0;
+    pp.dep_no_sys = 0;
+    pp.dep_phony = 0;
+    pp.dep_file = "";
     list<string> def_ops;          // "D<def>" / "U<name>", applied in command-line order
     list<string> isystem_dirs;
     list<string> after_dirs;
@@ -2988,9 +3381,19 @@ int main(int argc, char **argv) {
         string val = "";
         i32 takes = 0;
         list<string> valued;
-        valued.add("-D"); valued.add("-U"); valued.add("-I"); valued.add("-o"); valued.add("-x");
-        valued.add("-include"); valued.add("-imacros"); valued.add("-iquote"); valued.add("-isystem");
-        valued.add("-idirafter"); valued.add("-MF"); valued.add("-MT"); valued.add("-MQ");
+        valued.add("-D");
+        valued.add("-U");
+        valued.add("-I");
+        valued.add("-o");
+        valued.add("-x");
+        valued.add("-include");
+        valued.add("-imacros");
+        valued.add("-iquote");
+        valued.add("-isystem");
+        valued.add("-idirafter");
+        valued.add("-MF");
+        valued.add("-MT");
+        valued.add("-MQ");
         string flag = "";
         for (i32 vi = 0; vi < valued.length; vi++) {
             string f = valued[vi];
@@ -3034,18 +3437,19 @@ int main(int argc, char **argv) {
         else if (arg == "-dN") { pp.dump_names = 1; }
         else if (arg == "-dI") { pp.dump_includes = 1; }
         else if (arg.starts_with("--embed-dir=")) { pp.embed_dirs.add(arg[12:].dup); }
-        else if (arg == "--embed-dir" && ai + 1 < argc) { ai++; string ed = argv[ai]; pp.embed_dirs.add(ed); }
-        else if (arg.starts_with("-std=")) { std_name = arg[5:]; }
+        else if (arg == "--embed-dir" && ai + 1 < argc) {
+            ai++;
+            string ed = argv[ai];
+            pp.embed_dirs.add(ed);
+        } else if (arg.starts_with("-std=")) { std_name = arg[5:]; }
         else if (arg == "-ansi") { std_name = "c90"; }
         else if (arg.starts_with("-W") || arg == "-w" || arg == "-E"
-                 || (arg.starts_with("-f") && arg != "-ffreestanding") || arg.starts_with("-m")
-                 || arg.starts_with("-O") || arg.starts_with("-g") || arg == "-pipe"
-                 || arg.starts_with("-pedantic") || arg.starts_with("-d")
-                 || arg == "--gcc-lines" || arg == "-H"
-                 || arg == "-trigraphs" || arg == "-traditional-cpp") {
-
-        }
-        else if (arg == "-C") { if (g_keep_comments == 0) g_keep_comments = 1; }
+            || (arg.starts_with("-f") && arg != "-ffreestanding") || arg.starts_with("-m")
+            || arg.starts_with("-O") || arg.starts_with("-g") || arg == "-pipe"
+            || arg.starts_with("-pedantic") || arg.starts_with("-d")
+            || arg == "--gcc-lines" || arg == "-H"
+            || arg == "-trigraphs" || arg == "-traditional-cpp") {
+        } else if (arg == "-C") { if (g_keep_comments == 0) g_keep_comments = 1; }
         else if (arg == "-CC") { g_keep_comments = 2; }
         else if (arg == "-undef") { undef = 1; }
         else if (arg == "-nostdinc") { nostdinc = 1; }
@@ -3058,8 +3462,8 @@ int main(int argc, char **argv) {
             if (positional == 0) input_file = arg;
             else if (positional == 1) pp.out_path = arg;
             positional++;
-        }
-        else std::Println("sic-cpp: warning: unrecognized option '{}' (ignored)", arg, target = 2);
+        } else
+            std::Println("sic-cpp: warning: unrecognized option '{}' (ignored)", arg, target = 2);
     }
     pp.input_name = input_file.size > 0 && input_file != "-" ? input_file : "-";
     // -MD/-MMD without -MF: the .d file sits next to the output (`out.i` →
@@ -3069,7 +3473,7 @@ int main(int argc, char **argv) {
         if (pp.out_path.size == 0) {
             i32 sl = base.size - 1;
             while (sl >= 0 && base[sl] != '/') sl--;
-            base = base[sl+1:];
+            base = base[sl + 1:];
         }
         i32 dot = base.size - 1;
         while (dot > 0 && base[dot] != '.' && base[dot] != '/') dot--;
@@ -3089,7 +3493,8 @@ int main(int argc, char **argv) {
         // keeps its system position (else -I/usr/include would shadow the
         // compiler's own stddef.h/stdarg.h).
         list<string> std_dirs;
-        if (!nostdinc) std_dirs = info.size > 0 ? info_records(info, "include") : system_include_dirs(cc);   // -nostdinc drops only these
+        if (!nostdinc)
+            std_dirs = info.size > 0 ? info_records(info, "include") : system_include_dirs(cc);   // -nostdinc drops only these
         // The <x> chain: -I, then -isystem, the standard dirs, then -idirafter
         // (all but -I are system directories).
         list<string> sys;
@@ -3118,8 +3523,10 @@ int main(int argc, char **argv) {
     if (std_name == "c89" || std_name == "c90" || std_name == "gnu89" || std_name == "gnu90"
         || std_name == "iso9899:1990") stdc_version = "";
     else if (std_name == "iso9899:199409") stdc_version = "199409L";
-    else if (std_name.ends_with("99") || std_name.ends_with("9x") || std_name == "iso9899:1999") stdc_version = "199901L";
-    else if (std_name.ends_with("11") || std_name.ends_with("1x") || std_name == "iso9899:2011") stdc_version = "201112L";
+    else if (std_name.ends_with("99") || std_name.ends_with("9x") || std_name == "iso9899:1999")
+        stdc_version = "199901L";
+    else if (std_name.ends_with("11") || std_name.ends_with("1x") || std_name == "iso9899:2011")
+        stdc_version = "201112L";
     else if (std_name.ends_with("17") || std_name.ends_with("18") || std_name == "iso9899:2017" || std_name == "iso9899:2018") stdc_version = "201710L";
     if (info.size == 0 && cc.size == 0) {
         if (!undef) fallback_predefines(&pp);
@@ -3156,14 +3563,18 @@ int main(int argc, char **argv) {
                 if (f[k].size == 0) continue;
                 i32 eq = 0;
                 while (eq < f[k].size && f[k][eq] != '=') eq++;
-                string v = eq < f[k].size ? f[k][eq+1:] : "1";
+                string v = eq < f[k].size ? f[k][eq + 1:] : "1";
                 pp.has_cache[op + "(" + f[k][0:eq] + ")"] = v.dup;
             }
         }
     } else if (cc.size > 0) {
         list<string> ops;
-        ops.add("__has_attribute"); ops.add("__has_c_attribute"); ops.add("__has_cpp_attribute");
-        ops.add("__has_builtin"); ops.add("__has_feature"); ops.add("__has_extension");
+        ops.add("__has_attribute");
+        ops.add("__has_c_attribute");
+        ops.add("__has_cpp_attribute");
+        ops.add("__has_builtin");
+        ops.add("__has_feature");
+        ops.add("__has_extension");
         ops.add("__has_declspec_attribute");
         string prog = "";
         for (i32 i = 0; i < ops.length; i++)
@@ -3171,7 +3582,8 @@ int main(int argc, char **argv) {
         list<string> got = run_lines("printf '" + prog + "' | " + cc + " -xc -E -P - 2>/dev/null");
         for (i32 i = 0; i < got.length; i++) {
             string g = got[i].trim();
-            for (i32 k = 0; k < ops.length; k++) if (g == "siccpp_op_" + std::Fmt("{}", k)) pp.macros[ops[k]] = "B|";
+            for (i32 k = 0; k < ops.length; k++)
+                if (g == "siccpp_op_" + std::Fmt("{}", k)) pp.macros[ops[k]] = "B|";
         }
     }
     pp.macros["__STDC__"] = "O|1";
@@ -3197,7 +3609,8 @@ int main(int argc, char **argv) {
     pp.macros["__VERSION__"] = "O|\"Clang 15.0.0\"";
     if (verbose) {
         std::Println("#include <...> search starts here:", target = 2);
-        for (i32 i = 0; i < pp.include_dirs.length; i++) std::Println(" {}", pp.include_dirs[i], target = 2);
+        for (i32 i = 0; i < pp.include_dirs.length; i++)
+            std::Println(" {}", pp.include_dirs[i], target = 2);
         std::Println("End of search list.", target = 2);
     }
 
@@ -3226,7 +3639,7 @@ int main(int argc, char **argv) {
         }
         i32 eq = 0;
         while (eq < d.size && d[eq] != '=') eq++;
-        if (eq < d.size) pp_define(&pp, d[0:eq] + " " + d[eq+1:]);
+        if (eq < d.size) pp_define(&pp, d[0:eq] + " " + d[eq + 1:]);
         else pp_define(&pp, d + " 1");
         i32 n = 0;
         while (n < d.size && is_ident(d[n])) n++;
@@ -3239,7 +3652,11 @@ int main(int argc, char **argv) {
     if (input_file.size > 0 && input_file != "-") {
         pp.current_file = input_file;
         if (!file_exists(input_file)) {
-            std::Println("sic-cpp: fatal error: {}: No such file or directory", input_file, target = 2);
+            std::Println(
+                "sic-cpp: fatal error: {}: No such file or directory",
+                input_file,
+                target = 2
+            );
             std::Println("compilation terminated.", target = 2);
             return 1;
         }
@@ -3250,9 +3667,9 @@ int main(int argc, char **argv) {
         content = "";
         u8 buf[65536];
         while (true) {
-            i64 n = read(0, (void*)buf, 65536);
+            i64 n = read(0, (void *)buf, 65536);
             if (n <= 0) break;
-            content = content + string.create((char*)buf, (u64)n);
+            content = content + string.create((char *)buf, (u64)n);
         }
     }
 
@@ -3299,18 +3716,21 @@ int main(int argc, char **argv) {
 
 // A command-line `-include`/`-imacros` file: looked up in the current working
 // directory first (gcc shows it as `./name`), then like `#include "name"`.
-void cmdline_include(Preprocessor *pp, string name) {
+void cmdline_include(Preprocessor *pp, string name)
+{
     string path = "";
     i32 dir = -1;
     if (name.starts_with("/")) path = file_exists(name) ? name : "";
     else if (file_exists("./" + name)) path = "./" + name;
     else path = resolve_include(pp, name, 1, 0, &dir);
     if (path.size == 0) {
-        std::Println("<command-line>: fatal error: {}: No such file or directory", name, target = 2);
+        std::Println(
+            "<command-line>: fatal error: {}: No such file or directory",
+            name,
+            target = 2
+        );
         std::Println("compilation terminated.", target = 2);
         flush_and_exit(pp, 1);
     }
     enter_file(pp, path, dir >= 0 ? dir >= pp->user_dirs : 0, dir);
 }
-
-
