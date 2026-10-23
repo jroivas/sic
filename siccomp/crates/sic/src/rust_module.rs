@@ -99,6 +99,11 @@ impl Prim {
     fn sic(self) -> &'static str {
         if self == Prim::Char { "u8char" } else { self.rust() }
     }
+    /// The SIC spelling at the C boundary: a code point travels as `u32` (a
+    /// scalar on every ABI; SIC's `u8char` is a struct), converted explicitly.
+    fn sic_ffi(self) -> &'static str {
+        if self == Prim::Char { "u32" } else { self.rust() }
+    }
     /// Short tag for helper names (`vec_i64_push`).
     fn tag(self) -> &'static str { self.rust() }
 }
@@ -116,6 +121,9 @@ impl Elem {
     }
     fn sic(self) -> &'static str {
         match self { Elem::Prim(p) => p.sic(), Elem::Str => "string" }
+    }
+    fn sic_ffi(self) -> &'static str {
+        match self { Elem::Prim(p) => p.sic_ffi(), Elem::Str => "string" }
     }
     fn tag(self) -> &'static str {
         match self { Elem::Prim(p) => p.tag(), Elem::Str => "str" }
@@ -696,11 +704,23 @@ fn in_ns(ns: &[String], body: &str) -> String {
 // ── Code generation ──────────────────────────────────────────────────────────
 
 /// The C-boundary type of a returned value (Rust spelling, sic spelling).
+/// The boundary is scalars and pointers only, the same on every C ABI: a
+/// string goes in as `*const SicStr` and comes back through an out-pointer
+/// (`__ret`), never as a struct passed or returned by value.
+fn ret_out(t: &Ty) -> bool {
+    match t {
+        Ty::Str(_) | Ty::Bytes(_) => true,
+        Ty::Option(i) | Ty::Result(i, _) => matches!(**i, Ty::Str(_) | Ty::Bytes(_)),
+        _ => false,
+    }
+}
+
 fn ffi_ret(t: &Ty) -> (String, String) {
+    if ret_out(t) { return ("()".into(), "void".into()); }
     match t {
         Ty::Unit => ("()".into(), "void".into()),
-        Ty::Prim(p) => (p.ffi().into(), p.sic().into()),
-        Ty::Str(_) | Ty::Bytes(_) => ("SicStr".into(), "string".into()),
+        Ty::Prim(p) => (p.ffi().into(), p.sic_ffi().into()),
+        Ty::Str(_) | Ty::Bytes(_) => unreachable!(),
         Ty::List(..) | Ty::Obj(..) => ("*mut c_void".into(), "void *".into()),
         Ty::Option(i) | Ty::Result(i, _) => match **i {
             Ty::Unit => ("bool".into(), "bool".into()),
@@ -711,8 +731,8 @@ fn ffi_ret(t: &Ty) -> (String, String) {
 
 fn ffi_param(t: &Ty) -> (String, String) {
     match t {
-        Ty::Prim(p) => (p.ffi().into(), p.sic().into()),
-        Ty::Str(_) | Ty::Bytes(_) => ("SicStr".into(), "string".into()),
+        Ty::Prim(p) => (p.ffi().into(), p.sic_ffi().into()),
+        Ty::Str(_) | Ty::Bytes(_) => ("*const SicStr".into(), "string *".into()),
         _ => ("*mut c_void".into(), "void *".into()),
     }
 }
@@ -774,7 +794,7 @@ fn rust_in(t: &Ty, n: &str, module: &str, out: &mut String) -> String {
         }
         Ty::Prim(_) => n.into(),
         Ty::Str(h) => {
-            out.push_str(&format!("    let {n} = __sic_str(&{n});\n"));
+            out.push_str(&format!("    let {n} = __sic_str(&*{n});\n"));
             match h {
                 How::Owned => format!("{n}.into_owned()"),
                 How::RefOwned => format!("&{n}.into_owned()"),
@@ -782,7 +802,7 @@ fn rust_in(t: &Ty, n: &str, module: &str, out: &mut String) -> String {
             }
         }
         Ty::Bytes(h) => {
-            out.push_str(&format!("    let {n} = __sic_bytes(&{n});\n"));
+            out.push_str(&format!("    let {n} = __sic_bytes(&*{n});\n"));
             match h {
                 How::Owned => format!("{n}.to_vec()"),
                 How::RefOwned => format!("&{n}.to_vec()"),
@@ -820,7 +840,9 @@ fn glue_sym(module: &str, owner: Option<&str>, f: &Func) -> String {
 fn glue_fn(module: &str, owner: Option<&str>, f: &Func) -> String {
     let sym = glue_sym(module, owner, f);
     let fallible = matches!(f.ret, Ty::Option(_) | Ty::Result(..));
+    let out_str = ret_out(&f.ret);
     let mut params: Vec<String> = Vec::new();
+    if out_str { params.push("__ret: *mut SicStr".into()); }
     if fallible { params.push("__ok: *mut bool".into()); }
     if f.recv != Recv::None { params.push("__self: *mut c_void".into()); }
     for p in &f.params {
@@ -850,10 +872,22 @@ fn glue_fn(module: &str, owner: Option<&str>, f: &Func) -> String {
     let call = format!("{}({})", callee, args.join(", "));
     match &f.ret {
         Ty::Unit => body.push_str(&format!("    {};\n", call)),
+        Ty::Option(i) if out_str => {
+            body.push_str(&format!(
+                "    match {call} {{\n        Some(__v) => {{ *__ok = true; *__ret = {}; }}\n        None => {{ *__ok = false; }}\n    }}\n",
+                rust_out(i, "__v")));
+        }
         Ty::Option(i) => {
             body.push_str(&format!(
                 "    match {call} {{\n        Some(__v) => {{ *__ok = true; {} }}\n        None => {{ *__ok = false; {} }}\n    }}\n",
                 rust_out(i, "__v"), ffi_zero(i)));
+        }
+        Ty::Result(i, unit_err) if out_str => {
+            let err = if *unit_err { "String::from(\"error\")" } else { "__e.to_string()" };
+            let bind = if *unit_err { "_" } else { "__e" };
+            body.push_str(&format!(
+                "    match {call} {{\n        Ok(__v) => {{ *__ok = true; *__ret = {}; }}\n        Err({bind}) => {{ *__ok = false; __sic_set_err({err}); }}\n    }}\n",
+                rust_out(i, "__v")));
         }
         Ty::Result(i, unit_err) => {
             let err = if *unit_err { "String::from(\"error\")" } else { "__e.to_string()" };
@@ -863,6 +897,7 @@ fn glue_fn(module: &str, owner: Option<&str>, f: &Func) -> String {
                 if **i == Ty::Unit { "let _ = __v; true".to_string() } else { rust_out(i, "__v") },
                 ffi_zero(i)));
         }
+        t if out_str => body.push_str(&format!("    let __r = {call};\n    *__ret = {};\n", rust_out(t, "__r"))),
         t => body.push_str(&format!("    let __r = {call};\n    {}\n", rust_out(t, "__r"))),
     }
     let ret = if rret == "()" { String::new() } else { format!(" -> {}", rret) };
@@ -945,7 +980,7 @@ fn gen_glue(b: &Binding) -> String {
     let mut s = String::from(GLUE_PRELUDE);
     s.push_str(&format!("use ::{} as __c;\n\n", b.crate_ident));
     s.push_str(&format!(
-        "#[no_mangle]\npub extern \"C\" fn __sicrs_{m}_last_error() -> SicStr {{\n    __SIC_ERR.with(|c| __sic_out(c.borrow().as_bytes()))\n}}\n\n"));
+        "#[no_mangle]\npub unsafe extern \"C\" fn __sicrs_{m}_last_error(out: *mut SicStr) {{\n    *out = __SIC_ERR.with(|c| __sic_out(c.borrow().as_bytes()));\n}}\n\n"));
     for st in &b.structs {
         s.push_str(&format!(
             "#[no_mangle]\npub unsafe extern \"C\" fn __sicrs_{m}_{mk}_drop(p: *mut c_void) {{\n    if !p.is_null() {{ drop(Box::from_raw(p as *mut __c::{k})); }}\n}}\n\n",
@@ -959,7 +994,7 @@ fn gen_glue(b: &Binding) -> String {
     for e in &elems {
         let (t, rt, ft) = (e.tag(), e.rust(), e.ffi());
         let push_conv = match e {
-            Elem::Str => "__sic_str(&x).into_owned()",
+            Elem::Str => "__sic_str(&*x).into_owned()",
             Elem::Prim(Prim::Char) => "char::from_u32(x).unwrap_or('\\u{FFFD}')",
             Elem::Prim(_) => "x",
         };
@@ -968,15 +1003,24 @@ fn gen_glue(b: &Binding) -> String {
             Elem::Prim(Prim::Char) => "v[i] as u32",
             Elem::Prim(_) => "v[i]",
         };
+        // A string element goes in by pointer and comes out through `out`.
+        let (push_ty, get_sig, get_body) = match e {
+            Elem::Str => ("*const SicStr".to_string(),
+                "v: *mut c_void, i: usize, out: *mut SicStr)".to_string(),
+                format!("let v = &*(v as *mut Vec<{rt}>); *out = {get_conv};")),
+            _ => (ft.to_string(),
+                format!("v: *mut c_void, i: usize) -> {ft}"),
+                format!("let v = &*(v as *mut Vec<{rt}>); {get_conv}")),
+        };
         s.push_str(&format!(
 "#[no_mangle]
 pub extern \"C\" fn __sicrs_{m}_vec_{t}_new() -> *mut c_void {{ __sic_box(Vec::<{rt}>::new()) }}
 #[no_mangle]
-pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_push(v: *mut c_void, x: {ft}) {{ (*(v as *mut Vec<{rt}>)).push({push_conv}); }}
+pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_push(v: *mut c_void, x: {push_ty}) {{ (*(v as *mut Vec<{rt}>)).push({push_conv}); }}
 #[no_mangle]
 pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_len(v: *mut c_void) -> usize {{ (*(v as *mut Vec<{rt}>)).len() }}
 #[no_mangle]
-pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_get(v: *mut c_void, i: usize) -> {ft} {{ let v = &*(v as *mut Vec<{rt}>); {get_conv} }}
+pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_get({get_sig} {{ {get_body} }}
 #[no_mangle]
 pub unsafe extern \"C\" fn __sicrs_{m}_vec_{t}_free(v: *mut c_void) {{ drop(Box::from_raw(v as *mut Vec<{rt}>)); }}
 
@@ -1017,6 +1061,8 @@ fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: 
     let mut post = String::new();
     let mut args: Vec<String> = Vec::new();
     let fallible = matches!(f.ret, Ty::Option(_) | Ty::Result(..));
+    let out_str = ret_out(&f.ret);
+    if out_str { args.push("&__r".into()); }
     if fallible { args.push("&__ok".into()); }
     if let (Some(s), true) = (owner, f.recv != Recv::None) {
         args.push(format!("__rs_p_{}(self->__rs_h)", mangle(s)));
@@ -1028,15 +1074,27 @@ fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: 
                 let v = format!("__v{}", i);
                 let t = e.tag();
                 pre.push_str(&format!("{ind}void *{v} = __sicrs_{m}_vec_{t}_new();\n"));
-                pre.push_str(&format!("{ind}for ({} __x : {n}.values) __sicrs_{m}_vec_{t}_push({v}, __x);\n", e.sic()));
+                let pushed = match e {
+                    Elem::Str => "&__x".to_string(),
+                    Elem::Prim(Prim::Char) => "(u32)__x".to_string(),
+                    _ => "__x".to_string(),
+                };
+                pre.push_str(&format!("{ind}for ({} __x : {n}.values) __sicrs_{m}_vec_{t}_push({v}, {pushed});\n", e.sic()));
                 if *h == How::RefMut {
+                    let read = match e {
+                        Elem::Str => format!("{{ string __s; __sicrs_{m}_vec_{t}_get({v}, __i, &__s); {n}[__i] = __s; }}"),
+                        Elem::Prim(Prim::Char) => format!("{n}[__i] = (u8char)__sicrs_{m}_vec_{t}_get({v}, __i);"),
+                        _ => format!("{n}[__i] = __sicrs_{m}_vec_{t}_get({v}, __i);"),
+                    };
                     post.push_str(&format!(
-                        "{ind}for (usize __i = 0; __i < {n}.length; __i++) {n}[__i] = __sicrs_{m}_vec_{t}_get({v}, __i);\n"));
+                        "{ind}for (usize __i = 0; __i < {n}.length; __i++) {read}\n"));
                 }
                 post.push_str(&format!("{ind}__sicrs_{m}_vec_{t}_free({v});\n"));
                 args.push(v);
             }
             Ty::Obj(s, _) => args.push(format!("__rs_p_{}({}.__rs_h)", mangle(s), n)),
+            Ty::Str(_) | Ty::Bytes(_) => args.push(format!("&{}", n)),
+            Ty::Prim(Prim::Char) => args.push(format!("(u32){}", n)),
             _ => args.push(n),
         }
     }
@@ -1050,7 +1108,13 @@ fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: 
         out.push_str(&format!("{}}}\n", indent));
         return out;
     }
-    out.push_str(&format!("{ind}{} __r = {};\n", gret, call));
+    if out_str {
+        // The result arrives through `&__r` (an owned string, released or
+        // moved like any local).
+        out.push_str(&format!("{ind}string __r;\n{ind}{};\n", call));
+    } else {
+        out.push_str(&format!("{ind}{} __r = {};\n", gret, call));
+    }
     out.push_str(&post);
     // The sic value of the glue result `__r` (statements, then an expression).
     let conv = |t: &Ty, out: &mut String| -> String {
@@ -1059,11 +1123,17 @@ fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: 
                 let tg = e.tag();
                 out.push_str(&format!("{ind}{} __l;\n", sic_ty(t)));
                 out.push_str(&format!("{ind}usize __n = __sicrs_{m}_vec_{tg}_len(__r);\n"));
-                out.push_str(&format!("{ind}for (usize __i = 0; __i < __n; __i++) __l.add(__sicrs_{m}_vec_{tg}_get(__r, __i));\n"));
+                let add = match e {
+                    Elem::Str => format!("{{ string __s; __sicrs_{m}_vec_{tg}_get(__r, __i, &__s); __l.add(__s); }}"),
+                    Elem::Prim(Prim::Char) => format!("__l.add((u8char)__sicrs_{m}_vec_{tg}_get(__r, __i));"),
+                    _ => format!("__l.add(__sicrs_{m}_vec_{tg}_get(__r, __i));"),
+                };
+                out.push_str(&format!("{ind}for (usize __i = 0; __i < __n; __i++) {add}\n"));
                 out.push_str(&format!("{ind}__sicrs_{m}_vec_{tg}_free(__r);\n"));
                 "__l".into()
             }
             Ty::Obj(s, _) => format!("__rs_wrap_{}(__r)", mangle(s)),
+            Ty::Prim(Prim::Char) => "(u8char)__r".into(),
             _ => "__r".into(),
         }
     };
@@ -1074,7 +1144,7 @@ fn sic_fn_named(b: &Binding, owner: Option<&str>, f: &Func, name: &str, indent: 
             out.push_str(&format!("{ind}return Option::Some({});\n", e));
         }
         Ty::Result(i, _) => {
-            out.push_str(&format!("{ind}if (!__ok) return Result::Err(__sicrs_{m}_last_error());\n"));
+            out.push_str(&format!("{ind}if (!__ok) {{ string __e; __sicrs_{m}_last_error(&__e); return Result::Err(__e); }}\n"));
             let e = if **i == Ty::Unit { "true".to_string() } else { conv(i, &mut out) };
             out.push_str(&format!("{ind}return Result::Ok({});\n", e));
         }
@@ -1103,6 +1173,7 @@ fn sic_forward(f: &Func, name: &str, target: &str, indent: &str) -> String {
 /// The glue prototype of a function, in sic.
 fn sic_proto(m: &str, owner: Option<&str>, f: &Func) -> String {
     let mut ps: Vec<String> = Vec::new();
+    if ret_out(&f.ret) { ps.push("string *__ret".into()); }
     if matches!(f.ret, Ty::Option(_) | Ty::Result(..)) { ps.push("bool *__ok".into()); }
     if f.recv != Recv::None { ps.push("void *__self".into()); }
     for p in &f.params { ps.push(format!("{} {}", ffi_param(&p.ty).1, sic_ident(&p.name))); }
@@ -1119,7 +1190,7 @@ fn gen_sic(b: &Binding) -> String {
          // are Rust's; the functions call its Rust glue.\nmodule {};\n\n",
         b.package, m));
     // Glue prototypes.
-    s.push_str(&format!("string __sicrs_{m}_last_error(void);\n"));
+    s.push_str(&format!("void __sicrs_{m}_last_error(string *out);\n"));
     for st in &b.structs { s.push_str(&format!("void __sicrs_{m}_{}_drop(void *p);\n", mangle(&st.key))); }
     let mut elems = Vec::new();
     for (_, f) in all_funcs(b) {
@@ -1127,10 +1198,14 @@ fn gen_sic(b: &Binding) -> String {
         for p in &f.params { collect_elems(&p.ty, &mut elems); }
     }
     for e in &elems {
-        let (t, st) = (e.tag(), e.sic());
+        let t = e.tag();
+        let (push, get) = match e {
+            Elem::Str => ("string *x".to_string(), format!("void __sicrs_{m}_vec_{t}_get(void *v, usize i, string *out);")),
+            _ => (format!("{} x", e.sic_ffi()), format!("{} __sicrs_{m}_vec_{t}_get(void *v, usize i);", e.sic_ffi())),
+        };
         s.push_str(&format!(
-            "void *__sicrs_{m}_vec_{t}_new(void);\nvoid __sicrs_{m}_vec_{t}_push(void *v, {st} x);\n\
-             usize __sicrs_{m}_vec_{t}_len(void *v);\n{st} __sicrs_{m}_vec_{t}_get(void *v, usize i);\n\
+            "void *__sicrs_{m}_vec_{t}_new(void);\nvoid __sicrs_{m}_vec_{t}_push(void *v, {push});\n\
+             usize __sicrs_{m}_vec_{t}_len(void *v);\n{get}\n\
              void __sicrs_{m}_vec_{t}_free(void *v);\n"));
     }
     for (owner, f) in all_funcs(b) { s.push_str(&sic_proto(m, owner, f)); }

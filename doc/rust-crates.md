@@ -345,9 +345,17 @@ index out of bounds: the len is 3 but the index is 7
    written in SIC over the glue) — read it to see exactly what was bound;
 2. builds the glue with `cargo` as a static library (`DIR/target`, so rebuilds are
    incremental);
-3. compiles the SIC interface like any module, and links the Rust code into
-   `lib<name>.so` and `lib<name>.a`. Rust's own debug info is stripped unless you
-   pass `-g`.
+3. compiles the SIC interface like any module: `lib<name>.so` holds the SIC code
+   and the Rust code (linked with `--strip-debug` unless `-g`: Rust's standard
+   library ships with full debug info); `lib<name>.a` holds the SIC code and
+   `lib<name>_rs.a` the Rust code, both linked by a `-static` consumer (pass
+   `-Wl,--strip-debug` there for a small binary).
+
+The C boundary between the two halves uses only scalars and pointers: a `string`
+crosses as a pointer to its descriptor (results through an out-pointer), a
+`u8char` as its `u32` code point, a Rust object as an opaque pointer — no struct is
+passed or returned by value, so it does not depend on how a target's C ABI passes
+aggregates.
 
 The manifest records the system libraries Rust's standard library needs, so a
 consumer passes only `-I<dir>`, dynamic or `-static`. Several Rust modules can be
