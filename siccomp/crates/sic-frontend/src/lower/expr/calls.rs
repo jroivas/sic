@@ -230,6 +230,15 @@ impl<'m> FuncCtx<'m> {
                             "string.create(bytes, len) takes two arguments".to_string(),
                             sp.file.clone(), sp.line, sp.col));
                     };
+                    // The bytes are a pointer (or an array): a `string` already has
+                    // its length — reinterpreting its descriptor as bytes is wrong.
+                    if !matches!(self.infer_expr_type(ptr_e),
+                        Ok(Type::Pointer(_) | Type::Array { .. }) | Err(_))
+                    {
+                        return Err(CompileError::at(
+                            "string.create(bytes, len) takes a byte pointer (char*/u8*); for part of a string, slice it: s[0:len]".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
                     let ptr = self.lower_expr(ptr_e)?;
                     let len = self.lower_expr(len_e)?;
                     let v = self.make_string_val(ptr, len, Constant::int(0))?;

@@ -1,0 +1,7 @@
+// `string.create(bytes, len)` wraps raw bytes: a `string` argument (here a literal)
+// was reinterpreted as bytes — its descriptor — and read freed memory. Now an error.
+int main()
+{
+    string c = string.create("xyz", 2);
+    return c.size;
+}
