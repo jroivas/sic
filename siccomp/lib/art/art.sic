@@ -31,7 +31,8 @@ static int art_cur = -1;
 
 // Each coroutine starts here, runs its function, then marks itself done and
 // switches back to the scheduler (uc_link also points there as a safety net).
-static void art_trampoline(void) {
+static void art_trampoline(void)
+{
     int i = art_cur;
     art_fn[i](art_arg[i]);
     art_alive[i] = 0;
@@ -39,7 +40,8 @@ static void art_trampoline(void) {
 }
 
 // Schedule `fn(arg)` to run as a coroutine. It does not start until `run()`.
-int spawn(void (*fn)(void *), void *arg) {
+int spawn(void (*fn)(void *), void *arg)
+{
     if (art_n >= ART_MAX) return -1;
     int i = art_n;
     art_n = art_n + 1;
@@ -58,7 +60,8 @@ int spawn(void (*fn)(void *), void *arg) {
 
 // Yield from the current coroutine back to the scheduler (call only inside a
 // coroutine started by `spawn`).
-void yield_now(void) {
+void yield_now(void)
+{
     int i = art_cur;
     if (i < 0) return;
     swapcontext(art_ctx[i], &art_main);
@@ -66,7 +69,8 @@ void yield_now(void) {
 
 // Run the scheduler until every spawned coroutine has finished. Round-robin: each
 // pass resumes every still-alive coroutine once.
-void run(void) {
+void run(void)
+{
     int progress = 1;
     while (progress) {
         progress = 0;
@@ -88,7 +92,8 @@ void run(void) {
 }
 
 // The number of coroutines still scheduled (alive) — handy for tests/diagnostics.
-int pending(void) {
+int pending(void)
+{
     int c = 0;
     for (int i = 0; i < art_n; i++) if (art_alive[i]) c = c + 1;
     return c;
