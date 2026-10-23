@@ -41,9 +41,27 @@ i32 walk(i32 n)
     }
     while (t > 100);
     while (t < 0) { t++; }
+    while (t > 9) (*pt)++;
     auto add = [t](i32 x)
     {
         return x + t;
     };
     return add(t);
+}
+i32 base_of(char ty)
+{
+    i32 b = 10;
+    if (ty == 'x') { b = 16; }
+    else if (ty == 'o') { b = 8; }
+    else { b = 10; }
+    return b;
+}
+void scopes()
+{
+    {
+        i32 a = 1;
+    }
+    {
+        i32 b = 2;
+    }
 }

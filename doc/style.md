@@ -88,7 +88,8 @@ if (a) {
 - Spaces around binary and assignment operators (`a + b`, `x <<= 2`, `x <> y`,
   `v <<< 13`), around `?`/`:` of a conditional, and around `=>` of a lambda; none
   after unary operators (`-x`, `!ok`, `*p`, `&v`) or around `::`, `.`, `->`.
-- The `*` of a pointer binds to the name: `char *p`, `Buffer *self`, `u8 *buf`.
+- The `*` of a pointer binds to the name, everywhere: `char *p`, `Buffer *self`,
+  `char *a, b;`, `(u8 *)p`, and a return type: `char *name(i32 n)`.
 - A space after each comma and after the `;` of a `for` header; none just inside
   parentheses or brackets: `f(a, b)`, `xs[i]`, `for (int i = 0; i < n; i++)`.
 - Generic arguments without inner spaces at the brackets: `list<i32>`,

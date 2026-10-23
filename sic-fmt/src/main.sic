@@ -750,6 +750,10 @@ void classify_operator(Fmt *f, i32 i)
         return;
     i32 q = next_sig(f, i);
     i32 pp = prev_sig(f, p);
+    if (tis(f, q, ")") || tis(f, q, ",") || tis(f, q, "]") || (q >= 0 && f->t[q].generic && tx(f, q) != "<")) {
+        f->t[i].ptr = true;                 // `(T *)x`: no operand follows, no product
+        return;
+    }
     bool decl = (f->t[p].stmt && !tis(f, pp, ":") && q >= 0 && f->t[q].kind == K_WORD)
         || (pp >= 0 && f->t[pp].kind == K_WORD && f->t[pp].typew);
     if (decl || spaced(f, i) != spaced(f, i + 1))
@@ -1066,7 +1070,10 @@ i32 line_break(Fmt *f, i32 a, i32 b)
     } else if (bp && y == "{" && f->t[b].brace == B_FN) {
         r = oneline(f, b) ? 0 : 1;
     } else if (bp && y == "{" && f->t[b].brace == B_BLOCK) {
-        r = 0;
+        // a block of its own (for a scope) starts a line; others end one
+        bool own = ap && (x == ";" || x == "}" || (x == "{" && is_block(f, a)))
+            && !(ub >= 0 && is_block(f, ub) && oneline(f, ub));
+        r = own ? imax(1, keep) : 0;
     } else if (ap && x == "{" && is_block(f, a)) {
         r = oneline(f, a) ? 0 : 1;
     } else if (ap && x == "{") {
@@ -1078,7 +1085,9 @@ i32 line_break(Fmt *f, i32 a, i32 b)
     } else if (ap && x == "}" && is_block(f, f->t[a].mate)) {
         i32 o = f->t[a].mate;
         i32 u = f->t[o].up;
-        if (y == ";" || y == "," || y == ")" || y == "]" || y == "else"
+        if (y == "else" && oneline(f, o))
+            r = keep1;                      // a chain of one-line `if { … }` lines stays
+        else if (y == ";" || y == "," || y == ")" || y == "]" || y == "else"
             || (y == "while" && tis(f, prev_sig(f, o), "do")))
             r = 0;
         else if (type_body(f, o) && !type_body_ends(f, a))
@@ -1155,6 +1164,8 @@ i32 space(Fmt *f, i32 a, i32 b)
         return 0;                           // `o?.field`
     if (x == "." || x == "->" || x == "::" || y == "." || y == "->" || y == "::")
         return 0;
+    if (f->t[b].ptr)
+        return f->t[a].ptr ? 0 : 1;         // `char *p`, `char **p`
     if (y == "<" && f->t[b].generic)
         return 0;
     if (x == "<" && f->t[a].generic)
@@ -1169,10 +1180,10 @@ i32 space(Fmt *f, i32 a, i32 b)
     }
     if (x == ":")
         return f->t[a].colon == C_SLICE ? 0 : 1;
-    if (f->t[a].unary || f->t[a].ptr)
+    if (f->t[a].unary)
         return 0;
-    if (f->t[b].ptr)
-        return 1;
+    if (f->t[a].ptr)
+        return 0;
     if ((y == "++" || y == "--") && !f->t[b].unary)
         return 0;
     if (f->t[b].unary)
@@ -1183,6 +1194,8 @@ i32 space(Fmt *f, i32 a, i32 b)
                 return 1;
             return f->t[a].typew && tis(f, next_sig(f, b), "*") ? 1 : 0;   // `void (*fn)(int)`
         }
+        if (x == ")" && f->t[a].ctrl)
+            return 1;                       // a body after `while (c)`: `(*i)++;`
         return x == ")" || x == "]" || ak == K_STR ? 0 : 1;
     }
     if (y == "[") {
