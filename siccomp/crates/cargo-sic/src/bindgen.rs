@@ -985,35 +985,7 @@ pub struct Instance {
     pub name: Option<String>,
 }
 
-/// The top-level type arguments of `Base<A, B<C>>` (`A`, `B<C>`), trimmed.
-fn type_arg_texts(ty: &str) -> Vec<String> {
-    let Some(start) = ty.find('<') else { return Vec::new() };
-    let inner = &ty[start + 1..ty.rfind('>').unwrap_or(ty.len())];
-    let mut out = Vec::new();
-    let (mut depth, mut cur) = (0, String::new());
-    for c in inner.chars() {
-        match c {
-            '<' | '(' | '[' => { depth += 1; cur.push(c); }
-            '>' | ')' | ']' => { depth -= 1; cur.push(c); }
-            ',' if depth == 0 => { out.push(cur.trim().to_string()); cur.clear(); }
-            _ => cur.push(c),
-        }
-    }
-    if !cur.trim().is_empty() { out.push(cur.trim().to_string()); }
-    out
-}
-
-/// An instance's name suffix — the same as sic's `rust_args_mangled`: each
-/// argument reduced to identifier characters, joined by `__`.
-pub fn rust_args_mangled(args: &[String]) -> String {
-    args.iter().map(|a| {
-        let mut o = String::new();
-        for c in a.chars() {
-            if c.is_ascii_alphanumeric() { o.push(c); } else if !o.ends_with('_') { o.push('_'); }
-        }
-        o.trim_matches('_').to_string()
-    }).collect::<Vec<_>>().join("__")
-}
+use sic_rust_names::{args_mangled as rust_args_mangled, type_arg_texts};
 
 pub fn generate(api: &Value, krate: &str, crate_name: &str, version: &str, instances: &[Instance]) -> Result<Generated, String> {
     let fv = api["format_version"].as_u64().unwrap_or(0);

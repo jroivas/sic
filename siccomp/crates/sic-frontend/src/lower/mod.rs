@@ -5124,18 +5124,9 @@ fn subst_ast_type(ty: &AstType, subst: &HashMap<String, AstType>) -> AstType {
 /// driver builds them and compiles the unit again.
 pub const RUST_INSTANCES_MARKER: &str = "__sic_rust_instances__";
 
-/// A Rust generic instance's name suffix: its type arguments, each reduced to
-/// identifier characters (`i64, String` → `i64__String`, `Vec<u8>` → `Vec_u8`).
-/// `cargo sic` names the instance wrapper the same way.
-pub fn rust_args_mangled(args: &[String]) -> String {
-    args.iter().map(|a| {
-        let mut o = String::new();
-        for c in a.chars() {
-            if c.is_ascii_alphanumeric() { o.push(c); } else if !o.ends_with('_') { o.push('_'); }
-        }
-        o.trim_matches('_').to_string()
-    }).collect::<Vec<_>>().join("__")
-}
+/// A Rust generic instance's name suffix (shared with `cargo sic`, which names
+/// the instance wrapper the same way).
+pub use sic_rust_names::args_mangled as rust_args_mangled;
 
 fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
     use AstType::*;

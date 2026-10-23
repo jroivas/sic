@@ -1,0 +1,10 @@
+[package]
+name = "sic-rust-names"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Names shared by sic and cargo-sic for Rust generic instances: both sides
+# must spell an instance (`HashMap__i64__String`) identically.
+[lib]
+path = "src/lib.rs"
