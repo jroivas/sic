@@ -265,6 +265,9 @@ pub struct FuncCtx<'m> {
     /// How many `goto L` the function body holds per label — a constant-false
     /// `if` branch defining `L` is still reachable when a goto outside it exists.
     pub goto_counts: HashMap<String, usize>,
+    /// Blocks ended by a call that never returns (`exit(1);`): their terminator
+    /// is `Unreachable`, which otherwise means "not terminated yet".
+    pub diverged: std::collections::HashSet<BlockId>,
     /// Declared (AST) types of the function's parameters and locals by name
     /// (the latest declaration wins) — see `Lowerer::global_qtypes`.
     pub decl_qtypes: HashMap<String, QualType>,
@@ -434,6 +437,7 @@ impl<'m> FuncCtx<'m> {
             ret_ty,
             labels: HashMap::new(),
             goto_counts: HashMap::new(),
+            diverged: std::collections::HashSet::new(),
             decl_qtypes: HashMap::new(),
             addr_taken: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
@@ -552,6 +556,7 @@ impl<'m> FuncCtx<'m> {
 
     pub fn is_terminated(&self) -> bool {
         !matches!(self.current_block().terminator, Terminator::Unreachable)
+            || self.diverged.contains(&self.current_bb)
     }
 
     /// Whether integer-overflow detection is active here — inside `unsafe`, or an
@@ -1989,6 +1994,20 @@ impl<'m> Lowerer {
         constructor: Option<sic_ir::RunAt>,
         is_async: bool,
     ) -> Result<()> {
+        // Code no path reaches (sic.md §"Unreachable code"): warned once per body.
+        let wanted = if self.sic {
+            crate::diag::enabled("unreachable-code")
+        } else {
+            crate::diag::explicitly_enabled("unreachable-code")
+        };
+        if wanted {
+            for (s, left) in crate::ast::unreachable_code(body) {
+                let (file, line, col) = stmt_loc(s);
+                let why = if left > 0 { format!(" (control does not get past line {})", left) } else { String::new() };
+                crate::diag::warn("unreachable-code", file.as_deref(), line, col,
+                    &format!("code will never be executed{}", why));
+            }
+        }
         // A plain `tuple` local assigned tuples of different shapes is dynamically
         // typed in the WHOLE function (not just after the conflicting assignment):
         // lowering records it and asks for the function to be lowered again
@@ -2320,6 +2339,11 @@ impl<'m> FuncCtx<'m> {
                 // Free any bigint temporaries this statement created (sic.md
                 // §"Integer sizes") — per statement, so loop bodies don't leak.
                 if !self.is_terminated() { self.flush_bigint_temps(); }
+                // `exit(1);`, `abort();`, `unreachable;`: control ends here (a
+                // guard's `else` may end with one; what follows is dead).
+                if !self.is_terminated() && crate::ast::stmt_never_returns(e) {
+                    self.diverged.insert(self.current_bb);
+                }
             }
             Stmt::Block(stmts, _) => {
                 self.enter_scope();

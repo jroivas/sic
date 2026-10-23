@@ -1,0 +1,16 @@
+// Apple's "goto fail" bug: a repeated `goto fail;` skips the check after it.
+// -Werror=unreachable-code makes the dead code a compile error.
+int verify(int sig, int hash)
+{
+    int err = 0;
+    if (sig < 0)
+        goto fail;
+        goto fail;
+    if (hash < 0)
+        goto fail;
+    err = 1;
+fail:
+    return err;
+}
+
+int main() { return verify(1, -1); }

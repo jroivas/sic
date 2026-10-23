@@ -830,3 +830,147 @@ pub fn may_be_entered(s: &Stmt) -> bool {
     collect(s, &mut labels);
     reachable_from_outside(s, &labels)
 }
+
+// ─── Unreachable code (`-Wunreachable-code`) ──────────────────────────────────
+
+/// Functions that never return: a call to one, as a statement, ends its block.
+/// Only names the C standard library (or sic) reserves, so a program's own
+/// function of the name cannot exist.
+pub fn never_returns(name: &str) -> bool {
+    matches!(name, "abort" | "exit" | "_exit" | "_Exit" | "quick_exit" | "__sic_unreachable"
+        | "__builtin_trap" | "__builtin_unreachable" | "__assert_fail" | "longjmp" | "siglongjmp"
+        | "_longjmp" | "pthread_exit" | "thrd_exit")
+}
+
+/// The function a statement `name(…);` calls when it never returns.
+pub fn stmt_never_returns(e: &Expr) -> bool {
+    matches!(&e.kind, ExprKind::Call { func, .. } if matches!(&func.kind, ExprKind::Ident(n) if never_returns(n)))
+}
+
+fn const_true(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::IntLit(v, _) => *v != 0,
+        ExprKind::UIntLit(v, _) => *v != 0,
+        ExprKind::BoolLit(b) => *b,
+        _ => false,
+    }
+}
+
+/// Whether `s` holds a `break` (with `loops_only`: a `continue`) that leaves the
+/// statement it is in — not one belonging to a loop or switch nested inside.
+fn has_exit(s: &Stmt, continue_too: bool) -> bool {
+    match s {
+        Stmt::Break(_) => true,
+        Stmt::Continue(_) => continue_too,
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => false,
+        // a switch takes the `break`s, not the `continue`s
+        Stmt::Switch { body, .. } => continue_too && has_continue(body),
+        _ => direct_child_stmts(s).into_iter().any(|c| has_exit(c, continue_too)),
+    }
+}
+
+fn has_continue(s: &Stmt) -> bool {
+    match s {
+        Stmt::Continue(_) => true,
+        Stmt::While { .. } | Stmt::DoWhile { .. } | Stmt::For { .. } | Stmt::ForEach { .. } => false,
+        _ => direct_child_stmts(s).into_iter().any(has_continue),
+    }
+}
+
+/// The statements of a function body that no path reaches — after a `return`,
+/// `break`, `continue`, `goto`, `unreachable`, a call that never returns, or a
+/// loop that never ends — each with the line where control last left. One per
+/// dead stretch (its first statement); a jump target (a label some `goto` names,
+/// a `case`) starts a live one again. Apple's "goto fail" bug is the classic: a
+/// repeated `goto fail;` skipped the certificate check after it.
+pub fn unreachable_code(body: &[Stmt]) -> Vec<(&Stmt, u32)> {
+    let mut gotos = std::collections::HashMap::new();
+    for s in body { count_gotos(s, &mut gotos); }
+    let mut dead = Vec::new();
+    block_completes(body, &gotos, &mut dead);
+    dead
+}
+
+/// Whether control can fall out of the end of `ss`; records its dead stretches.
+fn block_completes<'a>(ss: &'a [Stmt], gotos: &std::collections::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
+    let mut live = true;
+    let mut left = 0u32;            // the line of the statement control did not pass
+    let mut reported = false;
+    for s in ss {
+        if !live && reachable_from_outside(s, gotos) {
+            live = true;
+            reported = false;
+        }
+        if !live {
+            // An empty statement, a `break` after a `return` (C style), a
+            // declaration without code, or an `unreachable` (it says so itself)
+            // is no dead code worth reporting.
+            let trivial = match s {
+                Stmt::Null(_) | Stmt::Break(_) | Stmt::Fallthrough(_) => true,
+                Stmt::Expr(e, _) => matches!(&e.kind, ExprKind::Call { func, .. }
+                    if matches!(&func.kind, ExprKind::Ident(n) if n == "__sic_unreachable")),
+                Stmt::Decl(Decl::Var { declarators, .. }) => declarators.iter().all(|d| d.init.is_none()),
+                Stmt::Decl(_) => true,
+                _ => false,
+            };
+            if !trivial && !reported {
+                dead.push((s, left));
+                reported = true;
+            }
+            continue;
+        }
+        if !stmt_completes(s, gotos, dead) {
+            live = false;
+            left = stmt_line_of(s);
+        }
+    }
+    live
+}
+
+fn stmt_line_of(s: &Stmt) -> u32 {
+    match s {
+        Stmt::Expr(_, sp) | Stmt::Return(_, sp) | Stmt::Break(sp) | Stmt::Continue(sp)
+        | Stmt::Goto(_, sp) | Stmt::Block(_, sp) | Stmt::Label(_, _, sp) | Stmt::Unsafe(_, sp) => sp.line,
+        Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
+        | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. } => span.line,
+        _ => 0,
+    }
+}
+
+/// Whether control can leave `s` by reaching its end; records dead code inside.
+fn stmt_completes<'a>(s: &'a Stmt, gotos: &std::collections::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
+    match s {
+        Stmt::Return(..) | Stmt::Goto(..) | Stmt::Break(_) | Stmt::Continue(_) => false,
+        Stmt::Expr(e, _) => !stmt_never_returns(e),
+        Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => block_completes(ss, gotos, dead),
+        Stmt::If { then, else_, .. } => {
+            let a = stmt_completes(then, gotos, dead);
+            let b = else_.as_ref().map_or(true, |e| stmt_completes(e, gotos, dead));
+            a || b
+        }
+        Stmt::While { cond, body, .. } => {
+            stmt_completes(body, gotos, dead);
+            !const_true(cond) || has_exit(body, false)
+        }
+        Stmt::For { cond, body, .. } => {
+            stmt_completes(body, gotos, dead);
+            !cond.as_ref().map_or(true, const_true) || has_exit(body, false)
+        }
+        Stmt::DoWhile { body, cond, .. } => {
+            let through = stmt_completes(body, gotos, dead);
+            if const_true(cond) { has_exit(body, false) } else { through || has_exit(body, true) }
+        }
+        Stmt::ForEach { body, .. } | Stmt::Defer(body, _) => { stmt_completes(body, gotos, dead); true }
+        Stmt::Switch { body, .. } => { stmt_completes(body, gotos, dead); true }
+        Stmt::Match { arms, .. } => {
+            let mut any = arms.is_empty();
+            for a in arms { any |= stmt_completes(&a.body, gotos, dead); }
+            any
+        }
+        Stmt::Label(_, b, _) | Stmt::Case(_, b, _) | Stmt::CaseRange(_, _, b, _) | Stmt::Default(b, _) => {
+            stmt_completes(b, gotos, dead)
+        }
+        Stmt::Guard { else_body, .. } => { stmt_completes(else_body, gotos, dead); true }
+        _ => true,
+    }
+}

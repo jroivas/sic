@@ -110,6 +110,32 @@ not disable it). A function, variable or macro of your own named `assert`
 replaces it, and C's `<assert.h>` `assert(…)` still applies where included (the
 preprocessor expands it first).
 
+## `unreachable`
+
+`unreachable` marks a point control never reaches — like Rust's `unreachable!()`.
+Three forms, all statements:
+
+```sic
+i32 sign(i32 x)
+{
+    if (x > 0) return 1;
+    else if (x < 0) return -1;
+    else return 0;
+    unreachable;                        // also `unreachable();`
+}
+
+if (state > LAST) unreachable("bad state");
+```
+
+If it is reached after all, it prints `file:line: unreachable code reached: bad
+state` to stderr and aborts. In a SIC file, `__builtin_unreachable()` (and C23's
+`unreachable()` from `<stddef.h>`) means the same: checked, not undefined.
+
+Control ends at an `unreachable`, as at `exit(…)` and `abort()`: a guard's `else`
+may end with one (`int v = find(k) else { exit(1); };`), and the code after it is
+unreachable. The [unreachable-code warning](getting-started.md) reports such code;
+an `unreachable` itself is never reported.
+
 ## Errors
 
 An error inside an expansion is reported at the invocation, with a note:

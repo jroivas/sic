@@ -42,6 +42,9 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     // Opt-in: common library headers (glib's gtestutils.h) declare it, so it
     // would print on nearly every file of a real project.
     ("long-double", Group::Explicit, false),
+    // Code no path reaches (after a return/goto/…). On by default in SIC; in C
+    // only when named (`-Wunreachable-code`), as clang — C code has plenty.
+    ("unreachable-code", Group::Default, false),
 ];
 
 #[derive(Default)]
@@ -124,6 +127,11 @@ pub fn configure<S: AsRef<str>>(flags: &[S], silent: bool) {
 /// Whether warning `name` is currently enabled.
 pub fn enabled(name: &str) -> bool {
     with(|c| is_enabled(c, name))
+}
+
+/// Whether warning `name` was asked for by name (`-W<name>`, `-Werror=<name>`).
+pub fn explicitly_enabled(name: &str) -> bool {
+    with(|c| !c.silent && c.explicit.get(name).copied().unwrap_or(false))
 }
 
 fn is_enabled(c: &Config, name: &str) -> bool {

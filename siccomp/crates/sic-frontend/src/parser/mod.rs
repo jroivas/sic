@@ -1987,6 +1987,15 @@ impl Parser {
         let block_item = std::mem::take(&mut self.stmt_block_item);
         if self.lang == Lang::Sic {
             if self.try_macro_definition()? { return Ok(Stmt::Null(sp)); }
+            // The bare statement `unreachable;` is the prelude macro's `unreachable()`.
+            if self.peek().kind == TokenKind::Ident && self.peek().text == "unreachable"
+                && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::Semi)
+                && self.macros.contains_key("unreachable")
+            {
+                let s = self.peek().span.clone();
+                self.tokens.insert(self.pos + 1, Token::new(TokenKind::RParen, ")".to_string(), s.clone()));
+                self.tokens.insert(self.pos + 1, Token::new(TokenKind::LParen, "(".to_string(), s));
+            }
             if self.try_expand_macro(MacroPos::Stmt { block_item })? {
                 self.stmt_block_item = block_item;
                 return self.parse_expanded(|p| p.parse_stmt());

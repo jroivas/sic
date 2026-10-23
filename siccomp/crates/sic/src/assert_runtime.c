@@ -12,3 +12,13 @@ __attribute__((weak)) void __sic_assert_fail(const char *expr, const char *file,
     }
     abort();
 }
+
+/* sic `unreachable` reached (sic.md §"Macros"): the place, then abort. */
+__attribute__((weak, noreturn)) void __sic_unreachable(const char *file, int line, string msg) {
+    if (msg.size > 0) {
+        dprintf(2, "%s:%d: unreachable code reached: %.*s\n", file, line, (int)msg.size, msg.ptr);
+    } else {
+        dprintf(2, "%s:%d: unreachable code reached\n", file, line);
+    }
+    abort();
+}

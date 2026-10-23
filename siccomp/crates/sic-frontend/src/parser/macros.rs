@@ -46,11 +46,20 @@ use crate::{Result, CompileError};
 /// variable or macro of the same name replaces one (existing code keeps its
 /// meaning). `assert` is always checked (like Rust's `assert!`, not affected by
 /// `NDEBUG`); C's `<assert.h>` `assert(…)` still wins where it is included,
-/// since the C preprocessor expands it first.
+/// since the C preprocessor expands it first. `unreachable` / `unreachable()` /
+/// `unreachable(msg)` marks a point control never reaches: reaching it reports
+/// the place and aborts (like Rust's `unreachable!`); code after it is unreachable.
 const PRELUDE: &str = r#"
 macro_rules assert {
     ($c:expr) => ( ($c) ? (void)0 : __sic_assert_fail($str($c), $file, $line, "") );
     ($c:expr, $m:expr) => ( ($c) ? (void)0 : __sic_assert_fail($str($c), $file, $line, $m) );
+}
+macro_rules unreachable {
+    () => ( __sic_unreachable($file, $line, "") );
+    ($m:expr) => ( __sic_unreachable($file, $line, $m) );
+}
+macro_rules __builtin_unreachable {
+    () => ( __sic_unreachable($file, $line, "") );
 }
 "#;
 

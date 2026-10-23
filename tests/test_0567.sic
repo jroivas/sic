@@ -1,0 +1,46 @@
+// `unreachable` marks a point control never reaches (all forms), a guard's
+// `else` may end with a call that never returns, and live code after jump
+// targets is not reported as unreachable (-Werror=unreachable-code is on).
+#include <stdlib.h>
+
+Option<int> find(int x) { return x > 0 ? Option::Some(x) : None; }
+
+int pick(int k)
+{
+    switch (k) {
+        case 1: return 10; break;       // a `break` after `return`: not reported
+        case 2: return 20;
+        default: return 30;
+    }
+    unreachable;
+}
+
+int classify(int x)
+{
+    if (x > 0) return 1;
+    else if (x < 0) return -1;
+    else return 0;
+    unreachable("classify fell through");
+}
+
+int skip(int n)
+{
+    int t = 0;
+    if (n > 3) goto done;
+    t = n;
+done:
+    return t;                           // a label is a jump target: live
+}
+
+int main()
+{
+    int v = find(7) else { exit(3); };
+    if (v != 7) return 1;
+    if (pick(2) != 20 || classify(-5) != -1 || skip(2) != 2) return 2;
+    while (1) {
+        if (v-- < 5) break;
+    }
+    if (v != 3) return 3;
+    if (v > 100) unreachable();
+    return 42;
+}

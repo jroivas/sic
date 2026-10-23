@@ -58,8 +58,23 @@ and `#define` behave as in C.
 Warnings use the GCC flags: `-Wall`, `-Wextra`, `-W<name>` / `-Wno-<name>`,
 `-Werror`, `-Werror=<name>` / `-Wno-error=<name>`, `-w`, `-pedantic`. sic reports
 `-Wdiv-by-zero`, `-Wshift-count-overflow`/`-negative` (C only — SIC defines those
-cases), `-Wunused-variable` (in `-Wall`), `-Wunsupported-asm` and `-Wlong-double` (opt-in);
+cases), `-Wunused-variable` (in `-Wall`), `-Wunsupported-asm`, `-Wunreachable-code`
+and `-Wlong-double` (opt-in);
 other warning names are accepted and ignored, so existing build flags keep working.
+
+`-Wunreachable-code` reports code no path reaches: after a `return`, `break`,
+`continue`, `goto`, [`unreachable`](macros.md#unreachable), `exit()`/`abort()`, or a
+loop that never ends — the shape of Apple's "goto fail" bug, where a repeated
+`goto fail;` silently skipped a certificate check:
+
+```
+check.sic:8:5: warning: code will never be executed (control does not get past line 7) [-Wunreachable-code]
+```
+
+It is on by default in SIC files and opt-in in C files (as in clang). It is a
+warning; `-Werror=unreachable-code` (or `-Werror`) makes it fail the build. A
+label that some `goto` jumps to, or a `case`, starts reachable code again; a
+`break` right after a `return` is not reported.
 As in GCC, nothing is reported from system headers.
 
 `long double` is deprecated. It is ABI-compatible with C: values are kept in the

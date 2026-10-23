@@ -1,0 +1,6 @@
+// Reaching `unreachable` reports the place and aborts (SIGABRT: status 134).
+int main(int argc, char **argv)
+{
+    if (argc > 0) unreachable("argc is never positive here");
+    return 0;
+}

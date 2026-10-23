@@ -1890,7 +1890,6 @@ string find_config(string dir)
             return "";
         d = dir_of(d);
     }
-    return "";
 }
 
 void sort_strings(list<string> *l)
