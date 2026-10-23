@@ -718,6 +718,11 @@ impl<'m> FuncCtx<'m> {
 
             // sic generic functions (sic.md §"Generics"): `add<int>` outside a call
             // has no single symbol to name — it must be applied.
+            ExprKind::TypeMember { ty, member } => {
+                let shown = match &ty.ty { crate::ast::AstType::Generic { name, .. } => name.clone(), _ => "type".into() };
+                Err(CompileError::at(format!("`{}<…>::{}` must be called", shown, member),
+                    expr.span.file.clone(), expr.span.line, expr.span.col))
+            }
             ExprKind::GenericRef { name, .. } => Err(CompileError::at(
                 format!("generic function `{}` must be called (`{}<…>(…)`)", name, name),
                 expr.span.file.clone(), expr.span.line, expr.span.col)),

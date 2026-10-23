@@ -147,6 +147,11 @@ impl<'m> FuncCtx<'m> {
         // A Rust generic's associated function: `m::Map<i64, string>::new()`, or
         // `m::Map::new()` where the target type is that instance — the call goes
         // to the instance (`m::hash_map::HashMap__i64__String::new`).
+        if let ExprKind::TypeMember { ty, member } = &func_expr.kind {
+            let target = self.type_member_path(ty, member, sp)?;
+            let callee = Expr { kind: ExprKind::EnumVariant { enum_name: target, variant: member.clone() }, span: func_expr.span.clone() };
+            return self.lower_call(&callee, args, sp);
+        }
         if self.is_sic() {
             if let ExprKind::EnumVariant { enum_name, variant } = &func_expr.kind {
                 if let Some(target) = self.rust_generic_call_target(enum_name) {
@@ -2036,9 +2041,8 @@ pub(crate) fn module_scoped_sym<'a>(path: &'a str, name: &str) -> (&'a str, Stri
 }
 
 impl<'m> FuncCtx<'m> {
-    /// The instance path an associated-function call on a Rust generic resolves
-    /// to: explicitly (`m::Map<#__sic_tyargN>`, the parser's spelling of
-    /// `m::Map<i64, string>`), or from the call's target type.
+    /// The instance path an associated-function call `m::Map::f(…)` on a Rust
+    /// generic resolves to, from the call's target type.
     pub(crate) fn rust_generic_call_target(&self, enum_name: &str) -> Option<String> {
         if self.lowerer.rust_generics.is_empty() { return None; }
         let inst_of = |ty: &Type| -> Option<(String, String, String)> {
@@ -2047,20 +2051,28 @@ impl<'m> FuncCtx<'m> {
             let (m, canon) = self.lowerer.rust_instance_of.get(n)?;
             Some((n.clone(), m.clone(), canon.clone()))
         };
-        if let Some(i) = enum_name.find("<#") {
-            let base = &enum_name[..i];
-            let end = enum_name[i..].find('>')? + i;
-            let alias = &enum_name[i + 2..end];
-            let ty = self.lowerer.struct_types.get(alias)?;
-            let (inst, m, _) = inst_of(ty)?;
-            let _ = base;
-            return Some(format!("{}::{}", m, inst.replace("__", "::")));
-        }
         let (m, canon, _, _) = self.lowerer.rust_generic_of(enum_name)?;
         let (inst, im, icanon) = inst_of(self.expected_ty.as_ref()?)?;
         if im == m && icanon == canon {
             return Some(format!("{}::{}", m, inst.replace("__", "::")));
         }
         None
+    }
+}
+
+impl<'m> FuncCtx<'m> {
+    /// `m::Map<i64, string>::member`: the path of the member on the instance
+    /// (`m::hash_map::HashMap__i64__String`), which the instance pass made.
+    pub(crate) fn type_member_path(&self, ty: &crate::ast::QualType, member: &str, sp: &crate::lexer::Span) -> Result<String> {
+        let shown = match &ty.ty { crate::ast::AstType::Generic { name, .. } => name.clone(), _ => "type".into() };
+        let err = |m: String| CompileError::at(m, sp.file.clone(), sp.line, sp.col);
+        let t = super::super::types::lower_type(ty, &self.lowerer.struct_types, self.ptr_size())
+            .map_err(|_| err(format!("`{}<…>::{}`: `{}` is not a generic type of an imported Rust crate", shown, member, shown)))?;
+        let Type::Struct(st) = &t else { return Err(err(format!("`{}<…>::{}`: not a type with members", shown, member))) };
+        let n = st.name.clone().unwrap_or_default();
+        let Some((m, _)) = self.lowerer.rust_instance_of.get(&n) else {
+            return Err(err(format!("`{}<…>::{}`: `{}` is not a generic type of an imported Rust crate", shown, member, shown)));
+        };
+        Ok(format!("{}::{}", m, n.replace("__", "::")))
     }
 }

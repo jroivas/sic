@@ -273,6 +273,7 @@ impl<'a> NsRenamer<'a> {
     fn expr(&mut self, e: &mut Expr) {
         match &mut e.kind {
             ExprKind::Ident(name) => self.rename(name),
+            ExprKind::TypeMember { ty, .. } => self.qual_type(ty),
             ExprKind::GenericRef { name, type_args } => {
                 self.rename(name);
                 for t in type_args.iter_mut() { self.qual_type(t); }

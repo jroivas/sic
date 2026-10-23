@@ -372,6 +372,12 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Call { func, args } => {
                 // A Rust generic's associated function resolves to its instance
                 // (`m::Map<i64, string>::new()`), as `lower_call` does.
+                if let ExprKind::TypeMember { ty, member } = &func.kind {
+                    let target = self.type_member_path(ty, member, &func.span)?;
+                    let callee = Expr { kind: ExprKind::EnumVariant { enum_name: target, variant: member.clone() }, span: func.span.clone() };
+                    let call = Expr { kind: ExprKind::Call { func: Box::new(callee), args: args.clone() }, span: expr.span.clone() };
+                    return self.infer_expr_type(&call);
+                }
                 if let ExprKind::EnumVariant { enum_name, variant } = &func.kind {
                     if let Some(target) = self.rust_generic_call_target(enum_name) {
                         let callee = Expr { kind: ExprKind::EnumVariant { enum_name: target, variant: variant.clone() }, span: func.span.clone() };

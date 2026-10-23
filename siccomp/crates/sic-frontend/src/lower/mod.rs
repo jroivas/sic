@@ -2797,6 +2797,7 @@ impl Lowerer {
         if self.generic_enum_defs.is_empty() && self.rust_generics.is_empty() { return Ok(()); }
         let mut uses: Vec<(String, Vec<QualType>)> = Vec::new();
         for d in &tu.decls { collect_generics_decl(d, &mut uses); }
+        for t in &tu.expr_types { collect_generics_type(&t.ty, &mut uses); }
         for (name, args) in uses {
             if name.contains("::") && self.rust_generic_of(&name).is_some() {
                 self.instantiate_rust_generic(&name, &args)?;
@@ -2804,18 +2805,6 @@ impl Lowerer {
             }
             if self.generic_enum_defs.is_empty() { continue; }
             self.instantiate_generic_enum(&name, &args)?;
-        }
-        // The parser's hidden typedefs of explicit instances (`m::Map<i64,
-        // string>::new()` → `__sic_tyargN`) were registered before their
-        // instance existed: register them now.
-        for d in &tu.decls {
-            let Decl::TypeDef { names, .. } = d else { continue };
-            for (n, qt) in names {
-                if !n.starts_with("__sic_tyarg") { continue; }
-                if let Ok(t) = types::lower_type(qt, &self.struct_types, self.ptr_size) {
-                    self.struct_types.insert(n.clone(), t);
-                }
-            }
         }
         if !self.rust_instance_requests.is_empty() {
             let mut msg = String::from(RUST_INSTANCES_MARKER);
@@ -5370,7 +5359,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         // `typeid(e)` inspects only the type — `e` is never evaluated.
         TypeId(_) => {}
         IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | WideStringLit(..) | CharLit(_) | Nullptr
-        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeIdOf(_) => {}
+        | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeMember { .. } | TypeIdOf(_) => {}
     }
 }
 

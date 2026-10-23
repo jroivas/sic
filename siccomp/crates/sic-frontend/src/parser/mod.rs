@@ -20,6 +20,8 @@ pub struct Parser {
     /// Type-parameter list captured while parsing the current function declarator,
     /// consumed when the `Decl::Func` is built.
     pending_type_params: Vec<String>,
+    /// Types named inside expressions (`TranslationUnit::expr_types`).
+    expr_types: Vec<QualType>,
     /// sic: how many `namespace { … }` bodies enclose the current declaration.
     /// Inside one, `new(` may name a function (`ns::new`); outside, `new` is
     /// only the allocation keyword.
@@ -143,7 +145,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -295,7 +297,7 @@ impl Parser {
                 ));
             }
         }
-        Ok(TranslationUnit { decls, source_file: self.source_file.clone() })
+        Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types) })
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -1022,18 +1024,18 @@ impl Parser {
             segs.push(self.expect_member_name()?);
         }
         let variant = segs.pop().unwrap();
-        let mut enum_name = segs.join("::");
         if let Some((n, args)) = type_args {
-            // The concrete type is declared as a hidden typedef (so the unit's
-            // generic-type pass instantiates it), and the path names it:
-            // `ns::Map<#__sic_tyargN>` — lowering resolves the call on that type.
-            self.macro_counter += 1;
-            let alias = format!("__sic_tyarg{}", self.macro_counter);
-            let ty = QualType::new(AstType::Generic { name: segs[..n].join("::"), args });
-            self.pending_decls.push(Decl::TypeDef { names: vec![(alias.clone(), ty)], span: sp.clone() });
-            enum_name = format!("{}<#{}>", segs[..n].join("::"), alias);
-            if n < segs.len() { enum_name = format!("{}::{}", enum_name, segs[n..].join("::")); }
+            if n != segs.len() {
+                return Err(CompileError::at(
+                    format!("`{}<…>::{}::…`: only a member of the generic type itself can follow its type arguments",
+                        segs[..n].join("::"), segs[n..].join("::")),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+            let ty = QualType::new(AstType::Generic { name: segs.join("::"), args });
+            self.expr_types.push(ty.clone());
+            return Ok(Expr::new(ExprKind::TypeMember { ty, member: variant }, sp));
         }
+        let enum_name = segs.join("::");
         Ok(Expr::new(ExprKind::EnumVariant { enum_name, variant }, sp))
     }
 

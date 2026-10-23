@@ -614,6 +614,9 @@ pub enum ExprKind {
     /// (`add<int>(1, 2)`). Carries the written type arguments so the call site can
     /// monomorphize without inference.
     GenericRef { name: String, type_args: Vec<QualType> },
+    /// sic: a member of a generic type made concrete in the expression —
+    /// `m::Map<i64, string>::new` (a Rust generic's associated function).
+    TypeMember { ty: QualType, member: String },
 
     /// Array subscript: a[i]
     Index { base: BoxExpr, index: BoxExpr },
@@ -697,6 +700,9 @@ pub enum UnOpKind {
 pub struct TranslationUnit {
     pub decls: Vec<Decl>,
     pub source_file: String,
+    /// Types named inside expressions (`m::Map<i64, string>::new()`), for the
+    /// generic-instance pass, which otherwise sees only declared types.
+    pub expr_types: Vec<QualType>,
 }
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────
