@@ -63,6 +63,120 @@ pub fn preprocess(
     preprocess_ex(file, defines, include_dirs, std, &[])
 }
 
+/// A byte of a string literal's contents, written so the literal means the same.
+fn push_literal_char(out: &mut String, c: char) {
+    match c {
+        '"' => out.push_str("\\\""),
+        '\\' => out.push_str("\\\\"),
+        '\n' => out.push_str("\\n"),
+        '\t' => out.push_str("\\t"),
+        '\r' => out.push_str("\\r"),
+        c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\{:03o}", c as u32)),
+        c => out.push(c),
+    }
+}
+
+/// SIC's multiline strings (`"""…"""`, raw `r"""…"""`) span lines, which no C
+/// preprocessor knows: it takes their later lines for code — blanks collapse, a
+/// `//` reads as a comment, a leading `#` as a directive. Each one is rewritten as
+/// the ordinary string literal it denotes, on one line, followed by the newlines
+/// it spanned (so every later token keeps its line). None when there is none.
+pub fn protect_multiline_strings(src: &str) -> Option<String> {
+    let c: Vec<char> = src.chars().collect();
+    let triple = |i: usize| c.get(i) == Some(&'"') && c.get(i + 1) == Some(&'"') && c.get(i + 2) == Some(&'"');
+    let mut out = String::with_capacity(src.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        // comments, and ordinary string and character literals, are skipped whole
+        if ch == '/' && c.get(i + 1) == Some(&'/') {
+            while i < c.len() && c[i] != '\n' { out.push(c[i]); i += 1; }
+            continue;
+        }
+        if ch == '/' && c.get(i + 1) == Some(&'*') {
+            out.push_str("/*");
+            i += 2;
+            while i < c.len() && !(c[i] == '*' && c.get(i + 1) == Some(&'/')) { out.push(c[i]); i += 1; }
+            if i < c.len() { out.push_str("*/"); i += 2; }
+            continue;
+        }
+        let ident_before = i > 0 && (c[i - 1].is_alphanumeric() || c[i - 1] == '_');
+        let raw = ch == 'r' && !ident_before && triple(i + 1);
+        if raw || (ch == '"' && triple(i)) {
+            let start = if raw { i + 4 } else { i + 3 };
+            let mut j = start;
+            while j < c.len() && !triple(j) {
+                if !raw && c[j] == '\\' { j += 1; }
+                j += 1;
+            }
+            if j >= c.len() {
+                return None;            // unterminated: the lexer reports it
+            }
+            let body = &c[start..j];
+            let mut lit = String::from("\"");
+            if raw {
+                for &b in body { push_literal_char(&mut lit, b); }
+            } else {
+                // as the lexer reads it: a newline and the indentation after it
+                // are one space; escapes keep their meaning
+                let (mut k, mut pending, mut any) = (0, false, false);
+                while k < body.len() {
+                    let b = body[k];
+                    if b == '\n' { pending = true; k += 1; continue; }
+                    if pending {
+                        if b == ' ' || b == '\t' || b == '\r' { k += 1; continue; }
+                        if any { lit.push(' '); }
+                        pending = false;
+                    }
+                    any = true;
+                    if b == '\\' && k + 1 < body.len() {
+                        let e = body[k + 1];
+                        if (e as u32) < 0x20 { push_literal_char(&mut lit, e); } else { lit.push('\\'); lit.push(e); }
+                        k += 2;
+                        continue;
+                    }
+                    push_literal_char(&mut lit, b);
+                    k += 1;
+                }
+            }
+            lit.push('"');
+            out.push_str(&lit);
+            for _ in body.iter().filter(|&&b| b == '\n') { out.push('\n'); }
+            changed = true;
+            i = j + 3;
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            out.push(ch);
+            i += 1;
+            while i < c.len() && c[i] != ch && c[i] != '\n' {
+                if c[i] == '\\' && i + 1 < c.len() { out.push(c[i]); i += 1; }
+                out.push(c[i]);
+                i += 1;
+            }
+            if i < c.len() && c[i] == ch { out.push(ch); i += 1; }
+            continue;
+        }
+        out.push(ch);
+        i += 1;
+    }
+    changed.then_some(out)
+}
+
+/// The source path into a `.d` dependency list made from standard input (the
+/// preprocessor read the file's protected text there, see
+/// [`protect_multiline_strings`]): in place of `<stdin>`, or first.
+fn fix_stdin_dependency(deps: &str, path: &str) -> String {
+    if deps.contains("<stdin>") {
+        return deps.replace("<stdin>", path);
+    }
+    match deps.find(": ") {
+        Some(k) => format!("{}: {} {}", &deps[..k], path, &deps[k + 2..]),
+        None => deps.to_string(),
+    }
+}
+
 /// Like [`preprocess`], but forwards extra flags to the preprocessor (e.g. `-dM` to dump
 /// macro definitions). Used to implement the driver's `-E`/`-dM` options.
 pub fn preprocess_ex(
@@ -132,27 +246,68 @@ pub fn preprocess_ex(
         cmd.arg(format!("-I{}", i));
     }
 
+    // A SIC source with multiline strings goes in protected (through standard
+    // input, named by a #line, its directory still searched for "includes").
+    let protected = if file != "-" && file.to_ascii_lowercase().ends_with(".sic") {
+        std::fs::read_to_string(file).ok().and_then(|t| protect_multiline_strings(&t))
+    } else {
+        None
+    };
+    if protected.is_some() {
+        let dir = std::path::Path::new(file).parent()
+            .map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty())
+            .unwrap_or_else(|| ".".to_string());
+        cmd.arg("-iquote");
+        cmd.arg(dir);
+    }
+
     for f in extra_flags {
         cmd.arg(f);
     }
 
-    cmd.arg(file);
-
-    // For `-` (read from standard input), the preprocessor must see our stdin.
-    if file == "-" {
-        cmd.stdin(std::process::Stdio::inherit());
-    }
-
-    let output = cmd.output().map_err(|e| {
-        CompileError::new(format!("failed to run {}: {}", bin, e))
-    })?;
+    let output = if let Some(text) = &protected {
+        cmd.arg("-");
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
+        let input = format!("#line 1 \"{}\"\n{}", file.replace('\\', "\\\\").replace('"', "\\\""), text);
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(input.as_bytes());
+        });
+        let out = child.wait_with_output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
+        let _ = writer.join();
+        out
+    } else {
+        cmd.arg(file);
+        // For `-` (read from standard input), the preprocessor must see our stdin.
+        if file == "-" {
+            cmd.stdin(std::process::Stdio::inherit());
+        }
+        cmd.output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CompileError::new(format!("preprocessor ({}) error:\n{}", bin, stderr)));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    if protected.is_some() {
+        // The dependencies were read from standard input: name the source.
+        let mf = extra_flags.iter().position(|f| *f == "-MF").and_then(|k| extra_flags.get(k + 1).map(|s| s.to_string()))
+            .or_else(|| extra_flags.iter().find_map(|f| f.strip_prefix("-MF").filter(|p| !p.is_empty()).map(|p| p.to_string())));
+        if let Some(d) = mf {
+            if let Ok(deps) = std::fs::read_to_string(&d) {
+                let _ = std::fs::write(&d, fix_stdin_dependency(&deps, file));
+            }
+        } else if extra_flags.iter().any(|f| *f == "-M" || *f == "-MM") {
+            text = fix_stdin_dependency(&text, file);
+        }
+    }
+    Ok(text)
 }
 
 /// Target-describing predefined macros for the host this compiler was built

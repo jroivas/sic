@@ -1,0 +1,20 @@
+// Multiline strings reach the lexer intact: the C preprocessor does not know
+// `"""`, and took their later lines for code — blanks collapsed, a `//` was a
+// comment, a `#` at the start of a line a directive.
+#include <string.h>
+
+int main()
+{
+    string raw = r"""a     b
+  c     d // not a comment
+#not a directive
+it's""";
+    if (raw != "a     b\n  c     d // not a comment\n#not a directive\nit's") return 1;
+    string folded = """one
+        two   three \x41
+        "four\"""";
+    if (folded != "one two   three A \"four\"") return 2;
+    if (__LINE__ != 17) return 3;    // line numbers after them are unchanged
+    if (strcmp(__FILE__ + strlen(__FILE__) - 13, "test_0566.sic") != 0) return 4;
+    return 42;
+}
