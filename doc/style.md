@@ -145,7 +145,8 @@ lines up with its `if`.
 A line over the width is broken where that makes it fit, as rustfmt does; a line
 that cannot be made to fit that way stays as written:
 
-- **A one-line body** opens into the block form first.
+- **A one-line body** opens into the block form first; a braceless body on its
+  `if`/`for`/`while`/`else` line moves to the next line.
 - **Calls, parameter lists and initializers** that end the line go one element
   per line, indented one level, the closing bracket back on its own line.
 - A list that is an operand in the middle of an expression (`a || f(x, y)`) is not

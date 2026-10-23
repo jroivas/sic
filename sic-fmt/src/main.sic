@@ -82,6 +82,7 @@ struct Tok {
     bool wrap;      // `(` or `{`: one element per line, to fit the width
     bool expand;    // a one-line block that does not fit
     bool nowrap;    // wrapping it made nothing shorter
+    bool own_line;  // a braceless body moved to its own line, to fit the width
     i32 brk;        // before it: 0 the same line, 1 a new line, 2 a blank line first
     i32 sp;         // spaces before it, on the same line
     i32 oline;      // the output line it is on
@@ -1061,7 +1062,9 @@ i32 line_break(Fmt *f, i32 a, i32 b)
     i32 r;
     bool ap = ak == K_PUNCT, bp = bk == K_PUNCT;
     i32 ua = f->t[a].up, ub = f->t[b].up;
-    if (ak == K_LCOMMENT || ak == K_PREPROC || bk == K_PREPROC || bk == K_VERBATIM) {
+    if (f->t[b].own_line) {
+        r = 1;
+    } else if (ak == K_LCOMMENT || ak == K_PREPROC || bk == K_PREPROC || bk == K_VERBATIM) {
         r = imax(1, keep);
     } else if (ak == K_VERBATIM) {
         r = keep > 0 || !(y == ";" || y == ",") ? imax(1, keep) : 0;
@@ -1543,6 +1546,13 @@ i32 pick(Fmt *f, i32 a, i32 b)
         if (is_block(f, j) && oneline(f, j) && !f->t[j].nowrap && f->t[j].mate <= b)
             return j;
     }
+    // `if (c) body;` on one line: the body onto its own line
+    for (i32 j = a + 1; j <= b; j++) {
+        bool else_if = tis(f, j, "if") && tis(f, f->t[j].body_of, "else");
+        if (f->t[j].body_of >= 0 && !else_if && !f->t[j].own_line && !f->t[j].nowrap
+            && !in_oneline_block(f, j))
+            return j;
+    }
     i32 best = -1, best_depth = 1 << 30, depth = 0;
     for (i32 j = a; j <= b; j++) {
         if (is_closer(f, j)) {
@@ -1609,7 +1619,9 @@ i32 range_width(Fmt *f, i32 a, i32 b)
 
 void set_break(Fmt *f, i32 c, bool on)
 {
-    if (is_block(f, c))
+    if (f->t[c].body_of >= 0 && !is_opener(f, c))
+        f->t[c].own_line = on;
+    else if (is_block(f, c))
         f->t[c].expand = on;
     else
         f->t[c].wrap = on;
@@ -1619,7 +1631,7 @@ void set_break(Fmt *f, i32 c, bool on)
 i32 next_candidate(Fmt *f, i32 L)
 {
     i32 c = pick(f, f->lfirst[L], f->llast[L]);
-    while (c >= 0 && !is_block(f, c) && cannot_fit(f, c, L)) {
+    while (c >= 0 && !is_block(f, c) && f->t[c].body_of < 0 && cannot_fit(f, c, L)) {
         f->t[c].nowrap = true;
         c = pick(f, f->lfirst[L], f->llast[L]);
     }
