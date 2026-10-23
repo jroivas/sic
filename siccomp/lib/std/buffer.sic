@@ -16,7 +16,8 @@ namespace buffer
         u64 capacity;
         u64 size;
         u8 *data;
-        ~Buffer() {
+        ~Buffer()
+        {
             del data;
         }
     };
@@ -26,8 +27,7 @@ namespace buffer
         Buffer *buf = new Buffer() else return NULL;
 
         buf->data = new u8(size);
-        if (!buf->data)
-        {
+        if (!buf->data) {
             del buf;
             return NULL;
         }
@@ -83,7 +83,7 @@ namespace buffer
     }
 
     // The raw byte pointer, for callers that need it directly.
-    const u8* Data(Buffer *b)
+    const u8 *Data(Buffer *b)
     {
         if (b == NULL)
             return NULL;

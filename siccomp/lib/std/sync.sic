@@ -30,14 +30,16 @@ namespace sync
         u64 data[8];
         bool live;                  // pthread_mutex_init succeeded
 
-        ~Mutex() {
+        ~Mutex()
+        {
             if (live)
                 pthread_mutex_destroy((pthread_mutex_t *)data);
         }
     };
 
     // Create a new mutex. Returns NULL on failure (out of memory/resources).
-    Mutex *CreateMutex() {
+    Mutex *CreateMutex()
+    {
         Mutex *m = new Mutex() else return NULL;
         if (pthread_mutex_init((pthread_mutex_t *)m->data, NULL) != 0) {
             del m;
@@ -48,25 +50,29 @@ namespace sync
     }
 
     // Destroy a mutex and free its allocation.
-    void DestroyMutex(Mutex *m) {
+    void DestroyMutex(Mutex *m)
+    {
         if (!m) return;
         del m;
     }
 
     // Lock the mutex. Blocks until acquired.
-    void Lock(Mutex *m) {
+    void Lock(Mutex *m)
+    {
         if (!m) return;
         pthread_mutex_lock((pthread_mutex_t *)m->data);
     }
 
     // Unlock the mutex.
-    void Unlock(Mutex *m) {
+    void Unlock(Mutex *m)
+    {
         if (!m) return;
         pthread_mutex_unlock((pthread_mutex_t *)m->data);
     }
 
     // Try to lock without blocking. Returns true if the lock was acquired.
-    bool TryLock(Mutex *m) {
+    bool TryLock(Mutex *m)
+    {
         if (!m) return false;
         return pthread_mutex_trylock((pthread_mutex_t *)m->data) == 0;
     }
@@ -80,7 +86,8 @@ namespace sync
         u64 data[8];
         bool live;                  // pthread_cond_init succeeded
 
-        ~Cond() {
+        ~Cond()
+        {
             if (live)
                 pthread_cond_destroy((pthread_cond_t *)data);
         }
@@ -89,7 +96,8 @@ namespace sync
     // Create a new condition variable. Returns NULL on failure. Its timed
     // waits run on CLOCK_MONOTONIC, so changing the wall clock does not
     // stretch or cut a TimedWait.
-    Cond *CreateCond() {
+    Cond *CreateCond()
+    {
         Cond *cv = new Cond() else return NULL;
         pthread_condattr_t attr;
         if (pthread_condattr_init(&attr) != 0) {
@@ -108,14 +116,16 @@ namespace sync
     }
 
     // Destroy a condition variable and free its allocation.
-    void DestroyCond(Cond *cv) {
+    void DestroyCond(Cond *cv)
+    {
         if (!cv) return;
         del cv;
     }
 
     // Wait on a condition variable. Unlocks mutex, waits for signal, then
     // re-acquires the mutex before returning.
-    void Wait(Cond *cv, Mutex *m) {
+    void Wait(Cond *cv, Mutex *m)
+    {
         if (!cv || !m) return;
         pthread_cond_wait(
             (pthread_cond_t *)cv->data,
@@ -126,7 +136,8 @@ namespace sync
     // Wait with a timeout in milliseconds. Returns true if woken (a signal —
     // or, as with Wait, a spurious wakeup: re-check the condition), false on
     // timeout or error.
-    bool TimedWait(Cond *cv, Mutex *m, u64 ms) {
+    bool TimedWait(Cond *cv, Mutex *m, u64 ms)
+    {
         if (!cv || !m) return false;
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -145,13 +156,15 @@ namespace sync
     }
 
     // Wake one thread waiting on this condition variable.
-    void NotifyOne(Cond *cv) {
+    void NotifyOne(Cond *cv)
+    {
         if (!cv) return;
         pthread_cond_signal((pthread_cond_t *)cv->data);
     }
 
     // Wake all threads waiting on this condition variable.
-    void NotifyAll(Cond *cv) {
+    void NotifyAll(Cond *cv)
+    {
         if (!cv) return;
         pthread_cond_broadcast((pthread_cond_t *)cv->data);
     }

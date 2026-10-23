@@ -42,7 +42,8 @@ void Exit(int status)
 // ---------------------------------------------------------------------------
 
 // Append `n` bytes at `p` to the output buffer, growing it as needed.
-static void out_put(char **buf, u64 *len, u64 *cap, char *p, u64 n) {
+static void out_put(char **buf, u64 *len, u64 *cap, char *p, u64 n)
+{
     if (n == 0)
         return;
     if (*len + n > *cap) {
@@ -60,13 +61,15 @@ static void out_put(char **buf, u64 *len, u64 *cap, char *p, u64 n) {
 }
 
 // Append `count` copies of the `n`-byte character at `p`.
-static void out_repeat(char **buf, u64 *len, u64 *cap, char *p, u64 n, u64 count) {
+static void out_repeat(char **buf, u64 *len, u64 *cap, char *p, u64 n, u64 count)
+{
     for (u64 k = 0; k < count; k++)
         out_put(buf, len, cap, p, n);
 }
 
 // Byte length of the UTF-8 sequence whose lead byte is `b`.
-static u64 utf8_len(u8 b) {
+static u64 utf8_len(u8 b)
+{
     if (b >= 0xF0) return 4;
     if (b >= 0xE0) return 3;
     if (b >= 0xC0) return 2;
@@ -74,7 +77,8 @@ static u64 utf8_len(u8 b) {
 }
 
 // The first `n` code points of `s` (all of it if shorter) — a view, no copy.
-static string first_chars(string s, u64 n) {
+static string first_chars(string s, u64 n)
+{
     char *p = s.ptr;
     u64 size = s.size;
     u64 i = 0;
@@ -85,12 +89,13 @@ static string first_chars(string s, u64 n) {
     }
     if (i > size)
         i = size;
-    return s[0 : i];
+    return s[0:i];
 }
 
 // Digits of `v` in `base` (2..16), most significant first, into `out`; returns
 // the digit count. `out` needs 64 bytes.
-static u64 put_digits(u64 v, u64 base, bool upper, char *out) {
+static u64 put_digits(u64 v, u64 base, bool upper, char *out)
+{
     char tmp[64];
     char *lower = "0123456789abcdef";
     char *higher = "0123456789ABCDEF";
@@ -109,7 +114,8 @@ static u64 put_digits(u64 v, u64 base, bool upper, char *out) {
 // An integer: `neg`/`mag` is the value, `bits` its width (for the two's
 // complement of a negative value in x/X/b/o). `*lead` gets the sign + prefix
 // length (where zero padding goes).
-static string int_str(bool neg, u64 mag, u64 bits, bool plus, bool alt, char ty, u64 *lead) {
+static string int_str(bool neg, u64 mag, u64 bits, bool plus, bool alt, char ty, u64 *lead)
+{
     u64 base = 10;
     bool upper = false;
     char *prefix = "";
@@ -128,7 +134,8 @@ static string int_str(bool neg, u64 mag, u64 bits, bool plus, bool alt, char ty,
     if (neg) { b[k] = '-'; k++; }
     else if (plus) { b[k] = '+'; k++; }
     if (alt && base != 10) {
-        b[k] = prefix[0]; b[k + 1] = prefix[1];
+        b[k] = prefix[0];
+        b[k + 1] = prefix[1];
         k += 2;
     }
     *lead = k;
@@ -139,13 +146,15 @@ static string int_str(bool neg, u64 mag, u64 bits, bool plus, bool alt, char ty,
 
 // A float through snprintf: %g by default, %.Nf with a precision, or the
 // explicit e/E/f/g type.
-static string float_str(double d, bool plus, bool has_prec, u64 prec, char ty, u64 *lead) {
+static string float_str(double d, bool plus, bool has_prec, u64 prec, char ty, u64 *lead)
+{
     char conv = has_prec ? 'f' : 'g';
     if (ty == 'e' || ty == 'E' || ty == 'f' || ty == 'g')
         conv = ty;
     char cf[8];
     u64 k = 0;
-    cf[k] = '%'; k++;
+    cf[k] = '%';
+    k++;
     if (plus) { cf[k] = '+'; k++; }
     if (has_prec) { cf[k] = '.'; cf[k + 1] = '*'; k += 2; }
     cf[k] = conv;
@@ -172,7 +181,8 @@ static string float_str(double d, bool plus, bool has_prec, u64 prec, char ty, u
 // whether it aligns/zero-pads as a number. A `string`/`char*` argument is
 // BORROWED — returned as a view over the caller's own bytes, never copied.
 static string arg_str(any x, bool plus, bool alt, bool has_prec, u64 prec, char ty,
-                      u64 *lead, bool *numeric) {
+    u64 *lead, bool *numeric)
+{
     *lead = 0;
     *numeric = true;
     match (type(x)) {
@@ -239,7 +249,8 @@ static string arg_str(any x, bool plus, bool alt, bool has_prec, u64 prec, char 
 
 // Append one rendered argument, padded to `width` with `fill` (`fn` bytes).
 static void out_arg(char **buf, u64 *len, u64 *cap, string body, u64 lead, bool numeric,
-                    char *fill, u64 fn, char align, bool zero, u64 width) {
+    char *fill, u64 fn, char align, bool zero, u64 width)
+{
     char *p = body.ptr;
     u64 size = body.size;
     u64 w = body.length;
@@ -267,11 +278,13 @@ static void out_arg(char **buf, u64 *len, u64 *cap, string body, u64 lead, bool 
     out_repeat(buf, len, cap, fill, fn, right);
 }
 
-static bool is_align(char c) {
+static bool is_align(char c)
+{
     return c == '<' || c == '>' || c == '^';
 }
 
-string Fmt(string fmt, va_array args, va_dict kwargs) {
+string Fmt(string fmt, va_array args, va_dict kwargs)
+{
     char *f = fmt.ptr;
     u64 n = fmt.size;     // byte length
     u64 cap = n + 64;
@@ -369,7 +382,7 @@ string Fmt(string fmt, va_array args, va_dict kwargs) {
                 out_arg(&buf, &len, &cap, r, lead, numeric, fill, fn, align, zero, width);
             }
         } else {
-            string key = fmt[i + 1 : colon];
+            string key = fmt[i + 1:colon];
             any v = kwargs[key];
             string r = arg_str(v, plus, alt, has_prec, prec, ty, &lead, &numeric);
             out_arg(&buf, &len, &cap, r, lead, numeric, fill, fn, align, zero, width);

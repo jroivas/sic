@@ -4,7 +4,8 @@ module std;
 // `i32` (as produced by indexing a `string`) and returns whether it is in the
 // class. A C preprocessor / lexer uses these constantly.
 
-bool IsSpace(i32 c) {
+bool IsSpace(i32 c)
+{
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
 }
 

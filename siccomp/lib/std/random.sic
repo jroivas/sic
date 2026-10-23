@@ -33,7 +33,8 @@ module std;
 
 // Fill buf with len bytes of system entropy, retrying short reads and
 // EINTR. False on failure.
-static bool FillRandom(u8 *buf, usize len) {
+static bool FillRandom(u8 *buf, usize len)
+{
     usize done = 0;
     while (done < len) {
         isize n = getrandom(buf + done, len - done, 0);
@@ -53,11 +54,20 @@ namespace random
     // ------------------------------------------------------------------
 
     // Quarter round for ChaCha (operates on u32 values through pointers).
-    static void chacha_qr(u32 *a, u32 *b, u32 *c, u32 *d) {
-        *a += *b; *d ^= *a; *d = *d <<< 16;
-        *c += *d; *b ^= *c; *b = *b <<< 12;
-        *a += *b; *d ^= *a; *d = *d <<< 8;
-        *c += *d; *b ^= *c; *b = *b <<< 7;
+    static void chacha_qr(u32 *a, u32 *b, u32 *c, u32 *d)
+    {
+        *a += *b;
+        *d ^= *a;
+        *d = *d <<< 16;
+        *c += *d;
+        *b ^= *c;
+        *b = *b <<< 12;
+        *a += *b;
+        *d ^= *a;
+        *d = *d <<< 8;
+        *c += *d;
+        *b ^= *c;
+        *b = *b <<< 7;
     }
 
     // ------------------------------------------------------------------
@@ -69,7 +79,8 @@ namespace random
     struct SplitMix64Type {
         u64 state;
 
-        u64 gen64(struct SplitMix64Type *self) {
+        u64 gen64(struct SplitMix64Type *self)
+        {
             self->state += 0x9E3779B97F4A7C15;
             u64 z = self->state;
             z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
@@ -78,7 +89,8 @@ namespace random
             return z;
         }
 
-        u32 gen32(struct SplitMix64Type *self) {
+        u32 gen32(struct SplitMix64Type *self)
+        {
             return (u32)(self->gen64());
         }
     };
@@ -93,7 +105,8 @@ namespace random
         u64 state;
         u64 inc;
 
-        u32 gen32(struct PCG32Type *self) {
+        u32 gen32(struct PCG32Type *self)
+        {
             u64 old = self->state;
             self->state = old * 0x5851F42D4C957F2D + (self->inc | 1);
             u32 xorshifted = (u32)(((old >> 18) ^ old) >> 27);
@@ -101,7 +114,8 @@ namespace random
             return (xorshifted >> rot) | (xorshifted << ((0 - rot) & 31));
         }
 
-        u64 gen64(struct PCG32Type *self) {
+        u64 gen64(struct PCG32Type *self)
+        {
             u32 lo = self->gen32();
             u32 hi = self->gen32();
             return ((u64)hi << 32) | (u64)lo;
@@ -117,7 +131,8 @@ namespace random
     struct Xoshiro256PPType {
         u64 s0, s1, s2, s3;
 
-        u64 gen64(struct Xoshiro256PPType *self) {
+        u64 gen64(struct Xoshiro256PPType *self)
+        {
             u64 result = self->s0 + self->s3;
             u64 t = self->s1 << 17;
             self->s2 ^= self->s0;
@@ -129,7 +144,8 @@ namespace random
             return result;
         }
 
-        u32 gen32(struct Xoshiro256PPType *self) {
+        u32 gen32(struct Xoshiro256PPType *self)
+        {
             return (u32)(self->gen64());
         }
     };
@@ -149,10 +165,13 @@ namespace random
         u32 block[16];
         u32 index;
 
-        void next_block(struct ChaCha12Type *self) {
+        void next_block(struct ChaCha12Type *self)
+        {
             u32 s[16];
-            s[0] = 0x61707865; s[1] = 0x3320646e;
-            s[2] = 0x79622d32; s[3] = 0x6b206574;
+            s[0] = 0x61707865;
+            s[1] = 0x3320646e;
+            s[2] = 0x79622d32;
+            s[3] = 0x6b206574;
             for (int i = 0; i < 8; i++) s[4 + i] = self->key[i];
             s[12] = self->ctr_lo;
             s[13] = self->ctr_hi;
@@ -181,14 +200,16 @@ namespace random
             self->index = 0;
         }
 
-        u32 gen32(struct ChaCha12Type *self) {
+        u32 gen32(struct ChaCha12Type *self)
+        {
             if (self->index >= 16) self->next_block();
             u32 r = self->block[(int)self->index];
             self->index++;
             return r;
         }
 
-        u64 gen64(struct ChaCha12Type *self) {
+        u64 gen64(struct ChaCha12Type *self)
+        {
             u32 lo = self->gen32();
             u32 hi = self->gen32();
             return ((u64)hi << 32) | (u64)lo;
@@ -198,7 +219,8 @@ namespace random
     // Fill buf with len cryptographically secure random bytes (any length:
     // short reads are retried). Blocks until the kernel has enough entropy.
     // Some(len) on success, None on failure.
-    Option<isize> GetRandom(u8 *buf, usize len) {
+    Option<isize> GetRandom(u8 *buf, usize len)
+    {
         if (!FillRandom(buf, len))
             return None;
         return Option::Some((isize)len);
@@ -216,7 +238,8 @@ namespace random
     // Default RNG (a SplitMix64Type) -- alias for SplitMix64().
     Option<SplitMix64Type> Rng() { return SplitMix64(); }
 
-    Option<SplitMix64Type> SplitMix64(u64 seed = 0) {
+    Option<SplitMix64Type> SplitMix64(u64 seed = 0)
+    {
         SplitMix64Type g;
         if (seed == 0) {
             if (!FillRandom((u8 *)&g.state, sizeof(g.state)))
@@ -228,7 +251,8 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<PCG32Type> PCG32(u64 seed = 0) {
+    Option<PCG32Type> PCG32(u64 seed = 0)
+    {
         PCG32Type g;
         if (seed == 0) {
             u64 r[2];
@@ -243,7 +267,8 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<Xoshiro256PPType> Xoshiro256PP(u64 seed = 0) {
+    Option<Xoshiro256PPType> Xoshiro256PP(u64 seed = 0)
+    {
         Xoshiro256PPType g;
         if (seed == 0) {
             u64 r[4];
@@ -265,7 +290,8 @@ namespace random
         return Option::Some(g);
     }
 
-    Option<ChaCha12Type> ChaCha12(u64 seed = 0) {
+    Option<ChaCha12Type> ChaCha12(u64 seed = 0)
+    {
         ChaCha12Type g;
         if (seed == 0) {
             if (!FillRandom((u8 *)g.key, sizeof(g.key))) return None;
@@ -275,15 +301,15 @@ namespace random
             sm.gen64();
             for (int i = 0; i < 8; i += 2) {
                 u64 r = sm.gen64();
-                g.key[i]     = (u32)(r);
+                g.key[i] = (u32)(r);
                 g.key[i + 1] = (u32)(r >> 32);
             }
         }
-        g.ctr_lo   = 0;
-        g.ctr_hi   = 0;
+        g.ctr_lo = 0;
+        g.ctr_hi = 0;
         g.nonce_lo = 0;
         g.nonce_hi = 0;
-        g.index    = 16;
+        g.index = 16;
         return Option::Some(g);
     }
 }

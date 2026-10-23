@@ -11,34 +11,34 @@ module std;
 namespace math
 {
     // Trigonometric
-    f64 Sin(f64 x)    { return sin(x);    }
-    f64 Cos(f64 x)    { return cos(x);    }
-    f64 Tan(f64 x)    { return tan(x);    }
-    f64 Asin(f64 x)   { return asin(x);   }
-    f64 Acos(f64 x)   { return acos(x);   }
-    f64 Atan(f64 x)   { return atan(x);   }
+    f64 Sin(f64 x) { return sin(x); }
+    f64 Cos(f64 x) { return cos(x); }
+    f64 Tan(f64 x) { return tan(x); }
+    f64 Asin(f64 x) { return asin(x); }
+    f64 Acos(f64 x) { return acos(x); }
+    f64 Atan(f64 x) { return atan(x); }
     f64 Atan2(f64 y, f64 x) { return atan2(y, x); }
-    f64 Sinh(f64 x)   { return sinh(x);   }
-    f64 Cosh(f64 x)   { return cosh(x);   }
-    f64 Tanh(f64 x)   { return tanh(x);   }
+    f64 Sinh(f64 x) { return sinh(x); }
+    f64 Cosh(f64 x) { return cosh(x); }
+    f64 Tanh(f64 x) { return tanh(x); }
 
     // Exponent / power / root
-    f64 Sqrt(f64 x)   { return sqrt(x);   }
+    f64 Sqrt(f64 x) { return sqrt(x); }
     f64 Pow(f64 x, f64 y) { return pow(x, y); }
-    f64 Exp(f64 x)    { return exp(x);    }
-    f64 Log(f64 x)    { return log(x);    }
-    f64 Log10(f64 x)  { return log10(x);  }
-    f64 Log2(f64 x)   { return log2(x);   }
+    f64 Exp(f64 x) { return exp(x); }
+    f64 Log(f64 x) { return log(x); }
+    f64 Log10(f64 x) { return log10(x); }
+    f64 Log2(f64 x) { return log2(x); }
 
     // Rounding / absolute / remainder
-    f64 Floor(f64 x)  { return floor(x);  }
-    f64 Ceil(f64 x)   { return ceil(x);   }
-    f64 Round(f64 x)  { return round(x);  }
-    f64 Fabs(f64 x)   { return fabs(x);   }
+    f64 Floor(f64 x) { return floor(x); }
+    f64 Ceil(f64 x) { return ceil(x); }
+    f64 Round(f64 x) { return round(x); }
+    f64 Fabs(f64 x) { return fabs(x); }
     f64 Fmod(f64 x, f64 y) { return fmod(x, y); }
     f64 Hypot(f64 x, f64 y) { return hypot(x, y); }
 
     // Common mathematical constants
     const f64 Pi = 3.14159265358979323846;
-    const f64 E  = 2.71828182845904523536;
+    const f64 E = 2.71828182845904523536;
 }

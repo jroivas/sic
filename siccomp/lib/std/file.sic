@@ -50,7 +50,7 @@ namespace file
 
     enum Status {
         Success,
-        Opened(File*),
+        Opened(File *),
         NotFound,
         InvalidObject,
         IO,
@@ -126,8 +126,7 @@ namespace file
     // needed. False if out of memory.
     static bool append(buffer::Buffer *buf, u8 *p, u64 n)
     {
-        if (buf->size + n > buf->capacity)
-        {
+        if (buf->size + n > buf->capacity) {
             u64 cap = buf->capacity < 128 ? 128 : buf->capacity;
             while (cap < buf->size + n)
                 cap *= 2;
@@ -145,8 +144,7 @@ namespace file
         File *tmp = new File() else return file::Status::OutOfMemory;
         int flags = 0;
 
-        match (mode)
-        {
+        match (mode) {
             Read: flags |= O_RDONLY;
             Write: flags |= O_WRONLY | O_CREAT | O_TRUNC;
             RW: flags |= O_RDWR;
@@ -156,16 +154,14 @@ namespace file
         do {
             tmp->fd = open(name.ptr, flags | O_CLOEXEC, 0644);
         } while (tmp->fd < 0 && errno == EINTR);
-        if (tmp->fd < 0)
-        {
+        if (tmp->fd < 0) {
             int err = errno;
             del tmp;
             return errno_status(err, file::Status::Error(err));
         }
         tmp->name = name;
         tmp->stream = false;
-        if (mode == OpenMode::Append)
-        {
+        if (mode == OpenMode::Append) {
             i64 end = lseek(tmp->fd, 0, SEEK_END);
             if (end > 0)
                 tmp->offset = (u64)end;
@@ -215,8 +211,7 @@ namespace file
         if (!f || !buf)
             return file::Status::InvalidObject;
 
-        if (!f->stream && offset != f->offset)
-        {
+        if (!f->stream && offset != f->offset) {
             file::Status st = Seek(f, offset);
             if (st != file::Status::Success)
                 return st;
@@ -270,10 +265,8 @@ namespace file
             f->offset += f->rlen - f->rpos;
             f->rpos = f->rlen;
         }
-        while (true)
-        {
-            if (buf->size == buf->capacity)
-            {
+        while (true) {
+            if (buf->size == buf->capacity) {
                 u64 cap = buf->capacity < 4096 ? 4096 : buf->capacity * 2;
                 if (!buffer::SetCapacity(buf, cap))
                     return file::Status::OutOfMemory;
@@ -300,18 +293,15 @@ namespace file
     {
         if (!f || !buf)
             return file::Status::InvalidObject;
-        if (!f->rbuf)
-        {
+        if (!f->rbuf) {
             f->rbuf = new u8(RBUF_SIZE);
             if (!f->rbuf)
                 return file::Status::OutOfMemory;
         }
         buf->size = 0;
         f->eof = false;
-        while (true)
-        {
-            if (f->rpos == f->rlen)
-            {
+        while (true) {
+            if (f->rpos == f->rlen) {
                 isize res;
                 do {
                     res = read(f->fd, f->rbuf, RBUF_SIZE);
@@ -320,16 +310,14 @@ namespace file
                     return errno_status(errno, file::Status::ReadError);
                 f->rpos = 0;
                 f->rlen = (u64)res;
-                if (res == 0)
-                {
+                if (res == 0) {
                     f->eof = true;
                     break;
                 }
             }
             u64 end = f->rpos;
             bool newline = false;
-            while (end < f->rlen)
-            {
+            while (end < f->rlen) {
                 u8 c = f->rbuf[end];
                 end++;
                 if (c == 10)        // '\n'
@@ -354,25 +342,21 @@ namespace file
     {
         // A ReadLine read-ahead left the descriptor past the logical position:
         // move it back (dropping the read-ahead) before writing.
-        if (!f->stream && f->rpos < f->rlen && offset == f->offset)
-        {
+        if (!f->stream && f->rpos < f->rlen && offset == f->offset) {
             file::Status st = Seek(f, offset);
             if (st != file::Status::Success)
                 return st;
         }
-        if (!f->stream && offset != f->offset)
-        {
+        if (!f->stream && offset != f->offset) {
             file::Status st = Seek(f, offset);
             if (st != file::Status::Success)
                 return st;
         }
 
         u64 done = 0;
-        while (done < n)
-        {
+        while (done < n) {
             isize res = write(f->fd, p + done, n - done);
-            if (res < 0)
-            {
+            if (res < 0) {
                 if (errno == EINTR)
                     continue;
                 return errno_status(errno, file::Status::WriteError);

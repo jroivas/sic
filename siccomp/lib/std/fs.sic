@@ -21,33 +21,39 @@ namespace fs
 
     // Create a directory. Returns true on success.
     // mode is the permission bits (default 0755).
-    bool MkDir(string path, u32 mode = 0755) {
+    bool MkDir(string path, u32 mode = 0755)
+    {
         return mkdir(path.ptr, mode) == 0;
     }
 
     // Remove an empty directory. Returns true on success.
-    bool RmDir(string path) {
+    bool RmDir(string path)
+    {
         return rmdir(path.ptr) == 0;
     }
 
     // Delete a file (unlink). Returns true on success.
-    bool Unlink(string path) {
+    bool Unlink(string path)
+    {
         return unlink(path.ptr) == 0;
     }
 
     // Rename a file or directory. Returns true on success.
-    bool Rename(string from, string to) {
+    bool Rename(string from, string to)
+    {
         return rename(from.ptr, to.ptr) == 0;
     }
 
     // Change the current working directory. Returns true on success.
-    bool ChDir(string path) {
+    bool ChDir(string path)
+    {
         return chdir(path.ptr) == 0;
     }
 
     // Get the current working directory as a string.
     // Returns None if the path cannot be determined.
-    Option<string> GetCwd() {
+    Option<string> GetCwd()
+    {
         char buf[4096];
         char *res = getcwd(buf, 4096);
         if (!res) return None;
@@ -61,7 +67,8 @@ namespace fs
 
     // List all entries in a directory (including . and ..), in the order
     // the filesystem returns them. None if the directory cannot be opened.
-    Option<list<string>> ReadDir(string path) {
+    Option<list<string>> ReadDir(string path)
+    {
         list<string> entries;
         DIR *dp = opendir(path.ptr);
         if (!dp) return None;
@@ -78,20 +85,23 @@ namespace fs
     // ------------------------------------------------------------------
 
     // Returns true if the path exists (any file type, including dirs).
-    bool Exists(string path) {
+    bool Exists(string path)
+    {
         struct stat sb;
         return stat(path.ptr, &sb) == 0;
     }
 
     // Returns true if the path is a regular file.
-    bool IsFile(string path) {
+    bool IsFile(string path)
+    {
         struct stat sb;
         if (stat(path.ptr, &sb) != 0) return false;
         return (sb.st_mode & S_IFMT) == S_IFREG;
     }
 
     // Returns true if the path is a directory.
-    bool IsDir(string path) {
+    bool IsDir(string path)
+    {
         struct stat sb;
         if (stat(path.ptr, &sb) != 0) return false;
         return (sb.st_mode & S_IFMT) == S_IFDIR;
