@@ -1,0 +1,1 @@
+test_0577.sic:9:6: error: cannot assign to 'p->id': it is const

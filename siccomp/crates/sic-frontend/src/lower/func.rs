@@ -271,6 +271,12 @@ pub struct FuncCtx<'m> {
     /// Declared (AST) types of the function's parameters and locals by name
     /// (the latest declaration wins) — see `Lowerer::global_qtypes`.
     pub decl_qtypes: HashMap<String, QualType>,
+    /// The declared type of the binding `define_local` is about to create (a
+    /// parameter or declarator); it is recorded by slot in `vid_qtypes`.
+    pub binding_qt: Option<(String, QualType)>,
+    /// Declared (AST) types of locals and parameters by slot, so `const` is
+    /// known per binding (an inner declaration shadows an outer one).
+    pub vid_qtypes: HashMap<ValId, QualType>,
     /// Names whose address has been taken (`&x`) so far in the function. A
     /// local outside this set cannot be changed by a call (loop-BCE).
     pub addr_taken: std::collections::HashSet<String>,
@@ -439,6 +445,8 @@ impl<'m> FuncCtx<'m> {
             goto_counts: HashMap::new(),
             diverged: std::collections::HashSet::new(),
             decl_qtypes: HashMap::new(),
+            binding_qt: None,
+            vid_qtypes: HashMap::new(),
             addr_taken: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
@@ -1287,6 +1295,10 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
+        if self.binding_qt.as_ref().map_or(false, |(n, _)| *n == name) {
+            let (_, qt) = self.binding_qt.take().unwrap();
+            self.vid_qtypes.insert(alloca_id, qt);
+        }
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
     }
 
@@ -2242,6 +2254,7 @@ impl<'m> Lowerer {
                     fc.owned_enum_locals.insert(ptr_vid);
                     fc.register_scope_exit(Cleanup::EnumRelease { addr: Val::Local(ptr_vid), ty: pty.clone() });
                 }
+                fc.binding_qt = Some((pname.clone(), p.ty.clone()));
                 fc.define_local(pname.clone(), pty, ptr_vid);
                 if owned_string_param {
                     fc.retain_string_at(&Val::Local(ptr_vid))?;
@@ -2630,6 +2643,7 @@ impl<'m> FuncCtx<'m> {
                 let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
                     self.decl_qtypes.insert(d.name.clone(), d.ty.clone());
+                    self.binding_qt = (!is_static && !is_extern).then(|| (d.name.clone(), d.ty.clone()));
                     // sic `atomic` (sic.md §"Atomics"): a top-level atomic-qualified
                     // declarator becomes an atomic local. `d.ty.qualifiers` is the
                     // TOP-level type, so `atomic int a` is atomic but `atomic int *p`

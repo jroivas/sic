@@ -1,0 +1,13 @@
+// A member declared const, reached through a pointer.
+struct S {
+    const int id;
+    int v;
+};
+
+int bump(S *p)
+{
+    p->id++;
+    return p->v;
+}
+
+int main() { return 0; }

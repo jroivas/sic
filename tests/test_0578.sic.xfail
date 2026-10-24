@@ -1,0 +1,1 @@
+test_0578.sic:9:11: error: cannot assign to 'origin.x': it is const

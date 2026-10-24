@@ -1,0 +1,1 @@
+test_0576.c:4:6: error: cannot assign to 's[…]': it is const

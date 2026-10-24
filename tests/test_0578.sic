@@ -1,0 +1,11 @@
+// A member of a const struct.
+struct P {
+    int x;
+};
+
+int main()
+{
+    const P origin = { 1 };
+    origin.x = 2;
+    return 0;
+}

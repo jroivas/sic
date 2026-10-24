@@ -5400,6 +5400,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        self.check_writable(lhs)?;
         // A borrowing closure may be assigned to a local closure variable (which
         // is then tracked), never to a field, global, `*p` or element.
         if op.is_none() {
@@ -6246,6 +6247,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_pre_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
+        self.check_writable(inner)?;
         if self.container_elem(inner).is_some() {
             let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };
             self.container_rmw(inner, op, Expr::new(ExprKind::IntLit(1, false), inner.span.clone()))?;
@@ -6265,6 +6267,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_post_inc(&mut self, inc: bool, inner: &Expr) -> Result<Val> {
+        self.check_writable(inner)?;
         if self.container_elem(inner).is_some() {
             let old = self.lower_expr(inner)?;
             let op = if inc { BinOpKind::Add } else { BinOpKind::Sub };

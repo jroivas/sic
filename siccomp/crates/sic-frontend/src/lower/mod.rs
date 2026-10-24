@@ -192,6 +192,9 @@ pub struct Lowerer {
     /// `del`s (its OWNED, refcounted fields). A managed-struct copy (`v = other`)
     /// retains exactly these — never a borrowed pointer field the dtor leaves alone.
     pub struct_owned_fields: HashMap<String, Vec<String>>,
+    /// `(struct, field)` pairs declared `const` (`struct S { const int id; }`):
+    /// assigning such a member is a compile error.
+    pub const_fields: HashSet<(String, String)>,
     /// sic member destructors: struct name → `void(S*)` releasing the struct's
     /// managed by-value fields (see `synthesize_member_dtors`); `None` = the
     /// struct has none. A struct with no `~S()` uses it as its destructor; a
@@ -353,6 +356,7 @@ impl Lowerer {
             private_types: std::collections::HashSet::new(),
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
+            const_fields: HashSet::new(),
             struct_owned_fields: HashMap::new(),
             member_dtor: HashMap::new(),
             tuple_shape_globals: HashMap::new(),
@@ -1196,6 +1200,11 @@ impl Lowerer {
             return Ok(());
         }
         if let (Some(name), Some(fields)) = (&s.name, &s.fields) {
+            for f in fields {
+                if let (Some(fname), true) = (&f.name, qt_top_const(&f.ty)) {
+                    self.const_fields.insert((name.clone(), fname.clone()));
+                }
+            }
             // A member naming the struct itself (`Node *next;`, sic's bare tag)
             // resolves to the struct: give the name an opaque entry while the
             // fields are lowered (a pointer pointee is opaque anyway).
@@ -5451,6 +5460,11 @@ pub(crate) fn decl_loc(d: &Decl) -> (Option<String>, u32, u32) {
 /// The qualifiers (const, volatile) of each pointee level of a pointer or
 /// array type, outermost first: `const int * const p` → [(const)]. None when
 /// a level is a typedef name (its qualifiers are not visible here).
+/// The declared object itself is `const`: `const int x`, `int *const p`.
+pub(crate) fn qt_top_const(qt: &QualType) -> bool {
+    qt.is_const() || matches!(&qt.ty, AstType::Pointer { quals, .. } if quals.contains(&TypeQual::Const))
+}
+
 pub(crate) fn pointee_quals(qt: &QualType) -> Option<Vec<(bool, bool)>> {
     let mut out = Vec::new();
     let mut cur = qt;

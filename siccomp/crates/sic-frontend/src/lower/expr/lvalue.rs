@@ -5,6 +5,86 @@ use super::super::func::{FuncCtx, LookupResult};
 use super::*;
 
 impl<'m> FuncCtx<'m> {
+    /// The declared (AST) type of an lvalue, where it is known: a variable, a
+    /// cast, or `*`/`[]` through one. `None` when it is not (a call result, a
+    /// typedef'd pointer); then no `const` is known either.
+    fn lvalue_qt(&self, e: &Expr) -> Option<crate::ast::QualType> {
+        use crate::ast::AstType;
+        match &e.kind {
+            ExprKind::Ident(n) => match self.lookup(n) {
+                Some(LookupResult::Local(_, vid)) => self.vid_qtypes.get(&vid).cloned(),
+                // A `static` local is a global too, under its own declaration.
+                Some(LookupResult::Global(..)) if self.static_locals.contains_key(n) => self.decl_qtypes.get(n).cloned(),
+                Some(LookupResult::Global(..)) => self.lowerer.global_qtypes.get(n).cloned(),
+                _ => None,
+            },
+            ExprKind::Cast { ty, .. } => Some(ty.clone()),
+            ExprKind::Unary { op: UnOpKind::Deref, expr } | ExprKind::Index { base: expr, .. } => {
+                match self.lvalue_qt(expr)?.ty {
+                    AstType::Pointer { base, .. } | AstType::Array { base, .. } => Some(*base),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The name a write to `e` would change, when that is `const`: a `const`
+    /// variable, an element or pointee of `const` type, a member declared
+    /// `const`, or a member of a `const` struct.
+    fn const_target(&self, e: &Expr) -> Option<String> {
+        // `x` for a variable, `*p` / `p[…]` for what `p` points to.
+        fn name(e: &Expr) -> String {
+            match &e.kind {
+                ExprKind::Ident(n) => n.clone(),
+                ExprKind::Unary { op: UnOpKind::Deref, expr } => format!("*{}", name(expr)),
+                ExprKind::Index { base, .. } => format!("{}[…]", name(base)),
+                ExprKind::Field { base, name: f } => format!("{}.{}", name(base), f),
+                ExprKind::Arrow { base, name: f } => format!("{}->{}", name(base), f),
+                _ => "(…)".to_string(),
+            }
+        }
+        match &e.kind {
+            ExprKind::Field { base, name: f } | ExprKind::Arrow { base, name: f } => {
+                let arrow = matches!(e.kind, ExprKind::Arrow { .. });
+                let bt = self.infer_expr_type(base).ok()?;
+                let st = match (arrow, bt) {
+                    (true, Type::Pointer(p)) => *p,
+                    (false, t) => t,
+                    _ => return None,
+                };
+                let st = super::super::types::resolve_aggregate(&st, &self.lowerer.struct_types);
+                if let Type::Struct(s) = &st {
+                    if let Some(sn) = &s.name {
+                        if self.lowerer.const_fields.contains(&(sn.clone(), f.clone())) { return Some(name(e)); }
+                    }
+                }
+                // A member of a `const` struct (`c.x`, `cp->x` with `const S *cp`).
+                let holder = if arrow {
+                    match self.lvalue_qt(base)?.ty {
+                        crate::ast::AstType::Pointer { base, .. } => *base,
+                        _ => return None,
+                    }
+                } else {
+                    if self.const_target(base).is_some() { return Some(name(e)); }
+                    self.lvalue_qt(base)?
+                };
+                holder.is_const().then(|| name(e))
+            }
+            _ => self.lvalue_qt(e).filter(super::super::qt_top_const).map(|_| name(e)),
+        }
+    }
+
+    /// A write to `e` (`=`, a compound assignment, `++`/`--`) must not change
+    /// something `const`.
+    pub(crate) fn check_writable(&self, e: &Expr) -> Result<()> {
+        match self.const_target(e) {
+            Some(n) => Err(CompileError::at(format!("cannot assign to '{}': it is const", n),
+                e.span.file.clone(), e.span.line, e.span.col)),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn lower_lvalue(&mut self, expr: &Expr) -> Result<LValue> {
         match &expr.kind {
             // sic (sic.md §"Namespace"): `N::member` as an lvalue is the member's
