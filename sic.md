@@ -9,7 +9,8 @@ sources (`.sic` files); the same compiler also builds ordinary C (it compiles re
 C codebases such as SQLite and QEMU). A few items remain partial or planned, noted
 inline where relevant: strict mode (with move semantics and `clone`), compile-time
 enforced error handling (§"Errors and exceptions"), and a cross-module generic
-template whose body calls other module functions.
+template whose body calls other module functions; calling a method through `?.`,
+and swapping through a cast.
 
 ## Limit undefined behavior
 
@@ -785,8 +786,11 @@ For example:
     int port = parse_port(s) ?: 8080;
 
     // If "user" is null, "username" becomes NULL without an exception;
-    // otherwise it is "user.name".
-    char *username = user?.name;
+    // otherwise it is the result of the "user.name()" call.
+    char *username = user?.name();
+
+(Not implemented yet: calling a method through `?.`; reading and writing a field
+through `?.` works.)
 
 On top of these, an `else` guard runs a custom action when a value is missing — an
 `Option`/`Result` without a value, or a null pointer — or a condition is false:
@@ -1909,8 +1913,19 @@ on target architectures that support it.
     printf("%d\n", a); // prints 20
     printf("%d\n", b); // prints 6
 
-Both values must have the same type, and both must be assignable: swapping an
-`i64` with an `i32`, or a cast such as `(i32)a <> b`, is a compile error.
+The types of the swapped values should be the same, or differ by a trivial
+conversion. Complex casting is not supported, but one can cast manually:
+
+    i64 a = 5;
+    i32 b = 1;
+
+    (i32)a <> b;
+
+    // a <> (i64)b; // An error, since the 64-bit value of `a` can't fit into
+                    // the 32-bit `b`. This would be the default as well.
+
+(Not implemented yet: swapping values of different types, and the cast form; today
+both sides must be variables of the same type.)
 
 ## Memory barriers
 
