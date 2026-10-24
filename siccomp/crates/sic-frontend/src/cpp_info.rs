@@ -273,17 +273,6 @@ const BUILTINS: &[&str] = &[
     "__sync_synchronize", "__sync_val_compare_and_swap",
 ];
 
-/// `__builtin_<f>` that sic lowers as the libc function `f` (when `f` is
-/// declared, as with its header included).
-const LIBC_BUILTINS: &[&str] = &[
-    "memcpy", "memmove", "memset", "memcmp", "memchr", "strlen", "strnlen", "strcmp",
-    "strncmp", "strcpy", "strncpy", "strcat", "strncat", "strchr", "strrchr", "strstr",
-    "strdup", "printf", "fprintf", "sprintf", "snprintf", "vsnprintf", "puts", "putchar",
-    "abort", "exit", "malloc", "calloc", "realloc", "free", "abs", "labs", "llabs",
-    "fabs", "fabsf", "fabsl", "sqrt", "sqrtf", "floor", "floorf", "ceil", "ceilf", "round",
-    "roundf", "trunc", "truncf", "copysign", "copysignf", "fmin", "fmax", "pow", "exp",
-    "log", "sin", "cos",
-];
 
 /// Every `__has_builtin` name sic answers 1 for.
 pub fn builtin_names() -> Vec<String> {
@@ -297,6 +286,7 @@ pub fn builtin_names() -> Vec<String> {
         v.push(format!("__sync_fetch_and_{}", op));
         v.push(format!("__sync_{}_and_fetch", op));
     }
-    for f in LIBC_BUILTINS { v.push(format!("__builtin_{}", f)); }
+    // `__builtin_<f>` of a libc function: the function, declared if need be.
+    for (f, _) in crate::lower::libc_builtins::LIBC_PROTOTYPES { v.push(format!("__builtin_{}", f)); }
     v
 }

@@ -1255,9 +1255,11 @@ impl<'m> FuncCtx<'m> {
                         } else
                         // Many `__builtin_<fn>` calls (memcpy, memmove, strlen, …)
                         // are just the libc function; retry resolution with the
-                        // prefix stripped.
+                        // prefix stripped, declaring the function when it was not.
                         if let Some(libc) = name.strip_prefix("__builtin_") {
                             if let Some(LookupResult::Func(fr)) = self.lookup(libc) {
+                                fr
+                            } else if let Some(fr) = self.lowerer.implicit_libc_decl(libc) {
                                 fr
                             } else {
                                 return Err(CompileError::at(
