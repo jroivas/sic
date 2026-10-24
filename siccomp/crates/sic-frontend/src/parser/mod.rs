@@ -569,7 +569,7 @@ impl Parser {
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
-            | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+            | TokenKind::Inline | TokenKind::Noreturn | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::TypeName | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
             | TokenKind::Eof | TokenKind::LBrace
         ) { return false; }
@@ -699,7 +699,7 @@ impl Parser {
                 && base.as_ref().is_some_and(is_aggregate_definition)
                 && (matches!(self.peek_kind(),
                         TokenKind::Extern | TokenKind::Static | TokenKind::Typedef
-                        | TokenKind::Auto | TokenKind::Register | TokenKind::Inline
+                        | TokenKind::Auto | TokenKind::Register | TokenKind::Inline | TokenKind::Noreturn
                         | TokenKind::TypeName)
                     || self.at_base_type_kw())
             {
@@ -771,6 +771,9 @@ impl Parser {
                 // `inline` function specifier: recorded so definitions can be
                 // omitted when unreferenced (GNU inline semantics).
                 TokenKind::Inline   => { quals.push(TypeQual::Inline); self.advance(); }
+                // C11 `_Noreturn` function specifier: like GNU
+                // `__attribute__((noreturn))`, a promise with no codegen effect.
+                TokenKind::Noreturn => { self.advance(); }
                 // signedness
                 TokenKind::Signed   => { signed = Some(true);  self.advance(); }
                 TokenKind::Unsigned => { signed = Some(false); self.advance(); }
@@ -1899,7 +1902,7 @@ impl Parser {
                 | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Tuple
                 | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict | TokenKind::Atomic
                 | TokenKind::Static | TokenKind::Extern | TokenKind::Auto | TokenKind::Register
-                | TokenKind::Inline | TokenKind::Typedef | TokenKind::ThreadLocal | TokenKind::Extension))
+                | TokenKind::Inline | TokenKind::Noreturn | TokenKind::Typedef | TokenKind::ThreadLocal | TokenKind::Extension))
     }
 
     fn starts_decl_specifier(&self) -> bool {
@@ -1918,7 +1921,7 @@ impl Parser {
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
-            | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+            | TokenKind::Inline | TokenKind::Noreturn | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal)
         {
             return true;
@@ -2173,7 +2176,7 @@ impl Parser {
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Complex | TokenKind::Atomic
             | TokenKind::Struct | TokenKind::Union | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Typedef
             | TokenKind::Extern | TokenKind::Static | TokenKind::Auto | TokenKind::Register
-            | TokenKind::Inline | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
+            | TokenKind::Inline | TokenKind::Noreturn | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict
             | TokenKind::Typeof | TokenKind::Alignas | TokenKind::ThreadLocal
             // A declaration may lead with attributes, e.g. glib's g_autoptr /
             // QEMU's RCU_READ_LOCK_GUARD: `__attribute__((cleanup(f))) T v = ...`.

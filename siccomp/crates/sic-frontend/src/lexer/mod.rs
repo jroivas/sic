@@ -691,6 +691,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         "goto"           => TokenKind::Goto,
         "if"             => TokenKind::If,
         "inline"         => TokenKind::Inline,
+        "_Noreturn"      => TokenKind::Noreturn,
         "int"            => TokenKind::Int,
         "long"           => TokenKind::Long,
         "register"       => TokenKind::Register,
