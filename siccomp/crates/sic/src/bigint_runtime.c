@@ -571,9 +571,9 @@ __attribute__((weak)) double __sic_rat_to_double(const __sic_rat *a) {
     return d;
 }
 
-/* Resolve to a decimal string with `decimals` fraction digits, rounded half away
-   from zero. malloc'd; caller frees. */
-__attribute__((weak)) char *__sic_rat_to_str(const __sic_rat *a, int decimals) {
+/* The value scaled by 10^decimals and rounded half away from zero: the digits a
+   `fixed` with `decimals` fraction digits holds. */
+__attribute__((weak)) __sic_bi *__sic_rat_scaled(const __sic_rat *a, int decimals) {
     if (decimals < 0) decimals = 0;
     __sic_bi *p = __sic_bi_pow10((unsigned)decimals);
     __sic_bi *scaled = __sic_bi_mul(a->num, p);          /* num * 10^decimals */
@@ -588,7 +588,35 @@ __attribute__((weak)) char *__sic_rat_to_str(const __sic_rat *a, int decimals) {
         __sic_bi_free(q); __sic_bi_free(one);
         q = nq;
     }
+    __sic_bi_free(p); __sic_bi_free(scaled); __sic_bi_free(rem); __sic_bi_free(rem2);
+    return q;
+}
+
+/* Resolve to a decimal string with `decimals` fraction digits, rounded half away
+   from zero. malloc'd; caller frees. */
+__attribute__((weak)) char *__sic_rat_to_str(const __sic_rat *a, int decimals) {
+    if (decimals < 0) decimals = 0;
+    __sic_bi *q = __sic_rat_scaled(a, decimals);
     char *s = __sic_fx_to_str(q, decimals);
-    __sic_bi_free(p); __sic_bi_free(scaled); __sic_bi_free(rem); __sic_bi_free(rem2); __sic_bi_free(q);
+    __sic_bi_free(q);
     return s;
+}
+
+/* Whether the value, shown with `decimals` fraction digits, has at most
+   `integral` integral digits — it fits a `fixed<integral,decimals>`. */
+__attribute__((weak)) int __sic_rat_fits(const __sic_rat *a, int integral, int decimals) {
+    if (decimals < 0) decimals = 0;
+    if (integral < 0) integral = 0;
+    __sic_bi *q = __sic_rat_scaled(a, decimals);
+    __sic_bi *lim = __sic_bi_pow10((unsigned)(integral + decimals));
+    int ok = __sic_bi_ucmp(q, lim) < 0;
+    __sic_bi_free(q); __sic_bi_free(lim);
+    return ok;
+}
+
+/* The value rounded half away from zero to `decimals` fraction digits (an
+   explicit `(fixed<I,F>)` conversion). */
+__attribute__((weak)) __sic_rat *__sic_rat_round(const __sic_rat *a, int decimals) {
+    if (decimals < 0) decimals = 0;
+    return __sic_rat_wrap(__sic_rat_scaled(a, decimals), __sic_bi_pow10((unsigned)decimals));
 }

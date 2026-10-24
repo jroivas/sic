@@ -71,9 +71,9 @@ pub enum AstType {
     /// field types are resolved from context (initializer / return value).
     Tuple,
     /// sic-only: the fixed-point type `fixed<integral,fraction>` (sic.md §"Built-in
-    /// fixed point"). `(0, 0)` marks a bare `fixed` whose precision is inferred
-    /// from its initializer.
-    Fixed { integral: u32, fraction: u32 },
+    /// fixed point"). `None` is a dimension left open (`fixed<,F>`, `fixed<I,>`,
+    /// bare `fixed`): it has no digit limit.
+    Fixed { integral: Option<u32>, fraction: Option<u32> },
     /// sic-only (sic.md §"Match"): a generic-enum instantiation `Name<Arg, …>`,
     /// e.g. `Option<int>` / `Result<string,int>`. Monomorphized to a concrete
     /// tagged enum when resolved.

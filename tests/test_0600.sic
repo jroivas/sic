@@ -1,0 +1,7 @@
+// A literal with more integral digits than the target fails at compile time,
+// before anything is calculated.
+int main() {
+    fixed<2,2> tmp = 12.34;
+    tmp += 131837129873981732198713298713289718973892179837297132891327893127397123738913278913273127891327913279132781327891327983789213;
+    return 0;
+}

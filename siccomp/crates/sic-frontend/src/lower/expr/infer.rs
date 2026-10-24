@@ -640,10 +640,10 @@ impl<'m> FuncCtx<'m> {
                 if self.is_sic() && matches!(op, Add | Sub | Mul | Div | Rem)
                     && (super::super::types::is_fixed(&lt) || super::super::types::is_fixed(&rt))
                 {
-                    let da = self.fixed_expr_dims(lhs).unwrap_or((20, 0));
-                    let db = self.fixed_expr_dims(rhs).unwrap_or((20, 0));
-                    let (i, f) = Self::fixed_result_dims(*op, da, db);
-                    return Ok(super::super::types::fixed_type(i, f));
+                    let open = super::super::types::FixedDims::open(0, 0);
+                    let da = self.fixed_expr_full_dims(lhs).unwrap_or(open);
+                    let db = self.fixed_expr_full_dims(rhs).unwrap_or(open);
+                    return Ok(super::super::types::fixed_type_dims(Self::fixed_result_dims(*op, da, db)));
                 }
                 // sic `u8char` arithmetic works on the code point (`lower_binop`
                 // extracts `cp`), so it yields that integer, not a `u8char`.

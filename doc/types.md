@@ -59,9 +59,9 @@ don't `free` it yourself. (Assigning it into a `string` copies it out safely; se
 
 ## `fixed` — exact decimal / rational
 
-`fixed<I,F>` is an exact fixed-point number: an arbitrary-precision mantissa
-scaled by a power of ten, so arithmetic is **exact and never routed through a
-float**. `I` is the number of integral digits, `F` the fractional digits:
+`fixed<I,F>` is an exact number: an arbitrary-precision rational, so arithmetic
+is **exact and never routed through a float**. `I` is the number of integral
+digits, `F` the fractional digits:
 
 ```sic
 fixed<10,2> price = 19.99;
@@ -69,18 +69,32 @@ fixed<10,2> total = price * 3;   // exactly 59.97
 // total.str == "59.97"
 ```
 
-- Operations harmonize scales automatically; the result type takes the larger
-  integral and fractional precision:
+- The result type takes the larger integral part and the larger fraction part
+  (`*` adds the fraction parts):
 
   ```sic
   fixed<4,2> p = 12.50;
   fixed<4,3> q = 2.125;
-  // (p * q).str == "26.56250"   (fraction scale 2 + 3 = 5)
+  // (p * q).str == "26.56250"   (fraction digits 2 + 3 = 5)
   // (p - q).str == "10.375"
   ```
 
-- Plain `fixed` (unspecified precision) is an exact rational that reduces — so
-  `1/3` stays exact and `(1/3) * 3 == 1` exactly:
+- Digits are never cut: storing a value whose type has more integral or fraction
+  digits than the target is a compile error (`fixed<5,0> h = p;` drops `p`'s
+  decimals). An integer counts with its type's digits (`int`: 10), a literal with
+  its own. Convert on purpose with a cast, which rounds: `(fixed<4,1>)(p * q)`.
+
+- A stored result with too many integral digits is an overflow exception (fixed
+  never wraps); catch it with `overflow { … }` / `exception { … }`, which leaves
+  the target unchanged:
+
+  ```sic
+  fixed<2,2> tmp = 99.99;
+  if (overflow { tmp += 10; }) { /* tmp is still 99.99 */ }
+  ```
+
+- Plain `fixed` (no limit) is an exact rational that reduces — so `1/3` stays
+  exact and `(1/3) * 3 == 1` exactly:
 
   ```sic
   fixed third = 1;
@@ -96,11 +110,8 @@ fixed<10,2> total = price * 3;   // exactly 59.97
   // (big + eps).str == "1234567890.123456790"
   ```
 
-Accessors: `.str` (decimal string, rounded to the display precision `F`), `.int`
-(truncated toward zero to a 64-bit integer). Always specify the precision
-(`fixed<I,F>`) when you can — a bare `fixed` may fall back to the slower rational
-path. Fixed overflow raises an exception (catchable with `overflow`), unlike
-integer wrap.
+Accessors: `.str` (decimal string, rounded to `F` decimals), `.int` (truncated
+toward zero to a 64-bit integer).
 
 ## Floating point
 

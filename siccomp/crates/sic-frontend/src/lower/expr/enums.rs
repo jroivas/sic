@@ -147,7 +147,7 @@ impl<'m> FuncCtx<'m> {
                     // its payload — a bare `lower_expr` yields a raw float, and a
                     // shared pointer would dangle when the source's `__sic_rat_free`
                     // cleanup runs.
-                    let val = self.eval_fixed_owned(&args[0], 0)?;
+                    let val = self.eval_fixed_into(&args[0], pty)?;
                     self.push_instr(Instr::Store { val, ptr: payload_ptr.ptr });
                 } else if self.is_sic() && super::super::types::is_bigint(pty) {
                     // A `bigint` payload: same ownership story via `__sic_bi_clone`.

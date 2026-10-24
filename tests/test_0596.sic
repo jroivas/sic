@@ -1,0 +1,50 @@
+// fixed<I,F> holds I integral and F fraction digits (sic.md §"Built-in fixed
+// point"). A value computed past I digits is an overflow exception when stored:
+// `overflow`/`exception` catch it and the target keeps its value. A cast rounds
+// to F decimals; a plain `fixed` has no limit.
+#include <string.h>
+
+fixed<4,2> half(fixed<4,2> v) { return v / 2; }
+fixed<2,2> twice(fixed<2,2> v) { return v * 2; }
+
+int main() {
+    fixed<2,2> tmp = 12.34;
+    tmp += 10;
+    if (strcmp(tmp.str, "22.34") != 0) return 1;
+
+    fixed<5,0> w = 12345;             // no decimals
+    if (strcmp(w.str, "12345") != 0) return 2;
+
+    // An overflowing store is caught; nothing is stored.
+    if (!overflow { tmp += 80; }) return 3;
+    if (strcmp(tmp.str, "22.34") != 0) return 4;
+    if (!exception { tmp = tmp * 5; }) return 5;
+    if (overflow { tmp = tmp * 4; }) return 6;          // 89.36 fits
+    if (strcmp(tmp.str, "89.36") != 0) return 7;
+
+    // A cast rounds (half away from zero) and still checks the integral part.
+    fixed<2,2> c = (fixed<2,2>)(tmp / 3);               // 29.7866…
+    if (strcmp(c.str, "29.79") != 0) return 8;
+    if (!overflow { c = (fixed<2,2>)(tmp * 1.5); }) return 9;
+    if (strcmp(c.str, "29.79") != 0) return 10;
+    fixed<2,0> r = (fixed<2,0>)(c);
+    if (strcmp(r.str, "30") != 0) return 11;
+
+    // Rounding counts: 99.995 shown with 2 decimals is 100.00.
+    fixed<3,3> n = 99.995;
+    if (!overflow { fixed<2,2> m = (fixed<2,2>)(n); }) return 12;
+
+    // Parameters and return values have the digits of their types.
+    if (strcmp(half(99.99).str, "50.00") != 0) return 13;
+    if (strcmp(twice(30).str, "60.00") != 0) return 14;
+    if (!overflow { twice(tmp + 50); }) return 17;     // the argument overflows
+
+    // Plain `fixed` has no limit; a wide type takes a long literal.
+    fixed big = 1318371298739817321987132987.5;
+    big += big;
+    if (strcmp(big.str, "2636742597479634643974265975.0") != 0) return 15;
+    fixed<30,0> g = 1318371298739817321987132987;
+    if (strcmp(g.str, "1318371298739817321987132987") != 0) return 16;
+
+    return 42;
+}

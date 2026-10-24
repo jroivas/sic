@@ -1,0 +1,1 @@
+test_0601.sic:6:20: error: fixed<5,4> cannot hold a fixed<10,9> value: it has 10 integral digits and fixed<5,4> only 5 (widen it, or cast to fixed<5,4> to check the value when it runs)

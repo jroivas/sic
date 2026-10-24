@@ -2394,7 +2394,7 @@ impl Lowerer {
         func.blocks.push(BasicBlock::new(entry));
         {
             let mut fc = func::FuncCtx::new_with_func(self, &mut func);
-            let msg = "sic: arithmetic exception (overflow or divide-by-zero) in unsafe block\n";
+            let msg = "sic: arithmetic exception (overflow or divide-by-zero)\n";
             let ptr = fc.emit_cstring(msg);
             let ptr = fc.coerce(ptr, &voidp).unwrap();
             let len = fc.coerce(Constant::uint(msg.len() as u64), &usize_ty).unwrap();

@@ -222,29 +222,56 @@ arbitrary precision), so its arithmetic never rounds: `(1 / 3) * 3 == 1`, and te
 `0.1`s add up to exactly `1`, which floats cannot do.
 
 The syntax for fixed number types is `fixed<a,b>`, where `a` is the number of
-meaningful digits of the integral part and `b` of the fraction part. The value
-itself stays exact; it is rounded (half away from zero) to `b` decimals only when
-it is shown or converted (`.str`, `.int`, a cast). Plain `fixed` shows 18
-decimals.
+digits of the integral part and `b` of the fraction part. The value itself is
+exact; it is rounded (half away from zero) to `b` decimals when it is shown
+(`.str`). Plain `fixed` has no digit limit and shows 18 decimals; either part may
+be left open: `fixed<,4>` (any integral part), `fixed<10,>` (any fraction).
 
 - fixed<2,4>: 2 digits for integral, 4 digits for fraction, e.g. -99.9999 to 99.9999
 - fixed<2,2>: 2 digits for integral, 2 digits for fraction, e.g. -99.99 to 99.99
 - fixed<10,1>: 10 digits for integral, 1 digit for fraction, e.g. -9999999999.9 to 9999999999.9
+- fixed<5,0>: a 5-digit integer, -99999 to 99999
 
 Operations may mix fixed numbers of different precisions. The result type takes
-the bigger integral and the bigger fraction part:
+the bigger integral part, and the bigger fraction part (for `*` the sum of the
+fraction parts, which is exactly how many decimals a product has). An integer
+counts with the digits of its type (`int`: 10), a literal with its own:
 
     fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
 
     // Prints fixed<10,9>
-    printf("%s\n", type(a + b).str);
+    printf("%s
+", type(a + b).str);
 
-Because the value is exact, storing it in a `fixed` of another precision loses
-nothing; only the number of decimals shown differs:
+A value is never cut to fit: storing a value whose type has more integral or
+fraction digits than the target is a compile error. Plain `fixed` does not have
+this limitation:
 
     fixed<10,9>  c = a + b;   // shown as 123456790.673456789
-    fixed<5,4>   f = a + b;   // the same value, shown as 123456790.6735
+    fixed        d = a + b;   // the same
+    fixed<5,4>   f = a + b;   // error: fixed<5,4> cannot hold a fixed<10,9> value
+
+    fixed<5,2> g = 12345.99;
+    fixed<5,0> h = g;         // error: the 2 fraction digits would be lost
+    fixed<4,9> k = g;         // error: an integral digit would be lost
+
+A value that grows past its integral digits when it is calculated, and is then
+stored, is an overflow exception: fixed numbers do not wrap around like integers.
+The calculation itself is exact, so only the stored result counts. The exception
+is caught like integer overflow, with `overflow` or `exception`, and the target
+keeps its old value:
+
+    fixed<2,2> tmp = 99.99;
+    tmp += 10;                // exception: 109.99 does not fit fixed<2,2>
+    if (overflow { tmp += 10; }) {
+        // tmp is still 99.99
+    }
+
+A cast converts on purpose: `(fixed<a,b>)x` rounds `x` to `b` decimals, and is an
+overflow exception if it then has more than `a` integral digits:
+
+    fixed<2,2> third = (fixed<2,2>)(tmp / 3);   // 33.33
 
 Exactness has a price: the numbers are arbitrary precision (built on `bigint`), so
 `fixed` math is slower than integer or floating-point math.

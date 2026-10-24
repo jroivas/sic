@@ -531,22 +531,43 @@ pub fn is_bigint(t: &Type) -> bool {
         if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref() == Some(BIGINT_MARKER)))
 }
 
-/// A `fixed<I,F>` value (sic.md §"Built-in fixed point"): at runtime a bigint
-/// mantissa scaled by 10^F. The integral/fraction digit counts `(I, F)` are
-/// carried in the marker struct name, distinct from a plain bigint so arithmetic
-/// dispatch and the compile-time scale stay separate. Both are pointers (ABI-eq).
-pub fn fixed_type(integral: u32, fraction: u32) -> Type {
-    Type::Pointer(Box::new(Type::Struct(StructType::plain(
-        Some(format!("(fixed:{},{})", integral, fraction)), vec![], false))))
+/// The digit counts of a `fixed` type (sic.md §"Built-in fixed point"): `i`
+/// integral and `f` fraction digits. An open dimension (`fixed<,F>`, `fixed<I,>`,
+/// a bare `fixed`) has no limit; its count is only the digits shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedDims { pub i: u32, pub f: u32, pub i_open: bool, pub f_open: bool }
+
+impl FixedDims {
+    pub fn bounded(i: u32, f: u32) -> Self { FixedDims { i, f, i_open: false, f_open: false } }
+    /// Both parts open: a bare `fixed`.
+    pub fn open(i: u32, f: u32) -> Self { FixedDims { i, f, i_open: true, f_open: true } }
 }
+
+/// A `fixed<I,F>` value (sic.md §"Built-in fixed point"): at runtime an exact
+/// rational (`__sic_rat*`). The digit counts are carried in the marker struct
+/// name (`(fixed:I,F)`, an open dimension marked `?`), distinct from a plain
+/// bigint so arithmetic dispatch stays separate. Both are pointers (ABI-eq).
+pub fn fixed_type_dims(d: FixedDims) -> Type {
+    let q = |open: bool| if open { "?" } else { "" };
+    Type::Pointer(Box::new(Type::Struct(StructType::plain(
+        Some(format!("(fixed:{}{},{}{})", d.i, q(d.i_open), d.f, q(d.f_open))), vec![], false))))
+}
+
+/// A bare `fixed`: no digit limit, default shown decimals.
+pub fn fixed_any() -> Type { fixed_type_dims(FixedDims::open(0, 0)) }
 
 /// True if `t` is a `fixed` value.
 pub fn is_fixed(t: &Type) -> bool {
-    fixed_dims(t).is_some()
+    fixed_full_dims(t).is_some()
 }
 
 /// The `(integral, fraction)` digit counts of a `fixed` value type, or `None`.
 pub fn fixed_dims(t: &Type) -> Option<(u32, u32)> {
+    fixed_full_dims(t).map(|d| (d.i, d.f))
+}
+
+/// The digit counts of a `fixed` value type with their open flags, or `None`.
+pub fn fixed_full_dims(t: &Type) -> Option<FixedDims> {
     let name = match t {
         Type::Pointer(inner) => match inner.as_ref() {
             Type::Struct(st) => st.name.as_deref()?,
@@ -556,7 +577,11 @@ pub fn fixed_dims(t: &Type) -> Option<(u32, u32)> {
     };
     let body = name.strip_prefix("(fixed:")?.strip_suffix(')')?;
     let (i, f) = body.split_once(',')?;
-    Some((i.parse().ok()?, f.parse().ok()?))
+    let dim = |s: &str| -> Option<(u32, bool)> {
+        match s.strip_suffix('?') { Some(n) => Some((n.parse().ok()?, true)), None => Some((s.parse().ok()?, false)) }
+    };
+    let ((i, i_open), (f, f_open)) = (dim(i)?, dim(f)?);
+    Some(FixedDims { i, f, i_open, f_open })
 }
 
 // ─── RTTI: the `type` value (sic.md §"RTTI") ──────────────────────────────────
@@ -798,9 +823,12 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         // the declaration/return site; this placeholder should not be lowered
         // directly, but return an empty tuple rather than erroring.
         AstType::Tuple       => tuple_type(vec![]),
-        // `fixed<I,F>` → its runtime bigint-mantissa pointer; a bare `fixed`
-        // (`(0,0)`) is a placeholder resolved from the initializer at the decl site.
-        AstType::Fixed { integral, fraction } => fixed_type(*integral, *fraction),
+        // `fixed<I,F>` → its runtime rational pointer; an open dimension has no
+        // digit limit (a bare `fixed` local takes its shown digits from its
+        // initializer at the decl site).
+        AstType::Fixed { integral, fraction } => fixed_type_dims(FixedDims {
+            i: integral.unwrap_or(0), f: fraction.unwrap_or(0),
+            i_open: integral.is_none(), f_open: fraction.is_none() }),
         AstType::Void        => Type::Void,
         AstType::Bool        => Type::Bool,
         AstType::Char { signed } => {

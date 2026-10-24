@@ -1,0 +1,8 @@
+// fixed<10,2> + fixed<1,9> has up to 10 integral and 9 fraction digits: it
+// does not fit a fixed<5,4> (sic.md §"Built-in fixed point").
+int main() {
+    fixed<10,2> a = 123456789.55;
+    fixed<1,9> b = 1.123456789;
+    fixed<5,4> f = a + b;
+    return 0;
+}

@@ -1,0 +1,1 @@
+test_0598.sic:4:20: error: fixed<5,0> cannot hold a fixed<5,2> value: it has 2 fraction digits and fixed<5,0> only 0 (widen it, or cast to fixed<5,0> to round)

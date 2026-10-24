@@ -1145,6 +1145,9 @@ impl<'m> FuncCtx<'m> {
                 // `fixed` is an exact rational, so `(double)f`/`(int)f` CONVERT the
                 // value (unlike a `bigint`, whose cast only reinterprets its pointer).
                 // Integer targets truncate toward zero; float targets resolve num/den.
+                if self.is_sic() && super::types::is_fixed(&target) {
+                    return self.lower_fixed_cast(inner, &target);
+                }
                 if self.is_sic() && matches!(self.infer_expr_type(inner), Ok(t) if super::types::is_fixed(&t)) {
                     if matches!(target, Type::Float32 | Type::Float64 | Type::Float80) {
                         let (r, _, _) = self.fixed_operand(inner)?;
@@ -2511,7 +2514,7 @@ impl<'m> FuncCtx<'m> {
     /// its declared display precision `F` (rounded half-away-from-zero) via
     /// `__sic_rat_to_str`. A bare/open `fixed` (F unspecified) uses the default F.
     fn fixed_to_str(&mut self, base: &Expr) -> Result<Val> {
-        let f = self.fixed_expr_dims(base).map(|d| d.1).filter(|&f| f > 0)
+        let f = self.fixed_expr_full_dims(base).map(Self::fixed_display_f)
             .unwrap_or(Self::FIXED_DEFAULT_F);
         let (r, _, _) = self.fixed_operand(base)?;
         let scale = self.coerce(Constant::int(f as i64), &Type::i32())?;
@@ -5719,12 +5722,16 @@ impl<'m> FuncCtx<'m> {
         // (`__sic_rat*`); the variable's declared `<I,F>` is display-only, so nothing
         // is rounded or rescaled on store.
         if self.is_sic() && super::types::is_fixed(&lv.ty) {
+            let target = lv.ty.clone();
             let newv = match op {
-                None => self.eval_fixed_owned(rhs, 0)?,
+                None => self.eval_fixed_into(rhs, &target)?,
                 Some(bin) => {
-                    // `f op= rhs` ≡ `f = f op rhs`.
-                    let m = self.lower_fixed_binop(bin, lhs, rhs)?;
-                    self.emit_rat_call("__sic_rat_clone", vec![m])?
+                    // `f op= rhs` ≡ `f = f op rhs`; the result has at least the
+                    // digits of `rhs`, so a too-wide `rhs` is reported as itself.
+                    self.check_fixed_fit(&target, &Self::promote_numeric_literals(rhs))?;
+                    let e = Expr::new(ExprKind::BinOp { op: bin, lhs: Box::new(lhs.clone()), rhs: Box::new(rhs.clone()) },
+                        rhs.span.clone());
+                    self.eval_fixed_into(&e, &target)?
                 }
             };
             let old = self.alloc_val();

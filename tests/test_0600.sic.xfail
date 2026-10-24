@@ -1,0 +1,1 @@
+test_0600.sic:5:12: error: fixed<2,2> cannot hold `13183712987398173219…`: it has 126 integral digits and fixed<2,2> only 2 (widen it, or cast to fixed<2,2> to check the value when it runs)

@@ -1,0 +1,7 @@
+// An uncaught fixed overflow ends the program (sic.md §"Built-in fixed point"):
+// 99.99 + 10 does not fit fixed<2,2>.
+int main() {
+    fixed<2,2> tmp = 99.99;
+    tmp += 10;
+    return 0;
+}

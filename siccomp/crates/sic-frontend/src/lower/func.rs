@@ -768,6 +768,16 @@ impl<'m> FuncCtx<'m> {
             self.emit_cleanups_to(0);
             self.set_terminator(Terminator::Ret(ret));
         } else {
+            // sic `fixed` return: the value must fit the declared digits; the
+            // caller owns the returned copy.
+            if let Some(e) = val.as_ref().filter(|_| self.is_sic() && super::types::is_fixed(&self.ret_ty)) {
+                let rt = self.ret_ty.clone();
+                let cl = self.eval_fixed_into(e, &rt)?;
+                self.flush_bigint_temps();
+                self.emit_cleanups_to(0);
+                self.set_terminator(Terminator::Ret(Some(cl)));
+                return Ok(());
+            }
             let ret = if let Some(e) = val {
                 // sic shorthand context (sic.md §"Bitfields", §"Enums"): an
                 // enum/bitfield return type lets a bare member resolve; a
@@ -807,7 +817,7 @@ impl<'m> FuncCtx<'m> {
                     // A `fixed` is an exact rational; clone with the matching
                     // runtime so the returned block is a well-formed copy.
                     let (cf, cty) = if super::types::is_fixed(&expected) {
-                        ("__sic_rat_clone", super::types::fixed_type(0, 0))
+                        ("__sic_rat_clone", super::types::fixed_any())
                     } else {
                         ("__sic_bi_clone", super::types::bigint_type())
                     };
@@ -1232,7 +1242,7 @@ impl<'m> FuncCtx<'m> {
             }
             Cleanup::RatFree { slot } => {
                 let p = self.alloc_val();
-                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::fixed_type(0, 0) });
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: super::types::fixed_any() });
                 let _ = self.emit_bigint_call("__sic_rat_free", vec![Val::Local(p)], Type::Void);
             }
             Cleanup::DictFree { slot } => {
@@ -2860,30 +2870,26 @@ impl<'m> FuncCtx<'m> {
                     }
                     // sic fixed-point local (sic.md §"Built-in fixed point"): a
                     // `fixed` value is an EXACT rational (`__sic_rat*`); the declared
-                    // `<I,F>` is display-only precision. A bare `fixed` (marked
-                    // `(0,0)`) keeps its declared type; the value is stored exactly
-                    // and freed at scope exit (value semantics, like bigint).
+                    // `<I,F>` are its digits, which the initializer must fit. The
+                    // value is freed at scope exit (value semantics, like bigint).
                     if self.is_sic() && matches!(d.ty.ty, AstType::Fixed { .. }) {
                         if let Some(Initializer::Expr(e)) = &d.init {
                             // Concrete target type: the declared `fixed<I,F>`, or —
-                            // for a bare `fixed` — the initializer's fixed type (so
-                            // `.str`/`typestr` report the operation's display dims). An
-                            // integer/decimal initializer is still a `fixed`, taking
-                            // its display dims from the literal.
-                            let target = match super::types::fixed_dims(&ty) {
-                                Some((0, 0)) | None => match self.infer_expr_type(e) {
-                                    Ok(t) if super::types::is_fixed(&t) => t,
-                                    _ => {
-                                        let (i, f) = self.fixed_expr_dims(e).unwrap_or((0, 0));
-                                        super::types::fixed_type(i, f)
-                                    }
-                                },
-                                Some(_) => ty.clone(),
+                            // for a bare `fixed` — no digit limit, shown with the
+                            // initializer's digits (so `.str`/`typestr` report the
+                            // operation's dims).
+                            let target = match &d.ty.ty {
+                                AstType::Fixed { integral: None, fraction: None } => {
+                                    let p = FuncCtx::promote_numeric_literals(e);
+                                    let dd = self.fixed_expr_full_dims(&p).unwrap_or(super::types::FixedDims::open(0, 0));
+                                    super::types::fixed_type_dims(super::types::FixedDims::open(dd.i, dd.f))
+                                }
+                                _ => ty.clone(),
                             };
                             let vid = self.alloc_val();
                             self.push_instr(Instr::Alloca { dest: vid, ty: target.clone(), align: None });
                             self.define_local(d.name.clone(), target.clone(), vid);
-                            let m = self.eval_fixed_owned(e, 0)?;
+                            let m = self.eval_fixed_into(e, &target)?;
                             self.push_instr(Instr::Store { val: m, ptr: Val::Local(vid) });
                             self.register_scope_exit(Cleanup::RatFree { slot: Val::Local(vid) });
                             if !d.name.is_empty() {
@@ -7178,7 +7184,8 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
         AstType::Typeof(_) => "typeof(...)".to_string(),
         AstType::Tuple => "tuple".to_string(),
-        AstType::Fixed { integral, fraction } => format!("fixed<{},{}>", integral, fraction),
+        AstType::Fixed { integral, fraction } => format!("fixed<{},{}>",
+            integral.map(|n| n.to_string()).unwrap_or_default(), fraction.map(|n| n.to_string()).unwrap_or_default()),
         AstType::Generic { name, .. } => name.clone(),
         AstType::Bitfield(b) => b.name.clone(),
         AstType::Auto => "auto".to_string(),

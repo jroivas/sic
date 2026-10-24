@@ -5,10 +5,11 @@ int main() {
     fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
 
-    // type(x).str: `+` combines to the larger of each; `*` sums.
+    // type(x).str: the integral part is the larger of the two; the fraction
+    // part the larger, or for `*` the sum.
     if (strcmp(type(a + b).str, "fixed<10,9>") != 0) return 1;
     if (strcmp(type(a).str,     "fixed<10,2>") != 0) return 2;
-    if (strcmp(type(a * b).str, "fixed<11,11>") != 0) return 3;
+    if (strcmp(type(a * b).str, "fixed<10,11>") != 0) return 3;
     if (strcmp(type(1.5).str,   "fixed<1,1>") != 0) return 4;
 
     // Storing into a big-enough fixed is fine; an int operand doesn't inflate.

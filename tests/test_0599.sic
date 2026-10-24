@@ -1,0 +1,6 @@
+// Storing a fixed<5,2> into fixed<4,9> would drop an integral digit.
+int main() {
+    fixed<5,2> a = 12345.99;
+    fixed<4,9> b = a;
+    return 0;
+}

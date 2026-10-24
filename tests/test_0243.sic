@@ -1,12 +1,13 @@
-// A fixed value is an EXACT rational; storing into any declared `fixed<a,b>` is
-// lossless (the `<a,b>` is display precision only, no fit error). `.int`
+// A fixed value is an EXACT rational: storing it into a `fixed<a,b>` that has
+// room for its digits keeps it; a cast rounds to the target's decimals. `.int`
 // truncates toward zero (sic.md §"Built-in fixed point").
 #include <string.h>
 int main() {
     fixed<10,2> a = 1.00;
     fixed<1,9> b = 1.0;
-    fixed<5,4> f = a + b;             // a+b = 2.0; stored exactly, shown at 4 dp
-    if (strcmp(f.str, "2.0000") != 0) return 1;
+    fixed<10,9> f = a + b;            // a+b = 2.0; shown at 9 dp
+    if (strcmp(f.str, "2.000000000") != 0) return 1;
+    if (strcmp(((fixed<5,4>)(a + b)).str, "2.0000") != 0) return 5;
 
     fixed x = 100.00 / 7.00;          // 14.2857…, exact rational
     if (x.int != 14) return 2;        // .int truncates toward zero

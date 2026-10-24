@@ -1,6 +1,7 @@
 use crate::ast::{Expr, ExprKind, BinOpKind, UnOpKind};
 use crate::{Result, CompileError};
 use super::super::func::FuncCtx;
+use super::super::types::FixedDims;
 #[allow(unused_imports)]
 use super::*;
 
@@ -225,11 +226,11 @@ impl<'m> FuncCtx<'m> {
 
     // ─── fixed-point (sic.md §"Built-in fixed point") ──────────────────────────
     //
-    // A `fixed<I,F>` value is, at runtime, a `bigint` mantissa equal to the real
-    // value × 10^F; the scale F (and integral width I) live in the compile-time
-    // type. Arithmetic harmonizes scales by rescaling a mantissa (× or ÷ 10^diff,
-    // all on bigints — never a float), then reuses the bigint ops. Memory is
-    // managed exactly like a bigint.
+    // A `fixed<I,F>` value is, at runtime, an exact rational (`__sic_rat*`); its
+    // `I` integral and `F` fraction digits live in the compile-time type. A store
+    // must not lose digits (`check_fixed_fit`), and a computed value that needs
+    // more integral digits than its target is an overflow exception. Memory is
+    // managed like a bigint.
 
     /// Whether `e` genuinely has a `fixed` type (a bare decimal literal does NOT —
     /// `3.5 + 2.5` on their own are `double`; they turn fixed only next to a real
@@ -282,7 +283,7 @@ impl<'m> FuncCtx<'m> {
     /// Emit a rational-runtime call yielding a `fixed` value (a `__sic_rat*`),
     /// tagging its type so memory management frees it via `__sic_rat_free`.
     pub(crate) fn emit_rat_call(&mut self, name: &str, args: Vec<Val>) -> Result<Val> {
-        self.emit_bigint_call(name, args, super::super::types::fixed_type(0, 0))
+        self.emit_bigint_call(name, args, super::super::types::fixed_any())
     }
 
     /// Free a `fixed` rational temporary immediately (in the current block).
@@ -305,7 +306,7 @@ impl<'m> FuncCtx<'m> {
             let r = self.lower_fixed_binop(*op, lhs, rhs)?;
             return Ok((r, i, f, false));
         }
-        if let ExprKind::DecimalLit(text) = &e.kind {
+        if let ExprKind::DecimalLit(text) | ExprKind::BigIntLit(text) = &e.kind {
             let (digits, i, f) = Self::decimal_lit_parts(text);
             let s = self.emit_cstring(&digits);
             let scale = self.coerce(Constant::int(f as i64), &Type::i32())?;
@@ -365,47 +366,187 @@ impl<'m> FuncCtx<'m> {
         self.emit_binop(op, cmp, Constant::int(0))
     }
 
-    /// Result `(integral, fraction)` digit widths of a fixed op, for `typestr` and
-    /// `.str` display precision (the value itself is an exact rational): `+`/`-`/`%`
-    /// take the larger of each; `*` sums them; `/` keeps the larger fraction (a
-    /// non-terminating quotient like 1/3 is shown to that many digits, rounded).
-    pub(crate) fn fixed_result_dims(op: BinOpKind, a: (u32, u32), b: (u32, u32)) -> (u32, u32) {
-        match op {
-            BinOpKind::Mul => (a.0 + b.0, a.1 + b.1),
-            BinOpKind::Div => (a.0 + b.1, a.1.max(b.1)),
-            _ => (a.0.max(b.0), a.1.max(b.1)),
-        }
+    /// The digits of a fixed op's result (sic.md §"Built-in fixed point"): the
+    /// integral part is the larger of the two (a result that grows past it is
+    /// caught when it is stored); the fraction part is exact — `*` sums the
+    /// fraction digits, the others take the larger. A part is open (no limit) when
+    /// either operand's is.
+    pub(crate) fn fixed_result_dims(op: BinOpKind, a: FixedDims, b: FixedDims) -> FixedDims {
+        let f = if op == BinOpKind::Mul { a.f + b.f } else { a.f.max(b.f) };
+        FixedDims { i: a.i.max(b.i), f, i_open: a.i_open || b.i_open, f_open: a.f_open || b.f_open }
     }
 
     /// Compile-time `(integral, fraction)` display widths of a fixed expression.
     pub(crate) fn fixed_expr_dims(&self, e: &Expr) -> Option<(u32, u32)> {
-        if let ExprKind::DecimalLit(text) = &e.kind {
-            let (_, i, f) = Self::decimal_lit_parts(text);
-            return Some((i, f));
-        }
+        self.fixed_expr_full_dims(e).map(|d| (d.i, d.f))
+    }
+
+    /// The digits a fixed-context expression can have: a literal has its own, an
+    /// integer as many as its type's range, a `fixed` its type's (open or not).
+    /// `None` for anything else (a float has no fixed number of digits).
+    pub(crate) fn fixed_expr_full_dims(&self, e: &Expr) -> Option<FixedDims> {
+        use BinOpKind::*;
         match &e.kind {
-            ExprKind::IntLit(v, _) => return Some((v.unsigned_abs().to_string().len().max(1) as u32, 0)),
-            ExprKind::UIntLit(v, _) => return Some((v.to_string().len().max(1) as u32, 0)),
+            ExprKind::DecimalLit(text) | ExprKind::BigIntLit(text) => {
+                let (_, i, f) = Self::decimal_lit_parts(text);
+                return Some(FixedDims::bounded(i, f));
+            }
+            ExprKind::IntLit(v, _) => return Some(FixedDims::bounded(v.unsigned_abs().to_string().len() as u32, 0)),
+            ExprKind::UIntLit(v, _) => return Some(FixedDims::bounded(v.to_string().len() as u32, 0)),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => return self.fixed_expr_full_dims(expr),
+            ExprKind::BinOp { op: op @ (Add | Sub | Mul | Div | Rem), lhs, rhs } => {
+                let a = self.fixed_expr_full_dims(lhs)?;
+                let b = self.fixed_expr_full_dims(rhs)?;
+                return Some(Self::fixed_result_dims(*op, a, b));
+            }
+            ExprKind::Ternary { then, else_, .. } => {
+                let a = self.fixed_expr_full_dims(then)?;
+                let b = self.fixed_expr_full_dims(else_)?;
+                return Some(Self::fixed_result_dims(Add, a, b));
+            }
             _ => {}
         }
-        match self.infer_expr_type(e) {
-            Ok(t) => super::super::types::fixed_dims(&t).or({
-                if matches!(t, Type::Int { .. }) { Some((19, 0)) } else { None }
-            }),
+        match self.infer_expr_type(e).ok()? {
+            t if super::super::types::is_fixed(&t) => super::super::types::fixed_full_dims(&t),
+            Type::Int { bits, signed } => {
+                let max = if bits >= 64 { if signed { i64::MAX as u64 } else { u64::MAX } }
+                    else if signed { (1u64 << (bits - 1)) - 1 } else { (1u64 << bits) - 1 };
+                Some(FixedDims::bounded(max.to_string().len() as u32, 0))
+            }
+            Type::Bool => Some(FixedDims::bounded(1, 0)),
             _ => None,
         }
     }
 
-    /// Materialize `e` as an OWNED `fixed` rational for storing into a slot (value
-    /// semantics). The rational is exact; the target's `F` is display precision, so
-    /// nothing is rounded here. Clones so the binding owns an independent block.
-    pub(crate) fn eval_fixed_owned(&mut self, e: &Expr, _to_f: u32) -> Result<Val> {
+    /// The decimals a fixed value of these digits is shown and rounded with: its
+    /// fraction digits, or the default for an open one left unspecified.
+    pub(crate) fn fixed_display_f(d: FixedDims) -> u32 {
+        if d.f_open && d.f == 0 { Self::FIXED_DEFAULT_F } else { d.f }
+    }
+
+    /// How a fixed type reads in a diagnostic: an open part is left empty.
+    fn fixed_dims_str(d: FixedDims) -> String {
+        if d.i_open && d.f_open { return "fixed".to_string(); }
+        let n = |v: u32, open: bool| if open { String::new() } else { v.to_string() };
+        format!("fixed<{},{}>", n(d.i, d.i_open), n(d.f, d.f_open))
+    }
+
+    /// Storing `src` into a `target` fixed must not lose digits (sic.md §"Built-in
+    /// fixed point"): its type must not have more integral or fraction digits than
+    /// the target's. A value that only grows too big at run time (`99.99 + 10` in a
+    /// `fixed<2,2>`) is an overflow exception instead (`emit_fixed_fit_check`).
+    pub(crate) fn check_fixed_fit(&self, target: &Type, src: &Expr) -> Result<()> {
+        let Some(t) = super::super::types::fixed_full_dims(target) else { return Ok(()) };
+        if t.i_open && t.f_open { return Ok(()); }
+        let s = self.fixed_expr_full_dims(src).unwrap_or(FixedDims::open(0, 0));
+        // A literal is quoted (a long one shortened); a typed value is named by its type.
+        let lit = |text: String| if text.chars().count() > 24 {
+            format!("`{}…`", text.chars().take(20).collect::<String>())
+        } else { format!("`{}`", text) };
+        let a_n = |name: String| format!("{} {} value", if name.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }, name);
+        let what = match &src.kind {
+            ExprKind::DecimalLit(text) | ExprKind::BigIntLit(text) => lit(text.clone()),
+            ExprKind::IntLit(v, _) => lit(v.to_string()),
+            ExprKind::UIntLit(v, _) => lit(v.to_string()),
+            _ => match self.infer_expr_type(src) {
+                Ok(ty) if super::super::types::is_fixed(&ty) => a_n(Self::fixed_dims_str(s)),
+                Ok(ty @ (Type::Int { .. } | Type::Bool)) => a_n(self.type_name_of(&ty)),
+                _ => "this value".to_string(),
+            },
+        };
+        let tn = Self::fixed_dims_str(t);
+        let fail = |part: &str, have: String, limit: u32, fix: &str| CompileError::at(
+            format!("{} cannot hold {}: it has {} {} digits and {} only {} ({})", tn, what, have, part, tn, limit, fix),
+            src.span.file.clone(), src.span.line, src.span.col);
+        let have = |n: u32, open: bool| if open { "any number of".to_string() } else { n.to_string() };
+        if !t.i_open && (s.i_open || s.i > t.i) {
+            return Err(fail("integral", have(s.i, s.i_open), t.i,
+                &format!("widen it, or cast to {} to check the value when it runs", tn)));
+        }
+        if !t.f_open && (s.f_open || s.f > t.f) {
+            return Err(fail("fraction", have(s.f, s.f_open), t.f,
+                &format!("widen it, or cast to {} to round", tn)));
+        }
+        Ok(())
+    }
+
+    /// Whether `e` computes a new fixed value that may need more integral digits
+    /// than its operands (`+ - * / %`); a literal, a variable or a call already
+    /// fits its type.
+    fn fixed_may_overflow(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::BinOp { op, .. } => matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div | BinOpKind::Rem),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => Self::fixed_may_overflow(expr),
+            ExprKind::Ternary { then, else_, .. } => Self::fixed_may_overflow(then) || Self::fixed_may_overflow(else_),
+            _ => false,
+        }
+    }
+
+    /// Raise an overflow exception (sic.md §"Integer overflow") when the rational
+    /// `r`, shown with the target's decimals, has more integral digits than the
+    /// `target` fixed holds. An `overflow`/`exception` guard catches it: the store
+    /// is skipped and this statement's fixed temporaries (and `r` when `owned`) are
+    /// freed on the way out; otherwise the program ends.
+    pub(crate) fn emit_fixed_fit_check(&mut self, r: Val, owned: bool, target: &Type) -> Result<()> {
+        let Some(t) = super::super::types::fixed_full_dims(target) else { return Ok(()) };
+        if t.i_open { return Ok(()); }
+        let i = self.coerce(Constant::int(t.i as i64), &Type::i32())?;
+        let f = self.coerce(Constant::int(Self::fixed_display_f(t) as i64), &Type::i32())?;
+        let fits = self.emit_bigint_call("__sic_rat_fits", vec![r.clone(), i, f], Type::i32())?;
+        let bad = self.emit_binop(BinOpKind::Eq, fits, Constant::int(0))?;
+        match self.overflow_target() {
+            None => self.branch_on_exception(bad, None),
+            Some(fail) => {
+                let leave = self.new_block_after_current();
+                let ok = self.new_block_after_current();
+                self.set_terminator(Terminator::CondJump { cond: bad, then_bb: leave, else_bb: ok });
+                self.switch_to_block(leave);
+                if owned { self.rat_free_now(r)?; }
+                for v in self.bigint_temps.clone() {
+                    let free = self.temp_free_fn(&v);
+                    self.emit_bigint_call(free, vec![v], Type::Void)?;
+                }
+                self.set_terminator(Terminator::Jump(fail));
+                self.switch_to_block(ok);
+            }
+        }
+        Ok(())
+    }
+
+    /// Materialize `e` as an OWNED `fixed` rational for storing into a slot of
+    /// type `target` (value semantics): its digits must fit (`check_fixed_fit`),
+    /// and a computed value is checked against the target's integral digits when
+    /// it runs. The rational itself stays exact. Clones so the binding owns an
+    /// independent block.
+    pub(crate) fn eval_fixed_into(&mut self, e: &Expr, target: &Type) -> Result<Val> {
         // A `fixed` target puts the RHS in a fixed numeric context: bare integer
         // literals adopt `fixed`, so `fixed a = 1/3` is the exact rational ⅓
         // rather than integer-divided to 0 (sic.md §"Built-in fixed point").
         let pe = Self::promote_numeric_literals(e);
+        self.check_fixed_fit(target, &pe)?;
         let (r, _, _) = self.fixed_operand(&pe)?;
+        if Self::fixed_may_overflow(&pe) {
+            self.emit_fixed_fit_check(r.clone(), false, target)?;
+        }
         self.emit_rat_call("__sic_rat_clone", vec![r])
+    }
+
+    /// `(fixed<I,F>) e`: the explicit conversion (sic.md §"Built-in fixed point")
+    /// — the value rounded (half away from zero) to `F` decimals, and an overflow
+    /// exception when it has more than `I` integral digits.
+    pub(crate) fn lower_fixed_cast(&mut self, e: &Expr, target: &Type) -> Result<Val> {
+        let t = super::super::types::fixed_full_dims(target).unwrap_or(FixedDims::open(0, 0));
+        let pe = Self::promote_numeric_literals(e);
+        let (r, _, _) = self.fixed_operand(&pe)?;
+        let r = if t.f_open { r } else {
+            let f = self.coerce(Constant::int(t.f as i64), &Type::i32())?;
+            let v = self.emit_rat_call("__sic_rat_round", vec![r, f])?;
+            self.bigint_temps.push(v.clone());
+            v
+        };
+        self.emit_fixed_fit_check(r.clone(), false, target)?;
+        if let Val::Local(id) = &r { self.val_types.insert(id.0, target.clone()); }
+        Ok(r)
     }
 
     /// sic numeric-context literal promotion (sic.md §"Built-in fixed point"): in
@@ -485,9 +626,16 @@ impl<'m> FuncCtx<'m> {
             // A `fixed` value is an exact rational (`__sic_rat*`) regardless of its
             // declared `<I,F>` (display-only), so a fixed argument is borrowed as-is;
             // a decimal literal / integer is (re)built into a fresh rational temp.
+            // Its digits must fit the parameter's; a computed value is checked
+            // when it runs.
+            let pe = Self::promote_numeric_literals(arg);
+            self.check_fixed_fit(pty, &pe)?;
             if !super::super::types::is_fixed(&at) {
-                let (m, _, _) = self.fixed_operand(arg)?; // registers the owned temp
+                let (m, _, _) = self.fixed_operand(&pe)?; // registers the owned temp
                 *pval = m;
+            }
+            if Self::fixed_may_overflow(&pe) {
+                self.emit_fixed_fit_check(pval.clone(), false, pty)?;
             }
             return Ok(true);
         }
