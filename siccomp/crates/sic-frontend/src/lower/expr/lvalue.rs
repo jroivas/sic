@@ -88,10 +88,58 @@ impl<'m> FuncCtx<'m> {
                     e.span.file.clone(), e.span.line, e.span.col));
             }
         }
-        match self.const_target(e) {
-            Some(n) => Err(CompileError::at(format!("cannot assign to '{}': it is const", n),
-                e.span.file.clone(), e.span.line, e.span.col)),
-            None => Ok(()),
+        if let Some(n) = self.const_target(e) {
+            return Err(CompileError::at(format!("cannot assign to '{}': it is const", n),
+                e.span.file.clone(), e.span.line, e.span.col));
+        }
+        self.check_mutable(e)
+    }
+
+    /// The variable a write to `e` changes in place: `x`, `x.f`, `x[i]` of an
+    /// array, list or dict. A write through a pointer (`p->f`, `*p`, `p[i]`)
+    /// changes what it points to instead — `None`.
+    fn write_root<'e>(&self, e: &'e Expr) -> Option<&'e Expr> {
+        match &e.kind {
+            ExprKind::Ident(_) => Some(e),
+            ExprKind::Field { base, .. } | ExprKind::Index { base, .. } => {
+                let bt = self.infer_expr_type(base).ok()?;
+                let t = &bt;
+                let by_value = !matches!(t, Type::Pointer(_))
+                    || super::super::types::is_list(t) || super::super::types::is_dict(t)
+                    || super::super::types::is_set(t);
+                if by_value { self.write_root(base) } else { None }
+            }
+            _ => None,
+        }
+    }
+
+    /// Strict mode (sic.md §"Strict mode"): a write must not change an
+    /// immutable variable — one not declared `mut` — except the one assignment
+    /// that initializes a local declared without a value (`late_init_ok`).
+    pub(crate) fn check_mutable(&self, e: &Expr) -> Result<()> {
+        // Code the compiler wrote (a tail call's parameter update) has no position.
+        if e.span.line == 0 { return Ok(()); }
+        let Some(root) = self.write_root(e) else { return Ok(()) };
+        let ExprKind::Ident(n) = &root.kind else { return Ok(()) };
+        let err = |msg: String| Err(CompileError::at(msg, e.span.file.clone(), e.span.line, e.span.col));
+        match self.lookup(n) {
+            Some(LookupResult::Local(_, vid)) => {
+                let Some(&has_init) = self.immutable_vids.get(&vid) else { return Ok(()) };
+                let direct = std::ptr::eq(root, e);
+                if direct && !has_init && self.late_init_ok.contains(&super::super::strict::site_of(e)) {
+                    return Ok(());
+                }
+                if direct && !has_init {
+                    return err(format!("`{}` is immutable and may already be assigned here; \
+                        it can be assigned once, on each path (declare it `mut` to change it)", n));
+                }
+                if direct { err(format!("cannot assign to `{}`: it is immutable (declare it `mut`)", n)) }
+                else { err(format!("cannot change `{}`: it is immutable (declare it `mut`)", n)) }
+            }
+            Some(LookupResult::Global(..)) if !self.static_locals.contains_key(n)
+                && self.lowerer.immutable_globals.contains(n) =>
+                err(format!("cannot change the global `{}`: it is immutable (declare it `mut`)", n)),
+            _ => Ok(()),
         }
     }
 

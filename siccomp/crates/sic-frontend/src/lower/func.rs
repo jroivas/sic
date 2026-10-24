@@ -273,9 +273,18 @@ pub struct FuncCtx<'m> {
     pub decl_qtypes: HashMap<String, QualType>,
     /// The declared type of the binding `define_local` is about to create (a
     /// parameter or declarator); it is recorded by slot in `vid_qtypes`.
-    pub binding_qt: Option<(String, QualType)>,
+    pub binding_qt: Option<(String, QualType, bool)>,
     /// The first error lowering a `defer`red statement at a scope exit.
     pub cleanup_error: Option<CompileError>,
+    /// sic strict mode (sic.md §"Strict mode"): this function's variables are
+    /// immutable unless `mut`.
+    pub strict: bool,
+    /// Strict mode: the immutable locals and parameters by slot, and whether
+    /// each was initialized by its declaration.
+    pub immutable_vids: HashMap<ValId, bool>,
+    /// Strict mode: the first-and-only assignments of immutable locals declared
+    /// without an initializer (`super::strict::late_init_sites`).
+    pub late_init_ok: std::collections::HashSet<super::strict::Site>,
     /// Declared (AST) types of locals and parameters by slot, so `const` is
     /// known per binding (an inner declaration shadows an outer one).
     pub vid_qtypes: HashMap<ValId, QualType>,
@@ -449,6 +458,9 @@ impl<'m> FuncCtx<'m> {
             decl_qtypes: HashMap::new(),
             binding_qt: None,
             cleanup_error: None,
+            strict: false,
+            immutable_vids: HashMap::new(),
+            late_init_ok: std::collections::HashSet::new(),
             vid_qtypes: HashMap::new(),
             addr_taken: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
@@ -1302,9 +1314,18 @@ impl<'m> FuncCtx<'m> {
         sname.map_or(false, |s| self.lowerer.struct_methods.contains_key(&(s, name.clone())))
     }
 
+    fn late_init_sites(&mut self, params: &[AstParam], body: &[Stmt]) {
+        self.late_init_ok = super::strict::late_init_sites(params, body);
+    }
+
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
-        if self.binding_qt.as_ref().map_or(false, |(n, _)| *n == name) {
-            let (_, qt) = self.binding_qt.take().unwrap();
+        if self.binding_qt.as_ref().map_or(false, |(n, _, _)| *n == name) {
+            let (_, qt, has_init) = self.binding_qt.take().unwrap();
+            // A `__` name is reserved for the implementation: the compiler's own
+            // variables (a range-`for` counter) are not the program's.
+            if self.strict && !super::strict::qt_is_mut(&qt) && !name.starts_with("__") {
+                self.immutable_vids.insert(alloca_id, has_init);
+            }
             self.vid_qtypes.insert(alloca_id, qt);
         }
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
@@ -2172,6 +2193,14 @@ impl<'m> Lowerer {
         let mut fc = FuncCtx::new_with_func(self, &mut func);
         fc.cur_fn = name.to_string();
         fc.pretty_func = pretty;
+        // sic strict mode (sic.md §"Strict mode"): a `strict` function, or one
+        // in a file that says `using strict;`.
+        if fc.is_sic() {
+            let file = body.first().and_then(|s| stmt_loc(s).0);
+            fc.strict = super::strict::qt_is_strict(ret_ty)
+                || file.map_or(false, |f| fc.lowerer.strict_files.contains(&f));
+            if fc.strict { fc.late_init_sites(params, body); }
+        }
         fc.async_elem = async_elem;
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
         // makes `return <int/other-enum>;` an error without an explicit cast.
@@ -2262,7 +2291,7 @@ impl<'m> Lowerer {
                     fc.owned_enum_locals.insert(ptr_vid);
                     fc.register_scope_exit(Cleanup::EnumRelease { addr: Val::Local(ptr_vid), ty: pty.clone() });
                 }
-                fc.binding_qt = Some((pname.clone(), p.ty.clone()));
+                fc.binding_qt = Some((pname.clone(), p.ty.clone(), true));
                 fc.define_local(pname.clone(), pty, ptr_vid);
                 if owned_string_param {
                     fc.retain_string_at(&Val::Local(ptr_vid))?;
@@ -2652,7 +2681,7 @@ impl<'m> FuncCtx<'m> {
                 let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
                     self.decl_qtypes.insert(d.name.clone(), d.ty.clone());
-                    self.binding_qt = (!is_static && !is_extern).then(|| (d.name.clone(), d.ty.clone()));
+                    self.binding_qt = (!is_static && !is_extern).then(|| (d.name.clone(), d.ty.clone(), d.init.is_some()));
                     // sic `atomic` (sic.md §"Atomics"): a top-level atomic-qualified
                     // declarator becomes an atomic local. `d.ty.qualifiers` is the
                     // TOP-level type, so `atomic int a` is atomic but `atomic int *p`
@@ -5310,6 +5339,14 @@ impl<'m> FuncCtx<'m> {
     ///   - a `string` → its code points (`.utf8`, yielding `u8char`);
     ///   - a struct with a `next()` method → the `Iterator<T>` protocol loop.
     fn lower_foreach(&mut self, ty: &QualType, name: &str, iterable: &Expr, body: &Stmt, sp: &crate::lexer::Span) -> Result<()> {
+        // A new binding on each pass (immutable in strict code unless `mut`).
+        self.binding_qt = Some((name.to_string(), ty.clone(), true));
+        let r = self.lower_foreach_inner(ty, name, iterable, body, sp);
+        if self.binding_qt.as_ref().map_or(false, |(n, _, _)| n == name) { self.binding_qt = None; }
+        r
+    }
+
+    fn lower_foreach_inner(&mut self, ty: &QualType, name: &str, iterable: &Expr, body: &Stmt, sp: &crate::lexer::Span) -> Result<()> {
         use crate::ast::BinOpKind;
         let sp = sp.clone();
         let mk = |k: ExprKind| Expr { kind: k, span: sp.clone() };

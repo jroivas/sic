@@ -28,6 +28,12 @@ pub enum TypeQual {
     /// sic-only: `@T` / `@mut T` reference type (sic.md §"References"). A scoped,
     /// reference-counted borrow; codegen-wise it is the underlying pointer type.
     Reference { mutable: bool },
+    /// sic strict mode (sic.md §"Strict mode"): `mut` — the declared variable
+    /// may be changed (strict code makes variables immutable by default).
+    Mut,
+    /// sic strict mode: `strict` on a function — its variables are immutable
+    /// unless `mut`.
+    Strict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -703,6 +709,9 @@ pub struct TranslationUnit {
     /// Types named inside expressions (`m::Map<i64, string>::new()`), for the
     /// generic-instance pass, which otherwise sees only declared types.
     pub expr_types: Vec<QualType>,
+    /// sic strict mode (sic.md §"Strict mode"): the files that say `using
+    /// strict;` — every function defined in them is strict.
+    pub strict_files: Vec<String>,
 }
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────

@@ -1,0 +1,1 @@
+test_0592.sic:11:6: error: cannot change `p`: it is immutable (declare it `mut`)

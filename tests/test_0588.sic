@@ -1,0 +1,9 @@
+// Strict mode: a variable initialized by its declaration is not assigned again.
+using strict;
+
+int main()
+{
+    int a = 1;
+    a = 2;
+    return a;
+}

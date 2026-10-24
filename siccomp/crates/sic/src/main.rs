@@ -1134,7 +1134,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1158,6 +1158,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         }
         combined.decls.extend(tu.decls);
         combined.expr_types.extend(tu.expr_types);
+        combined.strict_files.extend(tu.strict_files);
         used_files.push(ps);
     }
 

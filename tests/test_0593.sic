@@ -1,0 +1,10 @@
+// Strict mode: a strict file's globals are immutable unless `mut`.
+using strict;
+
+int limit = 1;
+
+int main()
+{
+    limit = 2;
+    return limit;
+}

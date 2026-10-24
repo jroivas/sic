@@ -1,0 +1,1 @@
+test_0594.sic:4:5: error: cannot assign to `n`: it is immutable (declare it `mut`)

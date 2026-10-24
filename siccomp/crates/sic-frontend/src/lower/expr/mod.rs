@@ -4073,6 +4073,7 @@ impl<'m> FuncCtx<'m> {
             if let ExprKind::Index { base, index } = &e.kind {
                 if matches!(self.infer_expr_type(base), Ok(t) if super::types::is_dict(&t)
                     || matches!(&t, Type::Pointer(i) if super::types::is_dict(i))) {
+                    self.check_mutable(e)?;
                     return self.lower_dict_del(base, index, &e.span);
                 }
             }
@@ -5989,6 +5990,8 @@ impl<'m> FuncCtx<'m> {
     /// it never converts. Scalars go through a crossed load/store; aggregates are
     /// exchanged byte-wise via a temporary.
     fn lower_swap(&mut self, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        self.check_writable(lhs)?;
+        self.check_writable(rhs)?;
         let lv_a = self.lower_lvalue(lhs)?;
         let lv_b = self.lower_lvalue(rhs)?;
 

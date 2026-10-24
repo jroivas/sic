@@ -1,0 +1,11 @@
+// Strict mode: nor once on some path and again after.
+using strict;
+
+int main()
+{
+    int a;
+    if (a == 0)
+        a = 1;
+    a = 2;
+    return a;
+}

@@ -2,6 +2,7 @@ pub(crate) mod types;
 mod expr;
 mod func;
 mod borrowck;
+pub(crate) mod strict;
 mod ns_resolve;
 mod init_norm;
 
@@ -197,6 +198,10 @@ pub struct Lowerer {
     pub const_fields: HashSet<(String, String)>,
     /// A malformed struct method found while hoisting (reported after it).
     pub method_error: Option<CompileError>,
+    /// sic strict mode (sic.md §"Strict mode"): files that say `using strict;`.
+    pub strict_files: HashSet<String>,
+    /// Strict mode: globals of a strict file not declared `mut`.
+    pub immutable_globals: HashSet<String>,
     /// sic member destructors: struct name → `void(S*)` releasing the struct's
     /// managed by-value fields (see `synthesize_member_dtors`); `None` = the
     /// struct has none. A struct with no `~S()` uses it as its destructor; a
@@ -360,6 +365,8 @@ impl Lowerer {
             struct_dtor: HashMap::new(),
             const_fields: HashSet::new(),
             method_error: None,
+            strict_files: HashSet::new(),
+            immutable_globals: HashSet::new(),
             struct_owned_fields: HashMap::new(),
             member_dtor: HashMap::new(),
             tuple_shape_globals: HashMap::new(),
@@ -446,6 +453,7 @@ impl Lowerer {
     }
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
+        self.strict_files = tu.strict_files.iter().cloned().collect();
         types::clear_typedefs();
         types::clear_global_vars();
         let dbg = std::env::var("SIC_TIMING").is_ok();
@@ -3170,6 +3178,13 @@ impl Lowerer {
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
         self.global_qtypes.insert(d.name.clone(), d.ty.clone());
+        // sic strict mode (sic.md §"Strict mode"): a strict file's globals are
+        // immutable unless `mut`.
+        if self.sic && d.span.file.as_ref().map_or(false, |f| self.strict_files.contains(f))
+            && !strict::qt_is_mut(&d.ty) && !matches!(d.ty.ty, AstType::Function { .. })
+        {
+            self.immutable_globals.insert(d.name.clone());
+        }
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         // sic module-level lambda (sic.md §"Lambdas"): a captureless lambda at file
         // scope initializes a function pointer with the lifted function's address.

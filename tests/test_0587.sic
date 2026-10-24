@@ -1,0 +1,65 @@
+// Strict mode: variables are immutable unless `mut`. What strict code may do:
+// change a `mut` variable, write through a pointer, call a method that changes
+// its struct, and initialize an immutable local declared without a value once,
+// on each path (it reads as zero before). Returns 42.
+using strict;
+
+struct P {
+    int x;
+    void bump(P *self) { self->x++; }
+};
+
+mut int calls = 0;
+int base = 10;
+
+int pick(mut int n)
+{
+    int r;
+    if (n > 5) r = 1;
+    else r = 2;
+    int z;
+    while (n > 0) {
+        if (n == 3) {
+            z = n;
+            break;
+        }
+        n--;
+    }
+    calls++;
+    return r + z;
+}
+
+int kind(int v)
+{
+    int k;
+    switch (v) {
+        case 1: k = 10; break;
+        default: k = 20; break;
+    }
+    return k;
+}
+
+int main()
+{
+    int a = 5;
+    mut int b = 1;
+    b += a;
+    P p;
+    p.bump();
+    P *pp = &p;
+    pp->x += 1;
+    int *q = new int(2);
+    defer del q;
+    q[0] = 7;
+    mut int sum = 0;
+    for (mut int i = 0; i < 3; i++) sum += i;
+    list<int> xs;
+    xs.push(4);
+    for (auto v : xs.values) sum += v;
+    int late;
+    int before = late;
+    late = 3;
+    // 6 + 2 + 7 + 7 + 4 + 0 + 3 + 10 - 10 = 29
+    int total = b + p.x + q[0] + sum + pick(9) + before + late + kind(1) - base;
+    return total + calls + 12;
+}

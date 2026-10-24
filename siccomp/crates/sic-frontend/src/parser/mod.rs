@@ -101,6 +101,8 @@ pub struct Parser {
     prelude_macros: HashSet<String>,
     /// `m[args]` expands to `…`, for a diagnostic inside the expansion.
     last_expansion: String,
+    /// Files that said `using strict;` (sic.md §"Strict mode").
+    strict_files: Vec<String>,
 }
 
 impl Parser {
@@ -145,7 +147,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -297,7 +299,8 @@ impl Parser {
                 ));
             }
         }
-        Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types) })
+        Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
+            strict_files: std::mem::take(&mut self.strict_files) })
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -326,6 +329,17 @@ impl Parser {
         self.pending_constructor = None;
         self.pending_weak = false;
         self.pending_thread_local = false;
+        // sic strict mode (sic.md §"Strict mode"): `using strict;` makes every
+        // function this file defines strict.
+        if self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "using"
+            && self.tokens.get(self.pos + 1).map_or(false, |t| t.kind == TokenKind::Ident && t.text == "strict")
+            && self.tokens.get(self.pos + 2).map(|t| t.kind) == Some(TokenKind::Semi)
+        {
+            self.pos += 3;
+            let f = sp.file.clone().unwrap_or_default();
+            if !self.strict_files.contains(&f) { self.strict_files.push(f); }
+            return Ok(Decl::TypeDef { names: vec![], span: sp });
+        }
         // sic `async` (sic.md §"Async"): a leading `async` marks the function.
         self.pending_async = self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "async";
         if self.pending_async { self.advance(); }
@@ -542,6 +556,8 @@ impl Parser {
 
     fn is_expr_start_not_decl(&self) -> bool {
         // If the current token cannot start a declaration, it's a top-level expr.
+        // sic strict mode: `mut int g;` / `strict int f()` are declarations.
+        if self.at_mut_strict_modifier() { return false; }
         // sic `tuple <name>` is a declaration (not an expression start); `tuple(`
         // is the pack/unpack expression.
         if self.peek_kind() == TokenKind::Tuple {
@@ -697,12 +713,11 @@ impl Parser {
                 // `__thread`/`_Thread_local`: per-thread storage. Orthogonal to
                 // the storage class, so it doesn't set `storage`.
                 TokenKind::ThreadLocal => { self.pending_thread_local = true; self.advance(); }
-                // sic strict mode (sic.md §"Strict mode"): `mut` (a mutable binding
-                // when immutable-by-default is on) and `strict` (mark a function
-                // strict) are accepted here. Immutability enforcement is not yet done,
-                // so for now they parse and are otherwise no-ops.
+                // sic strict mode (sic.md §"Strict mode"): `mut` (a variable that
+                // may change, in strict code) and `strict` (a strict function).
                 TokenKind::Ident if self.at_mut_strict_modifier() =>
                 {
+                    quals.push(if self.peek().text == "mut" { TypeQual::Mut } else { TypeQual::Strict });
                     self.advance();
                 }
                 // Storage classes

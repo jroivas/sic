@@ -1,0 +1,11 @@
+// Strict mode: a late-initialized variable is assigned once — not on each
+// pass of a loop.
+using strict;
+
+int main()
+{
+    int a;
+    for (mut int i = 0; i < 3; i++)
+        a = i;
+    return a;
+}

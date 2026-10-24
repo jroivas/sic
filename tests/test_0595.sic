@@ -1,0 +1,10 @@
+// Strict mode: a deferred statement runs at scope exit — never the first
+// assignment.
+using strict;
+
+int main()
+{
+    int a;
+    defer a = 1;
+    return a;
+}
