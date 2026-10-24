@@ -372,6 +372,14 @@ fn main() {
             // input, so it must not enter `link_order`.
             argv.push(a);
             if let Some(v) = iter.next() { argv.push(v); }
+        } else if a == "-I" || a == "-D" {
+            // `-I <dir>` / `-D <macro>` with the value as the next argument: both
+            // go to clap; the value is not a link input.
+            argv.push(a);
+            if let Some(v) = iter.next() { argv.push(v); }
+        } else if a == "-l" || a == "-L" {
+            // `-l <lib>` / `-L <dir>`: as `-l<lib>` / `-L<dir>`, in link order.
+            if let Some(v) = iter.next() { link_order.push(format!("{}{}", a, v)); }
         } else if a.starts_with("-Wl,") {
             // Linker pass-through: keep it in link order (group markers etc.).
             link_order.push(a);
