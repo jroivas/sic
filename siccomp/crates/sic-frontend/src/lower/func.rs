@@ -274,6 +274,8 @@ pub struct FuncCtx<'m> {
     /// The declared type of the binding `define_local` is about to create (a
     /// parameter or declarator); it is recorded by slot in `vid_qtypes`.
     pub binding_qt: Option<(String, QualType)>,
+    /// The first error lowering a `defer`red statement at a scope exit.
+    pub cleanup_error: Option<CompileError>,
     /// Declared (AST) types of locals and parameters by slot, so `const` is
     /// known per binding (an inner declaration shadows an outer one).
     pub vid_qtypes: HashMap<ValId, QualType>,
@@ -446,6 +448,7 @@ impl<'m> FuncCtx<'m> {
             diverged: std::collections::HashSet::new(),
             decl_qtypes: HashMap::new(),
             binding_qt: None,
+            cleanup_error: None,
             vid_qtypes: HashMap::new(),
             addr_taken: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
@@ -1192,7 +1195,12 @@ impl<'m> FuncCtx<'m> {
     fn emit_cleanup(&mut self, c: Cleanup) {
         match c {
             Cleanup::AttrFn { addr, fn_name } => self.emit_cleanup_call(addr, &fn_name),
-            Cleanup::Defer(stmt) => { let _ = self.lower_stmt(&stmt); }
+            Cleanup::Defer(stmt) => {
+                // Reported when the function is done (cleanups return nothing).
+                if let Err(e) = self.lower_stmt(&stmt) {
+                    if self.cleanup_error.is_none() { self.cleanup_error = Some(e); }
+                }
+            }
             Cleanup::StringRelease { addr } => self.emit_string_release_at(addr),
             Cleanup::FreePtr { slot } => self.emit_free_ptr_slot(slot),
             Cleanup::RefRelease { slot } => {
@@ -2311,6 +2319,7 @@ impl<'m> Lowerer {
         }
 
         fc.exit_scope();
+        if let Some(e) = fc.cleanup_error.take() { return Err(e); }
 
         // Replace the pre-registered placeholder, or add if not pre-registered
         if let Some(idx) = self.module.functions.iter().position(|f| f.name == name) {

@@ -1,0 +1,7 @@
+// An error in a `defer`red statement was dropped (the statement silently
+// lowered to nothing): it is reported like any other.
+int main()
+{
+    defer nosuch_fn(1);
+    return 0;
+}
