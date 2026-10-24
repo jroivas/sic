@@ -1181,6 +1181,27 @@ impl<'m> FuncCtx<'m> {
                         return self.coerce(d, &target);
                     }
                 }
+                // GCC vector ↔ integer of the same size (`(__m64)i`, `(long long)m`):
+                // the same bits, through memory (a vector is an aggregate). GCC
+                // rejects float ↔ vector casts.
+                if let Ok(src_ty) = self.infer_expr_type(inner) {
+                    let scalar = |t: &Type| matches!(t, Type::Int { .. });
+                    let ps = self.ptr_size();
+                    if matches!(target, Type::Array { .. }) && scalar(&src_ty) && src_ty.size_of(ps) == target.size_of(ps) {
+                        let v = self.lower_expr(inner)?;
+                        let v = self.coerce(v, &src_ty)?;
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: target.clone(), align: None });
+                        self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+                        return Ok(Val::Local(slot));
+                    }
+                    if scalar(&target) && matches!(src_ty, Type::Array { .. }) && src_ty.size_of(ps) == target.size_of(ps) {
+                        let p = self.lower_aggregate_ptr(inner)?;
+                        let d = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: d, ptr: p, ty: target.clone() });
+                        return Ok(Val::Local(d));
+                    }
+                }
                 let v = self.lower_expr(inner)?;
                 self.coerce(v, &target)
             }
