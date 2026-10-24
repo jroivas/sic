@@ -1,0 +1,8 @@
+// A string's bytes may be shared (a copy, a slice, a literal): they are not
+// changed in place. This wrote 4 bytes for a char and cut the string short.
+int main()
+{
+    string s = "ab" + "cd";
+    s[0] = 'X';
+    return 0;
+}

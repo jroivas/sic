@@ -1,0 +1,1 @@
+test_0585.sic:6:6: error: cannot change a byte of a `string`: strings are immutable (build a new string, or copy the bytes into a `char` array)

@@ -78,6 +78,16 @@ impl<'m> FuncCtx<'m> {
     /// A write to `e` (`=`, a compound assignment, `++`/`--`) must not change
     /// something `const`.
     pub(crate) fn check_writable(&self, e: &Expr) -> Result<()> {
+        // A `string`'s bytes may be shared (a copy, a slice, a literal's
+        // read-only data): they are never changed in place.
+        if let ExprKind::Index { base, .. } = &e.kind {
+            if self.is_sic() && matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_sic_string(&t)) {
+                return Err(CompileError::at(
+                    "cannot change a byte of a `string`: strings are immutable (build a new string, \
+                     or copy the bytes into a `char` array)".to_string(),
+                    e.span.file.clone(), e.span.line, e.span.col));
+            }
+        }
         match self.const_target(e) {
             Some(n) => Err(CompileError::at(format!("cannot assign to '{}': it is const", n),
                 e.span.file.clone(), e.span.line, e.span.col)),
