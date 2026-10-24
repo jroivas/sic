@@ -153,6 +153,43 @@ and never touched, so it isn't corrupted. A self-assign (`v = v`) is a no-op.
 For a field you want *shared* this way, allocate it with `new`/`del` (a `free()`-d
 malloc pointer has no reference count to share).
 
+## Copies: `clone()`
+
+Assignment shares; `x.clone()` makes an independent copy, so changing one never
+changes the other:
+
+```sic
+list<string> a;
+a.push("x");
+list<string> b = a;           // the same list
+list<string> c = a.clone();   // a new list with its own elements
+c.push("y");                  // a and b still hold one element
+```
+
+Every type clones: a `string` copies its bytes, a container clones each element,
+a struct clones field by field (a plain pointer field keeps pointing where it
+did), and a `new` pointer gets a new block of the same size. A tuple of plain
+values and a closure are immutable, so their clone shares them.
+
+A struct says how it is copied with a method `S clone(S *self)` that returns the
+copy — used wherever an `S` is cloned, also as a field or a container element. A
+struct with its own constructor or destructor must have one: it manages something
+(a file descriptor, a lock) that copying its fields would duplicate, so cloning it
+without one is a compile error.
+
+```sic
+struct File {
+    int fd;
+    ~File() { close(fd); }
+    File clone(File *self)
+    {
+        File f;
+        f.fd = dup(self->fd);   // its own descriptor, closed once
+        return f;
+    }
+};
+```
+
 ## `@` references
 
 A reference, written `@T`, is a **scoped, reference-counted borrow** of a

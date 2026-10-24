@@ -91,6 +91,11 @@ at *compile time* (`"hello" + 6` and `"hi"[9]` are compile errors), and a runtim
 index traps on out-of-range. Assigning `s + n` to a `char*` gives plain pointer
 arithmetic into the bytes (`char *p = "abcdef" + 2;` → `p` at `'c'`).
 
+A string is **immutable**: `s[i] = c` is a compile error. Its bytes may be shared
+— by a copy, a slice, or a literal's read-only data — so they are never changed in
+place. Build a new string (`s = "X" + s[1:];`), or copy the bytes into a `char`
+array to edit them.
+
 ## Comparison
 
 Compare bytes directly with `==` / `!=` — no `strcmp`, no NUL requirement:
@@ -186,7 +191,7 @@ It is the same test as `s.size == 0` (or `s == ""`).
 | `.length` | number of UTF-8 code points |
 | `.size`   | number of bytes |
 | `.ptr` / `.str` | a NUL-terminated `char*` (copies only if the view isn't already NUL-terminated) |
-| `.dup`    | an owned heap copy (see below) |
+| `.dup`    | an owned heap copy (see below); `.clone()` is the same for a `string` |
 | `.utf8`   | the bytes decoded into a `u8char[]` of code points (see [types](types.md#u8char--a-unicode-code-point)) |
 
 ```sic
@@ -207,6 +212,10 @@ the source:
 ```sic
 string owned = s.dup;        // independent heap copy
 ```
+
+`s.clone()` does the same for a `string` (`.clone()` copies any value; see
+[memory & ownership](memory-and-ownership.md#copies-clone)); `.dup` also takes a
+`char*` or `char[]`.
 
 You rarely need `.dup` explicitly: returning a `string` that views a *local*
 buffer copies it automatically (see

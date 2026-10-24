@@ -14,6 +14,13 @@ Ground rules:
   braces.
 - Enums are strict types. `int` → enum needs a cast; enum → `int` is implicit.
 - A `string` does not decay to `char*`. Pass `s.ptr` to C APIs (`printf("%s", s.ptr)`).
+  A string is immutable: `s[i] = c` is an error; build a new one.
+- Assignment of a managed value (string, list, dict, struct with them) **shares** it;
+  `x.clone()` makes an independent copy. A struct with its own constructor or
+  destructor needs a `S clone(S *self)` method to be cloned.
+- Writing to a `const` object is an error. `using strict;` (a file) or `strict` (a
+  function) makes variables immutable unless declared `mut`; a loop counter is then
+  `for (mut int i = 0; …)`.
 - Keep `#include <stdio.h>` / `printf` for plain output, or `import std;` and
   `std::Println("{} {}", a, b)`.
 

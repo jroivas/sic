@@ -7,8 +7,7 @@ but is not afraid to introduce breaking changes in order to improve it.
 compiler (Rust front end, Cranelift back end). They are active for SIC-mode
 sources (`.sic` files); the same compiler also builds ordinary C (it compiles real
 C codebases such as SQLite and QEMU). A few items remain partial or planned, noted
-inline where relevant: strict mode (with move semantics and `clone`), compile-time
-enforced error handling (§"Errors and exceptions"), and a cross-module generic
+inline where relevant: compile-time enforced error handling (§"Errors and exceptions"), and a cross-module generic
 template whose body calls other module functions; calling a method through `?.`,
 and swapping through a cast.
 
@@ -924,15 +923,10 @@ When a reference is passed as a parameter, a new reference is formed, and the re
 
 ## Strict mode
 
-> Planned: strict mode — `using strict;`, `strict` functions, move semantics and
-> `clone` — is not implemented yet. `mut` is accepted, and has no effect outside
-> strict mode.
+Strict mode makes variables immutable unless they say otherwise. It is off by
+default, and can be turned on for a whole file or for single functions.
 
-As another addition we add more Rust-like features, which are off by default.
-To enable them, a new strict mode is introduced.
-It can be applied per function, or per compilation unit.
-
-To enable it for a whole compilation unit:
+To enable it for every function in a file:
 
     using strict;
 
@@ -942,142 +936,139 @@ To use it for a single function:
         return 42;
     }
 
-It changes a few things:
-
-All variables are immutable after their initial assignment by default.
-The new `mut` keyword changes this:
+In strict code every variable — a local, a parameter, a global of a strict file —
+is immutable after its initialization. The `mut` keyword makes one changeable:
 
     int meaning = 42;
     mut int life = 123;
 
-In that example the variable `meaning` can't be changed, but `life` can.
-This is the opposite of the default in C.
-A mutable variable can be automatically promoted to immutable,
-but not the other way around.
+    life++;          // fine
+    meaning = 0;     // compile error: `meaning` is immutable
 
-Another change is passing pointers.
-We add borrowing, reference counting and ownership to all pointers by default.
+This is the opposite of the default in C, where only `const` variables are fixed.
 
-### Ownership, and moving it
+Immutability covers what the variable holds by value: the fields of a struct,
+the elements of an array, the entries of a list or a dict. With `p`, `xs` and
+`d` immutable, `p.x = 1`, `xs[0] = 1` and `d["k"] = v` are errors. What a
+pointer points to is not part of the pointer: `int *p` cannot be pointed
+elsewhere, but `*p = 1` and `p->x = 1` follow the pointee's `const`, as in C.
 
-One big thing is ownership. Variables are always owned by someone.
-Let's see an example in strict mode:
+Methods may change their struct: `p.bump()` works on an immutable `p`. A method
+that does not change it should take `const S *self`; the compiler then rejects
+any write through `self` in its body.
 
-    const char *text = "Hello";
-    char *another = text;
+A loop counter needs `mut`: `for (mut int i = 0; i < n; i++)`. The variable of a
+range-`for` is a new immutable binding on each pass.
 
-First we have `text`, which refers to the const string `Hello`.
-In strict mode one can omit `const` since all variables are by default immutable,
-that's why variable `another` doesn't need `const`.
+An immutable variable declared without a value may be assigned once — its late
+initialization — as long as no path through the function assigns it twice:
 
-This flow is different from C.
-In strict mode, instead of being assigned, the value is moved.
-This means that `text` is not valid any more after the assignment `another = text`.
-Thus only variable `another` is usable after the assignment.
-In C and non-strict mode both `text` and `another` would be valid and referring
-to same data.
+    int r;
+    if (n > 5)
+        r = 1;
+    else
+        r = 2;      // fine: one assignment on each path
 
-To copy the value into two different variables, there is the `clone` keyword:
+Until then it reads as zero, like any SIC variable. An assignment that a loop
+would run again, one that follows another assignment on some path, and one in a
+`defer` are errors. (A function that uses `goto` gets no late initialization.)
 
-    char *text = "Hello";
-    char *another = clone text;
+Outside strict mode `mut` is accepted and does nothing.
 
-This makes a clone of the value of `text` and assigns it to `another`.
-After this both variables are valid and can be used.
+## Ownership and copies
 
-Cloning might be an expensive operation, and is done recursively if needed.
-For example:
+A value of a primitive type (an integer, a float, a pointer) is copied, exactly
+as in C. Every other value — a `string`, a `list`/`dict`/`set`, a tuple, a
+closure, a `bigint`/`fixed`, a struct holding one of those — has an owner and is
+released when its owner's scope ends (see §"Scopes and automatic release"):
 
-    struct test1 {
-        int a;
-        int b;
+- **Assignment shares.** `b = a` makes `b` a second owner of the same value: only
+  a small descriptor or handle is copied, and a reference count goes up. A string
+  is immutable, so sharing one is invisible; a shared list is the same list.
+- **A result moves.** A function's result, `return x` and a new value
+  (`a + b`, `new`) go to their receiver without a copy.
+- **An argument is borrowed.** The callee uses the caller's value for the call.
+
+```sic
+list<int> a;
+list<int> b = a;    // the same list, two owners
+b.push(1);          // a.length is 1 as well
+```
+
+### Copying: `clone()`
+
+`x.clone()` makes an independent copy of any value: changing the copy never
+changes the original, and the two are released separately.
+
+```sic
+list<int> a;
+list<int> b = a.clone();
+b.push(1);          // a is still empty
+```
+
+What is copied depends on the type:
+
+| Type | `clone()` |
+|---|---|
+| primitive, enum, bitfield | the value |
+| `string` | its bytes (the same as `.dup`) |
+| `list`, `dict`, `set` | a new container, each element cloned |
+| tuple | a new tuple with each element cloned (a tuple of plain values, being immutable, is shared) |
+| tagged enum | the active variant's payload cloned |
+| `bigint`, `fixed` | the value |
+| `any` | a wrapped `string` is copied; any other wrapped value is a value or a borrow and stays |
+| closure | shared: its captures cannot change |
+| `weak<T>` | another weak reference to the same container |
+| `new` pointer | a new block of the same size, each element cloned |
+| struct | field by field, or by its own `clone()` method |
+
+A pointer that does not come from `new` has no size to copy: `p.clone()` on it is
+a compile error. A pointer to a struct (`p.clone()`, `p->clone()`) clones the
+struct, as `p.method()` calls a method on it.
+
+A struct clones field by field: each field is cloned by its type, and a plain
+pointer field keeps pointing where it did (the struct does not own it). A struct
+can say how it is copied with a method `S clone(S *self)` that returns the copy;
+it is then used wherever an `S` is cloned — directly, as a field of another
+struct, or as a container element.
+
+A struct with its own constructor or destructor manages something that copying
+its fields would duplicate — a file descriptor, a lock, a handle from a C
+library — so it is never cloned field by field: it must define `clone()`. Cloning
+it without one, or cloning a container of it, is a compile error.
+
+    struct File {
+        int fd;
+        string name;
+        ~File() { close(fd); }
+        File clone(File *self) {
+            File f;
+            f.fd = dup(self->fd);
+            f.name = self->name;
+            return f;
+        }
     };
 
-    struct test2 {
-        int a;
-        float b;
-    };
+    File a = open_file("log.txt");
+    File b = a.clone();         // a second descriptor; each is closed once
 
-    struct test3 {
-        struct test1 a;
-        struct test2 b;
-    };
+A clone of a struct that holds a list of itself (a tree) clones the whole tree.
+Strong references that form a cycle would make a clone run forever; a `weak<T>`
+reference is not followed (see §"Weak references").
 
-    struct test4 {
-        struct test3 a;
-        struct test3 *b;
-        @struct test3 *c;
-    };
+### References instead of copies
 
-    struct test4 *val1 = new struct test4;
-    val1->b = new struct test3;
-    val1->c = @val1->b;
-    struct test4 *val2 = clone val1;
-
-In this example `clone` needs to check all the other structs inside it,
-and call clone on them. This is done recursively until done.
-References can't be cloned as is, but a new similar reference is formed.
-In this example `val2->c` would still refer to `val1->b`,
-but `val2->b` would be different from `val1->b`.
-
-Note that cloning and moving apply only to non-primitive types.
-All primitive types (int, float, etc.) can be simply assigned:
-
-    int a = 4;
-    int b = a;
-
-In that example both `a` and `b` are still valid and usable.
-
-Ownership is moved the same way when a value is passed as a parameter:
-
-    void tst1(char *s) {
-        // Ownership of "s" is moved here
-        printf("Passed: %s\n", s);
-    }
-
-    void tst2(int v) {
-        printf("Passed: %d\n", v);
-    }
-
-    char *text = "Hello";
-    int val = 42;
-
-    tst1(text);
-    // "text" is not usable here any more
-    tst2(val);
-
-This example follows the rules defined earlier.
-After the calls, `text` is not usable in the caller, but `val` is, since it is primitive.
-Ownership of a variable can be passed back by returning the passed variable:
-
-    char *print_and_return(char *s) {
-        printf("Passed: %s\n", s);
-        return s;
-    }
-
-    char *text = "Hello";
-    char *text2 = print_and_return(text);
-    // "text" is not usable here any more but "text2" is basically the same
-
-    printf("Returned: %s\n", @text2);
-
-This is perfectly valid, since ownership is first taken and then returned.
-Since `text` is not mutable, the return value can't be assigned back to it;
-a new variable is needed.
-By the rules, `text` is moved and not usable after the call.
-
-Instead of moving ownership, a reference can be passed:
+Instead of a copy, a function can take a reference to a `new` allocation; see
+§"References":
 
     void print_ref(@char *s) {
         printf("Passed: %s\n", s);
     }
 
-    char *text = "Hello";
+    char *text = new char(6);
+    memcpy(text, "Hello", 6);
     print_ref(@text);
-    // "text" is still usable after the function call returns
-    // since it was passed as a reference
-
-    printf("Returned: %s\n", @text);
+    // "text" is still usable after the call returns
 
 ## Assignment and equals
 
