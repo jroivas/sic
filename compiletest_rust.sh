@@ -95,10 +95,18 @@ dotest() {
 
     # `.xfail` marker: the test passes iff sic *rejects* the source (used to pin
     # sic-only syntax, e.g. a `.sic` file that must fail because it uses a
-    # reserved Rust-style type alias as an identifier).
+    # reserved Rust-style type alias as an identifier). A non-empty marker's
+    # first line is the expected diagnostic: it must appear in sic's output.
     if [ -f "$test.xfail" ]; then
         if "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
             echo "FAIL $base: expected compile failure but it compiled"
+            return 1
+        fi
+        local want
+        want="$(head -n 1 "$test.xfail")"
+        if [ -n "$want" ] && ! grep -qF -- "$want" /tmp/sic_err_$base; then
+            echo "FAIL $base: expected the diagnostic: $want"
+            head -n 3 /tmp/sic_err_$base
             return 1
         fi
         echo "PASS $base (expected compile failure)"
