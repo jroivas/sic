@@ -1,5 +1,6 @@
 pub(crate) mod types;
 mod expr;
+pub(crate) use expr::builtin_extra_names;
 mod func;
 mod borrowck;
 pub(crate) mod strict;

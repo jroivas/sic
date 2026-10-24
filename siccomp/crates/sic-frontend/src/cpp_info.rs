@@ -286,6 +286,7 @@ pub fn builtin_names() -> Vec<String> {
         v.push(format!("__sync_fetch_and_{}", op));
         v.push(format!("__sync_{}_and_fetch", op));
     }
+    for n in crate::lower::builtin_extra_names() { v.push(n); }
     // `__builtin_<f>` of a libc function: the function, declared if need be.
     for (f, _) in crate::lower::libc_builtins::LIBC_PROTOTYPES { v.push(format!("__builtin_{}", f)); }
     v

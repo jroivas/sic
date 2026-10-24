@@ -533,7 +533,7 @@ impl<'m> FuncCtx<'m> {
         // count is reported as such (it fell through to "unknown function", or
         // the extra arguments were ignored).
         if let ExprKind::Ident(name) = &func_expr.kind {
-            if let Some((min, max)) = builtin_arity(name) {
+            if let Some((min, max)) = builtin_arity(name).or_else(|| super::builtins::extra_builtin_arity(name)) {
                 if (args.len() < min || args.len() > max) && !matches!(self.lookup(name), Some(_)) {
                     let want = if min == max { format!("{}", min) }
                         else if max == usize::MAX { format!("at least {}", min) }
@@ -544,6 +544,13 @@ impl<'m> FuncCtx<'m> {
                             if args.len() == 1 { "was" } else { "were" }),
                         sp.file.clone(), sp.line, sp.col));
                 }
+            }
+        }
+
+        // The builtins of `builtins.rs`.
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            if super::builtins::extra_builtin_arity(name).is_some() && !matches!(self.lookup(name), Some(_)) {
+                if let Some(v) = self.lower_extra_builtin(name, args, sp)? { return Ok(v); }
             }
         }
 
@@ -1852,18 +1859,87 @@ impl<'m> FuncCtx<'m> {
             Type::Pointer(inner) => *inner,
             _ => self.val_type(&a),
         };
+        // The operation is on the mathematical values of the operands (GCC):
+        // `__builtin_add_overflow(300, 0, &u8)` and `(-1, 0u, &unsigned)`
+        // overflow. Operands and result up to 64 bits are computed exactly in 128.
+        let int = |t: &Type| match t { Type::Int { bits, signed } => Some((*bits, *signed)), Type::Bool => Some((1, false)), _ => None };
+        let (at, bt) = (self.val_type(&a), self.val_type(&b));
+        match (int(&at), int(&bt), int(&ty)) {
+            (Some(x), Some(y), Some(r)) if x.0 <= 64 && y.0 <= 64 && r.0 <= 64 && !(at == ty && bt == ty) =>
+                self.overflow_exact(op, (a, x.1), (b, y.1), res_ptr, &ty),
+            _ => {
+                // Operands of the result type (or 128 bits wide): computed in it.
+                let a = self.coerce(a, &ty)?;
+                let b = self.coerce(b, &ty)?;
+                self.overflow_same_type(op, a, b, res_ptr, &ty)
+            }
+        }
+    }
 
-        // Coerce operands to the result type so the arithmetic is well-typed.
-        let a = self.coerce(a, &ty)?;
-        let b = self.coerce(b, &ty)?;
-
-        // result = a op b (wrapping), stored through *res.
-        let result = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: result, op, lhs: a.clone(), rhs: b.clone(), ty: ty.clone() });
-        let result = Val::Local(result);
-        self.push_instr(Instr::Store { val: result.clone(), ptr: res_ptr });
-
-        Ok(self.emit_overflow_flag(op, &a, &b, &result, &ty))
+    /// `a op b` on the exact values (each operand ≤ 64 bits, `signed` as its
+    /// type): computed in 128 bits, the result type's wrapped value stored
+    /// through `res`, overflow when the exact value does not fit `ty`.
+    fn overflow_exact(&mut self, op: BinOp, a: (Val, bool), b: (Val, bool), res: Val, ty: &Type) -> Result<Val> {
+        let w = Type::Int { bits: 128, signed: true };
+        let widen = |fc: &mut Self, v: Val, signed: bool| -> Val {
+            let d = fc.alloc_val();
+            let vt = fc.val_type(&v);
+            let v = if vt == Type::Bool { fc.coerce(v, &Type::u8()).unwrap() } else { v };
+            fc.push_instr(Instr::Cast { dest: d, op: if signed { CastOp::SExt } else { CastOp::ZExt }, val: v, to_ty: w.clone() });
+            fc.val_types.insert(d.0, w.clone());
+            Val::Local(d)
+        };
+        let (aw, bw) = (widen(self, a.0, a.1), widen(self, b.0, b.1));
+        let bin = |fc: &mut Self, op: BinOp, x: Val, y: Val| -> Val {
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: d, op, lhs: x, rhs: y, ty: w.clone() });
+            Val::Local(d)
+        };
+        let cmp = |fc: &mut Self, op: CmpOp, x: Val, y: Val| -> Val {
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: d, op, lhs: x, rhs: y, ty: w.clone() });
+            Val::Local(d)
+        };
+        let zero = self.coerce(Constant::int(0), &w)?;
+        // A product of two 64-bit values needs up to 128 bits unsigned: multiply
+        // the magnitudes, then apply the sign; a magnitude of 2^127 or more never
+        // fits a 64-bit result.
+        let (exact, huge) = if op == BinOp::Mul {
+            let abs = |fc: &mut Self, v: Val| -> Val {
+                let neg = cmp(fc, CmpOp::ISLt, v.clone(), zero.clone());
+                let n = bin(fc, BinOp::Sub, zero.clone(), v.clone());
+                let d = fc.alloc_val();
+                fc.push_instr(Instr::Select { dest: d, cond: neg, on_true: n, on_false: v, ty: w.clone() });
+                Val::Local(d)
+            };
+            let (ma, mb) = (abs(self, aw.clone()), abs(self, bw.clone()));
+            let mag = bin(self, BinOp::Mul, ma, mb);
+            let na = cmp(self, CmpOp::ISLt, aw, zero.clone());
+            let nb = cmp(self, CmpOp::ISLt, bw, zero.clone());
+            let neg = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: neg, op: BinOp::Xor, lhs: na, rhs: nb, ty: Type::Bool });
+            let nm = bin(self, BinOp::Sub, zero.clone(), mag.clone());
+            let v = self.alloc_val();
+            self.push_instr(Instr::Select { dest: v, cond: Val::Local(neg), on_true: nm, on_false: mag.clone(), ty: w.clone() });
+            let huge = cmp(self, CmpOp::ISLt, mag, zero.clone());
+            (Val::Local(v), Some(huge))
+        } else {
+            (bin(self, op, aw, bw), None)
+        };
+        self.val_types.insert(match &exact { Val::Local(id) => id.0, _ => 0 }, w.clone());
+        let r = self.coerce(exact.clone(), ty)?;
+        self.push_instr(Instr::Store { val: r.clone(), ptr: res });
+        let signed = matches!(ty, Type::Int { signed: true, .. });
+        let back = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: back, op: if signed { CastOp::SExt } else { CastOp::ZExt }, val: r, to_ty: w.clone() });
+        let mut ovf = cmp(self, CmpOp::INe, Val::Local(back), exact);
+        if let Some(h) = huge {
+            let d = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: d, op: BinOp::Or, lhs: ovf, rhs: h, ty: Type::Bool });
+            ovf = Val::Local(d);
+        }
+        self.val_types.insert(match &ovf { Val::Local(id) => id.0, _ => 0 }, Type::Bool);
+        Ok(ovf)
     }
 
     /// Compute the overflow flag (a `Bool` value) for a wrapping integer

@@ -8,6 +8,8 @@ mod simd;
 mod enums;
 pub(crate) use enums::PayloadOwn;
 mod calls;
+mod builtins;
+pub(crate) use builtins::extra_builtin_names as builtin_extra_names;
 mod clone;
 mod lvalue;
 mod infer;

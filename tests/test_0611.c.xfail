@@ -1,0 +1,1 @@
+test_0611.c:2:47: error: `__builtin_cpu_supports`: unknown CPU feature "sse9"

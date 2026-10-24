@@ -9,6 +9,7 @@ mod dict_runtime;
 mod async_runtime;
 mod list_runtime;
 mod tuple_runtime;
+mod cpu_runtime;
 mod assert_runtime;
 mod module_conf;
 mod rust_module;
@@ -780,6 +781,13 @@ fn parse_source(
         preprocessed = format!(
             "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
             assert_runtime::ASSERT_RUNTIME, path, preprocessed
+        );
+    }
+    // `__builtin_cpu_supports` / `__builtin_cpu_is`, in C as in SIC.
+    if cpu_runtime::uses_cpu(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            cpu_runtime::CPU_RUNTIME, path, preprocessed
         );
     }
     if is_sic && tuple_runtime::uses_tuple(&preprocessed) {
