@@ -6,20 +6,21 @@ but is not afraid to introduce breaking changes in order to improve it.
 **STATUS** Most of the features described here are implemented in the current
 compiler (Rust front end, Cranelift back end). They are active for SIC-mode
 sources (`.sic` files); the same compiler also builds ordinary C (it compiles real
-C codebases such as SQLite and QEMU). A few advanced items remain partial or
-planned — noted inline where relevant (e.g. `std.File`, `@`-capture lambdas, and a
-cross-module generic template whose body calls other module functions).
+C codebases such as SQLite and QEMU). A few items remain partial or planned, noted
+inline where relevant: strict mode (with move semantics and `clone`), compile-time
+enforced error handling (§"Errors and exceptions"), and a cross-module generic
+template whose body calls other module functions.
 
 ## Limit undefined behavior
 
-One of C's optimization strategies is "undefined behavior"
-when compiler may do whatever it wants.
+One of C's optimization strategies is "undefined behavior": cases where the
+compiler may do whatever it wants.
 
-We remove that freedom and try to specify what to do on each of the cases.
+We remove that freedom and specify what happens in each case.
 
-Reason is to avoid hard to debug undefined behavior cases.
-Our thesis is, compiler can do good enough code even with
-these rules, and same time prevent unnecessary lost human time.
+The reason is to avoid hard-to-debug undefined behavior. Our thesis is that the
+compiler can produce good enough code even with these rules, while saving the
+human time such bugs cost.
 
 ### Initialized variables
 
@@ -47,10 +48,10 @@ Example:
 
 ## Integer sizes
 
-Traditionally in C the size of `int` may be different according the system where it's compiled into.
-We specify size of all types explicitly:
+Traditionally in C the size of `int` may differ depending on the system it is compiled for.
+We specify the size of every type explicitly:
 
-- 8-32 bits: one unicode character as UTF-8 (u8char)
+- 8-32 bits: one Unicode character as UTF-8 (u8char)
 - 8 bits: char and unsigned char
 - 16 bits: short and unsigned short
 - 32 bits: int and unsigned int
@@ -66,10 +67,10 @@ On top of that we have specific bit size ints:
 - 64 bits: i64, u64
 - 128 bits: i128, u128
 
-Extending to bigger types is trivial, in case hardware support comes available.
-However compiler supports built-in bigint, which allows arbitrary big integers.
-These are not any specific bit/byte size, but can grow any size when needed.
-This of course has it's performance and storage size cost.
+Extending to bigger types is trivial if hardware support becomes available.
+The compiler also has a built-in `bigint` for arbitrarily large integers.
+A bigint has no fixed bit or byte size; it grows as needed.
+This of course has a cost in performance and storage.
 Otherwise bigints can be used like any other integer type:
 
     i32 a = 12345;
@@ -79,12 +80,12 @@ Otherwise bigints can be used like any other integer type:
     bigint d = a + b;
     d += c;
 
-In case it's specificly needed there's two types for machine word size:
+When specifically needed, there are two types of the machine word size:
 
 - isize: signed machine word size (32/64 bits)
 - usize: unsigned machine word size (32/64 bits)
 
-These can be used to produce optimal code for the target architecture. Should not be used in portable code.
+These can produce optimal code for the target architecture, but their size differs between targets, so they should not be used in portable code.
 
 ## Integer overflow
 
@@ -96,29 +97,29 @@ Instead these rules apply:
 - For example: signed 8 bit integer `127` plus one becomes `-128`
 - Divide by zero results in `0`
 
-There's possibility to relax these checks and make all operations unsafe.
-Thus operations must be wrapped inside `unsafe` block:
+Operations can instead be checked strictly by wrapping them in an `unsafe` block
+(`INT_MAX` and `INT_MIN` come from `<limits.h>`):
 
     unsafe {
-        int a = MAX_INT;
+        int a = INT_MAX;
         a++;
     }
 
-That would cause exception instead of becoming `MIN_INT`.
-Only way to guard and prevent exception inside `unsafe` block is to
-enclose operation into `overflow` keyword.
-The usage of `overflow` is not limited to `unsafe` blocks
-and it can be used to detect overflow situations.
+That raises an exception instead of becoming `INT_MIN`.
+The only way to catch the exception inside an `unsafe` block is to
+enclose the operation in an `overflow` block.
+The use of `overflow` is not limited to `unsafe` blocks:
+it can be used anywhere to detect overflow.
 
 Example:
 
     int main()
     {
-        int a = MAX_INT - 5;
+        int a = INT_MAX - 5;
 
         unsafe {
-            while (a > MAX_INT - 10 || a < 5) {
-                if (overflow { a++ }) {
+            while (a > INT_MAX - 10 || a < 5) {
+                if (overflow { a++; }) {
                     a = 0;
                 }
             }
@@ -127,34 +128,33 @@ Example:
         return 0;
     }
 
-Without `overflow` keyword execution of program would be
-ended with an exception. Now it just iterates first from
-MAX_INT - 5 to MAX_INT, then assigns a = 0, and continues
-iteration until 5.
+Without the `overflow` block the program would end with an exception. With it,
+the loop counts from INT_MAX - 5 to INT_MAX, then assigns a = 0, and continues
+counting until 5.
 
-By default the rules applies and this example is perfectly valid:
+By default the wrap-around rules apply, and this example is perfectly valid:
 
     int main()
     {
-        int a = MAX_INT - 5;
+        int a = INT_MAX - 5;
 
-        while (a > MAX_INT - 10 || a < 5) {
+        while (a > INT_MAX - 10 || a < 5) {
             a++;
         }
 
         return 0;
     }
 
-That would turn from MAX_INT to MIN_INT, and then continue until would reach 5.
-On functionality way it's not same as the first example.
-Thus most logical way to use `overflow` is without unsafe:
+There `a` wraps from INT_MAX to INT_MIN and then counts on until it reaches 5,
+which does not behave the same as the first example.
+So the most natural way to use `overflow` is without `unsafe`:
 
     int main()
     {
-        int a = MAX_INT - 5;
+        int a = INT_MAX - 5;
 
-        while (a > MAX_INT - 10 || a < 5) {
-            if (overflow { a++ }) {
+        while (a > INT_MAX - 10 || a < 5) {
+            if (overflow { a++; }) {
                 a = 0;
             }
         }
@@ -163,18 +163,19 @@ Thus most logical way to use `overflow` is without unsafe:
     }
 
 
-In case of overflow no values are changed.
-Thus let's consider this example:
+When an overflow is detected, the overflowing operation does not change its
+target, and the rest of the `overflow` block is skipped. Consider this example:
 
     int main()
     {
-        int a = MAX_INT;
+        int a = INT_MAX;
         int b = 0;
+        int c;
 
         unsafe {
-            overflow { a++ };
-            // Value of a is unchanged, so it's still MAX_INT
-            int c = overflow {
+            overflow { a++; };
+            // Value of a is unchanged, so it's still INT_MAX
+            c = overflow {
                 b = 1;   // This is always performed
                 a += 10; // This will overflow and
                          // break out from overflow block
@@ -187,23 +188,22 @@ Thus let's consider this example:
             };
         }
 
-        assert(a == MAX_INT);
+        assert(a == INT_MAX);
         assert(b == 1);
 
         return c;
     }
 
-That program would exit with error code, but would not fail at any point.
-Without `overflow` keywords execution would be ended at first `a++`.
-Also, here we first time take return value `overflow` and assign it into
-and integer. Earlier example in case of `if` works same way.
-So `overflow` return `0` in case of success, and `1` if overflow was detected.
+That program exits with code 1 (the value of `c`), but does not fail at any point.
+Without the `overflow` blocks, execution would end at the first `a++`.
+Here, for the first time, the value of an `overflow` block is assigned to an
+integer; the earlier `if` examples use the same value: `overflow` yields `0` on
+success and `1` when an overflow was detected.
 
 ## Built-in fixed point, and extended floats
 
-Floating point is great, but sometimes more exact representation is needed.
-Solution if fixed point math, and it improves precision, for example,
-on financial calculations.
+Floating point is great, but sometimes a more exact representation is needed,
+for example in financial calculations.
 
 For float:
 
@@ -217,30 +217,22 @@ ABI-compatible with C), but computed with `f64` precision. `f128` currently maps
 the same type (not IEEE binary128). C's `long double` is deprecated for that reason
 (opt-in warning `-Wlong-double`).
 
-Fixed point precision contains two parts: integral and fraction.
-It's possible to select precision for both of them separately.
-From integral part one bit is reserved for sign flag.
-Syntax for fixed number types is `fixed<a,b>`
-where `a` is max meaningful digits for integral part,
-and `b` is max meaningful digits for fraction part.
+`fixed` holds an **exact** rational number (a reduced numerator/denominator pair of
+arbitrary precision), so its arithmetic never rounds: `(1 / 3) * 3 == 1`, and ten
+`0.1`s add up to exactly `1`, which floats cannot do.
 
-- fixed<2,4>: 2 digits for integral, 4 digits for fraction allowing -99.9999 to 99.9999
-- fixed<2,2>: 2 digits for integral, 2 digits for fraction allowing -99.99 to 99.99
-- fixed<10,1>: 10 digits for integral, 1 digit for fraction allowing -9999999999.9 to 9999999999.9
+The syntax for fixed number types is `fixed<a,b>`, where `a` is the number of
+meaningful digits of the integral part and `b` of the fraction part. The value
+itself stays exact; it is rounded (half away from zero) to `b` decimals only when
+it is shown or converted (`.str`, `.int`, a cast). Plain `fixed` shows 18
+decimals.
 
-One can use plain `fixed` but it's in most cases sub-optimal.
-Compiler tries to determine maximum value, but sometimes that's just impossible.
-On these cases plain `fixed` needs to be extended during runtime to a bigger precision,
-and in practice this is always based on bigint.
-That might be expensive and compiler is unable to produce optimal code, which iw could be allowed
-in case the values would have fit inside of traditional integers.
-It's always recommended to define precision for fixed types.
+- fixed<2,4>: 2 digits for integral, 4 digits for fraction, e.g. -99.9999 to 99.9999
+- fixed<2,2>: 2 digits for integral, 2 digits for fraction, e.g. -99.99 to 99.99
+- fixed<10,1>: 10 digits for integral, 1 digit for fraction, e.g. -9999999999.9 to 9999999999.9
 
-On can perform operations on different sized fixed numbers with certain constraints.
-Result of the operation must fit into the combined bigger precision limits.
-Compiler takes bigger integral and fraction parts and uses that as result type.
-
-For example:
+Operations may mix fixed numbers of different precisions. The result type takes
+the bigger integral and the bigger fraction part:
 
     fixed<10,2> a = 123456789.55;
     fixed<1,9> b = 1.123456789;
@@ -248,56 +240,46 @@ For example:
     // Prints fixed<10,9>
     printf("%s\n", type(a + b).str);
 
-Similar way if storing the result to new fixed point number, reserved precision must be matching or bigger:
+Because the value is exact, storing it in a `fixed` of another precision loses
+nothing; only the number of decimals shown differs:
 
-    fixed<10,2> a = 123456789.55;
-    fixed<1,9> b = 1.123456789;
+    fixed<10,9>  c = a + b;   // shown as 123456790.673456789
+    fixed<5,4>   f = a + b;   // the same value, shown as 123456790.6735
 
-    fixed<10,9>  c = a + b;
-    fixed<11,11> d = a + b;
-    fixed<5,4>   f = a + b;  // Compiler failure
-
-Fixed numbers are most effective when the whole precision fits into 64 bit number, but are not limited to that.
-One just need to keep in mind, that compiler can generate way much more optimal code if the numbers does not
-exceed certain limits.
-Otherwise it might need to rely on bigint feature, which means most of the time a performance hit.
-
-Fixed point number may overflow and that can be cheked with `overflow` operator.
-Without the overflow operator fixed point math causes exception. This differs
-from integer math.
+Exactness has a price: the numbers are arbitrary precision (built on `bigint`), so
+`fixed` math is slower than integer or floating-point math.
 
 
 ## Built-in string
 
-We have built in string type, which creates optimal code to target.
-Traditional null terminated strings are of course still supported as well...
+SIC has a built-in `string` type. Traditional null-terminated strings (`char *`)
+are of course still supported as well.
 
-Built-in strings supports natively UTF-8.
+Built-in strings support UTF-8 natively.
 
-Conversion to traditional null terminated can be performed easily,
-with certain constraints. For example strings might not be null terminated,
-and conversion to null terminated string may cause a copy.
+Converting to a traditional null-terminated string is easy (`s.ptr`), with one
+caveat: a string is not necessarily null-terminated, so the conversion may copy it.
 
-This allows indexes and ranged from string to be just plain offsets to the
-original data.
+This lets the indexes and ranges of a string be plain offsets into the original
+data.
 
 Strings support concatenate and substring:
 
     int main()
     {
-        string test = "Hello world!"
+        string test = "Hello world!";
         string another = test + " And all others!";
 
         printf("%s\n", test);
         printf("%s\n", another);
-        // Substring, will print "world", open interval
+        // Substring, prints "world": from index 6 up to (not including) 11
         printf("%s\n", another[6:11]);
     }
 
-Support easy comparison without strcmp:
+Strings compare easily, without strcmp:
 
-    string test = "Hello world!"
-    string h = test[6:10];
+    string test = "Hello world!";
+    string h = test[6:11];
 
     if (h != "world")
         return 1;
@@ -333,7 +315,7 @@ while it is.
 
 ## Empty brackets pointer
 
-This is not valid:
+This is not valid, since an array needs a size or an initializer:
 
     char test[];
 
@@ -349,7 +331,7 @@ alignment. This means that struct like
         u32 val4;
     }
 
-Is internally reorganized by type size:
+is internally reorganized by type size:
 
     struct test {
         u64 val2;
@@ -367,7 +349,7 @@ The reordering follows a fixed, standardized rule set:
    `a` before `b`, no matter how many fields sit between them.
 3. **A union member sorts by its storage size**, which is the size of its largest
    element (rule 1 applied to the union).
-4. **The size is overridable.** A struct can pin its declared order (see below),
+4. **The order is overridable.** A struct can pin its declared order (see below),
    and because the physical order can differ from the source, the chosen
    permutation is recorded in the module manifest so consumers see the same
    layout.
@@ -403,7 +385,7 @@ Pin the seed for reproducible or split compile+link builds:
 
     -fstruct-order=random -fstruct-order-seed=12345   # or per struct: order_random(12345)
 
-`-d` prints the chosen build seed. Because the resulting permutation (for any mode)
+`-d` (debug output) prints the chosen build seed. Because the resulting permutation (for any mode)
 is written into the module manifest, a consumer that `import`s the module always
 sees the exact same layout the producer chose.
 
@@ -486,7 +468,7 @@ A `new`-allocated container is owned by its binding and freed automatically at s
 exit, the same as a locally-declared one.
 
 The implementation is a CPython-style insertion-ordered hash table (a compact
-entries array plus a sparse index), so iteration order will be stable and deletions
+entries array plus a sparse index), so iteration order is stable and deletions
 keep the surviving order intact. The key kind is tracked so key-type-specialized fast
 paths can be added later.
 
@@ -665,9 +647,9 @@ its arguments; a body that calls other module functions is not yet supported.
 
 ## Scopes and automatic release
 
-We borrow `new` keyword from C++ to create new "objects".
-However they're not fat objects like in C++, but structs which can have
-constructor and destructor:
+SIC borrows the `new` keyword from C++ to create new "objects".
+They are not C++ class objects, but structs, which can have a
+constructor and a destructor:
 
     struct test {
         test() {
@@ -680,9 +662,10 @@ constructor and destructor:
     }
 
 
-These looks like C++ classes, but we do not support directly other member methods
-than the constructor and destructor. Like in C++ they're automatically called on creation,
-and when getting out of scope:
+These look like C++ classes. A struct can also have methods, which take the
+struct as an explicit first parameter (`int get(test *self)`, called as
+`a.get()`). Like in C++, the constructor and destructor are called automatically
+on creation and when the object goes out of scope:
 
 
     void test()
@@ -690,23 +673,24 @@ and when getting out of scope:
         struct test a; // constructor of 'test' for 'a' is called here
         struct test *b = new struct test; // constructor of 'test' for 'b' is called here
 
-        // destructor of 'test' for 'a' called here, and 'a' is released,
-        // however 'b' is not released since it's not getting ouf of scope
+        // destructor of 'test' for 'a' called here, and 'a' is released;
+        // 'b' is not released here: it is released with `del b`
     }
 
-All dynamically allocated memory is reference counted.
-Accessing dynamically allocated memory causes boundary checks.
+Memory allocated with `new` is reference counted, and every access to it is
+bounds-checked.
 
-Using `new` and `del` is recommended instead of C style malloc/free.
-Let's see this example bit closer:
+Use `new` and `del` instead of C-style malloc/free.
+Let's look at this example more closely:
 
     int *val = new int(10);
     val[10] = 0;
     del val;
 
-This would either cause compile error or runtime exception.
-First `new int(10)` allocates memory for 10 ints so it's same as `sizeof(int) * 10`.
-In order to allocate just one integer `new int` is enough.
+This causes either a compile error or a runtime exception.
+`new int(10)` allocates memory for 10 ints, so it is the same as `sizeof(int) * 10`
+bytes, and index 10 is out of bounds.
+To allocate just one integer, `new int` is enough.
 
 An array may also be allocated with the bracket form `new T[count]`, where `count`
 is any expression:
@@ -717,25 +701,25 @@ is any expression:
 `new T[count]` is always an element count — unlike `new S(n)` on a struct with a
 constructor, which allocates one object and passes `n` to the constructor.
 
-Returned pointer is so called fat pointer. It will include information about the size of the allocation:
+The returned pointer is a so-called fat pointer. It includes information about the allocation:
 
 - start_of_allocation
 - size_of_allocation
 - reference_cnt
 - data
 
-It will have reference_cnt set as 1.
-On every access to the data is protected with boundary checks. Thus the next line will end up making this check:
+Its reference_cnt starts at 1.
+Every access to the data is bounds-checked, so `val[10] = 0` makes this check:
 
     (10 * sizeof(int)) < size_of_allocation
 
-Since we have allocated `10 * sizeof(int)` but we're accessing element starting at `10 * sizeof(int)` this check will fail.
-Failed check will cause runtime (or build time) exception.
+Since we allocated `10 * sizeof(int)` bytes but access the element starting at `10 * sizeof(int)`, this check fails.
+A failed check causes a runtime (or build-time) exception.
 
-In case there would not be any overflows we would end up deleting the allocation.
-It will free the memory in case reference_cnt is decremented to 0.
-It's also possible that reference to the allocation has been passed forward to a thread.
-On that case reference_cnt is still not 0, and memory will be freed when the reference gets out of scope.
+Without the out-of-bounds access, `del val` would release the allocation: it
+decrements reference_cnt, and frees the memory when the count reaches 0.
+A reference to the allocation may also have been passed on, for example to a thread.
+In that case reference_cnt is still not 0, and the memory is freed when that reference goes out of scope.
 
 ### Tail-call optimization
 
@@ -757,7 +741,7 @@ tail position (e.g. `return f(n-1) + f(n-2)`) is left as a real call.
 
 ## Defer keyword
 
-Borror `defer` syntax from Go to allow automatic action on every return.
+`defer`, borrowed from Go, runs a statement automatically on every exit from the scope.
 
 For example:
 
@@ -765,11 +749,11 @@ For example:
     {
         int *tmp = new int(10);
         defer del tmp;
-        int *tmp2 == new int(5);
+        int *tmp2 = new int(5);
         if (!tmp2)
-            return; // Defer statemen is run after this return
+            return; // the deferred statement runs after this return
         tmp[0] = 10;
-    } // Defer statenment is run here when exiting the scope
+    } // the deferred statement runs here when exiting the scope
 
 ## Field access
 
@@ -792,29 +776,30 @@ through a null base is simply dropped:
 
 ## Safe access
 
-We support ternary operation, but also elvis operator `?:` and safe
-access `?.` operator.
+Besides the ternary operator, SIC has the elvis operator `?:` and the safe-access
+operator `?.`.
 
 For example:
 
-    // If parse_port(s) causes NULL or error, port will be 8080
+    // If parse_port(s) returns 0 (or NULL), port will be 8080
     int port = parse_port(s) ?: 8080;
 
-    // If "user" is null "username" becomes NULL without exception
-    // Otherwise it will be result of "user.name()" call.
-    char *username = user?.name();
+    // If "user" is null, "username" becomes NULL without an exception;
+    // otherwise it is "user.name".
+    char *username = user?.name;
 
-On top of this we have `else` guard to trigger custom action:
+On top of these, an `else` guard runs a custom action when a value is missing — an
+`Option`/`Result` without a value, or a null pointer — or a condition is false:
 
-    int port = parse_port(s) else return 0;
+    int port = find_port(s) else return 0;     // find_port returns Option<int>
     auto val = table.find(key) else return -1;
 
     x > 0 else return EINVAL;
 
 ## References
 
-First we have a reference, which is indicated by `@` at the beginning of the type declaration.
-When taking a reference of a variable it's name is also prefixed with `@`:
+A reference is indicated by `@` at the beginning of the type declaration.
+When taking a reference to a variable, its name is also prefixed with `@`:
 
     int calculate_length(@char* s) {
         mut int i = 0;
@@ -831,22 +816,22 @@ When taking a reference of a variable it's name is also prefixed with `@`:
     int len = calculate_length(@name);
 
 This example looks like what you would normally do in C.
-Difference is that a reference to variable `name` is taken instead of passing `name` as plain pointer.
-Pointer would normally be passed as-is, but since we use `@` we're handling new kind of references.
-This referece has it's scope, and is automatically freed when getting out of scope.
-Thus it's valid only inside `calculate_length()` function.
-Inside the function variable `s` itself can be utilized as it would be a normal immutable pointer passed there.
+The difference is that a reference to the variable `name` is taken, instead of passing `name` as a plain pointer.
+A pointer would normally be passed as-is, but since we use `@`, we are handling a new kind of reference.
+This reference has its own scope, and is released automatically when it goes out of scope.
+Thus it is valid only inside the `calculate_length()` function.
+Inside the function, the variable `s` itself can be used as if it were a normal immutable pointer passed there.
 
-There's few things that happens:
-First one is reference counting.
-In case `name` would be freed on another context, freeing up the memory is not done until the last reference is dropped.
+A few things happen:
+The first one is reference counting.
+If `name` were freed in another context, the memory would not be freed until the last reference is dropped.
 It's safe to pass references around, since they can never point to freed memory.
 Reference to NULL is not allowed.
 This means that one can't call `free` on a reference.
 Dereferencing is not allowed. Thus references are **always** scoped.
 
-Note that on previous example the reference itself is mutable, but the value it's referring to is not.
-It would be totally fine to do even one step closed to "normal C":
+Note that in the previous example the reference itself is mutable, but the value it refers to is not.
+It would be totally fine to go even one step closer to "normal C":
 
     int calculate_length(@char* s) {
         mut int i = 0;
@@ -861,7 +846,7 @@ It would be totally fine to do even one step closed to "normal C":
 This is still memory safe. All access to the reference causes boundary checks.
 In case the boundaries are violated an exception is raised.
 
-In order to pass reference to mutable variable one needs to explicitly state that:
+To pass a reference to a mutable variable, one needs to state that explicitly:
 
     int calculate_length(@mut char* s) {
         int v = *(++s);
@@ -871,18 +856,18 @@ In order to pass reference to mutable variable one needs to explicitly state tha
         return v;
     }
 
-On that example both the reference itself and the value it's referring to are both mutable.
-One should rarely pass reference to a mutable variable.
-First of all, passing `@mut` makes the function to receive exclusive reference to the variable.
-Referenced variables may have either multiple readers, or only one writer.
-When a write reference is taken, other reads (or write) is not possible.
-Taking another reference to a variable with a mutable reference is not allowed by compiler.
+In that example both the reference itself and the value it refers to are mutable.
+One should rarely pass a reference to a mutable variable.
+First of all, passing `@mut` gives the function an exclusive reference to the variable.
+A referenced variable may have either multiple readers or only one writer.
+While a write reference exists, no other reads (or writes) are possible:
+the compiler does not allow taking another reference to a variable that has a mutable reference.
 
-Second, if you end up using this kind of construction, it's highly recommended to reconsider if you really need it.
-There is still legit use cases for this, thus it's not restricted by the language.
+Second, if you end up using this kind of construction, it's highly recommended to reconsider whether you really need it.
+There are still legitimate use cases for it, so the language does not restrict it.
 
-Returning a reference to local variable is not allowed. However if one wants to keep the reference alive
-it can be returned back to the caller:
+Returning a reference to a local variable is not allowed. However, to keep a reference alive,
+a function can return a reference it was given back to the caller:
 
     @char *tst(@char *s) {
         printf("Ref: %s\n", s);
@@ -893,8 +878,8 @@ it can be returned back to the caller:
     @char *ret = tst(@name);
     printf("Still: %s\n", ret);
 
-After the return reference is kept alive, it's scope just changes.
-This would cause compile error:
+After the return the reference is kept alive; only its scope changes.
+This would cause a compile error:
 
     @int tst() {
         int x = 42;
@@ -903,7 +888,7 @@ This would cause compile error:
 
     @int ret = tst();
 
-Variable `x` is local, and it's lifetime is bounded on the function scope.
+Variable `x` is local, and its lifetime is bound to the function scope.
 Referencing to it is allowed, but returning the reference is not.
 
 Passing reference to another function is valid:
@@ -927,15 +912,19 @@ Passing reference to another function is valid:
         return res;
     }
 
-When passing a reference as a parameter a new reference is formed, and the reference count of original variable is increased.
+When a reference is passed as a parameter, a new reference is formed, and the reference count of the original variable is increased.
 
 ## Strict mode
 
-As another addition we add more rusty like features, which are optional by default.
-In order to enable those a new strict mode is introduced.
-This can be applied per function, or per compilation unit.
+> Planned: strict mode — `using strict;`, `strict` functions, move semantics and
+> `clone` — is not implemented yet. `mut` is accepted, and has no effect outside
+> strict mode.
 
-To enable it for whole compilation unit do:
+As another addition we add more Rust-like features, which are off by default.
+To enable them, a new strict mode is introduced.
+It can be applied per function, or per compilation unit.
+
+To enable it for a whole compilation unit:
 
     using strict;
 
@@ -945,42 +934,42 @@ To use it for a single function:
         return 42;
     }
 
-It changes few things:
+It changes a few things:
 
-All variables are by default immutable after initial assign.
-Thus introduce new `mut` keyword to change this:
+All variables are immutable after their initial assignment by default.
+The new `mut` keyword changes this:
 
     int meaning = 42;
     mut int life = 123;
 
-On that example variable `meaning` can't be changed, but `life` can.
+In that example the variable `meaning` can't be changed, but `life` can.
 This is the opposite of the default in C.
-Mutable variable can be automatically promoted to immutable,
+A mutable variable can be automatically promoted to immutable,
 but not the other way around.
 
 Another change is passing pointers.
-We are adding borrowing, reference counting and ownership to all pointer by default.
+We add borrowing, reference counting and ownership to all pointers by default.
 
 ### Ownership, and moving it
 
 One big thing is ownership. Variables are always owned by someone.
-Let's see example in strict mode:
+Let's see an example in strict mode:
 
     const char *text = "Hello";
     char *another = text;
 
-First we have `text` which refers to const string `Hello`.
+First we have `text`, which refers to the const string `Hello`.
 In strict mode one can omit `const` since all variables are by default immutable,
 that's why variable `another` doesn't need `const`.
 
 This flow is different from C.
-In strict mode instead of doing assign, the value is moved.
-This means that `text` is not valid any more after assignment `another = text`.
+In strict mode, instead of being assigned, the value is moved.
+This means that `text` is not valid any more after the assignment `another = text`.
 Thus only variable `another` is usable after the assignment.
 In C and non-strict mode both `text` and `another` would be valid and referring
 to same data.
 
-If one needs to copy the value in two different variables, there's clone keyword:
+To copy the value into two different variables, there is the `clone` keyword:
 
     char *text = "Hello";
     char *another = clone text;
@@ -988,7 +977,7 @@ If one needs to copy the value in two different variables, there's clone keyword
 This makes a clone of the value of `text` and assigns it to `another`.
 After this both variables are valid and can be used.
 
-Cloning might me expensive operation, and is done recursively if needed.
+Cloning might be an expensive operation, and is done recursively if needed.
 For example:
 
     struct test1 {
@@ -1017,21 +1006,21 @@ For example:
     val1->c = @val1->b;
     struct test4 *val2 = clone val1;
 
-At this example `clone` needs to check all the other structs inside of it,
+In this example `clone` needs to check all the other structs inside it,
 and call clone on them. This is done recursively until done.
 References can't be cloned as is, but a new similar reference is formed.
 In this example `val2->c` would still refer to `val1->b`,
 but `val2->b` would be different from `val1->b`.
 
-Remark that cloning and moving is meant for only non-primitive types.
+Note that cloning and moving apply only to non-primitive types.
 All primitive types (int, float, etc.) can be simply assigned:
 
     int a = 4;
     int b = a;
 
-On that example both `a` and `b` are still valid and usable.
+In that example both `a` and `b` are still valid and usable.
 
-Ownership is moved similar way when passing as parameter:
+Ownership is moved the same way when a value is passed as a parameter:
 
     void tst1(char *s) {
         // Ownership of "s" is moved here
@@ -1039,18 +1028,18 @@ Ownership is moved similar way when passing as parameter:
     }
 
     void tst2(int v) {
-        printf("Passed: %v\n", v);
+        printf("Passed: %d\n", v);
     }
 
     char *text = "Hello";
     int val = 42;
 
-    tst1(name);
-    // "name" is not usable here any more
+    tst1(text);
+    // "text" is not usable here any more
     tst2(val);
 
 This example follows the rules defined earlier.
-After calls to function `name` is not usable on the caller, but value of `val` would be usable since it's primitive.
+After the calls, `text` is not usable in the caller, but `val` is, since it is primitive.
 Ownership of a variable can be passed back by returning the passed variable:
 
     char *print_and_return(char *s) {
@@ -1064,12 +1053,12 @@ Ownership of a variable can be passed back by returning the passed variable:
 
     printf("Returned: %s\n", @text2);
 
-This is perfectly valid, since ownership is first taken, and then returned.
-Since `text` is not mutable, one can't assign the return value back to it,
-but need to reserve new variable for it.
-Rules state also that `text` is moved and not useable after the call.
+This is perfectly valid, since ownership is first taken and then returned.
+Since `text` is not mutable, the return value can't be assigned back to it;
+a new variable is needed.
+By the rules, `text` is moved and not usable after the call.
 
-Instead of moving ownership, reference can be passed:
+Instead of moving ownership, a reference can be passed:
 
     void print_ref(@char *s) {
         printf("Passed: %s\n", s);
@@ -1097,7 +1086,7 @@ This is actually:
     while (c = (getc(in) != EOF))
         putc(c, out);
 
-Which is wrong on that case, and code should have been written as:
+Which is wrong in that case; the code should have been written as:
 
     while ((c = getc(in)) != EOF)
         putc(c, out);
@@ -1108,7 +1097,7 @@ Same problem applies to:
     if (x = y)
         foo();
 
-Which is just typo, and should be:
+Which is just a typo, and should be:
 
     if (x == y)
         foo();
@@ -1126,38 +1115,35 @@ First case would then be:
 
 This solution would cause compiler error on assignment inside conditionals.
 
-Third option is to keep with what we have, for example `for` statement would be:
+A third option is to keep what we have; for example, with a `for` statement:
 
-    for (char *c = getc(int); c != EOF; c = getc(int))
+    for (int c = getc(in); c != EOF; c = getc(in))
         putc(c, out);
 
 But we still have our repeated calls to `getc`.
 
-This leads to conclusion, that our solutions so far might not be the best ones.
-Better is to mandate usage of braces with assignment operators when using
-in evaluation expression. Mandate to write the assignment as this:
+This leads to the conclusion that our solutions so far might not be the best ones.
+Better is to require parentheses around an assignment used in a condition.
+The assignment must be written like this:
 
     while ((c = getc(in)) != EOF)
         putc(c, out);
 
-This would be valid with braces, if that's what you want:
+And this, if that is really what you want:
 
-    while (c = (getc(in) != EOF))
+    while ((c = (getc(in) != EOF)))
         putc(c, out);
 
-The another case looks bit more stupid with double braces, but tells compiler you really mean it:
+The other case looks a bit odd with double parentheses, but tells the compiler you really mean it:
 
     if ((x = y))
         foo();
 
-On that case compiler is allowed to optimize this to:
-
-    x = y;
-    foo();
+An unparenthesized assignment in a condition is a compile error.
 
 ## Dangling else
 
-Force curly braces for non-trivial if-statement.
+Curly braces are required for a non-trivial if statement.
 
 This is valid:
 
@@ -1182,14 +1168,14 @@ Proper way would be:
     } else
         do_other();
 
-Now it's clear to which `if` the `else` branch belongs to.
+Now it's clear which `if` the `else` branch belongs to.
 
 ## Imports
 
-Current C-preprocessor mechanism of include, headers and main units works
-but has it's drawbacks.
+The current C preprocessor mechanism of includes, headers and main units works,
+but has its drawbacks.
 
-Add support for real modules, which can be imported.
+SIC adds real modules, which can be imported.
 
 Example of module:
 
@@ -1208,11 +1194,11 @@ Example of module:
     }
 
 
-Everything is by default exported, unless defined as `static`. There's new
-special keyword called `private` to mark certain structs as module
-private and not exported. For functions `static` should be used.
-Difference from C headers is, that implementation is not exported,
-but only definitions of non-static symbols from the module.
+Everything is exported by default, unless defined as `static`. A new keyword,
+`private`, marks a struct as private to the module, so it is not exported.
+For functions `static` should be used.
+The difference from C headers is that the implementation is not exported,
+only the definitions of the module's non-static symbols.
 
 To use the module:
 
@@ -1225,8 +1211,8 @@ To use the module:
         printf("%d\n", test::meaning);
     }
 
-Note that exported symbols are accessible only from module's namespace.
-We can import specific symbols from module, or assign a new local identifier to them:
+Note that exported symbols are accessible only through the module's namespace.
+We can import specific symbols from a module, or give them a new local name:
 
     // Imports only "double_int" from test and specifies it as "double_int" here
     import test::double_int;
@@ -1240,11 +1226,11 @@ We can import specific symbols from module, or assign a new local identifier to 
         printf("%d\n", my_power(5));
     }
 
-If really needed there's special syntax to import all symbols to global namespace:
+If really needed, there is a special syntax to import all symbols into the global namespace:
 
-    import test::*
+    import test::*;
 
-This is same as importing all symbols from `test` separately.
+This is the same as importing all symbols from `test` separately.
 
 A module may itself import other modules:
 
@@ -1262,10 +1248,10 @@ module defines (plus a `dep` on each module it imports) — it does not re-expor
 dependencies' symbols. Symbols are module-qualified internally, so two modules that
 export a struct or function of the same name never collide.
 
-Idea of modules is to be separate compilation units, which can be tested and exported separately.
+The idea of modules is to be separate compilation units, which can be tested and exported separately.
 Modules could be described as libraries.
-For C compatibility normal header files can be generated from the module.
-On that case, module usage would be (in C):
+For C compatibility, normal header files are generated from the module.
+In that case, module usage would be (in C):
 
     #include "module_test.h"
 
@@ -1275,13 +1261,13 @@ On that case, module usage would be (in C):
         printf("%d\n", test_power(5));
     }
 
-Module can spread into multiple compilation units.
-Files of the module must be located under one folder (subfolders not allowed),
-and it's considered to be different module if files located in different folder.
-Headers and other files can be included still with preprocessor `#include`
+A module can span multiple compilation units.
+The files of a module must be located in one folder (subfolders are not allowed);
+files in a different folder form a different module.
+Headers and other files can still be included with the preprocessor's `#include`
 from outside the module folder.
 
-Example of multi file module. First `test.sic`:
+Example of a multi-file module. First `test.sic`:
 
     module test;
 
@@ -1306,18 +1292,17 @@ And `power.sic`
         return x * x;
     }
 
-While these all are under same folder they can form a module. The folder may
-contain other files, but in case they're not marked with same `module` tag
-they're not counted in.
+Since these are all in the same folder, they form a module. The folder may
+contain other files, but files not marked with the same `module` tag are not
+counted in.
 
-When compiling a module in C compatiblae mode, it produces these outputs
-(in Linux system):
+Compiling a module (`sic --emit-module <folder>`) produces these outputs in the
+module folder (on a Linux system):
 
-- [module\_name]\_[file\_name].o
-- [module\_name].a
+- lib[module\_name].a and lib[module\_name].so
 - module\_[module\_name].h
 - module\_[module\_name].def
-- module\_[module\_name].sicmod
+- module\_[module\_name].smod (the manifest `import` reads)
 
 ### Rust crates as modules
 
@@ -1352,8 +1337,8 @@ no declaration and no `import`. A module may return them and its consumers can
 `match` or guard-unwrap the values.
 
 New alternative to traditional `switch` and `case`.
-Match takes an instance of `enum`. It follows largely Rust syntax.
-Old C style enums are imporoved a bit:
+Match takes an instance of an `enum`. It largely follows Rust syntax.
+Old C-style enums are improved a bit:
 
     enum Option {
         Some<int>,
@@ -1365,15 +1350,15 @@ Old C style enums are imporoved a bit:
         Err<string>
     };
 
-Every value in enum may have values and the values may have different types.
-Type is defined after the name inside < and >.
+Every entry of an enum may carry a value, and the values may have different types.
+The type is given after the name, inside < and >.
 
 With these two we can make something like:
 
     Option a = Option::Some(5);
     Option b = Option::None;
 
-    function check_option(Option opt) {
+    void check_option(Option opt) {
         match (opt) {
             // We can use Option::None here, but not needed since type
             // can be resolved from `opt`
@@ -1384,13 +1369,13 @@ With these two we can make something like:
     check_option(a);
     check_option(b);
 
-    // Same here, type is Result, and even Ok would be defined on another
-    // enum, Result::Ok is used.
+    // Same here: the type is Result, so even if another enum also had
+    // an Ok, Result::Ok is used.
     Result r = Ok(5);
     Result e = Err("Some error");
 
     void check_result(Result res) {
-        match (r) {
+        match (res) {
             Ok(val): printf("Result: %d\n", val);
             Err(msg): {
                 printf("Error: %s\n", msg);
@@ -1402,13 +1387,13 @@ With these two we can make something like:
     check_result(r);
     check_result(e);
 
-Thus enum itself may contain type of the value.
-All entries in the enum contains name, and optionally a type.
-Instances of enums can contain value value of the defined type.
-All entries may have different type.
+Thus the enum itself may give the type of the value.
+Every entry in the enum has a name, and optionally a type.
+An instance of the enum can hold a value of the entry's type.
+Each entry may have a different type.
 
-Old C enums works as it. And the new format follows it still. Every item has
-it's integer value like enums in C. For example:
+Old C enums work as before, and the new format still follows them: every item has
+its integer value, like enums in C. For example:
 
     enum Test {
         NONE,
@@ -1431,13 +1416,13 @@ This prints out:
     Val b: 1
     Val c: 4
 
-This is because enumeration value of c is 4 (after GREEN = 3). In order to get
-get value inside of `c` one must use the wrapper:
+This is because the enumeration value of c is 4 (after GREEN = 3). To get the
+value inside `c`, one must use the wrapper:
 
     printf("Val of c: %d\n", Test::CUSTOM(c));
 
-The Test::CUSTOM will unwrap the value from c. It will cause exception if value
-of c in not CUSTOM. Better is to use:
+`Test::CUSTOM` unwraps the value from c. It causes an exception if c is not a
+CUSTOM. Better is to use:
 
     if (int cv = Test::CUSTOM(c))
     {
@@ -1642,6 +1627,8 @@ limited to 128.
 
 Built-in: `assert(cond)` / `assert(cond, msg)` — always checked; prints the
 condition's text and location, then aborts. A user `assert` replaces it.
+`unreachable;` / `unreachable(msg);` marks a point control never reaches; reaching
+it reports the location and aborts (see doc/macros.md).
 
 
 ## Weak references
@@ -1694,11 +1681,11 @@ element/value.
 
 ## Switch - case
 
-One problematic construction is `switch` and it's `case`.
-Biggest problem is the fallthrough in case of missing break.
+One problematic construct is `switch` and its `case`.
+The biggest problem is the fallthrough when a `break` is missing.
 
-We're breaking `switch` and making case end mandatory.
-Thus `break` and `fallthrough` must be specifically stated:
+We are breaking `switch` and making the end of a case mandatory:
+`break` or `fallthrough` must be stated explicitly:
 
     int test(int x)
     {
@@ -1732,15 +1719,16 @@ Thus `break` and `fallthrough` must be specifically stated:
         return r + a;
     }
 
-It's compiler fault in case there's missing `break` or `fallthrough` statement after every `case`.
-It's not allowed to have any code between `break` or `fallthrough` and the next `case` statement.
-Multiple `break` or `fallthrough` or their combinations is compiler error.
-Compared to C this is a breaking change, however current C code can easily made compatible by adding missing `fallthrough` statements.
+It is a compile error if a `case` does not end with `break` or `fallthrough` (or
+another statement that leaves it, such as `return`).
+No code is allowed between a `break` or `fallthrough` and the next `case` statement.
+Multiple `break` or `fallthrough` statements, or a combination of them, are a compile error.
+Compared to C this is a breaking change, but existing C code can easily be made compatible by adding the missing `fallthrough` statements.
 
 ## Rotate and shift
 
-Original C has only shift left and shift right operators, but missing rotate,
-even thought there's instructions for it on some CPU's, and it's widely utilized on programs.
+Original C has only shift left and shift right operators, but no rotate,
+even though some CPUs have instructions for it, and it is widely used in programs.
 
 Introducing rotate left `<<<` and rotate right `>>>` operators.  Example:
 
@@ -1781,13 +1769,13 @@ Results would be: `0`, `0x12345678`, `0xfab3a9c8`, `0xfffffab3`, `0xffffffff`.
 
 ## Arrays and lists
 
-Extend arrays and list handling with helpful sugar. Let's take an example:
+Arrays and lists get some helpful sugar. Let's take an example:
 
     int main()
     {
         int values[5];
         int tail[5];
-        string test = "Hello world!"
+        string test = "Hello world!";
 
         for (int i = 0; i < values.length; i++) {
             values[i] = i;
@@ -1798,33 +1786,33 @@ Extend arrays and list handling with helpful sugar. Let's take an example:
 
         int combined[20] = values + tail;
         // Will print 20, and not 10
-        // Contents will be 1..10 and rest zeros
+        // Contents: values (0..4), then tail (20..24), then zeros
         printf("Combined length: %d\n", combined.length);
-        // int combined[7] = values + tail // Would be an compiler error
+        // int combined[7] = values + tail // Would be a compile error
 
         // Will print 10
         printf("Combined2 length: %d\n", (values + tail).length);
     }
 
-Thus arrays (and strings) has both `size` and `length` values, which are
-calculated usually at compile time, but might get updated at runtime.
-Recommendation is to use `length` to determine number of elements.
-Value of `size` depend on the element size.
+Thus arrays (and strings) have both `size` and `length` values, which are
+usually calculated at compile time, but might be updated at runtime.
+The recommendation is to use `length` for the number of elements.
+The value of `size` depends on the element size.
 For example int takes 4 bytes thus `values.size` is 5 * 4 = 20,
 while `values.length` is 5.
-In case of string `length` tells number of unicode characters (or code points)
-in the string, but string `size` is the size of all the characters in bytes.
+For a string, `length` is the number of Unicode characters (code points)
+in the string, and `size` is the size of all the characters in bytes.
 
 The values are also used to perform runtime bound checks for extra safety and
 to prevent out of bounds errors.
 
 ## Tuples
 
-Support for built-in tuple type. Eases for example returning multiple values from function:
+SIC has a built-in tuple type. It makes it easy, for example, to return multiple values from a function:
 
     tuple get_two(int x)
     {
-        return tuple(x * 2, x * 3)
+        return tuple(x * 2, x * 3);
     }
 
     int main()
@@ -1838,7 +1826,7 @@ Support for built-in tuple type. Eases for example returning multiple values fro
         return 0;
     }
 
-Thus keyword "tuple" works in three ways:
+Thus the keyword "tuple" works in three ways:
 
 - type: tuple tmp;
 - pack values as: tmp = tuple(pack1, pack2, ...);
@@ -1855,8 +1843,8 @@ One can also access tuples with indexes, like arrays:
     printf("Third : %d\n", tmp[2]);
 
 Values in tuples are strongly typed.
-Types are assigned when tuple is created.
-All elements in tuple may have different type.
+The types are assigned when the tuple is created.
+The elements of a tuple may each have a different type.
 Types are checked when unpacking.
 Tuples are always immutable after creation.
 
@@ -1910,8 +1898,8 @@ from the first insertion, so indexing, iteration and unpack are all typed:
 
 ## Swap
 
-Support built-in swap operation, which can be compiled to assembly instruction
-on target architectures supporting it.
+SIC has a built-in swap operation, which can be compiled to a single instruction
+on target architectures that support it.
 
     int a = 6;
     int b = 20;
@@ -1921,16 +1909,8 @@ on target architectures supporting it.
     printf("%d\n", a); // prints 20
     printf("%d\n", b); // prints 6
 
-Types of the values swapped should be the same or trivial conversion.
-Complex casting is not supported. However one can manually cast:
-
-    i64 a = 5;
-    i32 b = 1;
-
-    (i32)a <> b;
-
-    // a <> (i64)b; // This would cause error since 64-bit "a" can't fit into
-                      // 32-bit "b". This would be the default as well.
+Both values must have the same type, and both must be assignable: swapping an
+`i64` with an `i32`, or a cast such as `(i32)a <> b`, is a compile error.
 
 ## Memory barriers
 
@@ -1955,18 +1935,22 @@ Both are contextual keywords: they are recognised only as a whole statement, so
 
 ## Errors and exceptions
 
+> Planned: this section describes a design. Today `std::file` reports errors with
+> `file::Status` values (see doc/standard-library.md), and the `&mut` parameters
+> and the check that a result is handled are not implemented.
+
 We have been talking about errors and exceptions earlier in this document, but haven't yet specified how they work.
-In case of SIC most errors are actually just bit better error codes. Let's take an example:
+In SIC most errors are actually just slightly better error codes. Let's take an example:
 
     int readbyte(&mut std::file::File f) {
         return f.read(1);
     }
 
-This simple function tries to read one byte from a file. We get the file as reference, read one byte from there and return the value.
-Instead of C API we use SIC API and it's `std::file` interface which implements SIC style errors.
+This simple function tries to read one byte from a file. We get the file as a reference, read one byte from it and return the value.
+Instead of the C API we use the SIC API, its `std::file` interface, which implements SIC-style errors.
 
-When we try to compile that example it fails. Reason is that we didn't actually handle the possible exception.
-For that we have two options: handle it locally, or pass it forward. Here's an example to just handle it there:
+When we try to compile that example, it fails. The reason is that we didn't handle the possible error.
+For that we have two options: handle it locally, or pass it forward. Here's an example that handles it there:
 
     int readbyte(&mut std::file::File f) {
         Result<int, string> res = f.read(1);
@@ -1977,17 +1961,17 @@ For that we have two options: handle it locally, or pass it forward. Here's an e
         }
     }
 
-As you can see the error in this case is actually just wrapper around an enum
-(`Result` is built into the language, not part of `std`). In order to pass it forward one just:
+As you can see, the error in this case is just a wrapper around an enum
+(`Result` is built into the language, not part of `std`). To pass it forward, one just writes:
 
     Result<int, string> readbyte(&mut std::file::File f) {
         return f.read(1);
     }
 
-Which passes the result forward and it's caller's responsibility to handle it.
+This passes the result forward, and it is the caller's responsibility to handle it.
 
-There's exceptions that may be triggered by some operations. For example divide by zero in unsafe mode
-(Remark that in normal mode result would be `0` instead without any exceptions):
+Some operations may raise exceptions, for example division by zero in unsafe mode
+(note that in normal mode the result would be `0`, without any exception):
 
     int dodiv(int a, int b) {
         unsafe {
@@ -1997,13 +1981,13 @@ There's exceptions that may be triggered by some operations. For example divide 
 
     printf("Res: %d\n", dodiv(10, 0));
 
-On these primitive exceptions the program in question is terminated. Stack trace might be printed, or some other error message.
-In order to handle the exeption instead of crashing the program one can use specific exception keywords: `overflow`, `divide_by_zero` and `exception`:
+On these primitive exceptions the program is terminated. A stack trace or some other error message might be printed.
+To handle the exception instead of crashing the program, one can use the exception keywords `overflow`, `divide_by_zero` and `exception`:
 
     int dodiv(int a, int b) {
         unsafe {
-            int res:
-            if (divide_by_zero { res = a / b }) {
+            int res;
+            if (divide_by_zero { res = a / b; }) {
                 return 0;
             }
             return res;
@@ -2012,28 +1996,29 @@ In order to handle the exeption instead of crashing the program one can use spec
 
     printf("Res: %d\n", dodiv(10, 0));
 
-On this case the example works exacly as it would in normal mode without the manual handling.
+In this case the example works exactly as it would in normal mode, without the manual handling.
 
-## Multine strings
+## Multiline strings
 
-We're borrowing multiline string syntax from Python:
+We're borrowing the multiline string syntax from Python:
 
-    string multistring = """This is multine string.
+    string multistring = """This is a multiline string.
         It starts with three quotation marks, and ends
-        until three quotations marks are found.
+        at the next three quotation marks.
         Thus it's valid to insert " or ' inside here.
-        In case one would like to have three quotation marks,
-        one can always escape it like \"\"\" this.
-        One escape would also work: \""""
+        To have three quotation marks in the text,
+        one can always escape them like \"\"\" this.
+        One escape works too: \""".
 
-        Inside this quotation newlines and indent is NOT saved unless
-        the string is marked as raw string.
-        That happens by giving identifier r before fist quotation mark.
+        In this kind of string, newlines and indentation are NOT kept
+        (a line break and the indentation after it become one space),
+        unless the string is marked as a raw string.
+        That happens by putting r before the first quotation mark.
         """;
 
     string raw_multistring = r"""This is raw multiline string.
 
-        All formatting, newlines, etc. is preserved.
+        All formatting, newlines, etc. are preserved.
         Suitable for making templates that should be printed or written as-is.
         """;
 
@@ -2041,7 +2026,7 @@ Those strings can be used like any strings.
 
 ## Namespace
 
-Support for namespaces like in C++
+SIC supports namespaces, as in C++:
 
     namespace test {
         int a = 4;
