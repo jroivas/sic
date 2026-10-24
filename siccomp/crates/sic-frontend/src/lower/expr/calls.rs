@@ -1696,7 +1696,7 @@ impl<'m> FuncCtx<'m> {
             if let Some(arg) = args.get(i) {
                 let at = self.infer_expr_type(arg)?;
                 super::super::unify_type(pat, &at, &params_set, &mut subst, self.ptr_size())
-                    .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
+                    .map_err(|e| if e.file.is_some() { e } else { CompileError::at(e.message, sp.file.clone(), sp.line, sp.col) })?;
             }
         }
 
@@ -1712,7 +1712,7 @@ impl<'m> FuncCtx<'m> {
         }
 
         let mangled = self.lowerer.instantiate_generic_fn(name, &ordered)
-            .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
+            .map_err(|e| if e.file.is_some() { e } else { CompileError::at(e.message, sp.file.clone(), sp.line, sp.col) })?;
 
         // Dispatch as an ordinary direct call to the concrete monomorph.
         let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
@@ -1741,7 +1741,7 @@ impl<'m> FuncCtx<'m> {
             ordered.push(super::super::lower_type(ta, &self.lowerer.struct_types, self.ptr_size())?);
         }
         let mangled = self.lowerer.instantiate_generic_fn(name, &ordered)
-            .map_err(|e| CompileError::at(e.to_string(), sp.file.clone(), sp.line, sp.col))?;
+            .map_err(|e| if e.file.is_some() { e } else { CompileError::at(e.message, sp.file.clone(), sp.line, sp.col) })?;
         let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
         self.lower_call(&callee, args, sp)
     }

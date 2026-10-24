@@ -1,0 +1,4 @@
+// A generic type-argument conflict is reported once, at the call (it read
+// "error: error: conflicting types ...").
+T add<T>(T a, T b) { return a + b; }
+int main() { return add(1, 2.0); }
