@@ -6,7 +6,8 @@ extern int memcmp(const void *, const void *, unsigned long);
 /* Reclaim an owned value box by its `vowned` kind (1 = plain block, 2 = refcounted
    string). Defined in the list runtime, which is prepended whenever dict is used. */
 extern void __sic_box_free(unsigned long vslot, int vowned);
-extern unsigned long __sic_box_clone(unsigned long vslot, int vowned);
+struct __sic_elem_tinfo;
+extern unsigned long __sic_box_clone(unsigned long vslot, int vowned, const struct __sic_elem_tinfo *ti);
 
 typedef struct __sic_dent {
     unsigned long hash;
@@ -253,8 +254,9 @@ __attribute__((weak)) void *__sic_dict_keys_string(__sic_dict *d) {
 }
 
 /* `clone()` (sic.md §"Copying: clone"): an independent copy — the same index
-   and entry order, string keys and every value box copied. */
-__attribute__((weak)) __sic_dict *__sic_dict_clone(__sic_dict *d) {
+   and entry order, string keys and every value copied by its type (its own
+   type-info, or the value type `ti`). */
+__attribute__((weak)) __sic_dict *__sic_dict_clone(__sic_dict *d, const struct __sic_elem_tinfo *ti) {
     if (!d) return __sic_dict_new();
     __sic_dict *r = (__sic_dict *)malloc(sizeof(__sic_dict));
     *r = *d;
@@ -272,7 +274,8 @@ __attribute__((weak)) __sic_dict *__sic_dict_clone(__sic_dict *d) {
             if (x->b) memcpy(k, (const void *)x->a, x->b);
             x->a = (unsigned long)k;
         }
-        x->vslot = __sic_box_clone(x->vslot, x->vowned);
+        x->vslot = __sic_box_clone(x->vslot, x->vowned,
+            x->vty ? (const struct __sic_elem_tinfo *)x->vty : ti);
     }
     return r;
 }

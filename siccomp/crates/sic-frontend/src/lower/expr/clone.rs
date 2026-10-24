@@ -143,22 +143,29 @@ impl<'m> FuncCtx<'m> {
         if ty_::is_closure(&rt) || ty_::is_fixed(&rt) || ty_::is_bigint(&rt) {
             return self.retain_managed_at(ptr, &rt);
         }
-        if ty_::is_list(&rt) {
-            let f = self.clone_extern("__sic_list_clone", vec![voidp.clone()], voidp);
-            self.clone_handle_at(ptr, &rt, f);
+        // A container copies each element by the element type (its type-info,
+        // which an `any` element carries itself); a tuple by its shape.
+        let elem = if ty_::is_list(&rt) { Some(("__sic_list_clone", ty_::list_elem(&rt, ps))) }
+            else if ty_::is_dict(&rt) || ty_::is_set(&rt) {
+                Some(("__sic_dict_clone", ty_::dict_kv(&rt, ps).map(|(_, v)| v).unwrap_or_else(ty_::any_type)))
+            } else { None };
+        if let Some((fname, et)) = elem {
+            let et = ty_::resolve_aggregate(&et, &self.lowerer.struct_types);
+            let ti = self.lower_type_value(&et);
+            let ti = self.coerce(ti, &voidp)?;
+            let f = self.clone_extern(fname, vec![voidp.clone(), voidp.clone()], voidp.clone());
+            let h = self.alloc_val();
+            self.push_instr(Instr::Load { dest: h, ptr: ptr.clone(), ty: voidp.clone() });
+            let n = self.alloc_val();
+            self.push_instr(Instr::Call { dest: Some(n), func: f, args: vec![Val::Local(h), ti], ret_ty: voidp.clone() });
+            let c = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: c, op: CastOp::BitCast, val: Val::Local(n), to_ty: rt.clone() });
+            self.val_types.insert(c.0, rt.clone());
+            self.push_instr(Instr::Store { val: Val::Local(c), ptr });
             return Ok(());
         }
-        if ty_::is_dict(&rt) || ty_::is_set(&rt) {
-            let f = self.clone_extern("__sic_dict_clone", vec![voidp.clone()], voidp);
-            self.clone_handle_at(ptr, &rt, f);
-            return Ok(());
-        }
-        if let Some(layout) = ty_::tuple_layout_of(&rt) {
-            let f = match self.lowerer.ensure_tuple_clone(&layout)? {
-                Some(f) => f,
-                // A tuple whose shape is known only at run time.
-                None => self.lowerer.ensure_tuple_clone_dyn()?,
-            };
+        if ty_::is_tuple(&rt) {
+            let f = self.lowerer.ensure_tuple_clone()?;
             self.clone_handle_at(ptr, &rt, f);
             return Ok(());
         }
@@ -278,52 +285,6 @@ impl<'m> FuncCtx<'m> {
             self.clone_at(flv.ptr, &fty)?;
         }
         Ok(())
-    }
-
-    /// The tuple clone body: a new block with the header and bytes copied, its
-    /// refcount 1, each element cloned.
-    fn tuple_clone_body(&mut self, layout: &Type) -> Result<Val> {
-        let ps = self.ptr_size() as i64;
-        let header = 4 * ps;
-        let total = layout.size_of(self.ptr_size()) as i64 + header;
-        let data = Val::Local(ValId(0x10000));
-        let block = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: block, base: data, index: Constant::int(-header), elem_size: 1,
-            result_ty: Type::char_ptr() });
-        let n = self.coerce(Constant::int(total), &Type::i64())?;
-        let nb = self.emit_malloc(n.clone())?;
-        self.emit_memcpy(nb.clone(), Val::Local(block), n)?;
-        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
-        let rcp = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: rcp, base: nb.clone(), index: Constant::int(3 * ps), elem_size: 1,
-            result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
-        let one = self.coerce(Constant::int(1), &usize_ty)?;
-        self.push_instr(Instr::Store { val: one, ptr: Val::Local(rcp) });
-        let nd = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: nd, base: nb, index: Constant::int(header), elem_size: 1,
-            result_ty: Type::Pointer(Box::new(layout.clone())) });
-        self.struct_fields_clone_at(Val::Local(nd), layout)?;
-        Ok(Val::Local(nd))
-    }
-
-    /// The container box clone of a managed struct `[dtor | clone | data]`
-    /// (`vowned` 8): a new box, the struct in it cloned.
-    fn box_clone_body(&mut self, sty: &Type) -> Result<Val> {
-        let ps = self.ptr_size() as i64;
-        let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
-        let total = sty.size_of(self.ptr_size()).max(1) as i64 + 2 * ps;
-        let data = self.coerce(Val::Local(ValId(0x10000)), &Type::char_ptr())?;
-        let block = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: block, base: data, index: Constant::int(-2 * ps), elem_size: 1,
-            result_ty: Type::char_ptr() });
-        let n = self.coerce(Constant::int(total), &Type::i64())?;
-        let nb = self.emit_malloc(n.clone())?;
-        self.emit_memcpy(nb.clone(), Val::Local(block), n)?;
-        let nd = self.alloc_val();
-        self.push_instr(Instr::GetElemPtr { dest: nd, base: nb, index: Constant::int(2 * ps), elem_size: 1,
-            result_ty: Type::Pointer(Box::new(sty.clone())) });
-        self.clone_at(Val::Local(nd), sty)?;
-        self.coerce(Val::Local(nd), &usize_ty)
     }
 
     /// `p.clone()` of a pointer from `new`: a new block of the same size (from
@@ -589,43 +550,83 @@ impl Lowerer {
         })
     }
 
-    /// `void *__sic_tuple_clone_<layout>(void *data)` for a tuple layout with an
-    /// element to clone; `None` for one without (shared: it is immutable), or
-    /// whose element types are known only at run time.
-    pub(crate) fn ensure_tuple_clone(&mut self, layout: &Type) -> Result<Option<FuncRef>> {
-        let Type::Struct(st) = layout else { return Ok(None) };
-        if st.fields.is_empty() { return Ok(None); }
-        if !st.fields.iter().any(|(_, t)| self.needs_clone(t)) { return Ok(None); }
-        let name = format!("__sic_tuple_clone_{:016x}", Self::clone_key(layout));
-        let layout = layout.clone();
-        self.synth_fn(&name, Type::void_ptr(), vec![Type::void_ptr()], move |fc| {
-            Ok(Some(fc.tuple_clone_body(&layout)?))
+    /// The type-info clone of `t` (sic.md §"Copying: clone"): `void f(void *p)`
+    /// making a byte copy of a `t` at `p` independent, or `None` when the bytes
+    /// are the whole value. Every tuple shares the shape-driven one.
+    pub(crate) fn ensure_clone_fn(&mut self, t: &Type) -> Result<Option<FuncRef>> {
+        let rt = ty_::resolve_aggregate(t, &self.struct_types);
+        if !self.needs_clone(&rt) { return Ok(None); }
+        if ty_::is_tuple(&rt) { return self.ensure_tuple_clone_at().map(Some); }
+        let name = format!("__sic_cloneat_{:016x}", Self::clone_key(&rt));
+        self.synth_fn(&name, Type::Void, vec![Type::void_ptr()], move |fc| {
+            let p = fc.coerce(Val::Local(ValId(0x10000)), &Type::Pointer(Box::new(rt.clone())))?;
+            fc.clone_at(p, &rt)?;
+            Ok(None)
         }).map(Some)
     }
 
-    /// `void *__sic_tuple_clone_dyn(void *data)`: clone a tuple by its shape —
-    /// the shape's clone function, or (no element to copy) share it. The list
-    /// runtime's `__sic_tuple_box_clone` is the same.
-    pub(crate) fn ensure_tuple_clone_dyn(&mut self) -> Result<FuncRef> {
+    /// `void __sic_tuple_clone_at(void **p)`: the tuple type-info clone.
+    fn ensure_tuple_clone_at(&mut self) -> Result<FuncRef> {
         let voidp = Type::void_ptr();
-        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        let f = self.ensure_tuple_clone()?;
+        self.synth_fn("__sic_tuple_clone_at", Type::Void, vec![voidp.clone()], move |fc| {
+            let p = fc.coerce(Val::Local(ValId(0x10000)), &Type::Pointer(Box::new(voidp.clone())))?;
+            let h = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: h, ptr: p.clone(), ty: voidp.clone() });
+            let n = fc.alloc_val();
+            fc.push_instr(Instr::Call { dest: Some(n), func: f, args: vec![Val::Local(h)], ret_ty: voidp.clone() });
+            fc.push_instr(Instr::Store { val: Val::Local(n), ptr: p });
+            Ok(None)
+        })
+    }
+
+    /// `void *__sic_tuple_clone(void *data)`: clone any tuple by its shape
+    /// `{ count; { typeinfo *ti; offset }[count] }`. A tuple holding only plain
+    /// values is shared (it is immutable); otherwise a new block gets the header
+    /// and bytes, refcount 1, and each element is cloned by its type-info.
+    pub(crate) fn ensure_tuple_clone(&mut self) -> Result<FuncRef> {
+        let voidp = Type::void_ptr();
         let ps = self.ptr_size as i64;
-        self.synth_fn("__sic_tuple_clone_dyn", voidp.clone(), vec![voidp.clone()], move |fc| {
+        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
+        self.synth_fn("__sic_tuple_clone", voidp.clone(), vec![voidp.clone()], move |fc| {
             let data = fc.coerce(Val::Local(ValId(0x10000)), &Type::char_ptr())?;
-            let out = fc.alloc_val();
-            fc.push_instr(Instr::Alloca { dest: out, ty: Type::char_ptr(), align: None });
-            fc.push_instr(Instr::Store { val: data.clone(), ptr: Val::Local(out) });
             let word = |fc: &mut FuncCtx, base: Val, off: Val| -> Val {
                 let p = fc.alloc_val();
                 fc.push_instr(Instr::GetElemPtr { dest: p, base, index: off, elem_size: 1,
-                    result_ty: Type::Pointer(Box::new(Type::Int { bits: ps as u32 * 8, signed: false })) });
+                    result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
                 let v = fc.alloc_val();
-                fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(p), ty: Type::Int { bits: ps as u32 * 8, signed: false } });
+                fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(p), ty: usize_ty.clone() });
                 Val::Local(v)
             };
+            let to_ptr = |fc: &mut FuncCtx, w: Val| -> Val {
+                let p = fc.alloc_val();
+                fc.push_instr(Instr::Cast { dest: p, op: CastOp::IntToPtr, val: w, to_ty: Type::char_ptr() });
+                Val::Local(p)
+            };
+            let var = |fc: &mut FuncCtx, ty: &Type, init: Val| -> Val {
+                let v = fc.alloc_val();
+                fc.push_instr(Instr::Alloca { dest: v, ty: ty.clone(), align: None });
+                fc.push_instr(Instr::Store { val: init, ptr: Val::Local(v) });
+                Val::Local(v)
+            };
+            let load = |fc: &mut FuncCtx, p: &Val, ty: &Type| -> Val {
+                let v = fc.alloc_val();
+                fc.push_instr(Instr::Load { dest: v, ptr: p.clone(), ty: ty.clone() });
+                Val::Local(v)
+            };
+            let bin = |fc: &mut FuncCtx, op: BinOp, a: Val, b: Val| -> Val {
+                let v = fc.alloc_val();
+                fc.push_instr(Instr::BinOp { dest: v, op, lhs: a, rhs: b, ty: usize_ty.clone() });
+                Val::Local(v)
+            };
+            let cmp = |fc: &mut FuncCtx, op: CmpOp, a: Val, b: Val| -> Val {
+                let v = fc.alloc_val();
+                fc.push_instr(Instr::Cmp { dest: v, op, lhs: a, rhs: b, ty: usize_ty.clone() });
+                Val::Local(v)
+            };
+            let zero = fc.coerce(Constant::int(0), &usize_ty)?;
+            let out = var(fc, &Type::char_ptr(), data.clone());
             let some = fc.new_block_after_current();
-            let has_shape = fc.new_block_after_current();
-            let call_bb = fc.new_block_after_current();
             let share = fc.new_block_after_current();
             let done = fc.new_block_after_current();
             let is_null = fc.alloc_val();
@@ -633,49 +634,113 @@ impl Lowerer {
             fc.set_terminator(Terminator::CondJump { cond: Val::Local(is_null), then_bb: done, else_bb: some });
             fc.switch_to_block(some);
             let shape = word(fc, data.clone(), Constant::int(-4 * ps));
-            let no_shape = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: no_shape, op: CmpOp::IEq, lhs: shape.clone(), rhs: Constant::uint(0), ty: usize_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(no_shape), then_bb: share, else_bb: has_shape });
+            let no_shape = cmp(fc, CmpOp::IEq, shape.clone(), zero.clone());
+            let has_shape = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: no_shape, then_bb: share, else_bb: has_shape });
             fc.switch_to_block(has_shape);
-            let sp = fc.alloc_val();
-            fc.push_instr(Instr::Cast { dest: sp, op: CastOp::IntToPtr, val: shape, to_ty: Type::char_ptr() });
-            let count = word(fc, Val::Local(sp), Constant::int(0));
-            let off = fc.alloc_val();
-            fc.push_instr(Instr::BinOp { dest: off, op: BinOp::Mul, lhs: count, rhs: Constant::uint(2 * ps as u64), ty: usize_ty.clone() });
-            let off2 = fc.alloc_val();
-            fc.push_instr(Instr::BinOp { dest: off2, op: BinOp::Add, lhs: Val::Local(off), rhs: Constant::uint(ps as u64), ty: usize_ty.clone() });
-            let fnw = word(fc, Val::Local(sp), Val::Local(off2));
-            let no_fn = fc.alloc_val();
-            fc.push_instr(Instr::Cmp { dest: no_fn, op: CmpOp::IEq, lhs: fnw.clone(), rhs: Constant::uint(0), ty: usize_ty.clone() });
-            fc.set_terminator(Terminator::CondJump { cond: Val::Local(no_fn), then_bb: share, else_bb: call_bb });
-            fc.switch_to_block(call_bb);
-            let fty = FunctionType { params: vec![voidp.clone()], ret: voidp.clone(), variadic: false };
-            let fp = fc.alloc_val();
-            fc.push_instr(Instr::Cast { dest: fp, op: CastOp::IntToPtr, val: fnw, to_ty: Type::Pointer(Box::new(Type::Function(Box::new(fty.clone())))) });
-            let dv = fc.coerce(data.clone(), &voidp)?;
-            let r = fc.alloc_val();
-            fc.push_instr(Instr::CallIndirect { dest: Some(r), fptr: Val::Local(fp), args: vec![dv], ret_ty: voidp.clone(), func_ty: Box::new(fty) });
-            let rc = fc.coerce(Val::Local(r), &Type::char_ptr())?;
-            fc.push_instr(Instr::Store { val: rc, ptr: Val::Local(out) });
+            let sp = to_ptr(fc, shape);
+            let count = word(fc, sp.clone(), Constant::int(0));
+            // Element `i`: its type-info's (clone, size) and its offset.
+            let elem = |fc: &mut FuncCtx, i: Val| -> (Val, Val, Val) {
+                let at = bin(fc, BinOp::Mul, i, Constant::uint(ps as u64 + 8));
+                let at = bin(fc, BinOp::Add, at, Constant::uint(8));
+                let ti = word(fc, sp.clone(), at.clone());
+                let off_at = bin(fc, BinOp::Add, at, Constant::uint(ps as u64));
+                let off = word(fc, sp.clone(), off_at);
+                let tp = to_ptr(fc, ti);
+                let cl = word(fc, tp.clone(), Constant::int(ty_::TYPEINFO_OFF_CLONE as i64));
+                let szp = fc.alloc_val();
+                fc.push_instr(Instr::GetElemPtr { dest: szp, base: tp, index: Constant::int(ty_::TYPEINFO_OFF_SIZE as i64),
+                    elem_size: 1, result_ty: Type::Pointer(Box::new(Type::u32())) });
+                let sz = load(fc, &Val::Local(szp), &Type::u32());
+                let sz = fc.coerce(sz, &usize_ty).unwrap();
+                (cl, sz, off)
+            };
+            // for (i = 0; i < count; i++) body(i), then continue at the exit block.
+            let each = |fc: &mut FuncCtx, body: &mut dyn FnMut(&mut FuncCtx, Val) -> Result<()>| -> Result<()> {
+                let iv = var(fc, &usize_ty, zero.clone());
+                let head = fc.new_block_after_current();
+                let lbody = fc.new_block_after_current();
+                let exit = fc.new_block_after_current();
+                fc.set_terminator(Terminator::Jump(head));
+                fc.switch_to_block(head);
+                let i = load(fc, &iv, &usize_ty);
+                let lt = cmp(fc, CmpOp::IULt, i.clone(), count.clone());
+                fc.set_terminator(Terminator::CondJump { cond: lt, then_bb: lbody, else_bb: exit });
+                fc.switch_to_block(lbody);
+                body(fc, i.clone())?;
+                let nx = bin(fc, BinOp::Add, i, Constant::uint(1));
+                fc.push_instr(Instr::Store { val: nx, ptr: iv.clone() });
+                fc.set_terminator(Terminator::Jump(head));
+                fc.switch_to_block(exit);
+                Ok(())
+            };
+            // Pass 1: the bytes the elements span, and whether any needs a clone.
+            let end = var(fc, &usize_ty, zero.clone());
+            let deep = var(fc, &usize_ty, zero.clone());
+            each(fc, &mut |fc, i| {
+                let (cl, sz, off) = elem(fc, i);
+                let e = bin(fc, BinOp::Add, off, sz);
+                let cur = load(fc, &end, &usize_ty);
+                let gt = cmp(fc, CmpOp::IUGt, e.clone(), cur.clone());
+                let m = fc.alloc_val();
+                fc.push_instr(Instr::Select { dest: m, cond: gt, on_true: e, on_false: cur, ty: usize_ty.clone() });
+                fc.push_instr(Instr::Store { val: Val::Local(m), ptr: end.clone() });
+                let d = load(fc, &deep, &usize_ty);
+                let d = bin(fc, BinOp::Or, d, cl);
+                fc.push_instr(Instr::Store { val: d, ptr: deep.clone() });
+                Ok(())
+            })?;
+            let d = load(fc, &deep, &usize_ty);
+            let plain = cmp(fc, CmpOp::IEq, d, zero.clone());
+            let copy = fc.new_block_after_current();
+            fc.set_terminator(Terminator::CondJump { cond: plain, then_bb: share, else_bb: copy });
+            fc.switch_to_block(copy);
+            let e = load(fc, &end, &usize_ty);
+            let total = bin(fc, BinOp::Add, e, Constant::uint(4 * ps as u64));
+            let total = fc.coerce(total, &Type::i64())?;
+            let block = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: block, base: data.clone(), index: Constant::int(-4 * ps), elem_size: 1,
+                result_ty: Type::char_ptr() });
+            let nb = fc.emit_malloc(total.clone())?;
+            fc.emit_memcpy(nb.clone(), Val::Local(block), total)?;
+            let rcp = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: rcp, base: nb.clone(), index: Constant::int(3 * ps), elem_size: 1,
+                result_ty: Type::Pointer(Box::new(usize_ty.clone())) });
+            let one = fc.coerce(Constant::int(1), &usize_ty)?;
+            fc.push_instr(Instr::Store { val: one, ptr: Val::Local(rcp) });
+            let nd = fc.alloc_val();
+            fc.push_instr(Instr::GetElemPtr { dest: nd, base: nb, index: Constant::int(4 * ps), elem_size: 1,
+                result_ty: Type::char_ptr() });
+            fc.push_instr(Instr::Store { val: Val::Local(nd), ptr: out.clone() });
+            // Pass 2: clone each element that has a clone, in the new block.
+            let fty = FunctionType { params: vec![voidp.clone()], ret: Type::Void, variadic: false };
+            each(fc, &mut |fc, i| {
+                let (cl, _, off) = elem(fc, i);
+                let has = cmp(fc, CmpOp::INe, cl.clone(), zero.clone());
+                let call_bb = fc.new_block_after_current();
+                let next = fc.new_block_after_current();
+                fc.set_terminator(Terminator::CondJump { cond: has, then_bb: call_bb, else_bb: next });
+                fc.switch_to_block(call_bb);
+                let ep = fc.alloc_val();
+                fc.push_instr(Instr::GetElemPtr { dest: ep, base: Val::Local(nd), index: off, elem_size: 1, result_ty: voidp.clone() });
+                let fp = fc.alloc_val();
+                fc.push_instr(Instr::Cast { dest: fp, op: CastOp::IntToPtr, val: cl,
+                    to_ty: Type::Pointer(Box::new(Type::Function(Box::new(fty.clone())))) });
+                fc.push_instr(Instr::CallIndirect { dest: None, fptr: Val::Local(fp), args: vec![Val::Local(ep)],
+                    ret_ty: Type::Void, func_ty: Box::new(fty.clone()) });
+                fc.set_terminator(Terminator::Jump(next));
+                fc.switch_to_block(next);
+                Ok(())
+            })?;
             fc.set_terminator(Terminator::Jump(done));
             fc.switch_to_block(share);
             fc.emit_rc_retain(data)?;
             fc.set_terminator(Terminator::Jump(done));
             fc.switch_to_block(done);
-            let r = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(out), ty: Type::char_ptr() });
-            Ok(Some(Val::Local(r)))
+            let r = load(fc, &out, &Type::char_ptr());
+            Ok(Some(r))
         })
-    }
-
-    /// `u64 __sic_boxclone_<S>(u64 data)`: a container element box of a
-    /// managed struct, cloned (stored in the box header for the runtime).
-    pub(crate) fn ensure_box_clone(&mut self, sty: &Type) -> Result<FuncRef> {
-        let n = match sty { Type::Struct(st) => st.name.clone().unwrap_or_default(), _ => String::new() };
-        let name = format!("__sic_boxclone_{}_{:016x}", n, Self::clone_key(sty));
-        let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
-        let sty = sty.clone();
-        self.synth_fn(&name, usize_ty.clone(), vec![usize_ty], move |fc| Ok(Some(fc.box_clone_body(&sty)?)))
     }
 
     /// `u64 __sic_any_clone(void *ty, u64 slot)`: an `any` owns only a wrapped

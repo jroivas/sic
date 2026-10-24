@@ -3,13 +3,13 @@
    element types are not known at compile time (a struct field, a parameter
    called with several shapes) is read through these checked accessors. A shape
    is `{ count; { typeinfo *ti; offset; } elem[count] }`; a typeinfo is
-   `{ name; id; size; kind }` and its `id` (a hash of the canonical type name)
-   identifies a type across modules. Prepended (post-preprocess) only when the
+   `{ name; id; size; kind; clone }` and its `id` (a hash of the canonical type
+   name) identifies a type across modules. Prepended (post-preprocess) only when the
    unit mentions `tuple`; weak-linked. */
 extern int dprintf(int fd, const char *fmt, ...);
 extern void abort(void);
 
-typedef struct __sic_tinfo { const char *name; unsigned long id; unsigned int size; unsigned int kind; } __sic_tinfo;
+typedef struct __sic_tinfo { const char *name; unsigned long id; unsigned int size; unsigned int kind; void (*clone)(void *); } __sic_tinfo;
 typedef struct __sic_tshape_elem { const __sic_tinfo *ti; unsigned long off; } __sic_tshape_elem;
 typedef struct __sic_tshape { unsigned long count; __sic_tshape_elem e[]; } __sic_tshape;
 

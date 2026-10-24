@@ -1,0 +1,69 @@
+// clone() copies a container element or a tuple element by its type (the
+// type-info's clone function): a plain struct element is a bare copy of its
+// bytes, a struct with a string field gets its own string, a nested list and a
+// tuple's string are copied too. The originals are freed first and the heap
+// reused, so a copy that still shared memory shows up. Returns 42.
+#include <string.h>
+
+struct Point { int x; int y; };
+struct Named { string name; int n; };
+
+list<Point> points()
+{
+    list<Point> l;
+    Point p = {1, 2};
+    l.push(p);
+    p.x = 3;
+    l.push(p);
+    return l;
+}
+
+int main()
+{
+    list<Point> pc;
+    list<list<Point>> nc;
+    dict<string, Point> dc;
+    list<Named> mc;
+    tuple tc;
+    tuple lc;
+    {
+        list<Point> pl = points();
+        pc = pl.clone();
+        pl[0].x = 100;
+
+        list<list<Point>> nl;
+        nl.push(points());
+        nc = nl.clone();
+
+        dict<string, Point> d;
+        Point q = {7, 8};
+        d["q"] = q;
+        dc = d.clone();
+
+        list<Named> ml;
+        Named a = {"al" + "pha", 1};
+        ml.push(a);
+        mc = ml.clone();
+
+        tuple t = tuple(5, "be" + "ta");
+        tc = t.clone();
+        tuple u = tuple(points(), 9);
+        lc = u.clone();
+    }
+    // The originals are gone; fill the heap with other data.
+    list<string> noise;
+    for (int i = 0; i < 64; i++) noise.push("xxxxxxxxxxxxxxxxxxxx" + "yyyy");
+
+    if (pc.length != 2 || pc[0].x != 1 || pc[1].x != 3 || pc[1].y != 2) return 1;
+    list<Point> in0 = nc[0];
+    if (in0.length != 2 || in0[1].x != 3) return 2;
+    Point dq = dc["q"];
+    if (dq.x != 7 || dq.y != 8) return 3;
+    if (mc[0].name != "alpha" || mc[0].n != 1) return 4;
+    int tn = tc[0];
+    string ts = tc[1];
+    if (tn != 5 || ts != "beta") return 5;
+    list<Point> tl = lc[0];
+    if (tl.length != 2 || tl[0].y != 2) return 6;
+    return 42;
+}

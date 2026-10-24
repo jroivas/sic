@@ -1884,9 +1884,10 @@ impl Lowerer {
 
     /// The RTTI record for a type (sic.md §"RTTI"), emitted once per name:
     /// `{ name*, id (hash of the name), size, kind }`.
-    pub(crate) fn type_info_global(&mut self, name: &str, kind: u32, size: u32) -> GlobalRef {
+    pub(crate) fn type_info_global(&mut self, name: &str, kind: u32, size: u32, clone: Option<FuncRef>) -> GlobalRef {
         use types as t;
-        if let Some(&g) = self.type_info_globals.get(name) { return g; }
+        let key = match clone { Some(f) => format!("{}#{}", name, f.index()), None => name.to_string() };
+        if let Some(&g) = self.type_info_globals.get(&key) { return g; }
         let mut nb = name.as_bytes().to_vec();
         nb.push(0);
         let name_g = {
@@ -1909,28 +1910,28 @@ impl Lowerer {
             ty: Type::Array { elem: Box::new(Type::i8()), len: t::TYPEINFO_REC_SIZE },
             init: Some(Constant::Aggregate {
                 bytes: b,
-                relocs: vec![(t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0))],
+                relocs: std::iter::once((t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0)))
+                    .chain(clone.map(|f| (t::TYPEINFO_OFF_CLONE, RelocTarget::Func(f)))).collect(),
             }),
             linkage: Linkage::Private, constant: true, thread_local: false,
         });
-        self.type_info_globals.insert(name.to_string(), g);
+        self.type_info_globals.insert(key, g);
         g
     }
 
     /// A tuple layout's shape descriptor (one per distinct shape):
-    /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count]; clone }`, read by
-    /// the tuple runtime to check a dynamically typed tuple's elements; `clone`
-    /// is the layout's clone function (`ensure_tuple_clone`), or null.
-    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64)], clone: Option<FuncRef>) -> GlobalRef {
-        let key = elems.iter().map(|(n, _, _, o)| format!("{}@{}", n, o)).collect::<Vec<_>>().join(",");
+    /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count] }`, read by the
+    /// tuple runtime to check a dynamically typed tuple's elements, and by
+    /// `__sic_tuple_clone` to copy each element by its type.
+    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64, Option<FuncRef>)]) -> GlobalRef {
+        let key = elems.iter().map(|(n, _, _, o, _)| format!("{}@{}", n, o)).collect::<Vec<_>>().join(",");
         if let Some(&g) = self.tuple_shape_globals.get(&key) { return g; }
         let ps = self.ptr_size as usize;
-        let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8) + ps];
+        let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8)];
         bytes[0..8].copy_from_slice(&(elems.len() as u64).to_le_bytes());
         let mut relocs = Vec::new();
-        if let Some(f) = clone { relocs.push((8 + elems.len() * (ps + 8), RelocTarget::Func(f))); }
-        for (i, (name, kind, size, off)) in elems.iter().enumerate() {
-            let ti = self.type_info_global(name, *kind, *size);
+        for (i, (name, kind, size, off, clone)) in elems.iter().enumerate() {
+            let ti = self.type_info_global(name, *kind, *size, *clone);
             let at = 8 + i * (ps + 8);
             relocs.push((at, RelocTarget::Global(ti, 0)));
             bytes[at + ps..at + ps + 8].copy_from_slice(&off.to_le_bytes());

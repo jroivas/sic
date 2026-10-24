@@ -588,16 +588,19 @@ pub fn fixed_full_dims(t: &Type) -> Option<FixedDims> {
 //
 // A `type` value is a pointer to a static `__sic_type_info` record, laid out (on
 // a 64-bit target) as opaque bytes: `[ char* name @0 | u64 id @8 | u32 size @16 |
-// u32 kind @20 ]` (24 bytes). `id` is a stable 64-bit FNV-1a hash of the canonical
+// u32 kind @20 | clone @24 ]` (32 bytes); `clone(void *p)` makes a byte copy of a
+// value at `p` independent (sic.md §"Copying: clone"), null when the bytes are
+// the whole value. `id` is a stable 64-bit FNV-1a hash of the canonical
 // type name, so equality is consistent across translation units. The value type
 // is a marker pointer (`Pointer(Struct("__sic_type_info"))`), like `fixed`.
 
 pub const TYPEINFO_MARKER: &str = "__sic_type_info";
-pub const TYPEINFO_REC_SIZE: usize = 24;
+pub const TYPEINFO_REC_SIZE: usize = 32;
 pub const TYPEINFO_OFF_NAME: usize = 0;
 pub const TYPEINFO_OFF_ID: usize = 8;
 pub const TYPEINFO_OFF_SIZE: usize = 16;
 pub const TYPEINFO_OFF_KIND: usize = 20;
+pub const TYPEINFO_OFF_CLONE: usize = 24;
 
 /// The `type` value type — a pointer to a `__sic_type_info` record.
 pub fn type_info_type() -> Type {
