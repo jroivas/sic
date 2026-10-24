@@ -44,6 +44,10 @@ impl<'m> FuncCtx<'m> {
                         let ty = ty.clone();
                         Ok(LValue { atomic, ..LValue::plain(Val::Global(gref), ty) })
                     }
+                    None if self.imported_global_expr(name, &expr.span).is_some() => {
+                        let g = self.imported_global_expr(name, &expr.span).unwrap();
+                        self.lower_lvalue(&g)
+                    }
                     _ => Err(CompileError::at(
                         format!("'{}' is not an lvalue", name),
                         expr.span.file.clone(), expr.span.line, expr.span.col,

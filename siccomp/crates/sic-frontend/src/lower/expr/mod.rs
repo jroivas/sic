@@ -636,6 +636,9 @@ impl<'m> FuncCtx<'m> {
                             }
                             _ => {}
                         }
+                        if let Some(g) = self.imported_global_expr(name, &expr.span) {
+                            return self.lower_expr(&g);
+                        }
                         Err(self.undefined_name_error(name, &expr.span))
                     }
                 }
@@ -5202,6 +5205,20 @@ impl<'m> FuncCtx<'m> {
     /// `std::SplitMix64`, and the bare name otherwise surfaced as an undefined
     /// name, a non-lvalue (`SplitMix64 *p = …` parses as a multiplication) or a
     /// silent `sizeof` of 4.
+    /// A bare name that is a module global imported by name (`import m::g;`,
+    /// `import m::*;`) and not otherwise defined: the `m.g` it stands for.
+    pub(crate) fn imported_global_expr(&self, name: &str, sp: &crate::lexer::Span) -> Option<Expr> {
+        if self.lookup(name).is_some() { return None; }
+        let (m, g) = self.lowerer.imported_globals.get(name)?;
+        Some(Expr {
+            kind: ExprKind::Field {
+                base: Box::new(Expr { kind: ExprKind::Ident(m.clone()), span: sp.clone() }),
+                name: g.clone(),
+            },
+            span: sp.clone(),
+        })
+    }
+
     pub(crate) fn undefined_name_error(&self, name: &str, sp: &crate::lexer::Span) -> CompileError {
         let msg = match self.lowerer.imported_type_paths.get(name) {
             Some(paths) => format!(

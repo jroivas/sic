@@ -84,6 +84,9 @@ pub struct Lowerer {
     /// bare name usable here → (mangled linker symbol, IR type). A bare call `f()`
     /// or `g()` resolves through this table.
     pub imported_syms: HashMap<String, (String, Type)>,
+    /// A module global imported by name (`import m::g [as h];`, `import m::*;`):
+    /// the bare (or alias) name → (module, exported name).
+    pub imported_globals: HashMap<String, (String, String)>,
     /// Whole imported modules (`import x;` or any `import x.*;`): module name →
     /// {export name → (mangled linker symbol, IR type)}. A namespaced use `x.f`
     /// resolves through this table.
@@ -318,6 +321,7 @@ impl Lowerer {
             sic: false,
             current_module: None,
             imported_syms: HashMap::new(),
+            imported_globals: HashMap::new(),
             imported_modules: HashMap::new(),
             include_dirs: Vec::new(),
             module_dirs: Vec::new(),
@@ -1091,6 +1095,9 @@ impl Lowerer {
         if sym == Some("*") {
             if let Some(exports) = self.imported_modules.get(module).cloned() {
                 for (name, export) in exports {
+                    if !matches!(export.1, Type::Function(_)) {
+                        self.imported_globals.entry(name.clone()).or_insert((module.to_string(), name.clone()));
+                    }
                     self.imported_syms.entry(name).or_insert(export);
                 }
             }
@@ -1105,6 +1112,9 @@ impl Lowerer {
         if let Some(s) = sym {
             if let Some(export) = self.imported_modules.get(module).and_then(|m| m.get(s)).cloned() {
                 let bind = alias.unwrap_or(s);
+                if !matches!(export.1, Type::Function(_)) {
+                    self.imported_globals.insert(bind.to_string(), (module.to_string(), s.to_string()));
+                }
                 self.imported_syms.insert(bind.to_string(), export);
             } else if self.qualified_only.get(s).map(|m| m == module).unwrap_or(false) {
                 // An enum/generic export: un-gate it (an alias for these is not

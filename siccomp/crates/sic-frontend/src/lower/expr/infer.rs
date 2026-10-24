@@ -63,7 +63,10 @@ impl<'m> FuncCtx<'m> {
                     Some(LookupResult::Global(ty, _)) => Ok(ty.clone()),
                     Some(LookupResult::EnumConst(_)) => Ok(Type::i32()),
                     Some(LookupResult::Func(_)) => Ok(Type::void_ptr()),
-                    None => Ok(Type::i32()),
+                    None => match self.imported_global_expr(name, &expr.span) {
+                        Some(g) => self.infer_expr_type(&g),
+                        None => Ok(Type::i32()),
+                    },
                 }
             }
             ExprKind::Cast { ty, .. } => self.lower_type(ty),
