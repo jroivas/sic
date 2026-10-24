@@ -554,6 +554,21 @@ impl<'m> FuncCtx<'m> {
         self.current_bb = id;
     }
 
+    /// The statement after a `case`/`default` label. It is its own scope, so a
+    /// temporary it creates (`case K: return f();`) is released on this case's
+    /// paths only — except a declaration right after the label (`case 2: int t =
+    /// x; …`), which belongs to the switch block as in C: the statements after it
+    /// use it.
+    fn lower_case_body(&mut self, body: &Stmt) -> Result<()> {
+        if matches!(body, Stmt::Decl(_)) {
+            return self.lower_stmt(body);
+        }
+        self.enter_scope();
+        self.lower_stmt(body)?;
+        self.exit_scope();
+        Ok(())
+    }
+
     pub fn is_terminated(&self) -> bool {
         !matches!(self.current_block().terminator, Terminator::Unreachable)
             || self.diverged.contains(&self.current_bb)
@@ -2517,9 +2532,7 @@ impl<'m> FuncCtx<'m> {
                 // the owned string in `case K: return f();` — is released only on
                 // this case's exit paths, not leaked into a sibling case's `return`
                 // (which runs `emit_cleanups_to(0)`) where its slot is uninitialized.
-                self.enter_scope();
-                self.lower_stmt(body)?;
-                self.exit_scope();
+                self.lower_case_body(body)?;
             }
             Stmt::CaseRange(lo, _hi, body, _) => {
                 // `case LOW ... HIGH:` — every value in the range was pre-created
@@ -2535,9 +2548,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.switch_to_block(case_bb);
                 self.func_mut().block_mut(case_bb).label = Some(format!("case_{}_range", low_val));
-                self.enter_scope();
-                self.lower_stmt(body)?;
-                self.exit_scope();
+                self.lower_case_body(body)?;
             }
             Stmt::Default(body, _) => {
                 // Use the enclosing switch's pre-created default block.
@@ -2549,9 +2560,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 self.switch_to_block(default_bb);
                 self.func_mut().block_mut(default_bb).label = Some("default".to_string());
-                self.enter_scope();
-                self.lower_stmt(body)?;
-                self.exit_scope();
+                self.lower_case_body(body)?;
             }
         }
         Ok(())
@@ -5554,7 +5563,30 @@ impl<'m> FuncCtx<'m> {
         // locals — lower them into a throwaway block.
         let pre = self.new_block_after_current();
         self.switch_to_block(pre);
-        self.lower_stmt(body)?;
+        match body {
+            // sic: each case — from its label to the next — is a scope of its own.
+            // Every way into it starts at the label, so its locals are always
+            // initialized before their cleanups run; a local declared in one case
+            // and skipped by jumping to another can no longer be released
+            // uninitialized. (C keeps one scope for the switch body, as in C.)
+            Stmt::Block(stmts, _) if self.is_sic() => {
+                self.enter_scope();
+                let mut region = false;
+                for st in stmts {
+                    if matches!(st, Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..)) {
+                        if region { self.exit_scope(); }
+                        self.enter_scope();
+                        region = true;
+                    } else if self.is_terminated() && !stmt_is_jump_target(st) {
+                        continue;
+                    }
+                    self.lower_stmt(st)?;
+                }
+                if region { self.exit_scope(); }
+                self.exit_scope();
+            }
+            _ => self.lower_stmt(body)?,
+        }
         if !self.is_terminated() { self.set_terminator(Terminator::Jump(end_bb)); }
         self.break_scope_depth.pop();
         self.break_stack.pop();

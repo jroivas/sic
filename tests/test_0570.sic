@@ -1,0 +1,32 @@
+// A declaration right after a case label is usable by the statements after it,
+// and each case is a scope of its own: a string declared in one case is never
+// released uninitialized when the switch jumps straight to another case.
+string pick(int x)
+{
+    switch (x) {
+        case 1:
+            string s = "a" + "b";           // right after the label
+            int n = s.size;
+            if (n != 2) return "";
+            return s + "!";
+        case 2:
+            x = x + 1;
+            string t = "t" + "wo";          // later in the case
+            return t;
+        case 3:
+            string u = "fall" + "s";
+            fallthrough;                    // `u` is released before case 4 runs
+        case 4:
+            return "four";
+        default:
+            break;
+    }
+    return "none";
+}
+
+int main()
+{
+    if (pick(1) != "ab!" || pick(2) != "two") return 1;
+    if (pick(3) != "four" || pick(4) != "four" || pick(9) != "none") return 2;
+    return 42;
+}
