@@ -1,0 +1,4 @@
+// A variadic callee: an extra named argument goes to the `...` part, and its
+// name may still be given only once.
+int f(int a, ...) { return a; }
+int main() { return f(a=1, x=2, x=3); }

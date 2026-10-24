@@ -5091,7 +5091,8 @@ fn blessed_enum_templates() -> Vec<EnumDef> {
 /// purely positional list (fixed slots in order, then the variadic tail in written
 /// order). Rules: named arguments may only follow positional ones; each name must
 /// match an as-yet-unfilled fixed parameter (or, for a variadic callee, drop to the
-/// tail with its name discarded — a future `va_dict` will capture the pairs); and
+/// tail with its name discarded — a future `va_dict` will capture the pairs); a
+/// name is given at most once; and
 /// every fixed parameter must end up filled.
 fn reorder_named_args(
     args: &[Expr],
@@ -5105,6 +5106,7 @@ fn reorder_named_args(
     let mut slots: Vec<Option<Expr>> = (0..k).map(|_| None).collect();
     let mut tail: Vec<Expr> = Vec::new();
     let mut seen_named = false;
+    let mut tail_names: Vec<&str> = Vec::new();
     let mut pos = 0usize;
     for arg in args {
         match &arg.kind {
@@ -5117,6 +5119,11 @@ fn reorder_named_args(
                     slots[i] = Some((**value).clone());
                 } else if variadic {
                     // A variadic (or unknown-name) argument: drop the name, keep order.
+                    // Each name still names one argument.
+                    if tail_names.contains(&name.as_str()) {
+                        return Err(err(format!("argument `{}` given more than once", name)));
+                    }
+                    tail_names.push(name);
                     tail.push((**value).clone());
                 } else {
                     return Err(err(format!("function has no parameter named `{}`", name)));

@@ -439,7 +439,8 @@ The rules are:
 - **Named arguments may only follow positional ones** — `sum(a = 1, 2)` is an error.
   (Once you start naming, keep naming; the named ones may be in any order.)
 - **Every mandatory parameter must be filled**, and no parameter may be given twice
-  (whether positionally and by name, or by two names).
+  (whether positionally and by name, or by two names): `sum(a = 5, b = 6, b = 9)`
+  is an error. The same holds for the named arguments a variadic callee collects.
 - Only parameter names are accepted; an unknown name is an error.
 
 Named parameters are a purely caller-side convenience — the callee is unchanged.

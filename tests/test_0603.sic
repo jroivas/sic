@@ -1,0 +1,3 @@
+// A named argument names one parameter: `b` given twice is an error.
+int sum(int a, int b) { return a + b; }
+int main() { return sum(a=5, b=6, b=9); }
