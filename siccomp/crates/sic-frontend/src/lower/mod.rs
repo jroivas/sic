@@ -195,6 +195,8 @@ pub struct Lowerer {
     /// `(struct, field)` pairs declared `const` (`struct S { const int id; }`):
     /// assigning such a member is a compile error.
     pub const_fields: HashSet<(String, String)>,
+    /// A malformed struct method found while hoisting (reported after it).
+    pub method_error: Option<CompileError>,
     /// sic member destructors: struct name → `void(S*)` releasing the struct's
     /// managed by-value fields (see `synthesize_member_dtors`); `None` = the
     /// struct has none. A struct with no `~S()` uses it as its destructor; a
@@ -357,6 +359,7 @@ impl Lowerer {
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             const_fields: HashSet::new(),
+            method_error: None,
             struct_owned_fields: HashMap::new(),
             member_dtor: HashMap::new(),
             tuple_shape_globals: HashMap::new(),
@@ -457,6 +460,7 @@ impl Lowerer {
             // Flatten namespaces first (they may contain structs with methods).
             self.flatten_namespaces(&mut t);
             self.hoist_struct_methods(&mut t);
+            if let Some(e) = self.method_error.take() { return Err(e); }
             Some(t)
         } else { None };
         let tu: &TranslationUnit = owned_tu.as_ref().unwrap_or(tu);
@@ -1906,15 +1910,17 @@ impl Lowerer {
     }
 
     /// A tuple layout's shape descriptor (one per distinct shape):
-    /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count]; }`, read by the
-    /// tuple runtime to check a dynamically typed tuple's elements.
-    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64)]) -> GlobalRef {
+    /// `{ u64 count; { typeinfo *ti; u64 offset; } elem[count]; clone }`, read by
+    /// the tuple runtime to check a dynamically typed tuple's elements; `clone`
+    /// is the layout's clone function (`ensure_tuple_clone`), or null.
+    pub(crate) fn tuple_shape_global(&mut self, elems: &[(String, u32, u32, u64)], clone: Option<FuncRef>) -> GlobalRef {
         let key = elems.iter().map(|(n, _, _, o)| format!("{}@{}", n, o)).collect::<Vec<_>>().join(",");
         if let Some(&g) = self.tuple_shape_globals.get(&key) { return g; }
         let ps = self.ptr_size as usize;
-        let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8)];
+        let mut bytes = vec![0u8; 8 + elems.len() * (ps + 8) + ps];
         bytes[0..8].copy_from_slice(&(elems.len() as u64).to_le_bytes());
         let mut relocs = Vec::new();
+        if let Some(f) = clone { relocs.push((8 + elems.len() * (ps + 8), RelocTarget::Func(f))); }
         for (i, (name, kind, size, off)) in elems.iter().enumerate() {
             let ti = self.type_info_global(name, *kind, *size);
             let at = 8 + i * (ps + 8);
@@ -2669,6 +2675,22 @@ impl Lowerer {
                                 Some(md) => format!("{}_{}__{}", md, sname, m.name),
                                 None => format!("__sic_m_{}_{}", sname, m.name),
                             };
+                            // `clone` (sic.md §"Copying: clone") is how a copy is
+                            // made — nested clones rely on its shape.
+                            if m.name == "clone" && self.sic {
+                                let names_s = |t: &AstType| match t {
+                                    AstType::Named(n) => n == &sname,
+                                    AstType::Struct(sd) => sd.name.as_deref() == Some(sname.as_str()),
+                                    _ => false,
+                                };
+                                let self_ok = m.params.len() == 1 && matches!(&m.params[0].ty.ty,
+                                    AstType::Pointer { base, .. } if names_s(&base.ty));
+                                if (!names_s(&m.ret_ty.ty) || !self_ok || m.variadic) && self.method_error.is_none() {
+                                    self.method_error = Some(CompileError::at(format!(
+                                        "a `clone` method is `{} clone({} *self)`: it returns the copy", sname, sname),
+                                        m.span.file.clone(), m.span.line, m.span.col));
+                                }
+                            }
                             self.struct_methods.insert((sname.clone(), m.name.clone()), mangled.clone());
                             (mangled, m.params.clone(), m.body.clone())
                         }

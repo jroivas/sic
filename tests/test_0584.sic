@@ -1,0 +1,7 @@
+// A plain pointer has no size to copy: only a `new` block can be cloned.
+int main()
+{
+    char *p = (char *)"abc";
+    char *q = p.clone();
+    return q[0];
+}

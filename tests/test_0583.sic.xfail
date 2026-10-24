@@ -1,0 +1,1 @@
+test_0583.sic:4:5: error: a `clone` method is `S clone(S *self)`: it returns the copy

@@ -8,6 +8,7 @@ mod simd;
 mod enums;
 pub(crate) use enums::PayloadOwn;
 mod calls;
+mod clone;
 mod lvalue;
 mod infer;
 mod asm;
@@ -2312,6 +2313,19 @@ impl<'m> FuncCtx<'m> {
             };
             let hp = self.coerce(block.clone(), &Type::Pointer(Box::new(Type::void_ptr())))?;
             self.push_instr(Instr::Store { val: Val::Func(fref), ptr: hp });
+            // The box's clone (sic.md §"Copying: clone"); null for a struct that
+            // cannot be cloned (the runtime reports it).
+            let sname = match v { Type::Struct(st) => st.name.clone().unwrap_or_default(), _ => String::new() };
+            let cv = if self.lowerer.clone_method(&sname) || !self.lowerer.has_user_lifecycle(&sname) {
+                Val::Func(self.lowerer.ensure_box_clone(v)?)
+            } else {
+                Constant::zero()
+            };
+            let cv = self.coerce(cv, &Type::void_ptr())?;
+            let cp = self.alloc_val();
+            self.push_instr(Instr::GetElemPtr { dest: cp, base: block.clone(), index: Constant::int(self.ptr_size() as i64),
+                elem_size: 1, result_ty: Type::Pointer(Box::new(Type::void_ptr())) });
+            self.push_instr(Instr::Store { val: cv, ptr: Val::Local(cp) });
             let data = self.alloc_val();
             self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(16), elem_size: 1,
                 result_ty: Type::Pointer(Box::new(v.clone())) });
@@ -2329,9 +2343,20 @@ impl<'m> FuncCtx<'m> {
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
         } else if is_owned_struct {
+            // `[size | 0 | data…]`: the size lets the runtime clone the box.
             let src = self.lower_aggregate_ptr(val)?;
-            let sz = self.coerce(Constant::int(v.size_of(self.ptr_size()).max(1) as i64), &Type::i64())?;
-            let heap = self.emit_malloc(sz.clone())?;
+            let bytes = v.size_of(self.ptr_size()).max(1) as i64;
+            let total = self.coerce(Constant::int(bytes + 16), &Type::i64())?;
+            let block = self.emit_malloc(total)?;
+            let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
+            let szp = self.coerce(block.clone(), &Type::Pointer(Box::new(usize_ty.clone())))?;
+            let szv = self.coerce(Constant::int(bytes), &usize_ty)?;
+            self.push_instr(Instr::Store { val: szv, ptr: szp });
+            let heap = self.alloc_val();
+            self.push_instr(Instr::GetElemPtr { dest: heap, base: block, index: Constant::int(16), elem_size: 1,
+                result_ty: Type::char_ptr() });
+            let heap = Val::Local(heap);
+            let sz = self.coerce(Constant::int(bytes), &Type::i64())?;
             self.emit_memcpy(heap.clone(), src, sz)?;
             let w = self.alloc_val();
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: heap, to_ty: Type::u64() });
@@ -2647,7 +2672,8 @@ impl<'m> FuncCtx<'m> {
         let elems: Vec<(String, u32, u32, u64)> = fields.iter().enumerate().map(|(i, (_, t))| {
             (self.type_name_of(t), super::types::type_kind(t), t.size_of(self.ptr_size()) as u32, offs.get(i).copied().unwrap_or(0))
         }).collect();
-        let g = self.lowerer.tuple_shape_global(&elems);
+        let clone = self.lowerer.ensure_tuple_clone(layout).ok().flatten();
+        let g = self.lowerer.tuple_shape_global(&elems, clone);
         let ptr = self.alloc_val();
         self.push_instr(Instr::GetElemPtr { dest: ptr, base: Val::Global(g), index: Constant::zero(), elem_size: 1, result_ty: Type::void_ptr() });
         self.val_types.insert(ptr.0, Type::void_ptr());

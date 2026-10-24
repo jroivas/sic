@@ -1,0 +1,1 @@
+test_0584.sic:5:16: error: `.clone()` of a pointer needs a `new` allocation (its size is in the block); this pointer is not known to be one

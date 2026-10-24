@@ -1,0 +1,35 @@
+module shelf;
+
+// Clone across a module boundary: a field-by-field clone of a struct defined
+// here, and a struct with a destructor that says how it is cloned.
+struct Book {
+    string title;
+    list<string> tags;
+};
+
+struct Lease {
+    int id;
+    ~Lease() { }
+    Lease clone(Lease *self)
+    {
+        Lease l;
+        l.id = self->id + 1;
+        return l;
+    }
+};
+
+struct Shelf {
+    Lease lease;
+    list<Book> books;
+};
+
+Shelf Make()
+{
+    Shelf s;
+    s.lease.id = 1;
+    Book b;
+    b.title = "a" + "b";
+    b.tags.push("x");
+    s.books.push(b);
+    return s;
+}

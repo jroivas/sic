@@ -1,0 +1,16 @@
+// A struct with its own destructor manages something its bytes do not show (a
+// file descriptor): it is never cloned field by field — not directly, nor as
+// an element of a cloned container.
+#include <unistd.h>
+
+struct File {
+    int fd;
+    ~File() { close(fd); }
+};
+
+int main()
+{
+    list<File> files;
+    list<File> copy = files.clone();
+    return 0;
+}

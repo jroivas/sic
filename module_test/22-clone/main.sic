@@ -1,0 +1,14 @@
+import shelf;
+
+int main()
+{
+    shelf::Shelf s = shelf::Make();
+    shelf::Shelf t = s.clone();
+    shelf::Book b = t.books[0];
+    b.tags.push("y");
+    t.books.push(b);
+    shelf::Book first = s.books[0];
+    if (s.books.length != 1 || t.books.length != 2 || first.tags.length != 1) return 1;
+    if (t.lease.id != 2 || s.lease.id != 1) return 2;
+    return 0;
+}

@@ -1,0 +1,70 @@
+// A struct says how it is cloned with `S clone(S *self)`; it is used wherever
+// the struct is cloned — directly, as a field of a field-by-field clone, and as
+// a container element. A struct holding a list of itself clones recursively.
+// Returns 42.
+int clones = 0;
+int closed = 0;
+
+struct Handle {
+    int fd;
+    ~Handle() { closed++; }
+    Handle clone(Handle *self)
+    {
+        clones++;
+        Handle h;
+        h.fd = self->fd + 100;
+        return h;
+    }
+};
+
+struct Wrap {
+    Handle h;
+    string tag;
+};
+
+struct Node {
+    int v;
+    list<Node> kids;
+};
+
+int count(Node *n)
+{
+    int c = 1;
+    for (Node k : n->kids.values)
+        c += count(&k);
+    return c;
+}
+
+int main()
+{
+    {
+        Handle a;
+        a.fd = 1;
+        Handle b = a.clone();
+        if (b.fd != 101 || clones != 1) return 1;
+
+        Wrap w;
+        w.h.fd = 2;
+        w.tag = "t" + "0";
+        Wrap v = w.clone();
+        if (v.h.fd != 102 || v.tag != "t0" || clones != 2) return 2;
+
+        list<Handle> hs;
+        hs.push(a);
+        list<Handle> hs2 = hs.clone();
+        Handle first = hs2[0];
+        if (first.fd != 101 || clones != 3) return 3;
+    }
+    if (closed == 0) return 4;
+
+    Node root;
+    Node c1;
+    Node c2;
+    c1.kids.push(c2);
+    root.kids.push(c1);
+    Node r2 = root.clone();
+    Node extra;
+    r2.kids.push(extra);
+    if (count(&root) != 3 || count(&r2) != 4) return 5;
+    return 42;
+}

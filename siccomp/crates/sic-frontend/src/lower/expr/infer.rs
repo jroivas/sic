@@ -415,6 +415,10 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // `x.clone()` (sic.md §"Copying: clone"): the receiver's type.
+                if let Some((base, arrow)) = self.builtin_clone_call(func, args) {
+                    return self.infer_clone_type(base, arrow);
+                }
                 // sic `string` methods (sic.md §"Built-in string"): `.contains` →
                 // bool; `.split`/`.rsplit` → `tuple(string, string)`.
                 if self.is_sic() {

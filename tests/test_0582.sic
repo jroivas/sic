@@ -1,0 +1,12 @@
+// A struct with its own constructor is not cloned field by field either.
+struct Counter {
+    int n;
+    Counter() { n = 1; }
+};
+
+int main()
+{
+    Counter c;
+    Counter d = c.clone();
+    return d.n;
+}

@@ -331,6 +331,11 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // `x.clone()` (sic.md §"Copying: clone"): an independent copy.
+        if let Some((base, arrow)) = self.builtin_clone_call(func_expr, args) {
+            return self.lower_clone(base, arrow, sp);
+        }
+
         // sic `string` methods (sic.md §"Built-in string"): `s.contains(sub)` (a
         // substring test — a single-char `sub` is a character search), and
         // Built-in `string` methods (sic.md §"Built-in string").

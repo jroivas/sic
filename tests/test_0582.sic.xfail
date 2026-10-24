@@ -1,0 +1,1 @@
+test_0582.sic:10:18: error: `Counter` has its own constructor or destructor, so it is not cloned field by field; write `Counter clone(Counter *self)` to say how it is copied

@@ -1,6 +1,7 @@
 extern void *malloc(unsigned long);
 extern void *realloc(void *, unsigned long);
 extern void free(void *);
+extern void *memcpy(void *, const void *, unsigned long);
 
 /* Forward references for container-element release (a `list`/`dict`/`set` stored
    inside a container is refcounted). `__sic_dict_free` lives in the dict runtime,
@@ -41,16 +42,19 @@ __attribute__((weak)) void __sic_str_rc_release(unsigned long *rc) {
 
 /* Reclaim a container element's owned value by its `vowned` kind (shared by the
    list and dict runtimes; sic.md §"Dict"/§"List"):
-     1 = a plain owned heap block (a deep-copied struct) — raw free;
+     1 = a plain owned heap block (a copied struct without managed fields):
+         `[size | 0 | data…]` with `vslot` = data — raw free;
      2 = a refcounted `string` block — `vslot` is the descriptor and its rc field
          (word 2) is the block base, so decrement the rc and free only at 0 (a
          reader that copied the descriptor and retained keeps it alive);
      3/4 = a nested list / dict handle, 5/6 = a weak one, 7 = a tuple;
-     8 = a deep-copied managed struct: its destructor runs before the free.
+     8 = a copied managed struct, `[dtor | clone | data…]`: its destructor runs
+         before the free (`clone` makes an independent box, see
+         `__sic_box_clone`).
    A borrowed value (vowned 0) is left alone. */
 __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     if (vowned == 1) {
-        free((void *)vslot);
+        free((unsigned long *)vslot - 2);
     } else if (vowned == 2) {
         unsigned long *desc = (unsigned long *)vslot;
         __sic_str_rc_release((unsigned long *)desc[2]);
@@ -70,8 +74,8 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
         /* a `tuple` element — release one reference (runs its element dtor at 0) */
         __sic_tuple_release((void *)vslot);
     } else if (vowned == 8) {
-        /* a deep-copied MANAGED struct (one with a destructor): the block is
-           [dtor | pad | data…] with `vslot` = data; destroy, then free the block */
+        /* a copied MANAGED struct (one with a destructor): the block is
+           [dtor | clone | data…] with `vslot` = data; destroy, then free the block */
         void **hdr = (void **)vslot - 2;
         void (*dtor)(void *) = (void (*)(void *))hdr[0];
         if (dtor) dtor((void *)vslot);
@@ -186,4 +190,84 @@ __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     free(l->vowned);
     l->vty = 0; l->vslot = 0; l->vowned = 0; l->len = 0; l->cap = 0;
     if (l->wrc == 0) free(l);
+}
+
+/* ── `clone()` (sic.md §"Copying: clone") ──────────────────────────────────────
+   An independent copy of a container: every element box is copied by its kind,
+   so nothing is shared with the original (a nested container is cloned too). */
+struct __sic_dict;
+extern __attribute__((weak)) struct __sic_dict *__sic_dict_clone(struct __sic_dict *);
+extern __attribute__((weak)) void __sic_dict_retain(struct __sic_dict *);
+extern __attribute__((weak)) void __sic_dict_weak_retain(struct __sic_dict *);
+__sic_list *__sic_list_clone(__sic_list *l);
+extern int dprintf(int fd, const char *fmt, ...);
+extern void abort(void);
+
+/* A value whose type has no clone (a struct with its own constructor or
+   destructor and no `clone()` method) reached a container clone. */
+__attribute__((weak)) void __sic_cannot_clone(const char *what) {
+    dprintf(2, "cannot clone %s: its type has no clone() method\n", what);
+    abort();
+}
+
+/* An owned string box `[rc | {data, size, rc} | bytes | NUL]`; `vslot` is the
+   descriptor. */
+__attribute__((weak)) unsigned long __sic_str_box_clone(unsigned long vslot) {
+    unsigned long *desc = (unsigned long *)vslot;
+    unsigned long size = desc[1];
+    unsigned long *block = (unsigned long *)malloc(sizeof(unsigned long) * 4 + size + 1);
+    unsigned char *bytes = (unsigned char *)(block + 4);
+    if (size) memcpy(bytes, (const void *)desc[0], size);
+    bytes[size] = 0;
+    block[0] = 1;
+    block[1] = (unsigned long)bytes;
+    block[2] = size;
+    block[3] = (unsigned long)block;
+    return (unsigned long)(block + 1);
+}
+
+/* A tuple element: a tuple whose shape names a clone function (one with an
+   element to copy) gets a new block from it; any other holds only plain values
+   and, being immutable, is shared. The shape is `{ count; { ti, off }[count];
+   clone }` at `data - 4` words (the compiler's `__sic_tuple_clone_dyn` is the
+   same). */
+__attribute__((weak)) unsigned long __sic_tuple_box_clone(unsigned long vslot) {
+    unsigned long *p = (unsigned long *)vslot;
+    if (!p) return 0;
+    unsigned long *shape = (unsigned long *)p[-4];
+    unsigned long (*fn)(unsigned long) = shape ? (unsigned long (*)(unsigned long))shape[1 + 2 * shape[0]] : 0;
+    if (fn) return fn(vslot);
+    p[-1]++;
+    return vslot;
+}
+
+__attribute__((weak)) unsigned long __sic_box_clone(unsigned long vslot, int vowned) {
+    if (vowned == 1) {
+        unsigned long *hdr = (unsigned long *)vslot - 2;
+        unsigned long *n = (unsigned long *)malloc(sizeof(unsigned long) * 2 + hdr[0]);
+        n[0] = hdr[0];
+        n[1] = 0;
+        memcpy(n + 2, (const void *)vslot, hdr[0]);
+        return (unsigned long)(n + 2);
+    }
+    if (vowned == 2) return __sic_str_box_clone(vslot);
+    if (vowned == 3) return (unsigned long)__sic_list_clone((__sic_list *)vslot);
+    if (vowned == 4) return (unsigned long)__sic_dict_clone((struct __sic_dict *)vslot);
+    if (vowned == 5) { __sic_list_weak_retain((__sic_list *)vslot); return vslot; }
+    if (vowned == 6) { __sic_dict_weak_retain((struct __sic_dict *)vslot); return vslot; }
+    if (vowned == 7) return __sic_tuple_box_clone(vslot);
+    if (vowned == 8) {
+        void **hdr = (void **)vslot - 2;
+        unsigned long (*fn)(unsigned long) = (unsigned long (*)(unsigned long))hdr[1];
+        if (!fn) __sic_cannot_clone("a container element");
+        return fn(vslot);
+    }
+    return vslot;   /* 0: a scalar or a borrowed value */
+}
+
+__attribute__((weak)) __sic_list *__sic_list_clone(__sic_list *l) {
+    __sic_list *r = __sic_list_new();
+    if (l) for (unsigned long i = 0; i < l->len; i++)
+        __sic_list_push(r, l->vty[i], __sic_box_clone(l->vslot[i], l->vowned[i]), l->vowned[i]);
+    return r;
 }

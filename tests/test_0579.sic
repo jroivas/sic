@@ -1,0 +1,100 @@
+// `x.clone()` is an independent deep copy (assignment shares): strings, lists,
+// dicts, nested containers, tuples, enums, fixed and structs of those, and a
+// `new` block. Each check changes the clone and expects the original as it was.
+// Returns 42.
+#include <string.h>
+
+struct Inner {
+    string name;
+    list<int> xs;
+};
+
+struct Outer {
+    int id;
+    Inner in;
+    dict<string, string> tags;
+    string notes[2];
+    fixed price;
+    Option<string> nick;
+};
+
+int main()
+{
+    string s = "abc" + "def";
+    string t = s.clone();
+    if (t != s || s.ptr == t.ptr) return 1;
+
+    list<string> l;
+    l.push("one");
+    list<string> m = l.clone();
+    m.push("two");
+    if (l.length != 1 || m.length != 2) return 2;
+
+    list<list<int>> ll;
+    list<int> a;
+    a.push(1);
+    ll.push(a);
+    list<list<int>> ll2 = ll.clone();
+    list<int> inner = ll2[0];
+    inner.push(2);
+    list<int> orig = ll[0];
+    if (orig.length != 1 || inner.length != 2) return 3;
+
+    dict<string, list<int>> d;
+    d["k"] = a;
+    dict<string, list<int>> d2 = d.clone();
+    list<int> dv = d2["k"];
+    dv.push(3);
+    list<int> dorig = d["k"];
+    if (dorig.length != 1 || dv.length != 2) return 4;
+
+    Outer o;
+    o.id = 7;
+    o.in.name = "n" + "1";
+    o.in.xs.push(5);
+    o.tags["k"] = "v";
+    o.notes[1] = "x" + "y";
+    o.price = 1.5;
+    o.nick = Option::Some("b" + "o");
+    Outer p = o.clone();
+    p.in.xs.push(6);
+    p.in.name = p.in.name + "!";
+    p.tags["k2"] = "w";
+    p.notes[1] = p.notes[1] + "z";
+    p.price = p.price * 2;
+    if (p.id != 7 || o.in.xs.length != 1 || p.in.xs.length != 2) return 5;
+    if (o.in.name != "n1" || p.in.name != "n1!") return 6;
+    if (o.tags.length != 1 || p.tags.length != 2) return 7;
+    if (o.notes[1] != "xy" || p.notes[1] != "xyz") return 8;
+    if (o.price != 1.5 || p.price != 3) return 9;
+    match (p.nick) {
+        Some(n): if (n != "bo") return 10;
+        None: return 11;
+    }
+
+    list<Outer> lo;
+    lo.push(o);
+    list<Outer> lo2 = lo.clone();
+    Outer q = lo2[0];
+    q.in.xs.push(9);
+    Outer r = lo[0];
+    if (r.in.xs.length != 1 || q.in.xs.length != 2) return 12;
+
+    tuple tp = tuple(a, "s" + "t");
+    tuple tq = tp.clone();
+    list<int> tl = tq[0];
+    tl.push(4);
+    list<int> tlo = tp[0];
+    if (tlo.length != 1 || tl.length != 2) return 13;
+
+    int *buf = new int(4);
+    buf[0] = 3;
+    int *buf2 = buf.clone();
+    buf2[0] = 4;
+    if (buf[0] != 3 || buf2[0] != 4) return 14;
+    del buf;
+    del buf2;
+
+    int n = 40;
+    return n.clone() + 2;
+}

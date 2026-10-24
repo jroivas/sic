@@ -1,0 +1,1 @@
+test_0581.sic:14:28: error: `File` has its own constructor or destructor, so it is not cloned field by field; write `File clone(File *self)` to say how it is copied

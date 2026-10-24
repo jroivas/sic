@@ -1,0 +1,7 @@
+// A `clone` method returns the copy.
+struct S {
+    int a;
+    int clone(S *self) { return self->a; }
+};
+
+int main() { return 0; }
