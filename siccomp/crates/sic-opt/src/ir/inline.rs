@@ -143,7 +143,7 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
                 match ins {
                     // Frame-sensitive intrinsics change meaning when moved into the
                     // caller's frame.
-                    Instr::ReturnAddress { .. } | Instr::VaStart { .. }
+                    Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::VaStart { .. }
                     | Instr::VaArg { .. } | Instr::VaEnd { .. } => { eligible = false; break 'scan; }
                     // Directly self-recursive: inlining it into itself never
                     // terminates (and into others it just re-expands to the caps).
@@ -451,7 +451,8 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. } | Instr::BSwap { dest, .. }
         | Instr::VecMoveMask { dest, .. }
         | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. } | Instr::AtomicCas { dest, .. }
-        | Instr::VaArg { dest, .. } | Instr::ReturnAddress { dest } => { *dest = md(*dest); }
+        | Instr::VaArg { dest, .. } | Instr::ReturnAddress { dest }
+        | Instr::FrameAddress { dest } => { *dest = md(*dest); }
         Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => { if let Some(d) = dest { *d = md(*d); } }
         Instr::DbgVar { slot, .. } => { *slot = md(*slot); }
         // No dest / no ValId field to remap (operands already handled above).

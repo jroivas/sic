@@ -262,7 +262,7 @@ const BUILTINS: &[&str] = &[
     "__builtin_nanf", "__builtin_nanl", "__builtin_object_size", "__builtin_offsetof",
     "__builtin_prefetch", "__builtin_return_address", "__builtin_signbit", "__builtin_signbitf",
     "__builtin_signbitl", "__builtin_subc", "__builtin_subcl", "__builtin_subcll",
-    "__builtin_sub_overflow", "__builtin_types_compatible_p", "__builtin_unreachable",
+    "__builtin_sub_overflow", "__builtin_trap", "__builtin_types_compatible_p", "__builtin_unreachable",
     "__builtin_va_arg", "__builtin_va_copy", "__builtin_va_end", "__builtin_va_start",
     // atomics (type-generic forms)
     "__atomic_always_lock_free", "__atomic_clear", "__atomic_compare_exchange",

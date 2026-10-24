@@ -1,0 +1,1 @@
+test_0607.c:3:38: error: `__builtin_clz` takes 1 argument, but 2 were given

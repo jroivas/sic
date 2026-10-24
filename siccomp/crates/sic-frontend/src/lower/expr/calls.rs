@@ -529,6 +529,24 @@ impl<'m> FuncCtx<'m> {
             return self.lower_call(&assocs[idx].1, args, sp);
         }
 
+        // A builtin sic lowers itself takes a fixed number of arguments; a wrong
+        // count is reported as such (it fell through to "unknown function", or
+        // the extra arguments were ignored).
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            if let Some((min, max)) = builtin_arity(name) {
+                if (args.len() < min || args.len() > max) && !matches!(self.lookup(name), Some(_)) {
+                    let want = if min == max { format!("{}", min) }
+                        else if max == usize::MAX { format!("at least {}", min) }
+                        else { format!("{} to {}", min, max) };
+                    return Err(CompileError::at(
+                        format!("`{}` takes {} argument{}, but {} {} given", name, want,
+                            if min == 1 && max == 1 { "" } else { "s" }, args.len(),
+                            if args.len() == 1 { "was" } else { "were" }),
+                        sp.file.clone(), sp.line, sp.col));
+                }
+            }
+        }
+
         // Handle __builtin_bswap* before evaluating args
         if let ExprKind::Ident(name) = &func_expr.kind {
             let bits: Option<u32> = match name.as_str() {
@@ -882,15 +900,26 @@ impl<'m> FuncCtx<'m> {
                     if let Some(e) = args.first() { return self.lower_expr(e); }
                 }
                 // Optimizer hints with no runtime effect for us.
-                "__builtin_prefetch" | "__builtin_unreachable"
-                | "__builtin_assume_aligned" => {
+                // `__builtin_trap()` ends the program (SIGILL, as GCC and Clang);
+                // reaching `__builtin_unreachable()` is undefined, and traps the
+                // same way. Code after either is dead.
+                "__builtin_trap" | "__builtin_unreachable" => {
+                    self.set_terminator(Terminator::Unreachable);
+                    let dead = self.new_block_after_current();
+                    self.switch_to_block(dead);
+                    return Ok(Constant::zero());
+                }
+                "__builtin_prefetch" | "__builtin_assume_aligned" => {
                     // `assume_aligned(p, ...)` returns its pointer; the rest are void.
                     if name.as_str() == "__builtin_assume_aligned" {
                         if let Some(e) = args.first() { return self.lower_expr(e); }
                     }
                     return Ok(Constant::zero());
                 }
-                "__builtin_constant_p" => return Ok(Constant::int(0)),
+                "__builtin_constant_p" => {
+                    let k = args.first().map_or(false, |a| self.is_constant_p(a));
+                    return Ok(Constant::int(k as i64));
+                }
                 // sic does no object-size analysis; return the "size unknown"
                 // sentinel so any _FORTIFY / size check falls through to the plain
                 // path: type 0/1 -> (size_t)-1, type 2/3 -> 0.
@@ -904,8 +933,8 @@ impl<'m> FuncCtx<'m> {
                 // `__builtin_return_address(0)` = the current function's return
                 // address. Critical for QEMU's GETPC(): a faulting helper uses it
                 // to restart the TB at the right guest PC. Level 0 maps to
-                // Cranelift's get_return_address; deeper levels (stack walking) and
-                // frame/CFA queries fall back to null (diagnostics degrade).
+                // Cranelift's get_return_address; deeper levels (stack walking)
+                // fall back to null (diagnostics degrade).
                 "__builtin_return_address" => {
                     let level0 = args.first()
                         .and_then(|e| crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).ok())
@@ -919,8 +948,32 @@ impl<'m> FuncCtx<'m> {
                     }
                     return Ok(Constant::zero());
                 }
-                "__builtin_frame_address" | "__builtin_dwarf_cfa"
-                    => return Ok(Constant::zero()),
+                // Level 0 is this function's frame pointer (frame pointers are
+                // always kept); a deeper level walks the saved frame-pointer chain.
+                // `__builtin_dwarf_cfa` is the caller's stack pointer at the call:
+                // two words above the frame pointer on x86-64.
+                "__builtin_frame_address" | "__builtin_dwarf_cfa" => {
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::FrameAddress { dest: d });
+                    let mut fp = Val::Local(d);
+                    self.val_types.insert(d.0, Type::void_ptr());
+                    if name.as_str() == "__builtin_dwarf_cfa" {
+                        let c = self.alloc_val();
+                        self.push_instr(Instr::GetElemPtr { dest: c, base: fp, index: Constant::int(2 * self.ptr_size() as i64),
+                            elem_size: 1, result_ty: Type::void_ptr() });
+                        return Ok(Val::Local(c));
+                    }
+                    let level = args.first()
+                        .and_then(|e| crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).ok())
+                        .unwrap_or(0);
+                    for _ in 0..level.max(0) {
+                        let n = self.alloc_val();
+                        self.push_instr(Instr::Load { dest: n, ptr: fp, ty: Type::void_ptr() });
+                        self.val_types.insert(n.0, Type::void_ptr());
+                        fp = Val::Local(n);
+                    }
+                    return Ok(fp);
+                }
                 // These identity/no-op address adjusters return their argument.
                 "__builtin_extract_return_addr" | "__builtin_frob_return_addr" => {
                     if let Some(e) = args.first() { return self.lower_expr(e); }
@@ -940,35 +993,33 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
                 // __builtin_fpclassify(NAN, INF, NORMAL, SUBNORMAL, ZERO, x):
-                // pick the category constant matching x. Subnormals are treated
-                // as normal (sic doesn't distinguish the boundary).
+                // the category constant matching x (x evaluated once).
                 "__builtin_fpclassify" => {
-                    if let [nan_v, inf_v, normal_v, _subnormal_v, zero_v, x] = args {
-                        let is_nan = self.lower_fp_classify("__builtin_isnan", x)?;
-                        let is_inf = self.lower_fp_classify("__builtin_isinf", x)?;
+                    if let [nan_v, inf_v, normal_v, sub_v, zero_v, x] = args {
+                        let ity = Type::i32();
+                        let mut cat = Vec::new();
+                        for e in [nan_v, inf_v, normal_v, sub_v, zero_v] {
+                            let v = self.lower_expr(e)?;
+                            cat.push(self.coerce(v, &ity)?);
+                        }
                         let xv = self.lower_expr(x)?;
                         let fty = match self.val_type(&xv) { t if t.is_float() => t, _ => Type::Float64 };
                         let xv = self.coerce(xv, &fty)?;
                         let is_zero = self.alloc_val();
-                        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::FOEq, lhs: xv, rhs: Val::Const(Constant::Float(0.0)), ty: fty });
-                        // result = isnan ? NAN : isinf ? INF : iszero ? ZERO : NORMAL
-                        let nan_v = self.lower_expr(nan_v)?;
-                        let inf_v = self.lower_expr(inf_v)?;
-                        let normal_v = self.lower_expr(normal_v)?;
-                        let zero_v = self.lower_expr(zero_v)?;
-                        let ity = Type::i32();
-                        let (nan_v, inf_v, normal_v, zero_v) = (
-                            self.coerce(nan_v, &ity)?, self.coerce(inf_v, &ity)?,
-                            self.coerce(normal_v, &ity)?, self.coerce(zero_v, &ity)?);
-                        let is_nan = self.coerce(is_nan, &Type::Bool)?;
-                        let is_inf = self.coerce(is_inf, &Type::Bool)?;
-                        let sel_zn = self.alloc_val();
-                        self.push_instr(Instr::Select { dest: sel_zn, cond: Val::Local(is_zero), on_true: zero_v, on_false: normal_v, ty: ity.clone() });
-                        let sel_inf = self.alloc_val();
-                        self.push_instr(Instr::Select { dest: sel_inf, cond: is_inf, on_true: inf_v, on_false: Val::Local(sel_zn), ty: ity.clone() });
-                        let sel = self.alloc_val();
-                        self.push_instr(Instr::Select { dest: sel, cond: is_nan, on_true: nan_v, on_false: Val::Local(sel_inf), ty: ity });
-                        return Ok(Val::Local(sel));
+                        self.push_instr(Instr::Cmp { dest: is_zero, op: CmpOp::FOEq, lhs: xv.clone(), rhs: Val::Const(Constant::Float(0.0)), ty: fty });
+                        let is_nan = self.fp_classify_of("__builtin_isnan", xv.clone())?;
+                        let is_inf = self.fp_classify_of("__builtin_isinf", xv.clone())?;
+                        let is_normal = self.fp_classify_of("__builtin_isnormal", xv)?;
+                        // nan ? NAN : inf ? INF : zero ? ZERO : normal ? NORMAL : SUBNORMAL
+                        let mut r = cat[3].clone();
+                        for (cond, v) in [(is_normal, cat[2].clone()), (Val::Local(is_zero), cat[4].clone()),
+                                          (is_inf, cat[1].clone()), (is_nan, cat[0].clone())] {
+                            let c = self.coerce(cond, &Type::Bool)?;
+                            let d = self.alloc_val();
+                            self.push_instr(Instr::Select { dest: d, cond: c, on_true: v, on_false: r, ty: ity.clone() });
+                            r = Val::Local(d);
+                        }
+                        return Ok(r);
                     }
                 }
                 // Infinity / huge-value constants.
@@ -2111,4 +2162,45 @@ impl<'m> FuncCtx<'m> {
         };
         Ok(format!("{}::{}", m, n.replace("__", "::")))
     }
+}
+
+/// The argument count `(min, max)` of a builtin sic lowers itself (sic answers
+/// `__has_builtin` 1 for it), or `None` for any other name.
+pub(crate) fn builtin_arity(name: &str) -> Option<(usize, usize)> {
+    let bits = |base: &str| -> bool {
+        name.strip_prefix("__builtin_").and_then(|r| r.strip_prefix(base))
+            .map_or(false, |s| matches!(s, "" | "l" | "ll"))
+    };
+    if ["clz", "ctz", "popcount", "ffs", "clrsb", "parity"].iter().any(|b| bits(b)) { return Some((1, 1)); }
+    if super::atomic_rmw_op(name).is_some() {
+        return Some(if name.starts_with("__sync_") { (2, usize::MAX) } else { (3, 3) });
+    }
+    Some(match name {
+        "__builtin_trap" | "__builtin_unreachable" | "__builtin_dwarf_cfa" | "__sync_synchronize"
+        | "__builtin_inf" | "__builtin_inff" | "__builtin_infl"
+        | "__builtin_huge_val" | "__builtin_huge_valf" | "__builtin_huge_vall" => (0, 0),
+        "__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64"
+        | "__builtin_isnan" | "__builtin_isinf" | "__builtin_isinf_sign" | "__builtin_isfinite"
+        | "__builtin_isnormal" | "__builtin_signbit" | "__builtin_signbitf" | "__builtin_signbitl"
+        | "__builtin_constant_p" | "__builtin_alloca" | "__builtin_frame_address"
+        | "__builtin_return_address" | "__builtin_extract_return_addr" | "__builtin_frob_return_addr"
+        | "__builtin_nan" | "__builtin_nanf" | "__builtin_nanl"
+        | "__atomic_thread_fence" | "__atomic_signal_fence" | "__sync_lock_release" => (1, 1),
+        "__builtin_expect" | "__builtin_alloca_with_align" | "__builtin_object_size"
+        | "__builtin_dynamic_object_size" | "__builtin_isgreater" | "__builtin_isgreaterequal"
+        | "__builtin_isless" | "__builtin_islessequal" | "__builtin_islessgreater"
+        | "__builtin_isunordered" | "__atomic_load_n" | "__atomic_test_and_set" | "__atomic_clear"
+        | "__atomic_always_lock_free" | "__atomic_is_lock_free" => (2, 2),
+        "__builtin_assume_aligned" => (2, 3),
+        "__builtin_prefetch" => (1, 3),
+        "__sync_lock_test_and_set" => (2, usize::MAX),
+        "__builtin_expect_with_probability" | "__builtin_add_overflow" | "__builtin_sub_overflow"
+        | "__builtin_mul_overflow" | "__atomic_load" | "__atomic_store" | "__atomic_store_n"
+        | "__atomic_exchange_n" | "__builtin_choose_expr" => (3, 3),
+        "__sync_bool_compare_and_swap" | "__sync_val_compare_and_swap" => (3, usize::MAX),
+        "__builtin_addc" | "__builtin_addcl" | "__builtin_addcll" | "__builtin_subc"
+        | "__builtin_subcl" | "__builtin_subcll" | "__atomic_exchange" => (4, 4),
+        "__atomic_compare_exchange" | "__atomic_compare_exchange_n" | "__builtin_fpclassify" => (6, 6),
+        _ => return None,
+    })
 }

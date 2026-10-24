@@ -6370,8 +6370,8 @@ impl<'m> FuncCtx<'m> {
     fn lower_ternary_inner(&mut self, cond: &Expr, then: &Expr, else_: &Expr) -> Result<Val> {
         // Constant-fold a compile-time-constant condition to just the taken arm,
         // like gcc/clang. QEMU's `dup_const`/tcg macros nest
-        // `__builtin_constant_p(x) ? <fold> : <runtime>`; sic returns 0 for
-        // `__builtin_constant_p`, so the dead `<fold>` arm (which ends in an
+        // `__builtin_constant_p(x) ? <fold> : <runtime>`; for a variable `x`
+        // `__builtin_constant_p` is 0, so the dead `<fold>` arm (which ends in an
         // exhaustiveness `qemu_build_not_reached_always()`) must not be lowered —
         // else it emits a call to that deliberately-undefined symbol.
         if let Ok(v) = crate::lower::eval_const_expr(cond, &self.lowerer.enum_consts) {
@@ -6990,49 +6990,73 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(ext))
     }
 
-    /// Lower a floating-point classification builtin (`isnan`/`isinf`/`isfinite`/
-    /// `isnormal`) to an `int` (0/1) using ordered comparisons: `x == x` is false
-    /// only for NaN, and `x - x == 0` is true only for finite values.
+    /// `__builtin_constant_p(e)` ([`crate::lower::builtin_constant_p`]).
+    pub(crate) fn is_constant_p(&self, e: &Expr) -> bool {
+        crate::lower::builtin_constant_p(e, &self.lowerer.enum_consts)
+    }
+
+    /// Lower a floating-point classification builtin (`isnan`/`isinf`/
+    /// `isinf_sign`/`isfinite`/`isnormal`) to an `int`.
     fn lower_fp_classify(&mut self, name: &str, arg: &Expr) -> Result<Val> {
         let x = self.lower_expr(arg)?;
+        self.fp_classify_of(name, x)
+    }
+
+    /// Classify the float `x` with ordered comparisons: `x == x` is false only
+    /// for NaN, `x - x == 0` true only for finite values, and a normal value is
+    /// at least the type's smallest normal in magnitude. `isinf_sign` is -1 for
+    /// -inf, 1 for +inf, 0 otherwise; the others are 0/1.
+    pub(crate) fn fp_classify_of(&mut self, name: &str, x: Val) -> Result<Val> {
         let fty = match self.val_type(&x) {
             t if t.is_float() => t,
             _ => Type::Float64,
         };
         let x = self.coerce(x, &fty)?;
         let zero = Val::Const(Constant::Float(0.0));
-        // self_eq = (x == x): 1 unless NaN.
-        let self_eq = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: self_eq, op: CmpOp::FOEq, lhs: x.clone(), rhs: x.clone(), ty: fty.clone() });
-        // diff = x - x; finite = (diff == 0): 1 only for finite x.
+        let cmp = |fc: &mut Self, op: CmpOp, a: Val, b: Val| -> Val {
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: d, op, lhs: a, rhs: b, ty: fty.clone() });
+            Val::Local(d)
+        };
+        let and = |fc: &mut Self, a: Val, b: Val| -> Val {
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::BinOp { dest: d, op: BinOp::And, lhs: a, rhs: b, ty: Type::Bool });
+            Val::Local(d)
+        };
+        let not = |fc: &mut Self, a: Val| -> Val {
+            let d = fc.alloc_val();
+            fc.push_instr(Instr::UnaryOp { dest: d, op: UnOp::BoolNot, val: a, ty: Type::Bool });
+            Val::Local(d)
+        };
+        let self_eq = cmp(self, CmpOp::FOEq, x.clone(), x.clone());
         let diff = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: diff, op: BinOp::FSub, lhs: x.clone(), rhs: x.clone(), ty: fty.clone() });
-        let finite = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: finite, op: CmpOp::FOEq, lhs: Val::Local(diff), rhs: zero.clone(), ty: fty.clone() });
-
+        let finite = cmp(self, CmpOp::FOEq, Val::Local(diff), zero.clone());
         let res = match name {
-            "__builtin_isnan" => {
-                // !self_eq
-                let r = self.alloc_val();
-                self.push_instr(Instr::UnaryOp { dest: r, op: UnOp::BoolNot, val: Val::Local(self_eq), ty: Type::Bool });
-                Val::Local(r)
-            }
-            "__builtin_isfinite" => Val::Local(finite),
+            "__builtin_isnan" => not(self, self_eq),
+            "__builtin_isfinite" => finite,
             "__builtin_isinf" | "__builtin_isinf_sign" => {
-                // self_eq && !finite  (not NaN, not finite → infinite)
-                let nfin = self.alloc_val();
-                self.push_instr(Instr::UnaryOp { dest: nfin, op: UnOp::BoolNot, val: Val::Local(finite), ty: Type::Bool });
-                let r = self.alloc_val();
-                self.push_instr(Instr::BinOp { dest: r, op: BinOp::And, lhs: Val::Local(self_eq), rhs: Val::Local(nfin), ty: Type::Bool });
-                Val::Local(r)
+                let nfin = not(self, finite);
+                let inf = and(self, self_eq, nfin);
+                if name == "__builtin_isinf_sign" {
+                    let neg = cmp(self, CmpOp::FOLt, x, zero);
+                    let ity = Type::i32();
+                    let s = self.alloc_val();
+                    self.push_instr(Instr::Select { dest: s, cond: neg, on_true: Constant::int(-1), on_false: Constant::int(1), ty: ity.clone() });
+                    let r = self.alloc_val();
+                    self.push_instr(Instr::Select { dest: r, cond: inf, on_true: Val::Local(s), on_false: Constant::int(0), ty: ity });
+                    return Ok(Val::Local(r));
+                }
+                inf
             }
-            // isnormal ≈ finite && x != 0 (ignores the subnormal boundary).
             _ => {
-                let nz = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: nz, op: CmpOp::FONe, lhs: x, rhs: zero, ty: fty });
-                let r = self.alloc_val();
-                self.push_instr(Instr::BinOp { dest: r, op: BinOp::And, lhs: Val::Local(finite), rhs: Val::Local(nz), ty: Type::Bool });
-                Val::Local(r)
+                // `long double` is computed in f64, so its values have f64's range.
+                let min = if fty == Type::Float32 { f32::MIN_POSITIVE as f64 } else { f64::MIN_POSITIVE };
+                let hi = cmp(self, CmpOp::FOGe, x.clone(), Val::Const(Constant::Float(min)));
+                let lo = cmp(self, CmpOp::FOLe, x, Val::Const(Constant::Float(-min)));
+                let big = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: big, op: BinOp::Or, lhs: hi, rhs: lo, ty: Type::Bool });
+                and(self, finite, Val::Local(big))
             }
         };
         self.coerce(res, &Type::i32())
@@ -7113,10 +7137,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Call { func, args }
                 if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
             {
-                match args.first() {
-                    Some(a) if self.lowerer.eval_const_int(a).is_some() => 1,
-                    _ => 0,
-                }
+                args.first().map_or(0, |a| self.is_constant_p(a) as i64)
             }
             _ => crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0),
         }
@@ -7354,7 +7375,7 @@ fn sync_builtin_base(name: &str) -> &str {
     name
 }
 
-fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
+pub(crate) fn atomic_rmw_op(name: &str) -> Option<(BinOp, bool)> {
     let (op_name, ret_new) = if let Some(rest) = name.strip_prefix("__atomic_fetch_") {
         (rest, false)
     } else if let Some(rest) = name.strip_prefix("__atomic_").and_then(|r| r.strip_suffix("_fetch")) {

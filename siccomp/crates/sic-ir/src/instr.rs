@@ -158,6 +158,8 @@ pub enum Instr {
     /// pointer). Backed by Cranelift's `get_return_address`. QEMU's `GETPC()`
     /// depends on it to restart a faulting TB at the right guest PC.
     ReturnAddress { dest: ValId },
+    /// `__builtin_frame_address(0)`: the current function's frame pointer.
+    FrameAddress { dest: ValId },
 
     /// Debug marker: the source line number that the following instructions
     /// correspond to. Emits no machine code; drives the DWARF line table.
@@ -175,7 +177,7 @@ impl Instr {
     pub fn for_each_val<F: FnMut(&Val)>(&self, mut f: F) {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
-            | Instr::ReturnAddress { .. } | Instr::Fence => {}
+            | Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::Fence => {}
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
@@ -203,7 +205,7 @@ impl Instr {
     pub fn for_each_val_mut<F: FnMut(&mut Val)>(&mut self, mut f: F) {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
-            | Instr::ReturnAddress { .. } | Instr::Fence => {}
+            | Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::Fence => {}
             Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
             Instr::Store { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
@@ -238,7 +240,7 @@ impl Instr {
             | Instr::BSwap { dest, .. } | Instr::VecMoveMask { dest, .. } | Instr::VaArg { dest, .. }
             | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. }
             | Instr::AtomicCas { dest, .. }
-            | Instr::ReturnAddress { dest } => Some(*dest),
+            | Instr::ReturnAddress { dest } | Instr::FrameAddress { dest } => Some(*dest),
             Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
             Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
             | Instr::AtomicStore { .. } | Instr::Fence

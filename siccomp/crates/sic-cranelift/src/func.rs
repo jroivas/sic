@@ -858,6 +858,12 @@ fn emit_instr(
             val_map.insert(dest.0, v);
         }
 
+        Instr::FrameAddress { dest } => {
+            // `__builtin_frame_address(0)` (frame pointers are always kept).
+            let v = builder.ins().get_frame_pointer(ptr_ty);
+            val_map.insert(dest.0, v);
+        }
+
         Instr::VaArg { dest, list_ptr, ty } => {
             // Walk the System V va_list: integer/pointer args come from the GP
             // region (gp_offset < 48) or the overflow area; floating-point args

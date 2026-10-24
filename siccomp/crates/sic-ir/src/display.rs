@@ -155,6 +155,7 @@ impl fmt::Display for Instr {
                 write!(f, "  %{} = va_arg {} {}", dest.0, ty, list_ptr),
             Instr::VaEnd { list_ptr } => write!(f, "  va_end {}", list_ptr),
             Instr::ReturnAddress { dest } => write!(f, "  %{} = return_address", dest.0),
+            Instr::FrameAddress { dest } => write!(f, "  %{} = frame_address", dest.0),
             Instr::CallIndirect { dest, fptr, args, ret_ty, .. } => {
                 if let Some(d) = dest { write!(f, "  %{} = ", d.0)?; } else { write!(f, "  ")?; }
                 write!(f, "call_indirect {} {}(", ret_ty, fptr)?;

@@ -4663,15 +4663,14 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
     let int32 = |v: i64| ConstInt::new(v, 32, true);
     match &e.kind {
         ExprKind::IntLit(v, wide) => Ok(ConstInt::new(*v, if *wide { 64 } else { 32 }, true)),
-        // `__builtin_constant_p(x)` folds to 0 here (sic can't prove constness),
-        // matching how `lower_call` lowers it. This lets a
-        // `__builtin_constant_p(x) ? <fold> : <runtime>` ternary fold to its
-        // runtime arm and drop the dead `<fold>` arm (QEMU's dup_const/tcg
-        // macros whose dead arm ends in `qemu_build_not_reached_always()`).
-        ExprKind::Call { func, .. }
+        // `__builtin_constant_p(x)` folds here as everywhere ([`builtin_constant_p`]),
+        // so a `__builtin_constant_p(x) ? <fold> : <runtime>` ternary keeps only
+        // its taken arm (QEMU's dup_const/tcg macros, whose other arm ends in
+        // `qemu_build_not_reached_always()`).
+        ExprKind::Call { func, args }
             if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
         {
-            Ok(int32(0))
+            Ok(int32(args.first().map_or(false, |a| builtin_constant_p(a, enum_consts)) as i64))
         }
         ExprKind::UIntLit(v, wide) => Ok(ConstInt::new(*v as i64, if *wide { 64 } else { 32 }, false)),
         ExprKind::BoolLit(b) => Ok(int32(*b as i64)),
@@ -4774,19 +4773,25 @@ fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
     })
 }
 
-/// Evaluate a `__builtin_choose_expr` condition at compile time, where
-/// `__builtin_constant_p(E)` is accurate (1 iff E folds to a constant). This
-/// differs from the top-level `eval_const_expr`, which conservatively folds
-/// `__builtin_constant_p` to 0 so runtime-value `?:` selects its runtime arm.
+/// `__builtin_constant_p(e)`: `e` is a compile-time constant — an integer
+/// constant expression, or a floating or string literal (GCC and Clang answer
+/// so without optimization; a variable is never one). Every place sic answers
+/// it uses this, so a condition folds the same way it would run.
+pub(crate) fn builtin_constant_p(e: &Expr, enum_consts: &HashMap<String, i64>) -> bool {
+    match &e.kind {
+        ExprKind::FloatLit(_) | ExprKind::DecimalLit(_) | ExprKind::StringLit(_) => true,
+        ExprKind::Unary { op: UnOpKind::Neg, expr } => builtin_constant_p(expr, enum_consts),
+        _ => eval_const_expr(e, enum_consts).is_ok(),
+    }
+}
+
+/// Evaluate a `__builtin_choose_expr` condition at compile time.
 fn choose_cond_const(e: &Expr, enum_consts: &HashMap<String, i64>) -> i64 {
     match &e.kind {
         ExprKind::Call { func, args }
             if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_constant_p") =>
         {
-            match args.first() {
-                Some(a) if eval_const_expr(a, enum_consts).is_ok() => 1,
-                _ => 0,
-            }
+            args.first().map_or(false, |a| builtin_constant_p(a, enum_consts)) as i64
         }
         ExprKind::BinOp { op: BinOpKind::LogAnd, lhs, rhs } =>
             (choose_cond_const(lhs, enum_consts) != 0 && choose_cond_const(rhs, enum_consts) != 0) as i64,
