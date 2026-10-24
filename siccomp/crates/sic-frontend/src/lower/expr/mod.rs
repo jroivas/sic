@@ -4585,6 +4585,22 @@ impl<'m> FuncCtx<'m> {
     /// allocation and register a scope-exit release, so it stays alive for the
     /// enclosing scope. The reference value is the referent pointer.
     fn lower_ref(&mut self, expr: &Expr) -> Result<Val> {
+        // A reference counts its referent through the `new` header in front of
+        // it; any other pointer (a string literal, a stack array, `malloc`
+        // memory) has no header — the count would be written into whatever lies
+        // there, and the last release would `free` memory never allocated.
+        let fat = match &expr.kind {
+            ExprKind::Ident(n) => self.fat_locals.contains(n),
+            ExprKind::New { .. } => true,
+            _ => false,
+        };
+        if self.is_sic() && !fat {
+            let what = match &expr.kind { ExprKind::Ident(n) => format!("`{}`", n), _ => "this".to_string() };
+            return Err(CompileError::at(format!(
+                "a reference (`@`) needs a `new` allocation or another reference, and {} is not known to be one \
+                 (declare it with `= new …`)", what),
+                expr.span.file.clone(), expr.span.line, expr.span.col));
+        }
         let p = self.lower_expr(expr)?;
         let pc = self.coerce(p.clone(), &Type::char_ptr())?;
         self.emit_rc_retain(pc.clone())?;

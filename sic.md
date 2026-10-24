@@ -830,7 +830,10 @@ A few things happen:
 The first one is reference counting.
 If `name` were freed in another context, the memory would not be freed until the last reference is dropped.
 It's safe to pass references around, since they can never point to freed memory.
-Reference to NULL is not allowed.
+Reference to NULL is not allowed, and a reference can only be taken to memory
+allocated with `new` (or to another reference): the count lives in the
+allocation's header, which a string literal, a stack array or `malloc` memory
+does not have.
 This means that one can't call `free` on a reference.
 Dereferencing is not allowed. Thus references are **always** scoped.
 
@@ -878,7 +881,8 @@ a function can return a reference it was given back to the caller:
         return s;
     }
 
-    char *name = "test";
+    char *name = new char(5);
+    memcpy(name, "test", 5);
     @char *ret = tst(@name);
     printf("Still: %s\n", ret);
 

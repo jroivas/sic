@@ -1,0 +1,10 @@
+// A reference counts its referent through the `new` header in front of it: `@`
+// of a string literal wrote the count into read-only memory (a crash), of a
+// stack array into the stack, and the last release freed memory never allocated.
+int first(@char *s) { return s[0]; }
+
+int main()
+{
+    char *name = "test";
+    return first(@name);
+}
