@@ -6598,6 +6598,7 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
         Instr::GetElemPtr { dest, result_ty, .. } => Some((*dest, result_ty.clone())),
         Instr::PtrOffset { dest, .. } => Some((*dest, Type::void_ptr())),
         Instr::BSwap { dest, ty, .. } => Some((*dest, ty.clone())),
+        Instr::Simd { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::Select { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::VaArg { dest, ty, .. } => Some((*dest, ty.clone())),
         _ => None,

@@ -5,6 +5,7 @@ use super::func::{FuncCtx, LookupResult};
 
 mod numeric;
 mod simd;
+mod ia32;
 mod enums;
 pub(crate) use enums::PayloadOwn;
 mod calls;

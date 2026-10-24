@@ -547,6 +547,13 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        // x86 SIMD builtins (`ia32.rs`).
+        if let ExprKind::Ident(name) = &func_expr.kind {
+            if name.starts_with("__builtin_ia32_") && !matches!(self.lookup(name), Some(_)) {
+                if let Some(v) = self.lower_ia32(name, args)? { return Ok(v); }
+            }
+        }
+
         // The builtins of `builtins.rs`.
         if let ExprKind::Ident(name) = &func_expr.kind {
             if super::builtins::extra_builtin_arity(name).is_some() && !matches!(self.lookup(name), Some(_)) {
@@ -700,20 +707,8 @@ impl<'m> FuncCtx<'m> {
                         return Ok(Val::Local(res));
                     }
                 }
-                // x86 SIMD vector intrinsics — scalar-emulated over the byte/lane
-                // aggregate that a `vector_size` type lowers to.
-                "__builtin_ia32_pmovmskb128" | "__builtin_ia32_pmovmskb256" => {
-                    if let [v] = args {
-                        let n = if name.ends_with("256") { 32 } else { 16 };
-                        return self.lower_vec_pmovmskb(v, n);
-                    }
-                }
-                "__builtin_ia32_pcmpeqb128" | "__builtin_ia32_pcmpeqb256" => {
-                    if let [a, b] = args {
-                        let n = if name.ends_with("256") { 32 } else { 16 };
-                        return self.lower_vec_pcmpeqb(a, b, n);
-                    }
-                }
+                // x86 SIMD intrinsics not yet in `ia32.rs`, scalar-emulated over
+                // the byte/lane aggregate that a `vector_size` type lowers to.
                 "__builtin_ia32_pshufb128" => {
                     if let [a, b] = args { return self.lower_vec_pshufb(a, b, 16); }
                 }

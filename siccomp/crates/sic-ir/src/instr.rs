@@ -36,6 +36,80 @@ pub enum CmpOp {
     FOEq, FONe, FOLt, FOLe, FOGt, FOGe,
 }
 
+/// Float vector comparisons (lanes are all ones when true): ordered (false
+/// when either side is NaN) and unordered (true when either is) forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FCmp {
+    Eq, Ne, Lt, Le, Gt, Ge, Ord,
+    UEq, UNe, ULt, ULe, UGt, UGe, Uno,
+}
+
+/// The operations of [`Instr::Simd`]. Lane-wise unless noted; `a`, `b`, `c`
+/// are the operands in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimdOp {
+    /// Integer lanes: wrapping `a + b`, `a - b`, low half of `a * b`.
+    Add, Sub, Mul,
+    /// Bitwise; `AndNot` is `a & !b`.
+    And, Or, Xor, AndNot,
+    /// Saturating add/sub, signed and unsigned.
+    SAddSat, UAddSat, SSubSat, USubSat,
+    SMin, SMax, UMin, UMax,
+    /// Unsigned `(a + b + 1) >> 1`.
+    AvgRound,
+    /// High half of the full product, signed / unsigned.
+    SMulHi, UMulHi,
+    /// i16 lanes: `(a * b + 0x4000) >> 15`, saturated.
+    MulHrs,
+    FAdd, FSub, FMul, FDiv,
+    /// x86 `min`/`max`: `a < b ? a : b` / `a > b ? a : b`, so `b` when either
+    /// is NaN or both are zero.
+    FMin, FMax,
+    /// Adjacent pairs summed: `[a0+a1, a2+a3, …, b0+b1, b2+b3, …]`.
+    AddPairwise,
+    Abs, Neg, Not, Popcnt,
+    FSqrt, FAbs, FNeg, FNearest, FFloor, FCeil, FTrunc,
+    /// `a` shifted by the scalar `b` (less than the lane width).
+    Shl, LShr, AShr,
+    /// Lanes all ones where the comparison holds; `ty` is the integer vector
+    /// of the same lane width.
+    ICmp(CmpOp),
+    FCmp(FCmp),
+    /// The low / high half of `a`'s lanes widened to twice the width.
+    SWidenLow, SWidenHigh, UWidenLow, UWidenHigh,
+    /// `a` then `b` narrowed to half the lane width with saturation: signed to
+    /// signed / signed to unsigned.
+    SNarrow, UNarrow,
+    /// Integer lanes to float lanes of the same width.
+    SIToFP,
+    /// Float lanes to integers of the same width, truncating; NaN and
+    /// out-of-range lanes give the minimum integer (x86 `cvttps2dq`).
+    FPToSI,
+    /// The low two f32 lanes to f64, and f64 lanes to f32 (high lanes zero).
+    FPromoteLow, FDemote,
+    /// Bytes of `a` (0..16) and `b` (16..32) picked by the constant indices.
+    Shuffle(Box<[u8; 16]>),
+    /// Bytes of `a` picked by the byte lanes of `b`; an index of 16 or more
+    /// gives zero.
+    Swizzle,
+    /// The scalar `a` in every lane.
+    Splat,
+    /// Lane `n` of `a` as a scalar of the lane type.
+    Extract(u8),
+    /// `a` with lane `n` replaced by the scalar `b`.
+    Insert(u8),
+    /// Bits of `b` where `a` has ones, else bits of `c`.
+    Select,
+    /// The same 128 bits as `ty`.
+    Bitcast,
+    /// `a * b + c` with one rounding.
+    Fma,
+    /// The high bit of each lane of `a`, packed into an i32.
+    MoveMask,
+    /// The constant 16 bytes, as `ty`.
+    Const(Box<[u8; 16]>),
+}
+
 /// Type conversion operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastOp {
@@ -125,6 +199,13 @@ pub enum Instr {
     /// of the vectorized byte-predicate count (see `try_vectorize_predcount`).
     VecMoveMask { dest: ValId, val: Val, ty: Type },
 
+    /// A portable operation on 128-bit vectors (`Type::simd128`); see
+    /// [`SimdOp`]. `arg_ty` is the type of the vector operands (the lanes the
+    /// op reads), `ty` the result's. Scalar operands (shift counts, inserted or
+    /// splatted lanes) are typed by their own value. x86 SIMD builtins lower to
+    /// sequences of these, a 256-bit one as two halves.
+    Simd { dest: ValId, op: SimdOp, args: Vec<Val>, arg_ty: Type, ty: Type },
+
     /// MemCopy (used for struct assignments).
     MemCopy { dst: Val, src: Val, size: u64, align: u64 },
 
@@ -183,6 +264,7 @@ impl Instr {
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
             | Instr::VecMoveMask { val, .. } => f(val),
+            Instr::Simd { args, .. } => { for a in args { f(a); } }
             Instr::Call { args, .. } => { for a in args { f(a); } }
             Instr::CallIndirect { fptr, args, .. } => { f(fptr); for a in args { f(a); } }
             Instr::GetFieldPtr { base, .. } => f(base),
@@ -211,6 +293,7 @@ impl Instr {
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
             | Instr::VecMoveMask { val, .. } => f(val),
+            Instr::Simd { args, .. } => { for a in args { f(a); } }
             Instr::Call { args, .. } => { for a in args { f(a); } }
             Instr::CallIndirect { fptr, args, .. } => { f(fptr); for a in args { f(a); } }
             Instr::GetFieldPtr { base, .. } => f(base),
@@ -238,6 +321,7 @@ impl Instr {
             | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
             | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. }
             | Instr::BSwap { dest, .. } | Instr::VecMoveMask { dest, .. } | Instr::VaArg { dest, .. }
+            | Instr::Simd { dest, .. }
             | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. }
             | Instr::AtomicCas { dest, .. }
             | Instr::ReturnAddress { dest } | Instr::FrameAddress { dest } => Some(*dest),
@@ -257,7 +341,7 @@ impl Instr {
             Instr::BinOp { .. } | Instr::UnaryOp { .. } | Instr::Cmp { .. }
             | Instr::Cast { .. } | Instr::BSwap { .. } | Instr::GetFieldPtr { .. }
             | Instr::GetElemPtr { .. } | Instr::PtrOffset { .. } | Instr::Select { .. }
-            | Instr::VecMoveMask { .. }
+            | Instr::VecMoveMask { .. } | Instr::Simd { .. }
             | Instr::LoadReadonly { .. })
     }
 }

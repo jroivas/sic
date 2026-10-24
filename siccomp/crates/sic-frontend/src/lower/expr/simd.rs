@@ -142,42 +142,6 @@ impl<'m> FuncCtx<'m> {
         Ok(rp_out)
     }
 
-    /// `__builtin_ia32_pmovmskb128/256`: pack the high bit of each byte into an int.
-    pub(crate) fn lower_vec_pmovmskb(&mut self, arg: &Expr, n: usize) -> Result<Val> {
-        let vp = self.lower_aggregate_ptr(arg)?;
-        let u8t = Type::u8();
-        let i32t = Type::i32();
-        let mut mask = Constant::int(0);
-        for i in 0..n {
-            let b = self.vec_load(&vp, i as i64, u8t.clone());
-            let b32 = self.coerce(b, &i32t)?;
-            let sh = self.vec_bin(BinOp::LShr, b32, Constant::int(7), i32t.clone());
-            let bit = self.vec_bin(BinOp::And, sh, Constant::int(1), i32t.clone());
-            let shifted = self.vec_bin(BinOp::Shl, bit, Constant::int(i as i64), i32t.clone());
-            mask = self.vec_bin(BinOp::Or, mask, shifted, i32t.clone());
-        }
-        Ok(mask)
-    }
-
-    /// `__builtin_ia32_pcmpeqb128/256`: per-byte equality → 0xFF/0x00 lanes.
-    pub(crate) fn lower_vec_pcmpeqb(&mut self, a: &Expr, b: &Expr, n: usize) -> Result<Val> {
-        let ap = self.lower_aggregate_ptr(a)?;
-        let bp = self.lower_aggregate_ptr(b)?;
-        let vty = self.infer_expr_type(a)?;
-        let rp = self.vec_alloca(vty);
-        let u8t = Type::u8();
-        for i in 0..n {
-            let x = self.vec_load(&ap, i as i64, u8t.clone());
-            let y = self.vec_load(&bp, i as i64, u8t.clone());
-            let eq = self.alloc_val();
-            self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: x, rhs: y, ty: u8t.clone() });
-            let val = self.alloc_val();
-            self.push_instr(Instr::Select { dest: val, cond: Val::Local(eq), on_true: Constant::int(0xFF), on_false: Constant::int(0), ty: u8t.clone() });
-            self.vec_store(&rp, i as i64, Val::Local(val));
-        }
-        Ok(rp)
-    }
-
     /// `__builtin_ia32_pshufb128`: byte shuffle `r[i] = (b[i]&0x80) ? 0 : a[b[i]&0x0F]`.
     pub(crate) fn lower_vec_pshufb(&mut self, a: &Expr, b: &Expr, n: usize) -> Result<Val> {
         let ap = self.lower_aggregate_ptr(a)?;

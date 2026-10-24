@@ -356,6 +356,7 @@ impl<'m> FuncCtx<'m> {
     /// The result type of the builtin `name` called with `args` (as GCC types
     /// it), or `None` when it is none sic lowers itself.
     pub(crate) fn builtin_result_type(&self, name: &str, args: &[Expr]) -> Option<Type> {
+        if let Some(t) = self.ia32_result_type(name, args) { return Some(t); }
         let arg = |i: usize| args.get(i).and_then(|a| self.infer_expr_type(a).ok());
         let pointee = || match arg(0) { Some(Type::Pointer(t)) => Some(crate::lower::types::resolve_aggregate(&t, &self.lowerer.struct_types)), _ => None };
         let u = |bits| Type::Int { bits, signed: false };
@@ -895,7 +896,7 @@ impl FuncCtx<'_> {
     /// The value of an integer constant, also through the widening casts
     /// that type it (`sizeof` is a `size_t` zero-extension of its constant),
     /// when they were just emitted in the current block.
-    fn int_const_of(&mut self, v: &Val) -> Option<u64> {
+    pub(crate) fn int_const_of(&mut self, v: &Val) -> Option<u64> {
         match v {
             Val::Const(Constant::Int(n)) => Some(*n as u64),
             Val::Const(Constant::UInt(n)) => Some(*n),

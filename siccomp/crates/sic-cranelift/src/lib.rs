@@ -1,5 +1,6 @@
 mod types;
 mod func;
+mod simd;
 mod dwarf;
 pub mod abi;
 

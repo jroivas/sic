@@ -848,6 +848,16 @@ fn emit_instr(
             val_map.insert(dest.0, result);
         }
 
+        Instr::Simd { dest, op, args, arg_ty, ty } => {
+            let vals: Vec<cir::Value> = args.iter().enumerate().map(|(i, a)| {
+                let t = super::simd::operand_type(op, i, arg_ty, ty);
+                let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, t);
+                if t.is_vector() { super::simd::bitcast(builder, v, t) } else { v }
+            }).collect();
+            let v = super::simd::emit(builder, op, &vals, arg_ty, ty);
+            val_map.insert(dest.0, v);
+        }
+
         Instr::VecMoveMask { dest, val, ty } => {
             // Extract each lane's high bit into a scalar bitmask (x86 `pmovmskb`).
             // `val` is a SIMD vector; feed it straight through (the scalar path
@@ -1174,6 +1184,7 @@ fn coerce_scalar(builder: &mut FunctionBuilder<'_>, v: cir::Value, to: cir::Type
     } else if from.is_float() && to.is_float() {
         if from.bits() < to.bits() { builder.ins().fpromote(to, v) } else { builder.ins().fdemote(to, v) }
     } else if from.bits() == to.bits() {
+        if from.is_vector() && to.is_vector() { return super::simd::bitcast(builder, v, to); }
         builder.ins().bitcast(to, MemFlagsData::new(), v)
     } else {
         v // width+category mismatch — not produced for a promoted scalar local
