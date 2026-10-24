@@ -878,9 +878,16 @@ impl Lowerer {
     /// and Clang declare it themselves, so declare it from its prototype
     /// ([`libc_builtins::LIBC_PROTOTYPES`]). `None` when `name` is not one.
     pub(crate) fn implicit_libc_decl(&mut self, name: &str) -> Option<FuncRef> {
+        if !libc_builtins::LIBC_PROTOTYPES.iter().any(|(n, _)| *n == name) { return None; }
+        if let Some(f) = self.module.func_ref_by_name(name) { return Some(f); }
+        let sig = self.libc_proto_sig(name)?;
+        Some(self.module.add_extern(ExternFunc { name: name.to_string(), sig }))
+    }
+
+    /// The signature of the libc function `name` from its builtin prototype.
+    pub(crate) fn libc_proto_sig(&self, name: &str) -> Option<FunctionType> {
         use crate::{lexer::Lexer, parser::Parser};
         let (_, proto) = libc_builtins::LIBC_PROTOTYPES.iter().find(|(n, _)| *n == name)?;
-        if let Some(f) = self.module.func_ref_by_name(name) { return Some(f); }
         let tokens = Lexer::new_lang(proto, std::collections::HashSet::new(), crate::Lang::C).tokenize().ok()?;
         let tu = Parser::new_lang(tokens, String::new(), crate::Lang::C).parse().ok()?;
         let Some(Decl::Func { ret_ty, params, variadic, .. }) = tu.decls.first() else { return None };
@@ -888,8 +895,7 @@ impl Lowerer {
         let ps: Vec<Type> = params.iter()
             .map(|p| lower_param_type(&p.ty, &self.struct_types, self.ptr_size))
             .collect::<Result<_>>().ok()?;
-        let sig = build_fn_sig(ret, ps, *variadic, self.ptr_size);
-        Some(self.module.add_extern(ExternFunc { name: name.to_string(), sig }))
+        Some(build_fn_sig(ret, ps, *variadic, self.ptr_size))
     }
 
     /// sic generic functions (sic.md §"Generics"): re-parse a generic-function

@@ -3476,6 +3476,8 @@ impl Parser {
                     "__builtin_choose_expr"  => return self.parse_choose_expr(sp),
                     "__builtin_types_compatible_p"
                                              => return self.parse_types_compatible(sp),
+                    "__builtin_convertvector" if self.at(TokenKind::LParen)
+                                             => return self.parse_convertvector(sp),
                     // sic RTTI (sic.md §"RTTI"): `typeid(x)` / `type(x)` → a `type`
                     // value. The argument may be a type (`typeid(int)`) or an
                     // expression (`type(x)`), like `sizeof`.
@@ -3571,6 +3573,20 @@ impl Parser {
         let else_ = Box::new(self.parse_assign_expr()?);
         self.expect(TokenKind::RParen)?;
         Ok(Expr::new(ExprKind::ChooseExpr { cond, then, else_ }, sp))
+    }
+
+    /// `__builtin_convertvector(expr, type)`: a call whose second argument is
+    /// the type (as `type(T)` carries one).
+    fn parse_convertvector(&mut self, sp: Span) -> Result<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let e = self.parse_assign_expr()?;
+        self.expect(TokenKind::Comma)?;
+        let tsp = self.span();
+        let (b, _) = self.parse_decl_specifiers()?;
+        let (_, t) = self.parse_declarator(b)?;
+        self.expect(TokenKind::RParen)?;
+        let func = Expr::new(ExprKind::Ident("__builtin_convertvector".to_string()), sp.clone());
+        Ok(Expr::new(ExprKind::Call { func: Box::new(func), args: vec![e, Expr::new(ExprKind::TypeIdOf(t), tsp)] }, sp))
     }
 
     /// `__builtin_types_compatible_p(type1, type2)`.

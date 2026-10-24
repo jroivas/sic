@@ -373,6 +373,13 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
+                // A builtin sic lowers itself has the result type GCC gives it
+                // (`c ? __builtin_bswap64(v) : 0` was cut to 32 bits).
+                if let ExprKind::Ident(name) = &func.kind {
+                    if !matches!(self.lookup(name), Some(_)) {
+                        if let Some(t) = self.builtin_result_type(name, args) { return Ok(t); }
+                    }
+                }
                 // A Rust generic's associated function resolves to its instance
                 // (`m::Map<i64, string>::new()`), as `lower_call` does.
                 if let ExprKind::TypeMember { ty, member } = &func.kind {

@@ -23,6 +23,7 @@ pub(crate) fn extra_builtin_names() -> Vec<String> {
         "__builtin_powil", "__builtin_iseqsig", "__sync_swap", "__builtin_is_aligned", "__builtin_align_up",
         "__builtin_align_down", "__builtin_memcpy_inline", "__builtin_memset_inline",
         "__atomic_fetch_nand", "__atomic_nand_fetch", "__sync_fetch_and_nand", "__sync_nand_and_fetch",
+        "__builtin_shufflevector", "__builtin_shuffle", "__builtin_convertvector",
     ].iter().map(|s| s.to_string()).collect();
     for s in ["s", "u"] { for o in ["add", "sub", "mul"] { for w in ["", "l", "ll"] {
         v.push(format!("__builtin_{}{}{}_overflow", s, o, w));
@@ -65,6 +66,9 @@ pub(crate) fn extra_builtin_arity(name: &str) -> Option<(usize, usize)> {
         | "__builtin_iseqsig" | "__sync_swap" | "__builtin_is_aligned" | "__builtin_align_up"
         | "__builtin_align_down" => (2, 2),
         "__builtin_memcpy_inline" | "__builtin_memset_inline" => (3, 3),
+        "__builtin_shufflevector" => (2, usize::MAX),
+        "__builtin_shuffle" => (2, 3),
+        "__builtin_convertvector" => (2, 2),
         "__atomic_fetch_nand" | "__atomic_nand_fetch" => (3, 3),
         "__sync_fetch_and_nand" | "__sync_nand_and_fetch" => (2, usize::MAX),
         _ => return None,
@@ -334,6 +338,9 @@ impl<'m> FuncCtx<'m> {
                     } else { self.coerce(r, &xt)? }
                 }
             }
+            "__builtin_shufflevector" => return self.lower_shufflevector(args, sp).map(Some),
+            "__builtin_shuffle" => return self.lower_shuffle(args, sp).map(Some),
+            "__builtin_convertvector" => return self.lower_convertvector(args, sp).map(Some),
             // Clang's always-inlined copies: the library calls.
             "__builtin_memcpy_inline" | "__builtin_memset_inline" => {
                 let libc = if name == "__builtin_memcpy_inline" { "memcpy" } else { "memset" };
@@ -351,6 +358,225 @@ impl<'m> FuncCtx<'m> {
             }
             _ => return Ok(None),
         }))
+    }
+
+    /// The result type of the builtin `name` called with `args` (as GCC types
+    /// it), or `None` when it is none sic lowers itself.
+    pub(crate) fn builtin_result_type(&self, name: &str, args: &[Expr]) -> Option<Type> {
+        let arg = |i: usize| args.get(i).and_then(|a| self.infer_expr_type(a).ok());
+        let pointee = || match arg(0) { Some(Type::Pointer(t)) => Some(crate::lower::types::resolve_aggregate(&t, &self.lowerer.struct_types)), _ => None };
+        let u = |bits| Type::Int { bits, signed: false };
+        let bits_of = |w: &str| w.parse::<u32>().ok();
+        if typed_overflow(name).is_some() { return Some(Type::Bool); }
+        if let Some(rest) = name.strip_prefix("__builtin_stdc_") {
+            return match rest {
+                "bit_floor" | "bit_ceil" | "rotate_left" | "rotate_right" => arg(0),
+                "has_single_bit" => Some(Type::Bool),
+                _ if STDC_BIT.contains(&rest) => Some(Type::u32()),
+                _ => None,
+            };
+        }
+        for p in ["__builtin_bitreverse", "__builtin_rotateleft", "__builtin_rotateright"] {
+            if let Some(b) = name.strip_prefix(p).and_then(bits_of) { return Some(u(b)); }
+        }
+        if let Some(rest) = name.strip_prefix("__builtin_") {
+            for base in ["clz", "ctz", "popcount", "ffs", "clrsb", "parity"] {
+                if rest.strip_prefix(base).map_or(false, |s| matches!(s, "" | "l" | "ll" | "g")) { return Some(Type::i32()); }
+            }
+        }
+        if super::atomic_rmw_op(name).is_some() { return pointee(); }
+        let f80 = Type::Float80;
+        Some(match name {
+            "__builtin_bswap16" => u(16), "__builtin_bswap32" => u(32), "__builtin_bswap64" => u(64),
+            "__builtin_bswap128" => u(128),
+            "__builtin_expect" | "__builtin_expect_with_probability" => Type::i64(),
+            "__builtin_object_size" | "__builtin_dynamic_object_size" => u(self.ptr_size() * 8),
+            "__builtin_alloca" | "__builtin_alloca_with_align" | "__builtin_frame_address"
+            | "__builtin_return_address" | "__builtin_extract_return_addr" | "__builtin_frob_return_addr"
+            | "__builtin_dwarf_cfa" | "__builtin_assume_aligned" => Type::void_ptr(),
+            "__builtin_inf" | "__builtin_huge_val" | "__builtin_nan" | "__builtin_nans"
+            | "__builtin_powi" => Type::Float64,
+            "__builtin_inff" | "__builtin_huge_valf" | "__builtin_nanf" | "__builtin_nansf"
+            | "__builtin_powif" => Type::Float32,
+            "__builtin_infl" | "__builtin_huge_vall" | "__builtin_nanl" | "__builtin_nansl"
+            | "__builtin_powil" => f80,
+            "__builtin_add_overflow" | "__builtin_sub_overflow" | "__builtin_mul_overflow"
+            | "__atomic_compare_exchange" | "__atomic_compare_exchange_n" | "__atomic_test_and_set"
+            | "__atomic_always_lock_free" | "__atomic_is_lock_free" | "__builtin_is_aligned" => Type::Bool,
+            "__sync_bool_compare_and_swap" => Type::Bool,
+            "__builtin_addc" | "__builtin_subc" => u(32),
+            "__builtin_addcl" | "__builtin_subcl" | "__builtin_addcll" | "__builtin_subcll" => u(64),
+            "__atomic_load_n" | "__atomic_exchange_n" | "__sync_val_compare_and_swap"
+            | "__sync_lock_test_and_set" | "__sync_swap" | "__atomic_fetch_nand" | "__atomic_nand_fetch"
+            | "__sync_fetch_and_nand" | "__sync_nand_and_fetch" => return pointee(),
+            "__atomic_load" | "__atomic_store" | "__atomic_store_n" | "__atomic_exchange"
+            | "__atomic_clear" | "__atomic_thread_fence" | "__atomic_signal_fence" | "__sync_synchronize"
+            | "__sync_lock_release" | "__builtin_prefetch" | "__builtin_trap" | "__builtin_unreachable"
+            | "__builtin_assume" | "__builtin___clear_cache" | "__builtin_cpu_init"
+            | "__builtin_memcpy_inline" | "__builtin_memset_inline" => Type::Void,
+            "__builtin_unpredictable" | "__builtin_speculation_safe_value" | "__builtin_align_up"
+            | "__builtin_align_down" => return arg(0),
+            "__builtin_FILE" | "__builtin_FUNCTION" => Type::char_ptr(),
+            "__builtin_constant_p" | "__builtin_LINE" | "__builtin_COLUMN" | "__builtin_classify_type"
+            | "__builtin_cpu_supports" | "__builtin_cpu_is" | "__builtin_isnan" | "__builtin_isinf"
+            | "__builtin_isinf_sign" | "__builtin_isfinite" | "__builtin_isnormal" | "__builtin_signbit"
+            | "__builtin_signbitf" | "__builtin_signbitl" | "__builtin_fpclassify" | "__builtin_isgreater"
+            | "__builtin_isgreaterequal" | "__builtin_isless" | "__builtin_islessequal"
+            | "__builtin_islessgreater" | "__builtin_isunordered" | "__builtin_issignaling"
+            | "__builtin_iseqsig" | "__builtin_isnanf" | "__builtin_isnanl" | "__builtin_isinff"
+            | "__builtin_isinfl" | "__builtin_finite" | "__builtin_finitef" | "__builtin_finitel" => Type::i32(),
+            "__builtin_shufflevector" => return self.shufflevector_type(args),
+            "__builtin_shuffle" | "__builtin_convertvector" if name == "__builtin_shuffle" => return arg(0),
+            "__builtin_convertvector" => return match args.get(1).map(|a| &a.kind) {
+                Some(ExprKind::TypeIdOf(qt)) => self.lower_type(qt).ok(),
+                _ => None,
+            },
+            _ => {
+                // `__builtin_<libc function>`: the function's return type.
+                let libc = name.strip_prefix("__builtin_")?;
+                if let Some(super::super::func::LookupResult::Func(f)) = self.lookup(libc) {
+                    return Some(self.lowerer.module.func_sig(f).ret.clone());
+                }
+                return self.lowerer.libc_proto_sig(libc).map(|s| s.ret);
+            }
+        })
+    }
+
+    /// `__builtin_shufflevector(a, b, i…)`: a vector of `a`'s element type with
+    /// one lane per index.
+    fn shufflevector_type(&self, args: &[Expr]) -> Option<Type> {
+        match self.infer_expr_type(args.first()?).ok()? {
+            Type::Array { elem, .. } => Some(Type::Array { elem, len: args.len().saturating_sub(2) }),
+            _ => None,
+        }
+    }
+
+    /// The element type and lane count of a vector operand.
+    fn vector_lanes(&self, e: &Expr, name: &str, sp: &crate::lexer::Span) -> Result<(Type, usize)> {
+        match self.infer_expr_type(e)? {
+            Type::Array { elem, len } => Ok(((*elem).clone(), len)),
+            _ => Err(CompileError::at(format!("`{}` needs a vector operand", name), sp.file.clone(), sp.line, sp.col)),
+        }
+    }
+
+    /// Lane `i` (a value) of the vector at `p`.
+    fn lane_ptr(&mut self, p: &Val, i: Val, esz: u64) -> Val {
+        let off = self.bin(BinOp::Mul, i, Constant::int(esz as i64), &Type::i64());
+        let d = self.alloc_val();
+        self.push_instr(Instr::PtrOffset { dest: d, base: p.clone(), offset: off });
+        Val::Local(d)
+    }
+
+    /// `__builtin_shufflevector(a, b, i0, i1, …)` (Clang): lane `k` of the result
+    /// is lane `ik` of `a ++ b` (constant indices; -1 leaves the lane zero).
+    fn lower_shufflevector(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let name = "__builtin_shufflevector";
+        let (elem, n) = self.vector_lanes(&args[0], name, sp)?;
+        let (_, nb) = self.vector_lanes(&args[1], name, sp)?;
+        let esz = elem.size_of(self.ptr_size());
+        let ap = self.lower_aggregate_ptr(&args[0])?;
+        let bp = self.lower_aggregate_ptr(&args[1])?;
+        let rty = Type::Array { elem: Box::new(elem.clone()), len: args.len() - 2 };
+        let r = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: r, ty: rty.clone(), align: None });
+        let r = Val::Local(r);
+        for (k, ie) in args[2..].iter().enumerate() {
+            let Some(i) = self.lowerer.eval_const_int(ie) else {
+                return Err(CompileError::at(format!("`{}`: index {} is not a constant", name, k), sp.file.clone(), sp.line, sp.col));
+            };
+            if i < -1 || i >= (n + nb) as i64 {
+                return Err(CompileError::at(format!("`{}`: index {} is out of range", name, i), sp.file.clone(), sp.line, sp.col));
+            }
+            let v = if i < 0 { self.coerce(Constant::zero(), &elem)? } else {
+                let (src, j) = if (i as usize) < n { (&ap, i) } else { (&bp, i - n as i64) };
+                let p = self.lane_ptr(src, Constant::int(j), esz);
+                let d = self.alloc_val();
+                self.push_instr(Instr::Load { dest: d, ptr: p, ty: elem.clone() });
+                Val::Local(d)
+            };
+            let dst = self.lane_ptr(&r, Constant::int(k as i64), esz);
+            self.push_instr(Instr::Store { val: v, ptr: dst });
+        }
+        self.val_types.insert(match &r { Val::Local(id) => id.0, _ => 0 }, rty);
+        Ok(r)
+    }
+
+    /// `__builtin_shuffle(a, mask)` / `(a, b, mask)` (GCC): lane `k` is lane
+    /// `mask[k]` of `a` (or of `a ++ b`), the index taken modulo the lane count.
+    fn lower_shuffle(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let name = "__builtin_shuffle";
+        let (elem, n) = self.vector_lanes(&args[0], name, sp)?;
+        let mask_e = args.last().unwrap();
+        let (melem, mn) = self.vector_lanes(mask_e, name, sp)?;
+        if mn != n || !n.is_power_of_two() {
+            return Err(CompileError::at(format!("`{}`: the mask needs one lane per element", name), sp.file.clone(), sp.line, sp.col));
+        }
+        let vty = self.infer_expr_type(&args[0])?;
+        let esz = elem.size_of(self.ptr_size());
+        let msz = melem.size_of(self.ptr_size());
+        let ap = self.lower_aggregate_ptr(&args[0])?;
+        let bp = if args.len() == 3 { self.lower_aggregate_ptr(&args[1])? } else { ap.clone() };
+        let mp = self.lower_aggregate_ptr(mask_e)?;
+        let r = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: r, ty: vty.clone(), align: None });
+        let r = Val::Local(r);
+        let i64t = Type::i64();
+        for k in 0..n {
+            let mptr = self.lane_ptr(&mp, Constant::int(k as i64), msz);
+            let m = self.alloc_val();
+            self.push_instr(Instr::Load { dest: m, ptr: mptr, ty: melem.clone() });
+            let m = self.coerce(Val::Local(m), &i64t)?;
+            let j = self.bin(BinOp::And, m.clone(), Constant::int(n as i64 - 1), &i64t);
+            let pa = self.lane_ptr(&ap, j.clone(), esz);
+            let va = self.alloc_val();
+            self.push_instr(Instr::Load { dest: va, ptr: pa, ty: elem.clone() });
+            let v = if args.len() == 3 {
+                let pb = self.lane_ptr(&bp, j, esz);
+                let vb = self.alloc_val();
+                self.push_instr(Instr::Load { dest: vb, ptr: pb, ty: elem.clone() });
+                let hi = self.bin(BinOp::And, m, Constant::int(n as i64), &i64t);
+                let from_b = self.cmp(CmpOp::INe, hi, Constant::int(0), &i64t);
+                self.select(from_b, Val::Local(vb), Val::Local(va), &elem)
+            } else { Val::Local(va) };
+            let dst = self.lane_ptr(&r, Constant::int(k as i64), esz);
+            self.push_instr(Instr::Store { val: v, ptr: dst });
+        }
+        self.val_types.insert(match &r { Val::Local(id) => id.0, _ => 0 }, vty);
+        Ok(r)
+    }
+
+    /// `__builtin_convertvector(v, T)`: each lane converted as a scalar
+    /// conversion to `T`'s element type (the lane counts match).
+    fn lower_convertvector(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let name = "__builtin_convertvector";
+        let (elem, n) = self.vector_lanes(&args[0], name, sp)?;
+        let ExprKind::TypeIdOf(qt) = &args[1].kind else {
+            return Err(CompileError::at(format!("`{}` needs a vector type", name), sp.file.clone(), sp.line, sp.col));
+        };
+        let tty = self.lower_type(qt)?;
+        let Type::Array { elem: telem, len } = &tty else {
+            return Err(CompileError::at(format!("`{}` needs a vector type", name), sp.file.clone(), sp.line, sp.col));
+        };
+        if *len != n {
+            return Err(CompileError::at(format!("`{}`: {} lanes cannot convert to {}", name, n, len), sp.file.clone(), sp.line, sp.col));
+        }
+        let telem = (**telem).clone();
+        let (esz, tsz) = (elem.size_of(self.ptr_size()), telem.size_of(self.ptr_size()));
+        let vp = self.lower_aggregate_ptr(&args[0])?;
+        let r = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: r, ty: tty.clone(), align: None });
+        let r = Val::Local(r);
+        for k in 0..n {
+            let p = self.lane_ptr(&vp, Constant::int(k as i64), esz);
+            let x = self.alloc_val();
+            self.push_instr(Instr::Load { dest: x, ptr: p, ty: elem.clone() });
+            self.val_types.insert(x.0, elem.clone());
+            let y = self.coerce(Val::Local(x), &telem)?;
+            let dst = self.lane_ptr(&r, Constant::int(k as i64), tsz);
+            self.push_instr(Instr::Store { val: y, ptr: dst });
+        }
+        self.val_types.insert(match &r { Val::Local(id) => id.0, _ => 0 }, tty);
+        Ok(r)
     }
 
     fn bin(&mut self, op: BinOp, a: Val, b: Val, ty: &Type) -> Val {
