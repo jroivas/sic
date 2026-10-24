@@ -1452,6 +1452,10 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        if let ExprKind::Ident(callee) = &func_expr.kind {
+            if let Some(v) = self.expand_mem_call(callee, fref, &arg_vals, &ret_ty)? { return Ok(v); }
+        }
+
         if is_void {
             self.push_instr(Instr::Call { dest: None, func: fref, args: arg_vals, ret_ty });
             Ok(Constant::zero())

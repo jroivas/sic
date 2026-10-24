@@ -58,6 +58,10 @@ pub struct Lowerer {
     /// loop-carried dependency is collapsed to its last iteration. Off at `-O0/1`,
     /// on at `-O2+`; `-fno-loop-delete` forces it off, `-floop-delete` on.
     pub loop_delete: bool,
+    /// `memcpy`/`memmove`/`memset` keep their standard meaning, so small
+    /// constant-size calls are expanded inline. `-fno-builtin` and
+    /// `-ffreestanding` turn it off for the plain names.
+    pub builtin_mem: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -325,6 +329,7 @@ impl Lowerer {
             struct_order_default: crate::ast::StructOrder::Default,
             vectorize: true,
             loop_delete: false,
+            builtin_mem: true,
             struct_order_seed: 0,
             emit_inline: HashSet::new(),
             global_types: HashMap::new(),

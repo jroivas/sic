@@ -1008,6 +1008,8 @@ fn lower_tu_once(
     // Auto-vectorization is on by default; `-fno-vectorize` disables it (e.g. to
     // keep C-mode codegen scalar while validating SQLite/QEMU).
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled));
+    lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
+        && !matches!(args.f_options.get("freestanding"), Some(FOption::Enabled));
     // Dead counted-loop elimination: default on at -O2+, overridable via -f.
     {
         let o = args.opt.as_str();

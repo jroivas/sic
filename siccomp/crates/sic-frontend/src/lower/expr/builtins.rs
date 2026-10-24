@@ -341,19 +341,12 @@ impl<'m> FuncCtx<'m> {
             "__builtin_shufflevector" => return self.lower_shufflevector(args, sp).map(Some),
             "__builtin_shuffle" => return self.lower_shuffle(args, sp).map(Some),
             "__builtin_convertvector" => return self.lower_convertvector(args, sp).map(Some),
-            // Clang's always-inlined copies: the library calls.
+            // Clang's always-inlined copies: the builtin copy, expanded inline
+            // up to 64 bytes like any constant-size one.
             "__builtin_memcpy_inline" | "__builtin_memset_inline" => {
-                let libc = if name == "__builtin_memcpy_inline" { "memcpy" } else { "memset" };
-                let f = self.lowerer.module.func_ref_by_name(libc)
-                    .or_else(|| self.lowerer.implicit_libc_decl(libc))
-                    .ok_or_else(|| err(format!("`{}` is not available", libc)))?;
-                let sig = self.lowerer.module.func_sig(f).clone();
-                let mut vals = Vec::new();
-                for (a, pt) in args.iter().zip(sig.params.iter()) {
-                    let v = self.lower_expr(a)?;
-                    vals.push(self.coerce(v, pt)?);
-                }
-                self.push_instr(Instr::Call { dest: None, func: f, args: vals, ret_ty: sig.ret.clone() });
+                let plain = if name == "__builtin_memcpy_inline" { "__builtin_memcpy" } else { "__builtin_memset" };
+                let callee = Expr { kind: ExprKind::Ident(plain.to_string()), span: sp.clone() };
+                self.lower_call(&callee, args, sp)?;
                 Constant::zero()
             }
             _ => return Ok(None),
@@ -868,5 +861,53 @@ impl<'m> FuncCtx<'m> {
         let result = self.bin(op, a.clone(), b.clone(), ty);
         self.push_instr(Instr::Store { val: result.clone(), ptr: res });
         Ok(self.emit_overflow_flag(op, &a, &b, &result, ty))
+    }
+}
+
+impl FuncCtx<'_> {
+    /// `memcpy`/`memmove`/`memset` (plain or `__builtin_`) with a constant size
+    /// of at most 64 bytes become the IR's `MemCopy`/`MemSet`, which the backend
+    /// expands to loads and stores, as GCC and Clang do. ggml reads every f16
+    /// through `memcpy(&s, &f, 2)`; a call per element made its dot products
+    /// 25x slower. `callee` is the name as written, `args` the call's final,
+    /// converted arguments; returns the call's value (the destination) when it
+    /// was expanded. The plain names keep the library call under `-fno-builtin`.
+    pub(crate) fn expand_mem_call(&mut self, callee: &str, fref: FuncRef, args: &[Val], ret_ty: &Type) -> Result<Option<Val>> {
+        if !fref.is_extern() || args.len() != 3 { return Ok(None); }
+        let lib = self.lowerer.module.externs[fref.index()].name.clone();
+        let base = callee.strip_prefix("__builtin_");
+        if base.is_none() && !self.lowerer.builtin_mem { return Ok(None); }
+        if base.unwrap_or(callee) != lib || !matches!(lib.as_str(), "memcpy" | "memmove" | "memset") {
+            return Ok(None);
+        }
+        let Some(n) = self.int_const_of(&args[2]) else { return Ok(None) };
+        if n > 64 { return Ok(None); }
+        let dst = args[0].clone();
+        if lib == "memset" {
+            let byte = self.coerce(args[1].clone(), &Type::Int { bits: 8, signed: false })?;
+            self.push_instr(Instr::MemSet { dst: dst.clone(), val: byte, size: n, align: 1 });
+        } else {
+            self.push_instr(Instr::MemCopy { dst: dst.clone(), src: args[1].clone(), size: n, align: 1 });
+        }
+        Ok(Some(self.coerce(dst, ret_ty)?))
+    }
+
+    /// The value of an integer constant, also through the widening casts
+    /// that type it (`sizeof` is a `size_t` zero-extension of its constant),
+    /// when they were just emitted in the current block.
+    fn int_const_of(&mut self, v: &Val) -> Option<u64> {
+        match v {
+            Val::Const(Constant::Int(n)) => Some(*n as u64),
+            Val::Const(Constant::UInt(n)) => Some(*n),
+            Val::Local(id) => {
+                let id = *id;
+                let src = self.current_block_mut().instrs.iter().rev().find_map(|i| match i {
+                    Instr::Cast { dest, op: CastOp::ZExt | CastOp::SExt, val, .. } if *dest == id => Some(val.clone()),
+                    _ => None,
+                })?;
+                self.int_const_of(&src)
+            }
+            _ => None,
+        }
     }
 }

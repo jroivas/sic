@@ -806,16 +806,38 @@ fn emit_instr(
         Instr::MemCopy { dst, src, size, .. } => {
             let dv = rval(dst, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let sv = rval(src, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
-            let szv = builder.ins().iconst(ptr_ty, *size as i64);
-            builder.call_memcpy(target_config, dv, sv, szv);
+            if *size <= SMALL_MEM_OP {
+                // Every load before the first store: correct for overlapping
+                // ranges too (memmove), and the loads can issue together.
+                let pieces = small_mem_pieces(*size);
+                let vals: Vec<cir::Value> = pieces.iter()
+                    .map(|&(off, t)| builder.ins().load(t, MemFlagsData::new(), sv, off))
+                    .collect();
+                for (&(off, _), v) in pieces.iter().zip(vals) {
+                    builder.ins().store(MemFlagsData::new(), v, dv, off);
+                }
+            } else {
+                let szv = builder.ins().iconst(ptr_ty, *size as i64);
+                builder.call_memcpy(target_config, dv, sv, szv);
+            }
         }
 
         Instr::MemSet { dst, val, size, .. } => {
             let dv = rval(dst, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let vv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I8);
             let vb = coerce(vv, ct::I8, builder, ptr_ty);
-            let szv = builder.ins().iconst(ptr_ty, *size as i64);
-            builder.call_memset(target_config, dv, vb, szv);
+            if *size <= SMALL_MEM_OP {
+                // The byte repeated across a 64-bit word, narrowed per piece.
+                let wide = builder.ins().uextend(ct::I64, vb);
+                let word = builder.ins().imul_imm_u(wide, 0x0101_0101_0101_0101u64 as i64);
+                for (off, t) in small_mem_pieces(*size) {
+                    let v = if t == ct::I64 { word } else { builder.ins().ireduce(t, word) };
+                    builder.ins().store(MemFlagsData::new(), v, dv, off);
+                }
+            } else {
+                let szv = builder.ins().iconst(ptr_ty, *size as i64);
+                builder.call_memset(target_config, dv, vb, szv);
+            }
         }
 
         Instr::BSwap { dest, val, ty } => {
@@ -1401,4 +1423,23 @@ fn emit_cast(
         CastOp::FPExt   => builder.ins().fpromote(dst, val),
         CastOp::FPTrunc => builder.ins().fdemote(dst, val),
     }
+}
+
+/// Copies and fills up to this many bytes are expanded to loads and stores
+/// instead of calling `memcpy`/`memset` (as GCC and Clang do for small
+/// constant sizes).
+const SMALL_MEM_OP: u64 = 64;
+
+/// Split `size` bytes into (offset, integer type) pieces of 8, 4, 2 and 1
+/// bytes, largest first. The accesses carry no alignment promise.
+fn small_mem_pieces(size: u64) -> Vec<(i32, cir::Type)> {
+    let mut out = Vec::new();
+    let mut off = 0u64;
+    for (w, t) in [(8u64, ct::I64), (4, ct::I32), (2, ct::I16), (1, ct::I8)] {
+        while size - off >= w {
+            out.push((off as i32, t));
+            off += w;
+        }
+    }
+    out
 }
