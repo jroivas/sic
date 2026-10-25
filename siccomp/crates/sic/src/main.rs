@@ -34,7 +34,7 @@ enum FOption {
 }
 
 #[derive(ClapParser, Debug, Clone)]
-#[command(name = "sic", about = "SIC compiler (Rust/Cranelift)")]
+#[command(name = "sic", about = "SIC compiler (Rust/Cranelift)", args_override_self = true)]
 struct Args {
     /// Input files: C sources to compile and/or object files to link
     #[arg(value_name = "FILE")]
