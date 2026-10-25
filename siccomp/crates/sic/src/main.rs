@@ -1047,6 +1047,12 @@ fn lower_tu_once(
             Some(FOption::Disabled) => false,
             None => level2,
         };
+        // GCC's spelling: `-funroll-loops` / `-fno-unroll-loops`.
+        lowerer.unroll = match args.f_options.get("unroll-loops") {
+            Some(FOption::Enabled) | Some(FOption::Value(_)) => true,
+            Some(FOption::Disabled) => false,
+            None => level2,
+        };
     }
     lowerer.lower(tu).map_err(|e| format!("{}", e).into())
 }

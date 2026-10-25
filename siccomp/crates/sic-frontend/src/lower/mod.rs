@@ -2,6 +2,7 @@ pub(crate) mod types;
 mod expr;
 pub(crate) use expr::builtin_extra_names;
 mod func;
+mod unroll;
 mod borrowck;
 pub(crate) mod strict;
 mod ns_resolve;
@@ -58,6 +59,9 @@ pub struct Lowerer {
     /// loop-carried dependency is collapsed to its last iteration. Off at `-O0/1`,
     /// on at `-O2+`; `-fno-loop-delete` forces it off, `-floop-delete` on.
     pub loop_delete: bool,
+    /// Full unrolling of short constant-count loops (`unroll.rs`); -O2+,
+    /// `-fno-unroll-loops` turns it off.
+    pub unroll: bool,
     /// `memcpy`/`memmove`/`memset` keep their standard meaning, so small
     /// constant-size calls are expanded inline. `-fno-builtin` and
     /// `-ffreestanding` turn it off for the plain names.
@@ -329,6 +333,7 @@ impl Lowerer {
             struct_order_default: crate::ast::StructOrder::Default,
             vectorize: true,
             loop_delete: false,
+            unroll: false,
             builtin_mem: true,
             struct_order_seed: 0,
             emit_inline: HashSet::new(),

@@ -228,6 +228,9 @@ pub struct FuncCtx<'m> {
     pub func: *mut Function, // raw pointer to avoid lifetime issues during construction
     /// Local variable map: name → (type, alloca ValId)
     pub locals: Vec<HashMap<String, (Type, ValId)>>,
+    /// Counters of fully unrolled loops (`unroll.rs`): in each copy of the
+    /// body the name is that iteration's constant value.
+    pub unroll_consts: Vec<(String, i64)>,
     /// sic: locals/params declared with a payload-less named enum type
     /// (`enum vals v`) → the enum name, so `v.str` → `"vals::ONE"` can find the
     /// variant table (the enum itself lowers to a plain int, losing its identity).
@@ -444,6 +447,7 @@ impl<'m> FuncCtx<'m> {
             lowerer,
             func: func as *mut Function,
             locals: vec![HashMap::new()],
+            unroll_consts: Vec::new(),
             enum_locals: HashMap::new(),
             bitfield_locals: HashMap::new(),
             weak_locals: HashMap::new(),
@@ -1752,6 +1756,9 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub fn lookup(&self, name: &str) -> Option<LookupResult<'_>> {
+        if let Some((_, v)) = self.unroll_consts.iter().rev().find(|(n, _)| n == name) {
+            return Some(LookupResult::EnumConst(*v));
+        }
         for scope in self.locals.iter().rev() {
             if let Some((ty, vid)) = scope.get(name) {
                 return Some(LookupResult::Local(ty, *vid));
@@ -4065,6 +4072,31 @@ impl<'m> FuncCtx<'m> {
         // `try_vectorize`).
         if let (Some(fi), Some(c), Some(p)) = (init, cond, post) {
             if self.try_delete_loop(fi, c, p, body)? {
+                self.exit_scope();
+                return Ok(());
+            }
+        }
+
+        // Full unrolling of a short constant-count loop (`unroll.rs`): one copy
+        // of the body per iteration, the counter a constant in each.
+        if self.lowerer.unroll {
+            let plan = {
+                let konst = |e: &Expr| self.lowerer.eval_const_int(e);
+                let is_int = |d: &crate::ast::Decl| match d {
+                    crate::ast::Decl::Var { base_ty, declarators, .. } => declarators.len() == 1
+                        && base_ty.qualifiers.is_empty() && declarators[0].ty.qualifiers.is_empty()
+                        && self.lower_type(&declarators[0].ty).map_or(false, |t| t == Type::i32()),
+                    _ => false,
+                };
+                super::unroll::plan(init, cond, post, body, &konst, &is_int)
+            };
+            if let Some(plan) = plan {
+                for v in plan.values {
+                    self.unroll_consts.push((plan.var.clone(), v));
+                    let r = self.lower_stmt(body);
+                    self.unroll_consts.pop();
+                    r?;
+                }
                 self.exit_scope();
                 return Ok(());
             }
