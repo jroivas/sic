@@ -142,34 +142,6 @@ impl<'m> FuncCtx<'m> {
         Ok(rp_out)
     }
 
-    /// `__builtin_ia32_pshufb128`: byte shuffle `r[i] = (b[i]&0x80) ? 0 : a[b[i]&0x0F]`.
-    pub(crate) fn lower_vec_pshufb(&mut self, a: &Expr, b: &Expr, n: usize) -> Result<Val> {
-        let ap = self.lower_aggregate_ptr(a)?;
-        let bp = self.lower_aggregate_ptr(b)?;
-        let vty = self.infer_expr_type(a)?;
-        let rp = self.vec_alloca(vty);
-        let u8t = Type::u8();
-        let i64t = Type::i64();
-        for i in 0..n {
-            let idx = self.vec_load(&bp, i as i64, u8t.clone());
-            let idx64 = self.coerce(idx, &i64t)?;
-            // lo = idx & 0x0F  → offset into `a`
-            let lo = self.vec_bin(BinOp::And, idx64.clone(), Constant::int(0x0F), i64t.clone());
-            let srcaddr = self.alloc_val();
-            self.push_instr(Instr::PtrOffset { dest: srcaddr, base: ap.clone(), offset: lo });
-            let src = self.alloc_val();
-            self.push_instr(Instr::Load { dest: src, ptr: Val::Local(srcaddr), ty: u8t.clone() });
-            // high bit set → zero the lane
-            let hib = self.vec_bin(BinOp::And, idx64, Constant::int(0x80), i64t.clone());
-            let clr = self.alloc_val();
-            self.push_instr(Instr::Cmp { dest: clr, op: CmpOp::INe, lhs: hib, rhs: Constant::int(0), ty: i64t.clone() });
-            let val = self.alloc_val();
-            self.push_instr(Instr::Select { dest: val, cond: Val::Local(clr), on_true: Constant::int(0), on_false: Val::Local(src), ty: u8t.clone() });
-            self.vec_store(&rp, i as i64, Val::Local(val));
-        }
-        Ok(rp)
-    }
-
     /// `__builtin_ia32_pclmulqdq128`: carry-less multiply of two selected 64-bit
     /// halves → a 128-bit result. `imm` selects which halves (bit0 of a, bit4 of b).
     pub(crate) fn lower_vec_pclmulqdq(&mut self, a: &Expr, b: &Expr, imm: &Expr) -> Result<Val> {

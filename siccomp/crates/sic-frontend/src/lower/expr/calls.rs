@@ -709,9 +709,6 @@ impl<'m> FuncCtx<'m> {
                 }
                 // x86 SIMD intrinsics not yet in `ia32.rs`, scalar-emulated over
                 // the byte/lane aggregate that a `vector_size` type lowers to.
-                "__builtin_ia32_pshufb128" => {
-                    if let [a, b] = args { return self.lower_vec_pshufb(a, b, 16); }
-                }
                 "__builtin_ia32_pclmulqdq128" => {
                     if let [a, b, imm] = args { return self.lower_vec_pclmulqdq(a, b, imm); }
                 }

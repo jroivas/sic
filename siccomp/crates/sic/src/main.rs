@@ -10,6 +10,7 @@ mod async_runtime;
 mod list_runtime;
 mod tuple_runtime;
 mod cpu_runtime;
+mod pcmpstr_runtime;
 mod assert_runtime;
 mod module_conf;
 mod rust_module;
@@ -788,6 +789,12 @@ fn parse_source(
         preprocessed = format!(
             "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
             cpu_runtime::CPU_RUNTIME, path, preprocessed
+        );
+    }
+    if pcmpstr_runtime::uses_pcmpstr(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            pcmpstr_runtime::PCMPSTR_RUNTIME, path, preprocessed
         );
     }
     if is_sic && tuple_runtime::uses_tuple(&preprocessed) {
