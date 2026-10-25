@@ -271,6 +271,12 @@ fn dso_handle_object() -> Result<Vec<u8>, String> {
 
 /// Expand driver-level tokens into ld arguments: `-Wl,a,b` → `a b`,
 /// `-pthread` → `-lpthread`; `-static` is a mode, not an input.
+/// gcc's driver flags that leave out the start files and/or default libraries
+/// (`-nostdlib` = `-nostartfiles` + `-nodefaultlibs`; `-nolibc` drops only the
+/// C library and libm). They ride in the link inputs; `ld_args` honours them.
+/// `-static-libgcc` is accepted as is: the compiler runtime is always static.
+const START_LIB_FLAGS: [&str; 5] = ["-nostdlib", "-nostartfiles", "-nodefaultlibs", "-nolibc", "-static-libgcc"];
+
 fn ld_inputs(tokens: &[String]) -> (Vec<String>, Vec<String>) {
     let mut search = Vec::new();   // -L…, which apply globally: put first
     let mut rest = Vec::new();
@@ -279,7 +285,7 @@ fn ld_inputs(tokens: &[String]) -> (Vec<String>, Vec<String>) {
             rest.extend(w.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()));
         } else if t == "-pthread" || t == "-pthreads" {
             rest.push("-lpthread".to_string());
-        } else if t == "-static" {
+        } else if t == "-static" || START_LIB_FLAGS.contains(&t.as_str()) {
         } else if t.starts_with("-L") {
             search.push(t.clone());
         } else {
@@ -297,6 +303,10 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
         Ok(d.join(name).to_string_lossy().into_owned())
     };
     let pie = !req.shared && req.pie.unwrap_or(!req.static_link);
+    let flag = |f: &str| req.inputs.iter().any(|t| t == f);
+    let start_files = !flag("-nostdlib") && !flag("-nostartfiles");
+    let default_libs = !flag("-nostdlib") && !flag("-nodefaultlibs");
+    let libc = default_libs && !flag("-nolibc");
     let mut a: Vec<String> = Vec::new();
     a.push("--build-id".into());
     a.push("--eh-frame-hdr".into());
@@ -318,8 +328,8 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
     a.push("-o".into());
     a.push(req.output.clone());
 
-    // Start files.
-    if !req.shared {
+    // Start files (and the `__dso_handle` object, which crtbegin provides).
+    if start_files && !req.shared {
         let has = |f: &str| tc.crt_dir.as_ref().map_or(false, |d| d.join(f).is_file());
         let first = if pie && req.static_link {
             if !has("rcrt1.o") { return Err("sic-link: -static-pie needs glibc's rcrt1.o, which was not found".into()); }
@@ -327,8 +337,10 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
         } else if pie && has("Scrt1.o") { "Scrt1.o" } else { "crt1.o" };
         a.push(crt(first)?);
     }
-    a.push(crt("crti.o")?);
-    a.push(dso.to_string_lossy().into_owned());
+    if start_files {
+        a.push(crt("crti.o")?);
+        a.push(dso.to_string_lossy().into_owned());
+    }
 
     // Search paths: the request's own first, then the system's.
     let (search, mut rest) = ld_inputs(&req.inputs);
@@ -348,7 +360,12 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
     // comes too, only as needed: sic calls `sin(2)` where gcc folds it, so a
     // program gcc links without `-lm` must link here as well.
     let rt: Vec<String> = tc.rt.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    if req.static_link {
+    if !default_libs {
+        // Nothing implicit: the objects and libraries given are the program.
+    } else if !libc {
+        a.extend(rt.iter().cloned());
+        if req.static_link { if let Some(eh) = &tc.rt_eh { a.push(eh.to_string_lossy().into_owned()); } }
+    } else if req.static_link {
         a.push("--start-group".into());
         a.extend(rt.iter().cloned());
         if let Some(eh) = &tc.rt_eh { a.push(eh.to_string_lossy().into_owned()); }
@@ -363,7 +380,7 @@ pub fn ld_args(req: &LinkRequest, tc: &Toolchain, dso: &Path) -> Result<Vec<Stri
         a.push("-lc".into());
         a.extend(rt.iter().cloned());
     }
-    a.push(crt("crtn.o")?);
+    if start_files { a.push(crt("crtn.o")?); }
     Ok(a)
 }
 

@@ -444,6 +444,13 @@ fn main() {
             link_order.push(a);
         } else if a.starts_with("-L") && a.len() > 2 {
             link_order.push(a);
+        } else if matches!(a.as_str(), "-nostdlib" | "-nostartfiles" | "-nodefaultlibs" | "-nolibc" | "-static-libgcc") {
+            // Start files / default libraries left out of the link (sic-link
+            // honours them; an external driver gets them verbatim).
+            link_order.push(a);
+        } else if a == "-nostdinc" {
+            // No system include directories: the preprocessor's flag.
+            cpp_include_flags.push(a);
         } else if a == "-shared" {
             // Produce a shared object; pass through to the linker.
             shared = true;
