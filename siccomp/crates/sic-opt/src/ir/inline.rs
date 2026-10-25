@@ -6,8 +6,10 @@
 //! called function's body into its caller at the call site, replacing the `Call`.
 //!
 //! Eligibility (a callee must be ALL of): defined here (not `extern`), not
-//! variadic, a SCALAR/void return (no aggregate/sret return — keeps parameter
-//! numbering simple and avoids the caller-slot ABI), free of frame-sensitive
+//! variadic, a scalar/void return or an aggregate returned through memory (the
+//! hidden result pointer is parameter 0 and the call's argument 0, so such a
+//! call inlines like a void one; a register-returned aggregate is not a
+//! candidate), free of frame-sensitive
 //! intrinsics (`__builtin_return_address`, `va_*`), and not directly self-recursive.
 //! A non-leaf callee (one that itself calls) is fine — its inner calls come along
 //! and may be inlined on a later pass iteration. A call is inlined when the callee
@@ -73,9 +75,9 @@ struct FnInfo {
     self_recursive: bool,
 }
 
-/// The parameter-value sentinel base used by the frontend: parameter `i` of a
-/// non-sret function is referenced in the body as `Val::Local(ValId(SENTINEL+i))`
-/// (see `lower_function`). We only inline non-sret callees, so the base is fixed.
+/// The parameter-value sentinel base used by the frontend: parameter `i` is
+/// referenced in the body as `Val::Local(ValId(SENTINEL+i))` (see
+/// `lower_function`); for an sret function parameter 0 is the result pointer.
 const SENTINEL: u32 = 0x10000;
 
 /// Per-caller caps so inlining can't blow up compile time or code size on
@@ -134,7 +136,8 @@ fn is_aggregate(t: &Type) -> bool {
 fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // A declaration (no body), a variadic, or an aggregate-return function is never
     // a candidate. Scan for the disqualifiers below.
-    let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && !is_aggregate(&f.sig.ret) && !f.noinline;
+    let ret_ok = !is_aggregate(&f.sig.ret) || sic_ir::abi::ret_in_memory(&f.sig.ret, 8);
+    let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && ret_ok && !f.noinline;
     let mut ret_val_count = 0;
     let mut self_rec = false;
     if eligible {
@@ -205,6 +208,8 @@ impl Inline {
                         if args.len() != m.functions[callee].params.len() { continue; }
                         // a value-returning call needs the callee to actually return one.
                         if dest.is_some() && ci.ret_val_count == 0 { continue; }
+                        // an sret call returns through its argument 0, never a value.
+                        if dest.is_some() && is_aggregate(&m.functions[callee].sig.ret) { continue; }
                         site = Some((bi, ii));
                         break 'find;
                     }
