@@ -562,6 +562,27 @@ fn main() {
             // Dependency-only: emit make rules and don't compile.
             deps_only = true;
             dep_flags.push(a);
+        } else if let Some(list) = a.strip_prefix("-Wp,") {
+            // Options for the preprocessor, comma-separated. As in GCC, `-MD`/`-MMD`
+            // there take the dependency file as their value (`-Wp,-MMD,dir/.f.o.d`,
+            // how Linux asks for its .d files); the rest go to cpp verbatim.
+            let parts: Vec<String> = list.split(',').map(|x| x.to_string()).collect();
+            let mut pi = parts.into_iter();
+            while let Some(p) = pi.next() {
+                match p.as_str() {
+                    "-MD" | "-MMD" => {
+                        dep_flags.push(p);
+                        if let Some(f) = pi.next() { dep_flags.push("-MF".to_string()); dep_flags.push(f); }
+                    }
+                    "-MF" | "-MT" | "-MQ" => {
+                        dep_flags.push(p);
+                        if let Some(v) = pi.next() { dep_flags.push(v); }
+                    }
+                    "-MG" | "-MP" => dep_flags.push(p),
+                    "" => {}
+                    _ => cpp_include_flags.push(p),
+                }
+            }
         } else if a == "-MD" || a == "-MMD" || a == "-MG" || a == "-MP" {
             // Generate dependencies as a side effect of compilation.
             dep_flags.push(a);
