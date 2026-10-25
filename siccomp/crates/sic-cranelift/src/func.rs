@@ -343,7 +343,10 @@ pub fn compile_function(
                 'scan: for b2 in &f.blocks {
                     for i2 in &b2.instrs {
                         if let Instr::Load { ptr: Val::Local(p), ty: lty, .. } = i2 {
-                            if p.0 == dest.0 && slot_clty(lty) != Some(ct) { consistent = false; break 'scan; }
+                            // A vector slot may be read as other 128-bit lanes (a free bitcast).
+                            let same = slot_clty(lty) == Some(ct)
+                                || (ct.is_vector() && vector_clty(lty).is_some());
+                            if p.0 == dest.0 && !same { consistent = false; break 'scan; }
                         }
                     }
                 }
@@ -483,10 +486,14 @@ fn emit_instr(
         Instr::Load { dest, ptr, ty } => {
             // Reading a register-promoted scalar local: use the SSA value directly
             // (no memory load), so it stays in a register. Every load of a promoted
-            // slot matches the slot type by construction, so no coercion is needed.
+            // slot matches the slot type by construction, except that a vector
+            // slot may be read as other 128-bit lanes (a bitcast).
             if let Val::Local(id) = ptr {
-                if let Some(&(var, _)) = promoted.get(&id.0) {
-                    let v = builder.use_var(var);
+                if let Some(&(var, vt)) = promoted.get(&id.0) {
+                    let mut v = builder.use_var(var);
+                    if vt.is_vector() {
+                        if let Some(lt) = vector_clty(ty) { v = super::simd::bitcast(builder, v, lt); }
+                    }
                     val_map.insert(dest.0, v);
                     return;
                 }

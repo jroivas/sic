@@ -20,6 +20,7 @@ pub mod algebraic;
 pub mod dce;
 pub mod tree_rec;
 pub mod inline;
+pub mod vec_split;
 
 pub use pass::{IrPass, IrPassManager};
 
@@ -31,6 +32,8 @@ pub fn run_ir_passes(module: &mut Module, cfg: &PassConfig) {
     if cfg.is_enabled("inline") {
         pm.add(Box::new(inline::Inline::new(cfg.inline_threshold, cfg.inline_aggressive)));
     }
+    // After inlining, which brings intrinsics' vector slots together.
+    if cfg.is_enabled("vec-split") { pm.add(Box::new(vec_split::VecSplit::new())); }
     if cfg.is_enabled("devirtual") { pm.add(Box::new(devirtual::Devirtualize::new())); }
     if cfg.is_enabled("ir-fold") { pm.add(Box::new(fold::IrFold::new())); }
     if cfg.is_enabled("algebraic") { pm.add(Box::new(algebraic::Algebraic::new())); }
