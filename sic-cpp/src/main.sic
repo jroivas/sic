@@ -1982,7 +1982,7 @@ i32 call_close_offset(Preprocessor *pp, string line, string next)
         if (is_ident_start(c)) {
             i32 st = i;
             while (i < all.size && is_ident(all[i])) i++;
-            if (pp->macros[all[st:i]].starts_with("F|")) {
+            if (ends_with_callable(pp, all[st:i])) {   // as in open_macro_call
                 i32 k = i;
                 while (k < all.size && (all[k] == ' ' || all[k] == '\t')) k++;
                 if (k < all.size && all[k] == '(') { in_call = 1; depth = 1; i = k + 1; }
@@ -1995,8 +1995,10 @@ i32 call_close_offset(Preprocessor *pp, string line, string next)
 }
 
 // Whether `line` ends inside an unclosed function-like macro invocation: a
-// name defined as a function-like macro, followed by `(`, whose parentheses are
-// not balanced by the end of the line. String/char literals are skipped.
+// name defined as a function-like macro, or an object-like one expanding to
+// such a name (Linux's `#define DECLARE_EVENT_CLASS_SCHEDSTAT
+// DECLARE_EVENT_CLASS`), followed by `(`, whose parentheses are not balanced by
+// the end of the line. String/char literals are skipped.
 i32 open_macro_call(Preprocessor *pp, string line)
 {
     i32 i = 0, depth = 0, in_call = 0;
@@ -2019,7 +2021,7 @@ i32 open_macro_call(Preprocessor *pp, string line)
             i32 st = i;
             while (i < line.size && is_ident(line[i])) i++;
             string name = line[st:i];
-            if (pp->macros[name].starts_with("F|")) {
+            if (ends_with_callable(pp, name)) {
                 i32 k = i;
                 while (k < line.size && (line[k] == ' ' || line[k] == '\t')) k++;
                 if (k < line.size && line[k] == '(') { in_call = 1; depth = 1; i = k + 1; }
