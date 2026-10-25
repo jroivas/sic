@@ -124,6 +124,10 @@ pub struct StructDef {
     /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
     /// struct {...} T QEMU_ALIGNED(N)`). Raises the whole type's alignment.
     pub align: Option<u32>,
+    /// An `aligned(EXPR)` whose value needs type sizes (`sizeof(struct S)`,
+    /// `sizeof(typedef)`): evaluated when lowering; the alignment is the larger
+    /// of the two.
+    pub align_expr: Option<BoxExpr>,
     /// `__attribute__((packed))` on the type (before the tag or after the
     /// closing brace): members are 1-byte aligned and there is no padding.
     pub packed: bool,
@@ -166,6 +170,8 @@ pub struct UnionDef {
     pub fields: Option<Vec<FieldDecl>>,
     /// Type-level `__attribute__((aligned(N)))` (see `StructDef::align`).
     pub align: Option<u32>,
+    /// See `StructDef::align_expr`.
+    pub align_expr: Option<BoxExpr>,
     /// `__attribute__((packed))` (see `StructDef::packed`).
     pub packed: bool,
     /// sic (sic.md §"Namespace"): `private union` — withhold from the manifest.
@@ -183,6 +189,8 @@ pub struct FieldDecl {
     /// union uses this on its `floatx80 d` member to make the whole union
     /// 16-aligned, which shifts every following field in `CPUX86State`.
     pub align: Option<u32>,
+    /// See `StructDef::align_expr`.
+    pub align_expr: Option<BoxExpr>,
     pub span: Span,
 }
 

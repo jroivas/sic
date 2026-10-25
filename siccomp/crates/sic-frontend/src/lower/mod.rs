@@ -1291,10 +1291,11 @@ impl Lowerer {
                     self.atomic_fields.insert((name.clone(), fname.clone()));
                 }
                 if bw.is_some() { any_bitfield = true; }
-                if f.align.is_some() { any_align = true; }
+                let falign = types::attr_align(f.align, &f.align_expr, &self.struct_types, self.ptr_size)?;
+                if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 bitfields.push(bw);
-                field_aligns.push(f.align);
+                field_aligns.push(falign);
             }
             if !weak_fields.is_empty() {
                 self.struct_weak_fields.insert(name.clone(), weak_fields);
@@ -1310,7 +1311,7 @@ impl Lowerer {
                 packed: s.packed,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
-                min_align: s.align,
+                min_align: types::attr_align(s.align, &s.align_expr, &self.struct_types, self.ptr_size)?,
                 layout_order: None,
             };
             use crate::ast::StructOrder;
@@ -1366,16 +1367,17 @@ impl Lowerer {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
-                if f.align.is_some() { any_align = true; }
+                let falign = types::attr_align(f.align, &f.align_expr, &self.struct_types, self.ptr_size)?;
+                if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
-                field_aligns.push(f.align);
+                field_aligns.push(falign);
             }
             let ir_ty = Type::Union(UnionType {
                 packed: u.packed,
                 name: Some(name.clone()),
                 fields: ir_fields,
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
-                min_align: u.align,
+                min_align: types::attr_align(u.align, &u.align_expr, &self.struct_types, self.ptr_size)?,
             });
             self.register_type_name(name.clone(), ir_ty);
         }
@@ -2707,7 +2709,7 @@ impl Lowerer {
                     name: Some("self".to_string()),
                     ty: QualType::new(AstType::Pointer {
                         base: Box::new(QualType::new(AstType::Struct(StructDef {
-                            name: Some(sname.clone()), fields: None, align: None, packed: false,
+                            name: Some(sname.clone()), fields: None, align: None, align_expr: None, packed: false,
                             order: crate::ast::StructOrder::Default, methods: vec![], private: false, span: sp.clone(),
                         }))),
                         quals: vec![],

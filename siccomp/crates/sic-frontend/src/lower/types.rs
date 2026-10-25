@@ -1159,13 +1159,14 @@ pub fn resolve_aggregate(ty: &Type, named: &HashMap<String, Type>) -> Type {
 fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     // Check if it's a forward reference (just a name, no fields)
     if s.fields.is_none() {
+        let align = attr_align(s.align, &s.align_expr, named, ptr_size)?;
         if let Some(name) = &s.name {
             if let Some(ty) = named.get(name) {
-                return Ok(ty.clone());
+                return Ok(with_min_align(ty.clone(), align));
             }
             // `struct S` outside the namespace that defines it (`N__S`).
             if let Some(k) = unique_ns_type(named, name) {
-                return Ok(named[&k].clone());
+                return Ok(with_min_align(named[&k].clone(), align));
             }
         }
         // Forward declaration — use an opaque struct
@@ -1183,10 +1184,11 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
         fty = c_bitfield_field_type(fty, bw);
         if bw.is_some() { any_bitfield = true; }
-        if f.align.is_some() { any_align = true; }
+        let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
+        if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
         bitfields.push(bw);
-        field_aligns.push(f.align);
+        field_aligns.push(falign);
     }
     Ok(Type::Struct(StructType {
         name: s.name.clone(),
@@ -1194,7 +1196,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         packed: s.packed,
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
         field_aligns: if any_align { field_aligns } else { Vec::new() },
-        min_align: s.align,
+        min_align: attr_align(s.align, &s.align_expr, named, ptr_size)?,
         // Inline/anonymous struct types keep declaration order; sic reordering is
         // applied to named structs at registration (register_struct_type_from_def).
         layout_order: None,
@@ -1205,6 +1207,30 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
 /// arithmetic of [`super::eval_const_expr`] with `sizeof(T)` and
 /// `__builtin_offsetof(T, ...)`, which need the type table and pointer width.
 /// Returns `None` for non-constant (e.g. VLA) expressions.
+/// An `aligned` attribute's value: the parser's constant `n` and/or an
+/// expression that needs type sizes (`aligned(sizeof(struct S))`, Linux's
+/// call_single_data_t), the larger of the two. An expression that does not
+/// fold is an error, as in GCC.
+pub(crate) fn attr_align(n: Option<u32>, e: &Option<crate::ast::BoxExpr>, named: &HashMap<String, Type>, ptr_size: u32) -> Result<Option<u32>> {
+    let Some(e) = e else { return Ok(n) };
+    let v = eval_const_size(e, named, ptr_size, &HashMap::new())
+        .filter(|v| *v > 0 && (*v as u64).is_power_of_two())
+        .ok_or_else(|| CompileError::at("requested alignment is not a positive power of 2".to_string(),
+            e.span.file.clone(), e.span.line, e.span.col))?;
+    Ok(Some(n.unwrap_or(0).max(v as u32)))
+}
+
+/// `t` with its alignment raised to `align` (a typedef or tag reference
+/// carrying an `aligned` attribute).
+fn with_min_align(t: Type, align: Option<u32>) -> Type {
+    let Some(a) = align else { return t };
+    match t {
+        Type::Struct(mut st) => { st.min_align = Some(st.min_align.unwrap_or(0).max(a)); Type::Struct(st) }
+        Type::Union(mut u) => { u.min_align = Some(u.min_align.unwrap_or(0).max(a)); Type::Union(u) }
+        other => other,
+    }
+}
+
 pub fn eval_const_size(
     e: &Expr,
     named: &HashMap<String, Type>,
@@ -1344,12 +1370,13 @@ fn eval_bit_width(e: &crate::ast::Expr) -> u32 {
 
 fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
     if u.fields.is_none() {
+        let align = attr_align(u.align, &u.align_expr, named, ptr_size)?;
         if let Some(name) = &u.name {
             if let Some(ty) = named.get(name) {
-                return Ok(ty.clone());
+                return Ok(with_min_align(ty.clone(), align));
             }
             if let Some(k) = unique_ns_type(named, name) {
-                return Ok(named[&k].clone());
+                return Ok(with_min_align(named[&k].clone(), align));
             }
         }
         return Ok(Type::Union(UnionType { packed: false, name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
@@ -1361,16 +1388,17 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
         let fty = lower_type(&f.ty, named, ptr_size)?;
-        if f.align.is_some() { any_align = true; }
+        let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
+        if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
-        field_aligns.push(f.align);
+        field_aligns.push(falign);
     }
     Ok(Type::Union(UnionType {
         packed: u.packed,
         name: u.name.clone(),
         fields: ir_fields,
         field_aligns: if any_align { field_aligns } else { Vec::new() },
-        min_align: u.align,
+        min_align: attr_align(u.align, &u.align_expr, named, ptr_size)?,
     }))
 }
 

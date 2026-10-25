@@ -79,6 +79,9 @@ pub struct Parser {
     /// largest N. Applied to the next struct/union member to raise its (and the
     /// aggregate's) alignment (QEMU's `FPReg` union → 16-aligned `CPUX86State`).
     pending_aligned: Option<u32>,
+    /// An `aligned(EXPR)` the parser cannot evaluate (it needs type sizes):
+    /// taken together with `pending_aligned`.
+    pending_aligned_expr: Option<BoxExpr>,
     /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
     /// `private` keyword has been consumed and applies to the next aggregate.
     pending_private: bool,
@@ -156,7 +159,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -642,6 +645,7 @@ impl Parser {
             // capture slot first and read it afterward.
             self.pending_vector_size = None;
             self.pending_aligned = None;
+            self.pending_aligned_expr = None;
             let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
             self.skip_attributes();
             if let Some(n) = self.pending_vector_size.take() {
@@ -653,6 +657,13 @@ impl Parser {
                 match &mut ty.ty {
                     AstType::Struct(sd) => sd.align = Some(sd.align.unwrap_or(0).max(n)),
                     AstType::Union(ud)  => ud.align = Some(ud.align.unwrap_or(0).max(n)),
+                    _ => {}
+                }
+            }
+            if let Some(e) = self.pending_aligned_expr.take() {
+                match &mut ty.ty {
+                    AstType::Struct(sd) => sd.align_expr = Some(e),
+                    AstType::Union(ud)  => ud.align_expr = Some(e),
                     _ => {}
                 }
             }
@@ -1152,8 +1163,10 @@ impl Parser {
         // A leading `struct __attribute__((aligned(N))) Tag {...}` raises the whole
         // type's alignment. Capture N here, before member parsing clears the slot.
         self.pending_aligned = None;
+        self.pending_aligned_expr = None;
         self.skip_attributes();
         let mut type_align = self.pending_aligned.take();
+        let mut align_expr = self.pending_aligned_expr.take();
 
         let name = if self.at(TokenKind::Ident) || self.at(TokenKind::TypeName) {
             Some(self.advance().text.clone())
@@ -1165,6 +1178,7 @@ impl Parser {
         self.pending_aligned = None;
         self.skip_attributes();
         type_align = type_align.or(self.pending_aligned.take());
+        align_expr = align_expr.or(self.pending_aligned_expr.take());
         // The type's own `packed`, kept apart from the members' (a member's
         // attribute or a nested definition sets and resets the shared flag).
         let mut packed = std::mem::take(&mut self.pending_packed);
@@ -1181,6 +1195,10 @@ impl Parser {
             let mut fields = Vec::new();
             while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
                 let before = self.pos;
+                // An empty member declaration (GNU C: a stray `;`, as Linux's
+                // `seqcount_t seqcount; __SEQ_LOCK(...);` leaves when the lock
+                // member compiles away) declares nothing.
+                if self.at(TokenKind::Semi) { self.advance(); continue; }
                 // sic member functions (sic.md §"Memory safety"): a constructor
                 // `S()`, destructor `~S()`, or method `Ret m(S* self){…}` in the
                 // body. C structs never have these.
@@ -1206,10 +1224,12 @@ impl Parser {
             // an alignment there raises the type's (Linux's struct page
             // `} _struct_page_alignment;`).
             self.pending_packed = false;
+            self.pending_aligned_expr = None;
             self.skip_attributes();
             if let Some(n) = self.pending_aligned.take() {
                 type_align = Some(type_align.unwrap_or(0).max(n));
             }
+            align_expr = self.pending_aligned_expr.take().or(align_expr);
             packed |= std::mem::take(&mut self.pending_packed);
             Some(fields)
         } else {
@@ -1235,9 +1255,9 @@ impl Parser {
 
         let private = std::mem::take(&mut self.pending_private);
         if is_union {
-            Ok(AstType::Union(UnionDef { name, fields, align: type_align, packed, private, span: sp }))
+            Ok(AstType::Union(UnionDef { name, fields, align: type_align, align_expr, packed, private, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, packed, order, methods, private, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, align_expr, packed, order, methods, private, span: sp }))
         }
     }
 
@@ -1354,12 +1374,13 @@ impl Parser {
         // scope `int g __attribute__((aligned(64)))`, a typedef, etc.) so it can't
         // leak onto this member and corrupt an unrelated struct's layout.
         self.pending_aligned = None;
+        self.pending_aligned_expr = None;
         let (base_ty, _) = self.parse_decl_specifiers()?;
         let mut fields = Vec::new();
 
         if self.at(TokenKind::Semi) {
             // Anonymous struct/union member
-            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, align: None, span: sp });
+            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, align: None, align_expr: None, span: sp });
             return Ok(fields);
         }
 
@@ -1369,6 +1390,7 @@ impl Parser {
             // member; capture both. `parse_declarator` runs `skip_attributes`
             // for the trailing form.
             let group_align = self.pending_aligned.take();
+            let group_align_expr = self.pending_aligned_expr.take();
             let (name, ty) = self.parse_declarator(base_ty.clone())?;
             let bit_width = if self.eat(TokenKind::Colon) {
                 Some(Box::new(self.parse_assign_expr()?))
@@ -1378,7 +1400,8 @@ impl Parser {
             // Trailing field attribute, e.g. `int x __attribute__((aligned(8)));`.
             self.skip_attributes();
             let align = self.pending_aligned.take().or(group_align);
-            fields.push(FieldDecl { name: Some(name), ty, bit_width, align, span: sp.clone() });
+            let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
+            fields.push(FieldDecl { name: Some(name), ty, bit_width, align, align_expr, span: sp.clone() });
             if !self.eat(TokenKind::Comma) { break; }
         }
         Ok(fields)
@@ -3896,6 +3919,9 @@ impl Parser {
                                 if let Some(n) = self.eval_align_tokens(i + 2, rp) {
                                     self.pending_aligned =
                                         Some(self.pending_aligned.unwrap_or(0).max(n));
+                                } else if let Some(e) = self.parse_tokens_as_expr(i + 2, rp) {
+                                    // Needs type sizes: evaluated when lowering.
+                                    self.pending_aligned_expr = Some(Box::new(e));
                                 }
                             }
                         }
@@ -3981,6 +4007,18 @@ impl Parser {
             (Some(b), _) => b,
             (None, _) => 4,              // `unsigned` alone
         })
+    }
+
+    /// `tokens[lo..hi]` parsed as one expression (the position is restored);
+    /// None unless it is exactly one expression.
+    fn parse_tokens_as_expr(&mut self, lo: usize, hi: usize) -> Option<Expr> {
+        if lo >= hi { return None; }
+        let save = self.pos;
+        self.pos = lo;
+        let e = self.parse_assign_expr();
+        let end = self.pos;
+        self.pos = save;
+        match e { Ok(e) if end == hi => Some(e), _ => None }
     }
 
     fn eval_align_tokens(&self, lo: usize, hi: usize) -> Option<u32> {
