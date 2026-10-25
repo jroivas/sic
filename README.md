@@ -42,7 +42,8 @@ The binary lands at `siccomp/target/release/sic` (or `.../debug/sic`).
     ./hello
 
     sic -c foo.c -o foo.o        # compile to an object file, don't link
-    sic -S foo.sic               # dump the textual IR instead of compiling
+    sic -S foo.c                 # write GNU assembler text (foo.s), as gcc -S does
+    sic --emit-ir foo.sic        # dump sic's textual IR instead of compiling
     sic -O2 foo.c -o foo         # optimize (0 | 1 | 2 | 3 | s | z)
 
 `sic` accepts the usual `-o -c -O -D -I -l -L -W` flags for gcc/clang

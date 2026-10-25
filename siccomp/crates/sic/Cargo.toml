@@ -14,6 +14,8 @@ sic-frontend  = { path = "../sic-frontend" }
 sic-opt       = { path = "../sic-opt" }
 sic-cranelift = { path = "../sic-cranelift" }
 sic-link      = { path = "../sic-link" }
+# Reading back the backend's ELF object for `-S` (already built for Cranelift).
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 syn = { version = "2", features = ["full"] }

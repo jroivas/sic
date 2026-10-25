@@ -12,6 +12,7 @@ mod tuple_runtime;
 mod cpu_runtime;
 mod ia32_runtime;
 mod isa;
+mod asm_out;
 mod assert_runtime;
 mod module_conf;
 mod rust_module;
@@ -44,9 +45,13 @@ struct Args {
     #[arg(short = 'o', long = "output")]
     output: Option<String>,
 
-    /// Emit IR text instead of compiling
-    #[arg(short = 'S', long = "emit-ir")]
+    /// Emit sic's IR text instead of compiling
+    #[arg(long = "emit-ir")]
     emit_ir: bool,
+
+    /// Compile to assembler text (GNU as syntax), do not assemble or link
+    #[arg(short = 'S')]
+    emit_asm: bool,
 
     /// Compile to object file, do not link
     #[arg(short = 'c', long = "emit-obj")]
@@ -1187,11 +1192,40 @@ fn producer_string() -> String {
 
 /// Codegen a lowered IR module to object-file bytes.
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let obj = compile_ir_code(ir_module, args)?;
+    if ir_module.asm_text_helpers.is_empty() { return Ok(obj); }
+    merge_asm_helpers(obj, &ir_module.asm_text_helpers)
+}
+
+/// The backend's object for `ir_module`, without the text inline-asm helpers.
+fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut backend = CraneliftBackend::new()
         .with_opt_level(opt_cranelift_level(&args.opt))
         .with_debug_info(args.debug_info);
     backend.compile_module(ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
+}
+
+/// Add the C inline-assembly helpers given as text (`Module::asm_text_helpers`)
+/// to `obj`: assembled by the system C driver's assembler, then merged with a
+/// relocatable link (`ld -r`; `$LD` when set), so the result is one object.
+fn merge_asm_helpers(obj: Vec<u8>, helpers: &[(String, String)]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let main_o = dir.path().join("code.o");
+    let asm_s = dir.path().join("asm.s");
+    let asm_o = dir.path().join("asm.o");
+    let out_o = dir.path().join("out.o");
+    fs::write(&main_o, &obj)?;
+    fs::write(&asm_s, asm_out::helpers_asm(helpers))?;
+    let cc = resolve_linker();
+    let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&asm_o).status()
+        .map_err(|e| format!("inline assembly: cannot run the assembler ({}): {}", cc, e))?;
+    if !st.success() { return Err(format!("inline assembly: the assembler ({}) failed", cc).into()); }
+    let ld = std::env::var("LD").ok().filter(|l| !l.is_empty() && !resolves_to_self(l)).unwrap_or_else(|| "ld".to_string());
+    let st = Command::new(&ld).arg("-r").arg(&main_o).arg(&asm_o).arg("-o").arg(&out_o).status()
+        .map_err(|e| format!("inline assembly: cannot run the linker ({}): {}", ld, e))?;
+    if !st.success() { return Err(format!("inline assembly: `{} -r` failed", ld).into()); }
+    Ok(fs::read(&out_o)?)
 }
 
 /// Write `module_<name>.smod` next to the object file. The manifest records the
@@ -1616,7 +1650,22 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // ── Emit IR (-S) ───────────────────────────────────────────────────────────
+    // ── Emit assembler text (-S) ───────────────────────────────────────────────
+    if args.emit_asm {
+        for src in &sources {
+            let ir_module = build_ir(src, args)?;
+            let obj = compile_ir_code(&ir_module, args)?;
+            let text = asm_out::object_to_asm(&obj, &ir_module.asm_text_helpers, src)?;
+            let out = match &args.output {
+                Some(o) if sources.len() == 1 => o.clone(),
+                _ => PathBuf::from(src).with_extension("s").to_string_lossy().into_owned(),
+            };
+            if out == "-" { print!("{}", text); } else { fs::write(&out, text)?; }
+        }
+        return Ok(());
+    }
+
+    // ── Emit IR (--emit-ir) ────────────────────────────────────────────────────
     if args.emit_ir {
         for src in &sources {
             let ir_module = build_ir(src, args)?;

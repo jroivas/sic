@@ -86,7 +86,17 @@ fn operand_ref(s: &str) -> Option<usize> {
 
 impl<'m> FuncCtx<'m> {
     pub(crate) fn lower_asm(&mut self, a: &AsmStmt) -> Result<()> {
+        // SIC has no inline assembly; it is a C feature here.
+        if self.is_sic() {
+            let sp = &a.span;
+            return Err(crate::CompileError::at(
+                "inline assembly is not supported in SIC (only in C sources)".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        }
         if !a.goto && self.try_lower_asm(a)? {
+            return Ok(());
+        }
+        if !a.goto && self.try_lower_text_asm(a)? {
             return Ok(());
         }
         let sp = &a.span;
@@ -95,6 +105,47 @@ impl<'m> FuncCtx<'m> {
             a.template.escape_debug()));
         self.call_asm_helper("trap", &[], vec![], Type::Void)?;
         Ok(())
+    }
+
+    /// A template with no outputs whose inputs are all constants (`"i"`/`"n"`):
+    /// its operands are substituted as GCC prints them (`%0` → `$24`, `%c0` →
+    /// `24`, `%n0` → `-24`) and the text becomes a helper function, assembled
+    /// by the system assembler (`-S` writes it as is). Linux's asm-offsets
+    /// `DEFINE()`s are such statements: `.ascii "->SYM %0 …" :: "i"(val)`.
+    /// `false` when the statement is not of this form (nothing emitted).
+    fn try_lower_text_asm(&mut self, a: &AsmStmt) -> Result<bool> {
+        if !a.outputs.is_empty() { return Ok(false); }
+        let mut vals: Vec<(Option<String>, i64)> = Vec::new();
+        for op in &a.inputs {
+            let c = constraint(&op.constraint);
+            if c.letters.is_empty() || !c.letters.chars().all(|ch| ch == 'i' || ch == 'n') { return Ok(false); }
+            let Some(v) = self.lowerer.eval_const_int(&op.expr) else { return Ok(false) };
+            vals.push((op.name.clone(), v));
+        }
+        let Some(text) = substitute_operands(&a.template, &vals) else { return Ok(false) };
+        // Callee-saved registers the template clobbers are saved around it.
+        let saved: Vec<&str> = ["rbx", "rbp", "r12", "r13", "r14", "r15"].into_iter()
+            .filter(|r| a.clobbers.iter().any(|c| {
+                let c = c.trim_start_matches('%');
+                c == *r || (r.starts_with('r') && r.len() == 3 && c == format!("e{}", &r[1..]))
+            }))
+            .collect();
+        let mut body = String::new();
+        for r in &saved { body.push_str(&format!("\tpush %{}\n", r)); }
+        body.push_str(&text);
+        body.push('\n');
+        for r in saved.iter().rev() { body.push_str(&format!("\tpop %{}\n", r)); }
+        body.push_str("\tret\n");
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut h);
+        let name = format!("text_{:016x}", h.finish());
+        let sym = format!("{}{}", ASM_HELPER_PREFIX, name);
+        if !self.lowerer.module.asm_text_helpers.iter().any(|(n, _)| *n == sym) {
+            self.lowerer.module.asm_text_helpers.push((sym, body));
+        }
+        self.call_asm_helper(&name, &[], vec![], Type::Void)?;
+        Ok(true)
     }
 
     /// Lower a recognised template; `false` = not recognised (nothing emitted).
@@ -336,4 +387,51 @@ impl<'m> FuncCtx<'m> {
         self.val_types.insert(dest.0, ret);
         Ok(Val::Local(dest))
     }
+}
+
+/// `template` with `%N` / `%[name]` operand references replaced by constants as
+/// GCC's AT&T printer writes them: plain `$v`, `%cN`/`%PN` → `v`, `%nN` → `-v`;
+/// `%%` → `%`, `%=` → a number unique to the statement. `None` for a
+/// reference or modifier it cannot print.
+fn substitute_operands(template: &str, vals: &[(Option<String>, i64)]) -> Option<String> {
+    let cs: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        if cs[i] != '%' { out.push(cs[i]); i += 1; continue; }
+        i += 1;
+        let c = *cs.get(i)?;
+        if c == '%' { out.push('%'); i += 1; continue; }
+        if c == '=' {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            template.hash(&mut h);
+            out.push_str(&format!("{}", h.finish() % 1_000_000));
+            i += 1;
+            continue;
+        }
+        let modifier = if c.is_ascii_alphabetic() { i += 1; Some(c) } else { None };
+        let n = match cs.get(i)? {
+            '[' => {
+                let end = cs[i..].iter().position(|&x| x == ']')? + i;
+                let name: String = cs[i + 1..end].iter().collect();
+                i = end + 1;
+                vals.iter().position(|(nm, _)| nm.as_deref() == Some(name.as_str()))?
+            }
+            d if d.is_ascii_digit() => {
+                let start = i;
+                while i < cs.len() && cs[i].is_ascii_digit() { i += 1; }
+                cs[start..i].iter().collect::<String>().parse().ok()?
+            }
+            _ => return None,
+        };
+        let v = vals.get(n)?.1;
+        match modifier {
+            None => out.push_str(&format!("${}", v)),
+            Some('c') | Some('P') => out.push_str(&format!("{}", v)),
+            Some('n') => out.push_str(&format!("{}", v.wrapping_neg())),
+            Some(_) => return None,
+        }
+    }
+    Some(out)
 }

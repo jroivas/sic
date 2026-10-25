@@ -159,6 +159,11 @@ pub struct Module {
     /// trampoline that sets the SysV `AL` vector-arg count, which Cranelift never
     /// emits for variadic calls (see cg_clif's `adjust_call_for_c_variadic`).
     pub float_vararg_externs: Vec<String>,
+    /// Inline-assembly helpers given as assembler text (symbol, body): a C
+    /// `asm` statement whose operands are all constants becomes a call of one.
+    /// The driver assembles them with the system assembler (`-S` writes the
+    /// text as is); each body ends in `ret`.
+    pub asm_text_helpers: Vec<(String, String)>,
     /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
     /// module defines — `(enum name, [(variant, discriminant)])` — for the manifest.
     pub sic_enum_exports: Vec<(String, Vec<(String, i64)>)>,
@@ -208,6 +213,7 @@ impl Module {
             sic_module: None,
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
+            asm_text_helpers: Vec::new(),
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),
             sic_generic_fn_exports: Vec::new(),

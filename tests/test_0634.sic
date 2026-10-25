@@ -1,0 +1,6 @@
+// SIC has no inline assembly (it is a C feature).
+int main()
+{
+    asm volatile("nop");
+    return 0;
+}
