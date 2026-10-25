@@ -240,6 +240,16 @@ fn target_triple() -> String {
     format!("{}-unknown-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
 }
 
+/// Whether `-std=<std>` is C23 or later (its keywords `bool`, `true`, … apply).
+/// Unknown spellings count as the newest standard.
+fn std_has_c23_keywords(std: &str) -> bool {
+    !matches!(std,
+        "c89" | "c90" | "c99" | "c9x" | "c11" | "c1x" | "c17" | "c18" | "ansi"
+        | "gnu89" | "gnu90" | "gnu99" | "gnu9x" | "gnu11" | "gnu1x" | "gnu17" | "gnu18"
+        | "iso9899:1990" | "iso9899:199409" | "iso9899:1999" | "iso9899:199x"
+        | "iso9899:2011" | "iso9899:2017" | "iso9899:2018")
+}
+
 /// Whether a target triple names the host: `<arch>[-<vendor>]-<os>[-<env>]` with
 /// the host's architecture (`amd64` too for x86_64) and OS, vendor `unknown`/`pc`
 /// or none, and a GNU environment (`gnu`, or none).
@@ -951,6 +961,7 @@ fn parse_source(
     }
 
     let mut lexer = Lexer::new_lang(&preprocessed, HashSet::new(), lang);
+    lexer.set_c23_keywords(std_has_c23_keywords(&args.std));
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
     let mut parser = Parser::new_lang(tokens, path.to_string(), lang);

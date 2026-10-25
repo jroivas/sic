@@ -25,6 +25,11 @@ pub struct Lexer {
     pub typedefs: HashSet<String>,
     /// Source language (affects Rust-style type-alias keywords).
     lang: Lang,
+    /// C: whether C23's keywords (`bool`, `true`, `false`, `nullptr`, `alignas`,
+    /// `thread_local`) are keywords. Before C23 they are ordinary identifiers
+    /// (`<stdbool.h>` makes macros of some; Linux declares its own `true`/`false`
+    /// enumerators and `typedef _Bool bool;`).
+    c23: bool,
 }
 
 impl Lexer {
@@ -43,8 +48,12 @@ impl Lexer {
             file: None,
             typedefs,
             lang,
+            c23: true,
         }
     }
+
+    /// Select the C standard's keyword set: `false` for `-std` before C23.
+    pub fn set_c23_keywords(&mut self, on: bool) { self.c23 = on; }
 
     /// The source as a character vector, for recovering exact source text of a
     /// construct from token char-index ranges (`Token::start`/`end`).
@@ -230,6 +239,12 @@ impl Lexer {
         // as late as possible — converted to int only at a use site, so e.g. `any
         // b = true` boxes with the BOOL type). In C they are the C23 integer
         // constants 1 and 0, so the parser sees plain IntLits.
+        if self.lang == Lang::C && !self.c23
+            && matches!(text.as_str(), "bool" | "true" | "false" | "nullptr" | "alignas" | "thread_local")
+        {
+            let kind = if self.typedefs.contains(&text) { TokenKind::TypeName } else { TokenKind::Ident };
+            return Token::new(kind, text, sp);
+        }
         match text.as_str() {
             "true"  if self.lang == Lang::Sic => return Token::new(TokenKind::BoolLit, "1".to_string(), sp),
             "false" if self.lang == Lang::Sic => return Token::new(TokenKind::BoolLit, "0".to_string(), sp),
