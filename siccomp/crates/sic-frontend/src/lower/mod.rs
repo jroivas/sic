@@ -4711,6 +4711,24 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
         {
             Ok(int32(args.first().map_or(false, |a| builtin_constant_p(a, enum_consts)) as i64))
         }
+        // The bit builtins on a constant (Linux's `ilog2(n)` is `63 -
+        // __builtin_clzll(n)` for a constant `n`): `clz`/`ctz` of 0 is undefined,
+        // so not a constant, as in GCC.
+        ExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, ExprKind::Ident(n) if const_bit_builtin(n).is_some()) => {
+            let ExprKind::Ident(n) = &func.kind else { unreachable!() };
+            let (op, bits) = const_bit_builtin(n).unwrap();
+            let v = eval_const_typed(&args[0], enum_consts)?.v as u64;
+            let v = if bits == 32 { v & 0xffff_ffff } else { v };
+            let r = match op {
+                "clz" | "ctz" if v == 0 => return Err(CompileError::new(format!("`{}(0)` is not a constant", n))),
+                "clz" => (if bits == 32 { (v as u32).leading_zeros() } else { v.leading_zeros() }) as i64,
+                "ctz" => v.trailing_zeros() as i64,
+                "popcount" => v.count_ones() as i64,
+                "parity" => (v.count_ones() & 1) as i64,
+                _ => if v == 0 { 0 } else { v.trailing_zeros() as i64 + 1 }, // ffs
+            };
+            Ok(int32(r))
+        }
         ExprKind::UIntLit(v, wide) => Ok(ConstInt::new(*v as i64, if *wide { 64 } else { 32 }, false)),
         ExprKind::BoolLit(b) => Ok(int32(*b as i64)),
         ExprKind::CharLit(v) => Ok(int32(*v as i64)),
@@ -4810,6 +4828,17 @@ fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
         },
         _ => return None,
     })
+}
+
+/// `__builtin_clzll` → ("clz", 64): the constant-foldable bit builtins.
+fn const_bit_builtin(n: &str) -> Option<(&'static str, u32)> {
+    let r = n.strip_prefix("__builtin_")?;
+    for op in ["clz", "ctz", "popcount", "parity", "ffs"] {
+        if let Some(sfx) = r.strip_prefix(op) {
+            return match sfx { "" => Some((op, 32)), "l" | "ll" => Some((op, 64)), _ => None };
+        }
+    }
+    None
 }
 
 /// `__builtin_constant_p(e)`: `e` is a compile-time constant — an integer
