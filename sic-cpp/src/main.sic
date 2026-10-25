@@ -3599,14 +3599,14 @@ int main(int argc, char **argv)
     pp.macros["__SICC__"] = "O|1";
     pp.macros["__SICC_MINOR__"] = "O|0";
     pp.macros["__clang__"] = "O|1";
-    pp.macros["__clang_major__"] = "O|15";
+    pp.macros["__clang_major__"] = "O|17";
     pp.macros["__clang_minor__"] = "O|0";
     pp.macros["__GNUC__"] = "O|4";
     pp.macros["__GNUC_MINOR__"] = "O|2";
     pp.macros["__GNUC_PATCHLEVEL__"] = "O|1";
-    pp.macros["__clang_patchlevel__"] = "O|0";
-    pp.macros["__clang_version__"] = "O|\"15.0.0\"";
-    pp.macros["__VERSION__"] = "O|\"Clang 15.0.0\"";
+    pp.macros["__clang_patchlevel__"] = "O|6";
+    pp.macros["__clang_version__"] = "O|\"17.0.6\"";
+    pp.macros["__VERSION__"] = "O|\"Clang 17.0.6\"";
     if (verbose) {
         std::Println("#include <...> search starts here:", target = 2);
         for (i32 i = 0; i < pp.include_dirs.length; i++)

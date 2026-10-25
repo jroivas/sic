@@ -405,8 +405,9 @@ pub(crate) fn target_predefines() -> Vec<&'static str> {
 
 /// Compiler-identity predefines. sic is neither GCC nor Clang, but many programs
 /// refuse to build unless they recognize a compiler of a sufficient version
-/// (e.g. QEMU errors out unless `__clang_major__ >= 10`). We advertise Clang
-/// 15.0.0.
+/// (e.g. QEMU errors out unless `__clang_major__ >= 10`, Linux 7.3 unless
+/// Clang >= 17.0.1). We advertise Clang 17.0.6 (the last 17.x): no higher than
+/// needed, since newer versions gate header paths on newer Clang features.
 ///
 /// We deliberately DO NOT also define `__GNUC__`, even though a real Clang does.
 /// `__GNUC__` gates glibc/library headers into GNU code paths that emit builtins
@@ -416,11 +417,11 @@ pub(crate) fn target_predefines() -> Vec<&'static str> {
 fn compiler_identity_predefines() -> Vec<(&'static str, &'static str)> {
     vec![
         ("__clang__", "1"),
-        ("__clang_major__", "15"),
+        ("__clang_major__", "17"),
         ("__clang_minor__", "0"),
-        ("__clang_patchlevel__", "0"),
-        ("__clang_version__", "\"15.0.0\""),
-        ("__VERSION__", "\"Clang 15.0.0\""),
+        ("__clang_patchlevel__", "6"),
+        ("__clang_version__", "\"17.0.6\""),
+        ("__VERSION__", "\"Clang 17.0.6\""),
         // A real Clang also defines __GNUC__ (as GCC 4.2.1) for compatibility, and
         // much library code gates GNU extensions (e.g. libslirp's
         // `SLIRP_PACKED_BEGIN/END`, which are ONLY defined under `#ifdef __GNUC__`)
