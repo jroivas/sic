@@ -712,6 +712,9 @@ pub struct TranslationUnit {
     /// sic strict mode (sic.md §"Strict mode"): the files that say `using
     /// strict;` — every function defined in them is strict.
     pub strict_files: Vec<String>,
+    /// Functions declared `__attribute__((always_inline))` (GCC's intrinsics):
+    /// inlined at every call when optimizing.
+    pub always_inline: Vec<String>,
 }
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────

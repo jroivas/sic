@@ -44,6 +44,10 @@ pub struct Parser {
     /// `__attribute__((constructor[(prio)]))` seen while parsing the current
     /// declaration's specifiers; the function runs before `main` via `.init_array`.
     pending_constructor: Option<sic_ir::RunAt>,
+    /// `__attribute__((always_inline))` seen for the current declaration.
+    pending_always_inline: bool,
+    /// The functions so declared.
+    always_inline: Vec<String>,
     /// `__attribute__((weak))` seen while parsing the current declaration; the
     /// declared symbols get weak linkage so duplicate definitions merge.
     pending_weak: bool,
@@ -147,7 +151,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -300,7 +304,7 @@ impl Parser {
             }
         }
         Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
-            strict_files: std::mem::take(&mut self.strict_files) })
+            strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline) })
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -327,6 +331,7 @@ impl Parser {
         // Reset per-declaration attribute state, then parse a leading
         // `__attribute__((constructor))` (captured by `skip_attributes`).
         self.pending_constructor = None;
+        self.pending_always_inline = false;
         self.pending_weak = false;
         self.pending_thread_local = false;
         // sic strict mode (sic.md §"Strict mode"): `using strict;` makes every
@@ -473,6 +478,9 @@ impl Parser {
             // `__attribute__((constructor))` may appear before the specifiers or
             // after the declarator; take whichever was captured for this function.
             let ctor = self.pending_constructor.take();
+            if std::mem::take(&mut self.pending_always_inline) {
+                self.always_inline.push(name.clone());
+            }
 
             // K&R (old-style) definition: the parameter list held only names,
             // and their declarations follow before the `{` body, e.g.
@@ -3813,6 +3821,8 @@ impl Parser {
                         }
                     } else if name == "weak" || name == "__weak__" {
                         self.pending_weak = true;
+                    } else if name == "always_inline" || name == "__always_inline__" {
+                        self.pending_always_inline = true;
                     } else if name == "constructor" || name == "__constructor__" {
                         // Optional priority: `constructor(101)`. Default 65535
                         // (GCC's default, run after all prioritized constructors).

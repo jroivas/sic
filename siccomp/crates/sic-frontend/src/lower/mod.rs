@@ -632,6 +632,9 @@ impl Lowerer {
             deps.sort();
             self.module.sic_module_deps = deps;
         }
+        for name in &tu.always_inline {
+            for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.always_inline = true; }
+        }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();

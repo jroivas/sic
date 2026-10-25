@@ -73,6 +73,8 @@ struct FnInfo {
     ret_val_count: usize,
     /// Directly self-recursive, and otherwise eligible (self-inlining candidate).
     self_recursive: bool,
+    /// Declared `always_inline`: inlined whatever its size.
+    always: bool,
 }
 
 /// The parameter-value sentinel base used by the frontend: parameter `i` is
@@ -164,7 +166,7 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // step expands it.
     let self_recursive = eligible && self_rec;
     if self_rec { eligible = false; }
-    FnInfo { eligible, size: inline_cost(f), ret_val_count, self_recursive }
+    FnInfo { eligible, size: inline_cost(f), ret_val_count, self_recursive, always: f.always_inline }
 }
 
 impl IrPass for Inline {
@@ -203,7 +205,7 @@ impl Inline {
                         if callee == caller { continue; }              // no direct self-inline
                         let ci = &info[callee];
                         if !ci.eligible { continue; }
-                        if !(self.aggressive || ci.size <= self.threshold) { continue; }
+                        if !(self.aggressive || ci.always || ci.size <= self.threshold) { continue; }
                         // parameter/argument arity must match (variadic excluded).
                         if args.len() != m.functions[callee].params.len() { continue; }
                         // a value-returning call needs the callee to actually return one.

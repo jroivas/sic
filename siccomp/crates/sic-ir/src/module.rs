@@ -68,6 +68,9 @@ pub struct Function {
     /// arguments land in every hot loop, which the back end then hoists into
     /// registers — spilling the loop's own variables).
     pub noinline: bool,
+    /// Always inline this function when optimizing (`always_inline`; GCC's
+    /// intrinsics), whatever its size.
+    pub always_inline: bool,
     /// Name of the next-id counter for values inside this function.
     next_val_id: u32,
     next_block_id: u32,
@@ -79,6 +82,7 @@ impl Function {
             name, sig, params, blocks: Vec::new(), linkage,
             constructor: None,
             noinline: false,
+            always_inline: false,
             next_val_id: 0, next_block_id: 0,
         }
     }
