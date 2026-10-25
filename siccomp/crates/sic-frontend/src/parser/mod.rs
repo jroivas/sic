@@ -1199,8 +1199,13 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RBrace)?;
-            // Trailing `struct T {...} __attribute__((packed/__order__))`.
+            // Trailing `struct T {...} __attribute__((packed/__order__/aligned))`;
+            // an alignment there raises the type's (Linux's struct page
+            // `} _struct_page_alignment;`).
             self.skip_attributes();
+            if let Some(n) = self.pending_aligned.take() {
+                type_align = Some(type_align.unwrap_or(0).max(n));
+            }
             Some(fields)
         } else {
             None
@@ -3941,6 +3946,38 @@ impl Parser {
     /// before). Operators are handled at the outermost (depth-0) level, splitting
     /// at the last occurrence for left-associativity; precedence low→high is
     /// `<<`, `+`, `*`.
+    /// The size of `( built-in type )` in `tokens[lo..hi]`: `char`, `short`,
+    /// `int`, `long` (+ `long long`), `float`, `double`, `_Bool`, `__int128`,
+    /// with signedness words, or any pointer. None for anything else.
+    fn builtin_sizeof_tokens(&self, lo: usize, hi: usize) -> Option<u32> {
+        if hi < lo + 3 || self.tokens[lo].kind != TokenKind::LParen || self.matching_rparen(lo) != Some(hi - 1) {
+            return None;
+        }
+        let toks = &self.tokens[lo + 1..hi - 1];
+        if toks.iter().any(|t| t.kind == TokenKind::Star) { return Some(8); }
+        let mut longs = 0;
+        let mut base: Option<u32> = None;
+        for t in toks {
+            match t.kind {
+                TokenKind::Signed | TokenKind::Unsigned | TokenKind::Const | TokenKind::Volatile => {}
+                TokenKind::Long => longs += 1,
+                TokenKind::Char | TokenKind::Bool => base = Some(1),
+                TokenKind::Short => base = Some(2),
+                TokenKind::Int => { if base.is_none() { base = Some(4); } }
+                TokenKind::Float => base = Some(4),
+                TokenKind::Double => base = Some(8),
+                TokenKind::TypeName if t.text == "__int128" || t.text == "__int128_t" || t.text == "__uint128_t" => base = Some(16),
+                _ => return None,
+            }
+        }
+        Some(match (base, longs) {
+            (Some(8), 1) => 16,          // long double
+            (Some(4) | None, 1..) => 8,  // long, long long
+            (Some(b), _) => b,
+            (None, _) => 4,              // `unsigned` alone
+        })
+    }
+
     fn eval_align_tokens(&self, lo: usize, hi: usize) -> Option<u32> {
         if lo >= hi { return None; }
         // Strip a fully-enclosing paren pair.
@@ -3971,9 +4008,12 @@ impl Parser {
                 });
             }
         }
-        // Atom: a bare integer literal, or sizeof(...) as the machine word.
+        // Atom: a bare integer literal, or `sizeof(T)` of a built-in type
+        // (`aligned(sizeof(int))` is Linux's atomic_t, `sizeof(void *)` QEMU's
+        // QEMU_ALIGNED). A typedef or struct operand is unknown here (None:
+        // the attribute is not applied) rather than guessed.
         if self.tokens[lo].kind == TokenKind::Sizeof {
-            return Some(8);
+            return self.builtin_sizeof_tokens(lo + 1, hi);
         }
         if hi - lo == 1 && self.tokens[lo].kind == TokenKind::IntLit {
             return self.tokens[lo].text
