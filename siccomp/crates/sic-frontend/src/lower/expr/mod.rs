@@ -1630,9 +1630,12 @@ impl<'m> FuncCtx<'m> {
 
         // GCC vector extension: when both operands are vector (array) types an
         // arithmetic/bitwise/comparison operator is element-wise, not scalar.
-        // Regular arrays decay to pointers before this point, so two array
-        // operands here means a `vector_size` type.
-        if !matches!(op, BinOpKind::LogAnd | BinOpKind::LogOr) {
+        // An operand declared as a C array decays to a pointer instead
+        // (`__stop_x - __start_x` is a pointer difference): vectors and arrays
+        // share the IR type, so the declaration decides.
+        if !matches!(op, BinOpKind::LogAnd | BinOpKind::LogOr)
+            && !self.is_c_array_object(lhs) && !self.is_c_array_object(rhs)
+        {
             if let (Ok(lt @ Type::Array { .. }), Ok(Type::Array { .. })) =
                 (self.infer_expr_type(lhs), self.infer_expr_type(rhs))
             {
@@ -4643,6 +4646,19 @@ impl<'m> FuncCtx<'m> {
         self.register_scope_exit(super::func::Cleanup::RefRelease { slot: Val::Local(slot) });
         // The reference's value is the referent pointer, with its own type.
         Ok(p)
+    }
+
+    /// `e` names a C array object (a variable declared with `[…]`, not a
+    /// `vector_size` vector) or is a string literal: it decays in an operator.
+    fn is_c_array_object(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::StringLit(_) | ExprKind::WideStringLit(..) => true,
+            ExprKind::Ident(n) => {
+                let qt = self.decl_qtypes.get(n).or_else(|| self.lowerer.global_qtypes.get(n));
+                matches!(qt.map(|q| &q.ty), Some(crate::ast::AstType::Array { vector: false, .. }))
+            }
+            _ => false,
+        }
     }
 
     /// Emit `memcpy(dst, src, n)`.

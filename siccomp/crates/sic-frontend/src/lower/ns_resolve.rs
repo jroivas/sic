@@ -120,7 +120,7 @@ impl<'a> NsRenamer<'a> {
     fn ast_type(&mut self, t: &mut AstType) {
         match t {
             AstType::Pointer { base, .. } | AstType::Weak(base) => self.qual_type(base),
-            AstType::Array { base, size } => {
+            AstType::Array { base, size, .. } => {
                 self.qual_type(base);
                 if let Some(s) = size { self.expr(s); }
             }

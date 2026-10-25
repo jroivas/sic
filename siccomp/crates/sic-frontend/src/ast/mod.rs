@@ -55,7 +55,9 @@ pub enum AstType {
     Bool,
     Complex,
     Pointer { base: Box<QualType>, quals: Vec<TypeQual> },
-    Array { base: Box<QualType>, size: Option<BoxExpr> },
+    /// `vector`: a GCC `vector_size` vector (operators act element-wise and it
+    /// does not decay), rather than a C array.
+    Array { base: Box<QualType>, size: Option<BoxExpr>, vector: bool },
     Function { ret: Box<QualType>, params: Vec<Param>, variadic: bool },
     Struct(StructDef),
     Union(UnionDef),

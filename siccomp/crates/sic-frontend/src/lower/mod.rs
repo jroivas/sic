@@ -3479,7 +3479,7 @@ impl Lowerer {
     /// evaluator (`eval_const_int` resolves `sizeof(global)` via `const_expr_type`,
     /// which `lower_type`'s dimension pass — lacking the symbol table — cannot).
     fn resolve_global_array_dims(&self, ir_ty: &mut Type, ast_ty: &AstType) {
-        if let (Type::Array { elem, len }, AstType::Array { base, size }) = (&mut *ir_ty, ast_ty) {
+        if let (Type::Array { elem, len }, AstType::Array { base, size, .. }) = (&mut *ir_ty, ast_ty) {
             if *len == 0 {
                 if let Some(sz) = size {
                     if let Some(n) = self.eval_const_int(sz) {
@@ -5353,9 +5353,10 @@ fn subst_ast_type(ty: &AstType, subst: &HashMap<String, AstType>) -> AstType {
             base: Box::new(QualType { ty: subst_ast_type(&base.ty, subst), qualifiers: base.qualifiers.clone(), storage: base.storage.clone() }),
             quals: quals.clone(),
         },
-        Array { base, size } => Array {
+        Array { base, size, vector } => Array {
             base: Box::new(QualType { ty: subst_ast_type(&base.ty, subst), qualifiers: base.qualifiers.clone(), storage: base.storage.clone() }),
             size: size.clone(),
+            vector: *vector,
         },
         Generic { name, args } => Generic {
             name: name.clone(),

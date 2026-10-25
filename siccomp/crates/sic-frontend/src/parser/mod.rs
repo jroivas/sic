@@ -1820,7 +1820,7 @@ impl Parser {
         }
         for suf in suffixes.into_iter().rev() {
             ty = match suf {
-                Suffix::Array(size) => QualType::new(AstType::Array { base: Box::new(ty), size }),
+                Suffix::Array(size) => QualType::new(AstType::Array { base: Box::new(ty), size, vector: false }),
                 Suffix::Func(params, variadic) => QualType::new(AstType::Function {
                     ret: Box::new(ty), params, variadic,
                 }),
@@ -4000,7 +4000,7 @@ impl Parser {
             let lanes = (n / ast_type_byte_size(&ty.ty).max(1)).max(1);
             Expr::new(ExprKind::IntLit(lanes as i64, false), span)
         };
-        QualType::new(AstType::Array { base: Box::new(ty), size: Some(Box::new(size)) })
+        QualType::new(AstType::Array { base: Box::new(ty), size: Some(Box::new(size)), vector: true })
     }
 
     fn skip_balanced_parens(&mut self) {
@@ -4125,8 +4125,8 @@ fn subst_sentinel(ty: QualType, sentinel: &str, repl: &QualType) -> QualType {
             ty: AstType::Function { ret: Box::new(subst_sentinel(*ret, sentinel, repl)), params, variadic },
             qualifiers: ty.qualifiers, storage: ty.storage,
         },
-        AstType::Array { base, size } => QualType {
-            ty: AstType::Array { base: Box::new(subst_sentinel(*base, sentinel, repl)), size },
+        AstType::Array { base, size, vector } => QualType {
+            ty: AstType::Array { base: Box::new(subst_sentinel(*base, sentinel, repl)), size, vector },
             qualifiers: ty.qualifiers, storage: ty.storage,
         },
         _ => ty,

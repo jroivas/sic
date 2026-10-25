@@ -2,7 +2,8 @@
 // table of function pointers placed in a section and walked through the
 // linker's __start_/__stop_ symbols, a function-scope `static` in its own
 // section (WARN_ONCE's .data.once), a function in a named section, and an
-// uncalled `static` function kept by `used`.
+// uncalled `static` function kept by `used`. `__stop_x - __start_x` of two
+// C arrays is a pointer difference (it was taken for a vector operation).
 #include <string.h>
 
 typedef int (*initcall_t)(void);
@@ -37,5 +38,7 @@ int main(void)
 {
     for (initcall_t *p = __start_sic_initcall; p < __stop_sic_initcall; p++) (*p)();
     int r = once() + once();            // 1
-    return calls + r + cold_path(15) + (int)strlen(tag) - 3; // 11 + 1 + 30 = 42
+    int n = (int)(__stop_sic_initcall - __start_sic_initcall);  // 2
+    int empty = __start_sic_initcall == __stop_sic_initcall;    // 0
+    return calls + r + cold_path(15) + (int)strlen(tag) - 3 + (n - 2) + empty; // 11 + 1 + 30 = 42
 }

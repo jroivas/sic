@@ -866,7 +866,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             // pointee re-resolves the full definition by name via `named`.
             Type::Pointer(Box::new(opaque_aggregate(inner)))
         }
-        AstType::Array { base, size } => {
+        AstType::Array { base, size, .. } => {
             let elem = lower_type(base, named, ptr_size)?;
             let len = if let Some(sz) = size {
                 // Fold the (constant) length expression — handles arithmetic like

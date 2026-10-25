@@ -946,7 +946,7 @@ impl<'m> FuncCtx<'m> {
     /// `eval_scoped_const`); others (VLAs, `T a[]`) stay 0.
     fn resolve_scoped_dims(&mut self, ast: &AstType, ty: Type) -> Type {
         match (ast, ty) {
-            (AstType::Array { base, size }, Type::Array { elem, len }) => {
+            (AstType::Array { base, size, .. }, Type::Array { elem, len }) => {
                 let elem = self.resolve_scoped_dims(&base.ty, *elem);
                 let len = match (len, size) {
                     (0, Some(sz)) => self.eval_scoped_const(sz).filter(|&n| n > 0).map_or(0, |n| n as usize),
@@ -1806,7 +1806,7 @@ impl<'m> FuncCtx<'m> {
                 let inner = self.lower_ast_type_scoped(&base.ty)?;
                 Ok(Type::Pointer(Box::new(super::types::opaque_aggregate(inner))))
             }
-            A::Array { base, size } => {
+            A::Array { base, size, .. } => {
                 let elem = self.lower_ast_type_scoped(&base.ty)?;
                 let len = match size {
                     Some(sz) => crate::lower::eval_const_expr(sz, &self.lowerer.enum_consts)
@@ -5441,7 +5441,7 @@ impl<'m> FuncCtx<'m> {
                     designators: vec![],
                     init: Initializer::Expr(Expr { kind: ExprKind::IntLit(*v, false), span: sp.clone() }),
                 }).collect();
-                let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))) }, qualifiers: vec![], storage: None };
+                let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))), vector: false }, qualifiers: vec![], storage: None };
                 let arr_decl = Stmt::Decl(Decl::Var {
                     base_ty: QualType::new(AstType::Int { signed: true }),
                     declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, unused: false, section: None, span: sp.clone() }],
