@@ -241,8 +241,7 @@ counts with the digits of its type (`int`: 10), a literal with its own:
     fixed<1,9> b = 1.123456789;
 
     // Prints fixed<10,9>
-    printf("%s
-", type(a + b).str);
+    printf("%s", type(a + b).str);
 
 A value is never cut to fit: storing a value whose type has more integral or
 fraction digits than the target is a compile error. Plain `fixed` does not have
