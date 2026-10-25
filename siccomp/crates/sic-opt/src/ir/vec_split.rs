@@ -7,14 +7,15 @@
 //! by plain loads and stores of its own address, so these never qualify and
 //! every intrinsic round-trips its operands through memory.
 //!
-//! A slot of 16 to 64 bytes whose every use, through casts and constant
-//! offsets, is a 16-byte vector load or store at a 16-byte boundary, or a copy
-//! of the whole slot, is split into 16-byte vector slots accessed directly; a
-//! copy becomes a load and store per part. Any other use (a lane read as a
+//! A slot of 16 to 256 bytes whose every use, through casts and constant
+//! offsets or indices, is a 16-byte vector load or store at a 16-byte
+//! boundary, or a copy or constant fill of whole 16-byte parts, is split
+//! into 16-byte vector slots accessed directly; a copy becomes a load and
+//! store per part. Any other use (a lane read as a
 //! scalar, the address passed on) leaves the slot as it is.
 
 use std::collections::{HashMap, HashSet};
-use sic_ir::{Module, Function, Instr, Val, ValId, Type, CastOp, Constant};
+use sic_ir::{Module, Function, Instr, Val, ValId, Type, CastOp, Constant, SimdOp};
 use super::pass::IrPass;
 
 pub struct VecSplit;
@@ -71,13 +72,26 @@ fn split_function(f: &mut Function) -> bool {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, ty, align } = ins {
                 let s = ty.size_of(8);
-                if s >= 16 && s <= 64 && s % 16 == 0 && align.map_or(true, |a| a <= 16) {
+                if s >= 16 && s <= 256 && s % 16 == 0 && align.map_or(true, |a| a <= 16) {
                     size.insert(*dest, s);
                 }
             }
         }
     }
     if size.is_empty() { return false; }
+    // Integer constants behind extensions (an index typed by a cast).
+    let mut konst: HashMap<ValId, i64> = HashMap::new();
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            if let Instr::Cast { dest, op: CastOp::SExt | CastOp::ZExt, val, .. } = ins {
+                if let Some(c) = const_off(val) { konst.insert(*dest, c); }
+            }
+        }
+    }
+    let const_off = |v: &Val| match v {
+        Val::Local(id) => konst.get(id).copied(),
+        _ => const_off(v),
+    };
     // Pointers into a candidate: (slot, byte offset), through pointer casts and
     // constant offsets (to a fixed point: definitions may follow uses in block
     // order).
@@ -94,6 +108,11 @@ fn split_function(f: &mut Function) -> bool {
                         Some(o) => (*dest, *v, o),
                         None => continue,
                     },
+                    Instr::GetElemPtr { dest, base: Val::Local(v), index, elem_size, .. } => match const_off(index) {
+                        Some(i) => (*dest, *v, i * *elem_size as i64),
+                        None => continue,
+                    },
+                    Instr::GetFieldPtr { dest, base: Val::Local(v), byte_offset, .. } => (*dest, *v, *byte_offset as i64),
                     _ => continue,
                 };
                 if alias.contains_key(&d) { continue; }
@@ -130,17 +149,26 @@ fn split_function(f: &mut Function) -> bool {
                         else if *p != r || size[&r] != 16 { rewrite.insert(r); }
                     }
                 }
+                // Copies and constant fills of whole 16-byte parts.
                 Instr::MemCopy { dst, src, size: n, .. } => {
                     for v in [dst, src] {
                         if let Val::Local(id) = v {
                             if let Some(&(r, o)) = alias.get(id) {
-                                if o != 0 || *n != size[&r] { bad.insert(r); } else { rewrite.insert(r); }
+                                let fits = o >= 0 && o % 16 == 0 && n % 16 == 0 && *n > 0 && o as u64 + n <= size[&r];
+                                if !fits { bad.insert(r); } else { rewrite.insert(r); }
                             }
                         }
                     }
                 }
+                Instr::MemSet { dst: Val::Local(id), val, size: n, .. } if alias.contains_key(id) => {
+                    let (r, o) = alias[id];
+                    let fits = o >= 0 && o % 16 == 0 && n % 16 == 0 && *n > 0 && o as u64 + n <= size[&r];
+                    if !fits || const_off(val).is_none() { bad.insert(r); } else { rewrite.insert(r); }
+                }
                 Instr::Cast { op: CastOp::BitCast, val: Val::Local(v), .. } if alias.contains_key(v) => {}
                 Instr::PtrOffset { base: Val::Local(v), offset, .. } if alias.contains_key(v) && const_off(offset).is_some() => {}
+                Instr::GetElemPtr { base: Val::Local(v), index, .. } if alias.contains_key(v) && const_off(index).is_some() => {}
+                Instr::GetFieldPtr { base: Val::Local(v), .. } if alias.contains_key(v) => {}
                 Instr::Alloca { .. } | Instr::DbgVar { .. } | Instr::SrcLine(_) => {}
                 other => other.for_each_val(|v| reject(v, &mut bad)),
             }
@@ -170,7 +198,9 @@ fn split_function(f: &mut Function) -> bool {
                     }
                 }
                 Instr::DbgVar { slot, .. } if split.contains(slot) => {}
-                Instr::Cast { dest, .. } | Instr::PtrOffset { dest, .. } if part_of(dest).is_some() && !split.contains(dest) => {}
+                Instr::Cast { dest, .. } | Instr::PtrOffset { dest, .. } | Instr::GetElemPtr { dest, .. }
+                | Instr::GetFieldPtr { dest, .. }
+                    if part_of(dest).is_some() && !split.contains(dest) => {}
                 Instr::Load { dest, ptr: Val::Local(p), ty } if part_of(p).is_some() => {
                     let (r, o) = part_of(p).unwrap();
                     out.push(Instr::Load { dest: *dest, ptr: Val::Local(parts[&r][(o / 16) as usize]), ty: ty.clone() });
@@ -179,14 +209,23 @@ fn split_function(f: &mut Function) -> bool {
                     let (r, o) = part_of(p).unwrap();
                     out.push(Instr::Store { val: val.clone(), ptr: Val::Local(parts[&r][(o / 16) as usize]) });
                 }
+                Instr::MemSet { dst: Val::Local(d), val, size: n, .. } if part_of(d).is_some() => {
+                    let (r, o) = part_of(d).unwrap();
+                    let byte = const_off(val).unwrap_or(0) as u8;
+                    let c = f.alloc_val();
+                    out.push(Instr::Simd { dest: c, op: SimdOp::Const(Box::new([byte; 16])), args: vec![], arg_ty: part_ty(), ty: part_ty() });
+                    for k in 0..(n / 16) as usize {
+                        out.push(Instr::Store { val: Val::Local(c), ptr: Val::Local(parts[&r][(o / 16) as usize + k]) });
+                    }
+                }
                 Instr::MemCopy { dst, src, size: n, .. }
                     if matches!(dst, Val::Local(d) if part_of(d).is_some()) || matches!(src, Val::Local(s) if part_of(s).is_some()) =>
                 {
-                    let side = |v: &Val| match v { Val::Local(id) => part_of(id).map(|(r, _)| r), _ => None };
+                    let side = |v: &Val| match v { Val::Local(id) => part_of(id).map(|(r, o)| (r, (o / 16) as usize)), _ => None };
                     let (ds, ss) = (side(dst), side(src));
                     for k in 0..(n / 16) as usize {
                         let from = match ss {
-                            Some(r) => Val::Local(parts[&r][k]),
+                            Some((r, p0)) => Val::Local(parts[&r][p0 + k]),
                             None => {
                                 let a = f.alloc_val();
                                 out.push(Instr::PtrOffset { dest: a, base: src.clone(), offset: Constant::int(16 * k as i64) });
@@ -196,7 +235,7 @@ fn split_function(f: &mut Function) -> bool {
                         let v = f.alloc_val();
                         out.push(Instr::Load { dest: v, ptr: from, ty: part_ty() });
                         let to = match ds {
-                            Some(r) => Val::Local(parts[&r][k]),
+                            Some((r, p0)) => Val::Local(parts[&r][p0 + k]),
                             None => {
                                 let a = f.alloc_val();
                                 out.push(Instr::PtrOffset { dest: a, base: dst.clone(), offset: Constant::int(16 * k as i64) });

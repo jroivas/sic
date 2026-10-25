@@ -1445,9 +1445,9 @@ fn emit_cast(
 }
 
 /// Copies and fills up to this many bytes are expanded to loads and stores
-/// instead of calling `memcpy`/`memset` (as GCC and Clang do for small
-/// constant sizes).
-const SMALL_MEM_OP: u64 = 64;
+/// (at most eight 16-byte pieces) instead of calling `memcpy`/`memset`, as GCC
+/// and Clang do for small constant sizes.
+const SMALL_MEM_OP: u64 = 128;
 
 /// Split `size` bytes into (offset, type) pieces of 16 (a vector register), 8,
 /// 4, 2 and 1 bytes, largest first. The accesses carry no alignment promise.
