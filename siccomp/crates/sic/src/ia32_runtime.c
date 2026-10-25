@@ -1,6 +1,9 @@
-/* SSE4.2 string comparisons (pcmpestri/pcmpestrm/pcmpistri/pcmpistrm and their
-   flag forms), following the definition in Intel's SDM. Prepended
-   (post-preprocess) only when the unit uses them; weak-linked.
+/* The x86 SIMD builtins too involved to expand inline: the SSE4.2 string
+   comparisons and the F16C float-to-half conversion, following Intel's SDM.
+   Prepended (post-preprocess) only when the unit uses them; weak-linked.
+
+   String comparisons (pcmpestri/pcmpestrm/pcmpistri/pcmpistrm and their flag
+   forms):
 
    `la`/`lb` are the explicit lengths (their absolute values, at most the
    element count), unused when `implicit` (each string ends at its first zero
@@ -90,4 +93,35 @@ __attribute__((weak)) int __sic_pcmpstr(const void *va, int ea, const void *vb, 
     case 5: return res2 & 1;
     default: return res2 == 0 && !(lb < n);
     }
+}
+
+/* `f` as an IEEE half, rounded by `mode`: 0 to nearest even, 1 down, 2 up,
+   3 toward zero (vcvtps2ph). NaNs are quieted, keeping their high payload. */
+__attribute__((weak)) unsigned short __sic_f32_to_f16(float f, int mode) {
+    union { float f; unsigned u; } v;
+    v.f = f;
+    unsigned sign = (v.u >> 16) & 0x8000u, exp = (v.u >> 23) & 0xffu, man = v.u & 0x7fffffu;
+    if (exp == 0xff) return (unsigned short)(sign | 0x7c00u | (man ? 0x200u | (man >> 13) : 0));
+    /* The value is m * 2^(e - 23); its half quantum is 2^(e - 10) when it is a
+       normal half (e >= -14), else 2^-24. */
+    int e = exp ? (int)exp - 127 : -126;
+    unsigned m = exp ? (man | 0x800000u) : man;
+    int shift = e >= -14 ? 13 : -1 - e;
+    unsigned r, rem, half;
+    if (shift > 25) { r = 0; rem = m; half = 1u << 25; }
+    else { r = m >> shift; rem = m & ((1u << shift) - 1); half = 1u << (shift - 1); }
+    switch (mode & 3) {
+    case 0: if (rem > half || (rem == half && (r & 1))) r++; break;
+    case 1: if (sign && rem) r++; break;
+    case 2: if (!sign && rem) r++; break;
+    default: break;
+    }
+    /* r carries the implicit bit (0x400) for a normal half, and a carry out of
+       the mantissa moves into the exponent. */
+    unsigned bits = e >= -14 ? ((unsigned)(e + 14) << 10) + r : r;
+    if (bits >= 0x7c00u) {
+        int inf = (mode & 3) == 0 || ((mode & 3) == 2 && !sign) || ((mode & 3) == 1 && sign);
+        bits = inf ? 0x7c00u : 0x7bffu;
+    }
+    return (unsigned short)(sign | bits);
 }

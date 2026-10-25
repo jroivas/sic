@@ -10,7 +10,7 @@ mod async_runtime;
 mod list_runtime;
 mod tuple_runtime;
 mod cpu_runtime;
-mod pcmpstr_runtime;
+mod ia32_runtime;
 mod assert_runtime;
 mod module_conf;
 mod rust_module;
@@ -791,10 +791,10 @@ fn parse_source(
             cpu_runtime::CPU_RUNTIME, path, preprocessed
         );
     }
-    if pcmpstr_runtime::uses_pcmpstr(&preprocessed) {
+    if ia32_runtime::uses_ia32(&preprocessed) {
         preprocessed = format!(
             "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
-            pcmpstr_runtime::PCMPSTR_RUNTIME, path, preprocessed
+            ia32_runtime::IA32_RUNTIME, path, preprocessed
         );
     }
     if is_sic && tuple_runtime::uses_tuple(&preprocessed) {

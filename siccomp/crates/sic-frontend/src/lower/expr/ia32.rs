@@ -395,7 +395,7 @@ impl FuncCtx<'_> {
     }
 
     /// `pcmp{e,i}str{i,m,a,c,o,s,z}128`: a call of the prepended
-    /// `__sic_pcmpstr` runtime (sic/src/pcmpstr_runtime.c).
+    /// `__sic_pcmpstr` runtime (sic/src/ia32_runtime.c).
     fn lower_pcmpstr(&mut self, name: &str, n: &str, args: &[Expr], rty: &Type) -> Result<Val> {
         let explicit = n.starts_with("pcmpestr");
         let want = if explicit { 5 } else { 3 };
@@ -438,6 +438,110 @@ impl FuncCtx<'_> {
             ret_ty: i32t,
         });
         Ok(out.unwrap_or(Val::Local(r)))
+    }
+
+    /// Byte indices for a swizzle from 32-bit lane indices already scaled to
+    /// bytes (`4·i`): each lane's index repeated into its four bytes, plus 0..4.
+    fn lane_bytes(&mut self, idx4: Val) -> Val {
+        let t = v128(int(8, false));
+        let rep = self.shuffle(idx4.clone(), idx4, std::array::from_fn(|i| (i & !3) as u8));
+        let ofs = self.sv_const(std::array::from_fn(|i| (i & 3) as u8));
+        self.sv(SimdOp::Add, vec![rep, ofs], t.clone(), t)
+    }
+
+    fn bin_s(&mut self, op: BinOp, l: Val, r: Val, ty: &Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: d, op, lhs: l, rhs: r, ty: ty.clone() });
+        Val::Local(d)
+    }
+
+    fn cmp_s(&mut self, op: CmpOp, l: Val, r: Val, ty: &Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: d, op, lhs: l, rhs: r, ty: ty.clone() });
+        Val::Local(d)
+    }
+
+    fn select_s(&mut self, c: Val, a: Val, b: Val, ty: &Type) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Select { dest: d, cond: c, on_true: a, on_false: b, ty: ty.clone() });
+        Val::Local(d)
+    }
+
+    fn ptr_add(&mut self, p: Val, off: Val) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::PtrOffset { dest: d, base: p, offset: off });
+        Val::Local(d)
+    }
+
+    /// Lane `i` of the parts `v` (lanes of `l`) as a scalar.
+    fn lane_get(&mut self, v: &[Val], i: usize, l: &Type) -> Val {
+        let per = 16 / l.size_of(8) as usize;
+        self.sv(SimdOp::Extract((i % per) as u8), vec![v[i / per].clone()], v128(l.clone()), l.clone())
+    }
+
+    fn lane_set(&mut self, v: &mut [Val], i: usize, l: &Type, x: Val) {
+        let per = 16 / l.size_of(8) as usize;
+        let t = v128(l.clone());
+        v[i / per] = self.sv(SimdOp::Insert((i % per) as u8), vec![v[i / per].clone(), x], t.clone(), t);
+    }
+
+    /// Whether lane `i` of the mask parts has its sign bit set.
+    fn lane_neg(&mut self, m: &[Val], i: usize, lb: u64) -> Val {
+        let it = int(8 * lb as u32, true);
+        let e = self.lane_get(m, i, &it);
+        self.cmp_s(CmpOp::ISLt, e, Constant::int(0), &it)
+    }
+
+    /// Masked loads and gathers: lane `i` is loaded from `addr(i)` where the
+    /// mask lane is negative, else from `fallback + i·lb` (a stack copy of
+    /// the pass-through value), so a masked-off lane never touches memory.
+    fn masked_lanes(&mut self, rty: &Type, l: &Type, lanes: usize, mask: &[Val], fallback: Val,
+                    mut addr: impl FnMut(&mut Self, usize) -> Result<Val>) -> Result<Vec<Val>> {
+        let lb = l.size_of(8);
+        let width = rty.size_of(self.ptr_size());
+        let mut r: Vec<Val> = (0..(width / 16).max(1)).map(|_| self.sv_zero()).collect();
+        for i in 0..lanes {
+            let a = addr(self, i)?;
+            let neg = self.lane_neg(mask, i, lb);
+            let fb = self.ptr_add(fallback.clone(), Constant::int((i as u64 * lb) as i64));
+            let p = self.select_s(neg, a, fb, &Type::void_ptr());
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: p, ty: l.clone() });
+            self.lane_set(&mut r, i, l, Val::Local(d));
+        }
+        Ok(r)
+    }
+
+    /// A stack copy of `parts` (`width` bytes), for masked lanes to read.
+    fn spill(&mut self, parts: &[Val], width: u64) -> Val {
+        let d = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: d, ty: vec(int(8, false), width), align: None });
+        self.store_parts(Val::Local(d), parts, width);
+        Val::Local(d)
+    }
+
+    /// Half (in u16 lanes 0..4 of `h`) to float, exactly: the magnitude
+    /// shifted into a float's mantissa and scaled by 2^112 (subnormal halves
+    /// become normal floats), infinities and NaNs given the all-ones exponent.
+    fn half4_to_float(&mut self, h: Val, high: bool) -> Val {
+        let (h16, i32t, f32t) = (v128(int(16, false)), v128(int(32, false)), v128(Type::Float32));
+        let op = if high { SimdOp::UWidenHigh } else { SimdOp::UWidenLow };
+        let w = self.sv(op, vec![h], h16, i32t.clone());
+        let splat = |me: &mut Self, x: u32| me.sv_const(std::array::from_fn(|i| (x >> (8 * (i % 4))) as u8));
+        let m7 = splat(self, 0x7fff);
+        let em = self.sv(SimdOp::And, vec![w.clone(), m7], i32t.clone(), i32t.clone());
+        let sm = splat(self, 0x8000);
+        let sign = self.sv(SimdOp::And, vec![w, sm], i32t.clone(), i32t.clone());
+        let sign = self.sv(SimdOp::Shl, vec![sign, Constant::int(16)], i32t.clone(), i32t.clone());
+        let sh = self.sv(SimdOp::Shl, vec![em.clone(), Constant::int(13)], i32t.clone(), i32t.clone());
+        let scale = splat(self, 0x7780_0000);
+        let fin = self.sv(SimdOp::FMul, vec![sh.clone(), scale], f32t.clone(), f32t);
+        let ex = splat(self, 0x7f80_0000);
+        let special = self.sv(SimdOp::Or, vec![sh, ex], i32t.clone(), i32t.clone());
+        let lim = splat(self, 0x7bff);
+        let big = self.sv(SimdOp::ICmp(CmpOp::ISGt), vec![em, lim], i32t.clone(), i32t.clone());
+        let mag = self.sv(SimdOp::Select, vec![big, special, fin], i32t.clone(), i32t.clone());
+        self.sv(SimdOp::Or, vec![mag, sign], i32t.clone(), i32t)
     }
 
     /// Lower `__builtin_ia32_<n>`; `None` when `n` is not handled here.
@@ -486,6 +590,302 @@ impl FuncCtx<'_> {
             return self.lower_pcmpstr(name, n, args, &rty).map(Some);
         }
         let parts = match n {
+            // ---- AVX / AVX2 -------------------------------------------------
+            // The 128-bit halves, and casts between the widths (the upper half
+            // of a widened value is zero here; GCC leaves it undefined).
+            "extract128i256" | "vextractf128_pd256" | "vextractf128_ps256" | "vextractf128_si256" => {
+                want(2)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let i = self.imm(&args[1], name)? as usize & 1;
+                vec![a[i].clone()]
+            }
+            "insert128i256" | "vinsertf128_pd256" | "vinsertf128_ps256" | "vinsertf128_si256" => {
+                want(3)?;
+                let (mut a, _) = self.vec_arg(&args[0])?;
+                let (b, _) = self.vec_arg(&args[1])?;
+                let i = self.imm(&args[2], name)? as usize & 1;
+                a[i] = b[0].clone();
+                a
+            }
+            // `ps256_ps` makes a 256-bit value of a 128-bit one; `ps_ps256` the reverse.
+            "pd_pd256" | "ps_ps256" | "si_si256" => {
+                want(1)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                vec![a[0].clone()]
+            }
+            "pd256_pd" | "ps256_ps" | "si256_si" => {
+                want(1)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                vec![a[0].clone(), self.sv_zero()]
+            }
+            // Each 128-bit result half: zero (imm bit 3 of its nibble) or one of
+            // a's or b's halves.
+            "permti256" | "vperm2f128_pd256" | "vperm2f128_ps256" | "vperm2f128_si256" => {
+                want(3)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let (b, _) = self.vec_arg(&args[1])?;
+                let imm = self.imm(&args[2], name)? as usize;
+                (0..2).map(|k| {
+                    let sel = imm >> (4 * k);
+                    if sel & 8 != 0 { self.sv_zero() } else { [&a[0], &a[1], &b[0], &b[1]][sel & 3].clone() }
+                }).collect()
+            }
+            // 64-bit lanes across the whole register.
+            "permdf256" | "permdi256" => {
+                want(2)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let imm = self.imm(&args[1], name)? as usize;
+                (0..2).map(|k| {
+                    let mut m = [0u8; 16];
+                    for d in 0..2 { put_lane(&mut m, d, (imm >> (2 * (2 * k + d))) & 3, 8); }
+                    self.shuffle(a[0].clone(), a[1].clone(), m)
+                }).collect()
+            }
+            // 32-bit lanes picked by a vector of indices, across the register.
+            "permvarsf256" | "permvarsi256" => {
+                want(2)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let (ix, _) = self.vec_arg(&args[1])?;
+                let (t8, t32) = (v128(int(8, false)), v128(int(32, false)));
+                let seven = self.sv_const(std::array::from_fn(|i| if i % 4 == 0 { 7 } else { 0 }));
+                let sixteen = self.sv_const([16; 16]);
+                ix.iter().map(|x| {
+                    let i = self.sv(SimdOp::And, vec![x.clone(), seven.clone()], t32.clone(), t32.clone());
+                    let i4 = self.sv(SimdOp::Shl, vec![i, Constant::int(2)], t32.clone(), t32.clone());
+                    let bi = self.lane_bytes(i4);
+                    let lo = self.sv(SimdOp::Swizzle, vec![a[0].clone(), bi.clone()], t8.clone(), t8.clone());
+                    let bh = self.sv(SimdOp::Sub, vec![bi, sixteen.clone()], t8.clone(), t8.clone());
+                    let hi = self.sv(SimdOp::Swizzle, vec![a[1].clone(), bh], t8.clone(), t8.clone());
+                    self.sv(SimdOp::Or, vec![lo, hi], t8.clone(), t8.clone())
+                }).collect()
+            }
+            // Lanes within each 128-bit half by immediate or by vector.
+            "vpermilps" | "vpermilps256" | "vpermilpd" | "vpermilpd256" => {
+                want(2)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let imm = self.imm(&args[1], name)? as usize;
+                a.iter().enumerate().map(|(k, x)| {
+                    let mut m = [0u8; 16];
+                    if n.starts_with("vpermilpd") {
+                        for d in 0..2 { put_lane(&mut m, d, (imm >> (2 * k + d)) & 1, 8); }
+                    } else {
+                        for d in 0..4 { put_lane(&mut m, d, (imm >> (2 * d)) & 3, 4); }
+                    }
+                    self.shuffle(x.clone(), x.clone(), m)
+                }).collect()
+            }
+            "vpermilvarps" | "vpermilvarps256" | "vpermilvarpd" | "vpermilvarpd256" => {
+                want(2)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let (c, _) = self.vec_arg(&args[1])?;
+                let pd = n.starts_with("vpermilvarpd");
+                let (t8, t32) = (v128(int(8, false)), v128(int(32, false)));
+                a.iter().zip(&c).map(|(x, y)| {
+                    let i4 = if pd {
+                        // Bit 1 of each 64-bit control picks the lane: 32-bit
+                        // lane indices 2·sel and 2·sel + 1.
+                        let one = self.sv_const(std::array::from_fn(|i| if i % 8 == 0 { 2 } else { 0 }));
+                        let sel = self.sv(SimdOp::And, vec![y.clone(), one], t32.clone(), t32.clone());
+                        let lanes = self.shuffle(sel.clone(), sel, std::array::from_fn(|i| ((i / 8) * 8 + i % 4) as u8));
+                        let odd = self.sv_const(std::array::from_fn(|i| if i % 8 == 4 { 1 } else { 0 }));
+                        let li = self.sv(SimdOp::Add, vec![lanes, odd], t32.clone(), t32.clone());
+                        self.sv(SimdOp::Shl, vec![li, Constant::int(2)], t32.clone(), t32.clone())
+                    } else {
+                        let three = self.sv_const(std::array::from_fn(|i| if i % 4 == 0 { 3 } else { 0 }));
+                        let i = self.sv(SimdOp::And, vec![y.clone(), three], t32.clone(), t32.clone());
+                        self.sv(SimdOp::Shl, vec![i, Constant::int(2)], t32.clone(), t32.clone())
+                    };
+                    let bi = self.lane_bytes(i4);
+                    self.sv(SimdOp::Swizzle, vec![x.clone(), bi], t8.clone(), t8.clone())
+                }).collect()
+            }
+            "movddup256" => {
+                want(1)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                let mut m = [0u8; 16];
+                for d in 0..2 { put_lane(&mut m, d, 0, 8); }
+                a.iter().map(|x| self.shuffle(x.clone(), x.clone(), m)).collect()
+            }
+            // Lane 0 of a 128-bit vector in every lane.
+            "pbroadcastb128" | "pbroadcastw128" | "pbroadcastd128" | "pbroadcastq128"
+            | "pbroadcastb256" | "pbroadcastw256" | "pbroadcastd256" | "pbroadcastq256"
+            | "vbroadcastss_ps" | "vbroadcastss_ps256" | "vbroadcastsd_pd256" => {
+                want(1)?;
+                let lb = match n { _ if n.starts_with("pbroadcastb") => 1, _ if n.starts_with("pbroadcastw") => 2,
+                                   _ if n.starts_with("pbroadcastq") || n.contains("sd") => 8, _ => 4 };
+                let (a, _) = self.vec_arg(&args[0])?;
+                let m: [u8; 16] = std::array::from_fn(|i| (i % lb) as u8);
+                let v = self.shuffle(a[0].clone(), a[0].clone(), m);
+                let w = rty.size_of(self.ptr_size());
+                (0..w / 16).map(|_| v.clone()).collect()
+            }
+            "vbroadcastsi256" => {
+                want(1)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                vec![a[0].clone(), a[0].clone()]
+            }
+            // Broadcasts from memory.
+            "vbroadcastss" | "vbroadcastss256" | "vbroadcastsd256" | "vbroadcastf128_pd256" | "vbroadcastf128_ps256" => {
+                want(1)?;
+                let p = self.lower_expr(&args[0])?;
+                let w = rty.size_of(self.ptr_size());
+                if n.starts_with("vbroadcastf128") {
+                    let v = self.load_parts(p, 16);
+                    vec![v[0].clone(), v[0].clone()]
+                } else {
+                    let l = if n == "vbroadcastsd256" { Type::Float64 } else { Type::Float32 };
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: d, ptr: p, ty: l.clone() });
+                    let t = v128(l);
+                    let v = self.sv(SimdOp::Splat, vec![Val::Local(d)], t.clone(), t);
+                    (0..w / 16).map(|_| v.clone()).collect()
+                }
+            }
+            // Per-lane shift counts; a count of the lane width or more gives
+            // zero (logical) or the sign (arithmetic).
+            "psllv2di" | "psllv4di" | "psllv4si" | "psllv8si" | "psrlv2di" | "psrlv4di" | "psrlv4si" | "psrlv8si" | "psrav4si" | "psrav8si" => {
+                want(2)?;
+                let (a, w) = self.vec_arg(&args[0])?;
+                let (c, _) = self.vec_arg(&args[1])?;
+                let bits = if n.ends_with("di") { 64 } else { 32 };
+                let (lu, ls) = (int(bits, false), int(bits, true));
+                let mut r = a.clone();
+                let lanes = (w / (bits as u64 / 8)) as usize;
+                for i in 0..lanes {
+                    let x = self.lane_get(&a, i, &lu);
+                    let k = self.lane_get(&c, i, &lu);
+                    let big = self.cmp_s(CmpOp::IUGe, k.clone(), Constant::int(bits as i64), &lu);
+                    let v = if n.starts_with("psra") {
+                        let kk = self.select_s(big, Constant::int(bits as i64 - 1), k, &lu);
+                        self.bin_s(BinOp::AShr, x, kk, &ls)
+                    } else {
+                        let op = if n.starts_with("psll") { BinOp::Shl } else { BinOp::LShr };
+                        let sh = self.bin_s(op, x, k, &lu);
+                        self.select_s(big, Constant::int(0), sh, &lu)
+                    };
+                    self.lane_set(&mut r, i, &lu, v);
+                }
+                r
+            }
+            // Masked loads/stores: masked-off lanes read zero and are not written.
+            "maskloadd" | "maskloadd256" | "maskloadq" | "maskloadq256" | "maskloadps" | "maskloadps256" | "maskloadpd" | "maskloadpd256" => {
+                want(2)?;
+                let p = self.lower_expr(&args[0])?;
+                let (m, _) = self.vec_arg(&args[1])?;
+                let l = if n.contains('q') || n.contains("pd") { int(64, true) } else { int(32, true) };
+                let w = rty.size_of(self.ptr_size());
+                let lanes = (w / l.size_of(8)) as usize;
+                let zeros: Vec<Val> = (0..(w / 16).max(1)).map(|_| self.sv_zero()).collect();
+                let fb = self.spill(&zeros, w);
+                let lb = l.size_of(8) as i64;
+                self.masked_lanes(&rty, &l, lanes, &m, fb, |me, i| Ok(me.ptr_add(p.clone(), Constant::int(lb * i as i64))))?
+            }
+            "maskstored" | "maskstored256" | "maskstoreq" | "maskstoreq256" | "maskstoreps" | "maskstoreps256" | "maskstorepd" | "maskstorepd256" => {
+                want(3)?;
+                let p = self.lower_expr(&args[0])?;
+                let (m, w) = self.vec_arg(&args[1])?;
+                let (v, _) = self.vec_arg(&args[2])?;
+                let l = if n.contains('q') || n.contains("pd") { int(64, true) } else { int(32, true) };
+                let lb = l.size_of(8);
+                let sink = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: sink, ty: l.clone(), align: None });
+                for i in 0..(w / lb) as usize {
+                    let neg = self.lane_neg(&m, i, lb);
+                    let at = self.ptr_add(p.clone(), Constant::int((lb * i as u64) as i64));
+                    let dst = self.select_s(neg, at, Val::Local(sink), &Type::void_ptr());
+                    let x = self.lane_get(&v, i, &l);
+                    self.push_instr(Instr::Store { val: x, ptr: dst });
+                }
+                return Ok(Some(Constant::zero()));
+            }
+            // gather{s,d}iv…(src, base, index, mask, scale): lane i from
+            // base + index[i]·scale where the mask lane is negative, else src.
+            _ if n.starts_with("gathersiv") || n.starts_with("gatherdiv") => {
+                want(5)?;
+                let (src, w) = self.vec_arg(&args[0])?;
+                let base = self.lower_expr(&args[1])?;
+                let base = self.coerce(base, &Type::void_ptr())?;
+                let (ix, iw) = self.vec_arg(&args[2])?;
+                let (m, _) = self.vec_arg(&args[3])?;
+                let scale = self.imm(&args[4], name)?;
+                let r = &n[9..];
+                let l = if r.contains("sf") || r.contains("si") { if r.contains("sf") { Type::Float32 } else { int(32, true) } }
+                        else if r.contains("df") { Type::Float64 } else { int(64, true) };
+                let il = if n.starts_with("gathersiv") { int(32, true) } else { int(64, true) };
+                let lanes = ((w / l.size_of(8)).min(iw / il.size_of(8))) as usize;
+                let fb = self.spill(&src, w);
+                let rt = vec(l.clone(), w / l.size_of(8));
+                let mut out = self.masked_lanes(&rt, &l, lanes, &m, fb, |me, i| {
+                    let x = me.lane_get(&ix, i, &il);
+                    let x = me.coerce(x, &int(64, true))?;
+                    let off = me.bin_s(BinOp::Mul, x, Constant::int(scale), &int(64, true));
+                    Ok(me.ptr_add(base.clone(), off))
+                })?;
+                // Lanes past the index count are zero; the rest keep `src` only
+                // through the fallback reads above.
+                out.truncate((w / 16).max(1) as usize);
+                out
+            }
+            // F16C: halves to floats, and floats to halves rounded by imm
+            // (imm bit 2: the current mode, round to nearest).
+            "vcvtph2ps" | "vcvtph2ps256" => {
+                want(1)?;
+                let (a, _) = self.vec_arg(&args[0])?;
+                if n.ends_with("256") {
+                    vec![self.half4_to_float(a[0].clone(), false), self.half4_to_float(a[0].clone(), true)]
+                } else {
+                    vec![self.half4_to_float(a[0].clone(), false)]
+                }
+            }
+            "vcvtps2ph" | "vcvtps2ph256" => {
+                want(2)?;
+                let (a, w) = self.vec_arg(&args[0])?;
+                let imm = self.imm(&args[1], name)?;
+                let mode = if imm & 4 != 0 { 0 } else { imm & 3 };
+                let func = match self.lookup("__sic_f32_to_f16") {
+                    Some(super::super::func::LookupResult::Func(f)) => f,
+                    _ => return Err(CompileError::new("the F16C runtime `__sic_f32_to_f16` is missing".to_string())),
+                };
+                let mut r = vec![self.sv_zero()];
+                for i in 0..(w / 4) as usize {
+                    let x = self.lane_get(&a, i, &Type::Float32);
+                    let d = self.alloc_val();
+                    self.push_instr(Instr::Call { dest: Some(d), func, args: vec![x, Constant::int(mode)], ret_ty: int(16, false) });
+                    self.lane_set(&mut r, i, &int(16, false), Val::Local(d));
+                }
+                r
+            }
+            // FMA: a·b ± c and the negated products, with one rounding.
+            _ if fma_kind(n).is_some() => {
+                want(3)?;
+                let (neg_ab, neg_c, alt, scalar, l) = fma_kind(n).unwrap();
+                let (a, _) = self.vec_arg(&args[0])?;
+                let (b, _) = self.vec_arg(&args[1])?;
+                let (c, _) = self.vec_arg(&args[2])?;
+                let t = v128(l.clone());
+                let lb = l.size_of(8) as usize;
+                let r: Vec<Val> = a.iter().zip(&b).zip(&c).map(|((x, y), z)| {
+                    let x2 = if neg_ab { self.sv(SimdOp::FNeg, vec![x.clone()], t.clone(), t.clone()) } else { x.clone() };
+                    let zn = self.sv(SimdOp::FNeg, vec![z.clone()], t.clone(), t.clone());
+                    let plus = self.sv(SimdOp::Fma, vec![x2.clone(), y.clone(), z.clone()], t.clone(), t.clone());
+                    let minus = self.sv(SimdOp::Fma, vec![x2, y.clone(), zn], t.clone(), t.clone());
+                    match alt {
+                        // fmaddsub: subtract in the even lanes, add in the odd.
+                        Some(even_sub) => {
+                            let (ev, od) = if even_sub { (&minus, &plus) } else { (&plus, &minus) };
+                            let mut m = [0u8; 16];
+                            for d in 0..16 / lb { put_lane(&mut m, d, if d % 2 == 0 { d } else { 16 / lb + d }, lb); }
+                            self.shuffle(ev.clone(), od.clone(), m)
+                        }
+                        None => if neg_c { minus } else { plus },
+                    }
+                }).collect();
+                if scalar { vec![self.merge_low(a[0].clone(), r[0].clone(), &l)] } else { r }
+            }
+            "vzeroall" | "vzeroupper" => {
+                want(0)?;
+                return Ok(Some(Constant::zero()));
+            }
             "crc32qi" | "crc32hi" | "crc32si" | "crc32di" => {
                 want(2)?;
                 return self.lower_crc32(n, args).map(Some);
@@ -1141,35 +1541,45 @@ impl FuncCtx<'_> {
                     self.sv(SimdOp::FPToSI, vec![x], f.clone(), i.clone())
                 }).collect()
             }
-            "cvttpd2dq" | "cvtpd2dq" => {
+            // f64 lanes to i32/f32 lanes: each 128-bit part gives two lanes;
+            // the 256-bit forms join them into one 128-bit result.
+            "cvttpd2dq" | "cvtpd2dq" | "cvtpd2ps" | "cvttpd2dq256" | "cvtpd2dq256" | "cvtpd2ps256" => {
                 want(1)?;
                 let (a, _) = self.vec_arg(&args[0])?;
-                let (i, f) = (v128(lane("d")), v128(Type::Float64));
-                let x = if n.starts_with("cvtt") { a[0].clone() } else { self.sv(SimdOp::FNearest, vec![a[0].clone()], f.clone(), f.clone()) };
-                vec![self.sv(SimdOp::FPToSI, vec![x], f, i)]
+                let f = v128(Type::Float64);
+                let r: Vec<Val> = a.iter().map(|x| {
+                    if n.starts_with("cvtpd2ps") {
+                        return self.sv(SimdOp::FDemote, vec![x.clone()], f.clone(), v128(Type::Float32));
+                    }
+                    let x = if n.starts_with("cvtt") { x.clone() } else { self.sv(SimdOp::FNearest, vec![x.clone()], f.clone(), f.clone()) };
+                    self.sv(SimdOp::FPToSI, vec![x], f.clone(), v128(int(32, true)))
+                }).collect();
+                if r.len() == 2 {
+                    vec![self.shuffle(r[0].clone(), r[1].clone(), std::array::from_fn(|i| if i < 8 { i as u8 } else { 8 + i as u8 }))]
+                } else { r }
             }
-            "cvtps2pd" => {
+            // i32/f32 lanes to f64: lanes 0..2 into the first part, 2..4 into the second.
+            "cvtps2pd" | "cvtps2pd256" | "cvtdq2pd" | "cvtdq2pd256" => {
                 want(1)?;
                 let (a, _) = self.vec_arg(&args[0])?;
-                vec![self.sv(SimdOp::FPromoteLow, vec![a[0].clone()], v128(Type::Float32), v128(Type::Float64))]
-            }
-            "cvtpd2ps" => {
-                want(1)?;
-                let (a, _) = self.vec_arg(&args[0])?;
-                vec![self.sv(SimdOp::FDemote, vec![a[0].clone()], v128(Type::Float64), v128(Type::Float32))]
-            }
-            "cvtdq2pd" => {
-                want(1)?;
-                let (a, _) = self.vec_arg(&args[0])?;
-                let (i, f) = (v128(lane("d")), v128(Type::Float64));
-                let mut r = self.sv_zero();
-                for k in 0..2u8 {
-                    let e = self.sv(SimdOp::Extract(k), vec![a[0].clone()], i.clone(), int(32, true));
-                    let c = self.alloc_val();
-                    self.push_instr(Instr::Cast { dest: c, op: CastOp::SIToFP, val: e, to_ty: Type::Float64 });
-                    r = self.sv(SimdOp::Insert(k), vec![r, Val::Local(c)], f.clone(), f.clone());
-                }
-                vec![r]
+                let f = v128(Type::Float64);
+                let halves = if n.ends_with("256") { 2 } else { 1 };
+                (0..halves).map(|h| {
+                    let src = if h == 0 { a[0].clone() } else {
+                        self.shuffle(a[0].clone(), a[0].clone(), std::array::from_fn(|i| (8 + i % 8) as u8))
+                    };
+                    if n.starts_with("cvtps2pd") {
+                        return self.sv(SimdOp::FPromoteLow, vec![src], v128(Type::Float32), f.clone());
+                    }
+                    let mut r = self.sv_zero();
+                    for k in 0..2u8 {
+                        let e = self.sv(SimdOp::Extract(k), vec![src.clone()], v128(lane("d")), int(32, true));
+                        let c = self.alloc_val();
+                        self.push_instr(Instr::Cast { dest: c, op: CastOp::SIToFP, val: e, to_ty: Type::Float64 });
+                        r = self.sv(SimdOp::Insert(k), vec![r, Val::Local(c)], f.clone(), f.clone());
+                    }
+                    r
+                }).collect()
             }
             // Scalar conversions of lane 0.
             "cvtss2si" | "cvtss2si64" | "cvttss2si" | "cvttss2si64" | "cvtsd2si" | "cvtsd2si64" | "cvttsd2si" | "cvttsd2si64" => {
@@ -1296,6 +1706,41 @@ impl FuncCtx<'_> {
             _ if (n.starts_with("pcmpestr") || n.starts_with("pcmpistr")) && n.ends_with("128") => {
                 if &n[8..n.len() - 3] == "m" { v128(int(8, true)) } else { Type::i32() }
             }
+            "extract128i256" | "pd_pd256" | "ps_ps256" | "si_si256" => {
+                let a = arg(0)?;
+                match a { Type::Array { elem, len } => vec(*elem, len as u64 / 2), t => t }
+            }
+            "vextractf128_pd256" => v128(Type::Float64),
+            "vextractf128_ps256" => v128(Type::Float32),
+            "vextractf128_si256" => v128(int(32, true)),
+            "pd256_pd" | "ps256_ps" | "si256_si" => {
+                let a = arg(0)?;
+                match a { Type::Array { elem, len } => vec(*elem, len as u64 * 2), t => t }
+            }
+            "insert128i256" | "vinsertf128_pd256" | "vinsertf128_ps256" | "vinsertf128_si256"
+            | "permti256" | "vperm2f128_pd256" | "vperm2f128_ps256" | "vperm2f128_si256"
+            | "permdf256" | "permdi256" | "permvarsf256" | "permvarsi256"
+            | "vpermilps" | "vpermilps256" | "vpermilpd" | "vpermilpd256"
+            | "vpermilvarps" | "vpermilvarps256" | "vpermilvarpd" | "vpermilvarpd256" | "movddup256"
+            | "psllv2di" | "psllv4di" | "psllv4si" | "psllv8si" | "psrlv2di" | "psrlv4di" | "psrlv4si" | "psrlv8si"
+            | "psrav4si" | "psrav8si" => arg(0)?,
+            "pbroadcastb128" => v128(int(8, true)), "pbroadcastw128" => v128(int(16, true)),
+            "pbroadcastd128" => v128(int(32, true)), "pbroadcastq128" => v128(int(64, true)),
+            "pbroadcastb256" => vec(int(8, true), 32), "pbroadcastw256" => vec(int(16, true), 16),
+            "pbroadcastd256" => vec(int(32, true), 8), "pbroadcastq256" | "vbroadcastsi256" => vec(int(64, true), 4),
+            "vbroadcastss_ps" | "vbroadcastss" => v128(Type::Float32),
+            "vbroadcastss_ps256" | "vbroadcastss256" | "vbroadcastf128_ps256" => vec(Type::Float32, 8),
+            "vbroadcastsd_pd256" | "vbroadcastsd256" | "vbroadcastf128_pd256" => vec(Type::Float64, 4),
+            "maskloadd" => v128(int(32, true)), "maskloadd256" => vec(int(32, true), 8),
+            "maskloadq" => v128(int(64, true)), "maskloadq256" => vec(int(64, true), 4),
+            "maskloadps" => v128(Type::Float32), "maskloadps256" => vec(Type::Float32, 8),
+            "maskloadpd" => v128(Type::Float64), "maskloadpd256" => vec(Type::Float64, 4),
+            _ if n.starts_with("maskstore") => Type::Void,
+            _ if n.starts_with("gathersiv") || n.starts_with("gatherdiv") => arg(0)?,
+            "vcvtph2ps" => v128(Type::Float32), "vcvtph2ps256" => vec(Type::Float32, 8),
+            "vcvtps2ph" | "vcvtps2ph256" => v128(int(16, true)),
+            _ if fma_kind(n).is_some() => arg(0)?,
+            "vzeroall" | "vzeroupper" => Type::Void,
             "crc32qi" | "crc32hi" | "crc32si" => Type::u32(),
             "crc32di" => Type::u64(),
             "addsubps" | "addsubpd" | "addsubps256" | "addsubpd256"
@@ -1347,9 +1792,10 @@ impl FuncCtx<'_> {
             "vec_ext_v4si" | "vec_ext_v8hi" | "vec_ext_v4hi" | "vec_ext_v2di" | "vec_ext_v16qi" | "vec_ext_v4sf" | "vec_ext_v2df" | "vec_ext_v2si" => ext_lane(n),
             "cvtdq2ps" | "cvtdq2ps256" => wide(Type::Float32),
             "cvttps2dq" | "cvtps2dq" | "cvttps2dq256" | "cvtps2dq256" => wide(int(32, true)),
-            "cvttpd2dq" | "cvtpd2dq" => v128(int(32, true)),
+            "cvttpd2dq" | "cvtpd2dq" | "cvttpd2dq256" | "cvtpd2dq256" => v128(int(32, true)),
             "cvtps2pd" | "cvtdq2pd" => v128(Type::Float64),
-            "cvtpd2ps" => v128(Type::Float32),
+            "cvtps2pd256" | "cvtdq2pd256" => vec(Type::Float64, 4),
+            "cvtpd2ps" | "cvtpd2ps256" => v128(Type::Float32),
             "cvtss2si" | "cvttss2si" | "cvtsd2si" | "cvttsd2si" => Type::i32(),
             "cvtss2si64" | "cvttss2si64" | "cvtsd2si64" | "cvttsd2si64" => Type::i64(),
             "storehps" | "storelps" | "movntps" | "movntpd" | "movntdq" | "movntps256" | "movntpd256" | "movntdq256"
@@ -1409,4 +1855,24 @@ fn extend_kind(n: &str) -> Option<(u32, u32, bool)> {
     let (f, t) = (bits(cs.next()?)?, bits(cs.next()?)?);
     if cs.next().is_some() || t <= f { return None; }
     Some((f, (t / f).trailing_zeros(), signed))
+}
+
+/// `vfmaddps256`, `vfnmsubsd3`, `vfmaddsubpd`, … → (negate a·b, subtract c,
+/// alternating (`Some(even lanes subtract)`), scalar lane-0 form, lane type).
+fn fma_kind(n: &str) -> Option<(bool, bool, Option<bool>, bool, Type)> {
+    let r = n.strip_prefix("vf")?;
+    let (neg_ab, r) = match r.strip_prefix('n') { Some(r) => (true, r), None => (false, r) };
+    let (neg_c, alt, r) = if let Some(r) = r.strip_prefix("maddsub") { (false, Some(true), r) }
+        else if let Some(r) = r.strip_prefix("msubadd") { (false, Some(false), r) }
+        else if let Some(r) = r.strip_prefix("madd") { (false, None, r) }
+        else if let Some(r) = r.strip_prefix("msub") { (true, None, r) }
+        else { return None };
+    let r = r.strip_suffix("256").unwrap_or(r);
+    let (l, scalar) = match r {
+        "ps" => (Type::Float32, false), "pd" => (Type::Float64, false),
+        "ss3" => (Type::Float32, true), "sd3" => (Type::Float64, true),
+        _ => return None,
+    };
+    if neg_ab && alt.is_some() { return None; }
+    Some((neg_ab, neg_c, alt, scalar, l))
 }

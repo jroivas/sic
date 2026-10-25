@@ -56,23 +56,33 @@ fn splat_bits(b: &mut FunctionBuilder<'_>, ty: cir::Type, bits: u64) -> cir::Val
 }
 
 fn fcmp(b: &mut FunctionBuilder<'_>, k: FCmp, x: cir::Value, y: cir::Value) -> cir::Value {
-    let cc = match k {
-        FCmp::Eq => FloatCC::Equal,
-        FCmp::Ne => FloatCC::OrderedNotEqual,
-        FCmp::Lt => FloatCC::LessThan,
-        FCmp::Le => FloatCC::LessThanOrEqual,
-        FCmp::Gt => FloatCC::GreaterThan,
-        FCmp::Ge => FloatCC::GreaterThanOrEqual,
-        FCmp::Ord => FloatCC::Ordered,
-        FCmp::UEq => FloatCC::UnorderedOrEqual,
-        FCmp::UNe => FloatCC::NotEqual,
-        FCmp::ULt => FloatCC::UnorderedOrLessThan,
-        FCmp::ULe => FloatCC::UnorderedOrLessThanOrEqual,
-        FCmp::UGt => FloatCC::UnorderedOrGreaterThan,
-        FCmp::UGe => FloatCC::UnorderedOrGreaterThanOrEqual,
-        FCmp::Uno => FloatCC::Unordered,
-    };
-    b.ins().fcmp(cc, x, y)
+    // The vector conditions every backend lowers; the rest are combinations
+    // (an unordered relation is the negated ordered opposite).
+    let basic = |b: &mut FunctionBuilder<'_>, cc: FloatCC| b.ins().fcmp(cc, x, y);
+    match k {
+        FCmp::Eq => basic(b, FloatCC::Equal),
+        FCmp::UNe => basic(b, FloatCC::NotEqual),
+        FCmp::Lt => basic(b, FloatCC::LessThan),
+        FCmp::Le => basic(b, FloatCC::LessThanOrEqual),
+        FCmp::Gt => basic(b, FloatCC::GreaterThan),
+        FCmp::Ge => basic(b, FloatCC::GreaterThanOrEqual),
+        FCmp::Ord => basic(b, FloatCC::Ordered),
+        FCmp::Uno => basic(b, FloatCC::Unordered),
+        FCmp::Ne => {
+            let o = basic(b, FloatCC::Ordered);
+            let n = basic(b, FloatCC::NotEqual);
+            b.ins().band(o, n)
+        }
+        FCmp::UEq => {
+            let u = basic(b, FloatCC::Unordered);
+            let e = basic(b, FloatCC::Equal);
+            b.ins().bor(u, e)
+        }
+        FCmp::ULt => { let c = basic(b, FloatCC::GreaterThanOrEqual); b.ins().bnot(c) }
+        FCmp::ULe => { let c = basic(b, FloatCC::GreaterThan); b.ins().bnot(c) }
+        FCmp::UGt => { let c = basic(b, FloatCC::LessThanOrEqual); b.ins().bnot(c) }
+        FCmp::UGe => { let c = basic(b, FloatCC::LessThan); b.ins().bnot(c) }
+    }
 }
 
 fn icc(op: &sic_ir::CmpOp) -> IntCC {
