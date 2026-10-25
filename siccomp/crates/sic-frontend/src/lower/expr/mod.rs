@@ -6101,6 +6101,9 @@ impl<'m> FuncCtx<'m> {
                     let a = self.to_bigint(inner)?;
                     return self.call_bigint_new("__sic_bi_neg", vec![a]);
                 }
+                if let Ok(vt @ Type::Array { .. }) = self.infer_expr_type(inner) {
+                    return self.lower_vector_unary(true, inner, &vt);
+                }
                 let v = self.lower_expr(inner)?;
                 // C integer promotions apply to unary `-`: `-(unsigned char)1` is
                 // computed in `int` (== -1), not wrapped in 8 bits (== 255).
@@ -6124,6 +6127,9 @@ impl<'m> FuncCtx<'m> {
                 Ok(Val::Local(ext))
             }
             UnOpKind::BitNot => {
+                if let Ok(vt @ Type::Array { .. }) = self.infer_expr_type(inner) {
+                    return self.lower_vector_unary(false, inner, &vt);
+                }
                 // sic bigint bitwise-not `~a` (= -a - 1) via the runtime.
                 if self.is_sic() && self.is_bigint_operand(inner) {
                     let a = self.to_bigint(inner)?;

@@ -1,6 +1,7 @@
 use crate::ast::{Expr, BinOpKind};
 use crate::{Result, CompileError};
 use super::super::func::FuncCtx;
+use sic_ir::SimdOp;
 #[allow(unused_imports)]
 use super::*;
 
@@ -140,6 +141,40 @@ impl<'m> FuncCtx<'m> {
             self.vec_store(&rp_out, off, v);
         }
         Ok(rp_out)
+    }
+
+    /// Unary `-v` / `~v` on a GCC vector: lane-wise, through the 128-bit parts
+    /// for 8/16/32-byte vectors, lane by lane otherwise.
+    pub(crate) fn lower_vector_unary(&mut self, neg: bool, inner: &Expr, vty: &Type) -> Result<Val> {
+        let Type::Array { elem, len } = vty else { return Err(CompileError::new("vector operand expected".to_string())) };
+        let elem = (**elem).clone();
+        let width = vty.size_of(self.ptr_size());
+        let p = self.lower_aggregate_ptr(inner)?;
+        let fl = elem.is_float();
+        if matches!(width, 8 | 16 | 32) && elem.size_of(8) <= 8 && 16 % elem.size_of(8) == 0 {
+            let parts = self.load_parts(p, width);
+            let op = if !neg { SimdOp::Not } else if fl { SimdOp::FNeg } else { SimdOp::Neg };
+            let r = self.per_part1(op, &parts, &elem);
+            return Ok(self.vec_result(&r, vty.clone()));
+        }
+        let out = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: out, ty: vty.clone(), align: None });
+        let esz = elem.size_of(self.ptr_size()) as i64;
+        for i in 0..*len as i64 {
+            let src = self.alloc_val();
+            self.push_instr(Instr::PtrOffset { dest: src, base: p.clone(), offset: Constant::int(i * esz) });
+            let src = Val::Local(src);
+            let x = self.alloc_val();
+            self.push_instr(Instr::Load { dest: x, ptr: src, ty: elem.clone() });
+            let op = if !neg { UnOp::Not } else if fl { UnOp::FNeg } else { UnOp::Neg };
+            let d = self.alloc_val();
+            self.push_instr(Instr::UnaryOp { dest: d, op, val: Val::Local(x), ty: elem.clone() });
+            let dst = self.alloc_val();
+            self.push_instr(Instr::PtrOffset { dest: dst, base: Val::Local(out), offset: Constant::int(i * esz) });
+            let dst = Val::Local(dst);
+            self.push_instr(Instr::Store { val: Val::Local(d), ptr: dst });
+        }
+        Ok(Val::Local(out))
     }
 
     /// `__builtin_ia32_pclmulqdq128`: carry-less multiply of two selected 64-bit

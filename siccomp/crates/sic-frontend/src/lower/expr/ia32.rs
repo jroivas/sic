@@ -147,7 +147,7 @@ impl FuncCtx<'_> {
     }
 
     /// The 128-bit parts of the `width`-byte vector at `ptr`.
-    fn load_parts(&mut self, ptr: Val, width: u64) -> Vec<Val> {
+    pub(super) fn load_parts(&mut self, ptr: Val, width: u64) -> Vec<Val> {
         let t = v128(int(64, true));
         if width == 8 {
             let d = self.alloc_val();
@@ -202,7 +202,7 @@ impl FuncCtx<'_> {
     }
 
     /// A fresh vector of type `ty` holding `parts`; the builtin's value.
-    fn vec_result(&mut self, parts: &[Val], ty: Type) -> Val {
+    pub(super) fn vec_result(&mut self, parts: &[Val], ty: Type) -> Val {
         let width = ty.size_of(self.ptr_size());
         let d = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: d, ty, align: None });
@@ -226,7 +226,7 @@ impl FuncCtx<'_> {
         a.iter().zip(b).map(|(x, y)| self.sv(op.clone(), vec![x.clone(), y.clone()], t.clone(), t.clone())).collect()
     }
 
-    fn per_part1(&mut self, op: SimdOp, a: &[Val], lane: &Type) -> Vec<Val> {
+    pub(super) fn per_part1(&mut self, op: SimdOp, a: &[Val], lane: &Type) -> Vec<Val> {
         let t = v128(lane.clone());
         a.iter().map(|x| self.sv(op.clone(), vec![x.clone()], t.clone(), t.clone())).collect()
     }
