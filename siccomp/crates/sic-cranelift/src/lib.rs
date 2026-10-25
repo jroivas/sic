@@ -397,11 +397,14 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
             if let Some(cc) = ctx.compiled_code() {
                 let size = cc.code_info().total_size as u64;
                 let mut raw: Vec<(u64, u32)> = Vec::new();
+                let base = ctx.func.params.base_srcloc();
                 for s in cc.buffer.get_srclocs_sorted() {
-                    if s.loc.is_default() {
+                    // Absolute, or relative to the function's base location.
+                    let loc = if s.loc.is_abs() { s.loc.as_abs() } else { s.loc.relocate(base) };
+                    if loc.is_default() {
                         continue;
                     }
-                    let line = s.loc.bits();
+                    let line = loc.bits();
                     // Collapse consecutive rows with the same line.
                     if raw.last().map(|r| r.1) != Some(line) {
                         raw.push((s.start as u64, line));
