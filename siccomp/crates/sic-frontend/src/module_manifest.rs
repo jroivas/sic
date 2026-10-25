@@ -31,7 +31,8 @@
 //! layout is exactly the built-in one. A record also carries its layout
 //! attributes after the fields: `@order:…` (sic reordering), `@packed`,
 //! `@align:N` (the type's `aligned(N)`), `@falign:I:N` (member I's) and
-//! `@bits:I:W` (member I is a W-bit bit-field); a reader refuses an `@`
+//! `@bits:I:W` (member I is a W-bit bit-field), `@fpacked:I` (member I is
+//! packed); a reader refuses an `@`
 //! token it does not know rather than mislay the type.
 
 use sic_ir::{Type, StructType, UnionType, FunctionType, Linkage, Module};
@@ -481,7 +482,7 @@ impl ModuleManifest {
                     let payload_fields: Vec<(String, Type)> = variants.iter()
                         .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
                     let data = Type::Union(UnionType {
-                        packed: false,
+                        packed: false, field_packed: Vec::new(),
                         name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                     let st = Type::Struct(StructType::plain(Some(name.to_string()), vec![
                         ("tag".to_string(), Type::Int { bits: 32, signed: true }),
@@ -695,11 +696,14 @@ fn encode_aggregate_record(ty: &Type) -> Option<String> {
     // Layout attributes, so a consumer computes the same offsets: `@packed`,
     // the type's `aligned(N)` (`@align:N`), a member's (`@falign:I:N`) and
     // bit-field widths (`@bits:I:W`).
-    let (packed, min_align, faligns, bits): (bool, Option<u32>, &Vec<Option<u32>>, &[Option<u32>]) = match ty {
-        Type::Struct(s) => (s.packed, s.min_align, &s.field_aligns, &s.bitfields),
-        Type::Union(u) => (u.packed, u.min_align, &u.field_aligns, &[]),
+    let (packed, min_align, faligns, bits, fpacked): (bool, Option<u32>, &Vec<Option<u32>>, &[Option<u32>], &Vec<bool>) = match ty {
+        Type::Struct(s) => (s.packed, s.min_align, &s.field_aligns, &s.bitfields, &s.field_packed),
+        Type::Union(u) => (u.packed, u.min_align, &u.field_aligns, &[], &u.field_packed),
         _ => unreachable!(),
     };
+    for (i, p) in fpacked.iter().enumerate() {
+        if *p { toks.push(format!("@fpacked:{}", i)); }
+    }
     if packed { toks.push("@packed".to_string()); }
     if let Some(a) = min_align { toks.push(format!("@align:{}", a)); }
     for (i, a) in faligns.iter().enumerate() {
@@ -727,6 +731,7 @@ fn decode_aggregate_record<'a>(
     let (mut packed, mut min_align) = (false, None);
     let mut faligns: Vec<(usize, u32)> = Vec::new();
     let mut bits: Vec<(usize, u32)> = Vec::new();
+    let mut fpacked: Vec<usize> = Vec::new();
     // `@falign:I:N` / `@bits:I:W`.
     let pair = |rest: &str| -> Option<(usize, u32)> {
         let (i, v) = rest.split_once(':')?;
@@ -742,6 +747,7 @@ fn decode_aggregate_record<'a>(
         if let Some(rest) = tok.strip_prefix("@align:") { min_align = Some(rest.parse().ok()?); continue; }
         if let Some(rest) = tok.strip_prefix("@falign:") { faligns.push(pair(rest)?); continue; }
         if let Some(rest) = tok.strip_prefix("@bits:") { bits.push(pair(rest)?); continue; }
+        if let Some(rest) = tok.strip_prefix("@fpacked:") { fpacked.push(rest.parse().ok()?); continue; }
         if tok.starts_with('@') { return None; }   // a layout attribute this reader does not know
         let (fname, tty) = tok.split_once(':')?;
         fields.push((fname.to_string(), decode_type(tty, ptr_size, registry)?));
@@ -754,9 +760,14 @@ fn decode_aggregate_record<'a>(
         Some(v)
     };
     let field_aligns = per_field(&faligns, fields.len())?;
+    let field_packed = if fpacked.is_empty() { Vec::new() } else {
+        let mut v = vec![false; fields.len()];
+        for i in fpacked { *v.get_mut(i)? = true; }
+        v
+    };
     Some(if is_union {
         if !bits.is_empty() { return None; }
-        Type::Union(UnionType { packed, name: Some(name.to_string()), fields, field_aligns, min_align })
+        Type::Union(UnionType { packed, field_packed, name: Some(name.to_string()), fields, field_aligns, min_align })
     } else {
         let bitfields = per_field(&bits, fields.len())?;
         let mut st = StructType::plain(Some(name.to_string()), fields, packed);
@@ -764,6 +775,7 @@ fn decode_aggregate_record<'a>(
         st.field_aligns = field_aligns;
         st.bitfields = bitfields;
         st.min_align = min_align;
+        st.field_packed = field_packed;
         Type::Struct(st)
     })
 }
@@ -974,7 +986,8 @@ mod tests {
         st.min_align = Some(4);
         st.field_aligns = vec![None, None, Some(8), None];
         st.bitfields = vec![None, None, Some(3), Some(30)];
-        let su = Type::Union(UnionType { packed: true, name: Some("U".into()), fields: vec![
+        st.field_packed = vec![false, true, false, false];
+        let su = Type::Union(UnionType { packed: true, field_packed: Vec::new(), name: Some("U".into()), fields: vec![
             ("c".into(), Type::Int { bits: 8, signed: true }), ("i".into(), i32t.clone())],
             field_aligns: vec![], min_align: None });
         for ty in [Type::Struct(st), su] {

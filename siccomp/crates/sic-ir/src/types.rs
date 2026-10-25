@@ -30,6 +30,10 @@ pub struct StructType {
     /// override on the member, raising its (and the struct's) alignment. Empty
     /// means no overrides (default).
     pub field_aligns: Vec<Option<u32>>,
+    /// Parallel to `fields`: `true` for a member declared `__attribute__((packed))`
+    /// (Linux's `compat_sigset_t sa_mask __packed;`): alignment 1, as if the
+    /// whole struct were packed for that member only. Empty means none.
+    pub field_packed: Vec<bool>,
     /// Type-level `__attribute__((aligned(n)))` on the struct itself, raising the
     /// whole type's alignment (QEMU's `QEMU_ALIGNED` on `CPUTLBDescFast`).
     pub min_align: Option<u32>,
@@ -44,7 +48,7 @@ pub struct StructType {
 impl StructType {
     /// Construct a plain (bit-field-free) struct.
     pub fn plain(name: Option<String>, fields: Vec<(String, Type)>, packed: bool) -> Self {
-        StructType { name, fields, packed, bitfields: Vec::new(), field_aligns: Vec::new(), min_align: None, layout_order: None }
+        StructType { name, fields, packed, bitfields: Vec::new(), field_aligns: Vec::new(), field_packed: Vec::new(), min_align: None, layout_order: None }
     }
 
     fn bitfield_width(&self, idx: usize) -> Option<u32> {
@@ -55,9 +59,14 @@ impl StructType {
     /// alignment and any `aligned(n)` override. An override wins even under
     /// `#pragma pack`/`packed` (which otherwise forces alignment 1).
     fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {
-        let natural = if self.packed { 1 } else { ty.align_of(ptr_size) };
+        let natural = if self.field_is_packed(idx) { 1 } else { ty.align_of(ptr_size) };
         let override_ = self.field_aligns.get(idx).copied().flatten().unwrap_or(0) as u64;
         natural.max(override_).max(1)
+    }
+
+    /// Whether member `idx` is packed: the whole struct is, or the member is.
+    fn field_is_packed(&self, idx: usize) -> bool {
+        self.packed || self.field_packed.get(idx).copied().unwrap_or(false)
     }
 }
 
@@ -67,6 +76,8 @@ pub struct UnionType {
     pub fields: Vec<(String, Type)>,
     /// Parallel to `fields`: `aligned(n)` overrides on members (see `StructType`).
     pub field_aligns: Vec<Option<u32>>,
+    /// Parallel to `fields`: packed members (see `StructType::field_packed`).
+    pub field_packed: Vec<bool>,
     /// `__attribute__((packed))`: alignment 1 (unless a member's or the
     /// union's own `aligned(n)` raises it).
     pub packed: bool,
@@ -239,7 +250,7 @@ impl StructType {
                         continue;
                     }
                     let unit_bits = size * 8;
-                    if self.packed {
+                    if self.field_is_packed(i) {
                         // Packed: bit-fields follow one another with no unit
                         // boundary; the field is accessed from its first byte.
                         byte_offsets[i] = bit_pos / 8;
@@ -310,6 +321,7 @@ impl StructType {
         !self.packed
             && self.bitfields.is_empty()
             && self.field_aligns.is_empty()
+            && self.field_packed.is_empty()
             && self.min_align.is_none()
     }
 
@@ -435,7 +447,7 @@ impl UnionType {
     /// `aligned(n)` override.
     fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {
         let override_ = self.field_aligns.get(idx).copied().flatten().unwrap_or(0) as u64;
-        let natural = if self.packed { 1 } else { ty.align_of(ptr_size) };
+        let natural = if self.packed || self.field_packed.get(idx).copied().unwrap_or(false) { 1 } else { ty.align_of(ptr_size) };
         natural.max(override_).max(1)
     }
 
@@ -526,7 +538,7 @@ mod reorder_tests {
     #[test]
     fn union_sorts_by_largest_member() {
         let uni = Type::Union(UnionType {
-            packed: false,
+            packed: false, field_packed: Vec::new(),
             name: None,
             fields: vec![("x".into(), i(16)), ("y".into(), i(64))],
             field_aligns: Vec::new(),

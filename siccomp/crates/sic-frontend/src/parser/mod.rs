@@ -1375,15 +1375,19 @@ impl Parser {
         // leak onto this member and corrupt an unrelated struct's layout.
         self.pending_aligned = None;
         self.pending_aligned_expr = None;
+        self.pending_packed = false;
         let (base_ty, _) = self.parse_decl_specifiers()?;
         let mut fields = Vec::new();
 
         if self.at(TokenKind::Semi) {
             // Anonymous struct/union member
-            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, align: None, align_expr: None, span: sp });
+            fields.push(FieldDecl { name: None, ty: base_ty, bit_width: None, align: None, align_expr: None, packed: false, span: sp });
             return Ok(fields);
         }
 
+        // A member's `packed` before the declarators applies to all of them;
+        // one after a declarator, to that member.
+        let group_packed = std::mem::take(&mut self.pending_packed);
         loop {
             // Alignment may be attached to the base type (before the declarator,
             // applying to every declarator in the group) or trail an individual
@@ -1401,7 +1405,8 @@ impl Parser {
             self.skip_attributes();
             let align = self.pending_aligned.take().or(group_align);
             let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
-            fields.push(FieldDecl { name: Some(name), ty, bit_width, align, align_expr, span: sp.clone() });
+            let packed = std::mem::take(&mut self.pending_packed) || group_packed;
+            fields.push(FieldDecl { name: Some(name), ty, bit_width, align, align_expr, packed, span: sp.clone() });
             if !self.eat(TokenKind::Comma) { break; }
         }
         Ok(fields)

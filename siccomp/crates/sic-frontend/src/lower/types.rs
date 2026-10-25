@@ -170,7 +170,7 @@ pub fn tagged_enum_type(
         }
     }
     let data = Type::Union(UnionType {
-        packed: false,
+        packed: false, field_packed: Vec::new(),
         name: None,
         fields,
         field_aligns: vec![],
@@ -481,7 +481,7 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
                 return Type::Struct(StructType::plain(Some(n.to_string()), vec![], false));
             }
             if let Some(n) = s.strip_prefix("u_") {
-                return Type::Union(UnionType { packed: false, name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
+                return Type::Union(UnionType { packed: false, field_packed: Vec::new(), name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
             }
             if let Some(bits) = s.strip_prefix('i').and_then(|b| b.parse::<u32>().ok()) {
                 return Type::Int { bits, signed: true };
@@ -1140,7 +1140,7 @@ pub fn opaque_aggregate(t: Type) -> Type {
         Type::Struct(st) if st.name.is_some() =>
             Type::Struct(StructType::plain(st.name, vec![], st.packed)),
         Type::Union(u) if u.name.is_some() =>
-            Type::Union(UnionType { packed: u.packed, name: u.name, fields: vec![], field_aligns: vec![], min_align: u.min_align }),
+            Type::Union(UnionType { packed: u.packed, field_packed: Vec::new(), name: u.name, fields: vec![], field_aligns: vec![], min_align: u.min_align }),
         other => other,
     }
 }
@@ -1176,6 +1176,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
     let mut ir_fields = Vec::new();
     let mut bitfields = Vec::new();
     let mut field_aligns = Vec::new();
+    let mut field_packed = Vec::new();
     let mut any_bitfield = false;
     let mut any_align = false;
     for f in fields {
@@ -1189,13 +1190,16 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         ir_fields.push((fname, fty));
         bitfields.push(bw);
         field_aligns.push(falign);
+        field_packed.push(f.packed);
     }
+    let any_packed = field_packed.iter().any(|p| *p);
     Ok(Type::Struct(StructType {
         name: s.name.clone(),
         fields: ir_fields,
         packed: s.packed,
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
         field_aligns: if any_align { field_aligns } else { Vec::new() },
+        field_packed: if any_packed { field_packed } else { Vec::new() },
         min_align: attr_align(s.align, &s.align_expr, named, ptr_size)?,
         // Inline/anonymous struct types keep declaration order; sic reordering is
         // applied to named structs at registration (register_struct_type_from_def).
@@ -1379,11 +1383,12 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
                 return Ok(with_min_align(named[&k].clone(), align));
             }
         }
-        return Ok(Type::Union(UnionType { packed: false, name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
+        return Ok(Type::Union(UnionType { packed: false, field_packed: Vec::new(), name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
     }
     let fields = u.fields.as_ref().unwrap();
     let mut ir_fields = Vec::new();
     let mut field_aligns = Vec::new();
+    let mut field_packed = Vec::new();
     let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
@@ -1392,9 +1397,11 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
         if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
         field_aligns.push(falign);
+        field_packed.push(f.packed);
     }
+    let any_packed = field_packed.iter().any(|p| *p);
     Ok(Type::Union(UnionType {
-        packed: u.packed,
+        packed: u.packed, field_packed: if any_packed { field_packed } else { Vec::new() },
         name: u.name.clone(),
         fields: ir_fields,
         field_aligns: if any_align { field_aligns } else { Vec::new() },

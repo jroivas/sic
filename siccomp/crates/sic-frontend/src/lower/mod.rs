@@ -858,7 +858,7 @@ impl Lowerer {
                         }
                         // A typedef naming another struct (`typedef geo::Point
                         // Point;`): a candidate re-export of the module.
-                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { packed: false, name: Some(target), .. }) = &ir_ty {
+                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { name: Some(target), .. }) = &ir_ty {
                             if target != name { self.typedef_aliases.push((name.clone(), target.clone())); }
                         }
                         self.register_type_name(name.clone(), ir_ty);
@@ -1054,7 +1054,7 @@ impl Lowerer {
                 let payload_fields: Vec<(String, Type)> = variants.iter()
                     .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
                 let data = Type::Union(sic_ir::UnionType {
-                    packed: false,
+                    packed: false, field_packed: Vec::new(),
                     name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                 let struct_type = Type::Struct(sic_ir::StructType::plain(Some(ename.clone()), vec![
                     ("tag".to_string(), Type::Int { bits: 32, signed: true }),
@@ -1271,6 +1271,7 @@ impl Lowerer {
             let mut ir_fields = Vec::new();
             let mut bitfields = Vec::new();
             let mut field_aligns = Vec::new();
+            let mut field_packed = Vec::new();
             let mut any_bitfield = false;
             let mut any_align = false;
             let mut weak_fields: Vec<(String, Type)> = Vec::new();
@@ -1296,6 +1297,7 @@ impl Lowerer {
                 ir_fields.push((fname, fty));
                 bitfields.push(bw);
                 field_aligns.push(falign);
+                field_packed.push(f.packed);
             }
             if !weak_fields.is_empty() {
                 self.struct_weak_fields.insert(name.clone(), weak_fields);
@@ -1311,6 +1313,7 @@ impl Lowerer {
                 packed: s.packed,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
+                field_packed: if field_packed.iter().any(|p| *p) { field_packed } else { Vec::new() },
                 min_align: types::attr_align(s.align, &s.align_expr, &self.struct_types, self.ptr_size)?,
                 layout_order: None,
             };
@@ -1357,11 +1360,12 @@ impl Lowerer {
             // A member naming the union itself resolves to it (see structs).
             if self.sic && !self.struct_types.contains_key(name) {
                 self.struct_types.insert(name.clone(), Type::Union(sic_ir::UnionType {
-                    packed: false,
+                    packed: false, field_packed: Vec::new(),
                     name: Some(name.clone()), fields: vec![], field_aligns: vec![], min_align: None }));
             }
             let mut ir_fields = Vec::new();
             let mut field_aligns = Vec::new();
+            let mut field_packed: Vec<bool> = Vec::new();
             let mut any_align = false;
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
@@ -1371,9 +1375,10 @@ impl Lowerer {
                 if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 field_aligns.push(falign);
+                field_packed.push(f.packed);
             }
             let ir_ty = Type::Union(UnionType {
-                packed: u.packed,
+                packed: u.packed, field_packed: if field_packed.iter().any(|p| *p) { field_packed } else { Vec::new() },
                 name: Some(name.clone()),
                 fields: ir_fields,
                 field_aligns: if any_align { field_aligns } else { Vec::new() },

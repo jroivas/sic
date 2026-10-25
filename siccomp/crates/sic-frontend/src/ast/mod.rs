@@ -191,6 +191,9 @@ pub struct FieldDecl {
     pub align: Option<u32>,
     /// See `StructDef::align_expr`.
     pub align_expr: Option<BoxExpr>,
+    /// `__attribute__((packed))` on the member: alignment 1 (Linux's
+    /// `compat_sigset_t sa_mask __packed;`).
+    pub packed: bool,
     pub span: Span,
 }
 
