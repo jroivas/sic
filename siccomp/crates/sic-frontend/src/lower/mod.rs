@@ -2867,6 +2867,14 @@ impl Lowerer {
             }
             return Ok(());
         }
+        // The definition's integer type (width when packed, signedness), for
+        // later references by tag (`sizeof(enum E)`, `enum E x;`), which carry
+        // no enumerators.
+        if let (Some(name), Some(_)) = (&e.name, &e.variants) {
+            if !self.sic || types::tagged_enum_type(e, &self.struct_types, self.ptr_size).is_none() {
+                self.struct_types.insert(format!("enum {}", name), types::enum_int_type(e));
+            }
+        }
         if let Some(variants) = &e.variants {
             let mut counter = 0i64;
             for v in variants {

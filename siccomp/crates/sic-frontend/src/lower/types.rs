@@ -186,7 +186,7 @@ pub fn tagged_enum_type(
     Some(Ok(Type::Struct(st)))
 }
 
-fn enum_int_type(e: &EnumDef) -> Type {
+pub(crate) fn enum_int_type(e: &EnumDef) -> Type {
     let signed = enum_is_signed(e);
     if !e.packed {
         return Type::Int { bits: 32, signed };
@@ -924,6 +924,11 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             // sic tagged enum → its `{ tag; union }` struct; plain C enum → int.
             if let Some(res) = tagged_enum_type(e, named, ptr_size) {
                 return res;
+            }
+            // A reference by tag takes the definition's type (registered by
+            // `register_enum`): a packed enum's width, its signedness.
+            if let (None, Some(n)) = (&e.variants, &e.name) {
+                if let Some(t) = named.get(&format!("enum {}", n)) { return Ok(t.clone()); }
             }
             enum_int_type(e)
         }

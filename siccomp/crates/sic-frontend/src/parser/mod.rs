@@ -1588,6 +1588,8 @@ impl Parser {
                 if !self.eat(TokenKind::Comma) { break; }
             }
             self.expect(TokenKind::RBrace)?;
+            // A trailing attribute (`enum E { … } __packed;`) applies to the enum.
+            if self.at(TokenKind::Attribute) { self.skip_attributes(); }
             Some(vs)
         } else {
             None
