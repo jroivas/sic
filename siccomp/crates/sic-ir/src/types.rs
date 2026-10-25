@@ -67,6 +67,9 @@ pub struct UnionType {
     pub fields: Vec<(String, Type)>,
     /// Parallel to `fields`: `aligned(n)` overrides on members (see `StructType`).
     pub field_aligns: Vec<Option<u32>>,
+    /// `__attribute__((packed))`: alignment 1 (unless a member's or the
+    /// union's own `aligned(n)` raises it).
+    pub packed: bool,
     /// Type-level `__attribute__((aligned(n)))` on the union itself.
     pub min_align: Option<u32>,
 }
@@ -236,6 +239,14 @@ impl StructType {
                         continue;
                     }
                     let unit_bits = size * 8;
+                    if self.packed {
+                        // Packed: bit-fields follow one another with no unit
+                        // boundary; the field is accessed from its first byte.
+                        byte_offsets[i] = bit_pos / 8;
+                        bit_offsets[i] = (bit_pos % 8) as u32;
+                        bit_pos += width;
+                        continue;
+                    }
                     if unit_bits > 0 && (bit_pos % unit_bits) + width > unit_bits {
                         bit_pos = round_up_bits(bit_pos, unit_bits);
                     }
@@ -424,7 +435,8 @@ impl UnionType {
     /// `aligned(n)` override.
     fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {
         let override_ = self.field_aligns.get(idx).copied().flatten().unwrap_or(0) as u64;
-        ty.align_of(ptr_size).max(override_).max(1)
+        let natural = if self.packed { 1 } else { ty.align_of(ptr_size) };
+        natural.max(override_).max(1)
     }
 
     pub fn size_of(&self, ptr_size: u32) -> u64 {
@@ -514,6 +526,7 @@ mod reorder_tests {
     #[test]
     fn union_sorts_by_largest_member() {
         let uni = Type::Union(UnionType {
+            packed: false,
             name: None,
             fields: vec![("x".into(), i(16)), ("y".into(), i(64))],
             field_aligns: Vec::new(),

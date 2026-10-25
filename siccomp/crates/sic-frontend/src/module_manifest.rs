@@ -477,6 +477,7 @@ impl ModuleManifest {
                     let payload_fields: Vec<(String, Type)> = variants.iter()
                         .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
                     let data = Type::Union(UnionType {
+                        packed: false,
                         name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                     let st = Type::Struct(StructType::plain(Some(name.to_string()), vec![
                         ("tag".to_string(), Type::Int { bits: 32, signed: true }),
@@ -713,7 +714,7 @@ fn decode_aggregate_record<'a>(
         fields.push((fname.to_string(), decode_type(tty, ptr_size, registry)?));
     }
     Some(if is_union {
-        Type::Union(UnionType { name: Some(name.to_string()), fields, field_aligns: Vec::new(), min_align: None })
+        Type::Union(UnionType { packed: false, name: Some(name.to_string()), fields, field_aligns: Vec::new(), min_align: None })
     } else {
         let mut st = StructType::plain(Some(name.to_string()), fields, false);
         st.layout_order = order;

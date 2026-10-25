@@ -124,6 +124,9 @@ pub struct StructDef {
     /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
     /// struct {...} T QEMU_ALIGNED(N)`). Raises the whole type's alignment.
     pub align: Option<u32>,
+    /// `__attribute__((packed))` on the type (before the tag or after the
+    /// closing brace): members are 1-byte aligned and there is no padding.
+    pub packed: bool,
     /// sic struct field ordering (sic.md §"Struct reordering"): the mode requested
     /// by this struct's `order_*` attribute, or `Default` to follow the global
     /// `-fstruct-order` default. `packed` forces `C` (declaration order).
@@ -163,6 +166,8 @@ pub struct UnionDef {
     pub fields: Option<Vec<FieldDecl>>,
     /// Type-level `__attribute__((aligned(N)))` (see `StructDef::align`).
     pub align: Option<u32>,
+    /// `__attribute__((packed))` (see `StructDef::packed`).
+    pub packed: bool,
     /// sic (sic.md §"Namespace"): `private union` — withhold from the manifest.
     pub private: bool,
     pub span: Span,

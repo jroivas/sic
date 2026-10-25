@@ -858,7 +858,7 @@ impl Lowerer {
                         }
                         // A typedef naming another struct (`typedef geo::Point
                         // Point;`): a candidate re-export of the module.
-                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { name: Some(target), .. }) = &ir_ty {
+                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { packed: false, name: Some(target), .. }) = &ir_ty {
                             if target != name { self.typedef_aliases.push((name.clone(), target.clone())); }
                         }
                         self.register_type_name(name.clone(), ir_ty);
@@ -1054,6 +1054,7 @@ impl Lowerer {
                 let payload_fields: Vec<(String, Type)> = variants.iter()
                     .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
                 let data = Type::Union(sic_ir::UnionType {
+                    packed: false,
                     name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                 let struct_type = Type::Struct(sic_ir::StructType::plain(Some(ename.clone()), vec![
                     ("tag".to_string(), Type::Int { bits: 32, signed: true }),
@@ -1306,7 +1307,7 @@ impl Lowerer {
             let mut st = StructType {
                 name: Some(name.clone()),
                 fields: ir_fields,
-                packed: false,
+                packed: s.packed,
                 bitfields: if any_bitfield { bitfields } else { Vec::new() },
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
                 min_align: s.align,
@@ -1355,6 +1356,7 @@ impl Lowerer {
             // A member naming the union itself resolves to it (see structs).
             if self.sic && !self.struct_types.contains_key(name) {
                 self.struct_types.insert(name.clone(), Type::Union(sic_ir::UnionType {
+                    packed: false,
                     name: Some(name.clone()), fields: vec![], field_aligns: vec![], min_align: None }));
             }
             let mut ir_fields = Vec::new();
@@ -1369,6 +1371,7 @@ impl Lowerer {
                 field_aligns.push(f.align);
             }
             let ir_ty = Type::Union(UnionType {
+                packed: u.packed,
                 name: Some(name.clone()),
                 fields: ir_fields,
                 field_aligns: if any_align { field_aligns } else { Vec::new() },
@@ -2704,7 +2707,7 @@ impl Lowerer {
                     name: Some("self".to_string()),
                     ty: QualType::new(AstType::Pointer {
                         base: Box::new(QualType::new(AstType::Struct(StructDef {
-                            name: Some(sname.clone()), fields: None, align: None,
+                            name: Some(sname.clone()), fields: None, align: None, packed: false,
                             order: crate::ast::StructOrder::Default, methods: vec![], private: false, span: sp.clone(),
                         }))),
                         quals: vec![],
@@ -4037,8 +4040,10 @@ impl Lowerer {
     /// Pack a bit-field's constant value into `buf` at byte offset `base` (the
     /// storage unit), read-modify-write so neighbouring bit-fields are preserved.
     fn serialize_bitfield(&self, e: &Expr, ty: &Type, bf: crate::lower::expr::BitField, buf: &mut [u8], base: usize) -> bool {
-        let size = ty.size_of(self.ptr_size) as usize;
-        if size == 0 || base + size > buf.len() { return false; }
+        let mut size = ty.size_of(self.ptr_size) as usize;
+        // A straddling packed bit-field covers more bytes than its type.
+        if let Some(n) = bf.straddle_bytes(size as u32 * 8) { size = n as usize; }
+        if size == 0 || size > 8 || base + size > buf.len() { return false; }
         let v = match self.eval_const_int(e) { Some(v) => v as u64, None => return false };
         let field_mask: u64 = if bf.width >= 64 { !0 } else { (1u64 << bf.width) - 1 };
         let mut cur: u64 = 0;

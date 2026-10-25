@@ -42,6 +42,15 @@ impl BitField {
     pub(crate) fn new(bit_offset: u32, width: u32, signed: bool) -> Self {
         BitField { bit_offset, width, signed }
     }
+
+    /// The bytes a field reaches past its declared type, when it does: a
+    /// packed struct's bit-field can straddle (`unsigned b:30` at bit 3 spans
+    /// 33 bits). Such a field is accessed byte by byte over exactly the bytes
+    /// it covers (never past the struct); None for an ordinary field.
+    pub(crate) fn straddle_bytes(&self, ty_bits: u32) -> Option<u32> {
+        let need = self.bit_offset + self.width;
+        (need > ty_bits).then(|| (need + 7) / 8)
+    }
 }
 
 /// Which AES-NI round intrinsic to emulate.
@@ -6201,6 +6210,16 @@ impl<'m> FuncCtx<'m> {
             // `while (e->is_decode)` where is_decode is a `_Bool:1` — an infinite
             // loop that stalled guest translation).
             let bits = ty.size_of(self.ptr_size()).max(1) as u32 * 8;
+            if let Some(n) = bf.straddle_bytes(bits) {
+                let acc = self.load_bytes_u64(&lv.ptr, n)?;
+                let left = 64 - (bf.bit_offset + bf.width);
+                let d = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: d, op: BinOp::Shl, lhs: acc, rhs: Constant::int(left as i64), ty: Type::u64() });
+                let res = self.alloc_val();
+                let (op, rty) = if bf.signed { (BinOp::AShr, Type::i64()) } else { (BinOp::LShr, Type::u64()) };
+                self.push_instr(Instr::BinOp { dest: res, op, lhs: Val::Local(d), rhs: Constant::int(64 - bf.width as i64), ty: rty });
+                return self.coerce(Val::Local(res), &ty);
+            }
             let raw = self.alloc_val();
             self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
             // Shift the field to the top, then back down: masks and (for signed
@@ -6257,6 +6276,31 @@ impl<'m> FuncCtx<'m> {
         let ty = ty.clone();
         let val = self.coerce(val, &ty)?;
         let mask: i64 = if bf.width >= 64 { -1 } else { ((1u64 << bf.width) - 1) as i64 };
+        let bits = ty.size_of(self.ptr_size()).max(1) as u32 * 8;
+        if let Some(n) = bf.straddle_bytes(bits) {
+            // A straddling packed bit-field: read-modify-write its bytes.
+            let u64t = Type::u64();
+            let acc = self.load_bytes_u64(ptr, n)?;
+            let wide = self.coerce(val.clone(), &u64t)?;
+            let vm = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: vm, op: BinOp::And, lhs: wide, rhs: Constant::int(mask), ty: u64t.clone() });
+            let vs = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: vs, op: BinOp::Shl, lhs: Val::Local(vm), rhs: Constant::int(bf.bit_offset as i64), ty: u64t.clone() });
+            let cleared = self.alloc_val();
+            let clear_mask = !(mask as u64).wrapping_shl(bf.bit_offset) as i64;
+            self.push_instr(Instr::BinOp { dest: cleared, op: BinOp::And, lhs: acc, rhs: Constant::int(clear_mask), ty: u64t.clone() });
+            let newv = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: newv, op: BinOp::Or, lhs: Val::Local(cleared), rhs: Val::Local(vs), ty: u64t.clone() });
+            for k in 0..n {
+                let sh = self.alloc_val();
+                self.push_instr(Instr::BinOp { dest: sh, op: BinOp::LShr, lhs: Val::Local(newv), rhs: Constant::int(8 * k as i64), ty: u64t.clone() });
+                let b = self.coerce(Val::Local(sh), &Type::u8())?;
+                let p = self.alloc_val();
+                self.push_instr(Instr::PtrOffset { dest: p, base: ptr.clone(), offset: Constant::int(k as i64) });
+                self.push_instr(Instr::Store { val: b, ptr: Val::Local(p) });
+            }
+            return Ok(val);
+        }
         let vm = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: vm, op: BinOp::And, lhs: val.clone(), rhs: Constant::int(mask), ty: ty.clone() });
         let vs = if bf.bit_offset > 0 {
@@ -6273,6 +6317,28 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::BinOp { dest: newv, op: BinOp::Or, lhs: Val::Local(cleared), rhs: vs, ty: ty.clone() });
         self.push_instr(Instr::Store { val: Val::Local(newv), ptr: ptr.clone() });
         Ok(val)
+    }
+
+    /// The `n` (≤ 8) bytes at `ptr` as a little-endian u64, one byte at a time.
+    fn load_bytes_u64(&mut self, ptr: &Val, n: u32) -> Result<Val> {
+        if n > 8 {
+            return Err(crate::CompileError::new("a packed bit-field spanning more than 64 bits is not supported".to_string()));
+        }
+        let u64t = Type::u64();
+        let mut acc = Constant::int(0);
+        for k in 0..n {
+            let p = self.alloc_val();
+            self.push_instr(Instr::PtrOffset { dest: p, base: ptr.clone(), offset: Constant::int(k as i64) });
+            let b = self.alloc_val();
+            self.push_instr(Instr::Load { dest: b, ptr: Val::Local(p), ty: Type::u8() });
+            let w = self.coerce(Val::Local(b), &u64t)?;
+            let sh = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: sh, op: BinOp::Shl, lhs: w, rhs: Constant::int(8 * k as i64), ty: u64t.clone() });
+            let o = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: o, op: BinOp::Or, lhs: acc, rhs: Val::Local(sh), ty: u64t.clone() });
+            acc = Val::Local(o);
+        }
+        Ok(acc)
     }
 
     /// `Some(is_dict)` when `e` is `c[k]` on a sic `list` or `dict`.

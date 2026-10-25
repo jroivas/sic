@@ -170,6 +170,7 @@ pub fn tagged_enum_type(
         }
     }
     let data = Type::Union(UnionType {
+        packed: false,
         name: None,
         fields,
         field_aligns: vec![],
@@ -480,7 +481,7 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
                 return Type::Struct(StructType::plain(Some(n.to_string()), vec![], false));
             }
             if let Some(n) = s.strip_prefix("u_") {
-                return Type::Union(UnionType { name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
+                return Type::Union(UnionType { packed: false, name: Some(n.to_string()), fields: vec![], field_aligns: vec![], min_align: None });
             }
             if let Some(bits) = s.strip_prefix('i').and_then(|b| b.parse::<u32>().ok()) {
                 return Type::Int { bits, signed: true };
@@ -1139,7 +1140,7 @@ pub fn opaque_aggregate(t: Type) -> Type {
         Type::Struct(st) if st.name.is_some() =>
             Type::Struct(StructType::plain(st.name, vec![], st.packed)),
         Type::Union(u) if u.name.is_some() =>
-            Type::Union(UnionType { name: u.name, fields: vec![], field_aligns: vec![], min_align: u.min_align }),
+            Type::Union(UnionType { packed: u.packed, name: u.name, fields: vec![], field_aligns: vec![], min_align: u.min_align }),
         other => other,
     }
 }
@@ -1190,7 +1191,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
     Ok(Type::Struct(StructType {
         name: s.name.clone(),
         fields: ir_fields,
-        packed: false,
+        packed: s.packed,
         bitfields: if any_bitfield { bitfields } else { Vec::new() },
         field_aligns: if any_align { field_aligns } else { Vec::new() },
         min_align: s.align,
@@ -1351,7 +1352,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
                 return Ok(named[&k].clone());
             }
         }
-        return Ok(Type::Union(UnionType { name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
+        return Ok(Type::Union(UnionType { packed: false, name: u.name.clone(), fields: vec![], field_aligns: vec![], min_align: None }));
     }
     let fields = u.fields.as_ref().unwrap();
     let mut ir_fields = Vec::new();
@@ -1365,6 +1366,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
         field_aligns.push(f.align);
     }
     Ok(Type::Union(UnionType {
+        packed: u.packed,
         name: u.name.clone(),
         fields: ir_fields,
         field_aligns: if any_align { field_aligns } else { Vec::new() },

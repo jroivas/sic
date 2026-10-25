@@ -1165,6 +1165,9 @@ impl Parser {
         self.pending_aligned = None;
         self.skip_attributes();
         type_align = type_align.or(self.pending_aligned.take());
+        // The type's own `packed`, kept apart from the members' (a member's
+        // attribute or a nested definition sets and resets the shared flag).
+        let mut packed = std::mem::take(&mut self.pending_packed);
 
         let mut methods: Vec<StructMethod> = Vec::new();
         let fields = if self.at(TokenKind::LBrace) {
@@ -1202,10 +1205,12 @@ impl Parser {
             // Trailing `struct T {...} __attribute__((packed/__order__/aligned))`;
             // an alignment there raises the type's (Linux's struct page
             // `} _struct_page_alignment;`).
+            self.pending_packed = false;
             self.skip_attributes();
             if let Some(n) = self.pending_aligned.take() {
                 type_align = Some(type_align.unwrap_or(0).max(n));
             }
+            packed |= std::mem::take(&mut self.pending_packed);
             Some(fields)
         } else {
             None
@@ -1213,7 +1218,7 @@ impl Parser {
         // `packed` pins the C layout (declaration order) and wins over any
         // `order_*` attribute; otherwise use the requested mode, or `Default`
         // (follow the global `-fstruct-order`) when none was given.
-        let order = if self.pending_packed {
+        let order = if packed {
             crate::ast::StructOrder::C
         } else {
             self.pending_order.take().unwrap_or(crate::ast::StructOrder::Default)
@@ -1230,9 +1235,9 @@ impl Parser {
 
         let private = std::mem::take(&mut self.pending_private);
         if is_union {
-            Ok(AstType::Union(UnionDef { name, fields, align: type_align, private, span: sp }))
+            Ok(AstType::Union(UnionDef { name, fields, align: type_align, packed, private, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, order, methods, private, span: sp }))
+            Ok(AstType::Struct(StructDef { name, fields, align: type_align, packed, order, methods, private, span: sp }))
         }
     }
 

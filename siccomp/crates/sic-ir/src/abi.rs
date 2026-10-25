@@ -174,7 +174,7 @@ mod tests {
         Type::Struct(StructType::plain(None, fields.into_iter().map(field).collect(), false))
     }
     fn un(fields: Vec<Type>) -> Type {
-        Type::Union(UnionType { name: None, fields: fields.into_iter().map(field).collect(),
+        Type::Union(UnionType { packed: false, name: None, fields: fields.into_iter().map(field).collect(),
                                 field_aligns: vec![], min_align: None })
     }
     fn i(bits: u32) -> Type { Type::Int { bits, signed: true } }
