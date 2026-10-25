@@ -126,14 +126,16 @@ impl<'m> FuncCtx<'m> {
     /// `false` when the statement is not of this form (nothing emitted).
     fn try_lower_text_asm(&mut self, a: &AsmStmt) -> Result<bool> {
         if !a.outputs.is_empty() { return Ok(false); }
-        let mut vals: Vec<(Option<String>, i64)> = Vec::new();
+        let mut vals: Vec<(Option<String>, Imm)> = Vec::new();
+        let mut strings = Vec::new();
         for op in &a.inputs {
             let c = constraint(&op.constraint);
             if c.letters.is_empty() || !c.letters.chars().all(|ch| ch == 'i' || ch == 'n') { return Ok(false); }
-            let Some(v) = self.lowerer.eval_const_int(&op.expr) else { return Ok(false) };
+            let Some(v) = self.const_operand(&op.expr, c.letters.contains('i'), true, &mut strings) else { return Ok(false) };
             vals.push((op.name.clone(), v));
         }
         let Some(text) = substitute_operands(&a.template, &vals) else { return Ok(false) };
+        let text = format!("{}{}", string_defs(&strings), text);
         // Callee-saved registers the template clobbers are saved around it.
         let saved: Vec<&str> = ["rbx", "rbp", "r12", "r13", "r14", "r15"].into_iter()
             .filter(|r| a.clobbers.iter().any(|c| {
@@ -147,16 +149,108 @@ impl<'m> FuncCtx<'m> {
         body.push('\n');
         for r in saved.iter().rev() { body.push_str(&format!("\tpop %{}\n", r)); }
         body.push_str("\tret\n");
+        let name = self.add_text_helper("text", body, a);
+        self.call_asm_helper(&name, &[], vec![], Type::Void)?;
+        Ok(true)
+    }
+
+    /// Register a text helper (deduplicated by its body) and return its name
+    /// (without the helper prefix). A body still holding local-constant
+    /// placeholders is unique to this statement and is completed by
+    /// `finish_asm_constants` once the function is lowered.
+    fn add_text_helper(&mut self, kind: &str, body: String, a: &AsmStmt) -> String {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut h);
-        let name = format!("text_{:016x}", h.finish());
+        let deferred = body.contains(LOCAL_MARK);
+        if deferred { (self.func_ref().name.as_str(), self.lowerer.module.asm_text_helpers.len()).hash(&mut h); }
+        let name = format!("{}_{:016x}", kind, h.finish());
         let sym = format!("{}{}", ASM_HELPER_PREFIX, name);
         if !self.lowerer.module.asm_text_helpers.iter().any(|(n, _)| *n == sym) {
+            if deferred {
+                let idx = self.lowerer.module.asm_text_helpers.len();
+                self.asm_deferred.push((idx, a.span.clone()));
+            }
             self.lowerer.module.asm_text_helpers.push((sym, body));
         }
-        self.call_asm_helper(&name, &[], vec![], Type::Void)?;
-        Ok(true)
+        name
+    }
+
+    /// A constant operand (`"i"` / `"n"`): an integer constant expression; with
+    /// `"i"` also a string literal's address (defined in the helper, appended
+    /// to `strings`). With `local_ok` (no register or memory alternative), also
+    /// a local initialized with a constant (checked when the function is
+    /// complete). None for anything else.
+    fn const_operand(&mut self, e: &Expr, addr_ok: bool, local_ok: bool, strings: &mut Vec<(String, String)>) -> Option<Imm> {
+        if let Some(v) = self.lowerer.eval_const_int(e) { return Some(Imm::Int(v)); }
+        match &e.kind {
+            ExprKind::StringLit(text) if addr_ok => {
+                let label = format!(".Lsic_s{}_{}", self.lowerer.module.asm_text_helpers.len(), strings.len());
+                strings.push((label.clone(), text.clone()));
+                Some(Imm::Label(label))
+            }
+            ExprKind::Ident(n) if local_ok => {
+                let (_, vid) = self.locals.iter().rev().find_map(|sc| sc.get(n)).cloned()?;
+                self.const_init_locals.contains_key(&vid).then_some(Imm::Local(vid))
+            }
+            _ => None,
+        }
+    }
+
+    /// Complete the helpers that print local constants (`try_lower_text_asm`,
+    /// `try_lower_operand_asm`), now that every use of each local is known: its
+    /// value is the constant it was initialized with when its slot is stored
+    /// only by that initialization and otherwise only loaded (its address is
+    /// never taken). GCC and Clang accept such an operand because they fold it
+    /// (Linux's `auto __flags = BUGFLAG_WARNING|(flags); asm(… "i"(__flags))`);
+    /// any other local is an error, as theirs is.
+    pub(crate) fn finish_asm_constants(&mut self) -> Result<()> {
+        for (idx, span) in std::mem::take(&mut self.asm_deferred) {
+            let body = self.lowerer.module.asm_text_helpers[idx].1.clone();
+            let mut out = String::new();
+            let mut rest = body.as_str();
+            while let Some(st) = rest.find(LOCAL_MARK) {
+                out.push_str(&rest[..st]);
+                let after = &rest[st + LOCAL_MARK.len_utf8()..];
+                let end = after.find(LOCAL_MARK).expect("unterminated asm placeholder");
+                let (vid, modifier) = after[..end].split_at(after[..end].len() - 1);
+                let vid = ValId(vid.parse().expect("asm placeholder slot"));
+                let Some(v) = self.constant_local(vid) else {
+                    return Err(crate::CompileError::at(
+                        "impossible constraint in asm: an \"i\" operand is a variable that is not a constant".to_string(),
+                        span.file.clone(), span.line, span.col));
+                };
+                out.push_str(&match modifier { "c" => format!("{}", v), "n" => format!("{}", v.wrapping_neg()), _ => format!("${}", v) });
+                rest = &after[end + LOCAL_MARK.len_utf8()..];
+            }
+            out.push_str(rest);
+            self.lowerer.module.asm_text_helpers[idx].1 = out;
+        }
+        Ok(())
+    }
+
+    /// The constant a local's slot always holds: its constant initialization
+    /// is the slot's only store and every other use is a load.
+    fn constant_local(&self, vid: ValId) -> Option<i64> {
+        let v = *self.const_init_locals.get(&vid)?;
+        let slot = Val::Local(vid);
+        let mut stores = 0;
+        for b in &self.func_ref().blocks {
+            for i in &b.instrs {
+                match i {
+                    Instr::Load { ptr, .. } if *ptr == slot => continue,
+                    Instr::Store { val, ptr } if *ptr == slot && *val != slot => { stores += 1; continue; }
+                    _ => {}
+                }
+                let mut escapes = false;
+                i.for_each_val(|x| if *x == slot { escapes = true; });
+                if escapes { return None; }
+            }
+            let mut escapes = false;
+            b.terminator.for_each_val(|x| if *x == slot { escapes = true; });
+            if escapes { return None; }
+        }
+        (stores == 1).then_some(v)
     }
 
     /// Lower a recognised template; `false` = not recognised (nothing emitted).
@@ -404,7 +498,7 @@ impl<'m> FuncCtx<'m> {
 /// GCC's AT&T printer writes them: plain `$v`, `%cN`/`%PN` → `v`, `%nN` → `-v`;
 /// `%%` → `%`, `%=` → a number unique to the statement. `None` for a
 /// reference or modifier it cannot print.
-fn substitute_operands(template: &str, vals: &[(Option<String>, i64)]) -> Option<String> {
+fn substitute_operands(template: &str, vals: &[(Option<String>, Imm)]) -> Option<String> {
     let cs: Vec<char> = template.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -436,15 +530,57 @@ fn substitute_operands(template: &str, vals: &[(Option<String>, i64)]) -> Option
             }
             _ => return None,
         };
-        let v = vals.get(n)?.1;
-        match modifier {
-            None => out.push_str(&format!("${}", v)),
-            Some('c') | Some('P') => out.push_str(&format!("{}", v)),
-            Some('n') => out.push_str(&format!("{}", v.wrapping_neg())),
-            Some(_) => return None,
-        }
+        out.push_str(&vals.get(n)?.1.print(modifier)?);
     }
     Some(out)
+}
+
+/// Brackets a local constant's placeholder in a helper body: `<mark>slot
+/// modifier<mark>` (modifier `$`, `c` or `n`), see `finish_asm_constants`.
+const LOCAL_MARK: char = '\u{1}';
+
+/// A constant operand's value.
+#[derive(Clone, Debug)]
+enum Imm {
+    /// An integer (`"i"(24)`, `"i"(sizeof(T))`).
+    Int(i64),
+    /// A string literal's address: a label the helper defines.
+    Label(String),
+    /// A local initialized with a constant, its slot: printed as a placeholder
+    /// until the function is complete.
+    Local(ValId),
+}
+
+impl Imm {
+    /// The operand as the template prints it: `$v` bare, `v` with `%c` / `%P`
+    /// (and `%a`, a constant address), `-v` with `%n`.
+    fn print(&self, modifier: Option<char>) -> Option<String> {
+        Some(match (self, modifier) {
+            (Imm::Int(v), None) => format!("${}", v),
+            (Imm::Int(v), Some('c' | 'P' | 'a')) => format!("{}", v),
+            (Imm::Int(v), Some('n')) => format!("{}", v.wrapping_neg()),
+            (Imm::Label(l), None) => format!("${}", l),
+            (Imm::Label(l), Some('c' | 'P' | 'a')) => l.clone(),
+            (Imm::Local(id), None) => format!("{m}{}${m}", id.0, m = LOCAL_MARK),
+            (Imm::Local(id), Some('c' | 'P' | 'a')) => format!("{m}{}c{m}", id.0, m = LOCAL_MARK),
+            (Imm::Local(id), Some('n')) => format!("{m}{}n{m}", id.0, m = LOCAL_MARK),
+            _ => return None,
+        })
+    }
+}
+
+/// The string literals constant operands point to, each under its label, in
+/// the read-only string section.
+fn string_defs(strings: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (label, text) in strings {
+        let esc: String = text.bytes().map(|b| match b {
+            b'"' => "\\\"".to_string(), b'\\' => "\\\\".to_string(),
+            0x20..=0x7e => (b as char).to_string(), _ => format!("\\{:03o}", b),
+        }).collect();
+        out.push_str(&format!("\t.pushsection .rodata.str1.1,\"aMS\",@progbits,1\n{}:\n\t.asciz \"{}\"\n\t.popsection\n", label, esc));
+    }
+    out
 }
 
 /// The x86-64 general registers: 64-, 32-, 16-, low 8-bit names and the high
@@ -477,7 +613,7 @@ enum OpLoc {
     /// In memory, its address in a register.
     Mem(usize),
     /// A constant.
-    Imm(i64),
+    Imm(Imm),
     /// A flag output `=@cc<cond>`: `set<cond>` into a register.
     Flag(String, usize),
 }
@@ -568,9 +704,7 @@ fn print_operands(template: &str, ops: &[OpInfo], names: &[Option<String>]) -> O
             (OpLoc::Reg(r), Some('V')) => out.push_str(&reg_name(*r, op.size, None)?),
             (OpLoc::Reg(r), m @ (None | Some('b' | 'h' | 'w' | 'k' | 'q'))) => { out.push('%'); out.push_str(&reg_name(*r, op.size, m)?); }
             (OpLoc::Mem(r), None | Some('b' | 'h' | 'w' | 'k' | 'q' | 'a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
-            (OpLoc::Imm(v), None) => out.push_str(&format!("${}", v)),
-            (OpLoc::Imm(v), Some('c' | 'P' | 'a')) => out.push_str(&format!("{}", v)),
-            (OpLoc::Imm(v), Some('n')) => out.push_str(&format!("{}", v.wrapping_neg())),
+            (OpLoc::Imm(v), m) => out.push_str(&v.print(m)?),
             _ => return None,
         }
     }
@@ -596,6 +730,7 @@ impl FuncCtx<'_> {
         let mut ops: Vec<Option<OpInfo>> = (0..all.len()).map(|_| None).collect();
         // Pass 1: fixed registers, constants, flags; note what needs a pool register.
         let mut want_reg: Vec<(usize, bool)> = Vec::new(); // (operand, memory?)
+        let mut strings = Vec::new();
         for (n, op) in all.iter().enumerate() {
             let is_out = n < nout;
             let raw = op.constraint.split(',').next().unwrap_or("");
@@ -621,7 +756,8 @@ impl FuncCtx<'_> {
             });
             let imm_ok = letters.chars().any(|ch| "inIJKLMNOPeZEF".contains(ch));
             if !is_out && imm_ok && fixed.is_none() {
-                if let Some(v) = self.lowerer.eval_const_int(&op.expr) {
+                if let Some(v) = self.const_operand(&op.expr, letters.contains('i'),
+                    !letters.chars().any(|ch| "rgqmoVXpRlQabcdSD".contains(ch)), &mut strings) {
                     ops[n] = Some(OpInfo { loc: OpLoc::Imm(v), size, load: false });
                     continue;
                 }
@@ -672,7 +808,7 @@ impl FuncCtx<'_> {
         let Some(text) = print_operands(&a.template, &ops, &names) else { return Ok(false) };
         let outputs: Vec<(usize, usize)> = ops[..nout].iter().enumerate().filter_map(|(n, o)| match o.loc {
             OpLoc::Reg(r) | OpLoc::Flag(_, r) => Some((n, r)), _ => None }).collect();
-        let body = operand_helper_body(&text, &ops, &outputs, scratch);
+        let body = operand_helper_body(&format!("{}{}", string_defs(&strings), text), &ops, &outputs, scratch);
 
         // The caller: lvalues once, the slots, the call, the outputs back.
         let i64t = Type::i64();
@@ -714,14 +850,7 @@ impl FuncCtx<'_> {
             let p = slot_at(self, n);
             self.push_instr(Instr::Store { val: v, ptr: p });
         }
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        body.hash(&mut h);
-        let name = format!("op_{:016x}", h.finish());
-        let sym = format!("{}{}", ASM_HELPER_PREFIX, name);
-        if !self.lowerer.module.asm_text_helpers.iter().any(|(n, _)| *n == sym) {
-            self.lowerer.module.asm_text_helpers.push((sym, body));
-        }
+        let name = self.add_text_helper("op", body, a);
         self.call_asm_helper(&name, &[Type::ptr(i64t.clone())], vec![Val::Local(slots)], Type::Void)?;
         for (n, _) in &outputs {
             let p = slot_at(self, *n);

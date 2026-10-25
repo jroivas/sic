@@ -231,6 +231,12 @@ pub struct FuncCtx<'m> {
     /// Counters of fully unrolled loops (`unroll.rs`): in each copy of the
     /// body the name is that iteration's constant value.
     pub unroll_consts: Vec<(String, i64)>,
+    /// Integer locals whose initializer is a constant expression, by slot:
+    /// candidates for an asm `"i"` operand (see `finish_asm_constants`).
+    pub const_init_locals: HashMap<ValId, i64>,
+    /// Asm text helpers (index into `asm_text_helpers`, the statement's span)
+    /// still holding local-constant placeholders.
+    pub asm_deferred: Vec<(usize, crate::lexer::Span)>,
     /// sic: locals/params declared with a payload-less named enum type
     /// (`enum vals v`) → the enum name, so `v.str` → `"vals::ONE"` can find the
     /// variant table (the enum itself lowers to a plain int, losing its identity).
@@ -448,6 +454,8 @@ impl<'m> FuncCtx<'m> {
             func: func as *mut Function,
             locals: vec![HashMap::new()],
             unroll_consts: Vec::new(),
+            const_init_locals: HashMap::new(),
+            asm_deferred: Vec::new(),
             enum_locals: HashMap::new(),
             bitfield_locals: HashMap::new(),
             weak_locals: HashMap::new(),
@@ -1330,6 +1338,13 @@ impl<'m> FuncCtx<'m> {
 
     fn late_init_sites(&mut self, params: &[AstParam], body: &[Stmt]) {
         self.late_init_ok = super::strict::late_init_sites(params, body);
+    }
+
+    /// Record a C integer local initialized with a constant expression (a
+    /// candidate asm `"i"` operand, see `finish_asm_constants`).
+    fn note_const_init(&mut self, vid: ValId, ty: &Type, init: &Expr) {
+        if self.is_sic() || !ty.is_int() { return; }
+        if let Some(v) = self.lowerer.eval_const_int(init) { self.const_init_locals.insert(vid, v); }
     }
 
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
@@ -2366,6 +2381,7 @@ impl<'m> Lowerer {
 
         fc.exit_scope();
         if let Some(e) = fc.cleanup_error.take() { return Err(e); }
+        fc.finish_asm_constants()?;
 
         // Replace the pre-registered placeholder, or add if not pre-registered
         if let Some(idx) = self.module.functions.iter().position(|f| f.name == name) {
@@ -2776,6 +2792,7 @@ impl<'m> FuncCtx<'m> {
                         }
                         // Bound AFTER the initializer, so `auto x = x;` sees the outer x.
                         self.define_local(d.name.clone(), it.clone(), vid);
+                        self.note_const_init(vid, &it, e);
                         if !d.name.is_empty() {
                             self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: it, slot: vid, is_param: false });
                         }
@@ -2970,6 +2987,7 @@ impl<'m> FuncCtx<'m> {
                     // `T *p = malloc(sizeof(*p))` must see `p` as a `T*` (not
                     // default to `int`, which would size the allocation wrong).
                     self.define_local(d.name.clone(), ty.clone(), vid);
+                    if let Some(Initializer::Expr(e)) = &d.init { self.note_const_init(vid, &ty, e); }
                     // Remember a payload-less enum-typed local so `v.str` works, and
                     // enforce strict enum typing on its initializer (sic.md §"Enums").
                     if let Some(en) = self.c_enum_name_of(&d.ty.ty) {
