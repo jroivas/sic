@@ -296,7 +296,28 @@ fn module_search_dirs() -> Vec<String> {
 fn handle_version_query(args: &[String]) -> bool {
     let version = env!("CARGO_PKG_VERSION");
     for a in args {
+        // gcc/clang `-print-file-name=NAME`: the full path of NAME in the
+        // linker's directories (start files, libraries, the compiler runtime's
+        // directory), or NAME itself when it is not there. Linux's Kconfig asks
+        // for `plugin` (GCC plugins; none here, so it gets `plugin` back).
+        if let Some(name) = a.strip_prefix("-print-file-name=").or_else(|| a.strip_prefix("--print-file-name=")) {
+            let tc = sic_link::toolchain();
+            let dirs = tc.crt_dir.iter().cloned()
+                .chain(tc.lib_dirs.iter().cloned())
+                .chain(tc.rt.iter().filter_map(|r| r.parent().map(|p| p.to_path_buf())));
+            let found = dirs.map(|d| d.join(name)).find(|p| !name.is_empty() && p.exists());
+            println!("{}", found.map_or(name.to_string(), |p| p.display().to_string()));
+            return true;
+        }
         match a.as_str() {
+            // The compiler runtime archive the link uses (libgcc.a / compiler-rt).
+            "-print-libgcc-file-name" | "--print-libgcc-file-name" => {
+                match &sic_link::toolchain().rt {
+                    Some(r) => println!("{}", r.display()),
+                    None => println!("libgcc.a"),
+                }
+                return true;
+            }
             "--version" => {
                 // clang-like banner.
                 println!("sic version {} (SIC Compiler, clang compatible, Cranelift)", version);
