@@ -1,13 +1,21 @@
 //! GNU inline assembly: `asm volatile("rdtsc" : "=a"(lo), "=d"(hi));`.
 //!
-//! Cranelift has no inline assembly, so a fixed set of x86-64 templates that
-//! real code uses (QEMU's host tick counter / cpuid probe / softfloat 128-bit
-//! helpers, glibc `<cpuid.h>`, compiler barriers, …) is recognised here and
-//! lowered to calls of tiny exact machine-code helpers (`sic_ir::asm_helpers`,
-//! emitted by the backend). Anything else WARNS at compile time and TRAPS
-//! (`ud2`) when executed: it must never silently do nothing — sic used to skip
-//! every asm statement, so QEMU's `rdtsc` "returned" 0, the guest's TSC never
-//! advanced and Visopsys divided by its zero CPU speed.
+//! Cranelift has no inline assembly, so a statement runs out of line, in a
+//! helper function the call stands for:
+//!  - a fixed set of x86-64 templates real code uses (QEMU's host tick counter /
+//!    cpuid probe / softfloat 128-bit helpers, glibc `<cpuid.h>`, compiler
+//!    barriers, …) maps to tiny exact machine-code helpers
+//!    (`sic_ir::asm_helpers`, emitted by the backend);
+//!  - any other template becomes a helper in assembler text
+//!    (`Module::asm_text_helpers`, assembled by the system assembler): constant
+//!    operands are printed into it, and register / memory / flag operands are
+//!    loaded from a slot array into the registers their constraints name and
+//!    stored back after (`try_lower_operand_asm`).
+//! What neither handles (vector-register operands, `asm goto`, …) WARNS at
+//! compile time and TRAPS (`ud2`) when executed: it must never silently do
+//! nothing — sic used to skip every asm statement, so QEMU's `rdtsc`
+//! "returned" 0, the guest's TSC never advanced and Visopsys divided by its
+//! zero CPU speed. Inline assembly is C only; SIC rejects it.
 
 use crate::ast::{AsmOperand, AsmStmt};
 use crate::Result;
@@ -99,9 +107,12 @@ impl<'m> FuncCtx<'m> {
         if !a.goto && self.try_lower_text_asm(a)? {
             return Ok(());
         }
+        if !a.goto && self.try_lower_operand_asm(a)? {
+            return Ok(());
+        }
         let sp = &a.span;
         crate::diag::warn("unsupported-asm", sp.file.as_deref(), sp.line, sp.col, &format!(
-            "unsupported inline assembly \"{}\" (sic recognises only a fixed set of x86-64 templates); it traps if executed",
+            "unsupported inline assembly \"{}\" (an operand constraint or modifier sic does not handle, such as vector registers, or asm goto); it traps if executed",
             a.template.escape_debug()));
         self.call_asm_helper("trap", &[], vec![], Type::Void)?;
         Ok(())
@@ -434,4 +445,292 @@ fn substitute_operands(template: &str, vals: &[(Option<String>, i64)]) -> Option
         }
     }
     Some(out)
+}
+
+/// The x86-64 general registers: 64-, 32-, 16-, low 8-bit names and the high
+/// 8-bit one (a–d only). Index = position here.
+const GPR: [(&str, &str, &str, &str, Option<&str>); 16] = [
+    ("rax", "eax", "ax", "al", Some("ah")), ("rbx", "ebx", "bx", "bl", Some("bh")),
+    ("rcx", "ecx", "cx", "cl", Some("ch")), ("rdx", "edx", "dx", "dl", Some("dh")),
+    ("rsi", "esi", "si", "sil", None), ("rdi", "edi", "di", "dil", None),
+    ("rbp", "ebp", "bp", "bpl", None), ("rsp", "esp", "sp", "spl", None),
+    ("r8", "r8d", "r8w", "r8b", None), ("r9", "r9d", "r9w", "r9b", None),
+    ("r10", "r10d", "r10w", "r10b", None), ("r11", "r11d", "r11w", "r11b", None),
+    ("r12", "r12d", "r12w", "r12b", None), ("r13", "r13d", "r13w", "r13b", None),
+    ("r14", "r14d", "r14w", "r14b", None), ("r15", "r15d", "r15w", "r15b", None),
+];
+const RDI: usize = 5;
+/// Registers handed to `r`-class operands, caller-saved first (rbp and rsp never).
+const POOL: [usize; 14] = [0, 2, 3, 4, 5, 8, 9, 10, 11, 1, 12, 13, 14, 15];
+
+/// The register a clobber names (`"rax"`, `"%eax"`, `"r8d"`, `"al"`, …).
+fn clobbered_gpr(c: &str) -> Option<usize> {
+    let c = c.trim_start_matches('%');
+    GPR.iter().position(|g| c == g.0 || c == g.1 || c == g.2 || c == g.3 || Some(c) == g.4)
+}
+
+/// Where an operand lives inside the helper.
+#[derive(Clone, Debug)]
+enum OpLoc {
+    /// In a register (index into `GPR`).
+    Reg(usize),
+    /// In memory, its address in a register.
+    Mem(usize),
+    /// A constant.
+    Imm(i64),
+    /// A flag output `=@cc<cond>`: `set<cond>` into a register.
+    Flag(String, usize),
+}
+
+/// One operand: its location, its value's width in bytes, and whether its
+/// value (or address) goes into the helper.
+struct OpInfo { loc: OpLoc, size: u64, load: bool }
+
+/// The helper for an operand-carrying asm statement: save the callee-saved
+/// registers, load each operand from the slot array (`%rdi`), run the
+/// template, store the outputs back, restore. `outputs` = (operand, register).
+fn operand_helper_body(text: &str, ops: &[OpInfo], outputs: &[(usize, usize)], scratch: usize) -> String {
+    let mut b = String::new();
+    for r in ["rbx", "rbp", "r12", "r13", "r14", "r15", "rdi"] { b.push_str(&format!("\tpush %{}\n", r)); }
+    // Loads through %rdi, the one into %rdi itself last.
+    let mut loads: Vec<(usize, usize)> = Vec::new();
+    for (n, op) in ops.iter().enumerate() {
+        if !op.load { continue; }
+        match op.loc { OpLoc::Reg(r) | OpLoc::Mem(r) => loads.push((n, r)), _ => {} }
+    }
+    loads.sort_by_key(|&(_, r)| r == RDI);
+    for (n, r) in loads { b.push_str(&format!("\tmov {}(%rdi), %{}\n", 8 * n, GPR[r].0)); }
+    b.push_str(text);
+    b.push('\n');
+    for op in ops {
+        if let OpLoc::Flag(cc, r) = &op.loc {
+            b.push_str(&format!("\tset{} %{}\n\tmovzbl %{}, %{}\n", cc, GPR[*r].3, GPR[*r].3, GPR[*r].1));
+        }
+    }
+    b.push_str(&format!("\tmov (%rsp), %{}\n", GPR[scratch].0));
+    for &(n, r) in outputs { b.push_str(&format!("\tmov %{}, {}(%{})\n", GPR[r].0, 8 * n, GPR[scratch].0)); }
+    b.push_str("\tadd $8, %rsp\n");
+    for r in ["r15", "r14", "r13", "r12", "rbp", "rbx"] { b.push_str(&format!("\tpop %{}\n", r)); }
+    b.push_str("\tret\n");
+    b
+}
+
+/// The template with operand references printed for their locations, as
+/// GCC's AT&T printer does: registers by the operand's width or the modifier
+/// (`b` `h` `w` `k` `q`; `V` without `%`), memory as `(%reg)`, constants as
+/// `$v` (`c`/`P`: `v`, `n`: `-v`); `z` the size suffix; `%%` and `%=`.
+fn print_operands(template: &str, ops: &[OpInfo], names: &[Option<String>]) -> Option<String> {
+    let cs: Vec<char> = template.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    let reg_name = |r: usize, size: u64, m: Option<char>| -> Option<String> {
+        let g = GPR[r];
+        Some(match m {
+            Some('b') => g.3.to_string(), Some('h') => g.4?.to_string(), Some('w') => g.2.to_string(),
+            Some('k') => g.1.to_string(), Some('q') => g.0.to_string(),
+            _ => match size { 1 => g.3, 2 => g.2, 4 => g.1, _ => g.0 }.to_string(),
+        })
+    };
+    while i < cs.len() {
+        if cs[i] != '%' { out.push(cs[i]); i += 1; continue; }
+        i += 1;
+        let c = *cs.get(i)?;
+        if c == '%' { out.push('%'); i += 1; continue; }
+        if c == '=' {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            template.hash(&mut h);
+            out.push_str(&format!("{}", h.finish() % 1_000_000));
+            i += 1;
+            continue;
+        }
+        let modifier = if c.is_ascii_alphabetic() { i += 1; Some(c) } else { None };
+        let n = match cs.get(i)? {
+            '[' => {
+                let end = cs[i..].iter().position(|&x| x == ']')? + i;
+                let name: String = cs[i + 1..end].iter().collect();
+                i = end + 1;
+                names.iter().position(|nm| nm.as_deref() == Some(name.as_str()))?
+            }
+            d if d.is_ascii_digit() => {
+                let start = i;
+                while i < cs.len() && cs[i].is_ascii_digit() { i += 1; }
+                cs[start..i].iter().collect::<String>().parse().ok()?
+            }
+            _ => return None,
+        };
+        let op = ops.get(n)?;
+        if modifier == Some('z') {
+            out.push(match op.size { 1 => 'b', 2 => 'w', 4 => 'l', _ => 'q' });
+            continue;
+        }
+        match (&op.loc, modifier) {
+            (OpLoc::Reg(r), Some('V')) => out.push_str(&reg_name(*r, op.size, None)?),
+            (OpLoc::Reg(r), m @ (None | Some('b' | 'h' | 'w' | 'k' | 'q'))) => { out.push('%'); out.push_str(&reg_name(*r, op.size, m)?); }
+            (OpLoc::Mem(r), None | Some('b' | 'h' | 'w' | 'k' | 'q' | 'a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
+            (OpLoc::Imm(v), None) => out.push_str(&format!("${}", v)),
+            (OpLoc::Imm(v), Some('c' | 'P' | 'a')) => out.push_str(&format!("{}", v)),
+            (OpLoc::Imm(v), Some('n')) => out.push_str(&format!("{}", v.wrapping_neg())),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+impl FuncCtx<'_> {
+    /// A statement with register / memory / flag operands: a helper taking a
+    /// slot array (one 8-byte slot per operand, in operand order) that loads
+    /// the operands into the registers their constraints ask for, runs the
+    /// template, and stores the outputs back (see `operand_helper_body`). The
+    /// caller fills the slots (input values, read-write outputs' current
+    /// values, memory operands' addresses) and copies the outputs out after.
+    /// `false` (nothing emitted) for a constraint it does not handle (vector
+    /// and x87 registers, …) or a template it cannot print.
+    fn try_lower_operand_asm(&mut self, a: &AsmStmt) -> Result<bool> {
+        let ps = self.ptr_size();
+        let nout = a.outputs.len();
+        let all: Vec<&AsmOperand> = a.outputs.iter().chain(a.inputs.iter()).collect();
+        let mut used = [false; 16];
+        used[6] = true; used[7] = true; // rbp, rsp
+        for c in &a.clobbers { if let Some(r) = clobbered_gpr(c) { used[r] = true; } }
+        let mut ops: Vec<Option<OpInfo>> = (0..all.len()).map(|_| None).collect();
+        // Pass 1: fixed registers, constants, flags; note what needs a pool register.
+        let mut want_reg: Vec<(usize, bool)> = Vec::new(); // (operand, memory?)
+        for (n, op) in all.iter().enumerate() {
+            let is_out = n < nout;
+            let raw = op.constraint.split(',').next().unwrap_or("");
+            let c = constraint(raw);
+            let ty = self.infer_expr_type(&op.expr).ok();
+            let size = ty.as_ref().map_or(8, |t| t.size_of(ps)).min(8).max(1);
+            if let Some(cc) = c.letters.strip_prefix("@cc") {
+                if !is_out { return Ok(false); }
+                want_reg.push((n, false));
+                ops[n] = Some(OpInfo { loc: OpLoc::Flag(cc.to_string(), 0), size, load: false });
+                continue;
+            }
+            if let Some(t) = c.tied {
+                if is_out || t >= nout { return Ok(false); }
+                continue; // after the outputs are placed
+            }
+            let letters = c.letters.as_str();
+            if letters.chars().any(|ch| "xvYtufykh".contains(ch)) && !letters.chars().any(|ch| "rgqm".contains(ch)) {
+                return Ok(false);
+            }
+            let fixed = letters.chars().find_map(|ch| match ch {
+                'a' => Some(0), 'b' => Some(1), 'c' => Some(2), 'd' => Some(3), 'S' => Some(4), 'D' => Some(5), _ => None,
+            });
+            let imm_ok = letters.chars().any(|ch| "inIJKLMNOPeZEF".contains(ch));
+            if !is_out && imm_ok && fixed.is_none() {
+                if let Some(v) = self.lowerer.eval_const_int(&op.expr) {
+                    ops[n] = Some(OpInfo { loc: OpLoc::Imm(v), size, load: false });
+                    continue;
+                }
+                if !letters.chars().any(|ch| "rgqmoVXp".contains(ch)) { return Ok(false); }
+            }
+            if let Some(r) = fixed {
+                if used[r] { return Ok(false); }
+                used[r] = true;
+                ops[n] = Some(OpInfo { loc: OpLoc::Reg(r), size, load: !is_out || c.rw });
+                continue;
+            }
+            let mem_only = letters.chars().any(|ch| "moV".contains(ch)) && !letters.chars().any(|ch| "rgqXp".contains(ch));
+            if mem_only {
+                want_reg.push((n, true));
+                ops[n] = Some(OpInfo { loc: OpLoc::Mem(0), size, load: true });
+                continue;
+            }
+            if !letters.chars().any(|ch| "rgqRlXpQ".contains(ch)) { return Ok(false); }
+            want_reg.push((n, false));
+            ops[n] = Some(OpInfo { loc: OpLoc::Reg(0), size, load: !is_out || c.rw });
+        }
+        // Pool registers.
+        for (n, _) in want_reg {
+            let Some(r) = POOL.iter().copied().find(|&r| !used[r]) else { return Ok(false) };
+            used[r] = true;
+            let info = ops[n].as_mut().unwrap();
+            info.loc = match &info.loc {
+                OpLoc::Mem(_) => OpLoc::Mem(r),
+                OpLoc::Flag(cc, _) => OpLoc::Flag(cc.clone(), r),
+                _ => OpLoc::Reg(r),
+            };
+        }
+        // Tied inputs share their output's register.
+        for (n, op) in all.iter().enumerate().skip(nout) {
+            if let Some(t) = constraint(op.constraint.split(',').next().unwrap_or("")).tied {
+                let OpLoc::Reg(r) = ops[t].as_ref().unwrap().loc else { return Ok(false) };
+                let size = self.infer_expr_type(&op.expr).ok().map_or(8, |t| t.size_of(ps)).min(8).max(1);
+                ops[n] = Some(OpInfo { loc: OpLoc::Reg(r), size, load: true });
+            }
+        }
+        let ops: Vec<OpInfo> = ops.into_iter().map(|o| o.unwrap()).collect();
+        // A register to find the slots again after the template: any not
+        // holding an output.
+        let out_regs: Vec<usize> = ops[..nout].iter().filter_map(|o| match o.loc {
+            OpLoc::Reg(r) | OpLoc::Flag(_, r) => Some(r), _ => None }).collect();
+        let Some(scratch) = POOL.iter().copied().find(|r| !out_regs.contains(r)) else { return Ok(false) };
+        let names: Vec<Option<String>> = all.iter().map(|o| o.name.clone()).collect();
+        let Some(text) = print_operands(&a.template, &ops, &names) else { return Ok(false) };
+        let outputs: Vec<(usize, usize)> = ops[..nout].iter().enumerate().filter_map(|(n, o)| match o.loc {
+            OpLoc::Reg(r) | OpLoc::Flag(_, r) => Some((n, r)), _ => None }).collect();
+        let body = operand_helper_body(&text, &ops, &outputs, scratch);
+
+        // The caller: lvalues once, the slots, the call, the outputs back.
+        let i64t = Type::i64();
+        let slots = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slots, ty: Type::Array { elem: Box::new(i64t.clone()), len: all.len().max(1) }, align: None });
+        let slot_at = |me: &mut Self, n: usize| -> Val {
+            let d = me.alloc_val();
+            me.push_instr(Instr::PtrOffset { dest: d, base: Val::Local(slots), offset: Constant::int(8 * n as i64) });
+            Val::Local(d)
+        };
+        let mut out_lvs = Vec::new();
+        for out in &a.outputs { out_lvs.push(self.lower_lvalue(&out.expr)?); }
+        for (n, op) in all.iter().enumerate() {
+            let info = &ops[n];
+            if !info.load { continue; }
+            let v = match info.loc {
+                OpLoc::Mem(_) => {
+                    if n < nout { out_lvs[n].ptr.clone() } else {
+                        match self.lower_lvalue(&op.expr) {
+                            Ok(lv) => lv.ptr,
+                            Err(_) => {
+                                // An rvalue memory operand: a temporary holds it.
+                                let ty = self.infer_expr_type(&op.expr)?;
+                                let v = self.lower_expr(&op.expr)?;
+                                let t = self.alloc_val();
+                                self.push_instr(Instr::Alloca { dest: t, ty: ty.clone(), align: None });
+                                let v = self.coerce(v, &ty)?;
+                                self.push_instr(Instr::Store { val: v, ptr: Val::Local(t) });
+                                Val::Local(t)
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if n < nout { self.load_lvalue(&out_lvs[n])? } else { self.lower_expr(&op.expr)? }
+                }
+            };
+            let v = self.coerce(v, &i64t)?;
+            let p = slot_at(self, n);
+            self.push_instr(Instr::Store { val: v, ptr: p });
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        body.hash(&mut h);
+        let name = format!("op_{:016x}", h.finish());
+        let sym = format!("{}{}", ASM_HELPER_PREFIX, name);
+        if !self.lowerer.module.asm_text_helpers.iter().any(|(n, _)| *n == sym) {
+            self.lowerer.module.asm_text_helpers.push((sym, body));
+        }
+        self.call_asm_helper(&name, &[Type::ptr(i64t.clone())], vec![Val::Local(slots)], Type::Void)?;
+        for (n, _) in &outputs {
+            let p = slot_at(self, *n);
+            let d = self.alloc_val();
+            self.push_instr(Instr::Load { dest: d, ptr: p, ty: i64t.clone() });
+            let ty = out_lvs[*n].ty.clone();
+            let v = self.coerce(Val::Local(d), &ty)?;
+            self.store_lvalue(&out_lvs[*n], v)?;
+        }
+        Ok(true)
+    }
 }
