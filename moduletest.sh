@@ -522,6 +522,42 @@ else
     bad "module-array-fields" "module build / manifest failed: $(cat err)"
 fi
 
+# ── Layout attributes in records ─────────────────────────────────────────────
+# packed / aligned(N) / member aligned / bit-field widths were not in the
+# struct record: the importer laid `Pk` out naturally (24 bytes, not 11) and
+# read every field after the first at the wrong offset.
+mkdir -p laymod
+cat > laymod/lay.sic <<'EOF'
+module lay;
+struct Pk { u16 s; u64 a; u8 c; } __attribute__((packed));
+struct Al { u8 c; u32 x __attribute__((aligned(8))); } __attribute__((aligned(16)));
+struct Bf { u32 a : 3; u32 b : 30; u8 c; } __attribute__((packed));
+Pk pk() { Pk p; p.s = 1; p.a = 30; p.c = 2; return p; }
+Al al() { Al a; a.c = 3; a.x = 4; return a; }
+Bf bf() { Bf b; b.a = 1; b.b = 0x2aaaaaaa; b.c = 1; return b; }
+EOF
+cat > layuse.sic <<'EOF'
+import lay;
+int main() {
+    auto p = lay::pk();
+    auto a = lay::al();
+    auto b = lay::bf();
+    if (sizeof(p) != 11 || sizeof(a) != 16 || sizeof(b) != 6) return 1;
+    if (b.b != 0x2aaaaaaa) return 2;
+    return (int)(p.s + p.a + p.c + a.c + a.x + b.a + b.c);   // 42
+}
+EOF
+if "$SIC" --emit-module laymod 2>err && grep -q "^struct Pk .* @packed" laymod/module_lay.smod; then
+    if "$SIC" layuse.sic -Ilaymod -o layuse 2>err; then
+        ./layuse; got=$?
+        [ "$got" -eq 42 ] && ok "module-layout-attributes" || bad "module-layout-attributes" "expected 42, got $got"
+    else
+        bad "module-layout-attributes" "compile/link failed: $(cat err)"
+    fi
+else
+    bad "module-layout-attributes" "module build / manifest failed: $(cat err) $(cat laymod/module_lay.smod 2>/dev/null)"
+fi
+
 # ── Namespaced module variables (`mod::ns::var`) ────────────────────────────
 # `std::math::pi` was "no exported symbol": only `mod::var` resolved, and its
 # type was not inferred (a variadic/format argument saw an int).

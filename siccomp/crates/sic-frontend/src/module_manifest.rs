@@ -28,7 +28,11 @@
 //! no record (opaque, pointer-sized). v2 also carries `bool` and the four
 //! compiler-known sic aggregates (`__sic_string`, `__sic_va_array`, `__sic_any`,
 //! `__sic_type_info`), which decode via the `types::` constructors so their
-//! layout is exactly the built-in one.
+//! layout is exactly the built-in one. A record also carries its layout
+//! attributes after the fields: `@order:…` (sic reordering), `@packed`,
+//! `@align:N` (the type's `aligned(N)`), `@falign:I:N` (member I's) and
+//! `@bits:I:W` (member I is a W-bit bit-field); a reader refuses an `@`
+//! token it does not know rather than mislay the type.
 
 use sic_ir::{Type, StructType, UnionType, FunctionType, Linkage, Module};
 use crate::lower::types as ltypes;
@@ -688,6 +692,22 @@ fn encode_aggregate_record(ty: &Type) -> Option<String> {
         let p: Vec<String> = perm.iter().map(|i| i.to_string()).collect();
         toks.push(format!("@order:{}", p.join(",")));
     }
+    // Layout attributes, so a consumer computes the same offsets: `@packed`,
+    // the type's `aligned(N)` (`@align:N`), a member's (`@falign:I:N`) and
+    // bit-field widths (`@bits:I:W`).
+    let (packed, min_align, faligns, bits): (bool, Option<u32>, &Vec<Option<u32>>, &[Option<u32>]) = match ty {
+        Type::Struct(s) => (s.packed, s.min_align, &s.field_aligns, &s.bitfields),
+        Type::Union(u) => (u.packed, u.min_align, &u.field_aligns, &[]),
+        _ => unreachable!(),
+    };
+    if packed { toks.push("@packed".to_string()); }
+    if let Some(a) = min_align { toks.push(format!("@align:{}", a)); }
+    for (i, a) in faligns.iter().enumerate() {
+        if let Some(a) = a { toks.push(format!("@falign:{}:{}", i, a)); }
+    }
+    for (i, w) in bits.iter().enumerate() {
+        if let Some(w) = w { toks.push(format!("@bits:{}:{}", i, w)); }
+    }
     Some(format!("{} {} {}", kw, name, toks.join(" ")))
 }
 
@@ -704,20 +724,46 @@ fn decode_aggregate_record<'a>(
     if let Some(t) = known_marker(name, ptr_size) { return Some(t); }
     let mut fields = Vec::new();
     let mut order: Option<Vec<usize>> = None;
+    let (mut packed, mut min_align) = (false, None);
+    let mut faligns: Vec<(usize, u32)> = Vec::new();
+    let mut bits: Vec<(usize, u32)> = Vec::new();
+    // `@falign:I:N` / `@bits:I:W`.
+    let pair = |rest: &str| -> Option<(usize, u32)> {
+        let (i, v) = rest.split_once(':')?;
+        Some((i.parse().ok()?, v.parse().ok()?))
+    };
     for tok in field_toks {
         // The `@order:…` token carries the struct's field-reordering permutation.
         if let Some(rest) = tok.strip_prefix("@order:") {
             order = Some(rest.split(',').filter_map(|s| s.parse().ok()).collect());
             continue;
         }
+        if tok == "@packed" { packed = true; continue; }
+        if let Some(rest) = tok.strip_prefix("@align:") { min_align = Some(rest.parse().ok()?); continue; }
+        if let Some(rest) = tok.strip_prefix("@falign:") { faligns.push(pair(rest)?); continue; }
+        if let Some(rest) = tok.strip_prefix("@bits:") { bits.push(pair(rest)?); continue; }
+        if tok.starts_with('@') { return None; }   // a layout attribute this reader does not know
         let (fname, tty) = tok.split_once(':')?;
         fields.push((fname.to_string(), decode_type(tty, ptr_size, registry)?));
     }
+    // A per-member list, or empty when no member has one (the IR default).
+    let per_field = |list: &[(usize, u32)], n: usize| -> Option<Vec<Option<u32>>> {
+        if list.is_empty() { return Some(Vec::new()); }
+        let mut v = vec![None; n];
+        for &(i, x) in list { *v.get_mut(i)? = Some(x); }
+        Some(v)
+    };
+    let field_aligns = per_field(&faligns, fields.len())?;
     Some(if is_union {
-        Type::Union(UnionType { packed: false, name: Some(name.to_string()), fields, field_aligns: Vec::new(), min_align: None })
+        if !bits.is_empty() { return None; }
+        Type::Union(UnionType { packed, name: Some(name.to_string()), fields, field_aligns, min_align })
     } else {
-        let mut st = StructType::plain(Some(name.to_string()), fields, false);
+        let bitfields = per_field(&bits, fields.len())?;
+        let mut st = StructType::plain(Some(name.to_string()), fields, packed);
         st.layout_order = order;
+        st.field_aligns = field_aligns;
+        st.bitfields = bitfields;
+        st.min_align = min_align;
         Type::Struct(st)
     })
 }
@@ -912,6 +958,36 @@ mod tests {
             "manifest:\n{}", text);
         let back = ModuleManifest::parse(&text, 8).unwrap();
         assert_eq!(m, back);
+    }
+
+    #[test]
+    fn roundtrip_layout_attributes() {
+        // packed / aligned(N) / member aligned / bit-fields survive the record,
+        // so an importer computes the exporter's offsets.
+        let i32t = Type::Int { bits: 32, signed: true };
+        let mut st = StructType::plain(Some("Hdr".into()), vec![
+            ("a".into(), Type::Int { bits: 16, signed: false }),
+            ("b".into(), Type::Int { bits: 64, signed: false }),
+            ("f".into(), i32t.clone()),
+            ("g".into(), i32t.clone()),
+        ], true);
+        st.min_align = Some(4);
+        st.field_aligns = vec![None, None, Some(8), None];
+        st.bitfields = vec![None, None, Some(3), Some(30)];
+        let su = Type::Union(UnionType { packed: true, name: Some("U".into()), fields: vec![
+            ("c".into(), Type::Int { bits: 8, signed: true }), ("i".into(), i32t.clone())],
+            field_aligns: vec![], min_align: None });
+        for ty in [Type::Struct(st), su] {
+            let rec = encode_aggregate_record(&ty).unwrap();
+            let mut it = rec.split_whitespace();
+            let kw = it.next().unwrap();
+            let name = it.next().unwrap();
+            let back = decode_aggregate_record(name, kw == "union", it, 8, &Default::default()).unwrap();
+            assert_eq!(ty, back, "record: {}", rec);
+            assert_eq!(ty.size_of(8), back.size_of(8));
+        }
+        // An attribute this reader does not know is refused, not dropped.
+        assert!(decode_aggregate_record("X", false, "a:i32 @future:1".split_whitespace(), 8, &Default::default()).is_none());
     }
 
     #[test]
