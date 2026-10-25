@@ -92,6 +92,18 @@ for test in "$TESTDIR"/preprocess*.sic; do
     if [ -n "$FAILFAST" ]; then break; fi
 done
 
+# Dependency output for standard input: only the included header is listed —
+# not `<stdin>` (Linux's fixdep failed opening it, checksyscalls.sh). Targets
+# differ between preprocessors (gcc `-`, clang the output), so only the
+# prerequisites are compared.
+total=$((total + 1))
+printf 'int dep_h;\n' > "$WORK/dep_h.h"
+printf '#include "dep_h.h"\nint x;\n' | ( cd "$WORK" && timeout "$TIMEOUT" "${CPPCMD[@]}" -MMD -MF "$WORK/dep.d" -x c - ) > /dev/null 2> "$WORK/err"
+got="$(sed -e 's/^[^:]*://' -e 's/\\$//' "$WORK/dep.d" 2>/dev/null | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')"
+if [ "$got" = "dep_h.h" ]; then passed=$((passed + 1)); else
+    failed=$((failed + 1)); echo "FAIL depfile-stdin: prerequisites '$got', want 'dep_h.h' $(head -c 200 "$WORK/err")"
+fi
+
 extra=""
 [ $xfailed -gt 0 ] && extra="$extra, $xfailed xfail"
 [ $xpassed -gt 0 ] && extra="$extra, $xpassed xpass"

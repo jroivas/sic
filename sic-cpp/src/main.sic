@@ -3259,9 +3259,11 @@ string dep_rule(Preprocessor *pp)
         if (dot > 0) base = base[0:dot];
         targets.add(make_escape(base + ".o"));
     }
+    // deps_sys: 1 = a system header (left out by -MM/-MMD), 2 = standard
+    // input (never listed).
     list<string> deps;
     for (i32 i = 0; i < pp->deps.length; i++)
-        if (!(pp->dep_no_sys && pp->deps_sys[i])) deps.add(make_escape(pp->deps[i]));
+        if (pp->deps_sys[i] != 2 && !(pp->dep_no_sys && pp->deps_sys[i] == 1)) deps.add(make_escape(pp->deps[i]));
     string out = "";
     i32 col = 0;
     for (i32 i = 0; i < targets.length; i++) out = out + make_word(targets[i], &col, 0);
@@ -3269,7 +3271,9 @@ string dep_rule(Preprocessor *pp)
     col++;
     for (i32 i = 0; i < deps.length; i++) out = out + make_word(deps[i], &col, 72);
     out = out + "\n";
-    if (pp->dep_phony) for (i32 i = 1; i < deps.length; i++) out = out + deps[i] + ":\n";
+    // -MP: a phony rule per header (not for the main file, when listed).
+    i32 first_header = pp->deps.length > 0 && pp->deps_sys[0] == 2 ? 0 : 1;
+    if (pp->dep_phony) for (i32 i = first_header; i < deps.length; i++) out = out + deps[i] + ":\n";
     return out;
 }
 
@@ -3678,7 +3682,9 @@ int main(int argc, char **argv)
     if (!g_keep_comments) content = strip_comments(content);
     pp.markers = !no_markers && !pp.dep_only && !pp.dump_macros;
     string main_file = pp.current_file;
-    add_dep(&pp, main_file, 0);
+    // Standard input is no file to depend on (gcc and clang leave it out):
+    // Linux's fixdep failed opening `<stdin>` (checksyscalls.sh).
+    add_dep(&pp, main_file, input_file.size > 0 && input_file != "-" ? 0 : 2);
 
     // gcc's preamble, then the implicit `-include stdc-predef.h` (glibc's
     // __STDC_IEC_559__, __STDC_ISO_10646__, …) when the C library provides one
