@@ -140,6 +140,14 @@ def vec_expr(ty, k):
     n = VEC[ty]
     return '({ %s v_; memcpy(&v_, in%d_%d, %d); v_; })' % (ty, n, k % inputs[n], n)
 
+# A gather's index vector: lanes 0..3 (int32 or int64), so base + index*scale
+# (scale <= 8, elements <= 8 bytes) stays inside buf_in. Random indices made
+# both the GCC and the sic binary fault.
+w('static const int idx32[8] __attribute__((aligned(32))) = {0, 3, 1, 2, 2, 0, 3, 1};')
+w('static const long long idx64[4] __attribute__((aligned(32))) = {2, 0, 3, 1};')
+def idx_expr(ty, wide):
+    return '({ %s v_; memcpy(&v_, %s, %d); v_; })' % (ty, 'idx64' if wide else 'idx32', VEC[ty])
+
 funcs = []
 for name, ret, ps in protos:
     tys = [t for t, _ in ps]
@@ -174,6 +182,9 @@ for name, ret, ps in protos:
         argv = []
         pre = []
         for j, ((t, imm), v) in enumerate(zip(ps, c)):
+            if 'gather' in name and v.startswith('V') and j > 0 and ps[j - 1][0].endswith('*'):
+                argv.append(idx_expr(t, 'i64gather' in name))
+                continue
             if v == 'PTR':
                 pre.append('memcpy(buf_in, pat, 64); memcpy(buf_out, pat, 64);')
                 argv.append('(%s)(%s)' % (t, 'buf_out' if 'const' not in t and ret == 'void' else 'buf_in'))
