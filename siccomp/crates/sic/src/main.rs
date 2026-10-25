@@ -11,6 +11,7 @@ mod list_runtime;
 mod tuple_runtime;
 mod cpu_runtime;
 mod ia32_runtime;
+mod isa;
 mod assert_runtime;
 mod module_conf;
 mod rust_module;
@@ -160,6 +161,11 @@ struct Args {
     #[arg(skip)]
     pthread: bool,
 
+    /// The machine flags (`-msse4.1`, `-mno-avx`, `-march=…`), in order; they
+    /// decide the x86 feature macros (see `isa.rs`).
+    #[arg(skip)]
+    machine_flags: Vec<String>,
+
     /// `-shared`: produce a shared object (`.so`) instead of an executable.
     /// Passed through to the linker; implies position-independent code.
     #[arg(skip)]
@@ -175,6 +181,15 @@ struct Args {
     /// (Some(false)); None = the default (PIE unless static).
     #[arg(skip)]
     pie: Option<bool>,
+}
+
+/// The x86 feature macros (`-D__AVX2__=1`, …) the machine flags select;
+/// warnings (an unknown `-march`) are printed once.
+fn isa_defines(args: &Args) -> Vec<String> {
+    let (isa, warnings) = isa::Isa::from_flags(&args.machine_flags);
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| for w in &warnings { eprintln!("sic: warning: {}", w); });
+    isa.defines()
 }
 
 /// The dependency-generation flags to hand to cpp. When the user didn't give a
@@ -346,6 +361,7 @@ fn main() {
     let mut link_order: Vec<String> = Vec::new();
     let mut deps_only = false;
     let mut pthread = false;
+    let mut machine_flags: Vec<String> = Vec::new();
     let mut shared = false;
     let mut static_link = false;
     let mut pie: Option<bool> = None;
@@ -481,9 +497,10 @@ fn main() {
             eprintln!("sic: error: '{}' is not supported (sic only targets 64-bit x86-64)", a);
             std::process::exit(1);
         } else if a.starts_with("-m") && a.len() > 2 {
-            // Other machine-dependent flags (`-msse2`, `-mavx`, `-march=...`,
-            // `-mtune=...`, `-mfpmath=...`, ...) are CPU feature/tuning hints.
-            // Accept and ignore them: they affect optimization, not correctness.
+            // Other machine-dependent flags: the instruction-set ones (`-mavx2`,
+            // `-mno-sse4.1`, `-march=...`) set the x86 feature macros; tuning
+            // (`-mtune=...`, `-mfpmath=...`) changes nothing here.
+            machine_flags.push(a.clone());
         } else if a == "-M" || a == "-MM" {
             // Dependency-only: emit make rules and don't compile.
             deps_only = true;
@@ -527,6 +544,7 @@ fn main() {
     args.cpp_include_flags = cpp_include_flags;
     args.link_order = link_order;
     args.pthread = pthread;
+    args.machine_flags = machine_flags;
     args.shared = shared;
     args.static_link = static_link;
     args.pie = pie;
@@ -757,6 +775,8 @@ fn parse_source(
     if args.pthread {
         extra.push("-D_REENTRANT");
     }
+    let isa_defs = isa_defines(args);
+    extra.extend(isa_defs.iter().map(|s| s.as_str()));
     let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
@@ -1484,6 +1504,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         // Preserve `-iquote`/`-isystem` search semantics for `-E` too (meson's
         // configure probes preprocess with these).
         extra.extend(args.cpp_include_flags.iter().map(|s| s.as_str()));
+        if args.pthread { extra.push("-D_REENTRANT"); }
+        let isa_defs = isa_defines(args);
+        extra.extend(isa_defs.iter().map(|s| s.as_str()));
         let mut out_text = String::new();
         for src in &sources {
             out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &extra)
