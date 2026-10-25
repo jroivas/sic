@@ -240,6 +240,23 @@ fn target_triple() -> String {
     format!("{}-unknown-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
 }
 
+/// Whether a target triple names the host: `<arch>[-<vendor>]-<os>[-<env>]` with
+/// the host's architecture (`amd64` too for x86_64) and OS, vendor `unknown`/`pc`
+/// or none, and a GNU environment (`gnu`, or none).
+fn target_is_host(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('-').collect();
+    let arch_ok = |a: &str| a == std::env::consts::ARCH
+        || (std::env::consts::ARCH == "x86_64" && a == "amd64");
+    let os = std::env::consts::OS;
+    match parts.as_slice() {
+        [a, o] => arch_ok(a) && *o == os,
+        [a, o, e] if *o == os => arch_ok(a) && *e == "gnu",
+        [a, v, o] => arch_ok(a) && matches!(*v, "unknown" | "pc") && *o == os,
+        [a, v, o, e] => arch_ok(a) && matches!(*v, "unknown" | "pc") && *o == os && *e == "gnu",
+        _ => false,
+    }
+}
+
 /// Default directories the compiler searches for installed module manifests
 /// (`module_<name>.smod`) and their `lib<name>.{so,a}` — so `import std;` works
 /// with no flags (sic.md §"Imports"). In order: every entry of `$SIC_MODULE_PATH`
@@ -509,6 +526,18 @@ fn main() {
             // for compatibility; acted upon only where sic implements them.
             if let Some((name, value)) = parse_f_option(&a) {
                 f_options.insert(name, value);
+            }
+        } else if a.starts_with("--target=") || a == "-target" || a == "--target" {
+            // Clang's target triple (Linux's Kconfig passes `--target=x86_64-linux-gnu`
+            // with every probe). sic produces only host code: accept a triple that
+            // names it, reject any other rather than build for the wrong target.
+            let t = match a.strip_prefix("--target=") {
+                Some(t) => t.to_string(),
+                None => iter.next().unwrap_or_default(),
+            };
+            if !target_is_host(&t) {
+                eprintln!("sic: error: target '{}' is not supported (sic only targets {})", t, target_triple());
+                std::process::exit(1);
             }
         } else if a == "-m64" {
             // sic targets x86-64; `-m64` is the default. Accept as a no-op.
