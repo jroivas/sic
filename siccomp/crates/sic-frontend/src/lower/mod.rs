@@ -632,6 +632,10 @@ impl Lowerer {
             deps.sort();
             self.module.sic_module_deps = deps;
         }
+        self.module.used_functions.extend(tu.used_fns.iter().cloned());
+        for (f, sec) in &tu.fn_sections {
+            if !self.module.fn_sections.iter().any(|(g, _)| g == f) { self.module.fn_sections.push((f.clone(), sec.clone())); }
+        }
         for name in &tu.always_inline {
             for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.always_inline = true; }
         }
@@ -3231,7 +3235,17 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Record a `section("…")` placement for global symbol `sym`.
+    fn note_data_section(&mut self, sym: &str, d: &Declarator) {
+        if let Some(sec) = &d.section {
+            if !self.module.data_sections.iter().any(|(g, _)| g == sym) {
+                self.module.data_sections.push((sym.to_string(), sec.clone()));
+            }
+        }
+    }
+
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
+        self.note_data_section(&d.name, d);
         self.global_qtypes.insert(d.name.clone(), d.ty.clone());
         // sic strict mode (sic.md §"Strict mode"): a strict file's globals are
         // immutable unless `mut`.
@@ -3404,6 +3418,7 @@ impl Lowerer {
     /// return its type and ref. Uses the same constant-initializer serialization
     /// as file-scope globals; the caller binds the local name to this global.
     fn add_static_local_global(&mut self, name: String, d: &Declarator, _base_ty: &QualType) -> Result<(Type, GlobalRef)> {
+        self.note_data_section(&name, d);
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         self.global_init_unserializable = false;
         let declared_ty = ir_ty.clone();

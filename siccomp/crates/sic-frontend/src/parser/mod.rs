@@ -46,6 +46,11 @@ pub struct Parser {
     pending_constructor: Option<sic_ir::RunAt>,
     /// `__attribute__((always_inline))` seen for the current declaration.
     pending_always_inline: bool,
+    /// `__attribute__((used))` / `section("…")` seen for the current declaration.
+    pending_used: bool,
+    pending_section: Option<String>,
+    used_fns: Vec<String>,
+    fn_sections: Vec<(String, String)>,
     /// The functions so declared.
     always_inline: Vec<String>,
     /// `__attribute__((weak))` seen while parsing the current declaration; the
@@ -151,7 +156,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -304,7 +309,8 @@ impl Parser {
             }
         }
         Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
-            strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline) })
+            strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline),
+            used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections) })
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -332,6 +338,8 @@ impl Parser {
         // `__attribute__((constructor))` (captured by `skip_attributes`).
         self.pending_constructor = None;
         self.pending_always_inline = false;
+        self.pending_used = false;
+        self.pending_section = None;
         self.pending_weak = false;
         self.pending_thread_local = false;
         // sic strict mode (sic.md §"Strict mode"): `using strict;` makes every
@@ -485,6 +493,8 @@ impl Parser {
             if std::mem::take(&mut self.pending_always_inline) {
                 self.always_inline.push(name.clone());
             }
+            if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
+            if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
 
             // K&R (old-style) definition: the parameter list held only names,
             // and their declarations follow before the `{` body, e.g.
@@ -549,7 +559,8 @@ impl Parser {
             None
         };
         if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &sp)?; }
-        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, span: sp.clone() });
+        // A `section` attribute in the specifiers applies to every declarator.
+        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, section: self.pending_section.clone(), span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
@@ -559,7 +570,7 @@ impl Parser {
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
-            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, span: self.span() });
+            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, section: self.pending_section.clone(), span: self.span() });
         }
         self.expect_semi("the declaration")?;
 
@@ -1086,7 +1097,7 @@ impl Parser {
         let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
         Ok(Decl::Var {
             base_ty: base_ty.clone(),
-            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, span: sp.clone() }],
+            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, section: None, span: sp.clone() }],
             weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp,
         })
     }
@@ -2766,6 +2777,7 @@ impl Parser {
         let spec_cleanup = self.pending_cleanup.take();
         // An `unused` attribute among the specifiers applies to every declarator.
         let spec_unused = std::mem::take(&mut self.pending_unused);
+        let spec_section = self.pending_section.take();
         let mut declarators = Vec::new();
         let mut first = true;
         loop {
@@ -2807,7 +2819,8 @@ impl Parser {
                 {
                     self.local_decls.push((name.clone(), dsp.clone()));
                 }
-                declarators.push(Declarator { name, ty, init, cleanup, unused, span: dsp });
+                let section = self.pending_section.take().or_else(|| spec_section.clone());
+                declarators.push(Declarator { name, ty, init, cleanup, unused, section, span: dsp });
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
@@ -3806,8 +3819,25 @@ impl Parser {
                                 self.pending_cleanup = Some(t.text.clone());
                             }
                         }
-                    } else if matches!(name, "unused" | "__unused__" | "maybe_unused" | "__maybe_unused__") {
+                    } else if matches!(name, "unused" | "__unused__" | "maybe_unused" | "__maybe_unused__"
+                                              | "used" | "__used__") {
+                        // `used`: referenced from outside the C code (Linux's
+                        // `__ADDRESSABLE`, initcall tables), so never "unused";
+                        // a function is emitted even if uncalled.
                         self.pending_unused = true;
+                        if name.contains("used") && !name.contains("unused") { self.pending_used = true; }
+                    } else if name == "section" || name == "__section__" {
+                        // `section("name")` (adjacent string literals concatenate).
+                        if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            let mut j = i + 2;
+                            let mut sec = String::new();
+                            while let Some(t) = self.tokens.get(j) {
+                                if t.kind != TokenKind::StringLit { break; }
+                                sec.push_str(&t.text);
+                                j += 1;
+                            }
+                            if !sec.is_empty() { self.pending_section = Some(sec); }
+                        }
                     } else if name == "packed" || name == "__packed__" {
                         self.pending_packed = true;
                     } else if name == "order_sic" || name == "__order_sic__" {

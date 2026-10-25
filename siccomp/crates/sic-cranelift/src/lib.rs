@@ -253,6 +253,16 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         }
         let did = global_ids[&(i as u32)];
         let mut desc = DataDescription::new();
+        // `section("…")` (thread-local data stays in .tdata/.tbss). A named
+        // section holds file contents, so zero-initialized data in one is
+        // written as zero bytes (cranelift-object would append BSS to it).
+        let mut in_custom_section = false;
+        if !g.thread_local {
+            if let Some((_, sec)) = ir_module.data_sections.iter().find(|(n, _)| *n == g.name) {
+                desc.set_custom_section(sec);
+                in_custom_section = true;
+            }
+        }
         // Align the global to its type's natural alignment. Without this the
         // linker packs data byte-aligned, so a struct/array of pointers can land
         // on an odd address and pointer loads read straddled, garbage bytes.
@@ -319,7 +329,8 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
             }
             _ => {
                 // zero-initialize
-                desc.define_zeroinit(size.max(1));
+                if in_custom_section { desc.define(vec![0u8; size.max(1)].into_boxed_slice()); }
+                else { desc.define_zeroinit(size.max(1)); }
             }
         }
         obj_module.define_data(did, &desc)?;
@@ -477,7 +488,31 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         bytes.push(0);
         product.object.section_mut(id).set_data(bytes, 1);
     }
-    Ok(product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
+    let bytes = product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
+    if ir_module.fn_sections.is_empty() { return Ok(bytes); }
+    place_function_sections(&bytes, &ir_module.fn_sections).map_err(CraneliftError::Unsupported)
+}
+
+/// `section("…")` on functions: each function is emitted in its own section
+/// (per-function sections), which is renamed here, with its relocations'
+/// section, since Cranelift's object writer has no per-function placement.
+fn place_function_sections(obj: &[u8], placements: &[(String, String)]) -> Result<Vec<u8>, String> {
+    use object::build::elf::{Builder, SectionData};
+    let mut b = Builder::read(obj).map_err(|e| format!("section placement: {}", e))?;
+    let mut renamed = Vec::new();
+    for (func, sec) in placements {
+        let Some(id) = b.symbols.iter().find(|s| s.name.as_slice() == func.as_bytes()).and_then(|s| s.section) else { continue };
+        b.sections.get_mut(id).name = sec.as_bytes().to_vec().into();
+        renamed.push((id, sec.clone()));
+    }
+    let relas: Vec<_> = b.sections.iter()
+        .filter(|s| matches!(s.data, SectionData::Relocation(_)))
+        .filter_map(|s| renamed.iter().find(|(id, _)| Some(*id) == s.sh_info_section).map(|(_, n)| (s.id(), n.clone())))
+        .collect();
+    for (id, n) in relas { b.sections.get_mut(id).name = format!(".rela{}", n).into_bytes().into(); }
+    let mut out = Vec::new();
+    b.write(&mut out).map_err(|e| format!("section placement: {}", e))?;
+    Ok(out)
 }
 
 /// Whether `ty` is, or reaches through pointers/arrays/function types, a

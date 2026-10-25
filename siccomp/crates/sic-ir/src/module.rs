@@ -164,6 +164,11 @@ pub struct Module {
     /// The driver assembles them with the system assembler (`-S` writes the
     /// text as is); each body ends in `ret`.
     pub asm_text_helpers: Vec<(String, String)>,
+    /// `section("…")` placements: (global symbol, section) and (function, section).
+    pub data_sections: Vec<(String, String)>,
+    pub fn_sections: Vec<(String, String)>,
+    /// Internal functions to emit even when nothing calls them (`used`).
+    pub used_functions: Vec<String>,
     /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
     /// module defines — `(enum name, [(variant, discriminant)])` — for the manifest.
     pub sic_enum_exports: Vec<(String, Vec<(String, i64)>)>,
@@ -214,6 +219,9 @@ impl Module {
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
             asm_text_helpers: Vec::new(),
+            data_sections: Vec::new(),
+            fn_sections: Vec::new(),
+            used_functions: Vec::new(),
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),
             sic_generic_fn_exports: Vec::new(),
@@ -370,9 +378,9 @@ impl Module {
         use std::collections::HashSet;
         let mut reachable: HashSet<u32> = HashSet::new();
         let mut work: Vec<u32> = Vec::new();
-        // Roots: anything not purely-internal, plus constructors.
+        // Roots: anything not purely-internal, plus constructors and `used`.
         for (i, f) in self.functions.iter().enumerate() {
-            if f.linkage != Linkage::Internal || f.constructor.is_some() {
+            if f.linkage != Linkage::Internal || f.constructor.is_some() || self.used_functions.contains(&f.name) {
                 if reachable.insert(i as u32) { work.push(i as u32); }
             }
         }

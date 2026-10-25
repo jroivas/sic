@@ -256,6 +256,8 @@ pub struct Declarator {
     pub cleanup: Option<String>,
     /// `__attribute__((unused))` / `[[maybe_unused]]`: no -Wunused-variable.
     pub unused: bool,
+    /// `__attribute__((section("name")))`: the object goes in that section.
+    pub section: Option<String>,
     pub span: Span,
 }
 
@@ -718,6 +720,11 @@ pub struct TranslationUnit {
     /// Functions declared `__attribute__((always_inline))` (GCC's intrinsics):
     /// inlined at every call when optimizing.
     pub always_inline: Vec<String>,
+    /// Functions declared `__attribute__((used))`: emitted even if nothing in
+    /// the C code calls them (asm or a linker script may).
+    pub used_fns: Vec<String>,
+    /// Functions with `__attribute__((section("name")))`: (function, section).
+    pub fn_sections: Vec<(String, String)>,
 }
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────
