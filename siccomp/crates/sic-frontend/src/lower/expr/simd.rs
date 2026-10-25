@@ -311,6 +311,33 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// Emulate an AES-NI round intrinsic over the 16-byte state.
+    /// `__builtin_ia32_aeskeygenassist128(a, rcon)`: for X1 = dword 1 and
+    /// X3 = dword 3 of `a`, `[SubWord(X1), RotWord(SubWord(X1)) ^ rcon,
+    /// SubWord(X3), RotWord(SubWord(X3)) ^ rcon]`.
+    pub(crate) fn lower_aeskeygenassist(&mut self, a: &Expr, rcon: i64) -> Result<Val> {
+        let ap = self.lower_aggregate_ptr(a)?;
+        let (u8t, i32t) = (Type::u8(), Type::i32());
+        let mut src = Vec::with_capacity(8);
+        for i in (4..8).chain(12..16) {
+            let b = self.vec_load(&ap, i, u8t.clone());
+            src.push(self.coerce(b, &i32t)?);
+        }
+        let sb = self.aes_sub_bytes(src, false)?;
+        let out = self.vec_alloca(Type::Array { elem: Box::new(Type::u8()), len: 16 });
+        for (w, x) in [(0usize, 0usize), (2, 4)] {
+            let word = &sb[x..x + 4];
+            for k in 0..4 {
+                let v = self.coerce(word[k].clone(), &u8t)?;
+                self.vec_store(&out, (4 * w + k) as i64, v);
+                let r = word[(k + 1) % 4].clone();
+                let r = if k == 0 { self.vec_bin(BinOp::Xor, r, Constant::int(rcon & 0xff), i32t.clone()) } else { r };
+                let r = self.coerce(r, &u8t)?;
+                self.vec_store(&out, (4 * (w + 1) + k) as i64, r);
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn lower_aes(&mut self, state: &Expr, key: Option<&Expr>, mode: AesMode) -> Result<Val> {
         // Byte permutations for (Inv)ShiftRows: out[i] = in[MAP[i]].
         const SHR: [usize; 16] = [0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11];

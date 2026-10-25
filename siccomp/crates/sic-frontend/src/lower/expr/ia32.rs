@@ -886,6 +886,11 @@ impl FuncCtx<'_> {
                 want(0)?;
                 return Ok(Some(Constant::zero()));
             }
+            "aeskeygenassist128" => {
+                want(2)?;
+                let rcon = self.imm(&args[1], name)?;
+                return self.lower_aeskeygenassist(&args[0], rcon).map(Some);
+            }
             "crc32qi" | "crc32hi" | "crc32si" | "crc32di" => {
                 want(2)?;
                 return self.lower_crc32(n, args).map(Some);
@@ -1741,6 +1746,7 @@ impl FuncCtx<'_> {
             "vcvtps2ph" | "vcvtps2ph256" => v128(int(16, true)),
             _ if fma_kind(n).is_some() => arg(0)?,
             "vzeroall" | "vzeroupper" => Type::Void,
+            "aeskeygenassist128" => v128(int(64, true)),
             "crc32qi" | "crc32hi" | "crc32si" => Type::u32(),
             "crc32di" => Type::u64(),
             "addsubps" | "addsubpd" | "addsubps256" | "addsubpd256"
