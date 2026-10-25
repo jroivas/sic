@@ -334,6 +334,9 @@ pub enum Decl {
     EnumDecl(EnumDef),
     /// Top-level standalone expression statement (SIC "fake main" mode)
     ExprStmt(Expr, Span),
+    /// `_Static_assert(cond, "message")` (C11; C23 also `static_assert` and no
+    /// message): at file scope, in a block, or as a struct member.
+    StaticAssert { cond: Expr, msg: Option<String>, span: Span },
     /// sic-only: `module x;` — this translation unit belongs to module `x`; its
     /// non-`static` top-level symbols are exported (mangled `x_sym`). sic.md §"Imports".
     Module(String, Span),

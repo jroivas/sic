@@ -1057,8 +1057,6 @@ impl<'m> FuncCtx<'m> {
                         return self.lower_bit_count(arg, bits, kind);
                     }
                 }
-                // Static assertions: accepted, not evaluated (compile-time only).
-                "_Static_assert" | "static_assert" => return Ok(Constant::zero()),
                 // Type-compat query: conservatively false (only affects _Generic-
                 // style dispatch we don't otherwise need).
                 "__builtin_types_compatible_p" => return Ok(Constant::int(0)),

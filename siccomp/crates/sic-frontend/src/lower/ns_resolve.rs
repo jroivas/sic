@@ -68,6 +68,7 @@ impl<'a> NsRenamer<'a> {
     /// initializers and types of globals, struct method bodies.
     pub(crate) fn top_decl(&mut self, d: &mut Decl) {
         match d {
+            Decl::StaticAssert { cond, .. } => self.expr(cond),
             Decl::Func { ret_ty, params, body, .. } => {
                 self.qual_type(ret_ty);
                 match body {

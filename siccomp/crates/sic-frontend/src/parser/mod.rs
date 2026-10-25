@@ -353,6 +353,10 @@ impl Parser {
         // template's exact source text (exported to the module manifest).
         let decl_start_tok = self.pos;
 
+        if self.at(TokenKind::StaticAssert) {
+            return self.parse_static_assert();
+        }
+
         // __asm__ at top level: skip
         if self.at(TokenKind::Asm) {
             self.parse_asm_skip()?;
@@ -1292,8 +1296,39 @@ impl Parser {
         }
     }
 
+    /// `_Static_assert ( constant-expression [, string-literal] ) ;`
+    fn parse_static_assert(&mut self) -> Result<Decl> {
+        let d = self.parse_static_assert_no_semi()?;
+        self.expect_semi("the static assertion")?;
+        Ok(d)
+    }
+
+    /// A static assertion without its `;` (a struct member's is the member
+    /// list's to consume).
+    fn parse_static_assert_no_semi(&mut self) -> Result<Decl> {
+        let sp = self.span();
+        self.expect(TokenKind::StaticAssert)?;
+        self.expect(TokenKind::LParen)?;
+        let cond = self.parse_assign_expr()?;
+        let mut msg = None;
+        if self.eat(TokenKind::Comma) {
+            let mut text = String::new();
+            while self.at(TokenKind::StringLit) { text.push_str(&self.advance().text); }
+            msg = Some(text);
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(Decl::StaticAssert { cond, msg, span: sp })
+    }
+
     fn parse_struct_field(&mut self) -> Result<Vec<FieldDecl>> {
         let sp = self.span();
+        // A static assertion among the members is checked at file scope once
+        // the enclosing declaration is done.
+        if self.at(TokenKind::StaticAssert) {
+            let d = self.parse_static_assert_no_semi()?;
+            self.pending_decls.push(d);
+            return Ok(Vec::new());
+        }
         // Clear any `aligned(N)` left over from a preceding declaration (a file-
         // scope `int g __attribute__((aligned(64)))`, a typedef, etc.) so it can't
         // leak onto this member and corrupt an unrelated struct's layout.
@@ -2008,6 +2043,9 @@ impl Parser {
 
     pub fn parse_stmt(&mut self) -> Result<Stmt> {
         let sp = self.span();
+        if self.at(TokenKind::StaticAssert) {
+            return Ok(Stmt::Decl(self.parse_static_assert()?));
+        }
         // sic macros (sic.md §"Macros"): a local definition, or a statement /
         // expression invocation expanded in place before parsing on.
         let block_item = std::mem::take(&mut self.stmt_block_item);

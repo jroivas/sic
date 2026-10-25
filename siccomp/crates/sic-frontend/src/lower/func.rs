@@ -2673,6 +2673,7 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_local_decl(&mut self, decl: &Decl) -> Result<()> {
         match decl {
+            Decl::StaticAssert { cond, msg, span } => self.lowerer.check_static_assert(cond, msg, span)?,
             Decl::Var { base_ty, declarators, .. } => {
                 // `_Alignas(N)` / `alignas(N)` requested alignment, if any.
                 let explicit_align = base_ty.qualifiers.iter().find_map(|q| match q {

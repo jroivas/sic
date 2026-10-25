@@ -3161,8 +3161,23 @@ impl Lowerer {
         self.lower_global_decl_inner(decl).map_err(|e| locate_error(e, file, line, col))
     }
 
+    /// A static assertion: an error when its condition evaluates to 0.
+    /// A condition sic cannot evaluate is accepted (gaps in the constant
+    /// evaluator must not reject valid code; GCC requires a constant).
+    pub(crate) fn check_static_assert(&self, cond: &Expr, msg: &Option<String>, span: &crate::lexer::Span) -> Result<()> {
+        if self.eval_const_int(cond) == Some(0) {
+            let text = match msg {
+                Some(m) => format!("static assertion failed: \"{}\"", m),
+                None => "static assertion failed".to_string(),
+            };
+            return Err(CompileError::at(text, span.file.clone(), span.line, span.col));
+        }
+        Ok(())
+    }
+
     fn lower_global_decl_inner(&mut self, decl: &Decl) -> Result<()> {
         match decl {
+            Decl::StaticAssert { cond, msg, span } => self.check_static_assert(cond, msg, span)?,
             Decl::Func { name, ret_ty, params, variadic, body: Some(body), storage, inline, constructor, type_params, is_async, .. } => {
                 // sic generic template: instantiated per concrete call, not here.
                 if !type_params.is_empty() { return Ok(()); }
@@ -4104,6 +4119,26 @@ impl Lowerer {
             ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_int(expr).map(|v| v.wrapping_neg()),
             ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_int(expr).map(|v| !v),
             ExprKind::Unary { op: UnOpKind::Not, expr } => self.eval_const_int(expr).map(|v| (v == 0) as i64),
+            // `&&` / `||` short-circuit: the other side need not be constant.
+            ExprKind::BinOp { op: BinOpKind::LogAnd, lhs, rhs } => {
+                if self.eval_const_int(lhs)? == 0 { Some(0) } else { Some((self.eval_const_int(rhs)? != 0) as i64) }
+            }
+            ExprKind::BinOp { op: BinOpKind::LogOr, lhs, rhs } => {
+                if self.eval_const_int(lhs)? != 0 { Some(1) } else { Some((self.eval_const_int(rhs)? != 0) as i64) }
+            }
+            // Comparisons depend on C's operand types (`sizeof(int) - 5 < 0`
+            // is false: the left side is unsigned), which the typed evaluator
+            // applies; plain integers compare as written otherwise.
+            ExprKind::BinOp { op: op @ (BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge), lhs, rhs } => {
+                if let Some(v) = types::eval_const_size(e, &self.struct_types, self.ptr_size, &self.enum_consts) {
+                    return Some(v);
+                }
+                let (l, r) = (self.eval_const_int(lhs)?, self.eval_const_int(rhs)?);
+                Some(match op {
+                    BinOpKind::Eq => l == r, BinOpKind::Ne => l != r, BinOpKind::Lt => l < r,
+                    BinOpKind::Le => l <= r, BinOpKind::Gt => l > r, _ => l >= r,
+                } as i64)
+            }
             ExprKind::BinOp { op, lhs, rhs } => {
                 let l = self.eval_const_int(lhs)?;
                 let r = self.eval_const_int(rhs)?;
@@ -5569,7 +5604,8 @@ pub(crate) fn locate_error(mut e: CompileError, file: Option<String>, line: u32,
 pub(crate) fn decl_loc(d: &Decl) -> (Option<String>, u32, u32) {
     match d {
         Decl::Var { span, .. } | Decl::Func { span, .. } | Decl::TypeDef { span, .. }
-        | Decl::ExprStmt(_, span) | Decl::Import { span, .. } | Decl::Namespace { span, .. } =>
+        | Decl::ExprStmt(_, span) | Decl::Import { span, .. } | Decl::Namespace { span, .. }
+        | Decl::StaticAssert { span, .. } =>
             (span.file.clone(), span.line, span.col),
         _ => (None, 0, 0),
     }

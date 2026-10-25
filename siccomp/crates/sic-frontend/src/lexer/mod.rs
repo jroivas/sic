@@ -26,7 +26,7 @@ pub struct Lexer {
     /// Source language (affects Rust-style type-alias keywords).
     lang: Lang,
     /// C: whether C23's keywords (`bool`, `true`, `false`, `nullptr`, `alignas`,
-    /// `thread_local`) are keywords. Before C23 they are ordinary identifiers
+    /// `thread_local`, `static_assert`) are keywords. Before C23 they are ordinary identifiers
     /// (`<stdbool.h>` makes macros of some; Linux declares its own `true`/`false`
     /// enumerators and `typedef _Bool bool;`).
     c23: bool,
@@ -240,7 +240,7 @@ impl Lexer {
         // b = true` boxes with the BOOL type). In C they are the C23 integer
         // constants 1 and 0, so the parser sees plain IntLits.
         if self.lang == Lang::C && !self.c23
-            && matches!(text.as_str(), "bool" | "true" | "false" | "nullptr" | "alignas" | "thread_local")
+            && matches!(text.as_str(), "bool" | "true" | "false" | "nullptr" | "alignas" | "thread_local" | "static_assert")
         {
             let kind = if self.typedefs.contains(&text) { TokenKind::TypeName } else { TokenKind::Ident };
             return Token::new(kind, text, sp);
@@ -707,6 +707,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         "if"             => TokenKind::If,
         "inline"         => TokenKind::Inline,
         "_Noreturn"      => TokenKind::Noreturn,
+        "_Static_assert" | "static_assert" => TokenKind::StaticAssert,
         "int"            => TokenKind::Int,
         "long"           => TokenKind::Long,
         "register"       => TokenKind::Register,
