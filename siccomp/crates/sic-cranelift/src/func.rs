@@ -831,7 +831,8 @@ fn emit_instr(
                 let wide = builder.ins().uextend(ct::I64, vb);
                 let word = builder.ins().imul_imm_u(wide, 0x0101_0101_0101_0101u64 as i64);
                 for (off, t) in small_mem_pieces(*size) {
-                    let v = if t == ct::I64 { word } else { builder.ins().ireduce(t, word) };
+                    let v = if t == ct::I8X16 { builder.ins().splat(ct::I8X16, vb) }
+                            else if t == ct::I64 { word } else { builder.ins().ireduce(t, word) };
                     builder.ins().store(MemFlagsData::new(), v, dv, off);
                 }
             } else {
@@ -1441,12 +1442,15 @@ fn emit_cast(
 /// constant sizes).
 const SMALL_MEM_OP: u64 = 64;
 
-/// Split `size` bytes into (offset, integer type) pieces of 8, 4, 2 and 1
-/// bytes, largest first. The accesses carry no alignment promise.
+/// Split `size` bytes into (offset, type) pieces of 16 (a vector register), 8,
+/// 4, 2 and 1 bytes, largest first. The accesses carry no alignment promise.
+/// Whole 16-byte pieces matter for SIMD data: a vector load of bytes that were
+/// just stored in 8-byte halves cannot be forwarded from the store buffer and
+/// stalls.
 fn small_mem_pieces(size: u64) -> Vec<(i32, cir::Type)> {
     let mut out = Vec::new();
     let mut off = 0u64;
-    for (w, t) in [(8u64, ct::I64), (4, ct::I32), (2, ct::I16), (1, ct::I8)] {
+    for (w, t) in [(16u64, ct::I8X16), (8, ct::I64), (4, ct::I32), (2, ct::I16), (1, ct::I8)] {
         while size - off >= w {
             out.push((off as i32, t));
             off += w;
