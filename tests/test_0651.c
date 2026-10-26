@@ -1,8 +1,9 @@
-// Non-PIC code (-fno-PIE, Linux's -mcmodel=kernel): direct calls and
-// RIP-relative data (no GOT), and 64-bit constants that do not fit an
-// immediate loaded from read-only data instead of a constant pool inside the
-// code — Cranelift put them in .text, where Linux's objtool could not decode
-// past them (0x20c49ba5e353f7cf, the ÷1000 multiplier, in init/main.o).
+// Kernel code (-mcmodel=kernel: non-PIC, objtool-checked): direct calls and
+// RIP-relative data (no GOT), and constants Cranelift would keep in a pool
+// inside the code — 64-bit ones, and operands of instructions with no
+// immediate form (cmov, mul, div, extends) — loaded from read-only data: Linux's
+// objtool could not decode past the pool (0x20c49ba5e353f7cf, the ÷1000
+// multiplier, in init/main.o). The compiler checks every function for it.
 #include <stdio.h>
 #include <string.h>
 
@@ -16,6 +17,9 @@ long rem7(long x) { return x % 1000000007L; }
 long mask(long x) { return x & 0x7fff0000ffff0000L; }
 int is_magic(unsigned long x) { return x == 0x123456789aUL; }
 void put(unsigned long *p) { *p = 0xdeadbeefcafeUL; }
+unsigned div7(unsigned x) { return x / 7; }                 // 32-bit magic for mul
+long clamp(long x) { return x > 100 ? 100 : x; }          // cmov from a constant
+unsigned char mul5(unsigned char x) { return x * 5; }     // 8-bit mul: no immediate
 
 int main(void) {
     int ok = 0;
@@ -30,5 +34,5 @@ int main(void) {
     char buf[32];
     snprintf(buf, sizeof buf, "%lx", v);           // a call into libc
     if (!strcmp(buf, "deadbeefcafe")) ok++;
-    return ok + 34;
+    return ok + 34 + (div7(700) == 100) + (clamp(500) == 100) + (mul5(51) == 255) - 3;
 }

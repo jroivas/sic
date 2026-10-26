@@ -48,11 +48,15 @@ pub struct CraneliftBackend {
     /// The x87 FPU may be used (`-mno-80387`: not); sic needs it only for
     /// `long double`.
     pub x87: bool,
+    /// Code must hold no data (`-mcmodel=kernel`: Linux's objtool decodes all
+    /// of it): Cranelift's constant pool is avoided (`wide_consts`), and a
+    /// function that would still use one is an error. Needs non-PIC code.
+    pub no_text_data: bool,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true, no_text_data: false }
     }
 
     /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
@@ -77,6 +81,12 @@ impl CraneliftBackend {
     pub fn with_float(mut self, sse: bool, x87: bool) -> Self {
         self.sse = sse;
         self.x87 = x87;
+        self
+    }
+
+    /// Keep data out of code (see `no_text_data`).
+    pub fn with_no_text_data(mut self, on: bool) -> Self {
+        self.no_text_data = on;
         self
     }
 
@@ -456,12 +466,35 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
                 .map_err(CraneliftError::Codegen)?;
         }
         if !cfg.pic {
-            // Non-PIC: every symbol is near (direct calls, RIP-relative data),
-            // and wide constants live in read-only data, not in the code.
+            // Non-PIC: every symbol is near (direct calls, RIP-relative data).
             colocate_symbols(&mut ctx.func);
+        }
+        if cfg.no_text_data && !cfg.pic {
+            // The lowering's own clean-up first (it runs again in
+            // `define_function`): a block parameter that only ever receives
+            // one constant becomes that constant, which must be rewritten too.
+            ctx.compute_cfg();
+            ctx.compute_domtree();
+            ctx.eliminate_unreachable_code(obj_module.isa())?;
+            ctx.remove_constant_phis(obj_module.isa())?;
+            ctx.func.dfg.resolve_all_aliases();
             wide_consts::wide_constants_to_rodata(&mut ctx.func, &mut obj_module, &mut wide_consts)?;
+            // Verified below from the disassembly: no constant pool in code.
+            ctx.want_disasm = true;
+            if std::env::var("SIC_DUMP_CLIF").map_or(false, |v| v == f.name) {
+                eprintln!("; after the optimizer and the constant rewrite\n{}", ctx.func.display());
+            }
         }
         let define_res = obj_module.define_function(fid, &mut ctx);
+        if std::env::var("SIC_DUMP_CLIF").map_or(false, |v| v == f.name) {
+            if let Some(t) = ctx.compiled_code().and_then(|c| c.vcode.as_ref()) { eprintln!("; machine code\n{}", t); }
+        }
+        if cfg.no_text_data && !cfg.pic && define_res.is_ok() {
+            if let Some(insn) = wide_consts::pool_instruction(&ctx) {
+                return Err(CraneliftError::Unsupported(format!(
+                    "internal: function '{}' would keep constant data inside its code (non-PIC code must not): `{}`", f.name, insn)));
+            }
+        }
         if dbg_timing {
             let e = dt.elapsed();
             if e.as_millis() > 100 { eprintln!("[timing] define_function '{}': {:?}", f.name, e); }

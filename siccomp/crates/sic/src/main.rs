@@ -1240,7 +1240,8 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
         .with_debug_info(args.debug_info)
         .with_pic(pic)
         .with_function_sections(function_sections)
-        .with_float(isa.sse2(), isa.x87());
+        .with_float(isa.sse2(), isa.x87())
+        .with_no_text_data(kernel_model);
     backend.compile_module(ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }
