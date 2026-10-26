@@ -54,6 +54,8 @@ struct Resolver<'a> {
     m: &'a Module,
     f: &'a Function,
     defs: HashMap<u32, &'a Instr>,
+    /// Where each value is defined: (block, instruction index).
+    at: HashMap<u32, (usize, usize)>,
     /// Defined functions whose address an operand took (kept as `used`).
     used_fns: Vec<String>,
 }
@@ -61,12 +63,51 @@ struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     fn new(m: &'a Module, f: &'a Function) -> Self {
         let mut defs = HashMap::new();
-        for b in &f.blocks {
-            for i in &b.instrs {
-                if let Some(d) = instr_dest(i) { defs.insert(d.0, i); }
+        let mut at = HashMap::new();
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for (ii, i) in b.instrs.iter().enumerate() {
+                if let Some(d) = instr_dest(i) { defs.insert(d.0, i); at.insert(d.0, (bi, ii)); }
             }
         }
-        Resolver { m, f, defs, used_fns: Vec::new() }
+        Resolver { m, f, defs, at, used_fns: Vec::new() }
+    }
+
+    /// The value the load `load` (a value id) reads from `slot`: the closest
+    /// earlier store to the slot in the same block — Linux's `rip_rel_ptr(p)`
+    /// stores its asm output back into `p`, after the asm read it — or, with
+    /// none there, the slot's only store. Only for a slot whose address never
+    /// escapes, so nothing but those stores writes it.
+    fn loaded_value(&self, load: ValId, slot: ValId) -> Option<Val> {
+        let sv = Val::Local(slot);
+        if !self.slot_private(slot) { return None; }
+        let &(bi, ii) = self.at.get(&load.0)?;
+        for i in self.f.blocks[bi].instrs[..ii].iter().rev() {
+            if let Instr::Store { val, ptr } = i {
+                if *ptr == sv { return Some(val.clone()); }
+            }
+        }
+        self.slot_value(slot)
+    }
+
+    /// Whether a slot is used only by loads from it and stores into it.
+    fn slot_private(&self, slot: ValId) -> bool {
+        let sv = Val::Local(slot);
+        for b in &self.f.blocks {
+            for i in &b.instrs {
+                match i {
+                    Instr::Load { ptr, .. } if *ptr == sv => continue,
+                    Instr::Store { val, ptr } if *ptr == sv && *val != sv => continue,
+                    _ => {}
+                }
+                let mut esc = false;
+                i.for_each_val(|v| if *v == sv { esc = true; });
+                if esc { return false; }
+            }
+            let mut esc = false;
+            b.terminator.for_each_val(|v| if *v == sv { esc = true; });
+            if esc { return false; }
+        }
+        true
     }
 
     /// The value a stack slot always holds: its only store, when every other
@@ -117,7 +158,7 @@ impl<'a> Resolver<'a> {
                 match ins {
                     Instr::Load { ptr: Val::Local(slot), .. }
                         if matches!(self.defs.get(&slot.0), Some(Instr::Alloca { .. })) => {
-                        let stored = self.slot_value(*slot)?;
+                        let stored = self.loaded_value(*id, *slot)?;
                         self.resolve(&stored, depth + 1)
                     }
                     Instr::Cast { op, val, to_ty, .. } => {
