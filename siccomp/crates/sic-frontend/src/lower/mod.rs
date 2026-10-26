@@ -3273,6 +3273,19 @@ impl Lowerer {
             self.immutable_globals.insert(d.name.clone());
         }
         let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+        // `typeof(name)` of a known function or global (Linux's EXPORT_SYMBOL:
+        // `extern typeof(sym) sym;`) has that symbol's type: the type-only
+        // evaluator knows no symbols and took it for `int`, which declared a
+        // function as data ("incompatible declaration").
+        if let AstType::Typeof(e) = &d.ty.ty {
+            if let ExprKind::Ident(n) = &e.kind {
+                if let Some(f) = self.module.func_ref_by_name(n) {
+                    ir_ty = Type::Function(Box::new(self.module.func_sig(f).clone()));
+                } else if let Some((t, _)) = self.globals_map.get(n) {
+                    ir_ty = t.clone();
+                }
+            }
+        }
         // sic module-level lambda (sic.md §"Lambdas"): a captureless lambda at file
         // scope initializes a function pointer with the lifted function's address.
         // A capturing closure needs a runtime environment, so it can't const-init a
