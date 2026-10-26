@@ -511,6 +511,19 @@ fn main() {
             // accepting it, clap rejected the whole invocation → every such probe
             // failed at configure time (HAVE_PTY_H etc. wrongly came out unset).
             dep_flags.push("-P".to_string());
+        } else if a == "-U" || (a.starts_with("-U") && a.len() > 2) {
+            // Undefine a macro (`-Ux86`, Linux's linker scripts; or `-U name`):
+            // forwarded to cpp.
+            if a == "-U" {
+                if let Some(v) = iter.next() { dep_flags.push(format!("-U{}", v)); }
+            } else {
+                dep_flags.push(a.clone());
+            }
+        } else if a == "-C" || a == "-CC" {
+            // Keep comments in the preprocessed output (`cpp -C`; `-CC` also
+            // in macro expansions): Linux preprocesses its linker scripts with
+            // `-E -P -C`. Forwarded to cpp.
+            dep_flags.push(a.clone());
         } else if a == "-x" {
             // `-x <lang>` selects the input language. sic only handles C, so
             // accept and ignore the language argument (consume it).
@@ -1678,7 +1691,12 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         extra.extend(isa_defs.iter().map(|s| s.as_str()));
         let mut out_text = String::new();
         for src in &sources {
-            out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &extra)
+            // Assembler source with the C preprocessor (`.S`): GCC defines
+            // `__ASSEMBLER__` (Linux's headers hide their C behind it; its
+            // `vdso64.lds.S` came out with all of it).
+            let mut ex = extra.clone();
+            if src.ends_with(".S") || src.ends_with(".sx") { ex.push("-D__ASSEMBLER__=1"); }
+            out_text.push_str(&preprocess_ex(src, &args.defines, &args.includes, &args.std, &ex)
                 .map_err(|e| format!("{}", e))?);
         }
         // With `-MF`/`-o` cpp writes to that file itself; otherwise emit here.

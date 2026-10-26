@@ -104,6 +104,21 @@ if [ "$got" = "dep_h.h" ]; then passed=$((passed + 1)); else
     failed=$((failed + 1)); echo "FAIL depfile-stdin: prerequisites '$got', want 'dep_h.h' $(head -c 200 "$WORK/err")"
 fi
 
+# The sic driver's own preprocessing of an assembler source (`sic -E` on a
+# `.S`, as Linux preprocesses its linker scripts with `-E -P -C -Ux86`): `-C`
+# and `-U` are accepted and forwarded, and `__ASSEMBLER__` is defined as GCC
+# does (the headers' C parts stayed in the script).
+SICDRV=""
+for p in release debug; do [ -x "$MYDIR/siccomp/target/$p/sic" ] && { SICDRV="$MYDIR/siccomp/target/$p/sic"; break; }; done
+if [ -n "$SICDRV" ]; then
+    total=$((total + 1))
+    printf '/* kept */\n#ifdef __ASSEMBLER__\nasm_part foo\n#else\nc_part\n#endif\n' > "$WORK/drv.S"
+    got="$( (cd "$WORK" && timeout "$TIMEOUT" "$SICDRV" -E -P -C -nostdinc -Dfoo=bar -Ufoo drv.S) 2> "$WORK/err" | grep -v '^$' | tr '\n' '|')"
+    if [ "$got" = "/* kept */|asm_part foo|" ]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); echo "FAIL driver-asm-cpp: got '$got' $(head -c 200 "$WORK/err")"
+    fi
+fi
+
 extra=""
 [ $xfailed -gt 0 ] && extra="$extra, $xfailed xfail"
 [ $xpassed -gt 0 ] && extra="$extra, $xpassed xpass"
