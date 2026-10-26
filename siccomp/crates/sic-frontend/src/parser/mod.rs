@@ -2916,8 +2916,12 @@ impl Parser {
         let sp = self.span();
         let cond = self.parse_logor()?;
         if self.eat(TokenKind::Question) {
-            // GNU `a ?: b`: omitted middle operand — the value is the condition.
+            // GNU `a ?: b`: omitted middle operand — the value is the condition
+            // (evaluated once). Whitespace between `?` and `:` changes nothing:
+            // they are two tokens either way (SIC's elvis, sic.md §"Safe access").
             if self.eat(TokenKind::Colon) {
+                crate::diag::warn("pedantic", sp.file.as_deref(), sp.line, sp.col,
+                    "ISO C forbids omitting the middle term of a '?:' expression");
                 let else_ = self.parse_assign_expr()?;
                 return Ok(Expr::new(ExprKind::Elvis {
                     cond: Box::new(cond), else_: Box::new(else_),

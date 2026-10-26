@@ -4196,6 +4196,11 @@ impl Lowerer {
             ExprKind::Ternary { cond, then, else_ } => {
                 if self.eval_const_int(cond)? != 0 { self.eval_const_int(then) } else { self.eval_const_int(else_) }
             }
+            // GNU `a ?: b`: `a` when nonzero.
+            ExprKind::Elvis { cond, else_ } => {
+                let c = self.eval_const_int(cond)?;
+                if c != 0 { Some(c) } else { self.eval_const_int(else_) }
+            }
             _ => None,
         }
     }
@@ -4256,6 +4261,11 @@ impl Lowerer {
             ExprKind::Ternary { cond, then, else_ } => {
                 let c = self.eval_const_int(cond)?;
                 if c != 0 { self.eval_ptr_reloc(then) } else { self.eval_ptr_reloc(else_) }
+            }
+            // `p ?: q` with a constant-decidable condition: the condition itself, or q.
+            ExprKind::Elvis { cond, else_ } => {
+                let c = self.eval_const_int(cond)?;
+                if c != 0 { self.eval_ptr_reloc(cond) } else { self.eval_ptr_reloc(else_) }
             }
             ExprKind::StringLit(s) => {
                 let mut bytes = s.clone().into_bytes();
@@ -4841,6 +4851,11 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
             } else {
                 eval_const_typed(else_, enum_consts)
             }
+        }
+        // GNU `a ?: b`: `a` when nonzero.
+        ExprKind::Elvis { cond, else_ } => {
+            let c = eval_const_typed(cond, enum_consts)?;
+            if c.v != 0 { Ok(c) } else { eval_const_typed(else_, enum_consts) }
         }
         // `__builtin_choose_expr(cond, a, b)` selects an arm at compile time from
         // the constant condition; the unchosen arm is discarded and never

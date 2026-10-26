@@ -1334,6 +1334,12 @@ fn eval_const_size_typed(
                 eval_const_size_typed(else_, named, ptr_size, enum_consts)
             }
         }
+        // GNU `a ?: b`: `a` when nonzero (Linux's `__aligned((__VA_ARGS__ + 0) ? :
+        // SMP_CACHE_BYTES)`).
+        ExprKind::Elvis { cond, else_ } => {
+            let c = eval_const_size_typed(cond, named, ptr_size, enum_consts)?;
+            if c.v != 0 { Some(c) } else { eval_const_size_typed(else_, named, ptr_size, enum_consts) }
+        }
         ExprKind::Cast { ty, expr } => {
             let inner = eval_const_size_typed(expr, named, ptr_size, enum_consts)?;
             // A cast to a primitive integer re-types (truncates / re-signs) to that

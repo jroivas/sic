@@ -8,7 +8,8 @@
 //!
 //! Supported flags: `-Wall`, `-Wextra`, `-Wunused`, `-W<name>`, `-Wno-<name>`,
 //! `-Werror`, `-Wno-error`, `-Werror=<name>`, `-Wno-error=<name>`, `-w`, and
-//! `-pedantic`/`-Wpedantic` (accepted; sic has no pedantic warnings yet).
+//! `-pedantic`/`-Wpedantic` (the driver maps `-pedantic-errors` to
+//! `-Werror=pedantic`).
 //! Unknown names are accepted silently, as real build systems pass many
 //! (QEMU compiles every file with `-Wall -Werror` and ~40 more `-W` options).
 
@@ -45,6 +46,9 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     // Code no path reaches (after a return/goto/…). On by default in SIC; in C
     // only when named (`-Wunreachable-code`), as clang — C code has plenty.
     ("unreachable-code", Group::Default, false),
+    // gcc -Wpedantic: ISO C diagnostics for GNU extensions in use. Only when
+    // asked for (`-Wpedantic`, `-pedantic`), as in gcc; C and SIC alike.
+    ("pedantic", Group::Explicit, false),
 ];
 
 #[derive(Default)]
@@ -103,7 +107,6 @@ pub fn configure<S: AsRef<str>>(flags: &[S], silent: bool) {
             "no-unused" => c.unused = Some(false),
             "error" => c.werror = true,
             "no-error" => c.werror = false,
-            "pedantic" | "no-pedantic" => {}
             _ => {
                 if let Some(n) = f.strip_prefix("no-error=") {
                     c.error.insert(n.to_string(), false);
