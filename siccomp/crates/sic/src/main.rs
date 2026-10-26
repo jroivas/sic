@@ -1215,11 +1215,16 @@ fn producer_string() -> String {
     format!("sic {} (preprocessor: {})", env!("CARGO_PKG_VERSION"), name)
 }
 
+/// Each function in its own section (the default), unless `-fno-function-sections`.
+fn function_sections(args: &Args) -> bool {
+    !matches!(args.f_options.get("function-sections"), Some(FOption::Disabled))
+}
+
 /// Codegen a lowered IR module to object-file bytes.
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
     if ir_module.asm_text_helpers.is_empty() { return Ok(obj); }
-    merge_asm_helpers(&obj, &ir_module.asm_text_helpers, src)
+    merge_asm_helpers(&obj, &ir_module.asm_text_helpers, src, function_sections(args))
 }
 
 /// The backend's object for `ir_module`, without the text inline-asm helpers.
@@ -1229,7 +1234,7 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
     let (isa, _) = isa::Isa::from_flags(&args.machine_flags);
     let kernel_model = args.machine_flags.iter().any(|m| m == "-mcmodel=kernel");
     let pic = args.pic_flag.unwrap_or(true) && !kernel_model;
-    let function_sections = !matches!(args.f_options.get("function-sections"), Some(FOption::Disabled));
+    let function_sections = function_sections(args);
     let mut backend = CraneliftBackend::new()
         .with_opt_level(opt_cranelift_level(&args.opt))
         .with_debug_info(args.debug_info)
@@ -1246,11 +1251,11 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
 /// a helper may name any symbol of the unit — a `static` one too (Linux's
 /// static keys and per-CPU variables), which a separately assembled helper
 /// object could not reach (local symbols do not link across objects).
-fn merge_asm_helpers(obj: &[u8], helpers: &[(String, String)], src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn merge_asm_helpers(obj: &[u8], helpers: &[(String, String)], src: &str, function_sections: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let asm_s = dir.path().join("unit.s");
     let out_o = dir.path().join("unit.o");
-    fs::write(&asm_s, asm_out::object_to_asm(obj, helpers, src)?)?;
+    fs::write(&asm_s, asm_out::object_to_asm(obj, helpers, src, function_sections)?)?;
     let cc = resolve_assembler();
     let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&out_o).status()
         .map_err(|e| format!("inline assembly: cannot run the assembler ({}): {}", cc, e))?;
@@ -1687,7 +1692,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         for src in &sources {
             let ir_module = build_ir(src, args)?;
             let obj = compile_ir_code(&ir_module, args)?;
-            let text = asm_out::object_to_asm(&obj, &ir_module.asm_text_helpers, src)?;
+            let text = asm_out::object_to_asm(&obj, &ir_module.asm_text_helpers, src, function_sections(args))?;
             let out = match &args.output {
                 Some(o) if sources.len() == 1 => o.clone(),
                 _ => PathBuf::from(src).with_extension("s").to_string_lossy().into_owned(),

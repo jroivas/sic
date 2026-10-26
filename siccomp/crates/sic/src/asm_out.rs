@@ -74,7 +74,7 @@ fn sym_ref(name: &str) -> String {
 
 /// The assembler text for `obj` (an ELF object from the backend) followed by
 /// the text `helpers` (symbol, body). `source` names the file (`.file`).
-pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str) -> Result<String, String> {
+pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str, function_sections: bool) -> Result<String, String> {
     let file = ElfFile64::<object::Endianness>::parse(obj).map_err(|e| format!("-S: reading the object: {}", e))?;
     let mut out = String::new();
     let _ = writeln!(out, "\t.file\t\"{}\"", source.replace('"', "\\\""));
@@ -194,17 +194,24 @@ pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str) -> 
             }
         }
     }
-    out.push_str(&helpers_asm(helpers));
+    out.push_str(&helpers_asm(helpers, function_sections));
     Ok(out)
 }
 
 /// The inline-assembly helpers as functions: weak and hidden (identical
-/// helpers from several units merge), each in its own section.
-pub fn helpers_asm(helpers: &[(String, String)]) -> String {
+/// helpers from several units merge), each in its own section — or all in
+/// `.text` without `function_sections` (`-fno-function-sections`: Linux's
+/// linker script places `.text`, not stray `.text.*` sections), aligned with
+/// `int3` padding.
+pub fn helpers_asm(helpers: &[(String, String)], function_sections: bool) -> String {
     let mut out = String::new();
     for (name, body) in helpers {
         let r = sym_ref(name);
-        let _ = writeln!(out, "\n\t.section\t.text.{},\"ax\",@progbits", name);
+        if function_sections {
+            let _ = writeln!(out, "\n\t.section\t.text.{},\"ax\",@progbits", name);
+        } else {
+            let _ = writeln!(out, "\n\t.text\n\t.balign\t16, 0xcc");
+        }
         let _ = writeln!(out, "\t.weak\t{r}\n\t.hidden\t{r}\n\t.type\t{r},@function\n{r}:");
         out.push_str(body);
         let _ = writeln!(out, "\t.size\t{r}, .-{r}");

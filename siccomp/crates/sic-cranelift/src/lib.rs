@@ -158,7 +158,9 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     // bundles `msi_enabled` (needed) with `hmp_pcie_aer_inject_error` (calls the
     // unavailable `monitor_printf`); without per-function GC the whole object,
     // and thus the dangling reference, is retained and the link fails.
-    obj_builder.per_function_section(cfg.function_sections);
+    // `section("…")` placements need a section per function to rename (see
+    // `finish_code_sections`, which merges them back for -fno-function-sections).
+    obj_builder.per_function_section(cfg.function_sections || !ir_module.fn_sections.is_empty());
 
     let mut obj_module = ObjectModule::new(obj_builder);
 
@@ -556,29 +558,150 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         product.object.section_mut(id).set_data(bytes, 1);
     }
     let bytes = product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
-    if ir_module.fn_sections.is_empty() { return Ok(bytes); }
-    place_function_sections(&bytes, &ir_module.fn_sections).map_err(CraneliftError::Unsupported)
+    if ir_module.fn_sections.is_empty() && cfg.function_sections { return Ok(bytes); }
+    finish_code_sections(&bytes, &ir_module.fn_sections, !cfg.function_sections).map_err(CraneliftError::Unsupported)
 }
 
-/// `section("…")` on functions: each function is emitted in its own section
-/// (per-function sections), which is renamed here, with its relocations'
-/// section, since Cranelift's object writer has no per-function placement.
-fn place_function_sections(obj: &[u8], placements: &[(String, String)]) -> Result<Vec<u8>, String> {
+/// The object's code sections, finished: `section("…")` placements (each
+/// function is emitted in its own section, renamed here with its relocation
+/// section — Cranelift's object writer has no per-function placement); with
+/// `one_text` (`-fno-function-sections`) the other functions' sections become
+/// `.text`; then sections of one name are merged into one (symbols,
+/// relocations and section-symbol references rebased), and alignment padding
+/// in code is `int3` (0xcc), not zeros: a tool that decodes code linearly
+/// (Linux's objtool) read `00 00` as `add %al,(%rax)`, and an odd gap ran
+/// into the next function ("can't find starting instruction").
+fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: bool) -> Result<Vec<u8>, String> {
     use object::build::elf::{Builder, SectionData};
-    let mut b = Builder::read(obj).map_err(|e| format!("section placement: {}", e))?;
-    let mut renamed = Vec::new();
+    use object::build::Id;
+    use object::elf;
+    let err = |e: object::build::Error| format!("code sections: {}", e);
+    let mut b = Builder::read(obj).map_err(err)?;
+    let is_code = |s: &object::build::elf::Section| s.sh_flags.0 & elf::SHF_EXECINSTR.0 != 0
+        && matches!(s.data, SectionData::Data(_));
+    // Placements, then the rest of the per-function code into `.text`.
+    let mut placed = std::collections::HashSet::new();
     for (func, sec) in placements {
         let Some(id) = b.symbols.iter().find(|s| s.name.as_slice() == func.as_bytes()).and_then(|s| s.section) else { continue };
         b.sections.get_mut(id).name = sec.as_bytes().to_vec().into();
-        renamed.push((id, sec.clone()));
+        placed.insert(id.index());
     }
-    let relas: Vec<_> = b.sections.iter()
-        .filter(|s| matches!(s.data, SectionData::Relocation(_)))
-        .filter_map(|s| renamed.iter().find(|(id, _)| Some(*id) == s.sh_info_section).map(|(_, n)| (s.id(), n.clone())))
+    if one_text {
+        let ids: Vec<_> = b.sections.iter()
+            .filter(|s| is_code(s) && !placed.contains(&s.id().index()) && s.name.as_slice().starts_with(b".text."))
+            .map(|s| s.id()).collect();
+        for id in ids { b.sections.get_mut(id).name = b".text".to_vec().into(); }
+    }
+    // Merge code sections by name, in order: (first, [(other, base offset)]).
+    let mut groups: Vec<(Vec<u8>, object::build::elf::SectionId, Vec<(object::build::elf::SectionId, u64)>)> = Vec::new();
+    let code: Vec<_> = b.sections.iter().filter(|s| is_code(s)).map(|s| s.id()).collect();
+    for id in code {
+        let name = b.sections.get(id).name.as_slice().to_vec();
+        match groups.iter_mut().find(|(n, _, _)| *n == name) {
+            Some((_, first, rest)) => {
+                let (first, other) = (*first, id);
+                let align = b.sections.get(other).sh_addralign.max(1);
+                let tail = match &b.sections.get(other).data { SectionData::Data(d) => d.as_slice().to_vec(), _ => unreachable!() };
+                let fs = b.sections.get_mut(first);
+                fs.sh_addralign = fs.sh_addralign.max(align);
+                let SectionData::Data(d) = &mut fs.data else { unreachable!() };
+                let v = d.to_mut();
+                let base = v.len().div_ceil(align as usize) as u64 * align;
+                v.resize(base as usize, 0xcc);
+                v.extend_from_slice(&tail);
+                rest.push((other, base));
+            }
+            None => groups.push((name, id, Vec::new())),
+        }
+    }
+    let mut moved: std::collections::HashMap<usize, (object::build::elf::SectionId, u64)> = Default::default();
+    for (_, first, rest) in &groups { for &(o, base) in rest { moved.insert(o.index(), (*first, base)); } }
+    if !moved.is_empty() {
+        // The surviving section's own section symbol, for references to a merged one.
+        let sec_sym: std::collections::HashMap<_, _> = b.symbols.iter()
+            .filter(|s| s.st_info.st_type() == elf::STT_SECTION && s.section.is_some())
+            .map(|s| (s.section.unwrap().index(), s.id())).collect();
+        let mut sym_rebase = std::collections::HashMap::new();
+        for sym in b.symbols.iter_mut() {
+            let Some(sec) = sym.section else { continue };
+            let Some(&(to, base)) = moved.get(&sec.index()) else { continue };
+            if sym.st_info.st_type() == elf::STT_SECTION {
+                sym.delete = true;
+                if let Some(&t) = sec_sym.get(&to.index()) { sym_rebase.insert(sym.id().index(), (t, base)); }
+            } else {
+                sym.section = Some(to);
+                sym.st_value += base;
+            }
+        }
+        // Relocations: those of a merged section move to the survivor's
+        // relocation section (or it becomes that), offsets rebased; references
+        // to a merged section's symbol go to the survivor's, addend rebased.
+        let mut rela_of = std::collections::HashMap::new();
+        for s in b.sections.iter() {
+            if let (SectionData::Relocation(_), Some(t)) = (&s.data, s.sh_info_section) { rela_of.insert(t.index(), s.id()); }
+        }
+        let rela_ids: Vec<_> = rela_of.values().copied().collect();
+        for rid in rela_ids {
+            let SectionData::Relocation(relocs) = &mut b.sections.get_mut(rid).data else { continue };
+            for r in relocs.iter_mut() {
+                if let Some(&(t, base)) = r.symbol.and_then(|sy| sym_rebase.get(&sy.index())) {
+                    r.symbol = Some(t);
+                    r.r_addend += base as i64;
+                }
+            }
+        }
+        for (&from, &(to, base)) in &moved {
+            let Some(&from_rela) = rela_of.get(&from) else { continue };
+            let SectionData::Relocation(relocs) = std::mem::replace(&mut b.sections.get_mut(from_rela).data, SectionData::Relocation(Vec::new())) else { continue };
+            let relocs: Vec<_> = relocs.into_iter().map(|mut r| { r.r_offset += base; r }).collect();
+            match rela_of.get(&to.index()) {
+                Some(&to_rela) => {
+                    if let SectionData::Relocation(v) = &mut b.sections.get_mut(to_rela).data { v.extend(relocs); }
+                    b.sections.get_mut(from_rela).delete = true;
+                }
+                None => {
+                    let rs = b.sections.get_mut(from_rela);
+                    rs.data = SectionData::Relocation(relocs);
+                    rs.sh_info_section = Some(to);
+                    rela_of.insert(to.index(), from_rela);
+                }
+            }
+        }
+        let gone: Vec<_> = b.sections.iter().filter(|s| moved.contains_key(&s.id().index())).map(|s| s.id()).collect();
+        for o in gone { b.sections.get_mut(o).delete = true; }
+        // Debug info and other non-code sections referring to a merged section's
+        // symbol were handled above (all relocation sections were rewritten).
+    }
+    // Zero padding between functions in code becomes int3.
+    let funcs: Vec<(object::build::elf::SectionId, u64, u64)> = b.symbols.iter()
+        .filter(|s| s.st_info.st_type() == elf::STT_FUNC && !s.delete)
+        .filter_map(|s| s.section.map(|sec| (sec, s.st_value, s.st_size))).collect();
+    for sec in b.sections.iter_mut() {
+        if sec.delete || !is_code(sec) { continue; }
+        let id = sec.id();
+        let SectionData::Data(d) = &mut sec.data else { continue };
+        let mut covered = vec![false; d.len()];
+        for &(s, v, n) in &funcs {
+            if s != id { continue; }
+            for k in v..(v + n).min(covered.len() as u64) { covered[k as usize] = true; }
+        }
+        if covered.iter().all(|c| *c) { continue; }
+        let v = d.to_mut();
+        for (k, c) in covered.iter().enumerate() { if !c && v[k] == 0 { v[k] = 0xcc; } }
+    }
+    // Every relocation section takes its target's name.
+    let names: Vec<_> = b.sections.iter().filter(|s| !s.delete).map(|s| (s.id(), s.name.as_slice().to_vec())).collect();
+    let fix: Vec<_> = b.sections.iter()
+        .filter(|s| !s.delete && matches!(s.data, SectionData::Relocation(_)))
+        .filter_map(|s| s.sh_info_section.and_then(|t| names.iter().find(|(i, _)| *i == t)).map(|(_, n)| (s.id(), n.clone())))
         .collect();
-    for (id, n) in relas { b.sections.get_mut(id).name = format!(".rela{}", n).into_bytes().into(); }
+    for (id, n) in fix {
+        let mut name = b".rela".to_vec();
+        name.extend_from_slice(&n);
+        b.sections.get_mut(id).name = name.into();
+    }
     let mut out = Vec::new();
-    b.write(&mut out).map_err(|e| format!("section placement: {}", e))?;
+    b.write(&mut out).map_err(err)?;
     Ok(out)
 }
 
