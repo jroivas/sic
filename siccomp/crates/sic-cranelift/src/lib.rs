@@ -52,11 +52,15 @@ pub struct CraneliftBackend {
     /// of it): Cranelift's constant pool is avoided (`wide_consts`), and a
     /// function that would still use one is an error. Needs non-PIC code.
     pub no_text_data: bool,
+    /// The x64 extensions the code may use (Cranelift settings such as
+    /// `has_popcnt`, from `-march`/`-m…`): nothing of the build machine's CPU
+    /// beyond them (`cranelift_native` would enable all of its features).
+    pub isa_flags: Vec<String>,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true, no_text_data: false }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true, no_text_data: false, isa_flags: Vec::new() }
     }
 
     /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
@@ -81,6 +85,12 @@ impl CraneliftBackend {
     pub fn with_float(mut self, sse: bool, x87: bool) -> Self {
         self.sse = sse;
         self.x87 = x87;
+        self
+    }
+
+    /// The x64 extensions the code may use (see `isa_flags`).
+    pub fn with_isa_flags(mut self, flags: Vec<String>) -> Self {
+        self.isa_flags = flags;
         self
     }
 
@@ -142,17 +152,19 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     flag_builder.set("preserve_frame_pointers", "true").unwrap();
     let flags = settings::Flags::new(flag_builder.clone());
 
-    // Native ISA
-    let isa = cranelift_native::builder()
-        .map_err(|e| CraneliftError::Unsupported(e.to_string()))?
-        .finish(flags)
-        .map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
+    // The host's architecture with only the requested extensions.
+    let make_isa = |flags: settings::Flags| -> Result<cranelift_codegen::isa::OwnedTargetIsa, CraneliftError> {
+        let mut b = cranelift_native::builder_with_options(false)
+            .map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
+        for f in &cfg.isa_flags {
+            b.enable(f).map_err(|e| CraneliftError::Unsupported(format!("{}: {}", f, e)))?;
+        }
+        b.finish(flags).map_err(|e| CraneliftError::Unsupported(e.to_string()))
+    };
+    let isa = make_isa(flags)?;
     let opt_isa = if opt_level == "none" { None } else {
         flag_builder.set("opt_level", opt_level).unwrap();
-        Some(cranelift_native::builder()
-            .map_err(|e| CraneliftError::Unsupported(e.to_string()))?
-            .finish(settings::Flags::new(flag_builder))
-            .map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
+        Some(make_isa(settings::Flags::new(flag_builder))?)
     };
     let mut wide_consts: HashMap<i64, cranelift_module::DataId> = HashMap::new();
 
@@ -173,6 +185,13 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     obj_builder.per_function_section(cfg.function_sections || !ir_module.fn_sections.is_empty());
 
     let mut obj_module = ObjectModule::new(obj_builder);
+
+    // Without SSSE3 Cranelift lowers a byte shuffle to a call of its
+    // `X86Pshufb` libcall, which the embedder provides: define it here, local
+    // to the object, when the module computes with vectors.
+    if cfg.sse && !cfg.isa_flags.iter().any(|f| f == "has_ssse3") && module_uses_simd(ir_module) {
+        define_pshufb_libcall(&mut obj_module)?;
+    }
 
     // ── Declare all functions first ──────────────────────────────────────────
     let mut func_ids: HashMap<u32, FuncId> = HashMap::new();
@@ -752,6 +771,62 @@ fn mentions_f80(ty: &sic_ir::Type) -> bool {
 
 /// Whether any function signature or instruction of the module involves
 /// `long double` (then the f80 helpers are emitted).
+/// Whether any function computes with SIMD vectors (x86 intrinsics).
+fn module_uses_simd(m: &sic_ir::Module) -> bool {
+    m.functions.iter().any(|f| f.blocks.iter().any(|b| b.instrs.iter().any(|i|
+        matches!(i, sic_ir::Instr::Simd { .. } | sic_ir::Instr::VecMoveMask { .. }))))
+}
+
+/// `__cranelift_x86_pshufb(src, mask)`: SSSE3's `pshufb` for SSE2-only code
+/// (Cranelift's libcall for a byte shuffle without SSSE3). Byte i of the
+/// result is 0 when mask byte i has its top bit set, else src byte
+/// (mask & 15). Built from byte loads and stores — no shuffle, so it does not
+/// call itself — and local to the object (Cranelift resolves the libcall to a
+/// symbol of that name in the object).
+fn define_pshufb_libcall(m: &mut ObjectModule) -> Result<(), CraneliftError> {
+    use cranelift_codegen::ir::{types as ct, InstBuilder};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    let mut sig = m.make_signature();
+    sig.params.push(cir::AbiParam::new(ct::I8X16));
+    sig.params.push(cir::AbiParam::new(ct::I8X16));
+    sig.returns.push(cir::AbiParam::new(ct::I8X16));
+    let name = (cranelift_module::default_libcall_names())(cir::LibCall::X86Pshufb);
+    let fid = m.declare_function(&name, CLinkage::Local, &sig)?;
+    let tcfg = m.target_config();
+    let mut ctx = m.make_context();
+    ctx.func.signature = sig;
+    let mut fbc = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let blk = b.create_block();
+        b.append_block_params_for_function_params(blk);
+        b.switch_to_block(blk);
+        b.seal_block(blk);
+        let (src, mask) = (b.block_params(blk)[0], b.block_params(blk)[1]);
+        let slot = b.create_sized_stack_slot(cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, 48, 4));
+        let base = b.ins().stack_addr(ct::I64, slot, 0);
+        let f = cranelift_codegen::ir::MemFlagsData::new();
+        b.ins().store(f, src, base, 0);
+        b.ins().store(f, mask, base, 16);
+        let zero = b.ins().iconst(ct::I8, 0);
+        for i in 0..16 {
+            let mi = b.ins().load(ct::I8, f, base, 16 + i);
+            let idx = b.ins().band_imm_u(mi, 15);
+            let idx = b.ins().uextend(ct::I64, idx);
+            let at = b.ins().iadd(base, idx);
+            let v = b.ins().load(ct::I8, f, at, 0);
+            let off = b.ins().icmp_imm_s(cir::condcodes::IntCC::SignedLessThan, mi, 0);
+            let r = b.ins().select(off, zero, v);
+            b.ins().store(f, r, base, 32 + i);
+        }
+        let out = b.ins().load(ct::I8X16, f, base, 32);
+        b.ins().return_(&[out]);
+        b.finalize(tcfg);
+    }
+    m.define_function(fid, &mut ctx)?;
+    Ok(())
+}
+
 fn module_uses_f80(m: &sic_ir::Module) -> bool {
     let sig_f80 = |s: &sic_ir::FunctionType| mentions_f80(&s.ret) || s.params.iter().any(mentions_f80);
     // Only externs actually used: headers declare many `long double` functions.

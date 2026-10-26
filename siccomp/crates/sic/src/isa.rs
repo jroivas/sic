@@ -6,7 +6,7 @@
 
 /// An extension, in implication order where one includes another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Feature { Sse3, Ssse3, Sse41, Sse42, Popcnt, Avx, Avx2, Fma, F16c, Aes, Pclmul }
+pub enum Feature { Sse3, Ssse3, Sse41, Sse42, Popcnt, Avx, Avx2, Fma, F16c, Aes, Pclmul, Cx16 }
 
 use Feature::*;
 
@@ -15,6 +15,7 @@ impl Feature {
         match self {
             Sse3 => "sse3", Ssse3 => "ssse3", Sse41 => "sse4.1", Sse42 => "sse4.2", Popcnt => "popcnt",
             Avx => "avx", Avx2 => "avx2", Fma => "fma", F16c => "f16c", Aes => "aes", Pclmul => "pclmul",
+            Cx16 => "cx16",
         }
     }
     fn macro_name(self) -> &'static str {
@@ -22,7 +23,18 @@ impl Feature {
             Sse3 => "__SSE3__", Ssse3 => "__SSSE3__", Sse41 => "__SSE4_1__", Sse42 => "__SSE4_2__",
             Popcnt => "__POPCNT__", Avx => "__AVX__", Avx2 => "__AVX2__", Fma => "__FMA__",
             F16c => "__F16C__", Aes => "__AES__", Pclmul => "__PCLMUL__",
+            Cx16 => "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16",
         }
+    }
+    /// The Cranelift x64 setting that lets the back end use the extension
+    /// itself (None: only sic's intrinsics use it).
+    fn cranelift_flag(self) -> Option<&'static str> {
+        Some(match self {
+            Sse3 => "has_sse3", Ssse3 => "has_ssse3", Sse41 => "has_sse41", Sse42 => "has_sse42",
+            Popcnt => "has_popcnt", Avx => "has_avx", Avx2 => "has_avx2", Fma => "has_fma",
+            Cx16 => "has_cmpxchg16b",
+            F16c | Aes | Pclmul => return None,
+        })
     }
     /// The extensions this one requires (GCC's `-m` implications).
     fn requires(self) -> &'static [Feature] {
@@ -33,10 +45,10 @@ impl Feature {
             Sse42 => &[Sse41],
             Avx => &[Sse42],
             Avx2 | Fma | F16c => &[Avx],
-            Aes | Pclmul => &[],
+            Aes | Pclmul | Cx16 => &[],
         }
     }
-    const ALL: [Feature; 11] = [Sse3, Ssse3, Sse41, Sse42, Popcnt, Avx, Avx2, Fma, F16c, Aes, Pclmul];
+    const ALL: [Feature; 12] = [Sse3, Ssse3, Sse41, Sse42, Popcnt, Avx, Avx2, Fma, F16c, Aes, Pclmul, Cx16];
 }
 
 /// The extensions in use, and the x86-64 baseline (MMX, SSE, SSE2, the x87
@@ -72,26 +84,26 @@ impl Isa {
     }
 
     fn march(&mut self, cpu: &str) -> Result<(), String> {
-        let v2 = [Sse42, Popcnt];
-        let v3 = [Sse42, Popcnt, Avx2, Fma, F16c];
+        let v2 = [Sse42, Popcnt, Cx16];
+        let v3 = [Sse42, Popcnt, Cx16, Avx2, Fma, F16c];
         let set: Vec<Feature> = match cpu {
             "native" => return Ok(self.native()),
             "x86-64" | "k8" | "opteron" | "athlon64" => vec![],
             "x86-64-v2" => v2.to_vec(),
             // AVX-512 is not offered: v4 is v3 here.
             "x86-64-v3" | "x86-64-v4" => v3.to_vec(),
-            "core2" => vec![Ssse3],
+            "core2" => vec![Ssse3, Cx16],
             "nehalem" => v2.to_vec(),
             "westmere" => [&v2[..], &[Aes, Pclmul]].concat(),
-            "sandybridge" => vec![Avx, Popcnt, Aes, Pclmul],
-            "ivybridge" => vec![Avx, F16c, Popcnt, Aes, Pclmul],
+            "sandybridge" => vec![Avx, Popcnt, Aes, Pclmul, Cx16],
+            "ivybridge" => vec![Avx, F16c, Popcnt, Aes, Pclmul, Cx16],
             "haswell" | "broadwell" | "skylake" | "skylake-avx512" | "cascadelake" | "cooperlake"
             | "cannonlake" | "icelake-client" | "icelake-server" | "tigerlake" | "rocketlake"
             | "alderlake" | "raptorlake" | "meteorlake" | "sapphirerapids" | "emeraldrapids"
             | "graniterapids" | "arrowlake" | "lunarlake" | "znver1" | "znver2" | "znver3"
             | "znver4" | "znver5" | "bdver4" => [&v3[..], &[Aes, Pclmul]].concat(),
-            "bdver1" | "bdver2" | "bdver3" => vec![Avx, Popcnt, Aes, Pclmul],
-            "btver2" => vec![Avx, F16c, Popcnt, Aes, Pclmul],
+            "bdver1" | "bdver2" | "bdver3" => vec![Avx, Popcnt, Aes, Pclmul, Cx16],
+            "btver2" => vec![Avx, F16c, Popcnt, Aes, Pclmul, Cx16],
             _ => return Err(format!("unknown -march={}; assuming x86-64", cpu)),
         };
         self.on.clear();
@@ -108,7 +120,7 @@ impl Isa {
             let host = [(Sse3, has!("sse3")), (Ssse3, has!("ssse3")), (Sse41, has!("sse4.1")),
                         (Sse42, has!("sse4.2")), (Popcnt, has!("popcnt")), (Avx, has!("avx")),
                         (Avx2, has!("avx2")), (Fma, has!("fma")), (F16c, has!("f16c")),
-                        (Aes, has!("aes")), (Pclmul, has!("pclmulqdq"))];
+                        (Aes, has!("aes")), (Pclmul, has!("pclmulqdq")), (Cx16, has!("cmpxchg16b"))];
             for (f, yes) in host {
                 if yes && f.requires().iter().all(|r| host.iter().any(|(g, y)| g == r && *y)) {
                     self.on.insert(f);
@@ -148,6 +160,13 @@ impl Isa {
         // Every extension builds on SSE2.
         if !isa.sse2 { isa.on.clear(); }
         (isa, warnings)
+    }
+
+    /// The Cranelift x64 settings for the enabled extensions: the back end
+    /// uses exactly what `-march`/`-m…` allow (GCC's x86-64 baseline by
+    /// default), never more of the build machine's CPU.
+    pub fn cranelift_flags(&self) -> Vec<&'static str> {
+        self.on.iter().filter_map(|f| f.cranelift_flag()).collect()
     }
 
     /// SSE2 is available: the floating-point and vector registers sic's back
@@ -193,6 +212,19 @@ mod tests {
         assert!(m.contains(&"-D__AVX2__=1".to_string()) && !m.contains(&"-D__FMA__=1".to_string()));
         let m = macros(&["-march=haswell", "-march=x86-64"]);
         assert!(!m.iter().any(|d| d.contains("SSE3")));
+    }
+
+    #[test]
+    fn backend_features_follow_flags() {
+        // The back end gets only what -march/-m allow (the baseline: nothing),
+        // not the build machine's CPU.
+        let flags = |f: &[&str]| { let v: Vec<String> = f.iter().map(|s| s.to_string()).collect(); Isa::from_flags(&v).0.cranelift_flags() };
+        assert!(flags(&[]).is_empty());
+        assert!(flags(&["-march=x86-64"]).is_empty());
+        let v2 = flags(&["-march=x86-64-v2"]);
+        for f in ["has_sse42", "has_popcnt", "has_cmpxchg16b"] { assert!(v2.contains(&f), "{} missing: {:?}", f, v2); }
+        assert!(!v2.contains(&"has_avx"));
+        assert!(flags(&["-mavx2", "-mno-sse"]).is_empty());
     }
 
     #[test]
