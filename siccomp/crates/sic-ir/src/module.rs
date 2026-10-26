@@ -130,6 +130,25 @@ pub struct ExternFunc {
     pub sig: FunctionType,
 }
 
+/// An inline-asm text helper (in `asm_text_helpers`) with `"i"` operands the
+/// frontend could not evaluate. Each call passes them as trailing arguments,
+/// from index `first_imm`, and the body holds a placeholder per operand:
+/// `\u{1}K M\u{1}` (operand K, modifier M: `$` none, `c`, `n` or `a`). After
+/// optimization (inlining makes an `always_inline` function's parameter a
+/// constant), `sic_opt::asm_imm` prints each call's values into a copy of the
+/// body and calls that copy without the extra arguments; a value that is still
+/// not a constant or `symbol + offset` is an error, as in GCC.
+#[derive(Debug, Clone)]
+pub struct AsmDeferred {
+    pub helper: String,
+    pub first_imm: usize,
+    /// Per operand: `true` for `"n"` (an integer is required).
+    pub int_only: Vec<bool>,
+    pub file: Option<String>,
+    pub line: u32,
+    pub col: u32,
+}
+
 /// The top-level compilation unit.
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -164,6 +183,10 @@ pub struct Module {
     /// The driver assembles them with the system assembler (`-S` writes the
     /// text as is); each body ends in `ret`.
     pub asm_text_helpers: Vec<(String, String)>,
+    /// Text helpers whose `"i"` operands are known only after optimization
+    /// (an `always_inline` function's parameter, a local initialized with a
+    /// constant): see [`AsmDeferred`].
+    pub asm_deferred: Vec<AsmDeferred>,
     /// `section("…")` placements: (global symbol, section) and (function, section).
     pub data_sections: Vec<(String, String)>,
     pub fn_sections: Vec<(String, String)>,
@@ -219,6 +242,7 @@ impl Module {
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
             asm_text_helpers: Vec::new(),
+            asm_deferred: Vec::new(),
             data_sections: Vec::new(),
             fn_sections: Vec::new(),
             used_functions: Vec::new(),

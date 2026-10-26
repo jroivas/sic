@@ -205,7 +205,8 @@ impl Inline {
                         if callee == caller { continue; }              // no direct self-inline
                         let ci = &info[callee];
                         if !ci.eligible { continue; }
-                        if !(self.aggressive || ci.always || ci.size <= self.threshold) { continue; }
+                        // Threshold 0 (below -O2): only `always_inline` functions.
+                        if !(self.aggressive || ci.always || (self.threshold > 0 && ci.size <= self.threshold)) { continue; }
                         // parameter/argument arity must match (variadic excluded).
                         if args.len() != m.functions[callee].params.len() { continue; }
                         // a value-returning call needs the callee to actually return one.

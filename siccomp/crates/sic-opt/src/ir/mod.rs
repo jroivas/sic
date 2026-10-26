@@ -21,6 +21,7 @@ pub mod dce;
 pub mod tree_rec;
 pub mod inline;
 pub mod vec_split;
+pub mod asm_imm;
 
 pub use pass::{IrPass, IrPassManager};
 

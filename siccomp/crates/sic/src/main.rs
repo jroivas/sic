@@ -730,6 +730,11 @@ fn pass_config(args: &Args) -> PassConfig {
     if level2 {
         for p in ["algebraic", "dce", "tree-rec", "inline", "devirtual", "licm", "vec-split"] { enabled.insert(p.to_string()); }
     }
+    // `always_inline` functions are inlined at every level, as in GCC (below
+    // -O2 the threshold is 0, so nothing else is): an `"i"` asm operand that is
+    // such a function's parameter (Linux's `arch_static_branch(key, branch)`)
+    // is only a constant once inlined.
+    enabled.insert("inline".to_string());
     // Per-pass overrides win over the -O default.
     for name in ALL {
         match args.f_options.get(name) {
@@ -744,7 +749,7 @@ fn pass_config(args: &Args) -> PassConfig {
     // gate AND always-inline (`inline_aggressive` — every eligible callee regardless
     // of size, bounded only by the per-caller growth cap). `-finline=<n>` overrides
     // the threshold explicitly.
-    cfg.inline_threshold = if level3 { 200 } else { 24 };
+    cfg.inline_threshold = if level3 { 200 } else if level2 { 24 } else { 0 };
     cfg.inline_aggressive = level3;
     if let Some(FOption::Value(v)) = args.f_options.get("inline") {
         if let Ok(n) = v.parse::<usize>() { cfg.inline_threshold = n; }
@@ -1178,6 +1183,8 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     if args.debug {
         eprintln!("{}", print_module(&ir_module));
     }
+    // Inline-asm `"i"` operands that only optimization made constant.
+    sic_opt::ir::asm_imm::specialize_asm(&mut ir_module)?;
     Ok(ir_module)
 }
 
@@ -1191,10 +1198,10 @@ fn producer_string() -> String {
 }
 
 /// Codegen a lowered IR module to object-file bytes.
-fn compile_ir(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
     if ir_module.asm_text_helpers.is_empty() { return Ok(obj); }
-    merge_asm_helpers(obj, &ir_module.asm_text_helpers)
+    merge_asm_helpers(&obj, &ir_module.asm_text_helpers, src)
 }
 
 /// The backend's object for `ir_module`, without the text inline-asm helpers.
@@ -1207,24 +1214,20 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
 }
 
 /// Add the C inline-assembly helpers given as text (`Module::asm_text_helpers`)
-/// to `obj`: assembled by the system C driver's assembler, then merged with a
-/// relocatable link (`ld -r`; `$LD` when set), so the result is one object.
-fn merge_asm_helpers(obj: Vec<u8>, helpers: &[(String, String)]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// to `obj`: the object is written back as assembler text with the helpers
+/// appended (as `-S` writes it) and assembled once by the system C driver, so
+/// a helper may name any symbol of the unit — a `static` one too (Linux's
+/// static keys and per-CPU variables), which a separately assembled helper
+/// object could not reach (local symbols do not link across objects).
+fn merge_asm_helpers(obj: &[u8], helpers: &[(String, String)], src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let main_o = dir.path().join("code.o");
-    let asm_s = dir.path().join("asm.s");
-    let asm_o = dir.path().join("asm.o");
-    let out_o = dir.path().join("out.o");
-    fs::write(&main_o, &obj)?;
-    fs::write(&asm_s, asm_out::helpers_asm(helpers))?;
+    let asm_s = dir.path().join("unit.s");
+    let out_o = dir.path().join("unit.o");
+    fs::write(&asm_s, asm_out::object_to_asm(obj, helpers, src)?)?;
     let cc = resolve_linker();
-    let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&asm_o).status()
+    let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&out_o).status()
         .map_err(|e| format!("inline assembly: cannot run the assembler ({}): {}", cc, e))?;
     if !st.success() { return Err(format!("inline assembly: the assembler ({}) failed", cc).into()); }
-    let ld = std::env::var("LD").ok().filter(|l| !l.is_empty() && !resolves_to_self(l)).unwrap_or_else(|| "ld".to_string());
-    let st = Command::new(&ld).arg("-r").arg(&main_o).arg(&asm_o).arg("-o").arg(&out_o).status()
-        .map_err(|e| format!("inline assembly: cannot run the linker ({}): {}", ld, e))?;
-    if !st.success() { return Err(format!("inline assembly: `{} -r` failed", ld).into()); }
     Ok(fs::read(&out_o)?)
 }
 
@@ -1338,7 +1341,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     let ir_module = lower_tu(&combined, sic_frontend::Lang::Sic, &name, args)?;
 
     // Codegen to a temp object and archive it into `lib<name>.a`.
-    let obj_bytes = compile_ir(&ir_module, args)?;
+    let obj_bytes = compile_ir(&ir_module, args, &name)?;
     let mut obj = tempfile::Builder::new().suffix(".o").tempfile()?;
     obj.write_all(&obj_bytes)?;
     let archive = dirp.join(format!("lib{}.a", name));
@@ -1696,7 +1699,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             let ir_module = build_ir(src, args)?;
-            let obj_bytes = compile_ir(&ir_module, args)?;
+            let obj_bytes = compile_ir(&ir_module, args, src)?;
             fs::write(&obj_path, &obj_bytes)?;
             // sic module: alongside the object, emit its portable manifest so
             // consumers can `import` it (sic.md §"Imports").
@@ -1739,7 +1742,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             assemble_source(src, &tmp.path().to_string_lossy(), args)?;
         } else {
             let ir_module = build_ir(src, args)?;
-            let obj_bytes = compile_ir(&ir_module, args)?;
+            let obj_bytes = compile_ir(&ir_module, args, src)?;
             tmp.write_all(&obj_bytes)?;
             for l in &ir_module.imported_links {
                 if !module_link_flags.contains(l) { module_link_flags.push(l.clone()); }

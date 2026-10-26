@@ -455,8 +455,10 @@ pub struct AsmStmt {
     pub outputs: Vec<AsmOperand>,
     pub inputs: Vec<AsmOperand>,
     pub clobbers: Vec<String>,
-    /// `asm goto` (has a label list) — never recognised.
+    /// `asm goto` (has a label list).
     pub goto: bool,
+    /// `asm goto`'s labels: `%l[name]` / `%lN` jump to them.
+    pub labels: Vec<String>,
     pub span: Span,
 }
 
@@ -836,6 +838,7 @@ fn direct_child_stmts(s: &Stmt) -> Vec<&Stmt> {
 /// Count every `goto L` in `s`, per label.
 pub fn count_gotos(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
     if let Stmt::Goto(l, _) = s { *out.entry(l.clone()).or_insert(0) += 1; }
+    if let Stmt::Asm(a) = s { for l in &a.labels { *out.entry(l.clone()).or_insert(0) += 1; } }
     for c in child_stmts(s) { count_gotos(c, out); }
 }
 
@@ -849,6 +852,7 @@ pub fn reachable_from_outside(s: &Stmt, total: &std::collections::HashMap<String
             Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) if !in_switch => *case = true,
             Stmt::Label(l, _, _) => labels.push(l.clone()),
             Stmt::Goto(l, _) => *inner.entry(l.clone()).or_insert(0) += 1,
+            Stmt::Asm(a) => for l in &a.labels { *inner.entry(l.clone()).or_insert(0) += 1; },
             _ => {}
         }
         let nested = in_switch || matches!(s, Stmt::Switch { .. });

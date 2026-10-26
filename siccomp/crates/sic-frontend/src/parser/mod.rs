@@ -4129,6 +4129,7 @@ impl Parser {
         // Section index: 0 = outputs, 1 = inputs, 2 = clobbers, 3 = labels.
         let mut sections: [Vec<AsmOperand>; 2] = [Vec::new(), Vec::new()];
         let mut clobbers = Vec::new();
+        let mut labels = Vec::new();
         let mut section: i32 = -1;
         while !self.at(TokenKind::RParen) && !self.at(TokenKind::Eof) {
             if self.eat(TokenKind::ColonColon) { section += 2; continue; }
@@ -4138,6 +4139,12 @@ impl Parser {
                 0 | 1 => {
                     let mut name = None;
                     if self.eat(TokenKind::LBracket) {
+                        // A symbolic operand name is an identifier (`[1]` is not).
+                        if !self.at(TokenKind::Ident) && !self.at(TokenKind::TypeName) {
+                            let sp = self.span();
+                            return Err(CompileError::at("expected identifier as the asm operand name",
+                                sp.file.clone(), sp.line, sp.col));
+                        }
                         name = Some(self.advance().text.clone());
                         self.expect(TokenKind::RBracket)?;
                     }
@@ -4153,13 +4160,13 @@ impl Parser {
                     while self.at(TokenKind::StringLit) { c.push_str(&self.advance().text.clone()); }
                     if c.is_empty() { self.advance(); } else { clobbers.push(c); }
                 }
-                _ => { self.advance(); goto = true; }
+                _ => { labels.push(self.advance().text.clone()); goto = true; }
             }
         }
         self.expect(TokenKind::RParen)?;
         self.eat(TokenKind::Semi);
         let [outputs, inputs] = sections;
-        Ok(Stmt::Asm(Box::new(AsmStmt { template, outputs, inputs, clobbers, goto, span: sp })))
+        Ok(Stmt::Asm(Box::new(AsmStmt { template, outputs, inputs, clobbers, goto, labels, span: sp })))
     }
 
     fn parse_asm_skip(&mut self) -> Result<()> {
