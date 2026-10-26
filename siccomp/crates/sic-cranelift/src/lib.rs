@@ -39,11 +39,20 @@ pub struct CraneliftBackend {
     /// Each function in its own section (`-ffunction-sections`, the default:
     /// the driver links with `--gc-sections`); off, all code is in `.text`.
     pub function_sections: bool,
+    /// SSE registers may be used (`-mno-sse` / `-mno-sse2`: not — Linux's
+    /// kernel code, which does not preserve the user's FPU state). Off, sic
+    /// emits no SSE: small copies use integer moves, a variadic function does
+    /// not save the vector argument registers, and a floating-point or vector
+    /// value is an error, as with GCC.
+    pub sse: bool,
+    /// The x87 FPU may be used (`-mno-80387`: not); sic needs it only for
+    /// `long double`.
+    pub x87: bool,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true }
     }
 
     /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
@@ -61,6 +70,13 @@ impl CraneliftBackend {
     /// Position-independent code or not (see `pic`).
     pub fn with_pic(mut self, pic: bool) -> Self {
         self.pic = pic;
+        self
+    }
+
+    /// Whether SSE and the x87 FPU may be used (see `sse`, `x87`).
+    pub fn with_float(mut self, sse: bool, x87: bool) -> Self {
+        self.sse = sse;
+        self.x87 = x87;
         self
     }
 
@@ -230,6 +246,11 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
 
     // ── `long double` helpers (sic_ir::f80) ─────────────────────────────────
     // Defined as module-local machine code when the module uses `long double`.
+    // `long double` is computed with x87 helpers: not without the FPU.
+    if !cfg.x87 && module_uses_f80(ir_module) {
+        return Err(CraneliftError::Unsupported(
+            "`long double` needs the x87 FPU, which is disabled (-mno-80387)".to_string()));
+    }
     let f80_fns: Option<func::F80Fns> = if module_uses_f80(ir_module) {
         if !is_x86_64 {
             return Err(CraneliftError::Unsupported("`long double` is only supported on x86-64".into()));
@@ -412,15 +433,16 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     for (i, f) in ir_module.functions.iter().enumerate() {
         // Skip functions that were not declared (dead internal functions).
         let Some(&fid) = func_ids.get(&(i as u32)) else { continue };
-        ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
+        ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv, cfg.sse);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
         let ft = std::time::Instant::now();
         let mut var_dbg: Vec<func::VarDbg> = Vec::new();
         func::compile_function(
             f, ir_module, &mut obj_module, &func_ids, &global_ids, &mut ctx.func, ptr_size,
-            &mut var_dbg, f80_fns,
+            &mut var_dbg, f80_fns, cfg.sse,
         )?;
+        if !cfg.sse { check_no_float(&ctx.func, &f.name)?; }
         if dbg_timing {
             let e = ft.elapsed();
             if e.as_millis() > 100 { eprintln!("[timing] compile_function '{}': {:?}", f.name, e); }
@@ -694,6 +716,7 @@ pub fn build_cl_sig_def(
     sig: &sic_ir::FunctionType,
     ptr_size: u32,
     call_conv: CallConv,
+    sse: bool,
 ) -> cir::Signature {
     let mut cl_sig = build_cl_sig(sig, ptr_size, call_conv);
     if sig.variadic {
@@ -701,8 +724,12 @@ pub fn build_cl_sig_def(
         for _ in 0..(VA_GP_REGS - n_gp) {
             cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
         }
-        for _ in 0..(VA_FP_REGS - n_fp) {
-            cl_sig.params.push(cir::AbiParam::new(cir::types::F64));
+        // The vector argument registers only when SSE may be used (GCC with
+        // `-mno-sse` saves none either; no floating-point argument exists).
+        if sse {
+            for _ in 0..(VA_FP_REGS - n_fp) {
+                cl_sig.params.push(cir::AbiParam::new(cir::types::F64));
+            }
         }
         for _ in 0..VA_OVERFLOW_SLOTS {
             cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
@@ -721,4 +748,18 @@ fn colocate_symbols(func: &mut cir::Function) {
     for (_, gv) in func.global_values.iter_mut() {
         if let cir::GlobalValueData::Symbol { colocated, tls: false, .. } = gv { *colocated = true; }
     }
+}
+
+/// With SSE disabled (`-mno-sse`), a function must not compute with floating-
+/// point or vector values: x86-64 has only SSE registers for them (and the x87
+/// FPU for `long double`). As GCC, that is an error rather than SSE code in,
+/// say, kernel code that does not save the FPU state.
+fn check_no_float(func: &cir::Function, name: &str) -> Result<(), CraneliftError> {
+    let bad = func.dfg.values().any(|v| { let t = func.dfg.value_type(v); t.is_float() || t.is_vector() })
+        || func.signature.params.iter().chain(&func.signature.returns).any(|p| p.value_type.is_float() || p.value_type.is_vector());
+    if bad {
+        return Err(CraneliftError::Unsupported(format!(
+            "function '{}' uses floating-point or vector values, but SSE is disabled (-mno-sse)", name)));
+    }
+    Ok(())
 }

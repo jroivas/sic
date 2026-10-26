@@ -1226,6 +1226,7 @@ fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<
 fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Position-independent unless `-fno-PIE`/`-fno-pic` (the last such flag
     // wins) or the kernel code model, which is never PIC.
+    let (isa, _) = isa::Isa::from_flags(&args.machine_flags);
     let kernel_model = args.machine_flags.iter().any(|m| m == "-mcmodel=kernel");
     let pic = args.pic_flag.unwrap_or(true) && !kernel_model;
     let function_sections = !matches!(args.f_options.get("function-sections"), Some(FOption::Disabled));
@@ -1233,7 +1234,8 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
         .with_opt_level(opt_cranelift_level(&args.opt))
         .with_debug_info(args.debug_info)
         .with_pic(pic)
-        .with_function_sections(function_sections);
+        .with_function_sections(function_sections)
+        .with_float(isa.sse2(), isa.x87());
     backend.compile_module(ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }

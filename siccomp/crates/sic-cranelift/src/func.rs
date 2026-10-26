@@ -117,6 +117,7 @@ pub fn compile_function(
     ptr_size: u32,
     var_dbg: &mut Vec<VarDbg>,
     f80_fns: Option<F80Fns>,
+    sse: bool,
 ) -> Result<(), super::CraneliftError> {
     if f.blocks.is_empty() { return Ok(()); }
 
@@ -256,7 +257,8 @@ pub fn compile_function(
             let overflow = builder.ins().stack_addr(ptr_ty, ovf_slot, (named_stack % 16) as i32);
 
             let n_gp_fill = VA_GP_REGS - n_gp;
-            let n_fp_fill = VA_FP_REGS - n_fp;
+            // No vector argument registers without SSE (`build_cl_sig_def`).
+            let n_fp_fill = if sse { VA_FP_REGS - n_fp } else { 0 };
             // The over-declared va filler params follow the (possibly expanded)
             // named params, so start at the block-param cursor, not the IR count.
             let mut idx = bp;
@@ -281,7 +283,8 @@ pub fn compile_function(
             va_info = Some(VaInfo {
                 reg_save, overflow,
                 gp_start: (n_gp * 8) as u32,
-                fp_start: (48 + n_fp * 16) as u32,
+                // Without SSE every FP slot counts as used (176 = the end).
+                fp_start: if sse { (48 + n_fp * 16) as u32 } else { 176 },
             });
         }
     }
@@ -403,7 +406,7 @@ pub fn compile_function(
             emit_instr(
                 instr, &mut builder, &mut val_map, &callee_refs, &data_refs,
                 ptr_ty, target_config, ptr_size, va_info,
-                &mut slot_map, var_dbg, module_ir, &promoted, f80, &vty,
+                &mut slot_map, var_dbg, module_ir, &promoted, f80, &vty, sse,
             );
         }
         let f80_ret = if f.sig.ret == Type::Float80 { f80 } else { None };
@@ -457,6 +460,7 @@ fn emit_instr(
     promoted: &HashMap<u32, (Variable, cir::Type)>,
     f80: Option<F80Refs>,
     vty: &HashMap<u32, Type>,
+    sse: bool,
 ) {
     match instr {
         Instr::Alloca { dest, ty, align } => {
@@ -816,7 +820,7 @@ fn emit_instr(
             if *size <= SMALL_MEM_OP {
                 // Every load before the first store: correct for overlapping
                 // ranges too (memmove), and the loads can issue together.
-                let pieces = small_mem_pieces(*size);
+                let pieces = small_mem_pieces(*size, sse);
                 let vals: Vec<cir::Value> = pieces.iter()
                     .map(|&(off, t)| builder.ins().load(t, MemFlagsData::new(), sv, off))
                     .collect();
@@ -837,7 +841,7 @@ fn emit_instr(
                 // The byte repeated across a 64-bit word, narrowed per piece.
                 let wide = builder.ins().uextend(ct::I64, vb);
                 let word = builder.ins().imul_imm_u(wide, 0x0101_0101_0101_0101u64 as i64);
-                for (off, t) in small_mem_pieces(*size) {
+                for (off, t) in small_mem_pieces(*size, sse) {
                     let v = if t == ct::I8X16 { builder.ins().splat(ct::I8X16, vb) }
                             else if t == ct::I64 { word } else { builder.ins().ireduce(t, word) };
                     builder.ins().store(MemFlagsData::new(), v, dv, off);
@@ -1449,15 +1453,17 @@ fn emit_cast(
 /// and Clang do for small constant sizes.
 const SMALL_MEM_OP: u64 = 128;
 
-/// Split `size` bytes into (offset, type) pieces of 16 (a vector register), 8,
-/// 4, 2 and 1 bytes, largest first. The accesses carry no alignment promise.
+/// Split `size` bytes into (offset, type) pieces of 16 (a vector register; not
+/// without `sse`), 8, 4, 2 and 1 bytes, largest first. The accesses carry no
+/// alignment promise.
 /// Whole 16-byte pieces matter for SIMD data: a vector load of bytes that were
 /// just stored in 8-byte halves cannot be forwarded from the store buffer and
 /// stalls.
-fn small_mem_pieces(size: u64) -> Vec<(i32, cir::Type)> {
+fn small_mem_pieces(size: u64, sse: bool) -> Vec<(i32, cir::Type)> {
     let mut out = Vec::new();
     let mut off = 0u64;
     for (w, t) in [(16u64, ct::I8X16), (8, ct::I64), (4, ct::I32), (2, ct::I16), (1, ct::I8)] {
+        if w == 16 && !sse { continue; }
         while size - off >= w {
             out.push((off as i32, t));
             off += w;

@@ -39,8 +39,21 @@ impl Feature {
     const ALL: [Feature; 11] = [Sse3, Ssse3, Sse41, Sse42, Popcnt, Avx, Avx2, Fma, F16c, Aes, Pclmul];
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Isa { on: std::collections::BTreeSet<Feature> }
+/// The extensions in use, and the x86-64 baseline (MMX, SSE, SSE2, the x87
+/// FPU), which only an explicit `-mno-…` turns off — Linux builds its kernel
+/// with `-mno-sse -mno-mmx -mno-sse2 -mno-80387`.
+#[derive(Debug, Clone)]
+pub struct Isa {
+    on: std::collections::BTreeSet<Feature>,
+    mmx: bool,
+    sse: bool,
+    sse2: bool,
+    x87: bool,
+}
+
+impl Default for Isa {
+    fn default() -> Self { Isa { on: Default::default(), mmx: true, sse: true, sse2: true, x87: true } }
+}
 
 impl Isa {
     fn enable(&mut self, f: Feature) {
@@ -117,21 +130,42 @@ impl Isa {
                 Some(n) => (false, n),
                 None => match a.strip_prefix("-m") { Some(n) => (true, n), None => continue },
             };
+            // The baseline: `-mno-sse` turns off SSE2 too, `-msse2` on SSE.
+            match (name, on) {
+                ("mmx", v) => { isa.mmx = v; continue; }
+                ("sse", v) => { isa.sse = v; if !v { isa.sse2 = false; } continue; }
+                ("sse2", v) => { isa.sse2 = v; if v { isa.sse = true; } continue; }
+                ("80387", v) => { isa.x87 = v; continue; }
+                ("soft-float", true) => { isa.x87 = false; continue; }
+                _ => {}
+            }
             // `-msse4` is SSE4.2; `-mno-sse4` turns off SSE4.1 too.
             let name = match name { "sse4" if on => "sse4.2", "sse4" => "sse4.1", n => n };
             if let Some(f) = Feature::ALL.iter().copied().find(|f| f.flag() == name) {
-                if on { isa.enable(f) } else { isa.disable(f) }
+                if on { isa.enable(f); isa.sse = true; isa.sse2 = true; } else { isa.disable(f) }
             }
         }
+        // Every extension builds on SSE2.
+        if !isa.sse2 { isa.on.clear(); }
         (isa, warnings)
     }
+
+    /// SSE2 is available: the floating-point and vector registers sic's back
+    /// end uses (off for `-mno-sse` / `-mno-sse2`).
+    pub fn sse2(&self) -> bool { self.sse2 }
+
+    /// The x87 FPU is available (off for `-mno-80387` / `-msoft-float`).
+    pub fn x87(&self) -> bool { self.x87 }
 
     /// `-D` flags for the feature macros: the x86-64 baseline (MMX, SSE, SSE2)
     /// and the enabled extensions.
     pub fn defines(&self) -> Vec<String> {
-        let mut v: Vec<String> = ["__MMX__", "__SSE__", "__SSE2__", "__FXSR__", "__SSE_MATH__",
-                                  "__SSE2_MATH__", "__MMX_WITH_SSE__"]
-            .iter().map(|m| format!("-D{}=1", m)).collect();
+        let mut m = vec!["__FXSR__"];
+        if self.mmx { m.push("__MMX__"); }
+        if self.sse { m.extend(["__SSE__", "__SSE_MATH__"]); }
+        if self.sse2 { m.extend(["__SSE2__", "__SSE2_MATH__"]); }
+        if self.mmx && self.sse2 { m.push("__MMX_WITH_SSE__"); }
+        let mut v: Vec<String> = m.iter().map(|m| format!("-D{}=1", m)).collect();
         for f in &self.on { v.push(format!("-D{}=1", f.macro_name())); }
         v
     }
@@ -159,5 +193,20 @@ mod tests {
         assert!(m.contains(&"-D__AVX2__=1".to_string()) && !m.contains(&"-D__FMA__=1".to_string()));
         let m = macros(&["-march=haswell", "-march=x86-64"]);
         assert!(!m.iter().any(|d| d.contains("SSE3")));
+    }
+
+    #[test]
+    fn baseline_off() {
+        // Linux's kernel flags: no SSE/MMX macros, and no extension survives.
+        let f: Vec<String> = ["-mno-sse", "-mno-mmx", "-mno-sse2", "-mno-avx", "-march=x86-64", "-mavx2", "-mno-sse"]
+            .iter().map(|s| s.to_string()).collect();
+        let (isa, _) = Isa::from_flags(&f);
+        let m = isa.defines();
+        assert!(!isa.sse2() && isa.x87());
+        assert!(!m.iter().any(|d| d.contains("SSE") || d.contains("MMX") || d.contains("AVX")), "{:?}", m);
+        let (isa, _) = Isa::from_flags(&["-mno-80387".to_string()]);
+        assert!(!isa.x87() && isa.sse2());
+        let m = macros(&["-mno-sse2", "-msse"]);
+        assert!(m.contains(&"-D__SSE__=1".to_string()) && !m.contains(&"-D__SSE2__=1".to_string()));
     }
 }
