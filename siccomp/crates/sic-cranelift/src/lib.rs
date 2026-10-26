@@ -2,6 +2,7 @@ mod types;
 mod func;
 mod simd;
 mod dwarf;
+mod wide_consts;
 pub mod abi;
 
 use std::collections::HashMap;
@@ -30,11 +31,19 @@ pub struct CraneliftBackend {
     pub opt_level: String,
     /// Emit DWARF debug info (line table + compile unit) when set (`-g`).
     pub debug_info: bool,
+    /// Position-independent code (the default). Off (`-fno-PIE`, Linux's
+    /// `-mcmodel=kernel`): every symbol is assumed within ±2 GB, as GCC's
+    /// small/kernel code models do — direct `call`s and RIP-relative data
+    /// references, no GOT — and code holds no data (see `wide_consts`).
+    pub pic: bool,
+    /// Each function in its own section (`-ffunction-sections`, the default:
+    /// the driver links with `--gc-sections`); off, all code is in `.text`.
+    pub function_sections: bool,
 }
 
 impl CraneliftBackend {
     pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false }
+        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true }
     }
 
     /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
@@ -48,13 +57,25 @@ impl CraneliftBackend {
         self.debug_info = debug_info;
         self
     }
+
+    /// Position-independent code or not (see `pic`).
+    pub fn with_pic(mut self, pic: bool) -> Self {
+        self.pic = pic;
+        self
+    }
+
+    /// One section per function or all in `.text` (see `function_sections`).
+    pub fn with_function_sections(mut self, on: bool) -> Self {
+        self.function_sections = on;
+        self
+    }
 }
 
 impl Backend for CraneliftBackend {
     type Error = CraneliftError;
 
     fn compile_module(&mut self, module: &sic_ir::Module) -> Result<Vec<u8>, CraneliftError> {
-        compile(module, self.ptr_size, &self.opt_level, self.debug_info)
+        compile(module, self)
     }
 }
 
@@ -70,12 +91,18 @@ fn ir_linkage(l: Linkage) -> CLinkage {
     }
 }
 
-fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_info: bool) -> Result<Vec<u8>, CraneliftError> {
+fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>, CraneliftError> {
+    let (ptr_size, opt_level, debug_info) = (cfg.ptr_size, cfg.opt_level.as_str(), cfg.debug_info);
     // Build settings
     let mut flag_builder = settings::builder();
-    flag_builder.set("use_colocated_libcalls", "false").unwrap();
-    flag_builder.set("is_pic", "true").unwrap();
-    flag_builder.set("opt_level", opt_level).unwrap();
+    let pic = if cfg.pic { "true" } else { "false" };
+    flag_builder.set("use_colocated_libcalls", if cfg.pic { "false" } else { "true" }).unwrap();
+    flag_builder.set("is_pic", pic).unwrap();
+    // The module's ISA lowers with `opt_level = none`: Cranelift's optimizer
+    // runs first, by hand, with the requested level (`opt_isa`), so that the
+    // wide constants it leaves are moved to read-only data before lowering
+    // (`wide_consts`); `opt_level` affects nothing but that optimizer pass.
+    flag_builder.set("opt_level", "none").unwrap();
     // Allow `i128` in function signatures (args/returns) — the SysV ABI passes a
     // 128-bit integer in a register pair. Needed for C `__int128` (QEMU's Int128).
     flag_builder.set("enable_llvm_abi_extensions", "true").unwrap();
@@ -87,13 +114,21 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // (`__builtin_return_address(0)` / QEMU's GETPC()) requires it.
     let _ = debug_info;
     flag_builder.set("preserve_frame_pointers", "true").unwrap();
-    let flags = settings::Flags::new(flag_builder);
+    let flags = settings::Flags::new(flag_builder.clone());
 
     // Native ISA
     let isa = cranelift_native::builder()
         .map_err(|e| CraneliftError::Unsupported(e.to_string()))?
         .finish(flags)
         .map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
+    let opt_isa = if opt_level == "none" { None } else {
+        flag_builder.set("opt_level", opt_level).unwrap();
+        Some(cranelift_native::builder()
+            .map_err(|e| CraneliftError::Unsupported(e.to_string()))?
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| CraneliftError::Unsupported(e.to_string()))?)
+    };
+    let mut wide_consts: HashMap<i64, cranelift_module::DataId> = HashMap::new();
 
     let mut obj_builder = ObjectBuilder::new(
         isa,
@@ -107,7 +142,7 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
     // bundles `msi_enabled` (needed) with `hmp_pcie_aer_inject_error` (calls the
     // unavailable `monitor_printf`); without per-function GC the whole object,
     // and thus the dangling reference, is retained and the link fails.
-    obj_builder.per_function_section(true);
+    obj_builder.per_function_section(cfg.function_sections);
 
     let mut obj_module = ObjectModule::new(obj_builder);
 
@@ -392,6 +427,16 @@ fn compile(ir_module: &sic_ir::Module, ptr_size: u32, opt_level: &str, debug_inf
         }
 
         let dt = std::time::Instant::now();
+        if let Some(oi) = &opt_isa {
+            ctx.optimize(&**oi, &mut cranelift_codegen::control::ControlPlane::default())
+                .map_err(CraneliftError::Codegen)?;
+        }
+        if !cfg.pic {
+            // Non-PIC: every symbol is near (direct calls, RIP-relative data),
+            // and wide constants live in read-only data, not in the code.
+            colocate_symbols(&mut ctx.func);
+            wide_consts::wide_constants_to_rodata(&mut ctx.func, &mut obj_module, &mut wide_consts)?;
+        }
         let define_res = obj_module.define_function(fid, &mut ctx);
         if dbg_timing {
             let e = dt.elapsed();
@@ -664,4 +709,16 @@ pub fn build_cl_sig_def(
         }
     }
     cl_sig
+}
+
+/// Non-PIC code (`-fno-PIE`, `-mcmodel=kernel`): every function and data symbol
+/// is within ±2 GB, so calls are direct `call rel32` and data is addressed
+/// RIP-relative — as GCC's small and kernel code models assume. (Cranelift
+/// otherwise reaches an imported symbol through `movabs` and an indirect call.)
+/// A thread-local symbol keeps its TLS access.
+fn colocate_symbols(func: &mut cir::Function) {
+    for (_, ef) in func.dfg.ext_funcs.iter_mut() { ef.colocated = true; }
+    for (_, gv) in func.global_values.iter_mut() {
+        if let cir::GlobalValueData::Symbol { colocated, tls: false, .. } = gv { *colocated = true; }
+    }
 }

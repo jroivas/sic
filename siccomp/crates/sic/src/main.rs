@@ -171,6 +171,11 @@ struct Args {
     #[arg(skip)]
     machine_flags: Vec<String>,
 
+    /// The last of `-f{pic,PIC,pie,PIE}` / `-fno-…` (GCC: the last one wins):
+    /// `Some(false)` for `-fno-PIE` (Linux's kernel build).
+    #[arg(skip)]
+    pic_flag: Option<bool>,
+
     /// `-shared`: produce a shared object (`.so`) instead of an executable.
     /// Passed through to the linker; implies position-independent code.
     #[arg(skip)]
@@ -415,6 +420,7 @@ fn main() {
     let mut deps_only = false;
     let mut pthread = false;
     let mut machine_flags: Vec<String> = Vec::new();
+    let mut pic_flag: Option<bool> = None;
     let mut shared = false;
     let mut static_link = false;
     let mut pie: Option<bool> = None;
@@ -547,6 +553,9 @@ fn main() {
             // GCC/Clang `-f<name>[=<value>]` options: parse and store. Accepted
             // for compatibility; acted upon only where sic implements them.
             if let Some((name, value)) = parse_f_option(&a) {
+                if matches!(name.as_str(), "pic" | "PIC" | "pie" | "PIE") {
+                    pic_flag = Some(!matches!(value, FOption::Disabled));
+                }
                 f_options.insert(name, value);
             }
         } else if a.starts_with("--target=") || a == "-target" || a == "--target" {
@@ -638,6 +647,7 @@ fn main() {
     args.link_order = link_order;
     args.pthread = pthread;
     args.machine_flags = machine_flags;
+    args.pic_flag = pic_flag;
     args.shared = shared;
     args.static_link = static_link;
     args.pie = pie;
@@ -1214,9 +1224,16 @@ fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<
 
 /// The backend's object for `ir_module`, without the text inline-asm helpers.
 fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Position-independent unless `-fno-PIE`/`-fno-pic` (the last such flag
+    // wins) or the kernel code model, which is never PIC.
+    let kernel_model = args.machine_flags.iter().any(|m| m == "-mcmodel=kernel");
+    let pic = args.pic_flag.unwrap_or(true) && !kernel_model;
+    let function_sections = !matches!(args.f_options.get("function-sections"), Some(FOption::Disabled));
     let mut backend = CraneliftBackend::new()
         .with_opt_level(opt_cranelift_level(&args.opt))
-        .with_debug_info(args.debug_info);
+        .with_debug_info(args.debug_info)
+        .with_pic(pic)
+        .with_function_sections(function_sections);
     backend.compile_module(ir_module)
         .map_err(|e| format!("codegen error: {}", e).into())
 }
