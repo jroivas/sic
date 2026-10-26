@@ -30,6 +30,11 @@ pub struct Lowerer {
     pub global_qtypes: HashMap<String, QualType>,
     /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
     pub atomic_globals: std::collections::HashSet<String>,
+    /// Register variables named after a register: (variable → register).
+    pub reg_vars: HashMap<String, String>,
+    /// Global register variables (file scope): variable → (type, register).
+    /// No storage; a read is the register's value (see `read_global_reg`).
+    pub global_reg_vars: HashMap<String, (Type, String)>,
     /// Value of each foldable `const` integer global, by global index (see
     /// `lower_global_var`): an rvalue read becomes an immediate.
     pub const_global_vals: HashMap<u32, i64>,
@@ -325,6 +330,8 @@ impl Lowerer {
             globals_map: HashMap::new(),
             global_qtypes: HashMap::new(),
             atomic_globals: std::collections::HashSet::new(),
+            reg_vars: HashMap::new(),
+            global_reg_vars: HashMap::new(),
             const_global_vals: HashMap::new(),
             atomic_fields: std::collections::HashSet::new(),
             enum_consts: HashMap::new(),
@@ -466,6 +473,8 @@ impl Lowerer {
 
     pub fn lower(mut self, tu: &TranslationUnit) -> Result<Module> {
         self.strict_files = tu.strict_files.iter().cloned().collect();
+        // Before any pass declares globals: a global register variable is none.
+        self.reg_vars.extend(tu.reg_vars.iter().cloned());
         types::clear_typedefs();
         types::clear_global_vars();
         let dbg = std::env::var("SIC_TIMING").is_ok();
@@ -638,6 +647,11 @@ impl Lowerer {
         }
         for name in &tu.always_inline {
             for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.always_inline = true; }
+        }
+        // `noinline` (sic ignored it): the kernel keeps such a function's own
+        // frame and return address (`rest_init`, stack-depth checks).
+        for name in &tu.noinline {
+            for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.noinline = true; }
         }
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
@@ -3263,6 +3277,16 @@ impl Lowerer {
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
+        // A global register variable (`register T x asm("rsp")`, GNU C) is the
+        // register itself: no storage. sic emitted it as data, which every
+        // object defined (Linux's vDSO: "multiple definition of
+        // current_stack_pointer").
+        // (`reg_vars` holds only `register`-class declarations.)
+        if let Some(reg) = self.reg_vars.get(&d.name).cloned() {
+            let ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
+            self.global_reg_vars.insert(d.name.clone(), (ty, reg));
+            return Ok(());
+        }
         self.note_data_section(&d.name, d);
         self.global_qtypes.insert(d.name.clone(), d.ty.clone());
         // sic strict mode (sic.md §"Strict mode"): a strict file's globals are

@@ -46,10 +46,17 @@ pub struct Parser {
     pending_constructor: Option<sic_ir::RunAt>,
     /// `__attribute__((always_inline))` seen for the current declaration.
     pending_always_inline: bool,
+    /// `__attribute__((noinline))` seen for the current declaration.
+    pending_noinline: bool,
+    noinline: Vec<String>,
     /// `__attribute__((used))` / `section("…")` seen for the current declaration.
     pending_used: bool,
     pending_section: Option<String>,
     used_fns: Vec<String>,
+    /// The `asm("name")` label after the last declarator (see `skip_decl_tail`).
+    pending_asm_label: Option<String>,
+    /// Register variables with a register name (see `TranslationUnit::reg_vars`).
+    reg_vars: Vec<(String, String)>,
     fn_sections: Vec<(String, String)>,
     /// The functions so declared.
     always_inline: Vec<String>,
@@ -159,7 +166,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -313,7 +320,9 @@ impl Parser {
         }
         Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
             strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline),
-            used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections) })
+            noinline: std::mem::take(&mut self.noinline),
+            used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
+            reg_vars: std::mem::take(&mut self.reg_vars) })
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -341,6 +350,7 @@ impl Parser {
         // `__attribute__((constructor))` (captured by `skip_attributes`).
         self.pending_constructor = None;
         self.pending_always_inline = false;
+        self.pending_noinline = false;
         self.pending_used = false;
         self.pending_section = None;
         self.pending_weak = false;
@@ -496,6 +506,7 @@ impl Parser {
             if std::mem::take(&mut self.pending_always_inline) {
                 self.always_inline.push(name.clone());
             }
+            if std::mem::take(&mut self.pending_noinline) { self.noinline.push(name.clone()); }
             if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
 
@@ -554,7 +565,11 @@ impl Parser {
         // Trailing `__asm__("name")` rename and/or `__attribute__((...))`
         // (including `vector_size`) before the initializer.
         let mut ty = ty;
+        self.pending_asm_label = None;
         self.skip_decl_tail();
+        if let (Some(StorageClass::Register), Some(reg)) = (&storage, self.pending_asm_label.take()) {
+            self.reg_vars.push((name.clone(), reg.trim_start_matches('%').to_string()));
+        }
         if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
         let init = if self.eat(TokenKind::Eq) {
             Some(self.parse_initializer()?)
@@ -2827,7 +2842,11 @@ impl Parser {
             let (name, mut ty) = self.parse_declarator(base_ty.clone())?;
             // Trailing `__asm__`/`__attribute__` before the initializer, e.g.
             // glib g_autoptr / QEMU RCU_READ_LOCK_GUARD cleanup locals.
+            self.pending_asm_label = None;
             self.skip_decl_tail();
+            if let (Some(StorageClass::Register), Some(reg)) = (&storage, self.pending_asm_label.take()) {
+                self.reg_vars.push((name.clone(), reg.trim_start_matches('%').to_string()));
+            }
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
             let cleanup = self.pending_cleanup.take()
                 .or_else(|| if first { spec_cleanup.clone() } else { None });
@@ -3823,7 +3842,14 @@ impl Parser {
                 }
             } else if self.at(TokenKind::Asm) {
                 self.advance();
-                if self.at(TokenKind::LParen) { self.skip_balanced_parens(); }
+                if self.at(TokenKind::LParen) {
+                    // `asm("name")`: a symbol rename, or a register variable's register.
+                    if matches!(self.tokens.get(self.pos + 1).map(|t| t.kind), Some(TokenKind::StringLit))
+                        && matches!(self.tokens.get(self.pos + 2).map(|t| t.kind), Some(TokenKind::RParen)) {
+                        self.pending_asm_label = Some(self.tokens[self.pos + 1].text.clone());
+                    }
+                    self.skip_balanced_parens();
+                }
             } else {
                 break;
             }
@@ -3938,6 +3964,8 @@ impl Parser {
                         self.pending_weak = true;
                     } else if name == "always_inline" || name == "__always_inline__" {
                         self.pending_always_inline = true;
+                    } else if name == "noinline" || name == "__noinline__" {
+                        self.pending_noinline = true;
                     } else if name == "constructor" || name == "__constructor__" {
                         // Optional priority: `constructor(101)`. Default 65535
                         // (GCC's default, run after all prioritized constructors).

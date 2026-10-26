@@ -101,6 +101,12 @@ impl<'m> FuncCtx<'m> {
                 "inline assembly is not supported in SIC (only in C sources)".to_string(),
                 sp.file.clone(), sp.line, sp.col));
         }
+        // An operand naming a global register variable (Linux's
+        // ASM_CALL_CONSTRAINT, `"+r"(current_stack_pointer)`, only tells the
+        // compiler the asm uses the stack) becomes a temporary holding the
+        // register's value; what the asm leaves in it is not written back.
+        let substituted = self.substitute_reg_var_operands(a)?;
+        let a = substituted.as_ref().unwrap_or(a);
         if !a.goto && self.try_lower_asm(a)? {
             return Ok(());
         }
@@ -116,6 +122,48 @@ impl<'m> FuncCtx<'m> {
             a.template.escape_debug()));
         self.call_asm_helper("trap", &[], vec![], Type::Void)?;
         Ok(())
+    }
+
+    /// The global register variable `name` refers to, unless a local shadows
+    /// it: (its type, the register).
+    pub(crate) fn global_reg_var(&self, name: &str) -> Option<(Type, String)> {
+        if matches!(self.lookup(name), Some(LookupResult::Local(..))) { return None; }
+        self.lowerer.global_reg_vars.get(name).cloned()
+    }
+
+    /// A read of a global register variable: the register's value. Only the
+    /// stack pointer is supported (the caller's `%rsp`, by a helper); any other
+    /// register holds whatever the surrounding code left there.
+    pub(crate) fn read_global_reg(&mut self, name: &str, sp: &crate::lexer::Span) -> Result<Option<Val>> {
+        let Some((ty, reg)) = self.global_reg_var(name) else { return Ok(None) };
+        if reg != "rsp" && reg != "esp" && reg != "sp" {
+            return Err(crate::CompileError::at(
+                format!("global register variable `{}` in `{}` is not supported (only the stack pointer)", name, reg),
+                sp.file.clone(), sp.line, sp.col));
+        }
+        let v = self.call_asm_helper("rsp", &[], vec![], Type::u64())?;
+        Ok(Some(self.coerce(v, &ty)?))
+    }
+
+    /// `a` with each operand that names a global register variable replaced by
+    /// a fresh local holding the register's value (None: no such operand).
+    fn substitute_reg_var_operands(&mut self, a: &AsmStmt) -> Result<Option<AsmStmt>> {
+        let names = |ops: &[AsmOperand]| ops.iter().any(|o| matches!(&o.expr.kind, ExprKind::Ident(n) if self.global_reg_var(n).is_some()));
+        if !names(&a.outputs) && !names(&a.inputs) { return Ok(None); }
+        let mut out = a.clone();
+        for (k, op) in out.outputs.iter_mut().chain(out.inputs.iter_mut()).enumerate() {
+            let ExprKind::Ident(n) = &op.expr.kind else { continue };
+            let Some((ty, _)) = self.global_reg_var(n) else { continue };
+            let n = n.clone();
+            let v = self.read_global_reg(&n, &op.expr.span)?.unwrap();
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: ty.clone(), align: None });
+            self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+            let tmp = format!("__sic_regvar_{}_{}", n, k);
+            self.define_local(tmp.clone(), ty, slot);
+            op.expr = Expr::new(ExprKind::Ident(tmp), op.expr.span.clone());
+        }
+        Ok(Some(out))
     }
 
     /// A template with no outputs whose inputs are all constants (`"i"`/`"n"`):

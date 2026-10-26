@@ -144,6 +144,15 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_lvalue(&mut self, expr: &Expr) -> Result<LValue> {
+        // A global register variable has no storage; only asm operands name it.
+        if let ExprKind::Ident(n) = &expr.kind {
+            if self.global_reg_var(n).is_some() {
+                let sp = &expr.span;
+                return Err(crate::CompileError::at(
+                    format!("global register variable `{}` cannot be assigned or have its address taken", n),
+                    sp.file.clone(), sp.line, sp.col));
+            }
+        }
         match &expr.kind {
             // sic (sic.md §"Namespace"): `N::member` as an lvalue is the member's
             // mangled global.

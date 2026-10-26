@@ -556,6 +556,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Nullptr => Ok(Constant::null()),
 
             ExprKind::Ident(name) => {
+                if let Some(v) = self.read_global_reg(name, &expr.span)? { return Ok(v); }
                 let atomic = self.is_atomic_name(name);
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, vid)) => {

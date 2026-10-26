@@ -740,11 +740,17 @@ pub struct TranslationUnit {
     /// Functions declared `__attribute__((always_inline))` (GCC's intrinsics):
     /// inlined at every call when optimizing.
     pub always_inline: Vec<String>,
+    /// Functions declared `__attribute__((noinline))`: never inlined.
+    pub noinline: Vec<String>,
     /// Functions declared `__attribute__((used))`: emitted even if nothing in
     /// the C code calls them (asm or a linker script may).
     pub used_fns: Vec<String>,
     /// Functions with `__attribute__((section("name")))`: (function, section).
     pub fn_sections: Vec<(String, String)>,
+    /// Register variables named after a register (`register T x asm("rsp")`):
+    /// (variable, register). At file scope one is a global register variable —
+    /// the register itself, with no storage (Linux's `current_stack_pointer`).
+    pub reg_vars: Vec<(String, String)>,
 }
 
 // ─── Reachability helpers (jump targets inside statements) ────────────────────

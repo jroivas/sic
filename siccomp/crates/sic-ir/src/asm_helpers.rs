@@ -11,6 +11,8 @@
 //!          mov %edx,12(%r8); pop %rbx; ret                        void (u32 leaf, u32 sub, u32 out[4])
 //! xgetbv:  mov %edi,%ecx; xgetbv; shl $32,%rdx; or %rdx,%rax; ret  u64 (u32)
 //! pause:   pause; ret        barrier: ret
+//! rsp:     lea 8(%rsp),%rax; ret   — the caller's stack pointer (a global
+//!          register variable `asm("rsp")`, Linux's current_stack_pointer)  u64 ()
 //! mfence/lfence/sfence: <fence>; ret
 //! divq:    mov %rdx,%r8; mov %rdi,%rax; mov %rsi,%rdx; div %r8;
 //!          mov %rdx,(%rcx); ret                                    u64 (u64 lo, u64 hi, u64 d, u64 *rem)
@@ -32,6 +34,7 @@ pub fn asm_helper_code(name: &str) -> Option<&'static [u8]> {
         "cpuid" => &[0x53, 0x89, 0xf8, 0x89, 0xf1, 0x49, 0x89, 0xd0, 0x0f, 0xa2, 0x41, 0x89, 0x00, 0x41, 0x89, 0x58, 0x04, 0x41, 0x89, 0x48, 0x08, 0x41, 0x89, 0x50, 0x0c, 0x5b, 0xc3],
         "xgetbv" => &[0x89, 0xf9, 0x0f, 0x01, 0xd0, 0x48, 0xc1, 0xe2, 0x20, 0x48, 0x09, 0xd0, 0xc3],
         "pause" => &[0xf3, 0x90, 0xc3],
+        "rsp" => &[0x48, 0x8d, 0x44, 0x24, 0x08, 0xc3],
         "barrier" => &[0xc3],
         "mfence" => &[0x0f, 0xae, 0xf0, 0xc3],
         "lfence" => &[0x0f, 0xae, 0xe8, 0xc3],
