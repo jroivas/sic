@@ -293,9 +293,62 @@ fn substitute(body: &str, vals: &[Imm], uid: &str) -> Option<String> {
     Some(out)
 }
 
-/// Specialize every deferred helper call in the functions that are emitted.
+/// Fold each branch whose condition is a constant (after the IR passes, as
+/// resolved here) into a jump: Linux's `switch (sizeof(*ptr)) { case 1: asm
+/// ("cmpxchgb …") … }` must not reach the assembler through its dead arms,
+/// whose operands do not fit (GCC and Clang drop them before emitting asm).
+fn fold_constant_branches(m: &mut Module) {
+    for fi in 0..m.functions.len() {
+        let mut folds: Vec<(usize, BlockId)> = Vec::new();
+        {
+            let f = &m.functions[fi];
+            let mut r = Resolver::new(m, f);
+            for (bi, b) in f.blocks.iter().enumerate() {
+                match &b.terminator {
+                    Terminator::CondJump { cond, then_bb, else_bb } => {
+                        if let Some(Imm::Int(c)) = r.resolve(cond, 0) {
+                            folds.push((bi, if c != 0 { *then_bb } else { *else_bb }));
+                        }
+                    }
+                    Terminator::Switch { val, default, arms } => {
+                        if let Some(Imm::Int(v)) = r.resolve(val, 0) {
+                            let to = arms.iter().find(|(k, _)| *k == v).map_or(*default, |(_, b)| *b);
+                            folds.push((bi, to));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (bi, to) in folds { m.functions[fi].blocks[bi].terminator = Terminator::Jump(to); }
+    }
+}
+
+/// Indices of the blocks reachable from the function's entry (its first block).
+fn reachable_blocks(f: &Function) -> HashSet<usize> {
+    let index: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    let mut seen = HashSet::new();
+    let mut work = if f.blocks.is_empty() { vec![] } else { vec![0usize] };
+    while let Some(i) = work.pop() {
+        if !seen.insert(i) { continue; }
+        let succ: Vec<BlockId> = match &f.blocks[i].terminator {
+            Terminator::Jump(b) => vec![*b],
+            Terminator::CondJump { then_bb, else_bb, .. } => vec![*then_bb, *else_bb],
+            Terminator::Switch { default, arms, .. } => std::iter::once(*default).chain(arms.iter().map(|(_, b)| *b)).collect(),
+            _ => vec![],
+        };
+        work.extend(succ.into_iter().filter_map(|b| index.get(&b).copied()));
+    }
+    seen
+}
+
+/// Finish the inline-assembly helpers after the IR passes: fold constant
+/// branches, specialize every deferred helper call in reachable code of the
+/// functions that are emitted, and keep only the helpers such code still
+/// calls (a helper of dead code may not even assemble).
 pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
-    if m.asm_deferred.is_empty() { return Ok(()); }
+    if m.asm_text_helpers.is_empty() { return Ok(()); }
+    fold_constant_branches(m);
     let deferred: HashMap<String, AsmDeferred> = m.asm_deferred.iter().map(|d| (d.helper.clone(), d.clone())).collect();
     let bodies: HashMap<String, String> = m.asm_text_helpers.iter()
         .filter(|(n, _)| deferred.contains_key(n)).cloned().collect();
@@ -304,11 +357,18 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
     // (function, block, instruction, specialized helper, its params)
     let mut rewrites: Vec<(usize, usize, usize, String, Vec<Type>, Type)> = Vec::new();
     let mut used_fns: Vec<String> = Vec::new();
+    // Helpers that live (emitted, reachable) code calls.
+    let mut called: HashSet<String> = HashSet::new();
     for (fi, f) in m.functions.iter().enumerate() {
         if f.linkage == Linkage::Internal && !reachable.contains(&(fi as u32)) { continue; }
+        let live = reachable_blocks(f);
         let mut r = Resolver::new(m, f);
         for (bi, b) in f.blocks.iter().enumerate() {
+            if !live.contains(&bi) { continue; }
             for (ii, ins) in b.instrs.iter().enumerate() {
+                if let Instr::Call { func, .. } = ins {
+                    if func.is_extern() { called.insert(m.externs[func.index()].name.clone()); }
+                }
                 let Instr::Call { func, args, .. } = ins else { continue };
                 if !func.is_extern() { continue; }
                 let ext = &m.externs[func.index()];
@@ -333,6 +393,7 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
                 let body = substitute(&bodies[&ext.name], &vals, &format!("{}", hv % 1_000_000_000_000)).ok_or_else(err)?;
                 let name = format!("{}_{:016x}", ext.name, hv);
                 if !new_helpers.iter().any(|(n, _)| *n == name) { new_helpers.push((name.clone(), body)); }
+                called.insert(name.clone());
                 rewrites.push((fi, bi, ii, name, ext.sig.params[..d.first_imm].to_vec(), ext.sig.ret.clone()));
             }
         }
@@ -351,6 +412,7 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
     let gone: HashSet<String> = deferred.keys().cloned().collect();
     m.asm_text_helpers.retain(|(n, _)| !gone.contains(n));
     m.asm_text_helpers.extend(new_helpers);
+    m.asm_text_helpers.retain(|(n, _)| called.contains(n));
     for n in used_fns { if !m.used_functions.contains(&n) { m.used_functions.push(n); } }
     m.asm_deferred.clear();
     Ok(())
