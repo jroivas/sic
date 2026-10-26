@@ -695,6 +695,14 @@ fn resolve_linker() -> String {
     if resolves_to_self(&choice) { "cc".to_string() } else { choice }
 }
 
+/// The C compiler driver that assembles `.s` / `.S` files and the inline-asm
+/// helpers: `$SIC_CC`, else `cc`. Never `$LD` — a build system's `LD=ld` (Linux's
+/// Kbuild) would read the assembler source as a linker script.
+fn resolve_assembler() -> String {
+    let choice = std::env::var("SIC_CC").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "cc".to_string());
+    if resolves_to_self(&choice) { "cc".to_string() } else { choice }
+}
+
 /// True if `prog` names this very executable — by file stem (`sic`) or by
 /// resolving to the same canonical path as the running binary.
 fn resolves_to_self(prog: &str) -> bool {
@@ -844,7 +852,7 @@ fn is_assembly(path: &str) -> bool {
 /// (which preprocesses `.S` and runs the assembler), forwarding the include and
 /// define flags an `.S` file may rely on.
 fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let cc = resolve_linker();
+    let cc = resolve_assembler();
     let mut cmd = Command::new(&cc);
     cmd.arg("-c").arg(src).arg("-o").arg(obj);
     for d in &args.defines { cmd.arg(format!("-D{}", d)); }
@@ -1224,7 +1232,7 @@ fn merge_asm_helpers(obj: &[u8], helpers: &[(String, String)], src: &str) -> Res
     let asm_s = dir.path().join("unit.s");
     let out_o = dir.path().join("unit.o");
     fs::write(&asm_s, asm_out::object_to_asm(obj, helpers, src)?)?;
-    let cc = resolve_linker();
+    let cc = resolve_assembler();
     let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&out_o).status()
         .map_err(|e| format!("inline assembly: cannot run the assembler ({}): {}", cc, e))?;
     if !st.success() { return Err(format!("inline assembly: the assembler ({}) failed", cc).into()); }

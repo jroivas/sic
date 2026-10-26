@@ -89,6 +89,9 @@ dotest() {
 
     local flags=""
     [ -f "$test.flags" ] && flags=$(cat "$test.flags")
+    # `.env`: VAR=value words set for the compile (a build system's `LD=ld`).
+    local envs=""
+    [ -f "$test.env" ] && envs=$(cat "$test.env")
 
     local bin_file="$outfolder/$base.bin"
     local obj_file="$outfolder/$base.o"
@@ -98,7 +101,7 @@ dotest() {
     # reserved Rust-style type alias as an identifier). A non-empty marker's
     # first line is the expected diagnostic: it must appear in sic's output.
     if [ -f "$test.xfail" ]; then
-        if "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
+        if env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
             echo "FAIL $base: expected compile failure but it compiled"
             return 1
         fi
@@ -113,7 +116,7 @@ dotest() {
         return 0
     fi
 
-    if ! "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
+    if ! env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
         echo "FAIL $base: compile error"
         cat /tmp/sic_err_$base
         return 1
