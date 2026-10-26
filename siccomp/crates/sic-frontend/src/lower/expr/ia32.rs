@@ -864,9 +864,18 @@ impl FuncCtx<'_> {
                 let (c, _) = self.vec_arg(&args[2])?;
                 let t = v128(l.clone());
                 let lb = l.size_of(8) as usize;
+                // Negating an operand keeps a NaN as it is: x86's FMA returns a
+                // NaN operand unchanged (quieted), and the plain negation flipped
+                // its sign — Cranelift folds it into `vfmsub` & co. with FMA,
+                // but without FMA (the x86-64 baseline) it computes it.
+                let neg = |me: &mut Self, v: &Val| {
+                    let n = me.sv(SimdOp::FNeg, vec![v.clone()], t.clone(), t.clone());
+                    let nan = me.sv(SimdOp::FCmp(sic_ir::FCmp::Uno), vec![v.clone(), v.clone()], t.clone(), t.clone());
+                    me.sv(SimdOp::Select, vec![nan, v.clone(), n], t.clone(), t.clone())
+                };
                 let r: Vec<Val> = a.iter().zip(&b).zip(&c).map(|((x, y), z)| {
-                    let x2 = if neg_ab { self.sv(SimdOp::FNeg, vec![x.clone()], t.clone(), t.clone()) } else { x.clone() };
-                    let zn = self.sv(SimdOp::FNeg, vec![z.clone()], t.clone(), t.clone());
+                    let x2 = if neg_ab { neg(self, x) } else { x.clone() };
+                    let zn = neg(self, z);
                     let plus = self.sv(SimdOp::Fma, vec![x2.clone(), y.clone(), z.clone()], t.clone(), t.clone());
                     let minus = self.sv(SimdOp::Fma, vec![x2, y.clone(), zn], t.clone(), t.clone());
                     match alt {
