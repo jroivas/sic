@@ -742,6 +742,9 @@ fn print_operands(template: &str, ops: &[OpInfo], names: &[Option<String>], labe
         }
         match (&op.loc, modifier) {
             (OpLoc::Reg(r), Some('V')) => out.push_str(&reg_name(*r, op.size, None)?),
+            // `%a` on a register: the address it holds (Linux's vDSO futex
+            // unlock: `cmpxchgl %k[zero], %a[lock]` with [lock] "D").
+            (OpLoc::Reg(r), Some('a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
             (OpLoc::Reg(r), m @ (None | Some('b' | 'h' | 'w' | 'k' | 'q'))) => { out.push('%'); out.push_str(&reg_name(*r, op.size, m)?); }
             (OpLoc::Mem(r), None | Some('b' | 'h' | 'w' | 'k' | 'q' | 'a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
             (OpLoc::Imm(v), m) => out.push_str(&v.print(m)?),
