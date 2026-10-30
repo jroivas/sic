@@ -5,6 +5,19 @@ use super::super::func::{FuncCtx, LookupResult};
 use super::*;
 
 impl<'m> FuncCtx<'m> {
+    /// The type of a C23 `auto` / GNU `__auto_type` variable: its initializer's
+    /// after the usual decay, so an array/function initializer gives a pointer.
+    pub fn infer_auto_type(&self, init: &Expr) -> Result<Type> {
+        let it = self.infer_expr_type(init)?;
+        Ok(match it {
+            Type::Array { elem, .. } => Type::Pointer(elem),
+            Type::Function(_) => Type::Pointer(Box::new(it)),
+            // An inferred aggregate may be the opaque (name-only) form; bind the
+            // full layout so `x.field` resolves.
+            other => super::super::types::resolve_aggregate(&other, &self.lowerer.struct_types),
+        })
+    }
+
     pub fn infer_expr_type(&self, expr: &Expr) -> Result<Type> {
         match &expr.kind {
             ExprKind::Generic { controlling, assocs } => {
@@ -603,6 +616,9 @@ impl<'m> FuncCtx<'m> {
                             for stmt in stmts {
                                 if let ast::Stmt::Decl(ast::Decl::Var { declarators, .. }) = stmt {
                                     if let Some(d) = declarators.iter().find(|d| &d.name == name) {
+                                        if let (ast::AstType::Auto, Some(ast::Initializer::Expr(i))) = (&d.ty.ty, &d.init) {
+                                            return self.infer_auto_type(i);
+                                        }
                                         return self.lower_type(&d.ty);
                                     }
                                 }

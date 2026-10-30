@@ -2751,22 +2751,14 @@ impl<'m> FuncCtx<'m> {
                         continue;
                     }
                     // C23 `auto x = e;` / GNU `__auto_type x = e;` (parsed as
-                    // `AstType::Auto`): the type is the initializer's (after the
-                    // usual decay, so an array/function initializer gives a pointer).
+                    // `AstType::Auto`): the type is the initializer's.
                     if matches!(d.ty.ty, AstType::Auto) && !self.is_sic() {
                         let Some(Initializer::Expr(e)) = &d.init else {
                             return Err(CompileError::at(
                                 format!("`auto` / `__auto_type` variable `{}` needs an initializer", d.name),
                                 d.span.file.clone(), d.span.line, d.span.col));
                         };
-                        let it = self.infer_expr_type(e)?;
-                        let it = match it {
-                            Type::Array { elem, .. } => Type::Pointer(elem),
-                            Type::Function(_) => Type::Pointer(Box::new(it)),
-                            // An inferred aggregate may be the opaque (name-only)
-                            // form; bind the full layout so `x.field` resolves.
-                            other => super::types::resolve_aggregate(&other, &self.lowerer.struct_types),
-                        };
+                        let it = self.infer_auto_type(e)?;
                         let vid = self.alloc_val();
                         self.push_instr(Instr::Alloca { dest: vid, ty: it.clone(), align: None });
                         if matches!(it, Type::Struct(_) | Type::Union(_)) {
@@ -2842,6 +2834,9 @@ impl<'m> FuncCtx<'m> {
                                         format!("cannot initialize tuple `{}` from a non-tuple value{}", d.name, hint),
                                         e.span.file.clone(), e.span.line, e.span.col));
                                 }
+                        if let Some(fname) = &d.cleanup {
+                            self.register_cleanup(Val::Local(vid), fname.clone());
+                        }
                                 // Assigned other shapes elsewhere in the function: dynamic.
                                 let pty = if self.tuple_local_forced_dynamic(&d.name) { super::types::tuple_type(vec![]) } else { pty };
                                 let vid = self.alloc_val();
@@ -4282,6 +4277,7 @@ impl<'m> FuncCtx<'m> {
             if lname == ivar { return Ok(false); }
             // LHS must be a plain local scalar (a global could be observed
             // elsewhere; an aggregate is not a trivial assign).
+                if matches!(de.ty.ty, AstType::Auto) { return Ok(false); }
             match self.lookup(&lname) {
                 Some(LookupResult::Local(ty, _)) if matches!(ty,
                     Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80
