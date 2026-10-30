@@ -12,6 +12,9 @@ thread_local! {
     /// enum comes out length 0 — QEMU's `init_type_list[MODULE_INIT_MAX]` then
     /// overlaps the next global and crashes at startup.
     static ENUM_CONSTS: RefCell<HashMap<String, i64>> = RefCell::new(HashMap::new());
+    /// A SIC source: its built-in type names (`string`, `set`, `i8`, …) are
+    /// reserved. In C they are ordinary names, a typedef's first.
+    static SIC_SOURCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Typedef names that denote an integer/bool type (`uint8_t` → u8), recorded
     /// as typedefs are registered, so type-blind constant folding can apply a
     /// cast to one: `(uint8_t)(U8 + 100)` must fold to 44, not 300 (a folded
@@ -938,6 +941,9 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             if n == "__builtin_va_list" {
                 return Ok(va_list_type());
             }
+            if !SIC_SOURCE.with(|s| s.get()) {
+                if let Some(t) = named.get(n) { return Ok(t.clone()); }
+            }
             // sic/Rust-style primitive type aliases (canonical short forms). The
             // long forms (`int8`, `uint8`, …) are deliberately not aliases, so a
             // user typedef/identifier of that name wins; C's `__int128` family is
@@ -1442,6 +1448,11 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> T
         }
         _ => Type::i32(),
     }
+}
+
+/// Whether the unit being lowered is a SIC source (see `SIC_SOURCE`).
+pub(crate) fn set_sic_source(on: bool) {
+    SIC_SOURCE.with(|s| s.set(on));
 }
 
 /// The IR type of sic's native `string`: a refcounted RAII slice
