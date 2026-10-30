@@ -84,6 +84,16 @@ pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str, fun
             if let Ok(n) = s.name() { if !n.is_empty() { let _ = writeln!(out, "\t.weak\t{}", sym_ref(n)); } }
         }
     }
+    // Parts of one name may differ in flags (a constant with pointers is
+    // writable for the dynamic loader, one without is not). An object allows
+    // that, but the assembler refuses to reopen a section with other flags:
+    // every part gets the union.
+    let mut name_flags: std::collections::HashMap<String, u64> = Default::default();
+    for sec in file.sections() {
+        if let Ok(n) = sec.name() {
+            *name_flags.entry(n.to_string()).or_default() |= sec.elf_section_header().sh_flags.get(file.endian()).0;
+        }
+    }
     for sec in file.sections() {
         let hdr = sec.elf_section_header();
         let e = file.endian();
@@ -104,7 +114,7 @@ pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str, fun
             }
             continue;
         }
-        let flags = hdr.sh_flags.get(e).0;
+        let flags = name_flags.get(name).copied().unwrap_or(hdr.sh_flags.get(e).0);
         let entsize = hdr.sh_entsize.get(e);
         let _ = writeln!(out, "\n\t.section\t{},{}", sym_ref(name), section_spec(flags, sh_type, entsize));
         let align = sec.align().max(1);

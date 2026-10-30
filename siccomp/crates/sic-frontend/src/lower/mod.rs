@@ -4530,10 +4530,14 @@ impl Lowerer {
 /// `const char *arr[]` (array of pointers to const char) is writable.
 fn type_is_const(qt: &QualType) -> bool {
     if qt.is_const() { return true; }
-    if let AstType::Array { base, .. } = &qt.ty {
-        return type_is_const(base);
+    match &qt.ty {
+        AstType::Array { base, .. } => type_is_const(base),
+        // `T *const p`: the qualifier is on the pointer (Linux's `const char
+        // *const names[] __initconst` landed writable, clashing with the
+        // read-only data of its section).
+        AstType::Pointer { quals, .. } => quals.contains(&TypeQual::Const),
+        _ => false,
     }
-    false
 }
 
 /// Look up a struct/union field by name, returning its byte offset and type.

@@ -610,8 +610,20 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         product.object.section_mut(id).set_data(bytes, 1);
     }
     let bytes = product.emit().map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
-    if ir_module.fn_sections.is_empty() && cfg.function_sections { return Ok(bytes); }
-    finish_code_sections(&bytes, &ir_module.fn_sections, !cfg.function_sections).map_err(CraneliftError::Unsupported)
+    // Named sections of only `const` variables are read-only in non-PIC code.
+    // Cranelift's object writer makes constants with pointers writable (for
+    // the dynamic loader), but nothing patches them here, and in one section
+    // with pointer-free constants the flags would clash (Linux's `.init.rodata`).
+    let mut ro_sections: Vec<&str> = Vec::new();
+    if !cfg.pic {
+        for (_, sec) in &ir_module.data_sections {
+            let all_const = ir_module.data_sections.iter().filter(|(_, s)| s == sec)
+                .all(|(g, _)| ir_module.globals.iter().any(|x| x.name == *g && x.constant));
+            if all_const && !ro_sections.contains(&sec.as_str()) { ro_sections.push(sec); }
+        }
+    }
+    if ir_module.fn_sections.is_empty() && cfg.function_sections && ro_sections.is_empty() { return Ok(bytes); }
+    finish_code_sections(&bytes, &ir_module.fn_sections, !cfg.function_sections, &ro_sections).map_err(CraneliftError::Unsupported)
 }
 
 /// The object's code sections, finished: `section("…")` placements (each
@@ -622,8 +634,9 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
 /// relocations and section-symbol references rebased), and alignment padding
 /// in code is `int3` (0xcc), not zeros: a tool that decodes code linearly
 /// (Linux's objtool) read `00 00` as `add %al,(%rax)`, and an odd gap ran
-/// into the next function ("can't find starting instruction").
-fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: bool) -> Result<Vec<u8>, String> {
+/// into the next function ("can't find starting instruction"). The sections
+/// `ro_sections` lose their write flag.
+fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: bool, ro_sections: &[&str]) -> Result<Vec<u8>, String> {
     use object::build::elf::{Builder, SectionData};
     use object::build::Id;
     use object::elf;
@@ -631,6 +644,11 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
     let mut b = Builder::read(obj).map_err(err)?;
     let is_code = |s: &object::build::elf::Section| s.sh_flags.0 & elf::SHF_EXECINSTR.0 != 0
         && matches!(s.data, SectionData::Data(_));
+    for sec in b.sections.iter_mut() {
+        if ro_sections.iter().any(|n| n.as_bytes() == sec.name.as_slice()) {
+            sec.sh_flags = elf::SectionFlags(sec.sh_flags.0 & !elf::SHF_WRITE.0);
+        }
+    }
     // Placements, then the rest of the per-function code into `.text`.
     let mut placed = std::collections::HashSet::new();
     for (func, sec) in placements {
