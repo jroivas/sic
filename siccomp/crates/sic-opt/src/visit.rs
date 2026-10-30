@@ -66,7 +66,7 @@ pub fn walk_init<V: MutVisitor>(v: &mut V, init: &mut Initializer) {
 pub fn walk_stmt<V: MutVisitor>(v: &mut V, s: &mut Stmt) {
     match s {
         Stmt::Decl(d) => v.visit_decl(d),
-        Stmt::Expr(e, _) => v.visit_expr(e),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) => v.visit_expr(e),
         Stmt::Block(stmts, _) | Stmt::Unsafe(stmts, _) => {
             for s in stmts { v.visit_stmt(s); }
         }
@@ -90,7 +90,7 @@ pub fn walk_stmt<V: MutVisitor>(v: &mut V, s: &mut Stmt) {
         Stmt::ForEach { iterable, body, .. } => { v.visit_expr(iterable); v.visit_stmt(body); }
         Stmt::Return(Some(e), _) => v.visit_expr(e),
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Fallthrough(_) | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
+        | Stmt::Fallthrough(_) | Stmt::Goto(_, _) | Stmt::AddrLabels(_) | Stmt::Null(_) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
         Stmt::Defer(inner, _) => v.visit_stmt(inner),
         Stmt::Delete(e, _) => v.visit_expr(e),
         Stmt::Label(_, inner, _) => v.visit_stmt(inner),
@@ -117,7 +117,7 @@ pub fn walk_expr<V: MutVisitor>(v: &mut V, e: &mut Expr) {
         ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::BoolLit(_)
         | ExprKind::BigIntLit(_) | ExprKind::DecimalLit(_) | ExprKind::FloatLit(_)
         | ExprKind::StringLit(_) | ExprKind::WideStringLit(..) | ExprKind::CharLit(_) | ExprKind::Ident(_)
-        | ExprKind::Nullptr | ExprKind::EnumVariant { .. } | ExprKind::TypeIdOf(_)
+        | ExprKind::Nullptr | ExprKind::LabelAddr(_) | ExprKind::EnumVariant { .. } | ExprKind::TypeIdOf(_)
         | ExprKind::SizeofType(_) | ExprKind::AlignofType(_)
         | ExprKind::GenericRef { .. } | ExprKind::TypeMember { .. }
         | ExprKind::TypesCompatible(..) => {}

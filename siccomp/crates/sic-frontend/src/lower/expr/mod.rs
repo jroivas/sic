@@ -554,6 +554,7 @@ impl<'m> FuncCtx<'m> {
                 self.make_string_val(data, size, rc)
             }
             ExprKind::Nullptr => Ok(Constant::null()),
+            ExprKind::LabelAddr(id) => self.coerce(Constant::int(*id), &Type::void_ptr()),
 
             ExprKind::Ident(name) => {
                 if let Some(v) = self.read_global_reg(name, &expr.span)? { return Ok(v); }
@@ -7521,7 +7522,8 @@ fn rewrite_capture_ref(s: &mut ast::Stmt, name: &str, deref: bool) {
     use ast::Stmt::*;
     match s {
         Decl(d) => rewrite_capture_decl(d, name, deref),
-        Expr(e, _) => rewrite_capture_expr(e, name, deref),
+        Expr(e, _) | GotoIndirect(e, _) => rewrite_capture_expr(e, name, deref),
+        AddrLabels(_) => {}
         Block(ss, _) | Unsafe(ss, _) => { for x in ss { rewrite_capture_ref(x, name, deref); } }
         If { cond, then, else_, .. } => {
             rewrite_capture_expr(cond, name, deref);

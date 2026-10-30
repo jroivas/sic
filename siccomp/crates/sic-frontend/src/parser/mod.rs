@@ -36,6 +36,8 @@ pub struct Parser {
     /// GNU `__label__` declarations of the enclosing blocks: written name →
     /// the function-wide name that makes it local to its block.
     local_labels: Vec<HashMap<String, String>>,
+    /// In a function body: the labels `&&name` took so far (`Stmt::AddrLabels`).
+    addr_labels: Option<Vec<(String, Span)>>,
     local_label_count: usize,
     /// Source characters, for recovering the exact text of a construct (a generic
     /// function template exported to a module manifest). Empty if not provided.
@@ -170,7 +172,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -2439,7 +2441,10 @@ impl Parser {
     fn parse_function_body(&mut self) -> Result<Vec<Stmt>> {
         let saved = std::mem::take(&mut self.local_decls);
         let start = self.pos;
-        let body = self.parse_compound_stmt_as_stmts();
+        let saved_labels = self.addr_labels.replace(Vec::new());
+        let mut body = self.parse_compound_stmt_as_stmts();
+        let labels = std::mem::replace(&mut self.addr_labels, saved_labels).unwrap_or_default();
+        if let (Ok(b), false) = (&mut body, labels.is_empty()) { b.insert(0, Stmt::AddrLabels(labels)); }
         let decls = std::mem::replace(&mut self.local_decls, saved);
         if body.is_ok() && !decls.is_empty() && crate::diag::enabled("unused-variable") {
             self.warn_unused_locals(start, self.pos, decls);
@@ -2686,6 +2691,12 @@ impl Parser {
     fn parse_goto(&mut self) -> Result<Stmt> {
         let sp = self.span();
         self.advance();
+        if self.lang != Lang::Sic && self.at(TokenKind::Star) {
+            self.advance();
+            let e = self.parse_expr()?;
+            self.expect_semi("`goto`")?;
+            return Ok(Stmt::GotoIndirect(e, sp));
+        }
         let name = self.expect_name()?;
         self.expect_semi("`goto`")?;
         Ok(Stmt::Goto(self.scoped_label(name), sp))
@@ -3226,6 +3237,20 @@ impl Parser {
                 self.advance();
                 let e = self.parse_cast()?;
                 Ok(Expr::new(ExprKind::Unary { op: UnOpKind::Addr, expr: Box::new(e) }, sp))
+            }
+            TokenKind::AmpAmp if self.lang != Lang::Sic => {
+                self.advance();
+                let name = self.expect_name()?;
+                let label = self.scoped_label(name);
+                let Some(labels) = &mut self.addr_labels else {
+                    return Err(CompileError::at("the address of a label outside a function".to_string(),
+                        sp.file.clone(), sp.line, sp.col));
+                };
+                let k = labels.iter().position(|(l, _)| *l == label).unwrap_or_else(|| {
+                    labels.push((label, sp.clone()));
+                    labels.len() - 1
+                });
+                Ok(Expr::new(ExprKind::LabelAddr(k as i64 + 1), sp))
             }
             TokenKind::Star => {
                 self.advance();

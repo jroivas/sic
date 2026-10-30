@@ -210,7 +210,7 @@ impl<'a> NsRenamer<'a> {
     fn stmt(&mut self, s: &mut Stmt) {
         match s {
             Stmt::Decl(d) => self.local_decl(d),
-            Stmt::Expr(e, _) | Stmt::Delete(e, _) => self.expr(e),
+            Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Delete(e, _) => self.expr(e),
             Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => self.block(ss),
             Stmt::If { cond, then, else_, .. } => {
                 self.expr(cond);
@@ -257,7 +257,7 @@ impl<'a> NsRenamer<'a> {
                 }
             }
             Stmt::Asm(a) => for o in a.outputs.iter_mut().chain(a.inputs.iter_mut()) { self.expr(&mut o.expr); },
-            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Fallthrough(_) | Stmt::Goto(..)
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Fallthrough(_) | Stmt::Goto(..) | Stmt::AddrLabels(_)
             | Stmt::Fence { .. } | Stmt::UnknownType(..) | Stmt::Null(_) => {}
         }
     }
@@ -331,7 +331,7 @@ impl<'a> NsRenamer<'a> {
             ExprKind::VaCopy { dst, src } => { self.expr(dst); self.expr(src); }
             ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::BoolLit(_) | ExprKind::BigIntLit(_)
             | ExprKind::DecimalLit(_) | ExprKind::FloatLit(_) | ExprKind::StringLit(_) | ExprKind::WideStringLit(..)
-            | ExprKind::CharLit(_) | ExprKind::Nullptr => {}
+            | ExprKind::CharLit(_) | ExprKind::Nullptr | ExprKind::LabelAddr(_) => {}
             // `Status::Joined` inside the namespace that defines `Status`.
             ExprKind::EnumVariant { enum_name, .. } => self.rename_type(enum_name),
         }

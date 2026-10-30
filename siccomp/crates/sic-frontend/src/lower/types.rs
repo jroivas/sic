@@ -1422,7 +1422,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
 /// back to `int`.
 fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Type {
     match &e.kind {
-        ExprKind::Nullptr => Type::void_ptr(),
+        ExprKind::Nullptr | ExprKind::LabelAddr(_) => Type::void_ptr(),
         ExprKind::CharLit(_) => Type::i32(),
         ExprKind::IntLit(_, is64) => if *is64 { Type::i64() } else { Type::i32() },
         ExprKind::UIntLit(_, is64) => if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() },

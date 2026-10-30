@@ -328,6 +328,10 @@ pub struct FuncCtx<'m> {
     pub switch_stack: Vec<(BlockId, BlockId, std::collections::HashMap<i64, BlockId>)>,
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
     pub pending_gotos: Vec<PendingGoto>,
+    /// `Stmt::AddrLabels`, and each `goto *`'s block and value: its jump is built
+    /// when every label is known.
+    pub addr_labels: Vec<(String, crate::lexer::Span)>,
+    pub indirect_gotos: Vec<(BlockId, Val)>,
     /// Each label's cleanups when it was defined (see `active_cleanup_counts`).
     pub label_scopes: HashMap<String, Vec<(u32, usize)>>,
     /// Last initialized local variable (for implicit return in sic)
@@ -497,6 +501,8 @@ impl<'m> FuncCtx<'m> {
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
+            addr_labels: Vec::new(),
+            indirect_gotos: Vec::new(),
             label_scopes: HashMap::new(),
             last_init_local: None,
             last_struct_temp: None,
@@ -2419,6 +2425,7 @@ impl<'m> Lowerer {
             return Err(CompileError::at(format!("label '{}' used but not defined", label.split('.').next().unwrap_or(label)),
                 sp.file.clone(), sp.line, sp.col));
         }
+        fc.finish_indirect_gotos()?;
 
         // Replace the pre-registered placeholder, or add if not pre-registered
         if let Some(idx) = self.module.functions.iter().position(|f| f.name == name) {
@@ -2616,6 +2623,17 @@ impl<'m> FuncCtx<'m> {
                     self.switch_to_block(placeholder);
                 }
             }
+            Stmt::AddrLabels(labels) => self.addr_labels = labels.clone(),
+            // No machine address of a block exists here, so `&&label` is a number
+            // and this picks among the function's labels, as a `switch` does.
+            Stmt::GotoIndirect(e, _) => {
+                let v = self.lower_expr(e)?;
+                let v = self.coerce(v, &Type::u64())?;
+                self.indirect_gotos.push((self.current_bb, v));
+                let dead = self.new_block_after_current();
+                self.set_terminator(Terminator::Jump(dead));
+                self.switch_to_block(dead);
+            }
             Stmt::Label(name, inner, _) => {
                 // Create a new block for this label
                 let label_bb = self.new_block_after_current();
@@ -2690,6 +2708,25 @@ impl<'m> FuncCtx<'m> {
                 self.func_mut().block_mut(default_bb).label = Some("default".to_string());
                 self.lower_case_body(body)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Every `goto *` selects among the function's address-taken labels; a value
+    /// that is none of them (undefined in C) traps.
+    fn finish_indirect_gotos(&mut self) -> Result<()> {
+        let mut arms = Vec::new();
+        for (k, (label, sp)) in self.addr_labels.iter().enumerate() {
+            let Some(&bb) = self.labels.get(label) else {
+                return Err(CompileError::at(format!("label '{}' used but not defined", label.split('.').next().unwrap_or(label)),
+                    sp.file.clone(), sp.line, sp.col));
+            };
+            arms.push((k as i64 + 1, bb));
+        }
+        if self.indirect_gotos.is_empty() { return Ok(()); }
+        let default = self.new_block_after_current();
+        for (bb, val) in std::mem::take(&mut self.indirect_gotos) {
+            self.func_mut().block_mut(bb).terminator = Terminator::Switch { val, default, arms: arms.clone() };
         }
         Ok(())
     }
@@ -6751,7 +6788,7 @@ fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
                 if let Some(Initializer::Expr(e)) = &d.init { scan_mutated_expr(e, out); }
             }
         }
-        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) => scan_mutated_expr(e, out),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) => scan_mutated_expr(e, out),
         Stmt::Block(ss, _) => for s in ss { scan_mutated_stmt(s, out); },
         Stmt::If { cond, then, else_, .. } => {
             scan_mutated_expr(cond, out); scan_mutated_stmt(then, out);
@@ -6813,7 +6850,7 @@ fn fat_prepass_stmt(s: &Stmt, cand: &FpSet<String>, newloc: &mut FpSet<String>,
     };
     match s {
         Stmt::Decl(Decl::Var { declarators, .. }) => decl_var(declarators, newloc, calls, esc),
-        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) => fat_prepass_expr(e, cand, newloc, calls, esc),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) => fat_prepass_expr(e, cand, newloc, calls, esc),
         Stmt::Block(ss, _) => for s in ss { fat_prepass_stmt(s, cand, newloc, calls, esc); },
         Stmt::If { cond, then, else_, .. } => {
             fat_prepass_expr(cond, cand, newloc, calls, esc);
@@ -6941,11 +6978,12 @@ fn stmt_line(stmt: &Stmt) -> u32 {
     match stmt {
         Stmt::Decl(d) => decl_line(d),
         Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
-        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
+        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s) | Stmt::GotoIndirect(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s.line,
         Stmt::Asm(a) => a.span.line,
+        Stmt::AddrLabels(l) => l[0].1.line,
         Stmt::Fence { span, .. } | Stmt::UnknownType(_, span) => span.line,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
@@ -6958,11 +6996,12 @@ fn stmt_loc(stmt: &Stmt) -> (Option<String>, u32, u32) {
     let s = match stmt {
         Stmt::Decl(d) => return super::decl_loc(d),
         Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)
-        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s)
+        | Stmt::Break(s) | Stmt::Continue(s) | Stmt::Goto(_, s) | Stmt::GotoIndirect(_, s)
         | Stmt::Null(s) | Stmt::Label(_, _, s) | Stmt::Case(_, _, s)
         | Stmt::CaseRange(_, _, _, s) | Stmt::Fallthrough(s)
         | Stmt::Default(_, s) | Stmt::Defer(_, s) | Stmt::Delete(_, s) | Stmt::Unsafe(_, s) => s,
         Stmt::Asm(a) => &a.span,
+        Stmt::AddrLabels(l) => &l[0].1,
         Stmt::Fence { span, .. } | Stmt::UnknownType(_, span) => span,
         Stmt::If { span, .. } | Stmt::While { span, .. } | Stmt::DoWhile { span, .. }
         | Stmt::For { span, .. } | Stmt::Switch { span, .. } | Stmt::Match { span, .. }
@@ -7159,9 +7198,9 @@ fn infer_calls_in_stmt(
             }
         }
         Stmt::Decl(_) | Stmt::Null(_) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Goto(_, _) | Stmt::Fallthrough(_) | Stmt::Return(None, _) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
+        | Stmt::Goto(_, _) | Stmt::AddrLabels(_) | Stmt::Fallthrough(_) | Stmt::Return(None, _) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
         Stmt::Asm(a) => for o in a.outputs.iter().chain(&a.inputs) { find_tuple_calls(fc, &o.expr, targets, found); },
-        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) =>
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) =>
             find_tuple_calls(fc, e, targets, found),
         Stmt::Block(ss, _) => infer_calls_in_stmts(fc, ss, targets, found),
         Stmt::If { cond, then, else_, .. } => {

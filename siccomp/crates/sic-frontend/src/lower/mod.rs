@@ -4823,6 +4823,7 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
     let int32 = |v: i64| ConstInt::new(v, 32, true);
     match &e.kind {
         ExprKind::IntLit(v, wide) => Ok(ConstInt::new(*v, if *wide { 64 } else { 32 }, true)),
+        ExprKind::LabelAddr(id) => Ok(ConstInt::new(*id, 64, false)),
         // `__builtin_constant_p(x)` folds here as everywhere ([`builtin_constant_p`]),
         // so a `__builtin_constant_p(x) ? <fold> : <runtime>` ternary keeps only
         // its taken arm (QEMU's dup_const/tcg macros, whose other arm ends in
@@ -5231,7 +5232,7 @@ fn rw_self_expr(e: &mut Expr, t: &HashSet<String>) {
 
 fn rw_self_stmt(s: &mut Stmt, t: &HashSet<String>) {
     match s {
-        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => rw_self_expr(e, t),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => rw_self_expr(e, t),
         Stmt::Block(ss, _) | Stmt::Unsafe(ss, _) => { for s in ss { rw_self_stmt(s, t); } }
         Stmt::Decl(Decl::Var { declarators, .. }) => {
             for d in declarators {
@@ -5559,7 +5560,7 @@ fn collect_generics_stmt(s: &Stmt, out: &mut Vec<(String, Vec<QualType>)>) {
 fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
     match s {
         Stmt::Decl(d) => collect_decl_names(d, out),
-        Stmt::Expr(e, _) => collect_expr_names(e, out),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) => collect_expr_names(e, out),
         Stmt::Block(ss, _) => { for s in ss { collect_stmt_names(s, out); } }
         Stmt::If { cond, then, else_, .. } => {
             collect_expr_names(cond, out);
@@ -5607,7 +5608,7 @@ fn collect_stmt_names(s: &Stmt, out: &mut Vec<String>) {
             for o in a.outputs.iter().chain(&a.inputs) { collect_expr_names(&o.expr, out); }
         }
         Stmt::Return(None, _) | Stmt::Break(_) | Stmt::Continue(_)
-        | Stmt::Goto(_, _) | Stmt::Null(_) | Stmt::Fallthrough(_) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
+        | Stmt::Goto(_, _) | Stmt::AddrLabels(_) | Stmt::Null(_) | Stmt::Fallthrough(_) | Stmt::Fence { .. } | Stmt::UnknownType(..) => {}
     }
 }
 
@@ -5694,7 +5695,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         OptField { base, .. } => collect_expr_names(base, out),
         // `typeid(e)` inspects only the type — `e` is never evaluated.
         TypeId(_) => {}
-        IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | WideStringLit(..) | CharLit(_) | Nullptr
+        IntLit(..) | UIntLit(..) | BoolLit(_) | BigIntLit(_) | DecimalLit(_) | FloatLit(_) | StringLit(_) | WideStringLit(..) | CharLit(_) | Nullptr | LabelAddr(_)
         | SizeofType(_) | AlignofType(_) | TypesCompatible(..) | EnumVariant { .. } | TypeMember { .. } | TypeIdOf(_) => {}
     }
 }

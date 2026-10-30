@@ -69,7 +69,7 @@ impl<'m> FuncCtx<'m> {
             } else {
                 Type::char_ptr()
             }),
-            ExprKind::Nullptr => Ok(Type::void_ptr()),
+            ExprKind::Nullptr | ExprKind::LabelAddr(_) => Ok(Type::void_ptr()),
             ExprKind::Ident(name) => {
                 match self.lookup(name) {
                     Some(LookupResult::Local(ty, _)) => Ok(ty.clone()),

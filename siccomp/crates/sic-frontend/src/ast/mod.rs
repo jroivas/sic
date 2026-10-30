@@ -411,6 +411,11 @@ pub enum Stmt {
     /// free at 0). sic.md §"Scopes and automatic release".
     Delete(Expr, Span),
     Goto(String, Span),
+    /// GNU `goto *expr;`.
+    GotoIndirect(Expr, Span),
+    /// The labels whose address the function takes (`&&name`), first in its body.
+    /// A `&&name` is the label's position here plus one.
+    AddrLabels(Vec<(String, Span)>),
     Label(String, BoxStmt, Span),
     Case(Expr, BoxStmt, Span),
     /// GCC case-range extension: `case LOW ... HIGH:`.
@@ -553,6 +558,7 @@ pub enum ExprKind {
     CharLit(i32),
     Ident(String),
     Nullptr,           // C23 null pointer constant
+    LabelAddr(i64),    // GNU `&&label`, see `Stmt::AddrLabels`
 
     /// sic tuple pack `tuple(e0, e1, …)` (sic.md §"Tuples"). Used as a value it
     /// builds a tuple; on the left of `=` it is an unpack pattern of lvalues.
@@ -799,7 +805,7 @@ fn child_stmts(s: &Stmt) -> Vec<&Stmt> {
     let mut v = direct_child_stmts(s);
     let mut ex: Vec<&Expr> = Vec::new();
     match s {
-        Stmt::Expr(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => ex.push(e),
+        Stmt::Expr(e, _) | Stmt::GotoIndirect(e, _) | Stmt::Return(Some(e), _) | Stmt::Delete(e, _) => ex.push(e),
         Stmt::If { cond, .. } | Stmt::While { cond, .. } | Stmt::DoWhile { cond, .. }
         | Stmt::Guard { cond, .. } => ex.push(cond),
         Stmt::Switch { val, .. } => ex.push(val),
@@ -845,6 +851,7 @@ fn direct_child_stmts(s: &Stmt) -> Vec<&Stmt> {
 pub fn count_gotos(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
     if let Stmt::Goto(l, _) = s { *out.entry(l.clone()).or_insert(0) += 1; }
     if let Stmt::Asm(a) = s { for l in &a.labels { *out.entry(l.clone()).or_insert(0) += 1; } }
+    if let Stmt::AddrLabels(ls) = s { for (l, _) in ls { *out.entry(l.clone()).or_insert(0) += 1; } }
     for c in child_stmts(s) { count_gotos(c, out); }
 }
 
