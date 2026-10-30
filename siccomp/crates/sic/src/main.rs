@@ -839,6 +839,9 @@ fn pass_config(args: &Args) -> PassConfig {
             None => {}
         }
     }
+    // Vector slots need vector registers (a 16-byte struct that is only copied
+    // qualifies, not just GCC vectors).
+    if !isa::Isa::from_flags(&args.machine_flags).0.sse2() { enabled.remove("vec-split"); }
     let mut cfg = PassConfig::new(enabled, args.debug);
     // Inliner budget: the threshold bounds the size of a callee that gets spliced
     // in. Modest at -O2 (small helpers like a `min3`/`edge`); at -O3+ a much larger
@@ -1229,7 +1232,8 @@ fn lower_tu_once(
     lowerer.set_struct_order(struct_order_default(args), struct_order_seed(args));
     // Auto-vectorization is on by default; `-fno-vectorize` disables it (e.g. to
     // keep C-mode codegen scalar while validating SQLite/QEMU).
-    lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled));
+    lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled))
+        && isa::Isa::from_flags(&args.machine_flags).0.sse2();
     lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
         && !matches!(args.f_options.get("freestanding"), Some(FOption::Enabled));
     // Dead counted-loop elimination: default on at -O2+, overridable via -f.
