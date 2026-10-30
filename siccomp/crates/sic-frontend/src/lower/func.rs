@@ -306,7 +306,7 @@ pub struct FuncCtx<'m> {
     /// blocks (and C fall-through between cases works).
     pub switch_stack: Vec<(BlockId, BlockId, std::collections::HashMap<i64, BlockId>)>,
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
-    pub pending_gotos: Vec<(String, BlockId)>,
+    pub pending_gotos: Vec<(String, BlockId, crate::lexer::Span)>,
     /// Last initialized local variable (for implicit return in sic)
     pub last_init_local: Option<(ValId, Type)>,
     /// The most recently registered managed-struct call temporary.
@@ -2366,6 +2366,11 @@ impl<'m> Lowerer {
 
         fc.exit_scope();
         if let Some(e) = fc.cleanup_error.take() { return Err(e); }
+        // A goto whose label never came (a `__label__` name's `.N` is not shown).
+        if let Some((label, _, sp)) = fc.pending_gotos.first() {
+            return Err(CompileError::at(format!("label '{}' used but not defined", label.split('.').next().unwrap_or(label)),
+                sp.file.clone(), sp.line, sp.col));
+        }
 
         // Replace the pre-registered placeholder, or add if not pre-registered
         if let Some(idx) = self.module.functions.iter().position(|f| f.name == name) {
@@ -2543,7 +2548,7 @@ impl<'m> FuncCtx<'m> {
                     return Err(CompileError::at("continue outside loop".to_string(), sp.file.clone(), sp.line, sp.col));
                 }
             }
-            Stmt::Goto(label, _) => {
+            Stmt::Goto(label, goto_sp) => {
                 if let Some(&target_bb) = self.labels.get(label) {
                     // Backward goto: label already seen
                     self.set_terminator(Terminator::Jump(target_bb));
@@ -2553,7 +2558,7 @@ impl<'m> FuncCtx<'m> {
                 } else {
                     // Forward goto: create placeholder, patch when label is found
                     let placeholder = self.new_block_after_current();
-                    self.pending_gotos.push((label.clone(), self.current_bb));
+                    self.pending_gotos.push((label.clone(), self.current_bb, goto_sp.clone()));
                     self.set_terminator(Terminator::Jump(placeholder));
                     self.switch_to_block(placeholder);
                 }
@@ -2636,8 +2641,8 @@ impl<'m> FuncCtx<'m> {
 
     fn patch_goto(&mut self, label: &str, target: BlockId) {
         let gotos_to_patch: Vec<BlockId> = self.pending_gotos.iter()
-            .filter(|(l, _)| l == label)
-            .map(|(_, bb)| *bb)
+            .filter(|(l, _, _)| l == label)
+            .map(|(_, bb, _)| *bb)
             .collect();
         for from_bb in gotos_to_patch {
             // The block's terminator should be a Jump to some placeholder.
@@ -2647,7 +2652,7 @@ impl<'m> FuncCtx<'m> {
                 blk.terminator = Terminator::Jump(target);
             }
         }
-        self.pending_gotos.retain(|(l, _)| l != label);
+        self.pending_gotos.retain(|(l, _, _)| l != label);
     }
 
     /// Whether `name` refers to an atomic-qualified local or global.
