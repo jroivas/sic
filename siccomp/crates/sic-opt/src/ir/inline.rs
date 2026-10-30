@@ -14,7 +14,10 @@
 //! A non-leaf callee (one that itself calls) is fine — its inner calls come along
 //! and may be inlined on a later pass iteration. A call is inlined when the callee
 //! is at most `threshold` IR instructions, or always when `aggressive` (`-O3`+).
-//! Per-caller growth and inline-count caps keep the worst case bounded.
+//! Per-caller growth and inline-count caps keep the worst case bounded; they do
+//! not stop an `always_inline` callee (its code may only be valid inlined: an
+//! `"i"` asm operand from a parameter), unless such callees call each other in a
+//! cycle, which would never end.
 //!
 //! Correctness notes:
 //!  - Call arguments are already coerced to their parameter types at the call site
@@ -135,6 +138,33 @@ fn is_aggregate(t: &Type) -> bool {
     matches!(t, Type::Struct(_) | Type::Union(_) | Type::Array { .. })
 }
 
+/// For each function, whether it is an eligible `always_inline` callee outside
+/// any cycle of such callees: expanding those always ends.
+fn must_inline(m: &Module, info: &[FnInfo]) -> Vec<bool> {
+    let forced = |i: usize| info[i].eligible && info[i].always;
+    let callees = |f: &Function| -> Vec<usize> {
+        let mut out = Vec::new();
+        for b in &f.blocks {
+            for ins in &b.instrs {
+                if let Instr::Call { func, .. } = ins {
+                    if !func.is_extern() && forced(func.index()) { out.push(func.index()); }
+                }
+            }
+        }
+        out
+    };
+    (0..info.len()).map(|start| {
+        if !forced(start) { return false; }
+        let mut seen = HashSet::new();
+        let mut work = callees(&m.functions[start]);
+        while let Some(c) = work.pop() {
+            if c == start { return false; }
+            if seen.insert(c) { work.extend(callees(&m.functions[c])); }
+        }
+        true
+    }).collect()
+}
+
 fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // A declaration (no body), a variadic, or an aggregate-return function is never
     // a candidate. Scan for the disqualifiers below.
@@ -175,9 +205,10 @@ impl IrPass for Inline {
     fn run(&mut self, m: &mut Module) -> bool {
         let n = m.functions.len();
         let info: Vec<FnInfo> = (0..n).map(|i| analyze(&m.functions[i], i)).collect();
+        let must = must_inline(m, &info);
         let mut changed = false;
         for caller in 0..n {
-            changed |= self.inline_into(m, caller, &info);
+            changed |= self.inline_into(m, caller, &info, &must);
         }
         for f in 0..n {
             changed |= self.self_inline(m, f, &info);
@@ -189,12 +220,13 @@ impl IrPass for Inline {
 impl Inline {
     /// Inline eligible call sites in function `caller` (repeatedly, so transitive
     /// and multiple-site cases are handled in one pass run, up to the caps).
-    fn inline_into(&self, m: &mut Module, caller: usize, info: &[FnInfo]) -> bool {
+    fn inline_into(&self, m: &mut Module, caller: usize, info: &[FnInfo], must: &[bool]) -> bool {
         let mut changed = false;
         let mut done = 0usize;
         loop {
-            if done >= MAX_INLINES_PER_FN { break; }
-            if func_size(&m.functions[caller]) > MAX_CALLER_INSTRS { break; }
+            // Past a cap only `must` callees go on (Linux's intel_pmu_init passes
+            // both, and kept out-of-line `arch_static_branch` copies).
+            let capped = done >= MAX_INLINES_PER_FN || func_size(&m.functions[caller]) > MAX_CALLER_INSTRS;
             // Find the first inlinable call site (block index, instr index).
             let mut site = None;
             'find: for (bi, b) in m.functions[caller].blocks.iter().enumerate() {
@@ -204,7 +236,7 @@ impl Inline {
                         let callee = func.index();
                         if callee == caller { continue; }              // no direct self-inline
                         let ci = &info[callee];
-                        if !ci.eligible { continue; }
+                        if !ci.eligible || (capped && !must[callee]) { continue; }
                         // Threshold 0 (below -O2): only `always_inline` functions.
                         if !(self.aggressive || ci.always || (self.threshold > 0 && ci.size <= self.threshold)) { continue; }
                         // parameter/argument arity must match (variadic excluded).
