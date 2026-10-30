@@ -4835,6 +4835,17 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
         // The bit builtins on a constant (Linux's `ilog2(n)` is `63 -
         // __builtin_clzll(n)` for a constant `n`): `clz`/`ctz` of 0 is undefined,
         // so not a constant, as in GCC.
+        // Linux's `cpu_to_be16(1)` as an enum value. A 16-bit result promotes to
+        // `int`, the wider ones are unsigned.
+        ExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, ExprKind::Ident(n) if const_bswap_bits(n).is_some()) => {
+            let ExprKind::Ident(n) = &func.kind else { unreachable!() };
+            let v = eval_const_typed(&args[0], enum_consts)?.v as u64;
+            Ok(match const_bswap_bits(n).unwrap() {
+                16 => int32((v as u16).swap_bytes() as i64),
+                32 => ConstInt::new((v as u32).swap_bytes() as i64, 32, false),
+                _ => ConstInt::new(v.swap_bytes() as i64, 64, false),
+            })
+        }
         ExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, ExprKind::Ident(n) if const_bit_builtin(n).is_some()) => {
             let ExprKind::Ident(n) = &func.kind else { unreachable!() };
             let (op, bits) = const_bit_builtin(n).unwrap();
@@ -4954,6 +4965,15 @@ fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
         },
         _ => return None,
     })
+}
+
+fn const_bswap_bits(n: &str) -> Option<u32> {
+    match n {
+        "__builtin_bswap16" => Some(16),
+        "__builtin_bswap32" => Some(32),
+        "__builtin_bswap64" => Some(64),
+        _ => None,
+    }
 }
 
 /// `__builtin_clzll` → ("clz", 64): the constant-foldable bit builtins.
