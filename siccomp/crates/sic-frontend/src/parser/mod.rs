@@ -4229,6 +4229,9 @@ impl Parser {
         }
         self.expect(TokenKind::RParen)?;
         self.eat(TokenKind::Semi);
+        // Basic asm (no colon at all) is emitted as written: `%` is not operand
+        // syntax there (Linux's `asm volatile ("outb %al, $0x80")`).
+        if section < 0 { template = template.replace('%', "%%"); }
         let [outputs, inputs] = sections;
         Ok(Stmt::Asm(Box::new(AsmStmt { template, outputs, inputs, clobbers, goto, labels, span: sp })))
     }
