@@ -820,6 +820,9 @@ impl FuncCtx<'_> {
         let all: Vec<&AsmOperand> = a.outputs.iter().chain(a.inputs.iter()).collect();
         let mut used = [false; 16];
         used[6] = true; used[7] = true; // rbp, rsp
+        // Fixed registers of plain outputs (no `+`, no `&`): one input may
+        // share each, as `[err] "=a"(err) : "a"(lmask)` in Linux's XSTATE_OP.
+        let mut shareable = [false; 16];
         for c in &a.clobbers { if let Some(r) = clobbered_gpr(c) { used[r] = true; } }
         let mut ops: Vec<Option<OpInfo>> = (0..all.len()).map(|_| None).collect();
         // Pass 1: fixed registers, constants, flags; note what needs a pool register.
@@ -859,8 +862,9 @@ impl FuncCtx<'_> {
                 if !letters.chars().any(|ch| "rgqmoVXp".contains(ch)) { return Ok(false); }
             }
             if let Some(r) = fixed {
-                if used[r] { return Ok(false); }
+                if used[r] && !(!is_out && shareable[r]) { return Ok(false); }
                 used[r] = true;
+                shareable[r] = is_out && !c.rw && !raw.contains('&');
                 ops[n] = Some(OpInfo { loc: OpLoc::Reg(r), size, load: !is_out || c.rw });
                 continue;
             }
