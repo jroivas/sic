@@ -33,6 +33,10 @@ pub struct Parser {
     /// (`default(…)`, `union(…)`): set for a namespace/module member or a struct
     /// method, consumed by the first declarator (parameters never see it).
     kw_names: bool,
+    /// GNU `__label__` declarations of the enclosing blocks: written name →
+    /// the function-wide name that makes it local to its block.
+    local_labels: Vec<HashMap<String, String>>,
+    local_label_count: usize,
     /// Source characters, for recovering the exact text of a construct (a generic
     /// function template exported to a module manifest). Empty if not provided.
     src_chars: Vec<char>,
@@ -166,7 +170,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -2468,14 +2472,41 @@ impl Parser {
         self.expect(TokenKind::LBrace)?;
         // A stale `unused` attribute (e.g. on a parameter) must not reach a local.
         self.pending_unused = false;
+        let scopes = self.local_labels.len();
+        while self.at(TokenKind::Ident) && self.peek().text == "__label__" { self.parse_local_labels()?; }
         let mut stmts = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
             if self.eat(TokenKind::Semi) { continue; }
             self.stmt_block_item = true;
             stmts.push(self.parse_stmt()?);
         }
+        self.local_labels.truncate(scopes);
         self.expect(TokenKind::RBrace)?;
         Ok(stmts)
+    }
+
+    /// GNU `__label__ a, b;` at the start of a block: those labels belong to
+    /// the block, so a macro can use its label each time it expands in one
+    /// function. Each gets a name of its own here (`a.N`: no identifier has a
+    /// dot), and everything after the parser sees ordinary labels.
+    fn parse_local_labels(&mut self) -> Result<()> {
+        self.advance();
+        let mut scope = HashMap::new();
+        loop {
+            let name = self.expect_name()?;
+            self.local_label_count += 1;
+            let unique = format!("{}.{}", name, self.local_label_count);
+            scope.insert(name, unique);
+            if !self.eat(TokenKind::Comma) { break; }
+        }
+        self.expect_semi("`__label__`")?;
+        self.local_labels.push(scope);
+        Ok(())
+    }
+
+    /// The label a written name refers to here (see `parse_local_labels`).
+    fn scoped_label(&self, name: String) -> String {
+        self.local_labels.iter().rev().find_map(|s| s.get(&name).cloned()).unwrap_or(name)
     }
 
     /// sic forbids a bare assignment as a controlling expression, because
@@ -2657,7 +2688,7 @@ impl Parser {
         self.advance();
         let name = self.expect_name()?;
         self.expect_semi("`goto`")?;
-        Ok(Stmt::Goto(name, sp))
+        Ok(Stmt::Goto(self.scoped_label(name), sp))
     }
 
     fn parse_switch(&mut self) -> Result<Stmt> {
@@ -2784,6 +2815,7 @@ impl Parser {
     fn parse_label(&mut self) -> Result<Stmt> {
         let sp = self.span();
         let name = self.advance().text.clone();
+        let name = self.scoped_label(name);
         self.advance(); // ':'
         let stmt = Box::new(self.parse_stmt()?);
         Ok(Stmt::Label(name, stmt, sp))
@@ -4188,7 +4220,11 @@ impl Parser {
                     while self.at(TokenKind::StringLit) { c.push_str(&self.advance().text.clone()); }
                     if c.is_empty() { self.advance(); } else { clobbers.push(c); }
                 }
-                _ => { labels.push(self.advance().text.clone()); goto = true; }
+                _ => {
+                    let name = self.advance().text.clone();
+                    labels.push(self.scoped_label(name));
+                    goto = true;
+                }
             }
         }
         self.expect(TokenKind::RParen)?;

@@ -219,9 +219,12 @@ impl<'m> FuncCtx<'m> {
         Ok(true)
     }
 
-    /// `asm goto`'s labels: (C label, the helper's local label for it).
+    /// `asm goto`'s labels: (C label as `%l[name]` writes it, the helper's local
+    /// label for it). A `__label__` name lost its `.N` suffix in the template.
     fn goto_labels(&self, a: &AsmStmt) -> Vec<(String, String)> {
-        a.labels.iter().enumerate().map(|(k, l)| (l.clone(), format!(".Lsic_g{}_{}", UID, k))).collect()
+        a.labels.iter().enumerate().map(|(k, l)| {
+            (l.split('.').next().unwrap_or(l).to_string(), format!(".Lsic_g{}_{}", UID, k))
+        }).collect()
     }
 
     /// After an `asm goto` helper returned `r`: 0 continues, K+1 jumps to the
