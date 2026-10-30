@@ -5,8 +5,29 @@ use crate::{Result, CompileError};
 use sic_ir::*;
 use super::{Lowerer, lower_type, lower_param_type, eval_const_expr};
 
+/// A forward `goto` waiting for its label.
+pub struct PendingGoto {
+    label: String,
+    from: BlockId,
+    span: crate::lexer::Span,
+    /// The cleanups active at the goto, and its locals when there are any.
+    scopes: Vec<(u32, Vec<Cleanup>)>,
+    locals: Vec<HashMap<String, (Type, ValId)>>,
+}
+
+/// The cleanups a `goto` from `scopes` to a label with `kept` runs: those
+/// registered after the label's, in every scope, innermost first.
+fn goto_cleanups(scopes: &[(u32, Vec<Cleanup>)], kept: &[(u32, usize)]) -> Vec<Cleanup> {
+    let mut run = Vec::new();
+    for (id, list) in scopes.iter().rev() {
+        let n = kept.iter().find(|(k, _)| k == id).map_or(0, |(_, n)| *n);
+        run.extend(list.iter().skip(n).rev().cloned());
+    }
+    run
+}
+
 /// A scope-exit action, run in LIFO order on every exit path (fall-through,
-/// `return`, `break`, `continue`).
+/// `return`, `break`, `continue`, `goto`).
 #[derive(Clone)]
 pub enum Cleanup {
     /// `__attribute__((cleanup(fn)))`: call `fn(&var)`.
@@ -306,7 +327,9 @@ pub struct FuncCtx<'m> {
     /// blocks (and C fall-through between cases works).
     pub switch_stack: Vec<(BlockId, BlockId, std::collections::HashMap<i64, BlockId>)>,
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
-    pub pending_gotos: Vec<(String, BlockId, crate::lexer::Span)>,
+    pub pending_gotos: Vec<PendingGoto>,
+    /// Each label's cleanups when it was defined (see `active_cleanup_counts`).
+    pub label_scopes: HashMap<String, Vec<(u32, usize)>>,
     /// Last initialized local variable (for implicit return in sic)
     pub last_init_local: Option<(ValId, Type)>,
     /// The most recently registered managed-struct call temporary.
@@ -323,6 +346,9 @@ pub struct FuncCtx<'m> {
     /// pairs from `__attribute__((cleanup(fn)))`. On scope exit / return / break /
     /// continue the cleanup functions are called (`fn(&var)`) in reverse order.
     pub cleanups: Vec<Vec<Cleanup>>,
+    /// A unique id per entry of `cleanups`, to tell scopes apart after they end.
+    pub scope_ids: Vec<u32>,
+    pub next_scope_id: u32,
     /// sic move-on-return: the local (address, destructor) that the `return`
     /// being lowered moves out (`return r;` / `return Some(r);`), whose `~S()`
     /// must not run on that path — the caller now owns the value.
@@ -471,12 +497,15 @@ impl<'m> FuncCtx<'m> {
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
+            label_scopes: HashMap::new(),
             last_init_local: None,
             last_struct_temp: None,
             pretty_func: String::new(),
             last_line: 0,
             sret: None,
             cleanups: vec![Vec::new()],
+            scope_ids: vec![0],
+            next_scope_id: 1,
             moved_on_return: None,
             moved_enum_on_return: None,
             ret_enum_retain: None,
@@ -629,6 +658,8 @@ impl<'m> FuncCtx<'m> {
     pub fn enter_scope(&mut self) {
         self.locals.push(HashMap::new());
         self.cleanups.push(Vec::new());
+        self.scope_ids.push(self.next_scope_id);
+        self.next_scope_id += 1;
     }
     pub fn exit_scope(&mut self) {
         // Run this scope's cleanups on normal fall-through. A terminated block
@@ -641,7 +672,24 @@ impl<'m> FuncCtx<'m> {
             }
         }
         self.cleanups.pop();
+        self.scope_ids.pop();
         self.locals.pop();
+    }
+
+    /// The active cleanups by scope id, outermost first (what a `goto` may leave).
+    fn active_cleanups(&self) -> Vec<(u32, Vec<Cleanup>)> {
+        self.scope_ids.iter().zip(&self.cleanups)
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    }
+
+    /// How many cleanups each scope has here (what a `goto` to here stays under).
+    fn active_cleanup_counts(&self) -> Vec<(u32, usize)> {
+        self.scope_ids.iter().zip(&self.cleanups)
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(id, c)| (*id, c.len()))
+            .collect()
     }
 
     /// Register a `__attribute__((cleanup(fn)))` action for a variable in the
@@ -2367,7 +2415,7 @@ impl<'m> Lowerer {
         fc.exit_scope();
         if let Some(e) = fc.cleanup_error.take() { return Err(e); }
         // A goto whose label never came (a `__label__` name's `.N` is not shown).
-        if let Some((label, _, sp)) = fc.pending_gotos.first() {
+        if let Some(PendingGoto { label, span: sp, .. }) = fc.pending_gotos.first() {
             return Err(CompileError::at(format!("label '{}' used but not defined", label.split('.').next().unwrap_or(label)),
                 sp.file.clone(), sp.line, sp.col));
         }
@@ -2549,8 +2597,10 @@ impl<'m> FuncCtx<'m> {
                 }
             }
             Stmt::Goto(label, goto_sp) => {
+                let scopes = self.active_cleanups();
                 if let Some(&target_bb) = self.labels.get(label) {
                     // Backward goto: label already seen
+                    for c in goto_cleanups(&scopes, &self.label_scopes[label]) { self.emit_cleanup(c); }
                     self.set_terminator(Terminator::Jump(target_bb));
                     // Switch to a fresh (unreachable) block so we can continue
                     let dead = self.new_block_after_current();
@@ -2558,7 +2608,10 @@ impl<'m> FuncCtx<'m> {
                 } else {
                     // Forward goto: create placeholder, patch when label is found
                     let placeholder = self.new_block_after_current();
-                    self.pending_gotos.push((label.clone(), self.current_bb, goto_sp.clone()));
+                    let locals = if scopes.is_empty() { Vec::new() } else { self.locals.clone() };
+                    self.pending_gotos.push(PendingGoto {
+                        label: label.clone(), from: self.current_bb, span: goto_sp.clone(), scopes, locals,
+                    });
                     self.set_terminator(Terminator::Jump(placeholder));
                     self.switch_to_block(placeholder);
                 }
@@ -2572,6 +2625,8 @@ impl<'m> FuncCtx<'m> {
                 self.switch_to_block(label_bb);
                 self.func_mut().block_mut(label_bb).label = Some(name.clone());
                 self.labels.insert(name.clone(), label_bb);
+                let counts = self.active_cleanup_counts();
+                self.label_scopes.insert(name.clone(), counts);
                 // Patch pending gotos that target this label
                 self.patch_goto(name, label_bb);
                 self.lower_stmt(inner)?;
@@ -2640,19 +2695,22 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn patch_goto(&mut self, label: &str, target: BlockId) {
-        let gotos_to_patch: Vec<BlockId> = self.pending_gotos.iter()
-            .filter(|(l, _, _)| l == label)
-            .map(|(_, bb, _)| *bb)
-            .collect();
-        for from_bb in gotos_to_patch {
-            // The block's terminator should be a Jump to some placeholder.
-            // Replace it with a jump to the real label block.
-            let blk = self.func_mut().block_mut(from_bb);
-            if let Terminator::Jump(_) = &blk.terminator {
-                blk.terminator = Terminator::Jump(target);
-            }
+        let (hits, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_gotos)
+            .into_iter().partition(|g| g.label == label);
+        self.pending_gotos = rest;
+        let here = self.current_bb;
+        for g in hits {
+            // The goto's block ends in a Jump to a placeholder: its scopes are
+            // known only now, so the cleanups it leaves are added to that block.
+            self.func_mut().block_mut(g.from).terminator = Terminator::Unreachable;
+            self.switch_to_block(g.from);
+            let run = goto_cleanups(&g.scopes, &self.label_scopes[label]);
+            let locals = std::mem::replace(&mut self.locals, g.locals);
+            for c in run { self.emit_cleanup(c); }
+            self.locals = locals;
+            self.set_terminator(Terminator::Jump(target));
         }
-        self.pending_gotos.retain(|(l, _, _)| l != label);
+        self.switch_to_block(here);
     }
 
     /// Whether `name` refers to an atomic-qualified local or global.
@@ -2776,6 +2834,9 @@ impl<'m> FuncCtx<'m> {
                         if !d.name.is_empty() {
                             self.push_instr(Instr::DbgVar { name: d.name.clone(), ty: it, slot: vid, is_param: false });
                         }
+                        if let Some(fname) = &d.cleanup {
+                            self.register_cleanup(Val::Local(vid), fname.clone());
+                        }
                         continue;
                     }
                     let mut ty = self.lower_type(&d.ty)?;
@@ -2834,9 +2895,6 @@ impl<'m> FuncCtx<'m> {
                                         format!("cannot initialize tuple `{}` from a non-tuple value{}", d.name, hint),
                                         e.span.file.clone(), e.span.line, e.span.col));
                                 }
-                        if let Some(fname) = &d.cleanup {
-                            self.register_cleanup(Val::Local(vid), fname.clone());
-                        }
                                 // Assigned other shapes elsewhere in the function: dynamic.
                                 let pty = if self.tuple_local_forced_dynamic(&d.name) { super::types::tuple_type(vec![]) } else { pty };
                                 let vid = self.alloc_val();
@@ -4219,6 +4277,7 @@ impl<'m> FuncCtx<'m> {
                 let de = &declarators[0];
                 if de.init.is_none() { return Ok(false); }
                 let _ = d;
+                if matches!(de.ty.ty, AstType::Auto) { return Ok(false); }
                 (de.name.clone(), Some(self.lower_type(&de.ty)?))
             }
             ForInit::Expr(e) => match &e.kind {
@@ -4277,7 +4336,6 @@ impl<'m> FuncCtx<'m> {
             if lname == ivar { return Ok(false); }
             // LHS must be a plain local scalar (a global could be observed
             // elsewhere; an aggregate is not a trivial assign).
-                if matches!(de.ty.ty, AstType::Auto) { return Ok(false); }
             match self.lookup(&lname) {
                 Some(LookupResult::Local(ty, _)) if matches!(ty,
                     Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80
