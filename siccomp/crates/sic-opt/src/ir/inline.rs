@@ -138,31 +138,63 @@ fn is_aggregate(t: &Type) -> bool {
     matches!(t, Type::Struct(_) | Type::Union(_) | Type::Array { .. })
 }
 
-/// For each function, whether it is an eligible `always_inline` callee outside
-/// any cycle of such callees: expanding those always ends.
-fn must_inline(m: &Module, info: &[FnInfo]) -> Vec<bool> {
-    let forced = |i: usize| info[i].eligible && info[i].always;
-    let callees = |f: &Function| -> Vec<usize> {
+/// Which functions lie on a cycle of calls that inlining could follow: the
+/// strongly connected components (Tarjan) of the eligible callees that have more
+/// than one member. Expanding such a function can bring its own call back.
+fn on_cycle(m: &Module, info: &[FnInfo]) -> Vec<bool> {
+    let n = info.len();
+    let edges: Vec<Vec<usize>> = (0..n).map(|i| {
         let mut out = Vec::new();
-        for b in &f.blocks {
+        if !info[i].eligible { return out; }
+        for b in &m.functions[i].blocks {
             for ins in &b.instrs {
                 if let Instr::Call { func, .. } = ins {
-                    if !func.is_extern() && forced(func.index()) { out.push(func.index()); }
+                    if !func.is_extern() && info[func.index()].eligible { out.push(func.index()); }
                 }
             }
         }
         out
-    };
-    (0..info.len()).map(|start| {
-        if !forced(start) { return false; }
-        let mut seen = HashSet::new();
-        let mut work = callees(&m.functions[start]);
-        while let Some(c) = work.pop() {
-            if c == start { return false; }
-            if seen.insert(c) { work.extend(callees(&m.functions[c])); }
+    }).collect();
+    let mut cycle = vec![false; n];
+    let mut index = vec![usize::MAX; n];
+    let mut low = vec![0; n];
+    let mut on_stack = vec![false; n];
+    let mut stack = Vec::new();
+    let mut next = 0;
+    for root in 0..n {
+        if index[root] != usize::MAX { continue; }
+        // (node, next edge)
+        let mut work = vec![(root, 0)];
+        while let Some(&mut (v, ref mut e)) = work.last_mut() {
+            if *e == 0 {
+                index[v] = next;
+                low[v] = next;
+                next += 1;
+                stack.push(v);
+                on_stack[v] = true;
+            }
+            if let Some(&w) = edges[v].get(*e) {
+                *e += 1;
+                if index[w] == usize::MAX {
+                    work.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(p, _)) = work.last() { low[p] = low[p].min(low[v]); }
+            if low[v] == index[v] {
+                let at = stack.iter().rposition(|&x| x == v).unwrap();
+                let many = stack.len() - at > 1;
+                for x in stack.drain(at..) {
+                    on_stack[x] = false;
+                    cycle[x] = many;
+                }
+            }
         }
-        true
-    }).collect()
+    }
+    cycle
 }
 
 fn analyze(f: &Function, self_idx: usize) -> FnInfo {
@@ -205,10 +237,10 @@ impl IrPass for Inline {
     fn run(&mut self, m: &mut Module) -> bool {
         let n = m.functions.len();
         let info: Vec<FnInfo> = (0..n).map(|i| analyze(&m.functions[i], i)).collect();
-        let must = must_inline(m, &info);
+        let cycle = on_cycle(m, &info);
         let mut changed = false;
         for caller in 0..n {
-            changed |= self.inline_into(m, caller, &info, &must);
+            changed |= self.inline_into(m, caller, &info, &cycle);
         }
         for f in 0..n {
             changed |= self.self_inline(m, f, &info);
@@ -220,12 +252,16 @@ impl IrPass for Inline {
 impl Inline {
     /// Inline eligible call sites in function `caller` (repeatedly, so transitive
     /// and multiple-site cases are handled in one pass run, up to the caps).
-    fn inline_into(&self, m: &mut Module, caller: usize, info: &[FnInfo], must: &[bool]) -> bool {
+    fn inline_into(&self, m: &mut Module, caller: usize, info: &[FnInfo], cycle: &[bool]) -> bool {
         let mut changed = false;
         let mut done = 0usize;
+        // A function on a cycle is expanded once here: each copy brings its call
+        // back (Linux's FSE_readNCount_body, always_inline, calls itself through
+        // FSE_readNCount).
+        let mut expanded: HashSet<usize> = HashSet::new();
         loop {
-            // Past a cap only `must` callees go on (Linux's intel_pmu_init passes
-            // both, and kept out-of-line `arch_static_branch` copies).
+            // Past a cap only `always_inline` callees go on (Linux's intel_pmu_init
+            // passes both, and kept out-of-line `arch_static_branch` copies).
             let capped = done >= MAX_INLINES_PER_FN || func_size(&m.functions[caller]) > MAX_CALLER_INSTRS;
             // Find the first inlinable call site (block index, instr index).
             let mut site = None;
@@ -236,7 +272,8 @@ impl Inline {
                         let callee = func.index();
                         if callee == caller { continue; }              // no direct self-inline
                         let ci = &info[callee];
-                        if !ci.eligible || (capped && !must[callee]) { continue; }
+                        if !ci.eligible || (capped && !ci.always) { continue; }
+                        if cycle[callee] && expanded.contains(&callee) { continue; }
                         // Threshold 0 (below -O2): only `always_inline` functions.
                         if !(self.aggressive || ci.always || (self.threshold > 0 && ci.size <= self.threshold)) { continue; }
                         // parameter/argument arity must match (variadic excluded).
@@ -251,6 +288,9 @@ impl Inline {
                 }
             }
             let Some((bi, ii)) = site else { break };
+            if let Instr::Call { func, .. } = &m.functions[caller].blocks[bi].instrs[ii] {
+                if cycle[func.index()] { expanded.insert(func.index()); }
+            }
             self.do_inline(m, caller, bi, ii);
             changed = true;
             done += 1;
