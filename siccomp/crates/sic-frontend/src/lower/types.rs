@@ -1217,7 +1217,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
 /// fold is an error, as in GCC.
 pub(crate) fn attr_align(n: Option<u32>, e: &Option<crate::ast::BoxExpr>, named: &HashMap<String, Type>, ptr_size: u32) -> Result<Option<u32>> {
     let Some(e) = e else { return Ok(n) };
-    let v = eval_const_size(e, named, ptr_size, &HashMap::new())
+    let v = ENUM_CONSTS.with(|ec| eval_const_size(e, named, ptr_size, &ec.borrow()))
         .filter(|v| *v > 0 && (*v as u64).is_power_of_two())
         .ok_or_else(|| CompileError::at("requested alignment is not a positive power of 2".to_string(),
             e.span.file.clone(), e.span.line, e.span.col))?;
