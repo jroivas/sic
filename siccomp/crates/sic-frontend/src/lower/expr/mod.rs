@@ -5308,12 +5308,12 @@ impl<'m> FuncCtx<'m> {
     /// `sizeof`/`_Alignof`/`__builtin_types_compatible_p` — an array dimension
     /// like QEMU's `ARRAY_SIZE(local_array)`. Those operands become literals and
     /// the plain constant folder does the rest. None: not a constant (a VLA).
-    pub(crate) fn eval_scoped_const(&mut self, e: &Expr) -> Option<i64> {
+    pub(crate) fn eval_scoped_const(&self, e: &Expr) -> Option<i64> {
         let folded = self.subst_scoped_consts(e)?;
         super::eval_const_expr(&folded, &self.lowerer.enum_consts).ok()
     }
 
-    fn subst_scoped_consts(&mut self, e: &Expr) -> Option<Expr> {
+    fn subst_scoped_consts(&self, e: &Expr) -> Option<Expr> {
         use ExprKind::*;
         let ps = self.ptr_size();
         let lit = |v: u64| Some(Expr::new(UIntLit(v, true), e.span.clone()));
@@ -5364,7 +5364,7 @@ impl<'m> FuncCtx<'m> {
     /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
     /// is a struct type registered under that bare name (a type spelled as an
     /// expression), else an error.
-    fn sizeof_operand_type(&mut self, e: &Expr) -> Result<Type> {
+    fn sizeof_operand_type(&self, e: &Expr) -> Result<Type> {
         if let ExprKind::Ident(name) = &e.kind {
             if self.lookup(name).is_none()
                 && !matches!(name.as_str(), "__func__" | "__FUNCTION__" | "__PRETTY_FUNCTION__")
@@ -7252,7 +7252,8 @@ impl<'m> FuncCtx<'m> {
             {
                 args.first().map_or(0, |a| self.is_constant_p(a) as i64)
             }
-            _ => crate::lower::eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0),
+            // Through `sizeof` of a local (Linux's `__inttype(*ptr)`).
+            _ => self.eval_scoped_const(e).unwrap_or(0),
         }
     }
 
