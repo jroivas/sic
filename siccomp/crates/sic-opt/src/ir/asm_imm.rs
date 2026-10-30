@@ -383,16 +383,21 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
                     }
                     vals.push(v);
                 }
-                // Identical copies share one helper; distinct ones get distinct
-                // label numbers (their bodies all land in one assembler file).
+                // Identical copies of one statement share a helper. Every helper
+                // gets its own label number, also those of two statements with
+                // the same text: all bodies land in one assembler file, and a
+                // number from the text would repeat (Linux's WARN()s, with the
+                // same file name string).
                 let pre = substitute(&bodies[&ext.name], &vals, "").ok_or_else(err)?;
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 pre.hash(&mut h);
-                let hv = h.finish();
-                let body = substitute(&bodies[&ext.name], &vals, &format!("{}", hv % 1_000_000_000_000)).ok_or_else(err)?;
-                let name = format!("{}_{:016x}", ext.name, hv);
-                if !new_helpers.iter().any(|(n, _)| *n == name) { new_helpers.push((name.clone(), body)); }
+                let name = format!("{}_{:016x}", ext.name, h.finish());
+                if !new_helpers.iter().any(|(n, _)| *n == name) {
+                    let uid = m.asm_text_helpers.len() + new_helpers.len();
+                    let body = substitute(&bodies[&ext.name], &vals, &uid.to_string()).ok_or_else(err)?;
+                    new_helpers.push((name.clone(), body));
+                }
                 called.insert(name.clone());
                 rewrites.push((fi, bi, ii, name, ext.sig.params[..d.first_imm].to_vec(), ext.sig.ret.clone()));
             }
