@@ -352,6 +352,9 @@ pub struct FuncCtx<'m> {
     pub cleanups: Vec<Vec<Cleanup>>,
     /// A unique id per entry of `cleanups`, to tell scopes apart after they end.
     pub scope_ids: Vec<u32>,
+    /// A block-scope typedef that hides another: its scope depth, the name and
+    /// the hidden type, back in force when the scope ends.
+    pub typedef_shadows: Vec<(usize, String, Type)>,
     pub next_scope_id: u32,
     /// sic move-on-return: the local (address, destructor) that the `return`
     /// being lowered moves out (`return r;` / `return Some(r);`), whose `~S()`
@@ -511,6 +514,7 @@ impl<'m> FuncCtx<'m> {
             sret: None,
             cleanups: vec![Vec::new()],
             scope_ids: vec![0],
+            typedef_shadows: Vec::new(),
             next_scope_id: 1,
             moved_on_return: None,
             moved_enum_on_return: None,
@@ -676,6 +680,11 @@ impl<'m> FuncCtx<'m> {
                 let calls: Vec<Cleanup> = scope.iter().rev().cloned().collect();
                 for c in calls { self.emit_cleanup(c); }
             }
+        }
+        while self.typedef_shadows.last().is_some_and(|(d, ..)| *d == self.scope_ids.len()) {
+            let (_, name, ty) = self.typedef_shadows.pop().unwrap();
+            super::types::note_typedef(&name, &ty);
+            self.lowerer.struct_types.insert(name, ty);
         }
         self.cleanups.pop();
         self.scope_ids.pop();
@@ -3389,7 +3398,9 @@ impl<'m> FuncCtx<'m> {
                     // QEMU's loongarch DO_VMUH multiplied in 32 bits).
                     if let Ok(ir_ty) = self.lower_type(ty) {
                         super::types::note_typedef(name, &ir_ty);
-                        self.lowerer.struct_types.insert(name.clone(), ir_ty);
+                        if let Some(old) = self.lowerer.struct_types.insert(name.clone(), ir_ty) {
+                            self.typedef_shadows.push((self.scope_ids.len(), name.clone(), old));
+                        }
                     }
                 }
             }
