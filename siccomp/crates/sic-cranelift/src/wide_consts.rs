@@ -56,8 +56,12 @@ pub(crate) fn wide_constants_to_rodata<M: Module>(
             }
             let op = func.dfg.insts[inst].opcode();
             // `cmp` takes an immediate only as its second operand; an 8-bit
-            // multiply has no immediate form.
-            let only_first = op == Opcode::Icmp;
+            // multiply has no immediate form, and a wider one only one (two
+            // constants meet when the optimizer did not run, -O0 and -O1).
+            let is_const = |v: cir::Value| matches!(func.dfg.value_def(v), cir::ValueDef::Result(d, _)
+                if matches!(func.dfg.insts[d], InstructionData::UnaryImm { opcode: Opcode::Iconst, .. }));
+            let two_const_mul = op == Opcode::Imul && func.dfg.inst_args(inst).iter().all(|&a| is_const(a));
+            let only_first = op == Opcode::Icmp || two_const_mul;
             let byte_mul = op == Opcode::Imul && func.dfg.ctrl_typevar(inst) == ct::I8;
             if !pools_any_constant(op) && !only_first && !byte_mul { continue; }
             for (k, &a) in func.dfg.inst_args(inst).iter().enumerate() {
