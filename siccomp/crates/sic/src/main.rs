@@ -399,11 +399,78 @@ fn handle_version_query(args: &[String]) -> bool {
     false
 }
 
+/// The first of `clang`, `gcc` on `$PATH` (not sic itself under that name).
+fn system_compiler() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for name in ["clang", "gcc"] {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join(name);
+            if p.is_file() && !resolves_to_self(&p.to_string_lossy()) { return Some(p); }
+        }
+    }
+    None
+}
+
+/// The arguments `cc` said it does not know, from its error output: Clang's
+/// "unknown argument", "unknown warning option", "optimization flag … is not
+/// supported" and "argument unused during compilation", GCC's "unrecognized
+/// command-line option". Only exact members of `args`.
+fn rejected_flags(stderr: &str, args: &[String]) -> Vec<String> {
+    const MARKERS: [&str; 5] = ["unknown argument: ", "unknown warning option ", "optimization flag ",
+        "argument unused during compilation: ", "unrecognized command-line option "];
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        for m in MARKERS {
+            let Some(at) = line.find(m) else { continue };
+            let quoted = line[at + m.len()..].trim_start_matches(|c| c == '\'' || c == '\u{2018}');
+            let flag = quoted.split(|c| c == '\'' || c == '\u{2019}').next().unwrap_or("");
+            if args.iter().any(|a| a == flag) && !out.iter().any(|f| f == flag) { out.push(flag.to_string()); }
+        }
+    }
+    out
+}
+
+/// sic generates x86-64 only (Cranelift has no i386 back end). A compile for
+/// 32-bit or 16-bit x86 (the last of `-m16`/`-m32`/`-mx32`/`-m64` decides;
+/// Linux's vDSO32 and real-mode code) is handed to the system compiler: Clang
+/// when installed, else GCC. Never returns then, and fails when neither exists
+/// — it must not emit 64-bit code for a 32-bit request.
+/// sic accepts any `-f`/`-W`/`-m` flag, so a build system that probes the
+/// compiler (Kbuild's cc-option) passes flags the real one may reject: those
+/// it names as unknown are dropped and it runs again. Other errors stand.
+fn delegate_non_64bit(args: &[String]) {
+    use std::io::Write;
+    let expanded = expand_response_files(args.iter().cloned());
+    let last = expanded.iter().skip(1).rev().find(|a| matches!(a.as_str(), "-m16" | "-m32" | "-mx32" | "-m64"));
+    let Some(flag) = last.filter(|a| a.as_str() != "-m64") else { return };
+    let Some(cc) = system_compiler() else {
+        eprintln!("sic: error: '{}' needs clang or gcc on PATH (sic only generates 64-bit x86-64)", flag);
+        std::process::exit(1);
+    };
+    let mut argv: Vec<String> = expanded[1..].to_vec();
+    loop {
+        let out = Command::new(&cc).args(&argv).stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped()).spawn().and_then(|c| c.wait_with_output());
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => { eprintln!("sic: error: cannot run {}: {}", cc.display(), e); std::process::exit(1); }
+        };
+        let text = String::from_utf8_lossy(&out.stderr);
+        let rejected = if out.status.success() { Vec::new() } else { rejected_flags(&text, &argv) };
+        if rejected.is_empty() {
+            let _ = std::io::stderr().write_all(&out.stderr);
+            std::process::exit(out.status.code().unwrap_or(1));
+        }
+        argv.retain(|a| !rejected.contains(a));
+    }
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().collect();
     if handle_version_query(&raw_args) {
         return;
     }
+    delegate_non_64bit(&raw_args);
 
     // Normalize a few GCC-style flags before clap sees them.
     let mut want_debug = false;
@@ -585,11 +652,9 @@ fn main() {
             }
         } else if a == "-m64" {
             // sic targets x86-64; `-m64` is the default. Accept as a no-op.
-        } else if a == "-m32" || a == "-mx32" {
-            // sic can only produce 64-bit code — fail loudly rather than
-            // silently emitting a 64-bit object for a 32-bit request.
-            eprintln!("sic: error: '{}' is not supported (sic only targets 64-bit x86-64)", a);
-            std::process::exit(1);
+        } else if a == "-m32" || a == "-mx32" || a == "-m16" {
+            // An earlier `-m32` overridden by a later `-m64` (see
+            // `delegate_non_64bit`, which took the last): the code is 64-bit.
         } else if a.starts_with("-m") && a.len() > 2 {
             // Other machine-dependent flags: the instruction-set ones (`-mavx2`,
             // `-mno-sse4.1`, `-march=...`) set the x86 feature macros; tuning

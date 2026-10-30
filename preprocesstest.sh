@@ -117,6 +117,16 @@ if [ -n "$SICDRV" ]; then
     if [ "$got" = "/* kept */|asm_part foo|" ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL driver-asm-cpp: got '$got' $(head -c 200 "$WORK/err")"
     fi
+    # `-m32` goes to the system compiler (Clang, else GCC; sic emits x86-64 only),
+    # a flag only sic accepts is dropped, and a later `-m64` stays in sic.
+    if command -v clang >/dev/null || command -v gcc >/dev/null; then
+        total=$((total + 1))
+        m32="$("$SICDRV" -m32 -ffoo-unknown-to-cc -E -dM -x c /dev/null 2> "$WORK/err" | grep -cE '^#define __i386__ ')"
+        m64="$("$SICDRV" -m32 -m64 -E -dM -x c /dev/null 2>/dev/null | grep -cE '^#define __x86_64__ ')"
+        if [ "$m32" = 1 ] && [ "$m64" = 1 ]; then passed=$((passed + 1)); else
+            failed=$((failed + 1)); echo "FAIL driver-m32: i386=$m32 x86_64=$m64 $(head -c 200 "$WORK/err")"
+        fi
+    fi
 fi
 
 extra=""
