@@ -1710,7 +1710,22 @@ impl Parser {
     /// immediately followed by a type, `)`, or `void` is a function suffix and
     /// is handled by `parse_declarator_suffix` instead.
     fn grouped_declarator_ahead(&self) -> bool {
-        let next = &self.tokens[(self.pos + 1).min(self.tokens.len() - 1)];
+        // Attributes may open the group: `int (__attribute__((ms_abi)) *f)(void)`.
+        let mut i = self.pos + 1;
+        while self.tokens.get(i).map(|t| t.kind) == Some(TokenKind::Attribute) {
+            i += 1;
+            let mut depth = 0;
+            while let Some(t) = self.tokens.get(i) {
+                match t.kind {
+                    TokenKind::LParen => depth += 1,
+                    TokenKind::RParen => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+                if depth == 0 { break; }
+            }
+        }
+        let next = &self.tokens[i.min(self.tokens.len() - 1)];
         match next.kind {
             TokenKind::Star | TokenKind::LParen | TokenKind::LBracket => true,
             TokenKind::Ident => !self.typedefs.contains(next.text.as_str()),
@@ -1825,6 +1840,7 @@ impl Parser {
             // base into the sentinel's place.
             let sentinel = format!("\0decl{}", self.pos);
             self.advance(); // (
+            self.skip_attributes();
             let sent_qt = QualType::new(AstType::Named(sentinel.clone()));
             let (name, inner_ty) = self.parse_declarator(sent_qt)?;
             self.expect(TokenKind::RParen)?;
