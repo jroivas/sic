@@ -321,7 +321,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     let used_globals = ir_module.used_globals();
     let mut global_ids: HashMap<u32, cranelift_module::DataId> = HashMap::new();
     for (i, g) in ir_module.globals.iter().enumerate() {
-        if g.linkage == Linkage::Import && !used_globals.contains(&(i as u32)) {
+        if matches!(g.linkage, Linkage::Import | Linkage::Internal | Linkage::Private) && !used_globals.contains(&(i as u32)) {
             continue;
         }
         let linkage = match g.linkage {
@@ -339,7 +339,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     // ── Define globals ───────────────────────────────────────────────────────
     for (i, g) in ir_module.globals.iter().enumerate() {
         // Imports are defined in another module (libc etc.); only declared here.
-        if g.linkage == Linkage::Import {
+        if g.linkage == Linkage::Import || !global_ids.contains_key(&(i as u32)) {
             continue;
         }
         let did = global_ids[&(i as u32)];

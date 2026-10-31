@@ -1433,6 +1433,7 @@ impl<'m> FuncCtx<'m> {
             // `typeof(x) x = …`: the operand is the outer `x`, which only names
             // it until this binding exists, so resolve it now.
             let qt = self.declared_qt(&qt);
+            if qt.qualifiers.contains(&crate::ast::TypeQual::Volatile) { self.func_mut().volatile_slots.push(alloca_id); }
             self.vid_qtypes.insert(alloca_id, qt);
         }
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));

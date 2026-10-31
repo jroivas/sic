@@ -71,6 +71,8 @@ pub struct Function {
     /// Always inline this function when optimizing (`always_inline`; GCC's
     /// intrinsics), whatever its size.
     pub always_inline: bool,
+    /// Slots of `volatile` variables: what they hold is not for passes to know.
+    pub volatile_slots: Vec<ValId>,
     /// Name of the next-id counter for values inside this function.
     next_val_id: u32,
     next_block_id: u32,
@@ -83,6 +85,7 @@ impl Function {
             constructor: None,
             noinline: false,
             always_inline: false,
+            volatile_slots: Vec::new(),
             next_val_id: 0, next_block_id: 0,
         }
     }
@@ -327,7 +330,7 @@ impl Module {
         // Only scan functions that will actually be emitted; an extern referenced
         // solely by a dead (unemitted) internal function must not be declared, or
         // it becomes an undefined symbol that pulls archive members.
-        let reachable = self.reachable_functions();
+        let (reachable, live) = self.live_items();
         let mut used = std::collections::HashSet::new();
         let note_val = |v: &Val, used: &mut std::collections::HashSet<usize>| {
             if let Val::Func(fr) = v {
@@ -350,7 +353,8 @@ impl Module {
         }
         // Extern functions referenced only via a static aggregate initializer
         // (e.g. a function-pointer table pointing at an extern).
-        for g in &self.globals {
+        for (i, g) in self.globals.iter().enumerate() {
+            if !live.contains(&(i as u32)) { continue; }
             if let Some(Constant::Aggregate { relocs, .. }) = &g.init {
                 for (_, target) in relocs {
                     if let RelocTarget::Func(fr) = target {
@@ -369,30 +373,7 @@ impl Module {
     /// — dragging real definitions into conflict with a unit test's stubs
     /// (QEMU's error-report.c declares `global_aio_wait` without using it).
     pub fn used_globals(&self) -> std::collections::HashSet<u32> {
-        let mut used = std::collections::HashSet::new();
-        let note_val = |v: &Val, used: &mut std::collections::HashSet<u32>| {
-            if let Val::Global(gr) = v { used.insert(gr.0); }
-        };
-        for f in &self.functions {
-            for bb in &f.blocks {
-                for instr in &bb.instrs {
-                    instr.for_each_val(|v| note_val(v, &mut used));
-                }
-                bb.terminator.for_each_val(|v| note_val(v, &mut used));
-            }
-        }
-        for g in &self.globals {
-            match &g.init {
-                Some(Constant::Aggregate { relocs, .. }) => {
-                    for (_, target) in relocs {
-                        if let RelocTarget::Global(gr, _) = target { used.insert(gr.0); }
-                    }
-                }
-                Some(Constant::GlobalAddr(gr)) => { used.insert(gr.0); }
-                _ => {}
-            }
-        }
-        used
+        self.live_items().1
     }
 
     /// Indices (into `functions`) of *defined* functions reachable from a root —
@@ -405,53 +386,86 @@ impl Module {
     /// object correct but bloated; removing them matches what a real compiler +
     /// `--gc-sections` achieve, without the archive-pull side effect.
     pub fn reachable_functions(&self) -> std::collections::HashSet<u32> {
+        self.live_items().0
+    }
+
+    /// The identifiers in assembler text of this unit: what it names is used,
+    /// whatever the IR says.
+    pub fn asm_names(&self) -> std::collections::HashSet<&str> {
+        let mut names = std::collections::HashSet::new();
+        let texts = self.asm_text_helpers.iter().map(|(_, t)| t).chain(&self.file_asm);
+        for t in texts {
+            names.extend(t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$')).filter(|w| !w.is_empty()));
+        }
+        names
+    }
+
+    /// The defined functions and the globals a root reaches. Roots: what is
+    /// visible outside (not `static`), constructors, `used`, what is placed in a
+    /// named section, and what assembler text names. A `static` table nothing
+    /// refers to keeps nothing alive (Linux's `dm_dax_ops`, whose users a disabled
+    /// config removes, points at functions calling what that config lacks).
+    pub fn live_items(&self) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
         use std::collections::HashSet;
-        let mut reachable: HashSet<u32> = HashSet::new();
-        let mut work: Vec<u32> = Vec::new();
-        // Roots: anything not purely-internal, plus constructors and `used`.
+        enum Item { Func(u32), Global(u32) }
+        let asm = self.asm_names();
+        let sections: HashSet<&str> = self.data_sections.iter().map(|(n, _)| n.as_str()).collect();
+        let mut funcs: HashSet<u32> = HashSet::new();
+        let mut globals: HashSet<u32> = HashSet::new();
+        let mut work: Vec<Item> = Vec::new();
         for (i, f) in self.functions.iter().enumerate() {
-            if f.linkage != Linkage::Internal || f.constructor.is_some() || self.used_functions.contains(&f.name) {
-                if reachable.insert(i as u32) { work.push(i as u32); }
+            if f.linkage != Linkage::Internal || f.constructor.is_some()
+                || self.used_functions.contains(&f.name) || asm.contains(f.name.as_str()) {
+                funcs.insert(i as u32);
+                work.push(Item::Func(i as u32));
             }
         }
-        // Roots: functions whose address a global initializer stores.
-        for g in &self.globals {
-            if let Some(Constant::Aggregate { relocs, .. }) = &g.init {
-                for (_, target) in relocs {
-                    if let RelocTarget::Func(fr) = target {
-                        if !fr.is_extern() && reachable.insert(fr.index() as u32) {
-                            work.push(fr.index() as u32);
+        for (i, g) in self.globals.iter().enumerate() {
+            let hidden = matches!(g.linkage, Linkage::Internal | Linkage::Private | Linkage::Import);
+            if !hidden || sections.contains(g.name.as_str()) || self.used_functions.contains(&g.name)
+                || asm.contains(g.name.as_str()) {
+                globals.insert(i as u32);
+                work.push(Item::Global(i as u32));
+            }
+        }
+        while let Some(item) = work.pop() {
+            let mut fs: Vec<u32> = Vec::new();
+            let mut gs: Vec<u32> = Vec::new();
+            let note = |v: &Val, fs: &mut Vec<u32>, gs: &mut Vec<u32>| match v {
+                Val::Func(fr) if !fr.is_extern() => fs.push(fr.index() as u32),
+                Val::Global(g) | Val::Const(Constant::GlobalAddr(g)) => gs.push(g.0),
+                _ => {}
+            };
+            match item {
+                Item::Func(fi) => {
+                    let Some(f) = self.functions.get(fi as usize) else { continue };
+                    for bb in &f.blocks {
+                        for instr in &bb.instrs {
+                            if let Instr::Call { func, .. } = instr {
+                                if !func.is_extern() { fs.push(func.index() as u32); }
+                            }
+                            instr.for_each_val(|v| note(v, &mut fs, &mut gs));
                         }
+                        bb.terminator.for_each_val(|v| note(v, &mut fs, &mut gs));
                     }
                 }
-            }
-        }
-        // Transitive closure over calls and address-of within reachable functions.
-        while let Some(fi) = work.pop() {
-            let Some(f) = self.functions.get(fi as usize) else { continue };
-            let mut refs: Vec<u32> = Vec::new();
-            for bb in &f.blocks {
-                for instr in &bb.instrs {
-                    if let Instr::Call { func, .. } = instr {
-                        if !func.is_extern() { refs.push(func.index() as u32); }
-                    }
-                    instr.for_each_val(|v| {
-                        if let Val::Func(fr) = v {
-                            if !fr.is_extern() { refs.push(fr.index() as u32); }
+                Item::Global(gi) => match self.globals.get(gi as usize).and_then(|g| g.init.as_ref()) {
+                    Some(Constant::Aggregate { relocs, .. }) => {
+                        for (_, target) in relocs {
+                            match target {
+                                RelocTarget::Func(fr) => if !fr.is_extern() { fs.push(fr.index() as u32); },
+                                RelocTarget::Global(g, _) => gs.push(g.0),
+                            }
                         }
-                    });
-                }
-                bb.terminator.for_each_val(|v| {
-                    if let Val::Func(fr) = v {
-                        if !fr.is_extern() { refs.push(fr.index() as u32); }
                     }
-                });
+                    Some(Constant::GlobalAddr(g)) => gs.push(g.0),
+                    _ => {}
+                },
             }
-            for r in refs {
-                if reachable.insert(r) { work.push(r); }
-            }
+            for r in fs { if funcs.insert(r) { work.push(Item::Func(r)); } }
+            for r in gs { if globals.insert(r) { work.push(Item::Global(r)); } }
         }
-        reachable
+        (funcs, globals)
     }
 }
 

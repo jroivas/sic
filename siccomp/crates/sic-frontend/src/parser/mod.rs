@@ -596,6 +596,7 @@ impl Parser {
         // An alias has no storage of its own: a reference to the name, which the
         // assembler binds to the target.
         let aliased = self.take_alias(&name, &storage);
+        if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
         let mut base_ty = base_ty;
         if aliased { base_ty.storage = Some(StorageClass::Extern); }
         let init = if self.eat(TokenKind::Eq) {

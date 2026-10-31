@@ -164,6 +164,7 @@ impl<'a> Resolver<'a> {
                     Instr::Cast { op, val, to_ty, .. } => {
                         let x = self.resolve(val, depth + 1)?;
                         match (op, x) {
+                            (CastOp::BitCast, Imm::Int(v)) if matches!(to_ty, Type::Int { .. }) => Some(Imm::Int(truncate(v, to_ty))),
                             (CastOp::PtrToInt | CastOp::IntToPtr | CastOp::BitCast, x) => Some(x),
                             (CastOp::SExt, x @ Imm::Int(_)) => Some(x),
                             // The source width is not known here: only a

@@ -169,7 +169,7 @@ ILEOF
     # Dead code leaves no reference behind at -O2 (the test's stubs are for builds
     # without optimization; sic does not define __OPTIMIZE__ itself).
     total=$((total + 1))
-    got="$( (cd "$WORK" && "$SICDRV" -O2 -D__OPTIMIZE__=1 -c "$TESTDIR/test_0692.c" -o dead.o && nm -u dead.o | grep -cE 'bug_|TOKEN|never_defined') 2> "$WORK/err")"
+    got="$( (cd "$WORK" && "$SICDRV" -O2 -D__OPTIMIZE__=1 -c "$TESTDIR/test_0692.c" -o dead.o && "$SICDRV" -O2 -D__OPTIMIZE__=1 -c "$TESTDIR/test_0694.c" -o dead2.o && nm -u dead.o dead2.o | grep -cE 'bug_|TOKEN|never_defined') 2> "$WORK/err")"
     if [ "$got" = "0" ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL dead-references: got '$got' $(nm -u "$WORK/dead.o" 2>/dev/null | head -5 | tr '\n' ' ') $(head -c 200 "$WORK/err")"
     fi

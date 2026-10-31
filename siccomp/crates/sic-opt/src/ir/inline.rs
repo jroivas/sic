@@ -83,7 +83,7 @@ struct FnInfo {
 /// The parameter-value sentinel base used by the frontend: parameter `i` is
 /// referenced in the body as `Val::Local(ValId(SENTINEL+i))` (see
 /// `lower_function`); for an sret function parameter 0 is the result pointer.
-const SENTINEL: u32 = 0x10000;
+pub(crate) const SENTINEL: u32 = 0x10000;
 
 /// Per-caller caps so inlining can't blow up compile time or code size on
 /// pathological (e.g. deep or mutually-recursive) call graphs.
@@ -377,6 +377,9 @@ impl Inline {
                     vmap.entry(*slot).or_insert_with(|| Val::Local(caller.alloc_val()));
                 }
             }
+        }
+        for s in &callee.volatile_slots {
+            if let Some(Val::Local(new)) = vmap.get(s) { caller.volatile_slots.push(*new); }
         }
         // --- 2. Fresh block ids for every callee block + a continuation block. ----
         let mut bmap: HashMap<BlockId, BlockId> = HashMap::new();
