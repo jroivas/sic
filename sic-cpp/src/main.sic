@@ -1828,6 +1828,9 @@ i32 avoid_paste(string a, string b)
     if (a == ".") return c == '.' || c == '%' || b_num;
     if (a == "#") return c == '#' || c == '%';
     i32 a0 = a[0];
+    // A paste that is no single token (assembler text: `initcall##n##.init` in
+    // Linux's linker script) ends in what the next token follows.
+    if (is_ident_start(a0) && !is_ident(a[a.size - 1])) return avoid_paste(a[a.size - 1:], b);
     if (is_ident_start(a0)) return b_name || b_chr || b_str;
     if ((a0 >= '0' && a0 <= '9') || (a0 == '.' && a.size > 1))
         return b_num || b_name || b_chr || c == '.' || c == '+' || c == '-';
