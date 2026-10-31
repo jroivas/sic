@@ -1285,12 +1285,22 @@ impl<'m> FuncCtx<'m> {
                 let mut result = Constant::zero();
                 let n = stmts.len();
                 for (i, stmt) in stmts.iter().enumerate() {
-                    if self.is_terminated() { break; }
+                    // Code after a `goto` is dead up to the next label.
+                    if self.is_terminated() && !matches!(stmt, ast::Stmt::Label(..)) { continue; }
                     if i + 1 == n {
-                        if let ast::Stmt::Expr(e, _) = stmt {
-                            result = self.lower_expr(e)?;
-                            continue;
+                        // The last statement may carry labels: `out: sz;` in
+                        // Linux's FIND_NEXT_BIT. Its value is still the result.
+                        let mut last = stmt;
+                        while let ast::Stmt::Label(name, inner, sp) = last {
+                            self.lower_label(name, sp)?;
+                            last = inner;
                         }
+                        if let ast::Stmt::Expr(e, _) = last {
+                            result = self.lower_expr(e)?;
+                        } else {
+                            self.lower_stmt(last)?;
+                        }
+                        continue;
                     }
                     self.lower_stmt(stmt)?;
                 }

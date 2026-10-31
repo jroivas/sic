@@ -669,6 +669,22 @@ impl<'m> FuncCtx<'m> {
             .map(|g| g.fail_bb)
     }
 
+    /// Start the block of label `name`, and resolve the gotos waiting for it.
+    pub(crate) fn lower_label(&mut self, name: &str, _sp: &crate::lexer::Span) -> Result<()> {
+        let label_bb = self.new_block_after_current();
+        if !self.is_terminated() {
+            self.set_terminator(Terminator::Jump(label_bb));
+        }
+        self.switch_to_block(label_bb);
+        self.func_mut().block_mut(label_bb).label = Some(name.to_string());
+        self.labels.insert(name.to_string(), label_bb);
+        let counts = self.active_cleanup_counts();
+        self.label_scopes.insert(name.to_string(), counts);
+        // Patch pending gotos that target this label
+        self.patch_goto(name, label_bb);
+        Ok(())
+    }
+
     pub fn enter_scope(&mut self) {
         self.locals.push(HashMap::new());
         self.cleanups.push(Vec::new());
@@ -2707,19 +2723,8 @@ impl<'m> FuncCtx<'m> {
                 self.set_terminator(Terminator::Jump(dead));
                 self.switch_to_block(dead);
             }
-            Stmt::Label(name, inner, _) => {
-                // Create a new block for this label
-                let label_bb = self.new_block_after_current();
-                if !self.is_terminated() {
-                    self.set_terminator(Terminator::Jump(label_bb));
-                }
-                self.switch_to_block(label_bb);
-                self.func_mut().block_mut(label_bb).label = Some(name.clone());
-                self.labels.insert(name.clone(), label_bb);
-                let counts = self.active_cleanup_counts();
-                self.label_scopes.insert(name.clone(), counts);
-                // Patch pending gotos that target this label
-                self.patch_goto(name, label_bb);
+            Stmt::Label(name, inner, sp) => {
+                self.lower_label(name, sp)?;
                 self.lower_stmt(inner)?;
             }
             Stmt::Case(val, body, _) => {

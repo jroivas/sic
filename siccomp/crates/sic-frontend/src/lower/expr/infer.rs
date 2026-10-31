@@ -612,7 +612,9 @@ impl<'m> FuncCtx<'m> {
             // block (`typeof(x) _o = x; _o;`), invisible to the outer scope, so
             // resolve such declarators here.
             ExprKind::StmtExpr(stmts) => {
-                match stmts.last() {
+                let mut last = stmts.last();
+                while let Some(ast::Stmt::Label(_, inner, _)) = last { last = Some(inner.as_ref()); }
+                match last {
                     Some(ast::Stmt::Expr(e, _)) => {
                         if let ExprKind::Ident(name) = &e.kind {
                             for stmt in stmts {
