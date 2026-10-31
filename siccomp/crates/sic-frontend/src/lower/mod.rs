@@ -134,6 +134,12 @@ pub struct Lowerer {
     /// Set by `build_global_init` when an aggregate initializer could not be
     /// serialized and was zero-filled ([`Lowerer::check_global_init`]).
     pub global_init_unserializable: bool,
+    /// The `static`s of the function being lowered, which a static initializer
+    /// may name: its own (a list head pointing at itself) and its neighbours'.
+    pub scoped_statics: HashMap<String, (Type, GlobalRef)>,
+    literal_globals: HashMap<(u32, u32), (Type, GlobalRef)>,
+    /// The function whose `static` is being initialized, for `__func__` there.
+    pub scoped_fn_name: Option<String>,
     /// The first element that kept a global's initializer from being a constant.
     global_init_bad_element: Option<crate::lexer::Span>,
     pub c_enum_variant: HashMap<String, String>,
@@ -369,6 +375,9 @@ impl Lowerer {
             c_enum_defs: HashMap::new(),
             global_init_unserializable: false,
             global_init_bad_element: None,
+            scoped_statics: HashMap::new(),
+            literal_globals: HashMap::new(),
+            scoped_fn_name: None,
             c_enum_variant: HashMap::new(),
             c_enum_param: HashMap::new(),
             bitfield_param: HashMap::new(),
@@ -3537,6 +3546,10 @@ impl Lowerer {
     /// as file-scope globals; the caller binds the local name to this global.
     fn add_static_local_global(&mut self, name: String, d: &Declarator, mut ir_ty: Type) -> Result<(Type, GlobalRef)> {
         self.note_data_section(&name, d);
+        // Reserved first: the initializer may name the variable itself.
+        let gref = self.module.add_global(Global { name: name.clone(), ty: ir_ty.clone(), init: None,
+            linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false });
+        self.scoped_statics.insert(d.name.clone(), (ir_ty.clone(), gref));
         self.global_init_unserializable = false;
         let declared_ty = ir_ty.clone();
         let init = self.build_global_init(d, &mut ir_ty);
@@ -3550,8 +3563,9 @@ impl Lowerer {
             ir_ty.clone()
         };
         let ty_for_map = map_ty;
-        let g = Global { name, ty: ir_ty, init, linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false };
-        let gref = self.module.add_global(g);
+        let g = &mut self.module.globals[gref.0 as usize];
+        g.ty = ir_ty;
+        g.init = init;
         Ok((ty_for_map, gref))
     }
 
@@ -4155,12 +4169,22 @@ impl Lowerer {
 
     /// Pack a bit-field's constant value into `buf` at byte offset `base` (the
     /// storage unit), read-modify-write so neighbouring bit-fields are preserved.
-    fn serialize_bitfield(&self, e: &Expr, ty: &Type, bf: crate::lower::expr::BitField, buf: &mut [u8], base: usize) -> bool {
+    fn serialize_bitfield(&mut self, e: &Expr, ty: &Type, bf: crate::lower::expr::BitField, buf: &mut [u8], base: usize) -> bool {
         let mut size = ty.size_of(self.ptr_size) as usize;
         // A straddling packed bit-field covers more bytes than its type.
         if let Some(n) = bf.straddle_bytes(size as u32 * 8) { size = n as usize; }
+        // In a packed struct the storage unit may reach past the object: only the
+        // bytes holding the field are written.
+        let bits = bf.bit_offset as usize + bf.width as usize;
+        size = size.min(bits.div_ceil(8));
         if size == 0 || size > 8 || base + size > buf.len() { return false; }
-        let v = match self.eval_const_int(e) { Some(v) => v as u64, None => return false };
+        let v = match self.eval_const_int(e) {
+            Some(v) => v as u64,
+            None => {
+                if self.global_init_bad_element.is_none() { self.global_init_bad_element = Some(e.span.clone()); }
+                return false;
+            }
+        };
         let field_mask: u64 = if bf.width >= 64 { !0 } else { (1u64 << bf.width) - 1 };
         let mut cur: u64 = 0;
         for i in 0..size { cur |= (buf[base + i] as u64) << (8 * i); }
@@ -4249,6 +4273,18 @@ impl Lowerer {
                 let idx = self.select_generic_const(controlling, assocs)?;
                 self.eval_const_int(&assocs[idx].1)
             }
+            ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } =>
+                self.eval_const_int(if self.eval_const_int(cond)? != 0 { then } else { else_ }),
+            // A builtin of what only this evaluator can fold (Linux's
+            // `__builtin_ctzll(mask)`, the mask built with sizeof and casts).
+            ExprKind::Call { func, args } => {
+                let args = args.iter().map(|a| Some(Expr::new(ExprKind::IntLit(self.eval_const_int(a)?, true), a.span.clone())))
+                    .collect::<Option<Vec<_>>>()?;
+                let call = Expr::new(ExprKind::Call { func: func.clone(), args }, e.span.clone());
+                eval_const_expr(&call, &self.enum_consts).ok()
+            }
+            // The address of a constant lvalue: `&((struct s *)0)->f[i]`, `&*(T *)0`.
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => self.const_lvalue(expr).map(|(a, _)| a),
             ExprKind::SizeofType(qt) => {
                 lower_type(qt, &self.struct_types, self.ptr_size).ok()
                     .map(|t| t.size_of(self.ptr_size) as i64)
@@ -4318,9 +4354,6 @@ impl Lowerer {
                     _ => return None,
                 })
             }
-            ExprKind::Ternary { cond, then, else_ } => {
-                if self.eval_const_int(cond)? != 0 { self.eval_const_int(then) } else { self.eval_const_int(else_) }
-            }
             // GNU `a ?: b`: `a` when nonzero.
             ExprKind::Elvis { cond, else_ } => {
                 let c = self.eval_const_int(cond)?;
@@ -4335,8 +4368,21 @@ impl Lowerer {
     /// initializers need — notably `sizeof(global_array)` for `ARRAY_SIZE`.
     fn const_expr_type(&self, e: &Expr) -> Option<Type> {
         match &e.kind {
-            ExprKind::Ident(name) => self.globals_map.get(name).map(|(t, _)| t.clone())
+            ExprKind::Ident(name) => self.named_object(name).map(|(t, _)| t.clone())
                 .or_else(|| self.global_types.get(name).cloned()),
+            ExprKind::IntLit(_, wide) => Some(if *wide { Type::i64() } else { Type::i32() }),
+            ExprKind::UIntLit(_, wide) => Some(if *wide { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
+            ExprKind::CharLit(_) => Some(Type::i32()),
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => Some(Type::Pointer(Box::new(self.const_expr_type(expr)?))),
+            // Of pointer arms, a null pointer constant gives way to the other one:
+            // what `__is_constexpr` tests (`8 ? (void *)((long)(x) * 0l) : (int *)8`).
+            ExprKind::Ternary { then, else_, .. } => {
+                let null = |x: &Expr| match &x.kind {
+                    ExprKind::Cast { expr, .. } => self.eval_const_int(expr) == Some(0),
+                    _ => false,
+                };
+                if null(then) { self.const_expr_type(else_) } else { self.const_expr_type(then) }
+            }
             ExprKind::Index { base, .. } => {
                 match types::resolve_aggregate(&self.const_expr_type(base)?, &self.struct_types) {
                     Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
@@ -4402,7 +4448,11 @@ impl Lowerer {
                 let g = self.add_wide_string_global(units, *p);
                 Some(RelocTarget::Global(g, 0))
             }
-            ExprKind::Unary { op: UnOpKind::Addr, expr } => self.addr_of_reloc(expr),
+            // `&*p` is `p`.
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => match &expr.kind {
+                ExprKind::Unary { op: UnOpKind::Deref, expr: inner } => self.eval_ptr_reloc(inner),
+                _ => self.addr_of_reloc(expr),
+            },
             // `_Generic(...)` in a static initializer: select the matching
             // association at compile time and evaluate it. QEMU's TCG `all_outop[]`
             // table is `[OP] = _Generic(outop_X, T: &outop_X.base)` — without this
@@ -4422,10 +4472,15 @@ impl Lowerer {
             }
             // A bare function or array name decays to its own address.
             ExprKind::Ident(name) => {
+                if matches!(name.as_str(), "__func__" | "__FUNCTION__" | "__PRETTY_FUNCTION__") {
+                    let mut bytes = self.scoped_fn_name.clone()?.into_bytes();
+                    bytes.push(0);
+                    return Some(RelocTarget::Global(self.add_cstring_global(bytes), 0));
+                }
                 if let Some(fref) = self.module.func_ref_by_name(name) {
                     return Some(RelocTarget::Func(fref));
                 }
-                if let Some((ty, gref)) = self.globals_map.get(name) {
+                if let Some((ty, gref)) = self.named_object(name) {
                     if matches!(ty, Type::Array { .. }) {
                         return Some(RelocTarget::Global(*gref, 0));
                     }
@@ -4460,6 +4515,9 @@ impl Lowerer {
     /// What adding 1 to the address `e` adds in bytes.
     fn reloc_scale(&self, e: &Expr) -> Option<i64> {
         let t = match &e.kind {
+            // `(p + 1) + 2` steps as `p` does.
+            ExprKind::BinOp { lhs, rhs, .. } =>
+                return if self.eval_const_int(rhs).is_some() { self.reloc_scale(lhs) } else { self.reloc_scale(rhs) },
             ExprKind::Cast { ty, .. } => lower_type(ty, &self.struct_types, self.ptr_size).ok()?,
             ExprKind::Unary { op: UnOpKind::Addr, expr } => Type::Pointer(Box::new(self.const_expr_type(expr)?)),
             _ => self.const_expr_type(e)?,
@@ -4559,15 +4617,61 @@ impl Lowerer {
             let gref = self.emit_compound_literal_global(ty, init)?;
             return Some(RelocTarget::Global(gref, 0));
         }
+        if let ExprKind::StringLit(_) | ExprKind::WideStringLit(..) = &e.kind { return self.eval_ptr_reloc(e); }
+        self.materialize_literals(e)?;
         let (gref, off, _) = self.base_addr(e)?;
         Some(RelocTarget::Global(gref, off))
+    }
+
+    /// A file-scope object by name, or a `static` of the current function.
+    fn named_object(&self, name: &str) -> Option<&(Type, GlobalRef)> {
+        self.scoped_statics.get(name).or_else(|| self.globals_map.get(name))
+    }
+
+    /// The address and type of an lvalue at a constant address, off an integer
+    /// rather than a symbol: the `offsetof` idiom, `&((T *)0)->member`.
+    fn const_lvalue(&self, e: &Expr) -> Option<(i64, Type)> {
+        let member = |agg: &Type, name: &str| {
+            let st = types::resolve_aggregate(agg, &self.struct_types);
+            crate::lower::expr::resolve_field_access(&st, name, self.ptr_size, &self.struct_types)
+                .map(|(off, t, _)| (off as i64, t))
+        };
+        match &e.kind {
+            ExprKind::Unary { op: UnOpKind::Deref, expr } => match self.const_expr_type(expr)? {
+                Type::Pointer(t) => Some((self.eval_const_int(expr)?, *t)),
+                _ => None,
+            },
+            ExprKind::Arrow { base, name } => {
+                let Type::Pointer(t) = self.const_expr_type(base)? else { return None };
+                let (off, ft) = member(&t, name)?;
+                Some((self.eval_const_int(base)?.wrapping_add(off), ft))
+            }
+            ExprKind::Field { base, name } => {
+                let (a, t) = self.const_lvalue(base)?;
+                let (off, ft) = member(&t, name)?;
+                Some((a.wrapping_add(off), ft))
+            }
+            ExprKind::Index { base, index } => {
+                let i = self.eval_const_int(index)?;
+                let (a, elem) = match self.const_lvalue(base) {
+                    Some((a, Type::Array { elem, .. })) => (a, *elem),
+                    _ => match self.const_expr_type(base)? {
+                        Type::Pointer(t) => (self.eval_const_int(base)?, *t),
+                        _ => return None,
+                    },
+                };
+                let esize = types::resolve_aggregate(&elem, &self.struct_types).size_of(self.ptr_size) as i64;
+                Some((a.wrapping_add(i.wrapping_mul(esize)), elem))
+            }
+            _ => None,
+        }
     }
 
     /// Resolve a constant lvalue expression to (global, byte offset, type).
     fn base_addr(&self, e: &Expr) -> Option<(GlobalRef, i64, Type)> {
         match &e.kind {
             ExprKind::Ident(name) => {
-                let (ty, gref) = self.globals_map.get(name)?;
+                let (ty, gref) = self.named_object(name)?;
                 Some((*gref, 0, ty.clone()))
             }
             ExprKind::Index { base, index } => {
@@ -4576,17 +4680,37 @@ impl Lowerer {
                     Type::Array { elem, .. } => *elem,
                     _ => return None,
                 };
-                let idx = eval_const_expr(index, &self.enum_consts).ok()?;
-                let esize = elem.size_of(self.ptr_size) as i64;
+                let idx = self.eval_const_int(index)?;
+                let esize = types::resolve_aggregate(&elem, &self.struct_types).size_of(self.ptr_size) as i64;
                 Some((gref, off + idx * esize, elem))
             }
+            // Through anonymous members too (Linux's `init_mm.mmlist`).
             ExprKind::Field { base, name } => {
                 let (gref, off, bty) = self.base_addr(base)?;
                 let st = types::resolve_aggregate(&bty, &self.struct_types);
-                let (foff, fty) = field_offset_by_name(&st, name, self.ptr_size)?;
+                let (foff, fty, _) = crate::lower::expr::resolve_field_access(&st, name, self.ptr_size, &self.struct_types)?;
                 Some((gref, off + foff as i64, fty))
             }
+            ExprKind::CompoundLiteral { .. } => {
+                let (ty, gref) = self.literal_globals.get(&(e.span.line, e.span.col))?;
+                Some((*gref, 0, ty.clone()))
+            }
             _ => None,
+        }
+    }
+
+    /// Give each compound literal in `e`'s lvalue path its global, for `base_addr`
+    /// (Linux's `&((struct a[]) { … })[0].attr.attr`).
+    fn materialize_literals(&mut self, e: &Expr) -> Option<()> {
+        match &e.kind {
+            ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => self.materialize_literals(base),
+            ExprKind::CompoundLiteral { ty, init } => {
+                let gref = self.emit_compound_literal_global(ty, init)?;
+                let t = self.module.globals[gref.0 as usize].ty.clone();
+                self.literal_globals.insert((e.span.line, e.span.col), (t, gref));
+                Some(())
+            }
+            _ => Some(()),
         }
     }
 

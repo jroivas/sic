@@ -2917,7 +2917,18 @@ impl<'m> FuncCtx<'m> {
                         let uniq = self.lowerer.module.globals.len();
                         let gname = format!("{}.{}.{}", fname, d.name, uniq);
                         let ty = self.lower_type(&d.ty)?;
-                        let (gty, gref) = self.lowerer.add_static_local_global(gname, d, ty)?;
+                        // What the initializer may name: this function's `static`s,
+                        // and for `typeof` and `sizeof`, its other variables.
+                        self.lowerer.scoped_statics = self.static_locals.iter()
+                            .map(|(n, s)| (n.clone(), (s.0.clone(), s.1))).collect();
+                        let vars = self.locals.iter().flatten().map(|(n, (t, _))| (n.clone(), t.clone())).collect();
+                        super::types::set_local_var_types(vars);
+                        self.lowerer.scoped_fn_name = Some(fname);
+                        let added = self.lowerer.add_static_local_global(gname, d, ty);
+                        self.lowerer.scoped_fn_name = None;
+                        super::types::set_local_var_types(HashMap::new());
+                        self.lowerer.scoped_statics.clear();
+                        let (gty, gref) = added?;
                         let qt = self.declared_qt(&d.ty);
                         self.bind_static(&d.name, gty, gref, qt);
                         continue;

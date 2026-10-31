@@ -24,6 +24,13 @@ thread_local! {
     /// dimension like `int v[sizeof(g) / sizeof(g[0])]` (QEMU's ARRAY_SIZE of a
     /// global) folds in the scope-less path — it came out 0, silently.
     static GLOBAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    static LOCAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+}
+
+/// The current function's variables, while a `static` of it is initialized:
+/// `typeof(local)` there is a type, whatever the value.
+pub fn set_local_var_types(vars: HashMap<String, Type>) {
+    LOCAL_VAR_TYPES.with(|m| *m.borrow_mut() = vars);
 }
 
 /// Record file-scope variable `name`'s type for constant folding.
@@ -42,6 +49,8 @@ fn global_expr_type(e: &Expr) -> Option<Type> {
     use crate::ast::{ExprKind, UnOpKind};
     match &e.kind {
         ExprKind::Ident(n) => GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned()),
+        ExprKind::StringLit(s) => Some(Type::Array { elem: Box::new(Type::i8()), len: s.len() + 1 }),
+        ExprKind::IntLit(_, wide) => Some(if *wide { Type::i64() } else { Type::i32() }),
         ExprKind::Index { base, .. } => match global_expr_type(base)? {
             Type::Array { elem, .. } | Type::Pointer(elem) => Some(*elem),
             _ => None,
@@ -1444,7 +1453,8 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
         ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).ok()?,
         ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
         | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Type::u64(),
-        ExprKind::Ident(n) => match GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned()) {
+        ExprKind::Ident(n) => match LOCAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned())
+            .or_else(|| GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned())) {
             Some(t) => t,
             // An enumerator is an `int`, or the first wider type that holds it.
             None => {
