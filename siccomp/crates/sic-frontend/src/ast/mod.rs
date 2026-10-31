@@ -69,6 +69,9 @@ pub enum AstType {
     Named(String),    // typedef name
     Builtin(String),  // __builtin_va_list etc.
     Typeof(BoxExpr),  // typeof(expr) — resolved to the operand's type
+    /// A `typeof` already resolved where it stood: the lowering of a struct
+    /// member needs no scope, the operand may have needed one.
+    Lowered(sic_ir::Type),
     /// sic-only: the `tuple` type (sic.md §"Tuples"). Its concrete positional
     /// field types are resolved from context (initializer / return value).
     Tuple,

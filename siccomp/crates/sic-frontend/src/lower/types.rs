@@ -936,7 +936,10 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
             }
             enum_int_type(e)
         }
-        AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size),
+        AstType::Typeof(e) => typeof_expr_type(e, named, ptr_size).ok_or_else(|| CompileError::at(
+            "the type of this `typeof` operand is not known outside a function",
+            e.span.file.clone(), e.span.line, e.span.col))?,
+        AstType::Lowered(t) => t.clone(),
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
                 return Ok(va_list_type());
@@ -1426,28 +1429,45 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
 /// available. Covers the constant/literal cases that appear in system headers
 /// (notably `typeof(nullptr)` in C23 `<stddef.h>`); unknown expressions fall
 /// back to `int`.
-fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Type {
-    match &e.kind {
+fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Option<Type> {
+    let member = |agg: &Type, name: &str| {
+        let resolved = resolve_aggregate(agg, named);
+        super::expr::resolve_field_access(&resolved, name, ptr_size, named).map(|(_, t, _)| t)
+    };
+    Some(match &e.kind {
         ExprKind::Nullptr | ExprKind::LabelAddr(_) => Type::void_ptr(),
         ExprKind::CharLit(_) => Type::i32(),
         ExprKind::IntLit(_, is64) => if *is64 { Type::i64() } else { Type::i32() },
         ExprKind::UIntLit(_, is64) => if *is64 { Type::Int { bits: 64, signed: false } } else { Type::u32() },
         ExprKind::FloatLit(_) => Type::Float64,
         ExprKind::StringLit(_) => Type::char_ptr(),
-        ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).unwrap_or_else(|_| Type::i32()),
+        ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).ok()?,
         ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
         | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Type::u64(),
+        ExprKind::Ident(n) => GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned())?,
         ExprKind::Unary { op: UnOpKind::Addr, expr } => {
-            Type::Pointer(Box::new(typeof_expr_type(expr, named, ptr_size)))
+            Type::Pointer(Box::new(typeof_expr_type(expr, named, ptr_size)?))
         }
-        ExprKind::Unary { op: UnOpKind::Deref, expr } => {
-            match typeof_expr_type(expr, named, ptr_size) {
+        ExprKind::Unary { op: UnOpKind::Deref, expr } | ExprKind::Index { base: expr, .. } => {
+            match typeof_expr_type(expr, named, ptr_size)? {
                 Type::Pointer(inner) => *inner,
-                other => other,
+                Type::Array { elem, .. } => *elem,
+                _ => return None,
             }
         }
-        _ => Type::i32(),
-    }
+        ExprKind::Field { base, name } => member(&typeof_expr_type(base, named, ptr_size)?, name)?,
+        ExprKind::Arrow { base, name } => match typeof_expr_type(base, named, ptr_size)? {
+            Type::Pointer(inner) | Type::Array { elem: inner, .. } => member(&inner, name)?,
+            _ => return None,
+        },
+        // Both arms the same is all this path can type without the conversions.
+        ExprKind::Ternary { then, else_, .. } | ExprKind::ChooseExpr { then, else_, .. } => {
+            let t = typeof_expr_type(then, named, ptr_size)?;
+            if t != typeof_expr_type(else_, named, ptr_size)? { return None; }
+            t
+        }
+        _ => return None,
+    })
 }
 
 /// Whether the unit being lowered is a SIC source (see `SIC_SOURCE`).

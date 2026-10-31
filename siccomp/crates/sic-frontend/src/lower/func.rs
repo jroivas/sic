@@ -1909,8 +1909,35 @@ impl<'m> FuncCtx<'m> {
                 };
                 Ok(Type::Array { elem: Box::new(elem), len })
             }
-            _ => lower_type(&QualType::new(ty.clone()), &self.lowerer.struct_types, self.lowerer.ptr_size),
+            _ => lower_type(&QualType::new(self.resolve_typeof(ty)?), &self.lowerer.struct_types, self.lowerer.ptr_size),
         }
+    }
+
+    /// `ty` with every `typeof` in it (struct members too, which the standalone
+    /// lowerer reaches with no scope) resolved here.
+    fn resolve_typeof(&self, ty: &AstType) -> Result<AstType> {
+        use crate::ast::AstType as A;
+        if !contains_typeof(ty) { return Ok(ty.clone()); }
+        let qual = |q: &QualType| -> Result<QualType> {
+            Ok(QualType { ty: self.resolve_typeof(&q.ty)?, ..q.clone() })
+        };
+        let fields = |fs: &Option<Vec<crate::ast::FieldDecl>>| -> Result<Option<Vec<crate::ast::FieldDecl>>> {
+            let Some(fs) = fs else { return Ok(None) };
+            fs.iter().map(|f| Ok(crate::ast::FieldDecl { ty: qual(&f.ty)?, ..f.clone() })).collect::<Result<Vec<_>>>().map(Some)
+        };
+        Ok(match ty {
+            A::Typeof(e) => A::Lowered(self.infer_expr_type(e)?),
+            A::Pointer { base, quals } => A::Pointer { base: Box::new(qual(base)?), quals: quals.clone() },
+            A::Array { base, size, vector } => A::Array { base: Box::new(qual(base)?), size: size.clone(), vector: *vector },
+            A::Function { ret, params, variadic } => A::Function {
+                ret: Box::new(qual(ret)?),
+                params: params.iter().map(|p| Ok(crate::ast::Param { ty: qual(&p.ty)?, ..p.clone() })).collect::<Result<Vec<_>>>()?,
+                variadic: *variadic,
+            },
+            A::Struct(s) => A::Struct(crate::ast::StructDef { fields: fields(&s.fields)?, ..s.clone() }),
+            A::Union(u) => A::Union(crate::ast::UnionDef { fields: fields(&u.fields)?, ..u.clone() }),
+            other => other.clone(),
+        })
     }
 }
 
@@ -2820,7 +2847,7 @@ impl<'m> FuncCtx<'m> {
                     crate::ast::TypeQual::Align(n) => Some(*n),
                     _ => None,
                 });
-                match &base_ty.ty {
+                match &self.resolve_typeof(&base_ty.ty)? {
                     AstType::Struct(s) => {
                         self.lowerer.register_struct_type_from_def(s)?;
                     }
@@ -3427,7 +3454,7 @@ impl<'m> FuncCtx<'m> {
                 for (name, ty) in names {
                     // A block-scope `typedef enum { e, f } h;` (or a struct with an
                     // inline enum member) defines its constants here too.
-                    self.lowerer.register_nested_struct_defs(&ty.ty)?;
+                    self.lowerer.register_nested_struct_defs(&self.resolve_typeof(&ty.ty)?)?;
                     // Scope-aware: `typedef __typeof(Vd->D(0)) T;` must see the
                     // locals (the scope-less lowerer made every such T an `int` —
                     // QEMU's loongarch DO_VMUH multiplied in 32 bits).
@@ -7080,6 +7107,8 @@ fn contains_typeof(ty: &AstType) -> bool {
         A::Pointer { base, .. } | A::Array { base, .. } => contains_typeof(&base.ty),
         A::Function { ret, params, .. } =>
             contains_typeof(&ret.ty) || params.iter().any(|p| contains_typeof(&p.ty.ty)),
+        A::Struct(s) => s.fields.iter().flatten().any(|f| contains_typeof(&f.ty.ty)),
+        A::Union(u) => u.fields.iter().flatten().any(|f| contains_typeof(&f.ty.ty)),
         _ => false,
     }
 }
@@ -7360,7 +7389,7 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Union(u) => format!("union {}", u.name.clone().unwrap_or_default()),
         AstType::Enum(e) => format!("enum {}", e.name.clone().unwrap_or_default()),
         AstType::Function { ret, .. } => format!("{} ()", c_type_string(ret)),
-        AstType::Typeof(_) => "typeof(...)".to_string(),
+        AstType::Typeof(_) | AstType::Lowered(_) => "typeof(...)".to_string(),
         AstType::Tuple => "tuple".to_string(),
         AstType::Fixed { integral, fraction } => format!("fixed<{},{}>",
             integral.map(|n| n.to_string()).unwrap_or_default(), fraction.map(|n| n.to_string()).unwrap_or_default()),

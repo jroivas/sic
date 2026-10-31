@@ -155,7 +155,7 @@ impl<'a> NsRenamer<'a> {
             | AstType::Long { .. } | AstType::LongLong { .. } | AstType::Float | AstType::Double
             | AstType::LongDouble | AstType::Bool | AstType::Complex | AstType::Bitfield(_)
             | AstType::Builtin(_) | AstType::Tuple | AstType::Fixed { .. }
-            | AstType::Auto => {}
+            | AstType::Auto | AstType::Lowered(_) => {}
         }
     }
 
