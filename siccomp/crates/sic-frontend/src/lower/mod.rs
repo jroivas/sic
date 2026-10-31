@@ -4999,7 +4999,20 @@ pub(crate) fn builtin_constant_p(e: &Expr, enum_consts: &HashMap<String, i64>) -
     match &e.kind {
         ExprKind::FloatLit(_) | ExprKind::DecimalLit(_) | ExprKind::StringLit(_) => true,
         ExprKind::Unary { op: UnOpKind::Neg, expr } => builtin_constant_p(expr, enum_consts),
-        _ => eval_const_expr(e, enum_consts).is_ok(),
+        _ if eval_const_expr(e, enum_consts).is_ok() => true,
+        // Constant whatever its value: that evaluator knows no type sizes.
+        ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_) | ExprKind::AlignofType(_)
+        | ExprKind::AlignofExpr(_) | ExprKind::OffsetOf { .. } => true,
+        ExprKind::Unary { op: UnOpKind::BitNot | UnOpKind::Not, expr } | ExprKind::Cast { expr, .. } =>
+            builtin_constant_p(expr, enum_consts),
+        ExprKind::BinOp { op, lhs, rhs } => {
+            let by_zero = matches!(op, BinOpKind::Div | BinOpKind::Rem)
+                && matches!(eval_const_expr(rhs, enum_consts), Ok(0));
+            !by_zero && builtin_constant_p(lhs, enum_consts) && builtin_constant_p(rhs, enum_consts)
+        }
+        ExprKind::Ternary { cond, then, else_ } => builtin_constant_p(cond, enum_consts)
+            && builtin_constant_p(then, enum_consts) && builtin_constant_p(else_, enum_consts),
+        _ => false,
     }
 }
 

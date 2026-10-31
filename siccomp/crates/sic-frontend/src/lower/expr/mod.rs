@@ -5314,7 +5314,7 @@ impl<'m> FuncCtx<'m> {
         super::eval_const_expr(&folded, &self.lowerer.enum_consts).ok()
     }
 
-    fn subst_scoped_consts(&self, e: &Expr) -> Option<Expr> {
+    pub(crate) fn subst_scoped_consts(&self, e: &Expr) -> Option<Expr> {
         use ExprKind::*;
         let ps = self.ptr_size();
         let lit = |v: u64| Some(Expr::new(UIntLit(v, true), e.span.clone()));

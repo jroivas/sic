@@ -1903,8 +1903,8 @@ impl<'m> FuncCtx<'m> {
             A::Array { base, size, .. } => {
                 let elem = self.lower_ast_type_scoped(&base.ty)?;
                 let len = match size {
-                    Some(sz) => crate::lower::eval_const_expr(sz, &self.lowerer.enum_consts)
-                        .ok().filter(|&v| v >= 0).map(|v| v as usize).unwrap_or(0),
+                    Some(sz) => self.eval_scoped_const(sz)
+                        .filter(|&v| v >= 0).map(|v| v as usize).unwrap_or(0),
                     None => 0,
                 };
                 Ok(Type::Array { elem: Box::new(elem), len })
@@ -1914,10 +1914,11 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// `ty` with every `typeof` in it (struct members too, which the standalone
-    /// lowerer reaches with no scope) resolved here.
+    /// lowerer reaches with no scope) resolved here, and the `sizeof`s of a
+    /// member's array dimension.
     fn resolve_typeof(&self, ty: &AstType) -> Result<AstType> {
         use crate::ast::AstType as A;
-        if !contains_typeof(ty) { return Ok(ty.clone()); }
+        if !member_needs_scope(ty) { return Ok(ty.clone()); }
         let qual = |q: &QualType| -> Result<QualType> {
             Ok(QualType { ty: self.resolve_typeof(&q.ty)?, ..q.clone() })
         };
@@ -1928,7 +1929,11 @@ impl<'m> FuncCtx<'m> {
         Ok(match ty {
             A::Typeof(e) => A::Lowered(self.infer_expr_type(e)?),
             A::Pointer { base, quals } => A::Pointer { base: Box::new(qual(base)?), quals: quals.clone() },
-            A::Array { base, size, vector } => A::Array { base: Box::new(qual(base)?), size: size.clone(), vector: *vector },
+            A::Array { base, size, vector } => A::Array {
+                base: Box::new(qual(base)?),
+                size: size.as_ref().map(|s| self.subst_scoped_consts(s).map_or_else(|| s.clone(), Box::new)),
+                vector: *vector,
+            },
             A::Function { ret, params, variadic } => A::Function {
                 ret: Box::new(qual(ret)?),
                 params: params.iter().map(|p| Ok(crate::ast::Param { ty: qual(&p.ty)?, ..p.clone() })).collect::<Result<Vec<_>>>()?,
@@ -7107,8 +7112,34 @@ fn contains_typeof(ty: &AstType) -> bool {
         A::Pointer { base, .. } | A::Array { base, .. } => contains_typeof(&base.ty),
         A::Function { ret, params, .. } =>
             contains_typeof(&ret.ty) || params.iter().any(|p| contains_typeof(&p.ty.ty)),
-        A::Struct(s) => s.fields.iter().flatten().any(|f| contains_typeof(&f.ty.ty)),
-        A::Union(u) => u.fields.iter().flatten().any(|f| contains_typeof(&f.ty.ty)),
+        A::Struct(s) => s.fields.iter().flatten().any(|f| member_needs_scope(&f.ty.ty)),
+        A::Union(u) => u.fields.iter().flatten().any(|f| member_needs_scope(&f.ty.ty)),
+        _ => false,
+    }
+}
+
+/// A struct member's type says something only a function's scope can answer: a
+/// `typeof`, or an array dimension of `sizeof(expr)`, which the standalone
+/// lowerer took for 0.
+fn member_needs_scope(ty: &AstType) -> bool {
+    use crate::ast::AstType as A;
+    match ty {
+        A::Array { base, size, .. } =>
+            size.as_ref().is_some_and(|s| sizeof_of_expr(s)) || member_needs_scope(&base.ty),
+        A::Pointer { base, .. } => member_needs_scope(&base.ty),
+        _ => contains_typeof(ty),
+    }
+}
+
+fn sizeof_of_expr(e: &Expr) -> bool {
+    use crate::ast::ExprKind::*;
+    match &e.kind {
+        SizeofExpr(_) | AlignofExpr(_) => true,
+        SizeofType(qt) | AlignofType(qt) => contains_typeof(&qt.ty),
+        BinOp { lhs, rhs, .. } => sizeof_of_expr(lhs) || sizeof_of_expr(rhs),
+        Unary { expr, .. } | Cast { expr, .. } => sizeof_of_expr(expr),
+        Ternary { cond, then, else_ } | ChooseExpr { cond, then, else_ } =>
+            sizeof_of_expr(cond) || sizeof_of_expr(then) || sizeof_of_expr(else_),
         _ => false,
     }
 }
