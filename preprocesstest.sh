@@ -104,6 +104,16 @@ if [ "$got" = "dep_h.h" ]; then passed=$((passed + 1)); else
     failed=$((failed + 1)); echo "FAIL depfile-stdin: prerequisites '$got', want 'dep_h.h' $(head -c 200 "$WORK/err")"
 fi
 
+# A computed header name is spelled as is: no guard space between tokens that
+# would lex as one (Linux's <trace/events/9p.h> became `9p .h`).
+total=$((total + 1))
+printf 'in_9p\n' > "$WORK/9p.h"
+printf '#define SYS 9p\n#define H1(s) <s.h>\n#define H2(s) H1(s)\n#include H2(SYS)\n#if __has_include(H2(SYS))\nfound\n#endif\n' > "$WORK/hn.c"
+got="$( (cd "$WORK" && timeout "$TIMEOUT" "${CPPCMD[@]}" -I. hn.c) 2> "$WORK/err" | grep -v '^#' | grep -v '^$' | tr '\n' '|')"
+if [ "$got" = "in_9p|found|" ]; then passed=$((passed + 1)); else
+    failed=$((failed + 1)); echo "FAIL header-name-spelling: got '$got' $(head -c 200 "$WORK/err")"
+fi
+
 # The sic driver's own preprocessing of an assembler source (`sic -E` on a
 # `.S`, as Linux preprocesses its linker scripts with `-E -P -C -Ux86`): `-C`
 # and `-U` are accepted and forwarded, and `__ASSEMBLER__` is defined as GCC

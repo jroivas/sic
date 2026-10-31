@@ -1834,7 +1834,7 @@ i32 avoid_paste(string a, string b)
     return 0;
 }
 
-string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file)
+string expand_joined(string line, dict<string, string> *macros, i32 cur_line, string cur_file, i32 guard)
 {
     // ONE scan: every expansion is rescanned with the rest of the line as it is
     // produced (emit_rescan), so nothing is left for a second pass — which would
@@ -1844,7 +1844,8 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
     list<string> toks = expand_tokens(tokenize(line), macros, cur_line, cur_file, nothing_active);
     // Join. At a padding boundary (`\x03`, around macro expansions and
     // substituted arguments) with no whitespace, add a space where the two
-    // tokens would otherwise lex as one (`- -1`, not `--1`; `4 .5`, not `4.5`).
+    // tokens would otherwise lex as one (`- -1`, not `--1`; `4 .5`, not `4.5`):
+    // with `guard`, as text that is read again as tokens needs.
     string result = "";
     string prev = "";
     i32 pad = 0;
@@ -1856,7 +1857,7 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
             if (result.size > 0 && result[result.size - 1] != ' ') result = result + " ";
             continue;
         }
-        if (pad && result.size > 0 && result[result.size - 1] != ' ' && avoid_paste(prev, t))
+        if (guard && pad && result.size > 0 && result[result.size - 1] != ' ' && avoid_paste(prev, t))
             result = result + " ";
         pad = 0;
         result = result + t;
@@ -1866,6 +1867,18 @@ string expand_line(string line, dict<string, string> *macros, i32 cur_line, stri
     // significant in preprocessed output — drop it, matching `cpp`. `.rtrim()` is a
     // view into the local `result`, so `.dup` it to return an owned string.
     return result.rtrim().dup;
+}
+
+string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file)
+{
+    return expand_joined(line, macros, cur_line, cur_file, 1);
+}
+
+// A computed header name is spelled, not lexed again: Linux's
+// `<trace/events/system.h>` with `system` being `9p` names `9p.h`, not `9p .h`.
+string expand_header_name(string line, dict<string, string> *macros, i32 cur_line, string cur_file)
+{
+    return expand_joined(line, macros, cur_line, cur_file, 0);
 }
 
 // ── Conditionals ──────────────────────────────────────────────────────────
@@ -2272,7 +2285,7 @@ void pp_include(Preprocessor *pp, string rest, i32 next)
     string path = header_name(rest, &quoted);
     if (path.size == 0) {
         // A computed include: `#include MACRO` expands to `<x>` / `"x"`.
-        string ex = expand_line(rest, &pp->macros, pp->current_line, pp->current_file);
+        string ex = expand_header_name(rest, &pp->macros, pp->current_line, pp->current_file);
         path = header_name(ex, &quoted);
         if (path.size == 0) return;
     }
@@ -2544,7 +2557,7 @@ string substitute_defined(Preprocessor *pp, string rest)
                 i32 quoted = 0;
                 string path = header_name(arg, &quoted);
                 if (path.size == 0) {
-                    string ex = expand_line(arg, &pp->macros, pp->current_line, pp->current_file);
+                    string ex = expand_header_name(arg, &pp->macros, pp->current_line, pp->current_file);
                     path = header_name(ex, &quoted);
                 }
                 i32 from = 0;
