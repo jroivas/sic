@@ -274,10 +274,13 @@ pub struct FuncCtx<'m> {
     /// operand), propagated through those operators, and reset to `Any` everywhere
     /// else (taken at the top of `lower_expr`).
     pub bf_ctx: BfCtx,
-    /// Function-scope `static` locals: name → (type, internal global). These
-    /// have static storage duration, so they resolve to a module global rather
-    /// than a stack slot.
-    pub static_locals: HashMap<String, (Type, GlobalRef)>,
+    /// Function-scope `static` and block-scope `extern` names: name → (type,
+    /// global, scope depth, declared type). They have static storage duration,
+    /// so they resolve to a module global rather than a stack slot.
+    pub static_locals: HashMap<String, (Type, GlobalRef, usize, QualType)>,
+    /// A binding in `static_locals` hid this one until the end of the scope at
+    /// this depth.
+    pub static_shadows: Vec<(usize, String, Option<(Type, GlobalRef, usize, QualType)>)>,
     /// Type of each value produced by instructions: ValId → Type
     pub val_types: HashMap<u32, Type>,
     /// Current basic block id being built
@@ -486,6 +489,7 @@ impl<'m> FuncCtx<'m> {
             weak_locals: HashMap::new(),
             bf_ctx: BfCtx::Any,
             static_locals: HashMap::new(),
+            static_shadows: Vec::new(),
             val_types: HashMap::new(),
             current_bb: entry_id,
             ret_ty,
@@ -686,9 +690,23 @@ impl<'m> FuncCtx<'m> {
             super::types::note_typedef(&name, &ty);
             self.lowerer.struct_types.insert(name, ty);
         }
+        while self.static_shadows.last().is_some_and(|(d, ..)| *d == self.locals.len()) {
+            let (_, name, old) = self.static_shadows.pop().unwrap();
+            match old {
+                Some(o) => { self.static_locals.insert(name, o); }
+                None => { self.static_locals.remove(&name); }
+            }
+        }
         self.cleanups.pop();
         self.scope_ids.pop();
         self.locals.pop();
+    }
+
+    /// Bind `name` to a global for the rest of this scope.
+    fn bind_static(&mut self, name: &str, ty: Type, gref: GlobalRef, qt: QualType) {
+        let depth = self.locals.len();
+        let old = self.static_locals.insert(name.to_string(), (ty, gref, depth, qt));
+        self.static_shadows.push((depth, name.to_string(), old));
     }
 
     /// The active cleanups by scope id, outermost first (what a `goto` may leave).
@@ -1395,6 +1413,15 @@ impl<'m> FuncCtx<'m> {
         self.late_init_ok = super::strict::late_init_sites(params, body);
     }
 
+    /// A declaration's type as it is recorded: a top-level `typeof` resolved
+    /// while its operand still means what it did there, `auto` when unknown.
+    fn declared_qt(&self, qt: &QualType) -> QualType {
+        if !matches!(qt.ty, AstType::Typeof(_)) { return qt.clone(); }
+        let mut r = self.typeof_operand_qt(qt).unwrap_or_else(|| QualType::new(AstType::Auto));
+        r.qualifiers.extend(qt.qualifiers.iter().cloned());
+        r
+    }
+
     pub fn define_local(&mut self, name: String, ty: Type, alloca_id: ValId) {
         if self.binding_qt.as_ref().map_or(false, |(n, _, _)| *n == name) {
             let (_, qt, has_init) = self.binding_qt.take().unwrap();
@@ -1403,6 +1430,9 @@ impl<'m> FuncCtx<'m> {
             if self.strict && !super::strict::qt_is_mut(&qt) && !name.starts_with("__") {
                 self.immutable_vids.insert(alloca_id, has_init);
             }
+            // `typeof(x) x = …`: the operand is the outer `x`, which only names
+            // it until this binding exists, so resolve it now.
+            let qt = self.declared_qt(&qt);
             self.vid_qtypes.insert(alloca_id, qt);
         }
         self.locals.last_mut().unwrap().insert(name, (ty, alloca_id));
@@ -1822,13 +1852,14 @@ impl<'m> FuncCtx<'m> {
         if let Some((_, v)) = self.unroll_consts.iter().rev().find(|(n, _)| n == name) {
             return Some(LookupResult::EnumConst(*v));
         }
-        for scope in self.locals.iter().rev() {
+        let st = self.static_locals.get(name);
+        for (i, scope) in self.locals.iter().enumerate().rev() {
+            if let Some((ty, gref, ..)) = st.filter(|s| s.2 == i + 1) {
+                return Some(LookupResult::Global(ty, *gref));
+            }
             if let Some((ty, vid)) = scope.get(name) {
                 return Some(LookupResult::Local(ty, *vid));
             }
-        }
-        if let Some((ty, gref)) = self.static_locals.get(name) {
-            return Some(LookupResult::Global(ty, *gref));
         }
         if let Some((ty, gref)) = self.lowerer.globals_map.get(name) {
             return Some(LookupResult::Global(ty, *gref));
@@ -2807,7 +2838,8 @@ impl<'m> FuncCtx<'m> {
                 let is_static = matches!(base_ty.storage, Some(StorageClass::Static));
                 let is_extern = matches!(base_ty.storage, Some(StorageClass::Extern));
                 for d in declarators {
-                    self.decl_qtypes.insert(d.name.clone(), d.ty.clone());
+                    let qt = self.declared_qt(&d.ty);
+                    self.decl_qtypes.insert(d.name.clone(), qt);
                     self.binding_qt = (!is_static && !is_extern).then(|| (d.name.clone(), d.ty.clone(), d.init.is_some()));
                     // sic `atomic` (sic.md §"Atomics"): a top-level atomic-qualified
                     // declarator becomes an atomic local. `d.ty.qualifiers` is the
@@ -2838,7 +2870,8 @@ impl<'m> FuncCtx<'m> {
                     if is_extern {
                         self.lowerer.lower_global_var(d, base_ty, false, false)?;
                         if let Some((gty, gref)) = self.lowerer.globals_map.get(&d.name).cloned() {
-                            self.static_locals.insert(d.name.clone(), (gty, gref));
+                            let qt = self.declared_qt(&d.ty);
+                            self.bind_static(&d.name, gty, gref, qt);
                         }
                         continue;
                     }
@@ -2850,8 +2883,10 @@ impl<'m> FuncCtx<'m> {
                         let fname = self.func_ref().name.clone();
                         let uniq = self.lowerer.module.globals.len();
                         let gname = format!("{}.{}.{}", fname, d.name, uniq);
-                        let (gty, gref) = self.lowerer.add_static_local_global(gname, d, base_ty)?;
-                        self.static_locals.insert(d.name.clone(), (gty, gref));
+                        let ty = self.lower_type(&d.ty)?;
+                        let (gty, gref) = self.lowerer.add_static_local_global(gname, d, ty)?;
+                        let qt = self.declared_qt(&d.ty);
+                        self.bind_static(&d.name, gty, gref, qt);
                         continue;
                     }
                     // C23 `auto x = e;` / GNU `__auto_type x = e;` (parsed as

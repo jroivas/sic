@@ -14,7 +14,7 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Ident(n) => match self.lookup(n) {
                 Some(LookupResult::Local(_, vid)) => self.vid_qtypes.get(&vid).cloned(),
                 // A `static` local is a global too, under its own declaration.
-                Some(LookupResult::Global(..)) if self.static_locals.contains_key(n) => self.decl_qtypes.get(n).cloned(),
+                Some(LookupResult::Global(..)) if self.static_locals.contains_key(n) => self.static_locals.get(n).map(|s| s.3.clone()),
                 Some(LookupResult::Global(..)) => self.lowerer.global_qtypes.get(n).cloned(),
                 _ => None,
             },
@@ -30,12 +30,18 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// `typeof(e)` stands for `e`'s declared type: follow it to that, as far as
-    /// it is known.
-    fn typeof_operand_qt(&self, mut qt: crate::ast::QualType) -> Option<crate::ast::QualType> {
-        while let crate::ast::AstType::Typeof(e) = &qt.ty {
-            qt = self.lvalue_qt(e)?;
+    /// it is known. A redeclared global can name itself (`extern int x;
+    /// typeof(x) x;`), so the walk is bounded; a local cannot, see
+    /// `define_local`.
+    pub(crate) fn typeof_operand_qt(&self, qt: &crate::ast::QualType) -> Option<crate::ast::QualType> {
+        let mut qt = qt.clone();
+        for _ in 0..16 {
+            match &qt.ty {
+                crate::ast::AstType::Typeof(e) => qt = self.lvalue_qt(e)?,
+                _ => return Some(qt),
+            }
         }
-        Some(qt)
+        None
     }
 
     /// The name a write to `e` would change, when that is `const`: a `const`
@@ -609,7 +615,7 @@ impl<'m> FuncCtx<'m> {
         // The declared pointee qualifiers take part too, where they are known
         // (`const int *` is not `int *`); top-level qualifiers are dropped.
         let ctrl_quals = self.lvalue_qt(controlling)
-            .and_then(|qt| self.typeof_operand_qt(qt))
+            .and_then(|qt| self.typeof_operand_qt(&qt))
             .as_ref()
             .and_then(super::super::pointee_quals);
         let mut default_idx = None;
@@ -618,9 +624,12 @@ impl<'m> FuncCtx<'m> {
                 None => default_idx = Some(i),
                 Some(qt) => {
                     if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty) {
-                        let aq = self.typeof_operand_qt(qt.clone())
-                            .as_ref()
-                            .and_then(super::super::pointee_quals);
+                        let aq = match &qt.ty {
+                            crate::ast::AstType::Typeof(_) => self.typeof_operand_qt(qt)
+                                .as_ref()
+                                .and_then(super::super::pointee_quals),
+                            _ => super::super::pointee_quals(qt),
+                        };
                         // Each side may stop early at a typedef: compare the
                         // levels both of them know.
                         let quals_match = match (&ctrl_quals, aq) {

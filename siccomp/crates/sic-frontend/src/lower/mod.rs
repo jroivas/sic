@@ -3474,9 +3474,8 @@ impl Lowerer {
     /// Create an internal global backing a function-scope `static` local, and
     /// return its type and ref. Uses the same constant-initializer serialization
     /// as file-scope globals; the caller binds the local name to this global.
-    fn add_static_local_global(&mut self, name: String, d: &Declarator, _base_ty: &QualType) -> Result<(Type, GlobalRef)> {
+    fn add_static_local_global(&mut self, name: String, d: &Declarator, mut ir_ty: Type) -> Result<(Type, GlobalRef)> {
         self.note_data_section(&name, d);
-        let mut ir_ty = lower_type(&d.ty, &self.struct_types, self.ptr_size)?;
         self.global_init_unserializable = false;
         let declared_ty = ir_ty.clone();
         let init = self.build_global_init(d, &mut ir_ty);
