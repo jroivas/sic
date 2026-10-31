@@ -58,6 +58,19 @@ int f(struct engine *engine) {
   static const struct { const int *p; unsigned n; } dv[] = { { states, sizeof(states) / sizeof(states[0]) } };
   return g.n == &g && sp == states && un[1][0] == 'K' && props[0].off == 4 && dv[0].n == 2;
 }
+// A string or null as a condition, and sizeof through a function's return type.
+struct uts { char sysname[65]; char release[65]; };
+static inline struct uts *utsname(void) { return 0; }
+struct shdr { const char *name; unsigned len; const char *cname; unsigned clen; const char *search; unsigned slen; };
+#define SH(__n, __c, __s) { .name = __n, .len = sizeof(__n) - 1, .cname = __c, \
+	.clen = (__c) ? sizeof(__c) - 1 : 0, .search = __s, .slen = (__s) ? sizeof(__s) - 1 : 0 }
+static const struct shdr shdrs[] = { [0] = SH("CSeq", NULL, NULL), [1] = SH("From", "f", "sip:") };
+static int gval;
+static const unsigned by_addr = &gval ? 3 : 4;
+#define LIMIT (sizeof(utsname()->sysname) + sizeof(utsname()->release))
+struct proc2 { unsigned a; };
+static const struct proc2 pc[] = { { (LIMIT + 3) >> 2 } };
+
 static const char *where(void) { static const char *const here = __func__; return here; }
 
 #define CHECK(c) do { if (!(c)) { printf("fail line %d\n", __LINE__); return 1; } } while (0)
@@ -71,6 +84,9 @@ int main(void)
 	CHECK(!__builtin_strcmp(fmt[0]->n, "a") && !__builtin_strcmp(((struct stra *)fmt[0])->str, "cfg"));
 	CHECK(hs[0].len == 4 && note.h.a == 6 && !__builtin_strcmp((char *)note.nm, "Linux"));
 	CHECK(sizeof(note.nm) == 6 && pn.ns.t == 2 && pn.ns.ops == &pidops);
+	CHECK(shdrs[0].len == 4 && shdrs[0].clen == 0 && shdrs[0].slen == 0 && !shdrs[0].cname);
+	CHECK(shdrs[1].clen == 1 && shdrs[1].slen == 4 && !__builtin_strcmp(shdrs[1].search, "sip:"));
+	CHECK(by_addr == 3 && pc[0].a == 33);
 	CHECK(f(&e) == 1 && !__builtin_strcmp(where(), "where"));
 	return 42;
 }

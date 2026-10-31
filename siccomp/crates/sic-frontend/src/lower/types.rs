@@ -33,6 +33,14 @@ pub fn set_local_var_types(vars: HashMap<String, Type>) {
     LOCAL_VAR_TYPES.with(|m| *m.borrow_mut() = vars);
 }
 
+/// What the function `name` returns: any declared so far, also a skipped inline.
+pub fn function_return_type(name: &str) -> Option<Type> {
+    GLOBAL_VAR_TYPES.with(|m| match m.borrow().get(name) {
+        Some(Type::Function(sig)) => Some(sig.ret.clone()),
+        _ => None,
+    })
+}
+
 /// Record file-scope variable `name`'s type for constant folding.
 pub fn note_global_var(name: &str, ty: &Type) {
     GLOBAL_VAR_TYPES.with(|m| { m.borrow_mut().insert(name.to_string(), ty.clone()); });

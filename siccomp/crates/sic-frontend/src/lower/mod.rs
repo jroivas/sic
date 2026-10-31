@@ -4274,7 +4274,7 @@ impl Lowerer {
                 self.eval_const_int(&assocs[idx].1)
             }
             ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } =>
-                self.eval_const_int(if self.eval_const_int(cond)? != 0 { then } else { else_ }),
+                self.eval_const_int(if self.const_truth(cond)? { then } else { else_ }),
             // A builtin of what only this evaluator can fold (Linux's
             // `__builtin_ctzll(mask)`, the mask built with sizeof and casts).
             ExprKind::Call { func, args } => {
@@ -4373,6 +4373,11 @@ impl Lowerer {
             ExprKind::IntLit(_, wide) => Some(if *wide { Type::i64() } else { Type::i32() }),
             ExprKind::UIntLit(_, wide) => Some(if *wide { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
             ExprKind::CharLit(_) => Some(Type::i32()),
+            // What a call returns, for `sizeof(f()->member)`, which calls nothing.
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(n) => types::function_return_type(n),
+                _ => None,
+            },
             ExprKind::Unary { op: UnOpKind::Addr, expr } => Some(Type::Pointer(Box::new(self.const_expr_type(expr)?))),
             // Of pointer arms, a null pointer constant gives way to the other one:
             // what `__is_constexpr` tests (`8 ? (void *)((long)(x) * 0l) : (int *)8`).
@@ -4621,6 +4626,16 @@ impl Lowerer {
         self.materialize_literals(e)?;
         let (gref, off, _) = self.base_addr(e)?;
         Some(RelocTarget::Global(gref, off))
+    }
+
+    /// A constant condition. A literal's or object's address is one, and not null
+    /// (Linux's `(__cname) ? sizeof(__cname) - 1 : 0` with a string or NULL).
+    fn const_truth(&self, e: &Expr) -> Option<bool> {
+        match &e.kind {
+            ExprKind::StringLit(_) | ExprKind::WideStringLit(..) => Some(true),
+            ExprKind::Unary { op: UnOpKind::Addr, expr } if self.base_addr(expr).is_some() => Some(true),
+            _ => self.eval_const_int(e).map(|v| v != 0),
+        }
     }
 
     /// A file-scope object by name, or a `static` of the current function.
