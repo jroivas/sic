@@ -7,7 +7,7 @@ use cranelift_module::{FuncId, DataId, Module};
 use cranelift_object::ObjectModule;
 use sic_ir::*;
 use super::types::{cl_type, ptr_cl, vector_clty};
-use super::{build_cl_sig, va_named_reg_counts, VA_GP_REGS, VA_FP_REGS, VA_OVERFLOW_SLOTS};
+use super::{build_cl_sig, va_named_reg_counts, VA_GP_REGS, VA_FP_REGS};
 
 /// Runtime handles for a variadic function's System V register save area, used
 /// by `va_start`/`va_arg`. See `compile_function`'s prologue.
@@ -240,7 +240,7 @@ pub fn compile_function(
         if f.sig.variadic {
             // Reconstruct the System V register save area from the over-declared
             // trailing params (see `build_cl_sig_def`): GP fillers, then FP
-            // fillers, then stack-overflow slots. Only the *vararg* slots need
+            // fillers. Only the *vararg* slots need
             // correct values — `va_arg`/glibc never read below `gp_offset`/
             // `fp_offset`, which start past the named params.
             let (n_gp, n_fp) = va_named_reg_counts(&f.sig, ptr_size);
@@ -248,13 +248,12 @@ pub fn compile_function(
                 cir::StackSlotKind::ExplicitSlot, 176, 4, // 16-byte aligned
             ));
             let reg_save = builder.ins().stack_addr(ptr_ty, rsa_slot, 0);
-            // The copy keeps the real overflow area's alignment mod 16 (it starts
-            // after the named stack params), so a 16-aligned vararg (`long
-            // double`) is found at the same rounded-up place by sic and glibc.
-            let ovf_slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
-                cir::StackSlotKind::ExplicitSlot, (VA_OVERFLOW_SLOTS * 8 + 8) as u32, 4,
-            ));
-            let overflow = builder.ins().stack_addr(ptr_ty, ovf_slot, (named_stack % 16) as i32);
+            // The stack varargs in place, past the saved frame pointer, return
+            // address and named stack params (frame pointers are always kept).
+            // Copying them would read past the caller's frame: off the end of a
+            // stack, for a call near its top (Linux's `_printk` from `kernel_init`).
+            let fp = builder.ins().get_frame_pointer(ptr_ty);
+            let overflow = builder.ins().iadd_imm_s(fp, 16 + named_stack as i64);
 
             let n_gp_fill = VA_GP_REGS - n_gp;
             // No vector argument registers without SSE (`build_cl_sig_def`).
@@ -271,12 +270,6 @@ pub fn compile_function(
             for k in 0..n_fp_fill {
                 if idx < params.len() {
                     builder.ins().store(MemFlagsData::new(), params[idx], reg_save, (48 + (n_fp + k) * 16) as i32);
-                }
-                idx += 1;
-            }
-            for k in 0..VA_OVERFLOW_SLOTS {
-                if idx < params.len() {
-                    builder.ins().store(MemFlagsData::new(), params[idx], overflow, (k * 8) as i32);
                 }
                 idx += 1;
             }

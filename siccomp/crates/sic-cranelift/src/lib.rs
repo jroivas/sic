@@ -936,16 +936,6 @@ pub fn build_cl_sig(
 /// registers (rdi,rsi,rdx,rcx,r8,r9) and 8 vector registers (xmm0–xmm7).
 pub const VA_GP_REGS: usize = 6;
 pub const VA_FP_REGS: usize = 8;
-/// Extra trailing stack slots captured for varargs that overflow the registers.
-/// Cranelift can't expose the real System V overflow_arg_area pointer, so a
-/// variadic callee copies this many incoming stack slots into a synthetic
-/// overflow area; a `va_list` that consumes more stack args than this reads
-/// garbage. It must therefore exceed the widest real variadic call — e.g.
-/// QEMU's `x86_cpu_dump_state` forwards ~15 stack args through `qemu_fprintf`
-/// to glibc's `vfprintf`. Extra slots are harmless (they read unused caller
-/// frame and are never consumed past the format string).
-pub const VA_OVERFLOW_SLOTS: usize = 64;
-
 /// Count how many named parameters occupy general-purpose vs vector argument
 /// registers (each capped at the number of such registers).
 pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize, usize) {
@@ -981,10 +971,10 @@ pub fn named_stack_bytes(sig: &sic_ir::FunctionType, ptr_size: u32) -> u32 {
 /// Build the signature used to *compile* a variadic function body. Cranelift has
 /// no native variadic support, so we over-declare trailing params to capture the
 /// incoming argument registers: `i64` params grab the remaining GP registers,
-/// `f64` params grab the remaining XMM registers, and extra `i64` params grab
-/// the start of the stack overflow area. The prologue spills these into a
-/// System-V-layout register save area (see `func::compile_function`) so a
-/// `va_list` built here is ABI-compatible with libc's `vfprintf` et al.
+/// `f64` params grab the remaining XMM registers. The prologue spills these into
+/// a System-V-layout register save area (see `func::compile_function`) so a
+/// `va_list` built here is ABI-compatible with libc's `vfprintf` et al. The stack
+/// varargs stay where the caller put them: `va_list` points at them.
 pub fn build_cl_sig_def(
     sig: &sic_ir::FunctionType,
     ptr_size: u32,
@@ -1003,9 +993,6 @@ pub fn build_cl_sig_def(
             for _ in 0..(VA_FP_REGS - n_fp) {
                 cl_sig.params.push(cir::AbiParam::new(cir::types::F64));
             }
-        }
-        for _ in 0..VA_OVERFLOW_SLOTS {
-            cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
         }
     }
     cl_sig
