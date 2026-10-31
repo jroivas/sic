@@ -134,6 +134,8 @@ pub struct Lowerer {
     /// Set by `build_global_init` when an aggregate initializer could not be
     /// serialized and was zero-filled ([`Lowerer::check_global_init`]).
     pub global_init_unserializable: bool,
+    /// The first element that kept a global's initializer from being a constant.
+    global_init_bad_element: Option<crate::lexer::Span>,
     pub c_enum_variant: HashMap<String, String>,
     /// sic strict enum typing (sic.md §"Enums"): `(function, param index)` → the
     /// param's payload-less enum name, so a call site can reject a plain `int` or a
@@ -366,6 +368,7 @@ impl Lowerer {
             variant_enum: HashMap::new(),
             c_enum_defs: HashMap::new(),
             global_init_unserializable: false,
+            global_init_bad_element: None,
             c_enum_variant: HashMap::new(),
             c_enum_param: HashMap::new(),
             bitfield_param: HashMap::new(),
@@ -3648,13 +3651,14 @@ impl Lowerer {
     /// constant is an error, not a silently zero-filled object. (C keeps the
     /// lenient zero-fill.)
     fn check_global_init(&mut self, d: &Declarator) -> Result<()> {
-        if self.sic && std::mem::take(&mut self.global_init_unserializable) {
+        let at = self.global_init_bad_element.take();
+        if std::mem::take(&mut self.global_init_unserializable) {
+            let sp = at.unwrap_or_else(|| d.span.clone());
             return Err(CompileError::at(
                 format!("initializer of `{}` is not a compile-time constant (a global is \
                          initialized at load time; set non-constant parts at run time)", d.name),
-                d.span.file.clone(), d.span.line, d.span.col));
+                sp.file, sp.line, sp.col));
         }
-        self.global_init_unserializable = false;
         Ok(())
     }
 
@@ -3764,10 +3768,11 @@ impl Lowerer {
                     Err(_) => {
                         // A pointer global initialized with a symbolic address:
                         // another array/function name, `&x`, or a string.
-                        if matches!(&*ir_ty, Type::Pointer(_)) {
+                        let wide = matches!(&*ir_ty, Type::Int { .. }) && ir_ty.size_of(self.ptr_size) == self.ptr_size as u64;
+                        if matches!(&*ir_ty, Type::Pointer(_)) || wide {
                             if let Some(reloc) = self.eval_ptr_reloc(e) {
                                 return match reloc {
-                                    RelocTarget::Global(g, 0) => Some(Constant::GlobalAddr(g)),
+                                    RelocTarget::Global(g, 0) if !wide => Some(Constant::GlobalAddr(g)),
                                     other => {
                                         let ps = self.ptr_size as usize;
                                         Some(Constant::Aggregate {
@@ -3794,7 +3799,13 @@ impl Lowerer {
                             ExprKind::Cast { expr: inner, .. } => float_of(inner).map(Constant::Float),
                             ExprKind::Unary { op: UnOpKind::Neg, expr: inner } =>
                                 float_of(inner).map(|f| Constant::Float(-f)),
-                            _ => None,
+                            _ => {
+                                if !self.sic {
+                                    self.global_init_unserializable = true;
+                                    self.global_init_bad_element = Some(e.span.clone());
+                                }
+                                None
+                            }
                         }
                     }
                 }
@@ -4024,7 +4035,9 @@ impl Lowerer {
                         _ => return false,
                     },
                 };
-                self.serialize_scalar(e, &ty, buf, base, relocs)
+                let ok = self.serialize_scalar(e, &ty, buf, base, relocs);
+                if !ok && self.global_init_bad_element.is_none() { self.global_init_bad_element = Some(e.span.clone()); }
+                ok
             }
         }
     }
@@ -4193,10 +4206,21 @@ impl Lowerer {
                     None => false,
                 }
             }
-            _ => match self.eval_const_int(e) {
-                Some(v) => { buf[base..base + size].copy_from_slice(&v.to_le_bytes()[..size]); true }
-                None => false,
-            },
+            _ => {
+                // An address in an integer as wide as a pointer: `(unsigned
+                // long)&x`, which the linker fills in like a pointer (Linux's
+                // `INIT_THREAD`, `.sp = (unsigned long)&__top_init_kernel_stack`).
+                if size == self.ptr_size as usize {
+                    if let Some(reloc) = self.eval_ptr_reloc(e) {
+                        relocs.push((base, reloc));
+                        return true;
+                    }
+                }
+                match self.eval_const_int(e) {
+                    Some(v) => { buf[base..base + size].copy_from_slice(&v.to_le_bytes()[..size]); true }
+                    None => false,
+                }
+            }
         }
     }
 
@@ -4403,8 +4427,41 @@ impl Lowerer {
                 }
                 None
             }
+            // An address plus or minus a constant: elements for a pointer, bytes
+            // for an integer (`(unsigned long)&stack + sizeof(stack)`).
+            ExprKind::BinOp { op: op @ (BinOpKind::Add | BinOpKind::Sub), lhs, rhs } => {
+                let (addr, n) = match self.eval_const_int(rhs) {
+                    Some(n) => (lhs, n),
+                    None if *op == BinOpKind::Add => (rhs, self.eval_const_int(lhs)?),
+                    None => return None,
+                };
+                let scale = self.reloc_scale(addr)?;
+                let by = n.wrapping_mul(scale);
+                match self.eval_ptr_reloc(addr)? {
+                    RelocTarget::Global(g, a) =>
+                        Some(RelocTarget::Global(g, if *op == BinOpKind::Add { a + by } else { a - by })),
+                    r @ RelocTarget::Func(_) if by == 0 => Some(r),
+                    _ => None,
+                }
+            }
             _ => None,
         }
+    }
+
+    /// What adding 1 to the address `e` adds in bytes.
+    fn reloc_scale(&self, e: &Expr) -> Option<i64> {
+        let t = match &e.kind {
+            ExprKind::Cast { ty, .. } => lower_type(ty, &self.struct_types, self.ptr_size).ok()?,
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => Type::Pointer(Box::new(self.const_expr_type(expr)?)),
+            _ => self.const_expr_type(e)?,
+        };
+        Some(match t {
+            Type::Pointer(p) | Type::Array { elem: p, .. } => match *p {
+                Type::Void | Type::Function(_) => 1,
+                other => types::resolve_aggregate(&other, &self.struct_types).size_of(self.ptr_size) as i64,
+            },
+            _ => 1,
+        })
     }
 
     /// Materialize a static compound literal `(T){...}` as a private, constant
