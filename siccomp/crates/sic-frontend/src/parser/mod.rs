@@ -60,6 +60,8 @@ pub struct Parser {
     /// `__attribute__((used))` / `section("…")` seen for the current declaration.
     pending_used: bool,
     pending_section: Option<String>,
+    /// `__attribute__((alias("target")))` seen for the current declarator.
+    pending_alias: Option<String>,
     used_fns: Vec<String>,
     /// The `asm("name")` label after the last declarator (see `skip_decl_tail`).
     pending_asm_label: Option<String>,
@@ -174,7 +176,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -363,6 +365,7 @@ impl Parser {
         self.pending_noinline = false;
         self.pending_used = false;
         self.pending_section = None;
+        self.pending_alias = None;
         self.pending_weak = false;
         self.pending_thread_local = false;
         // sic strict mode (sic.md §"Strict mode"): `using strict;` makes every
@@ -518,6 +521,7 @@ impl Parser {
             }
             if std::mem::take(&mut self.pending_noinline) { self.noinline.push(name.clone()); }
             if self.pending_weak { self.weak_fns.push(name.clone()); }
+            self.take_alias(&name, &storage);
             if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
 
@@ -582,6 +586,11 @@ impl Parser {
             self.reg_vars.push((name.clone(), reg.trim_start_matches('%').to_string()));
         }
         if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
+        // An alias has no storage of its own: a reference to the name, which the
+        // assembler binds to the target.
+        let aliased = self.take_alias(&name, &storage);
+        let mut base_ty = base_ty;
+        if aliased { base_ty.storage = Some(StorageClass::Extern); }
         let init = if self.eat(TokenKind::Eq) {
             Some(self.parse_initializer()?)
         } else {
@@ -1126,6 +1135,7 @@ impl Parser {
         self.skip_decl_tail();
         if let AstType::Function { params, variadic, ret } = ty.ty.clone() {
             if self.pending_weak { self.weak_fns.push(name.clone()); }
+            self.take_alias(&name, storage);
             return Ok(Decl::Func {
                 name, ret_ty: *ret, params, variadic,
                 type_params: Vec::new(), template_src: None,
@@ -3975,6 +3985,15 @@ impl Parser {
                         // a function is emitted even if uncalled.
                         self.pending_unused = true;
                         if name.contains("used") && !name.contains("unused") { self.pending_used = true; }
+                    } else if name == "alias" || name == "__alias__" {
+                        let mut j = i + 2;
+                        let mut target = String::new();
+                        while let Some(t) = self.tokens.get(j) {
+                            if t.kind != TokenKind::StringLit { break; }
+                            target.push_str(&t.text);
+                            j += 1;
+                        }
+                        if !target.is_empty() { self.pending_alias = Some(target); }
                     } else if name == "section" || name == "__section__" {
                         // `section("name")` (adjacent string literals concatenate).
                         if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
@@ -4281,6 +4300,18 @@ impl Parser {
         if section < 0 { template = template.replace('%', "%%"); }
         let [outputs, inputs] = sections;
         Ok(Stmt::Asm(Box::new(AsmStmt { template, outputs, inputs, clobbers, goto, labels, span: sp })))
+    }
+
+    /// Bind `name` to the alias target just parsed, if any, in the unit's
+    /// assembler text; the target stays in the object however little C uses it.
+    fn take_alias(&mut self, name: &str, storage: &Option<StorageClass>) -> bool {
+        let Some(target) = self.pending_alias.take() else { return false };
+        let bind = if self.pending_weak { format!("\t.weak\t{}\n", name) }
+            else if matches!(storage, Some(StorageClass::Static)) { String::new() }
+            else { format!("\t.globl\t{}\n", name) };
+        self.file_asm.push(format!("{}\t.set\t{}, {}\n", bind, name, target));
+        self.used_fns.push(target);
+        true
     }
 
     fn parse_file_asm(&mut self) -> Result<()> {
