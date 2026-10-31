@@ -19,7 +19,7 @@
 
 use crate::ast::{AsmOperand, AsmStmt};
 use crate::Result;
-use super::super::func::FuncCtx;
+use super::super::func::{FuncCtx, LookupResult};
 use super::*;
 use sic_ir::asm_helpers::ASM_HELPER_PREFIX;
 
@@ -93,6 +93,17 @@ fn operand_ref(s: &str) -> Option<usize> {
 }
 
 impl<'m> FuncCtx<'m> {
+    /// `e` as a symbol-relative memory operand: a file-scope object at a constant
+    /// offset. Not a name a local hides, nor a `static` of this function.
+    fn global_operand_text(&self, e: &Expr) -> Option<String> {
+        let mut root = e;
+        while let ExprKind::Field { base, .. } | ExprKind::Index { base, .. } = &root.kind { root = base; }
+        let ExprKind::Ident(n) = &root.kind else { return None };
+        if !matches!(self.lookup(n), Some(LookupResult::Global(..))) || self.static_locals.contains_key(n) { return None; }
+        let (name, off) = self.lowerer.global_lvalue(e)?;
+        Some(if off == 0 { format!("{}(%rip)", name) } else { format!("{}{:+}(%rip)", name, off) })
+    }
+
     pub(crate) fn lower_asm(&mut self, a: &AsmStmt) -> Result<()> {
         // SIC has no inline assembly; it is a C feature here.
         if self.is_sic() {
@@ -696,6 +707,10 @@ enum OpLoc {
     Reg(usize),
     /// In memory, its address in a register.
     Mem(usize),
+    /// In memory at a symbol's constant offset, printed as `sym+8(%rip)`: an
+    /// exact instruction form that patching relies on (Linux's paravirt
+    /// `call *pv_ops+N(%rip)`, which must be `ff 15 disp32`).
+    Sym(String),
     /// A constant.
     Imm(Imm),
     /// A flag output `=@cc<cond>`: `set<cond>` into a register.
@@ -798,6 +813,7 @@ fn print_operands(template: &str, ops: &[OpInfo], names: &[Option<String>], labe
             (OpLoc::Reg(r), Some('a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
             (OpLoc::Reg(r), m @ (None | Some('b' | 'h' | 'w' | 'k' | 'q'))) => { out.push('%'); out.push_str(&reg_name(*r, op.size, m)?); }
             (OpLoc::Mem(r), None | Some('b' | 'h' | 'w' | 'k' | 'q' | 'a')) => out.push_str(&format!("(%{})", GPR[*r].0)),
+            (OpLoc::Sym(s), None | Some('b' | 'h' | 'w' | 'k' | 'q' | 'a')) => out.push_str(s),
             (OpLoc::Imm(v), m) => out.push_str(&v.print(m)?),
             _ => return None,
         }
@@ -869,6 +885,12 @@ impl FuncCtx<'_> {
                 continue;
             }
             let mem_only = letters.chars().any(|ch| "moV".contains(ch)) && !letters.chars().any(|ch| "rgqXp".contains(ch));
+            if mem_only && !is_out && !c.rw {
+                if let Some(text) = self.global_operand_text(&op.expr) {
+                    ops[n] = Some(OpInfo { loc: OpLoc::Sym(text), size, load: false });
+                    continue;
+                }
+            }
             if mem_only {
                 want_reg.push((n, true));
                 ops[n] = Some(OpInfo { loc: OpLoc::Mem(0), size, load: true });

@@ -1664,6 +1664,10 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
+        if !self.is_sic() && matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+            if let Some(v) = self.lower_pointer_to_array_arith(op, lhs, rhs)? { return Ok(v); }
+        }
+
         // GCC vector extension: when both operands are vector (array) types an
         // arithmetic/bitwise/comparison operator is element-wise, not scalar.
         // An operand declared as a C array decays to a pointer instead
@@ -4684,6 +4688,92 @@ impl<'m> FuncCtx<'m> {
         Ok(p)
     }
 
+    /// `cur op rhs` for `lhs op= rhs` or `++lhs`: a pointer to an array steps by it
+    /// (see `lower_pointer_to_array_arith`).
+    fn emit_lvalue_step(&mut self, op: BinOpKind, lhs: &Expr, cur: Val, rhs: Val) -> Result<Val> {
+        if !self.is_sic() && matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+            if let Ok(Type::Pointer(p)) = self.infer_expr_type(lhs) {
+                let a = super::types::resolve_aggregate(&p, &self.lowerer.struct_types);
+                if matches!(a, Type::Array { .. }) {
+                    let i64t = Type::i64();
+                    let idx = self.coerce(rhs, &i64t)?;
+                    let idx = if op == BinOpKind::Sub {
+                        let d = self.alloc_val();
+                        self.push_instr(Instr::UnaryOp { dest: d, op: UnOp::Neg, val: idx, ty: i64t });
+                        Val::Local(d)
+                    } else { idx };
+                    let dest = self.alloc_val();
+                    let result_ty = Type::Pointer(Box::new(a.clone()));
+                    let elem_size = a.size_of(self.ptr_size());
+                    self.push_instr(Instr::GetElemPtr { dest, base: cur, index: idx, elem_size, result_ty: result_ty.clone() });
+                    self.val_types.insert(dest.0, result_ty);
+                    return Ok(Val::Local(dest));
+                }
+            }
+        }
+        self.emit_binop(op, cur, rhs)
+    }
+
+    /// Arithmetic on a pointer whose element is itself an array: `int (*p)[5]`, or
+    /// a `int m[4][5]` decayed. In IR a decayed array and a pointer to an array are
+    /// both `Pointer(Array)`, and `emit_binop` steps by the array's element; only
+    /// the operand's C type tells that here the step is the whole array (Linux's
+    /// `target - __x86_indirect_thunk_array`, of `u8[32]` elements).
+    fn lower_pointer_to_array_arith(&mut self, op: BinOpKind, lhs: &Expr, rhs: &Expr) -> Result<Option<Val>> {
+        let (Ok(lt), Ok(rt)) = (self.infer_expr_type(lhs), self.infer_expr_type(rhs)) else { return Ok(None) };
+        let named = &self.lowerer.struct_types;
+        let stride = |t: &Type| match t {
+            Type::Pointer(p) => match super::types::resolve_aggregate(p, named) {
+                a @ Type::Array { .. } => Some(a),
+                _ => None,
+            },
+            Type::Array { elem, .. } => match super::types::resolve_aggregate(elem, named) {
+                a @ Type::Array { .. } => Some(a),
+                _ => None,
+            },
+            _ => None,
+        };
+        let is_int = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool);
+        let pointerish = |t: &Type| matches!(t, Type::Pointer(_) | Type::Array { .. });
+        let ps = self.ptr_size();
+        let i64t = Type::i64();
+        let step = |me: &mut Self, base: Val, idx: Val, neg: bool, a: Type| -> Result<Option<Val>> {
+            let idx = me.coerce(idx, &i64t)?;
+            let idx = if neg {
+                let d = me.alloc_val();
+                me.push_instr(Instr::UnaryOp { dest: d, op: UnOp::Neg, val: idx, ty: i64t.clone() });
+                Val::Local(d)
+            } else { idx };
+            let dest = me.alloc_val();
+            let result_ty = Type::Pointer(Box::new(a.clone()));
+            me.push_instr(Instr::GetElemPtr { dest, base, index: idx, elem_size: a.size_of(ps), result_ty: result_ty.clone() });
+            me.val_types.insert(dest.0, result_ty);
+            Ok(Some(Val::Local(dest)))
+        };
+        if let (Some(a), true) = (stride(&lt), is_int(&rt)) {
+            let (l, r) = (self.lower_expr(lhs)?, self.lower_expr(rhs)?);
+            return step(self, l, r, op == BinOpKind::Sub, a);
+        }
+        if let (Some(a), true, BinOpKind::Add) = (stride(&rt), is_int(&lt), op) {
+            let (l, r) = (self.lower_expr(lhs)?, self.lower_expr(rhs)?);
+            return step(self, r, l, false, a);
+        }
+        if op == BinOpKind::Sub && pointerish(&lt) && pointerish(&rt) {
+            let Some(a) = stride(&lt).or_else(|| stride(&rt)) else { return Ok(None) };
+            let size = a.size_of(ps) as i64;
+            let (l, r) = (self.lower_expr(lhs)?, self.lower_expr(rhs)?);
+            let (lp, rp) = (self.coerce(l, &i64t)?, self.coerce(r, &i64t)?);
+            let diff = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: diff, op: BinOp::Sub, lhs: lp, rhs: rp, ty: i64t.clone() });
+            if size <= 1 { return Ok(Some(Val::Local(diff))); }
+            let quot = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: quot, op: BinOp::SDiv, lhs: Val::Local(diff), rhs: Constant::int(size), ty: i64t.clone() });
+            self.val_types.insert(quot.0, i64t.clone());
+            return Ok(Some(Val::Local(quot)));
+        }
+        Ok(None)
+    }
+
     /// `e` is a C array object (declared with `[…]`, not a `vector_size` vector)
     /// or a string literal: it decays where an operator or cast uses it. Vectors
     /// and arrays share the IR type, so the declaration decides.
@@ -6077,7 +6167,7 @@ impl<'m> FuncCtx<'m> {
         let store_val = if let Some(bin_op) = op {
             // Load current value (bit-field aware), apply op, store result.
             let cur = self.load_lvalue(&lv)?;
-            self.emit_binop(bin_op, cur, rhs_val)?
+            self.emit_lvalue_step(bin_op, lhs, cur, rhs_val)?
         } else {
             rhs_val
         };
@@ -6454,7 +6544,7 @@ impl<'m> FuncCtx<'m> {
             return self.emit_binop(op, Val::Local(old), Constant::int(1));
         }
         let cur = self.load_lvalue(&lv)?;
-        let result = self.emit_binop(op, cur, Constant::int(1))?;
+        let result = self.emit_lvalue_step(op, inner, cur, Constant::int(1))?;
         self.store_lvalue(&lv, result)
     }
 
@@ -6474,7 +6564,7 @@ impl<'m> FuncCtx<'m> {
             return Ok(Val::Local(old));
         }
         let old = self.load_lvalue(&lv)?;
-        let result = self.emit_binop(op, old.clone(), Constant::int(1))?;
+        let result = self.emit_lvalue_step(op, inner, old.clone(), Constant::int(1))?;
         self.store_lvalue(&lv, result)?;
         Ok(old)
     }

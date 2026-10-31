@@ -4682,6 +4682,12 @@ impl Lowerer {
         }
     }
 
+    /// The symbol and offset of a constant lvalue.
+    pub(crate) fn global_lvalue(&self, e: &Expr) -> Option<(String, i64)> {
+        let (gref, off, _) = self.base_addr(e)?;
+        Some((self.module.globals[gref.0 as usize].name.clone(), off))
+    }
+
     /// Resolve a constant lvalue expression to (global, byte offset, type).
     fn base_addr(&self, e: &Expr) -> Option<(GlobalRef, i64, Type)> {
         match &e.kind {
