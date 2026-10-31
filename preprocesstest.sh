@@ -136,6 +136,17 @@ if [ -n "$SICDRV" ]; then
     if [ "$got" = "42" ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL weak-override: got '$got' $(head -c 200 "$WORK/err")"
     fi
+    # One ELF section per section name (Linux's modpost reads one `.modinfo`), and
+    # no undefined symbol that only dead code named (it counts them all). The kernel
+    # code model, which writes the object without going through the assembler here.
+    if command -v readelf >/dev/null; then
+        total=$((total + 1))
+        printf 'static const char a[] __attribute__((used,section(".modinfo"),aligned(1))) = "license=GPL";\nstatic const char b[] __attribute__((used,section(".modinfo"),aligned(1))) = "author=x";\nvoid gone(void);\nint f(int x) { if (0) gone(); return x; }\n' > "$WORK/mi.c"
+        got="$( (cd "$WORK" && "$SICDRV" -O2 -fno-PIE -mcmodel=kernel -c mi.c -o mi.o && readelf -SW mi.o | grep -c ' \.modinfo ' && readelf -sW mi.o | grep -c ' UND gone') 2> "$WORK/err" | tr '\n' ' ')"
+        if [ "$got" = "1 0 " ]; then passed=$((passed + 1)); else
+            failed=$((failed + 1)); echo "FAIL section-merge: got '$got' $(head -c 200 "$WORK/err")"
+        fi
+    fi
     # `-m32` goes to the system compiler (Clang, else GCC; sic emits x86-64 only),
     # a flag only sic accepts is dropped, and a later `-m64` stays in sic.
     if command -v clang >/dev/null || command -v gcc >/dev/null; then

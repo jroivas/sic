@@ -666,6 +666,7 @@ impl Lowerer {
             }
         }
         self.module.weak_externs = tu.weak_fns.iter().chain(&self.weak_vars).cloned().collect();
+        self.module.file_asm = tu.file_asm.clone();
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();

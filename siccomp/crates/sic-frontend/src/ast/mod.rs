@@ -751,6 +751,8 @@ pub struct TranslationUnit {
     pub always_inline: Vec<String>,
     /// Functions declared `__attribute__((noinline))`: never inlined.
     pub noinline: Vec<String>,
+    /// The text of each file-scope `asm("…");`, in source order.
+    pub file_asm: Vec<String>,
     /// Functions declared `__attribute__((weak))`, by a definition or a prototype.
     pub weak_fns: Vec<String>,
     /// Functions declared `__attribute__((used))`: emitted even if nothing in

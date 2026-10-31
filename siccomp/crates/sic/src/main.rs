@@ -1305,8 +1305,8 @@ fn function_sections(args: &Args) -> bool {
 /// Codegen a lowered IR module to object-file bytes.
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
-    if ir_module.asm_text_helpers.is_empty() { return Ok(obj); }
-    merge_asm_helpers(&obj, &ir_module.asm_text_helpers, src, function_sections(args))
+    if ir_module.asm_text_helpers.is_empty() && ir_module.file_asm.is_empty() { return Ok(obj); }
+    merge_asm_helpers(&obj, ir_module, src, function_sections(args))
 }
 
 /// The backend's object for `ir_module`, without the text inline-asm helpers.
@@ -1335,11 +1335,11 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
 /// a helper may name any symbol of the unit — a `static` one too (Linux's
 /// static keys and per-CPU variables), which a separately assembled helper
 /// object could not reach (local symbols do not link across objects).
-fn merge_asm_helpers(obj: &[u8], helpers: &[(String, String)], src: &str, function_sections: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn merge_asm_helpers(obj: &[u8], ir_module: &sic_ir::Module, src: &str, function_sections: bool) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let asm_s = dir.path().join("unit.s");
     let out_o = dir.path().join("unit.o");
-    fs::write(&asm_s, asm_out::object_to_asm(obj, helpers, src, function_sections)?)?;
+    fs::write(&asm_s, asm_out::object_to_asm(obj, ir_module, src, function_sections)?)?;
     let cc = resolve_assembler();
     let st = Command::new(&cc).arg("-c").arg(&asm_s).arg("-o").arg(&out_o).status()
         .map_err(|e| format!("inline assembly: cannot run the assembler ({}): {}", cc, e))?;
@@ -1419,7 +1419,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), reg_vars: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), reg_vars: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1446,6 +1446,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         combined.strict_files.extend(tu.strict_files);
         combined.always_inline.extend(tu.always_inline);
         combined.weak_fns.extend(tu.weak_fns);
+        combined.file_asm.extend(tu.file_asm);
         combined.used_fns.extend(tu.used_fns);
         combined.fn_sections.extend(tu.fn_sections);
         used_files.push(ps);
@@ -1782,7 +1783,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         for src in &sources {
             let ir_module = build_ir(src, args)?;
             let obj = compile_ir_code(&ir_module, args)?;
-            let text = asm_out::object_to_asm(&obj, &ir_module.asm_text_helpers, src, function_sections(args))?;
+            let text = asm_out::object_to_asm(&obj, &ir_module, src, function_sections(args))?;
             let out = match &args.output {
                 Some(o) if sources.len() == 1 => o.clone(),
                 _ => PathBuf::from(src).with_extension("s").to_string_lossy().into_owned(),

@@ -74,7 +74,7 @@ fn sym_ref(name: &str) -> String {
 
 /// The assembler text for `obj` (an ELF object from the backend) followed by
 /// the text `helpers` (symbol, body). `source` names the file (`.file`).
-pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str, function_sections: bool) -> Result<String, String> {
+pub fn object_to_asm(obj: &[u8], ir_module: &sic_ir::Module, source: &str, function_sections: bool) -> Result<String, String> {
     let file = ElfFile64::<object::Endianness>::parse(obj).map_err(|e| format!("-S: reading the object: {}", e))?;
     let mut out = String::new();
     let _ = writeln!(out, "\t.file\t\"{}\"", source.replace('"', "\\\""));
@@ -204,7 +204,10 @@ pub fn object_to_asm(obj: &[u8], helpers: &[(String, String)], source: &str, fun
             }
         }
     }
-    out.push_str(&helpers_asm(helpers, function_sections));
+    out.push_str(&helpers_asm(&ir_module.asm_text_helpers, function_sections));
+    for text in &ir_module.file_asm {
+        let _ = writeln!(out, "\t.text\n{}", text);
+    }
     Ok(out)
 }
 

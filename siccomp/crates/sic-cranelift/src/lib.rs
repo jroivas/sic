@@ -626,7 +626,12 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
             if all_const && !ro_sections.contains(&sec.as_str()) { ro_sections.push(sec); }
         }
     }
-    if ir_module.fn_sections.is_empty() && cfg.function_sections && ro_sections.is_empty() { return Ok(bytes); }
+    // Several variables in one named section: one ELF section, as a tool reading
+    // the object expects (Linux's modpost reads one `.modinfo`).
+    let named: std::collections::HashSet<&str> = ir_module.data_sections.iter().map(|(_, s)| s.as_str()).collect();
+    let shared_section = named.len() < ir_module.data_sections.len();
+    if ir_module.fn_sections.is_empty() && cfg.function_sections && ro_sections.is_empty()
+        && !shared_section && !cfg.no_text_data { return Ok(bytes); }
     finish_code_sections(&bytes, &ir_module.fn_sections, !cfg.function_sections, &ro_sections).map_err(CraneliftError::Unsupported)
 }
 
@@ -634,8 +639,10 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
 /// function is emitted in its own section, renamed here with its relocation
 /// section — Cranelift's object writer has no per-function placement); with
 /// `one_text` (`-fno-function-sections`) the other functions' sections become
-/// `.text`; then sections of one name are merged into one (symbols,
-/// relocations and section-symbol references rebased), and alignment padding
+/// `.text`; then sections of one name and flags, code or data, are merged into
+/// one (symbols, relocations and section-symbol references rebased), an
+/// undefined symbol nothing refers to is dropped (its call was in dead code,
+/// and a tool counting undefined symbols takes it as needed), and alignment padding
 /// in code is `int3` (0xcc), not zeros: a tool that decodes code linearly
 /// (Linux's objtool) read `00 00` as `add %al,(%rax)`, and an odd gap ran
 /// into the next function ("can't find starting instruction"). The sections
@@ -666,11 +673,15 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
             .map(|s| s.id()).collect();
         for id in ids { b.sections.get_mut(id).name = b".text".to_vec().into(); }
     }
-    // Merge code sections by name, in order: (first, [(other, base offset)]).
-    let mut groups: Vec<(Vec<u8>, object::build::elf::SectionId, Vec<(object::build::elf::SectionId, u64)>)> = Vec::new();
-    let code: Vec<_> = b.sections.iter().filter(|s| is_code(s)).map(|s| s.id()).collect();
-    for id in code {
-        let name = b.sections.get(id).name.as_slice().to_vec();
+    // Merge sections by name, in order: (first, [(other, base offset)]).
+    let is_alloc = |s: &object::build::elf::Section| s.sh_flags.0 & elf::SHF_ALLOC.0 != 0
+        && matches!(s.data, SectionData::Data(_));
+    let mut groups: Vec<((Vec<u8>, u64), object::build::elf::SectionId, Vec<(object::build::elf::SectionId, u64)>)> = Vec::new();
+    let mergeable: Vec<_> = b.sections.iter().filter(|s| is_alloc(s)).map(|s| s.id()).collect();
+    for id in mergeable {
+        let s = b.sections.get(id);
+        let name = (s.name.as_slice().to_vec(), s.sh_flags.0);
+        let fill = if is_code(s) { 0xcc } else { 0 };
         match groups.iter_mut().find(|(n, _, _)| *n == name) {
             Some((_, first, rest)) => {
                 let (first, other) = (*first, id);
@@ -681,7 +692,7 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
                 let SectionData::Data(d) = &mut fs.data else { unreachable!() };
                 let v = d.to_mut();
                 let base = v.len().div_ceil(align as usize) as u64 * align;
-                v.resize(base as usize, 0xcc);
+                v.resize(base as usize, fill);
                 v.extend_from_slice(&tail);
                 rest.push((other, base));
             }
@@ -745,6 +756,15 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
         for o in gone { b.sections.get_mut(o).delete = true; }
         // Debug info and other non-code sections referring to a merged section's
         // symbol were handled above (all relocation sections were rewritten).
+    }
+    let referenced: std::collections::HashSet<usize> = b.sections.iter()
+        .filter_map(|s| match &s.data { SectionData::Relocation(r) => Some(r), _ => None })
+        .flatten().filter_map(|r| r.symbol.map(|s| s.index())).collect();
+    for sym in b.symbols.iter_mut() {
+        if sym.section.is_none() && sym.st_shndx == elf::SHN_UNDEF && !sym.name.as_slice().is_empty()
+            && !referenced.contains(&sym.id().index()) {
+            sym.delete = true;
+        }
     }
     // Zero padding between functions in code becomes int3.
     let funcs: Vec<(object::build::elf::SectionId, u64, u64)> = b.symbols.iter()

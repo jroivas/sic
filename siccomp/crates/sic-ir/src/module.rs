@@ -178,6 +178,8 @@ pub struct Module {
     /// trampoline that sets the SysV `AL` vector-arg count, which Cranelift never
     /// emits for variadic calls (see cg_clif's `adjust_call_for_c_variadic`).
     pub float_vararg_externs: Vec<String>,
+    /// The text of each file-scope `asm("…");`, for the assembler as is.
+    pub file_asm: Vec<String>,
     /// Externs declared weak: undefined at link time resolves to address 0.
     pub weak_externs: Vec<String>,
     /// Inline-assembly helpers given as assembler text (symbol, body): a C
@@ -244,6 +246,7 @@ impl Module {
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
             weak_externs: Vec::new(),
+            file_asm: Vec::new(),
             asm_text_helpers: Vec::new(),
             asm_deferred: Vec::new(),
             data_sections: Vec::new(),
