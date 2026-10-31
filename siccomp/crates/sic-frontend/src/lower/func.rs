@@ -4328,10 +4328,10 @@ impl<'m> FuncCtx<'m> {
 
         self.loop_stack.push((end_bb, post_bb));
         self.break_stack.push(end_bb);
-        // `break` exits the whole loop, so it also runs the for-init scope's
-        // cleanups (WITH_QEMU_LOCK_GUARD declares its guard there); `continue`
-        // jumps to the post-expression with that scope still live.
-        self.break_scope_depth.push(self.cleanups.len() - 1);
+        // The for-init scope stays live for both: `continue` jumps to the
+        // post-expression, and `break` to `end_bb`, where that scope ends and runs
+        // its cleanups, once (Linux's scoped_guard only ever leaves by `break`).
+        self.break_scope_depth.push(self.cleanups.len());
         self.continue_scope_depth.push(self.cleanups.len());
         self.switch_to_block(body_bb);
         // A bare (non-block) body must still get its own per-iteration scope so
