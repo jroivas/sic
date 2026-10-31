@@ -192,13 +192,20 @@ impl<'a> Resolver<'a> {
                         let r = self.resolve(rhs, depth + 1)?;
                         match (l, r) {
                             (Imm::Int(a), Imm::Int(b)) => {
+                                // Values are i64 here: nothing wider folds, and a
+                                // shift count must be below the type's width.
+                                let bits = int_bits(ty);
+                                if bits > 64 { return None; }
+                                if matches!(op, BinOp::Shl | BinOp::AShr | BinOp::LShr)
+                                    && !(0..bits as i64).contains(&b) { return None; }
+                                let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
                                 let v = match op {
                                     BinOp::Add => a.wrapping_add(b), BinOp::Sub => a.wrapping_sub(b),
                                     BinOp::Mul => a.wrapping_mul(b),
                                     BinOp::And => a & b, BinOp::Or => a | b, BinOp::Xor => a ^ b,
                                     BinOp::Shl => a.wrapping_shl(b as u32),
                                     BinOp::AShr => a.wrapping_shr(b as u32),
-                                    BinOp::LShr => ((a as u64).wrapping_shr(b as u32)) as i64,
+                                    BinOp::LShr => (((a as u64) & mask).wrapping_shr(b as u32)) as i64,
                                     _ => return None,
                                 };
                                 Some(Imm::Int(truncate(v, ty)))
@@ -213,7 +220,8 @@ impl<'a> Resolver<'a> {
                     Instr::Cmp { op, lhs, rhs, ty, .. } => {
                         let (Imm::Int(a), Imm::Int(b)) = (self.resolve(lhs, depth + 1)?, self.resolve(rhs, depth + 1)?)
                             else { return None };
-                        let bits = match ty { Type::Int { bits, .. } => *bits, Type::Bool => 1, _ => 64 };
+                        let bits = int_bits(ty);
+                        if bits > 64 { return None; }
                         let mask = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
                         let (ua, ub) = ((a as u64) & mask, (b as u64) & mask);
                         let sext = |u: u64| if bits < 64 && (u >> (bits - 1)) & 1 == 1 { (u | !mask) as i64 } else { u as i64 };
@@ -244,6 +252,10 @@ impl<'a> Resolver<'a> {
             }
         }
     }
+}
+
+fn int_bits(ty: &Type) -> u32 {
+    match ty { Type::Int { bits, .. } => *bits, Type::Bool => 1, _ => 64 }
 }
 
 fn add(x: Imm, o: i64) -> Imm {
@@ -321,6 +333,30 @@ fn fold_constant_branches(m: &mut Module) {
             }
         }
         for (bi, to) in folds { m.functions[fi].blocks[bi].terminator = Terminator::Jump(to); }
+    }
+}
+
+/// Fold constant branches and empty the blocks they cut off, so a call only dead
+/// code makes keeps nothing alive: a `static` function, an extern symbol (Linux
+/// leaves references to what a disabled config does not define in such branches).
+/// A dead block keeps what live code may still name: a variable's slot, when a
+/// `goto` jumps past its declaration.
+pub fn prune_dead_blocks(m: &mut Module) {
+    fold_constant_branches(m);
+    for f in &mut m.functions {
+        let live = reachable_blocks(f);
+        if live.len() == f.blocks.len() { continue; }
+        let mut used: HashSet<ValId> = HashSet::new();
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if !live.contains(&bi) { continue; }
+            for ins in &b.instrs { ins.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); }); }
+            b.terminator.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); });
+        }
+        for (bi, b) in f.blocks.iter_mut().enumerate() {
+            if live.contains(&bi) { continue; }
+            b.instrs.retain(|i| matches!(i, Instr::Alloca { .. }) || i.dest().is_some_and(|d| used.contains(&d)));
+            b.terminator = Terminator::Unreachable;
+        }
     }
 }
 

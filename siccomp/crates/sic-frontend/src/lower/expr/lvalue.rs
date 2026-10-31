@@ -8,7 +8,7 @@ impl<'m> FuncCtx<'m> {
     /// The declared (AST) type of an lvalue, where it is known: a variable, a
     /// cast, or `*`/`[]` through one. `None` when it is not (a call result, a
     /// typedef'd pointer); then no `const` is known either.
-    fn lvalue_qt(&self, e: &Expr) -> Option<crate::ast::QualType> {
+    pub(crate) fn lvalue_qt(&self, e: &Expr) -> Option<crate::ast::QualType> {
         use crate::ast::AstType;
         match &e.kind {
             ExprKind::Ident(n) => match self.lookup(n) {

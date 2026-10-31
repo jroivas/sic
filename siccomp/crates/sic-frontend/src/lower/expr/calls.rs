@@ -735,9 +735,31 @@ impl<'m> FuncCtx<'m> {
                 // `malloc` so the code links and yields correct storage. NOTE:
                 // this leaks (the block is not freed on function return); adequate
                 // for bounded uses, but a proper dynamic stack alloca is a TODO.
+                // `__builtin_strcmp` of two literals is a constant: Linux tells
+                // operators apart with it, and the unmatched arm must vanish.
+                "__builtin_strcmp" => {
+                    if let [Expr { kind: ExprKind::StringLit(a), .. }, Expr { kind: ExprKind::StringLit(b), .. }] = args {
+                        return Ok(Constant::int(match a.as_bytes().cmp(b.as_bytes()) {
+                            std::cmp::Ordering::Less => -1,
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                        }));
+                    }
+                }
                 "__builtin_alloca" | "alloca" | "__builtin_alloca_with_align" => {
                     if let [size_expr, ..] = args {
                         let voidp = Type::void_ptr();
+                        // A size with a known bound, outside a loop: a stack slot
+                        // of the bound, which needs no allocator (Linux's kernel
+                        // stack offset, `x & 0x3f8`, where there is no `malloc`).
+                        if let (Some(bound), true) = (self.alloca_bound(size_expr), self.loop_stack.is_empty()) {
+                            self.lower_expr(size_expr)?;
+                            let dest = self.alloc_val();
+                            let ty = Type::Array { elem: Box::new(Type::Int { bits: 8, signed: false }), len: bound as usize };
+                            self.push_instr(Instr::Alloca { dest, ty, align: Some(16) });
+                            self.val_types.insert(dest.0, voidp);
+                            return Ok(Val::Local(dest));
+                        }
                         let fref = match self.lowerer.module.func_ref_by_name("malloc") {
                             Some(f) => f,
                             None => self.lowerer.module.add_extern(ExternFunc {

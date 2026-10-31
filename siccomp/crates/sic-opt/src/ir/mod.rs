@@ -41,6 +41,7 @@ pub fn run_ir_passes(module: &mut Module, cfg: &PassConfig) {
     if cfg.is_enabled("dce") { pm.add(Box::new(dce::Dce::new())); }
     if cfg.is_enabled("tree-rec") { pm.add(Box::new(tree_rec::TreeRec::new())); }
     pm.run(module);
+    if cfg.is_enabled("dce") { asm_imm::prune_dead_blocks(module); }
 }
 
 /// Substitute every use of each mapped `ValId` with its replacement `Val`

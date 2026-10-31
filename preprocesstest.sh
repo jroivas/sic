@@ -114,6 +114,15 @@ if [ "$got" = "in_9p|found|" ]; then passed=$((passed + 1)); else
     failed=$((failed + 1)); echo "FAIL header-name-spelling: got '$got' $(head -c 200 "$WORK/err")"
 fi
 
+# Assembler text allows a paste that is no single token, and adds no space after
+# it (Linux's linker script: `.initcall##level##.init` became `.initcall1. init`).
+total=$((total + 1))
+printf '#define L(x) .foo##x##.init\nL(1)\n' > "$WORK/ap.S"
+got="$( (cd "$WORK" && timeout "$TIMEOUT" "${CPPCMD[@]}" -x assembler-with-cpp -P ap.S) 2> "$WORK/err" | grep -v '^$' | tr '\n' '|')"
+if [ "$got" = ".foo1.init|" ]; then passed=$((passed + 1)); else
+    failed=$((failed + 1)); echo "FAIL asm-paste: got '$got' $(head -c 200 "$WORK/err")"
+fi
+
 # The sic driver's own preprocessing of an assembler source (`sic -E` on a
 # `.S`, as Linux preprocesses its linker scripts with `-E -P -C -Ux86`): `-C`
 # and `-U` are accepted and forwarded, and `__ASSEMBLER__` is defined as GCC
@@ -156,6 +165,13 @@ ILEOF
     got="$( (cd "$WORK" && "$SICDRV" -c il1.c -o il1.o && "$SICDRV" -c il2.c -o il2.o && "$SICDRV" il1.o il2.o -o il && { timeout "$TIMEOUT" ./il; echo $?; }; nm il1.o | grep -cE ' T (plain|st)$') 2> "$WORK/err" | tr '\n' ' ')"
     if [ "$got" = "42 0 " ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL external-inline: got '$got' $(head -c 200 "$WORK/err")"
+    fi
+    # Dead code leaves no reference behind at -O2 (the test's stubs are for builds
+    # without optimization; sic does not define __OPTIMIZE__ itself).
+    total=$((total + 1))
+    got="$( (cd "$WORK" && "$SICDRV" -O2 -D__OPTIMIZE__=1 -c "$TESTDIR/test_0692.c" -o dead.o && nm -u dead.o | grep -cE 'bug_|TOKEN|never_defined') 2> "$WORK/err")"
+    if [ "$got" = "0" ]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); echo "FAIL dead-references: got '$got' $(nm -u "$WORK/dead.o" 2>/dev/null | head -5 | tr '\n' ' ') $(head -c 200 "$WORK/err")"
     fi
     # One ELF section per section name (Linux's modpost reads one `.modinfo`), and
     # no undefined symbol that only dead code named (it counts them all). The kernel

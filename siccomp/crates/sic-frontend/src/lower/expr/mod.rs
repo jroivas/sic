@@ -1065,6 +1065,12 @@ impl<'m> FuncCtx<'m> {
                 self.load_lvalue(&lv)
             }
 
+            // `(void)name` reads nothing unless the name is volatile: no reference
+            // stays behind (Linux's `(void)RCU` names a token no object defines).
+            ExprKind::Cast { ty, expr: inner }
+                if matches!(ty.ty, crate::ast::AstType::Void) && matches!(inner.kind, ExprKind::Ident(_))
+                    && !self.lvalue_qt(inner).is_some_and(|q| q.qualifiers.contains(&crate::ast::TypeQual::Volatile)) =>
+                Ok(Constant::zero()),
             ExprKind::Cast { ty, expr: inner } => {
                 let target = self.lower_type(ty)?;
                 // `(struct S)s` on a value of that same struct/union type (a GNU
@@ -5401,7 +5407,36 @@ impl<'m> FuncCtx<'m> {
         r
     }
 
+    /// The largest value of a constant, or of `x & constant`.
+    pub(crate) fn alloca_bound(&self, e: &Expr) -> Option<u64> {
+        if let Some(v) = self.eval_scoped_const(e) { return u64::try_from(v).ok(); }
+        match &e.kind {
+            ExprKind::Cast { expr, .. } => self.alloca_bound(expr),
+            ExprKind::BinOp { op: BinOpKind::BitAnd, lhs, rhs } => self.eval_scoped_const(lhs)
+                .or_else(|| self.eval_scoped_const(rhs)).and_then(|v| u64::try_from(v).ok()),
+            _ => None,
+        }
+    }
+
+    /// `x & 0` with `x` free of side effects: 0 for any `x`, which the constant
+    /// evaluator cannot know (Linux's `IS_DAX()` with S_DAX 0 makes the DAX code
+    /// disappear).
+    fn masked_to_zero(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::BinOp { op: BinOpKind::BitAnd, lhs, rhs } => {
+                (self.eval_scoped_const(rhs) == Some(0) && side_effect_free(lhs))
+                    || (self.eval_scoped_const(lhs) == Some(0) && side_effect_free(rhs))
+            }
+            ExprKind::Cast { expr, .. } => self.masked_to_zero(expr),
+            _ => false,
+        }
+    }
+
     fn lower_logical_inner(&mut self, is_and: bool, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        if is_and && self.masked_to_zero(rhs) {
+            if !side_effect_free(lhs) { self.lower_expr(lhs)?; }
+            return Ok(Constant::zero());
+        }
         let result_ptr = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: result_ptr, ty: Type::i32(), align: None });
         let zero = Constant::zero();
