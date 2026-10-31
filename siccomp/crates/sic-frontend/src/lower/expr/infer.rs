@@ -603,6 +603,8 @@ impl<'m> FuncCtx<'m> {
             // `@expr` has the referent's (pointer) type.
             ExprKind::Ref { expr, .. } => self.infer_expr_type(expr),
             ExprKind::Comma(_, rhs) => self.infer_expr_type(rhs),
+            ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. } => self.infer_expr_type(expr),
+            ExprKind::VaArg { ty, .. } => self.lower_type(ty),
             // GCC statement expression `({ ...; expr; })` has the type of its last
             // statement when that is an expression statement, else void. Needed so
             // `typeof(({...; p;}))` (QEMU's nested qobject_ref) keeps `p`'s type.
