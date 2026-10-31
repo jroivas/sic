@@ -613,6 +613,7 @@ string spaces(i32 n)
 // Global because the tokenizer has no preprocessor handle.
 i32 g_keep_comments = 0;
 i64 g_counter = 0;   // the next __COUNTER__ value
+string g_base_file = "";   // the main input file, for __BASE_FILE__
 // A strict ISO dialect (-std=c99/c11/…, not gnu*): GNU `, ## __VA_ARGS__` then
 // keeps the comma for a macro with no fixed parameters (`M()`), as gcc does.
 i32 g_strict_iso = 0;
@@ -1476,6 +1477,13 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
         // glue(_val, __COUNTER__); left as text, nested macros shared one name.
         if (tok == "__COUNTER__") { out.add(std::Fmt("{}", g_counter)); g_counter++; continue; }
         if (tok == "__FILE__") { out.add("\"" + cur_file + "\""); continue; }
+        if (tok == "__BASE_FILE__") { out.add("\"" + g_base_file + "\""); continue; }
+        if (tok == "__FILE_NAME__") {
+            i32 b = cur_file.size;
+            while (b > 0 && cur_file[b - 1] != '/') b--;
+            out.add("\"" + cur_file[b:] + "\"");
+            continue;
+        }
         if (tok == "__DATE__") { out.add("\"Jan  1 2026\""); continue; }
         if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
         if (tok == "__STDC__") { out.add("1"); continue; }
@@ -3550,6 +3558,8 @@ int main(int argc, char **argv)
     // also `defined` / `#ifdef`-visible, as in gcc and clang.
     pp.macros["__has_include"] = "B|";
     pp.macros["__COUNTER__"] = "B|";   // dynamic (expand_tokens); `#ifdef __COUNTER__`
+    pp.macros["__BASE_FILE__"] = "B|";   // likewise
+    pp.macros["__FILE_NAME__"] = "B|";
     pp.macros["__has_include_next"] = "B|";
     pp.macros["__has_embed"] = "B|";
     pp.macros["__STDC_EMBED_NOT_FOUND__"] = "O|0";
@@ -3682,6 +3692,7 @@ int main(int argc, char **argv)
     if (!g_keep_comments) content = strip_comments(content);
     pp.markers = !no_markers && !pp.dep_only && !pp.dump_macros;
     string main_file = pp.current_file;
+    g_base_file = main_file;
     // Standard input is no file to depend on (gcc and clang leave it out):
     // Linux's fixdep failed opening `<stdin>` (checksyscalls.sh).
     add_dep(&pp, main_file, input_file.size > 0 && input_file != "-" ? 0 : 2);
