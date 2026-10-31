@@ -13,6 +13,8 @@
 
 import std;
 
+#include <string.h>
+
 // ── Structs ────────────────────────────────────────────────────────────────
 
 struct Preprocessor {
@@ -598,6 +600,62 @@ void add_env_dirs(list<string> *dirs, string var)
     for (i32 i = 0; i < parts.length; i++) if (parts[i].size > 0) add_dir(dirs, parts[i]);
 }
 
+// ── String building ─────────────────────────────────────────────────────────
+
+// Text built piece by piece goes through one growing buffer: `s = s + x` copies
+// all of `s` each time, quadratic in the result (`strip_comments` alone took a
+// minute on sqlite3.c).
+std::buffer::Buffer *sb_new(u64 capacity) { return std::buffer::Create(capacity > 0 ? capacity : 64); }
+
+void sb_reserve(std::buffer::Buffer *b, u64 extra)
+{
+    u64 need = b->size + extra;
+    if (need <= b->capacity) return;
+    std::buffer::SetCapacity(b, need > b->capacity * 2 ? need : b->capacity * 2);
+}
+
+void sb_add(std::buffer::Buffer *b, string s)
+{
+    sb_reserve(b, s.size);
+    memcpy(b->data + b->size, s.ptr, s.size);
+    b->size += s.size;
+}
+
+void sb_spaces(std::buffer::Buffer *b, i32 n)
+{
+    sb_reserve(b, n);
+    memset(b->data + b->size, ' ', n);
+    b->size += n;
+}
+
+// The text as an owned string; the buffer is gone.
+string sb_take(std::buffer::Buffer *b)
+{
+    string out = std::buffer::Value(b).dup;
+    del b;
+    return out;
+}
+
+// Scratch buffers, reused so a small piece of text costs no allocation; a stack,
+// as macro expansion recurses while a replacement is being built. Text taken
+// from one must be `.dup`ed before the buffer goes back.
+std::buffer::Buffer *g_sb_pool[64];
+i32 g_sb_top = 0;
+
+std::buffer::Buffer *sb_get()
+{
+    if (g_sb_top == 0) return sb_new(256);
+    auto b = g_sb_pool[--g_sb_top];
+    b->size = 0;
+    return b;
+}
+
+void sb_put(std::buffer::Buffer *b)
+{
+    if (g_sb_top < 64) g_sb_pool[g_sb_top++] = b;
+    else del b;
+}
+
 // `n` spaces (for output indentation / blanked-out comments).
 string spaces(i32 n)
 {
@@ -696,14 +754,13 @@ string strip_comments(string s)
     // Each comment is replaced by SPACES of the same width (its newlines kept),
     // so line numbers, directive boundaries and token columns all survive — gcc
     // indents `-P` output by the first token's source column, and a comment
-    // before it counts. Verbatim text is copied as whole slices, one
-    // concatenation per comment line (linear in the file size).
+    // before it counts. Verbatim text is copied as whole slices.
     // Comments go before directives are split into lines (C11 5.1.1.2 phase 3):
     // a block comment spanning lines inside a directive does not end it (glib's
     // `#define G_C_STD_CHECK_VERSION(version) ( … /* …\n … */ \` ), so there its
     // newlines become line splices — the directive stays one logical line and
     // the physical line count is kept.
-    string out = "";
+    auto out = sb_new(s.size);
     i32 run = 0;   // start of the pending verbatim run
     i32 i = 0;
     i32 dir = directive_starts(s, 0);   // is the current logical line a directive?
@@ -715,18 +772,19 @@ string strip_comments(string s)
             continue;
         }
         if (c == '/' && i + 1 < s.size && s[i + 1] == '*') {
-            out = out + s[run:i];
+            sb_add(out, s[run:i]);
             i32 col = i;   // start of the current blanked segment
             i += 2;
             while (i + 1 < s.size && !(s[i] == '*' && s[i + 1] == '/')) {
                 if (s[i] == '\n') {
-                    out = out + spaces(i - col) + (dir ? "\\\n" : "\n");
+                    sb_spaces(out, i - col);
+                    sb_add(out, dir ? "\\\n" : "\n");
                     col = i + 1;
                 }
                 i++;
             }
             i = i + 2 <= s.size ? i + 2 : s.size;   // skip the closing */
-            out = out + spaces(i - col);
+            sb_spaces(out, i - col);
             run = i;
             continue;
         }
@@ -734,9 +792,9 @@ string strip_comments(string s)
             // A line comment runs to the end of the LOGICAL line: a backslash-
             // newline continues it (phase 2 splices before phase 3); each spliced
             // newline is kept so the line count survives.
-            out = out + s[run:i];
+            sb_add(out, s[run:i]);
             while (i < s.size && !(s[i] == '\n' && s[i - 1] != '\\')) {
-                if (s[i] == '\n') out = out + "\n";
+                if (s[i] == '\n') sb_add(out, "\n");
                 i++;
             }
             run = i;   // the newline itself stays in the next run
@@ -752,7 +810,8 @@ string strip_comments(string s)
         }
         i++;
     }
-    return out + s[run:s.size];
+    sb_add(out, s[run:s.size]);
+    return sb_take(out);
 }
 
 // ── Tokenizer ──────────────────────────────────────────────────────────────
@@ -772,12 +831,14 @@ string strip_comments(string s)
 string unpaint(string s)
 {
     if (!s.contains("\x04") && !s.contains("\x05") && !s.contains("\x07")) return s;
-    string out = "";
+    auto out = sb_get();
     for (i32 i = 0; i < s.size; i++) {
-        if (s[i] == 7) out = out + "##";
-        else if (s[i] != 4 && s[i] != 5) out = out + s[i:i + 1];
+        if (s[i] == 7) sb_add(out, "##");
+        else if (s[i] != 4 && s[i] != 5) sb_add(out, s[i:i + 1]);
     }
-    return out;
+    string r = std::buffer::Value(out).dup;
+    sb_put(out);
+    return r;
 }
 
 list<string> tokenize(string input)
@@ -1336,10 +1397,86 @@ i32 eval_if_expr(string expr, dict<string, string> *macros)
 // Is `name` already being expanded (the C "blue paint" hide set)? A macro in the
 // active set is emitted literally instead of re-expanded, so `#define A B` /
 // `#define B A` terminates (yielding `A`) instead of recursing forever.
-i32 name_active(list<string> active, string name)
+// It is a chain through the frames of the enclosing expansions.
+struct Active {
+    string name;
+    Active *up;
+}
+
+i32 name_active(Active *active, string name)
 {
-    for (i32 i = 0; i < active.length; i++) if (active[i] == name) return 1;
+    for (Active *a = active; a; a = a->up) if (a->name == name) return 1;
     return 0;
+}
+
+// Is token `t` the single character `c`? (Most tokens are told from the padding,
+// space and `(` tokens by this alone.)
+i32 tok_is(string t, i32 c) { return t.size == 1 && t[0] == c; }
+
+// What a macro's encoding says, worked out on first use: macros expand far more
+// often than they are defined. Found by name and tied to the encoding it was made
+// from (a redefinition stores a new one; the old stays alive here, so its address
+// is not reused).
+struct MacroDef {
+    string enc;
+    string body;              // the replacement list, as text
+    list<string> raw_params;  // as written
+    list<string> params;      // a variadic one named: `__VA_ARGS__` or `name`
+    i32 is_va;
+    i32 hash;                 // the body holds a `#`
+    i32 has_tokens;           // an object-like macro's `tokens` are ready
+    list<string> tokens;      // an object-like macro's body, tokenized and pasted
+}
+
+dict<string, i64> g_macro_defs;
+
+MacroDef *macro_def(string name, string enc)
+{
+    MacroDef *d = (MacroDef *)g_macro_defs[name];
+    if (d && d->enc.ptr == enc.ptr) return d;
+    d = new MacroDef();
+    d->enc = enc;
+    d->is_va = 0;
+    d->has_tokens = 0;
+    // Parse | separated encoding: "F|params|body"
+    tuple ep = enc.split("|");
+    string params_section = "";
+    string body = "";
+    if (ep.length >= 2) {
+        if (enc[0] == 'F') {
+            tuple ep2 = ep[1].split("|");
+            if (ep2.length >= 2) { params_section = ep2[0]; body = ep2[1]; }
+            else { body = ep[1]; }
+        } else {
+            body = ep[1];
+        }
+    }
+    d->body = body;
+    d->hash = 0;
+    for (i32 i = 0; i < body.size; i++) if (body[i] == '#') { d->hash = 1; break; }
+
+    // Split params by comma
+    i32 pi = 0;
+    while (pi < params_section.size) {
+        i32 ps = pi;
+        while (pi < params_section.size && params_section[pi] != ',') pi++;
+        d->raw_params.add(params_section[ps:pi].trim());   // `(maj, min)`: drop the space
+        if (pi < params_section.size && params_section[pi] == ',') {
+            if (pi + 1 < params_section.size) pi++; else break;
+        }
+    }
+    // Variadic macro (C11 6.10.3p12): a trailing `...` is named `__VA_ARGS__`
+    // (GNU `name...` names it `name`) and receives every remaining argument.
+    i32 np = d->raw_params.length;
+    for (i32 k = 0; k < np; k++) {
+        string p = d->raw_params[k];
+        if (k == np - 1 && p.ends_with("...")) {
+            d->is_va = 1;
+            d->params.add(p == "..." ? "__VA_ARGS__" : p[0:p.size - 3].trim());
+        } else d->params.add(p);
+    }
+    g_macro_defs[name.dup] = (i64)d;
+    return d;
 }
 
 // Token pasting (C11 6.10.3.3): `a ## b` joins its operands into ONE token, and
@@ -1348,6 +1485,13 @@ i32 name_active(list<string> active, string name)
 // dropped; chains `a ## b ## c` fold left to right.
 list<string> paste_tokens(list<string> t)
 {
+    // Nothing to paste and no placemarker: the tokens stand.
+    i32 plain = 1;
+    for (i32 n = 0; n < t.length; n++) {
+        string x = t[n];
+        if (x.size == 2 ? x[0] == '#' && x[1] == '#' : tok_is(x, 6)) { plain = 0; break; }
+    }
+    if (plain) return t;
     list<string> out;
     i32 i = 0;
     while (i < t.length) {
@@ -1382,21 +1526,23 @@ list<string> paste_tokens(list<string> t)
 }
 
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
-    i32 cur_line, string cur_file, list<string> active);
+    i32 cur_line, string cur_file, Active *active);
 
 // Argument `i`, fully macro-expanded (computed on first use, then cached).
 string expanded_arg(list<string> *exps, list<i32> *done, list<string> *args, i32 i,
-    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active)
+    dict<string, string> *macros, i32 cur_line, string cur_file, Active *active)
 {
     if ((*done)[i]) return (*exps)[i];
     list<string> aexp = expand_tokens(tokenize((*args)[i]), macros, cur_line, cur_file, active);
-    string arg_exp = "";
+    auto arg_exp = sb_get();
     for (i32 ei = 0; ei < aexp.length; ei++) {
-        if (aexp[ei] == " ") {
-            if (arg_exp.size > 0 && arg_exp[arg_exp.size - 1] != ' ') arg_exp = arg_exp + " ";
-        } else arg_exp = arg_exp + aexp[ei];
+        string t = aexp[ei];
+        if (tok_is(t, ' ')) {
+            if (arg_exp->size > 0 && arg_exp->data[arg_exp->size - 1] != ' ') sb_add(arg_exp, " ");
+        } else sb_add(arg_exp, t);
     }
-    (*exps)[i] = arg_exp.trim().dup;
+    (*exps)[i] = std::buffer::Value(arg_exp).trim().dup;
+    sb_put(arg_exp);
     (*done)[i] = 1;
     return (*exps)[i];
 }
@@ -1409,25 +1555,25 @@ string expanded_arg(list<string> *exps, list<i32> *done, list<string> *args, i32
 // macro whose expansion it ended has been left. Returns 1 when the rest of
 // `tokens` was consumed that way.
 i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
-    dict<string, string> *macros, i32 cur_line, string cur_file, list<string> active)
+    dict<string, string> *macros, i32 cur_line, string cur_file, Active *active)
 {
     // A pending name ends the expansion — bare, or with an unclosed argument
     // list. A bare one is invoked if `(` follows here, stays pending if this
     // context ends too, and is otherwise not a call; an unclosed call always
     // continues into the tokens that follow (or stays pending at their end).
     i32 last = be.length - 1;
-    while (last >= 0 && (be[last] == " " || be[last] == "\x03")) last--;
+    while (last >= 0 && (tok_is(be[last], ' ') || tok_is(be[last], 3))) last--;
     i32 open_call = 0;
     if (last >= 0 && be[last][0] != 5) {
         i32 p = last;
         while (p >= 0 && be[p][0] != 5) p--;
         if (p >= 0) {
             i32 q = p + 1;
-            while (q < be.length && (be[q] == " " || be[q] == "\x03")) q++;
-            if (q < be.length && be[q] == "(") {
+            while (q < be.length && (tok_is(be[q], ' ') || tok_is(be[q], 3))) q++;
+            if (q < be.length && tok_is(be[q], '(')) {
                 i32 d = 0;
                 for (i32 t = q; t < be.length; t++) {
-                    if (be[t] == "(") d++; else if (be[t] == ")") d--;
+                    if (tok_is(be[t], '(')) d++; else if (tok_is(be[t], ')')) d--;
                 }
                 if (d > 0) { open_call = 1; last = p; }
             }
@@ -1435,17 +1581,18 @@ i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
     }
     i32 splice = 0;
     i32 n = k;
-    while (n < tokens.length && (tokens[n] == " " || tokens[n] == "\x03")) n++;
+    while (n < tokens.length && (tok_is(tokens[n], ' ') || tok_is(tokens[n], 3))) n++;
     if (last >= 0 && be[last][0] == 5) {
-        if (n < tokens.length && (open_call || tokens[n] == "(")) splice = 1;
+        if (n < tokens.length && (open_call || tok_is(tokens[n], '('))) splice = 1;
         else if (n < tokens.length) be[last] = be[last][1:];
     }
     i32 end = splice ? last : be.length;
     out->add("\x03");   // padding: the expansion's boundaries
     for (i32 ei = 0; ei < end; ei++) {
-        if (be[ei] == " ") {
-            if (out->length == 0 || (*out)[out->length - 1] != " ") out->add(" ");
-        } else out->add(be[ei]);
+        string t = be[ei];
+        if (tok_is(t, ' ')) {
+            if (out->length == 0 || !tok_is((*out)[out->length - 1], ' ')) out->add(" ");
+        } else out->add(t);
     }
     if (!splice) { out->add("\x03"); return 0; }
     list<string> rest;
@@ -1458,58 +1605,73 @@ i32 emit_rescan(list<string> *out, list<string> be, list<string> tokens, i32 k,
 }
 
 list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
-    i32 cur_line, string cur_file, list<string> active)
+    i32 cur_line, string cur_file, Active *active)
 {
     list<string> out;
     for (i32 i = 0; i < tokens.length; i++) {
         string tok = tokens[i];
-        if (tok == "##") continue;
-        if (tok == " ") {
-            // Keep a space that follows tokens which expanded to nothing (`i > 0`
-            // with nothing emitted yet): gcc prints it before the first printed
-            // token (`EMPTY int d;` → ` int d;`). Plain leading whitespace drops.
-            if (out.length > 0 ? out[out.length - 1] != " " : i > 0) out.add(" ");
+        i32 c0 = tok[0];
+        // Neither a name nor a marked one: only `##` and a space are special.
+        if (!is_ident_start(c0) && c0 != 4 && c0 != 5) {
+            if (tok.size == 2 && c0 == '#' && tok[1] == '#') continue;
+            if (tok_is(tok, ' ')) {
+                // Keep a space that follows tokens which expanded to nothing (`i > 0`
+                // with nothing emitted yet): gcc prints it before the first printed
+                // token (`EMPTY int d;` → ` int d;`). Plain leading whitespace drops.
+                if (out.length > 0 ? !tok_is(out[out.length - 1], ' ') : i > 0) out.add(" ");
+                continue;
+            }
+            // ## token pasting: if next token is ##, skip space
+            if (i + 1 < tokens.length && tokens[i + 1].size == 2 && tokens[i + 1] == "##") {
+                out.add(tok);
+                i++;
+                while (i + 1 < tokens.length && tok_is(tokens[i + 1], ' ')) i++;
+                continue;
+            }
+            out.add(tok);
             continue;
         }
         // Predefined dynamic macros
-        if (tok == "__LINE__") { out.add(std::Fmt("{}", cur_line)); continue; }
-        // 0, 1, 2, … per use (gcc): QEMU makes unique names with
-        // glue(_val, __COUNTER__); left as text, nested macros shared one name.
-        if (tok == "__COUNTER__") { out.add(std::Fmt("{}", g_counter)); g_counter++; continue; }
-        if (tok == "__FILE__") { out.add("\"" + cur_file + "\""); continue; }
-        if (tok == "__BASE_FILE__") { out.add("\"" + g_base_file + "\""); continue; }
-        if (tok == "__FILE_NAME__") {
-            i32 b = cur_file.size;
-            while (b > 0 && cur_file[b - 1] != '/') b--;
-            out.add("\"" + cur_file[b:] + "\"");
-            continue;
+        if (c0 == '_') {
+            if (tok == "__LINE__") { out.add(std::Fmt("{}", cur_line)); continue; }
+            // 0, 1, 2, … per use (gcc): QEMU makes unique names with
+            // glue(_val, __COUNTER__); left as text, nested macros shared one name.
+            if (tok == "__COUNTER__") { out.add(std::Fmt("{}", g_counter)); g_counter++; continue; }
+            if (tok == "__FILE__") { out.add("\"" + cur_file + "\""); continue; }
+            if (tok == "__BASE_FILE__") { out.add("\"" + g_base_file + "\""); continue; }
+            if (tok == "__FILE_NAME__") {
+                i32 b = cur_file.size;
+                while (b > 0 && cur_file[b - 1] != '/') b--;
+                out.add("\"" + cur_file[b:] + "\"");
+                continue;
+            }
+            if (tok == "__DATE__") { out.add("\"Jan  1 2026\""); continue; }
+            if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
+            if (tok == "__STDC__") { out.add("1"); continue; }
         }
-        if (tok == "__DATE__") { out.add("\"Jan  1 2026\""); continue; }
-        if (tok == "__TIME__") { out.add("\"00:00:00\""); continue; }
-        if (tok == "__STDC__") { out.add("1"); continue; }
 
         // Macro lookup. A macro already being expanded is emitted painted — never
         // re-expanded, in this pass or a later one — so recursive macros terminate.
         if (tok[0] == 5) tok = tok[1:];   // a pending name is considered afresh here
-        if (name_active(active, tok) && macros[tok].size >= 2) tok = "\x04" + tok;
         string enc = tok[0] == 4 ? "" : macros[tok];
+        if (enc.size >= 2 && name_active(active, tok)) { tok = "\x04" + tok; enc = ""; }
         if (enc.size >= 2) {
             // The expansion of this macro hides its own name.
-            list<string> nactive;
-            for (i32 ni = 0; ni < active.length; ni++) nactive.add(active[ni]);
-            nactive.add(tok);
+            Active nactive;
+            nactive.name = tok;
+            nactive.up = active;
             if (enc[0] == 'F') {
                 // Function-like: is the next token '(' ? (Padding is transparent;
                 // any other token — even a macro expanding to nothing — is not.)
                 i32 j = i + 1;
-                while (j < tokens.length && (tokens[j] == " " || tokens[j] == "\x03")) j++;
+                while (j < tokens.length && (tok_is(tokens[j], ' ') || tok_is(tokens[j], 3))) j++;
                 if (j >= tokens.length) { out.add("\x05" + tok); continue; }   // pending
-                if (j < tokens.length && tokens[j] == "(") {
+                if (j < tokens.length && tok_is(tokens[j], '(')) {
                     // Collect arg text between balanced parens
                     i32 k = j + 1, depth = 1;
                     while (k < tokens.length && depth > 0) {
-                        if (tokens[k] == "(") depth++;
-                        else if (tokens[k] == ")") depth--;
+                        if (tok_is(tokens[k], '(')) depth++;
+                        else if (tok_is(tokens[k], ')')) depth--;
                         k++;
                     }
                     if (depth > 0) {
@@ -1523,78 +1685,50 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                     // The arguments split at top-level `,` TOKENS: a comma inside a
                     // string/char literal (one token) or nested parentheses does not
                     // separate (C11 6.10.3p11; brackets and braces do not group).
-                    string arg_str = "";
-                    string cur_arg = "";
+                    auto cur_arg = sb_get();
+                    i32 seen = 0;      // argument text was seen
+                    i32 last_c = 0;    // its last character
                     list<string> split_args;
                     i32 adepth = 0;
                     for (i32 ai = j + 1; ai < k - 1; ai++) {
-                        if (tokens[ai] == " " && arg_str.size > 0 && arg_str[arg_str.size - 1] == ' ') continue;
-                        if (tokens[ai] == "\x03") continue;          // padding is not argument text
-                        arg_str = arg_str + tokens[ai];
-                        if (tokens[ai] == "(") adepth++;
-                        else if (tokens[ai] == ")") adepth--;
-                        if (tokens[ai] == "," && adepth == 0) {
-                            split_args.add(cur_arg);
-                            cur_arg = "";
-                        } else cur_arg = cur_arg + (tokens[ai] == "##" ? "\x07" : tokens[ai]);   // an argument's `##` is text
+                        string at = tokens[ai];
+                        if (tok_is(at, ' ') && seen && last_c == ' ') continue;
+                        if (tok_is(at, 3)) continue;          // padding is not argument text
+                        seen = 1;
+                        last_c = at[at.size - 1];
+                        if (tok_is(at, '(')) adepth++;
+                        else if (tok_is(at, ')')) adepth--;
+                        if (tok_is(at, ',') && adepth == 0) {
+                            split_args.add(std::buffer::Value(cur_arg).dup);
+                            cur_arg->size = 0;
+                        } else sb_add(cur_arg, at == "##" ? "\x07" : at);   // an argument's `##` is text
                     }
-                    split_args.add(cur_arg);
-                    // Parse | separated encoding: "F|params|body"
-                    tuple ep = enc.split("|");
-                    string params_section = "";
-                    string body = "";
-                    if (ep.length >= 2) {
-                        if (enc[0] == 'F') {
-                            tuple ep2 = ep[1].split("|");
-                            if (ep2.length >= 2) { params_section = ep2[0]; body = ep2[1]; }
-                            else { body = ep[1]; }
-                        } else {
-                            body = ep[1];
-                        }
-                    }
-
-                    // Split params by comma, args by top-level comma
-                    list<string> param_names;
-                    i32 pi = 0;
-                    while (pi < params_section.size) {
-                        i32 ps = pi;
-                        while (pi < params_section.size && params_section[pi] != ',') pi++;
-                        param_names.add(params_section[ps:pi].trim());   // `(maj, min)`: drop the space
-                        if (pi < params_section.size && params_section[pi] == ',') {
-                            if (pi + 1 < params_section.size) pi++; else break;
-                        }
-                    }
+                    split_args.add(std::buffer::Value(cur_arg).dup);
+                    sb_put(cur_arg);
+                    MacroDef *d = macro_def(tok, enc);
+                    list<string> param_names = d->params;
 
                     list<string> args_list;
                     // `M()` on a macro WITH parameters passes one empty argument
                     // (C11 6.10.3p4), so `#x` of it is `""`.
-                    if (arg_str.size > 0 || param_names.length > 0) args_list = split_args;
+                    if (seen || param_names.length > 0) args_list = split_args;
 
-                    // Variadic macro (C11 6.10.3p12): a trailing `...` is named
-                    // `__VA_ARGS__` (GNU `name...` names it `name`) and receives every
-                    // remaining argument, commas included.
-                    i32 is_va = 0;
+                    // A trailing variadic parameter receives every remaining
+                    // argument, commas included.
+                    i32 is_va = d->is_va;
                     i32 n_given = args_list.length;   // arguments as written, before folding
                     {
                         // gcc: a call must match the parameter count (a variadic
                         // macro may omit its variadic part, C23 / GNU).
                         i32 np = param_names.length;
-                        i32 va = np > 0 && param_names[np - 1].ends_with("...");
-                        i32 need = va ? np - 1 : np;
-                        if (!va && n_given > np)
+                        i32 need = is_va ? np - 1 : np;
+                        if (!is_va && n_given > np)
                             expand_fail("macro ‘" + tok + "’ passed " + std::Fmt("{}", n_given) + " arguments, but takes just " + std::Fmt("{}", np));
                         else if (n_given < need)
                             expand_fail("macro ‘" + tok + "’ requires " + std::Fmt("{}", need) + " arguments, but only " + std::Fmt("{}", n_given) + " given");
                     }
-                    if (param_names.length > 0 && param_names[param_names.length - 1].ends_with("...")) {
-                        is_va = 1;
-                        string last = param_names[param_names.length - 1];
-                        string vname = last == "..." ? "__VA_ARGS__" : last[0:last.size - 3].trim();
+                    if (is_va) {
                         i32 nfixed = param_names.length - 1;
-                        list<string> pn2;
-                        for (i32 k = 0; k < nfixed; k++) pn2.add(param_names[k]);
-                        pn2.add(vname);
-                        param_names = pn2;
                         list<string> al2;
                         for (i32 k = 0; k < nfixed && k < args_list.length; k++)
                             al2.add(args_list[k]);
@@ -1608,12 +1742,24 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         args_list = al2;
                     }
 
+                    // Without parameters both passes below leave the body as it
+                    // is: its tokens are kept.
+                    if (param_names.length == 0) {
+                        if (!d->has_tokens) { d->tokens = paste_tokens(tokenize(d->body)); d->has_tokens = 1; }
+                        list<string> be = expand_tokens(d->tokens, macros, cur_line, cur_file, &nactive);
+                        if (emit_rescan(&out, be, tokens, k, macros, cur_line, cur_file, active))
+                            return out;
+                        i = k - 1;
+                        continue;
+                    }
+                    string body = d->body;
+
                     // Stringize `#param` → "<raw arg>" (the UNexpanded argument,
                     // C11 6.10.3.2). Done before normal substitution so the `#`
                     // operator sees the parameter, not its replacement. A `##` is
                     // left alone (handled as token-paste elsewhere).
-                    {
-                        string sb = "";
+                    if (d->hash) {
+                        auto sb = sb_get();
                         i32 si = 0;
                         while (si < body.size) {
                             // A string/char literal in the body is copied as is: a
@@ -1626,12 +1772,12 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                     si++;
                                 }
                                 if (si < body.size) si++;
-                                sb = sb + body[st:si];
+                                sb_add(sb, body[st:si]);
                                 continue;
                             }
                             // Leave `##` (token paste) intact — consume both chars.
                             if (body[si] == '#' && si + 1 < body.size && body[si + 1] == '#') {
-                                sb = sb + "##";
+                                sb_add(sb, "##");
                                 si += 2;
                                 continue;
                             }
@@ -1649,15 +1795,16 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                         break;
                                     }
                                 if (matched >= 0) {
-                                    sb = sb + stringize_arg(args_list[matched]);
+                                    sb_add(sb, stringize_arg(args_list[matched]));
                                     si = sj;
                                     continue;
                                 }
                             }
-                            sb = sb + body[si:si + 1];
+                            sb_add(sb, body[si:si + 1]);
                             si++;
                         }
-                        body = sb;
+                        body = std::buffer::Value(sb).dup;
+                        sb_put(sb);
                     }
 
                     // Parameter substitution — ONE left-to-right pass over the body
@@ -1678,7 +1825,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                         arg_done.add(0);
                     }
                     {
-                        string nb = "";
+                        auto nb = sb_get();
                         i32 bi = 0;
                         while (bi < body.size) {
                             i32 c = body[bi];
@@ -1690,7 +1837,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                     bi++;
                                 }
                                 if (bi < body.size) bi++;
-                                nb = nb + body[st:bi];
+                                sb_add(nb, body[st:bi]);
                                 continue;
                             }
                             // A preprocessing number (`2op`, `0x1f`, `1e+5`) is ONE
@@ -1710,7 +1857,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                     if (is_ident(d) || d == '.') { bi++; continue; }
                                     break;
                                 }
-                                nb = nb + body[st:bi];
+                                sb_add(nb, body[st:bi]);
                                 continue;
                             }
                             if (is_ident_start(c)) {
@@ -1720,7 +1867,7 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 i32 pidx = -1;
                                 for (i32 k = 0; k < param_names.length && k < args_list.length; k++)
                                     if (param_names[k] == word) { pidx = k; break; }
-                                if (pidx < 0) { nb = nb + word; continue; }
+                                if (pidx < 0) { sb_add(nb, word); continue; }
                                 // Adjacent to `##` (either side, spaces allowed)?
                                 i32 l = st - 1;
                                 while (l >= 0 && (body[l] == ' ' || body[l] == '\t')) l--;
@@ -1731,68 +1878,70 @@ list<string> expand_tokens(list<string> tokens, dict<string, string> *macros,
                                 // An expanded argument is fenced with padding (`\x03`):
                                 // where it meets a neighbour without whitespace, the
                                 // final join decides whether a space is needed.
-                                if (!pasted) { nb = nb + "\x03" + expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active) + "\x03"; continue; }
+                                if (!pasted) { sb_add(nb, "\x03"); sb_add(nb, expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active)); sb_add(nb, "\x03"); continue; }
                                 string raw = args_list[pidx].trim();
                                 // GNU `, ## __VA_ARGS__` is not a paste: with the variadic
                                 // argument OMITTED (`F(a)`; `F()` too unless strict ISO) the
                                 // comma is dropped, otherwise the comma stays and the
                                 // argument is substituted (macro-expanded) as usual.
                                 if (is_va && pidx == param_names.length - 1 && l >= 1 && body[l] == '#' && body[l - 1] == '#') {
-                                    i32 e = nb.size;
-                                    while (e > 0 && (nb[e - 1] == ' ' || nb[e - 1] == '\t')) e--;
+                                    i32 e = nb->size;
+                                    while (e > 0 && (nb->data[e - 1] == ' ' || nb->data[e - 1] == '\t')) e--;
                                     i32 h = e - 2;                     // at the `##`
-                                    while (h > 0 && (nb[h - 1] == ' ' || nb[h - 1] == '\t')) h--;
-                                    if (e >= 2 && nb[e - 1] == '#' && nb[e - 2] == '#' && h > 0 && nb[h - 1] == ',') {
+                                    while (h > 0 && (nb->data[h - 1] == ' ' || nb->data[h - 1] == '\t')) h--;
+                                    if (e >= 2 && nb->data[e - 1] == '#' && nb->data[e - 2] == '#' && h > 0 && nb->data[h - 1] == ',') {
                                         i32 nfixed = param_names.length - 1;
                                         i32 absent = n_given <= nfixed || (nfixed == 0 && raw.size == 0 && !g_strict_iso);
                                         if (absent) {
                                             i32 c0 = h - 1;            // drop the comma and the space before it
-                                            while (c0 > 0 && (nb[c0 - 1] == ' ' || nb[c0 - 1] == '\t')) c0--;
-                                            nb = nb[0:c0].dup;
+                                            while (c0 > 0 && (nb->data[c0 - 1] == ' ' || nb->data[c0 - 1] == '\t')) c0--;
+                                            nb->size = c0;
                                         } else {
-                                            nb = nb[0:h].dup;          // keep the comma, drop the `##`
-                                            if (args_list[pidx].size > 0 && std::IsSpace(args_list[pidx][0])) nb = nb + " ";
-                                            nb = nb + "\x03" + expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active) + "\x03";
+                                            nb->size = h;        // keep the comma, drop the `##`
+                                            if (args_list[pidx].size > 0 && std::IsSpace(args_list[pidx][0])) sb_add(nb, " ");
+                                            sb_add(nb, "\x03");
+                                            sb_add(nb, expanded_arg(&arg_exps, &arg_done, &args_list, pidx, macros, cur_line, cur_file, active));
+                                            sb_add(nb, "\x03");
                                         }
                                         continue;
                                     }
                                 }
-                                if (raw.size > 0) { nb = nb + raw; continue; }
+                                if (raw.size > 0) { sb_add(nb, raw); continue; }
                                 // An empty `##` operand is a placemarker (C11 6.10.3.3p2):
                                 // `TG##_t##TG2` with TG2 empty is `TG_t` — it must not paste
                                 // the next token (the `,` that ended the argument).
-                                nb = nb + "\x06";
+                                sb_add(nb, "\x06");
                                 continue;
                             }
-                            nb = nb + body[bi:bi + 1];
+                            sb_add(nb, body[bi:bi + 1]);
                             bi++;
                         }
-                        body = nb;
+                        body = std::buffer::Value(nb).dup;
+                        sb_put(nb);
                     }
 
                     // Expand body and emit
                     list<string> bt = paste_tokens(tokenize(body));
-                    list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
+                    list<string> be = expand_tokens(bt, macros, cur_line, cur_file, &nactive);
                     if (emit_rescan(&out, be, tokens, k, macros, cur_line, cur_file, active))
                         return out;
                     i = k - 1;
                     continue;
                 }
             } else if (enc[0] == 'O') {
-                tuple ep = enc.split("|");
-                string body = ep.length >= 2 ? ep[1] : "";
-                list<string> bt = paste_tokens(tokenize(body));
-                list<string> be = expand_tokens(bt, macros, cur_line, cur_file, nactive);
+                MacroDef *d = macro_def(tok, enc);
+                if (!d->has_tokens) { d->tokens = paste_tokens(tokenize(d->body)); d->has_tokens = 1; }
+                list<string> be = expand_tokens(d->tokens, macros, cur_line, cur_file, &nactive);
                 if (emit_rescan(&out, be, tokens, i + 1, macros, cur_line, cur_file, active))
                     return out;
                 continue;
             }
         }
         // ## token pasting: if next token is ##, skip space
-        if (i + 1 < tokens.length && tokens[i + 1] == "##") {
+        if (i + 1 < tokens.length && tokens[i + 1].size == 2 && tokens[i + 1] == "##") {
             out.add(tok);
             i++;
-            while (i + 1 < tokens.length && tokens[i + 1] == " ") i++;
+            while (i + 1 < tokens.length && tok_is(tokens[i + 1], ' ')) i++;
             continue;
         }
         out.add(tok);
@@ -1842,34 +1991,35 @@ string expand_joined(string line, dict<string, string> *macros, i32 cur_line, st
     // ONE scan: every expansion is rescanned with the rest of the line as it is
     // produced (emit_rescan), so nothing is left for a second pass — which would
     // wrongly expand what C leaves alone (`DEFER(f)(1)` stays `f (1)`).
-    list<string> nothing_active;
     g_expand_error = "";   // a caller that reports it does so right after
-    list<string> toks = expand_tokens(tokenize(line), macros, cur_line, cur_file, nothing_active);
+    list<string> toks = expand_tokens(tokenize(line), macros, cur_line, cur_file, NULL);
     // Join. At a padding boundary (`\x03`, around macro expansions and
     // substituted arguments) with no whitespace, add a space where the two
     // tokens would otherwise lex as one (`- -1`, not `--1`; `4 .5`, not `4.5`):
     // with `guard`, as text that is read again as tokens needs.
-    string result = "";
+    auto result = sb_get();
     string prev = "";
     i32 pad = 0;
     for (i32 i = 0; i < toks.length; i++) {
         string t = toks[i];
-        if (t == "\x03") { pad = 1; continue; }
+        if (tok_is(t, 3)) { pad = 1; continue; }
         if (t.size > 0 && (t[0] == 4 || t[0] == 5 || t[0] == 7)) t = unpaint(t);
-        if (t == " ") {
-            if (result.size > 0 && result[result.size - 1] != ' ') result = result + " ";
+        if (tok_is(t, ' ')) {
+            if (result->size > 0 && result->data[result->size - 1] != ' ') sb_add(result, " ");
             continue;
         }
-        if (guard && pad && result.size > 0 && result[result.size - 1] != ' ' && avoid_paste(prev, t))
-            result = result + " ";
+        if (guard && pad && result->size > 0 && result->data[result->size - 1] != ' ' && avoid_paste(prev, t))
+            sb_add(result, " ");
         pad = 0;
-        result = result + t;
+        sb_add(result, t);
         prev = t;
     }
     // Trailing whitespace (e.g. where a line-end comment became a space) is never
     // significant in preprocessed output — drop it, matching `cpp`. `.rtrim()` is a
-    // view into the local `result`, so `.dup` it to return an owned string.
-    return result.rtrim().dup;
+    // view into the buffer, so `.dup` it to return an owned string.
+    string out = std::buffer::Value(result).rtrim().dup;
+    sb_put(result);
+    return out;
 }
 
 string expand_line(string line, dict<string, string> *macros, i32 cur_line, string cur_file)
@@ -3343,15 +3493,16 @@ void flush_and_exit(Preprocessor *pp, i32 code)
     } else if (pp->dump_macros) {
         std::Print("{}", macro_dump(pp), target = fd);
     } else {
-        // Written in ~64 KB chunks (one growing string would be quadratic).
-        string text = "";
+        // Written in ~64 KB chunks.
+        auto text = sb_new(131072);
         for (i32 i = 0; i < pp->output_lines.length; i++) {
             string line = pp->output_lines[i];
             if (pp->compact && line.trim().size == 0) continue;
-            text = text + line + "\n";
-            if (text.size > 65536) { std::Print("{}", text, target = fd); text = ""; }
+            sb_add(text, line);
+            sb_add(text, "\n");
+            if (text->size > 65536) { std::Print("{}", std::buffer::Value(text), target = fd); text->size = 0; }
         }
-        std::Print("{}", text, target = fd);
+        std::Print("{}", std::buffer::Value(text), target = fd);
         if (pp->dep_side) {
             i32 df = open_out(pp->dep_file);
             if (df >= 0) { std::Print("{}", dep_rule(pp), target = df); close(df); }
