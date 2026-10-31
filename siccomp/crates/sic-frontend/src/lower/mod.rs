@@ -4789,21 +4789,6 @@ fn type_is_const(qt: &QualType) -> bool {
     }
 }
 
-/// Look up a struct/union field by name, returning its byte offset and type.
-fn field_offset_by_name(st: &Type, name: &str, ptr_size: u32) -> Option<(u64, Type)> {
-    match st {
-        Type::Struct(s) => {
-            let idx = s.fields.iter().position(|(n, _)| n == name)?;
-            Some((s.field_offset(idx, ptr_size), s.fields[idx].1.clone()))
-        }
-        Type::Union(u) => {
-            let (_, fty) = u.fields.iter().find(|(n, _)| n == name)?;
-            Some((0, fty.clone()))
-        }
-        _ => None,
-    }
-}
-
 /// Evaluate a constant expression (only literals and simple arithmetic).
 /// Expand any leading GNU range designator `[lo ... hi]` in a brace-list into one
 /// `Index` item per index. Ranges are (nearly) always the sole/first designator,
