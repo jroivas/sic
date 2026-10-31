@@ -19,6 +19,8 @@ CFLAGS=${CFLAGS:-}
 # FAILFAST=1: stop at the first failing test and exit non-zero immediately (used by
 # check.sh). Either way, the script exits non-zero at the end if any test failed.
 FAILFAST="${FAILFAST:-}"
+# JOBS=N: run N tests at once (default 1). Output stays in test order.
+JOBS="${JOBS:-1}"
 
 # Guard against testing a stale compiler: warn when any compiler source is
 # newer than the binary under test (e.g. only the release build was rebuilt).
@@ -84,8 +86,8 @@ tests=0; success=0; failed_list=()
 
 dotest() {
     local test="$1"
-    local base; base=$(basename "$test"); base="${base%.*}"
-    tests=$((tests + 1))
+    # Keeps the extension: a `.c` and a `.sic` test may share a name.
+    local base; base=$(basename "$test")
 
     local flags=""
     [ -f "$test.flags" ] && flags=$(cat "$test.flags")
@@ -141,12 +143,13 @@ dotest() {
     fi
 }
 
-for test in "$TESTDIR"/test_*.sic "$TESTDIR"/test_*.c; do
-    [ -e "$test" ] || continue
-    if dotest "$test"; then
+# Count one finished test: its name and whether it passed.
+tally() {
+    tests=$((tests + 1))
+    if [ "$2" -eq 0 ]; then
         success=$((success + 1))
     else
-        failed_list+=("$(basename "$test")")
+        failed_list+=("$(basename "$1")")
         # FAILFAST: stop and report at the first failure (default behavior is
         # unchanged — run everything, then print the summary below).
         if [ -n "$FAILFAST" ]; then
@@ -156,7 +159,36 @@ for test in "$TESTDIR"/test_*.sic "$TESTDIR"/test_*.c; do
             exit 1
         fi
     fi
+}
+
+all_tests=()
+for test in "$TESTDIR"/test_*.sic "$TESTDIR"/test_*.c; do
+    [ -e "$test" ] && all_tests+=("$test")
 done
+
+if [ "$JOBS" -le 1 ]; then
+    for test in "${all_tests[@]}"; do
+        rc=0; dotest "$test" || rc=$?
+        tally "$test" "$rc"
+    done
+else
+    results="$outfolder/results.$$"
+    rm -rf "$results"; mkdir -p "$results"
+    trap 'rm -rf "$results"' EXIT
+    n=0
+    for test in "${all_tests[@]}"; do
+        while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n || true; done
+        ( rc=0; dotest "$test" > "$results/$n.log" 2>&1 || rc=$?; echo "$rc" > "$results/$n.rc" ) &
+        n=$((n + 1))
+    done
+    wait
+    n=0
+    for test in "${all_tests[@]}"; do
+        cat "$results/$n.log"
+        tally "$test" "$(cat "$results/$n.rc")"
+        n=$((n + 1))
+    done
+fi
 
 echo ""
 echo "Passed ${success}/${tests}"
