@@ -826,6 +826,7 @@ impl Lowerer {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                 }).collect();
                 let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                types::note_global_var(name, &Type::Function(Box::new(sig.clone())));
                 if self.module.func_ref_by_name(name).is_none() {
                     self.module.add_extern(ExternFunc { name: name.clone(), sig });
                 }
@@ -838,8 +839,19 @@ impl Lowerer {
                 // this holds for a skipped inline definition too.
                 self.register_nested_struct_defs(&ret_ty.ty)?;
                 for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
-                // Skip unreferenced inline definitions (see `emit_inline`).
-                if *inline && !self.emit_inline.contains(name) { return Ok(()); }
+                // Skip unreferenced inline definitions (see `emit_inline`), but
+                // `typeof(name)` still has its type (Linux's DECLARE_STATIC_CALL).
+                if *inline && !self.emit_inline.contains(name) {
+                    let ret = lower_type(ret_ty, &self.struct_types, self.ptr_size);
+                    let ps: Result<Vec<_>> = params.iter().map(|p| {
+                        lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
+                    }).collect();
+                    if let (Ok(ret), Ok(ps)) = (ret, ps) {
+                        let sig = build_fn_sig(ret, ps, *variadic, self.ptr_size);
+                        types::note_global_var(name, &Type::Function(Box::new(sig)));
+                    }
+                    return Ok(());
+                }
                 // Function definition — pre-register with empty body for stable FuncRef
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                 // sic async: the signature returns `Task<ret>` (sic.md §"Async").
@@ -848,6 +860,7 @@ impl Lowerer {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                 }).collect();
                 let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                types::note_global_var(name, &Type::Function(Box::new(sig.clone())));
                 // Register the DEFINED function even when a prior forward
                 // declaration only produced an extern (e.g. `static void f();`
                 // then `static void f() {...}` in QEMU's qht.c). Otherwise a

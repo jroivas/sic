@@ -1455,6 +1455,14 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
                 _ => return None,
             }
         }
+        ExprKind::Call { func, .. } => match typeof_expr_type(func, named, ptr_size)? {
+            Type::Function(sig) => sig.ret,
+            Type::Pointer(p) => match *p {
+                Type::Function(sig) => sig.ret,
+                _ => return None,
+            },
+            _ => return None,
+        },
         ExprKind::Field { base, name } => member(&typeof_expr_type(base, named, ptr_size)?, name)?,
         ExprKind::Arrow { base, name } => match typeof_expr_type(base, named, ptr_size)? {
             Type::Pointer(inner) | Type::Array { elem: inner, .. } => member(&inner, name)?,
