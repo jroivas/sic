@@ -261,6 +261,8 @@ pub struct Lowerer {
     /// routes these through an `AL`-setting trampoline on x86-64 (Cranelift never
     /// sets `AL` for variadic calls). Surfaced on the IR module for the backend.
     pub float_vararg_externs: HashSet<String>,
+    /// File-scope variables declared `__attribute__((weak))`.
+    weak_vars: Vec<String>,
     /// sic RTTI (sic.md §"RTTI"): canonical type name → the emitted static
     /// `__sic_type_info` record, so repeated `typeid(x)` of the same type share
     /// one record.
@@ -397,6 +399,7 @@ impl Lowerer {
             tuple_param_types: HashMap::new(),
             fat_params: HashMap::new(),
             float_vararg_externs: HashSet::new(),
+            weak_vars: Vec::new(),
             type_info_globals: HashMap::new(),
             bitfield_defs: HashMap::new(),
             bitfield_variant: HashMap::new(),
@@ -654,6 +657,15 @@ impl Lowerer {
         for name in &tu.noinline {
             for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.noinline = true; }
         }
+        // A weak definition can be replaced at link time, so a call must reach the
+        // symbol: never expanded, even in its own unit (Linux's `__weak` defaults).
+        for name in &tu.weak_fns {
+            for f in self.module.functions.iter_mut().filter(|f| &f.name == name) {
+                f.linkage = Linkage::Weak;
+                f.noinline = true;
+            }
+        }
+        self.module.weak_externs = tu.weak_fns.iter().chain(&self.weak_vars).cloned().collect();
         self.module.imported_links = std::mem::take(&mut self.imported_links);
         self.module.float_vararg_externs =
             std::mem::take(&mut self.float_vararg_externs).into_iter().collect();
@@ -3279,6 +3291,9 @@ impl Lowerer {
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
+        // A weak declaration makes the symbol weak for good.
+        let weak = weak || self.weak_vars.contains(&d.name);
+        if weak && !self.weak_vars.contains(&d.name) { self.weak_vars.push(d.name.clone()); }
         // A global register variable (`register T x asm("rsp")`, GNU C) is the
         // register itself: no storage. sic emitted it as data, which every
         // object defined (Linux's vDSO: "multiple definition of

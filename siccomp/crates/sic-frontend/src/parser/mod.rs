@@ -55,6 +55,7 @@ pub struct Parser {
     /// `__attribute__((noinline))` seen for the current declaration.
     pending_noinline: bool,
     noinline: Vec<String>,
+    weak_fns: Vec<String>,
     /// `__attribute__((used))` / `section("…")` seen for the current declaration.
     pending_used: bool,
     pending_section: Option<String>,
@@ -172,7 +173,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -327,6 +328,7 @@ impl Parser {
         Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
             strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline),
             noinline: std::mem::take(&mut self.noinline),
+            weak_fns: std::mem::take(&mut self.weak_fns),
             used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
             reg_vars: std::mem::take(&mut self.reg_vars) })
     }
@@ -513,6 +515,7 @@ impl Parser {
                 self.always_inline.push(name.clone());
             }
             if std::mem::take(&mut self.pending_noinline) { self.noinline.push(name.clone()); }
+            if self.pending_weak { self.weak_fns.push(name.clone()); }
             if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
 
@@ -1120,6 +1123,7 @@ impl Parser {
         let (name, ty) = self.parse_declarator(base_ty.clone())?;
         self.skip_decl_tail();
         if let AstType::Function { params, variadic, ret } = ty.ty.clone() {
+            if self.pending_weak { self.weak_fns.push(name.clone()); }
             return Ok(Decl::Func {
                 name, ret_ty: *ret, params, variadic,
                 type_params: Vec::new(), template_src: None,

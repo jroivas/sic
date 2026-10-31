@@ -127,6 +127,15 @@ if [ -n "$SICDRV" ]; then
     if [ "$got" = "/* kept */|asm_part foo|" ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL driver-asm-cpp: got '$got' $(head -c 200 "$WORK/err")"
     fi
+    # A strong definition in another object replaces a weak one, for callers next
+    # to the weak one too: they must not have inlined it (Linux's __weak defaults).
+    total=$((total + 1))
+    printf 'int __attribute__((weak)) val(void) { return 1; }\nint call(void) { return val(); }\n' > "$WORK/w1.c"
+    printf 'int call(void);\nint val(void) { return 42; }\nint main(void) { return call(); }\n' > "$WORK/w2.c"
+    got="$( (cd "$WORK" && "$SICDRV" -O2 -c w1.c -o w1.o && "$SICDRV" -O2 -c w2.c -o w2.o && "$SICDRV" w1.o w2.o -o weak && { timeout "$TIMEOUT" ./weak; echo $?; }) 2> "$WORK/err")"
+    if [ "$got" = "42" ]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); echo "FAIL weak-override: got '$got' $(head -c 200 "$WORK/err")"
+    fi
     # `-m32` goes to the system compiler (Clang, else GCC; sic emits x86-64 only),
     # a flag only sic accepts is dropped, and a later `-m64` stays in sic.
     if command -v clang >/dev/null || command -v gcc >/dev/null; then

@@ -234,7 +234,8 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
             func_ids.insert(FuncRef::extern_(i).0, fid);
             continue;
         }
-        let fid = obj_module.declare_function(&e.name, CLinkage::Import, &sig)?;
+        let linkage = if ir_module.weak_externs.contains(&e.name) { CLinkage::Preemptible } else { CLinkage::Import };
+        let fid = obj_module.declare_function(&e.name, linkage, &sig)?;
         func_ids.insert(FuncRef::extern_(i).0, fid);
     }
 
@@ -323,7 +324,10 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         if g.linkage == Linkage::Import && !used_globals.contains(&(i as u32)) {
             continue;
         }
-        let linkage = ir_linkage(g.linkage);
+        let linkage = match g.linkage {
+            Linkage::Import if ir_module.weak_externs.contains(&g.name) => CLinkage::Preemptible,
+            l => ir_linkage(l),
+        };
         // A `__thread` global is TLS: writable and declared with the tls flag so
         // the backend emits it into .tdata/.tbss and accesses go through the TLS
         // ABI (see `tls_value` in func.rs).
