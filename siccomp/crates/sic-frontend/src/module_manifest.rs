@@ -481,7 +481,7 @@ impl ModuleManifest {
                     // token (e.g. a function returning it by value) decodes correctly.
                     let payload_fields: Vec<(String, Type)> = variants.iter()
                         .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
-                    let data = Type::Union(UnionType {
+                    let data = Type::Union(UnionType { pack_limit: None,
                         packed: false, field_packed: Vec::new(),
                         name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                     let st = Type::Struct(StructType::plain(Some(name.to_string()), vec![
@@ -767,7 +767,7 @@ fn decode_aggregate_record<'a>(
     };
     Some(if is_union {
         if !bits.is_empty() { return None; }
-        Type::Union(UnionType { packed, field_packed, name: Some(name.to_string()), fields, field_aligns, min_align })
+        Type::Union(UnionType { pack_limit: None, packed, field_packed, name: Some(name.to_string()), fields, field_aligns, min_align })
     } else {
         let bitfields = per_field(&bits, fields.len())?;
         let mut st = StructType::plain(Some(name.to_string()), fields, packed);
@@ -987,7 +987,7 @@ mod tests {
         st.field_aligns = vec![None, None, Some(8), None];
         st.bitfields = vec![None, None, Some(3), Some(30)];
         st.field_packed = vec![false, true, false, false];
-        let su = Type::Union(UnionType { packed: true, field_packed: Vec::new(), name: Some("U".into()), fields: vec![
+        let su = Type::Union(UnionType { pack_limit: None, packed: true, field_packed: Vec::new(), name: Some("U".into()), fields: vec![
             ("c".into(), Type::Int { bits: 8, signed: true }), ("i".into(), i32t.clone())],
             field_aligns: vec![], min_align: None });
         for ty in [Type::Struct(st), su] {

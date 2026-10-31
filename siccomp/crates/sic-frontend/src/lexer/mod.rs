@@ -15,6 +15,8 @@ pub enum Lang {
 }
 
 pub struct Lexer {
+    pack: u8,
+    pack_stack: Vec<u8>,
     src: Vec<char>,
     pos: usize,
     line: u32,
@@ -41,6 +43,8 @@ impl Lexer {
     /// Construct a lexer for a specific source language.
     pub fn new_lang(source: &str, typedefs: HashSet<String>, lang: Lang) -> Self {
         Lexer {
+            pack: 0,
+            pack_stack: Vec::new(),
             src: source.chars().collect(),
             pos: 0,
             line: 1,
@@ -77,6 +81,7 @@ impl Lexer {
             let mut tok = self.next_token()?;
             tok.start = start as u32;
             tok.end = self.pos as u32;
+            tok.pack = self.pack;
             tokens.push(tok);
         }
         Ok(tokens)
@@ -130,7 +135,34 @@ impl Lexer {
 
     /// Handle a preprocessor line marker like `# 42 "foo.c" 1`. The directive
     /// states that the line *following* it is line `N` of the named file.
+    /// `#pragma pack(…)`: `()`, `(n)`, `(push[, id][, n])`, `(pop[, id])`. An
+    /// identifier names a pushed level; none of the code sic takes uses that, and
+    /// it is read like the plain form. Anything else (`show`) changes nothing.
+    fn pragma_pack(&mut self, args: &str) {
+        let mut parts = args.split(',').map(str::trim).filter(|a| !a.is_empty());
+        let number = |w: &str| w.parse::<u8>().ok().filter(|n| n.is_power_of_two());
+        match parts.next() {
+            None => self.pack = 0,
+            Some("push") => {
+                self.pack_stack.push(self.pack);
+                if let Some(n) = parts.filter_map(number).next() { self.pack = n; }
+            }
+            Some("pop") => { self.pack = self.pack_stack.pop().unwrap_or(0); }
+            Some(w) => { if let Some(n) = number(w) { self.pack = n; } }
+        }
+    }
+
     fn handle_line_marker(&mut self) {
+        // `#pragma pack` lays out the structs that follow: the one pragma the
+        // parser needs. The rest are skipped as a line marker's tail.
+        let line: String = self.src[self.pos..].iter().take_while(|c| **c != '\n').collect();
+        let directive = line[1..].trim_start();
+        if let Some(rest) = directive.strip_prefix("pragma") {
+            let rest = rest.trim_start();
+            if let Some(args) = rest.strip_prefix("pack").map(str::trim_start).and_then(|r| r.strip_prefix('(')) {
+                if let Some(args) = args.split(')').next() { self.pragma_pack(args); }
+            }
+        }
         // consume '#'
         self.advance();
         // skip spaces

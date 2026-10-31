@@ -19,12 +19,14 @@ pub struct Token {
     /// text of a construct (e.g. a generic-function template exported to a module
     /// manifest). Defaults to `0..0` for synthesized tokens.
     pub start: u32,
+    /// `#pragma pack` in force here: the maximum member alignment, 0 for none.
+    pub pack: u8,
     pub end: u32,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, text: String, span: Span) -> Self {
-        Token { kind, text, span, start: 0, end: 0 }
+        Token { kind, text, span, start: 0, pack: 0, end: 0 }
     }
 
     pub fn is(&self, kind: TokenKind) -> bool { self.kind == kind }

@@ -1227,6 +1227,11 @@ impl Parser {
         // The type's own `packed`, kept apart from the members' (a member's
         // attribute or a nested definition sets and resets the shared flag).
         let mut packed = std::mem::take(&mut self.pending_packed);
+        // `#pragma pack` in force at the definition.
+        let mut pack = None;
+        if self.at(TokenKind::LBrace) {
+            if self.peek().pack != 0 { pack = Some(self.peek().pack as u32); }
+        }
 
         let mut methods: Vec<StructMethod> = Vec::new();
         let fields = if self.at(TokenKind::LBrace) {
@@ -1300,9 +1305,9 @@ impl Parser {
 
         let private = std::mem::take(&mut self.pending_private);
         if is_union {
-            Ok(AstType::Union(UnionDef { name, fields, align: type_align, align_expr, packed, private, span: sp }))
+            Ok(AstType::Union(UnionDef { name, pack, fields, align: type_align, align_expr, packed, private, span: sp }))
         } else {
-            Ok(AstType::Struct(StructDef { name, fields, align: type_align, align_expr, packed, order, methods, private, span: sp }))
+            Ok(AstType::Struct(StructDef { name, pack, fields, align: type_align, align_expr, packed, order, methods, private, span: sp }))
         }
     }
 

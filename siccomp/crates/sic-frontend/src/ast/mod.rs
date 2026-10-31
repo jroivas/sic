@@ -122,6 +122,8 @@ pub enum StructOrder {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub name: Option<String>,
+    /// `#pragma pack(n)` at the definition: members align to at most `n`.
+    pub pack: Option<u32>,
     pub fields: Option<Vec<FieldDecl>>,
     /// Type-level `__attribute__((aligned(N)))` — on the tag (`struct
     /// __attribute__((aligned(N))) T {...}`) or the typedef name (`typedef
@@ -170,6 +172,8 @@ pub enum MethodKind { Method, Ctor, Dtor }
 #[derive(Debug, Clone)]
 pub struct UnionDef {
     pub name: Option<String>,
+    /// See `StructDef::pack`.
+    pub pack: Option<u32>,
     pub fields: Option<Vec<FieldDecl>>,
     /// Type-level `__attribute__((aligned(N)))` (see `StructDef::align`).
     pub align: Option<u32>,

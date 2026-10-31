@@ -919,7 +919,7 @@ impl Lowerer {
                         }
                         // A typedef naming another struct (`typedef geo::Point
                         // Point;`): a candidate re-export of the module.
-                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { name: Some(target), .. }) = &ir_ty {
+                        if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { pack_limit: None, name: Some(target), .. }) = &ir_ty {
                             if target != name { self.typedef_aliases.push((name.clone(), target.clone())); }
                         }
                         self.register_type_name(name.clone(), ir_ty);
@@ -1114,7 +1114,7 @@ impl Lowerer {
             for (ename, variants) in &manifest.tagenums {
                 let payload_fields: Vec<(String, Type)> = variants.iter()
                     .filter_map(|(v, _, p)| p.clone().map(|t| (v.clone(), t))).collect();
-                let data = Type::Union(sic_ir::UnionType {
+                let data = Type::Union(sic_ir::UnionType { pack_limit: None,
                     packed: false, field_packed: Vec::new(),
                     name: None, fields: payload_fields, field_aligns: vec![], min_align: None });
                 let struct_type = Type::Struct(sic_ir::StructType::plain(Some(ename.clone()), vec![
@@ -1387,7 +1387,7 @@ impl Lowerer {
             // or the global `-fstruct-order` default). The concrete permutations
             // live on `StructType`; the override layout forms (packed / bit-field /
             // `aligned`) are declined there and stay in declaration order.
-            let mut st = StructType {
+            let mut st = StructType { pack_limit: s.pack,
                 name: Some(name.clone()),
                 fields: ir_fields,
                 packed: s.packed,
@@ -1440,7 +1440,7 @@ impl Lowerer {
         if let (Some(name), Some(fields)) = (&u.name, &u.fields) {
             // A member naming the union itself resolves to it (see structs).
             if self.sic && !self.struct_types.contains_key(name) {
-                self.struct_types.insert(name.clone(), Type::Union(sic_ir::UnionType {
+                self.struct_types.insert(name.clone(), Type::Union(sic_ir::UnionType { pack_limit: None,
                     packed: false, field_packed: Vec::new(),
                     name: Some(name.clone()), fields: vec![], field_aligns: vec![], min_align: None }));
             }
@@ -1458,7 +1458,7 @@ impl Lowerer {
                 field_aligns.push(falign);
                 field_packed.push(f.packed);
             }
-            let ir_ty = Type::Union(UnionType {
+            let ir_ty = Type::Union(UnionType { pack_limit: u.pack,
                 packed: u.packed, field_packed: if field_packed.iter().any(|p| *p) { field_packed } else { Vec::new() },
                 name: Some(name.clone()),
                 fields: ir_fields,
@@ -2794,7 +2794,7 @@ impl Lowerer {
                 let self_param = |sp: &crate::lexer::Span| crate::ast::Param {
                     name: Some("self".to_string()),
                     ty: QualType::new(AstType::Pointer {
-                        base: Box::new(QualType::new(AstType::Struct(StructDef {
+                        base: Box::new(QualType::new(AstType::Struct(StructDef { pack: None,
                             name: Some(sname.clone()), fields: None, align: None, align_expr: None, packed: false,
                             order: crate::ast::StructOrder::Default, methods: vec![], private: false, span: sp.clone(),
                         }))),
