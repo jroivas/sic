@@ -1213,7 +1213,8 @@ impl<'m> FuncCtx<'m> {
                         self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
                         return Ok(Val::Local(slot));
                     }
-                    if scalar(&target) && matches!(src_ty, Type::Array { .. }) && src_ty.size_of(ps) == target.size_of(ps) {
+                    if scalar(&target) && matches!(src_ty, Type::Array { .. }) && src_ty.size_of(ps) == target.size_of(ps)
+                        && !self.is_c_array_object(inner) {
                         let p = self.lower_aggregate_ptr(inner)?;
                         let d = self.alloc_val();
                         self.push_instr(Instr::Load { dest: d, ptr: p, ty: target.clone() });
@@ -4665,15 +4666,25 @@ impl<'m> FuncCtx<'m> {
         Ok(p)
     }
 
-    /// `e` names a C array object (a variable declared with `[…]`, not a
-    /// `vector_size` vector) or is a string literal: it decays in an operator.
+    /// `e` is a C array object (declared with `[…]`, not a `vector_size` vector)
+    /// or a string literal: it decays where an operator or cast uses it. Vectors
+    /// and arrays share the IR type, so the declaration decides.
     fn is_c_array_object(&self, e: &Expr) -> bool {
+        use crate::ast::AstType;
+        let declared = |q: Option<crate::ast::QualType>| match q.map(|q| q.ty) {
+            Some(AstType::Array { vector, .. }) => !vector,
+            Some(AstType::Named(n)) => !self.lowerer.vector_typedefs.contains(&n),
+            _ => false,
+        };
         match &e.kind {
             ExprKind::StringLit(_) | ExprKind::WideStringLit(..) => true,
-            ExprKind::Ident(n) => {
-                let qt = self.decl_qtypes.get(n).or_else(|| self.lowerer.global_qtypes.get(n));
-                matches!(qt.map(|q| &q.ty), Some(crate::ast::AstType::Array { vector: false, .. }))
-            }
+            ExprKind::Ident(_) => declared(self.lvalue_qt(e)),
+            // An element of an array of arrays, reached by a variable or a member.
+            ExprKind::Index { base, .. } | ExprKind::Unary { op: UnOpKind::Deref, expr: base } =>
+                declared(self.lvalue_qt(e)) || (self.lvalue_qt(e).is_none() && self.is_c_array_object(base)),
+            // A member declared as an array of the struct's own definition.
+            ExprKind::Field { name, .. } | ExprKind::Arrow { name, .. } =>
+                !self.lowerer.vector_fields.contains(name),
             _ => false,
         }
     }

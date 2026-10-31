@@ -211,6 +211,10 @@ pub struct Lowerer {
     /// `(struct, field)` pairs declared `const` (`struct S { const int id; }`):
     /// assigning such a member is a compile error.
     pub const_fields: HashSet<(String, String)>,
+    /// Typedefs of GCC vectors and members declared with one. Vectors and C arrays
+    /// share the IR type, so only the declaration tells them apart.
+    pub vector_typedefs: HashSet<String>,
+    pub vector_fields: HashSet<String>,
     /// A malformed struct method found while hoisting (reported after it).
     pub method_error: Option<CompileError>,
     /// sic strict mode (sic.md §"Strict mode"): files that say `using strict;`.
@@ -385,6 +389,8 @@ impl Lowerer {
             struct_ctor: HashMap::new(),
             struct_dtor: HashMap::new(),
             const_fields: HashSet::new(),
+            vector_typedefs: HashSet::new(),
+            vector_fields: HashSet::new(),
             method_error: None,
             strict_files: HashSet::new(),
             immutable_globals: HashSet::new(),
@@ -876,6 +882,7 @@ impl Lowerer {
             }
             Decl::TypeDef { names, .. } => {
                 for (name, ty) in names {
+                    if self.declares_vector(&ty.ty) { self.vector_typedefs.insert(name.clone()); }
                     // Register any enums/tagged structs nested in the type body
                     // (e.g. `typedef struct { enum { A, B } k; } T;`) so their
                     // constants and tags resolve.
@@ -1288,7 +1295,26 @@ impl Lowerer {
         Ok(())
     }
 
+    /// `ty` as written is a GCC vector.
+    pub(crate) fn declares_vector(&self, ty: &AstType) -> bool {
+        match ty {
+            AstType::Array { vector, .. } => *vector,
+            AstType::Named(n) => self.vector_typedefs.contains(n),
+            _ => false,
+        }
+    }
+
+    fn note_vector_fields(&mut self, fields: &[crate::ast::FieldDecl]) {
+        for f in fields {
+            // An array of vectors counts too: its elements are vectors.
+            let mut t = &f.ty.ty;
+            while let AstType::Array { base, vector: false, .. } = t { t = &base.ty; }
+            if let (Some(n), true) = (&f.name, self.declares_vector(t)) { self.vector_fields.insert(n.clone()); }
+        }
+    }
+
     fn register_struct_type_from_def(&mut self, s: &StructDef) -> Result<()> {
+        if let Some(fields) = &s.fields { self.note_vector_fields(fields); }
         // An anonymous struct is not registered itself, but what its members
         // define is (`struct { enum { X } x; } s;` makes `X` a constant).
         if s.name.is_none() {
@@ -1392,6 +1418,7 @@ impl Lowerer {
     }
 
     fn register_union_type_from_def(&mut self, u: &UnionDef) -> Result<()> {
+        if let Some(fields) = &u.fields { self.note_vector_fields(fields); }
         if u.name.is_none() {
             if let Some(fields) = &u.fields {
                 for f in fields { self.register_nested_struct_defs(&f.ty.ty)?; }
