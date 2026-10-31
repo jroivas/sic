@@ -29,6 +29,15 @@ impl<'m> FuncCtx<'m> {
         }
     }
 
+    /// `typeof(e)` stands for `e`'s declared type: follow it to that, as far as
+    /// it is known.
+    fn typeof_operand_qt(&self, mut qt: crate::ast::QualType) -> Option<crate::ast::QualType> {
+        while let crate::ast::AstType::Typeof(e) = &qt.ty {
+            qt = self.lvalue_qt(e)?;
+        }
+        Some(qt)
+    }
+
     /// The name a write to `e` would change, when that is `const`: a `const`
     /// variable, an element or pointee of `const` type, a member declared
     /// `const`, or a member of a `const` struct.
@@ -597,22 +606,25 @@ impl<'m> FuncCtx<'m> {
             Some(t) => t,
             None => decay(self.infer_expr_type(controlling)?),
         };
-        // A plain variable's declared pointee qualifiers take part too
+        // The declared pointee qualifiers take part too, where they are known
         // (`const int *` is not `int *`); top-level qualifiers are dropped.
-        let ctrl_quals = match &controlling.kind {
-            ExprKind::Ident(n) => self.decl_qtypes.get(n)
-                .or_else(|| self.lowerer.global_qtypes.get(n))
-                .and_then(super::super::pointee_quals),
-            _ => None,
-        };
+        let ctrl_quals = self.lvalue_qt(controlling)
+            .and_then(|qt| self.typeof_operand_qt(qt))
+            .as_ref()
+            .and_then(super::super::pointee_quals);
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {
                 None => default_idx = Some(i),
                 Some(qt) => {
                     if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty) {
-                        let quals_match = match (&ctrl_quals, super::super::pointee_quals(qt)) {
-                            (Some(c), Some(a)) => *c == a,
+                        let aq = self.typeof_operand_qt(qt.clone())
+                            .as_ref()
+                            .and_then(super::super::pointee_quals);
+                        // Each side may stop early at a typedef: compare the
+                        // levels both of them know.
+                        let quals_match = match (&ctrl_quals, aq) {
+                            (Some(c), Some(a)) => c.iter().zip(&a).all(|(x, y)| x == y),
                             _ => true,
                         };
                         if quals_match { return Ok(i); }

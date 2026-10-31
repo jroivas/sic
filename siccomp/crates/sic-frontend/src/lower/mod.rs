@@ -5742,9 +5742,11 @@ pub(crate) fn pointee_quals(qt: &QualType) -> Option<Vec<(bool, bool)>> {
                 out.push((base.is_const(), base.qualifiers.contains(&TypeQual::Volatile)));
                 cur = base;
             }
-            // A typedef name hides its own qualifiers: unknown at the top, and
-            // the levels above it are all that is known below a pointer.
-            AstType::Named(_) => return if out.is_empty() { None } else { Some(out) },
+            // A typedef name, `typeof` or `auto` hides its own qualifiers: unknown
+            // at the top, and the levels above it are all that is known below a
+            // pointer.
+            AstType::Named(_) | AstType::Typeof(_) | AstType::Auto =>
+                return if out.is_empty() { None } else { Some(out) },
             _ => return Some(out),
         }
     }
