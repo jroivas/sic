@@ -1296,7 +1296,15 @@ impl<'m> FuncCtx<'m> {
                             last = inner;
                         }
                         if let ast::Stmt::Expr(e, _) = last {
-                            result = self.lower_expr(e)?;
+                            // An aggregate's value is its address, as everywhere
+                            // (a load would be read through again: Linux's
+                            // READ_ONCE() of a `pmd_t`).
+                            let t = self.infer_expr_type(e).map(|t| super::types::resolve_aggregate(&t, &self.lowerer.struct_types));
+                            result = if !self.is_sic() && matches!(t, Ok(Type::Struct(_) | Type::Union(_))) {
+                                self.lower_aggregate_ptr(e)?
+                            } else {
+                                self.lower_expr(e)?
+                            };
                         } else {
                             self.lower_stmt(last)?;
                         }
