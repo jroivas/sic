@@ -136,6 +136,27 @@ if [ -n "$SICDRV" ]; then
     if [ "$got" = "42" ]; then passed=$((passed + 1)); else
         failed=$((failed + 1)); echo "FAIL weak-override: got '$got' $(head -c 200 "$WORK/err")"
     fi
+    # `inline` alone is an external definition with `gnu_inline` (Linux's `inline`)
+    # or next to a declaration without it (C11 6.7.4p7, EXPORT_SYMBOL): another
+    # object can call each one, and without either it stays out of the symbol table.
+    total=$((total + 1))
+    cat > "$WORK/il1.c" <<'ILEOF'
+__attribute__((gnu_inline)) inline int g(void) { return 10; }
+inline int d1(void) { return 20; }
+int d1(void);
+int d2(void);
+inline int d2(void) { return 3; }
+inline int d3(void) { return 7; }
+extern typeof(d3) d3;
+inline int plain(void) { return 1; }
+static inline int st(void) { return 2; }
+int use(void) { return plain() + st(); }
+ILEOF
+    printf 'int g(void), d1(void), d2(void), d3(void), use(void);\nint main(void) { return g() + d1() + d2() + d3() + use() - 3 + 2; }\n' > "$WORK/il2.c"
+    got="$( (cd "$WORK" && "$SICDRV" -c il1.c -o il1.o && "$SICDRV" -c il2.c -o il2.o && "$SICDRV" il1.o il2.o -o il && { timeout "$TIMEOUT" ./il; echo $?; }; nm il1.o | grep -cE ' T (plain|st)$') 2> "$WORK/err" | tr '\n' ' ')"
+    if [ "$got" = "42 0 " ]; then passed=$((passed + 1)); else
+        failed=$((failed + 1)); echo "FAIL external-inline: got '$got' $(head -c 200 "$WORK/err")"
+    fi
     # One ELF section per section name (Linux's modpost reads one `.modinfo`), and
     # no undefined symbol that only dead code named (it counts them all). The kernel
     # code model, which writes the object without going through the assembler here.
