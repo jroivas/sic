@@ -821,12 +821,13 @@ impl Lowerer {
             Decl::Func { name, ret_ty, params, variadic, body: Some(_), storage, inline, type_params, is_async, .. } => {
                 // sic generic template: not emitted directly; instantiated per call.
                 if !type_params.is_empty() { return Ok(()); }
-                // Skip unreferenced inline definitions (see `emit_inline`).
-                if *inline && !self.emit_inline.contains(name) { return Ok(()); }
                 // Register any struct/union/enum defined in the return type or
-                // parameters before lowering them.
+                // parameters before lowering them. They outlive the function, so
+                // this holds for a skipped inline definition too.
                 self.register_nested_struct_defs(&ret_ty.ty)?;
                 for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
+                // Skip unreferenced inline definitions (see `emit_inline`).
+                if *inline && !self.emit_inline.contains(name) { return Ok(()); }
                 // Function definition — pre-register with empty body for stable FuncRef
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                 // sic async: the signature returns `Task<ret>` (sic.md §"Async").
