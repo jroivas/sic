@@ -1444,7 +1444,16 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
         ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).ok()?,
         ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
         | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Type::u64(),
-        ExprKind::Ident(n) => GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned())?,
+        ExprKind::Ident(n) => match GLOBAL_VAR_TYPES.with(|m| m.borrow().get(n).cloned()) {
+            Some(t) => t,
+            // An enumerator is an `int`, or the first wider type that holds it.
+            None => {
+                let v = ENUM_CONSTS.with(|ec| ec.borrow().get(n).copied())?;
+                if i32::try_from(v).is_ok() { Type::i32() }
+                else if u32::try_from(v).is_ok() { Type::u32() }
+                else { Type::i64() }
+            }
+        },
         ExprKind::Unary { op: UnOpKind::Addr, expr } => {
             Type::Pointer(Box::new(typeof_expr_type(expr, named, ptr_size)?))
         }
@@ -1468,6 +1477,25 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
             Type::Pointer(inner) | Type::Array { elem: inner, .. } => member(&inner, name)?,
             _ => return None,
         },
+        ExprKind::Comma(_, rhs) => typeof_expr_type(rhs, named, ptr_size)?,
+        ExprKind::Unary { op: UnOpKind::Not, .. } => Type::i32(),
+        ExprKind::Unary { op: UnOpKind::Neg | UnOpKind::BitNot, expr } => {
+            let t = typeof_expr_type(expr, named, ptr_size)?;
+            if t.is_float() { t } else { sic_ir::types::usual_arith_conv(&t, &t) }
+        }
+        ExprKind::BinOp { op, lhs, rhs } => {
+            use BinOpKind::*;
+            if matches!(op, Eq | Ne | Lt | Le | Gt | Ge | LogAnd | LogOr) { return Some(Type::i32()); }
+            let l = typeof_expr_type(lhs, named, ptr_size)?;
+            let arith = |t: &Type| !matches!(t, Type::Pointer(_) | Type::Array { .. });
+            if matches!(op, Shl | Shr) {
+                if !arith(&l) { return None; }
+                return Some(sic_ir::types::usual_arith_conv(&l, &l));
+            }
+            let r = typeof_expr_type(rhs, named, ptr_size)?;
+            if !arith(&l) || !arith(&r) { return None; }
+            sic_ir::types::usual_arith_conv(&l, &r)
+        }
         // Both arms the same is all this path can type without the conversions.
         ExprKind::Ternary { then, else_, .. } | ExprKind::ChooseExpr { then, else_, .. } => {
             let t = typeof_expr_type(then, named, ptr_size)?;
