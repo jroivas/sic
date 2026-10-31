@@ -60,6 +60,29 @@ char *const p4 = (char *)ws + 3;
 const unsigned long u1 = (unsigned long)ws + 3;
 const unsigned long u2 = (unsigned long)&ws[1] - 8;
 const unsigned long u3 = sizeof(long) + (unsigned long)ws;
+// An array member decays to its address (Linux's init_files).
+struct fdt { unsigned max; void **fd; unsigned long *open_fds; unsigned long *row; };
+struct files { struct fdt *fdt; struct fdt tab; unsigned long open_init[2]; void *fa[4]; unsigned long m[2][3]; };
+struct files init_files = {
+	.fdt = &init_files.tab,
+	.tab = { .max = 64, .fd = &init_files.fa[0], .open_fds = init_files.open_init, .row = init_files.m[1] },
+};
+
+// _Generic of a null handler (Linux's device attributes).
+struct device;
+typedef long show_const_t(const struct device *);
+typedef long store_const_t(const struct device *, int);
+struct dattr { const char *name; long (*show)(struct device *); long (*store)(struct device *, int); };
+#define ATTR(n, _show, _store) { .name = #n, \
+	.show = _Generic(_show, show_const_t * : (void *)_show, default : _show), \
+	.store = _Generic(_store, store_const_t * : (void *)_store, default : _store) }
+static long a_show(struct device *d) { return 1; }
+static long c_show(const struct device *d) { return 2; }
+static long a_store(struct device *d, int v) { return 3; }
+static struct dattr d1 = ATTR(a, a_show, NULL);
+static struct dattr d2 = ATTR(b, a_show, a_store);
+static struct dattr d3 = ATTR(c, c_show, NULL);
+
 unsigned long lone = (unsigned long)&stack_top;
 unsigned long list_of[] = { 1, (unsigned long)other, 3, (unsigned long)&other[1] };
 
@@ -79,6 +102,10 @@ int main(void)
 	CHECK(fs.g == (long)&fs && fs.h == (long)&fs.b && fs.i == (long)&it.th.a);
 	CHECK(p1 == &ws[2] && p2 == &ws[2] && p3 == &ws[2].a && p4 == (char *)ws + 3);
 	CHECK(u1 == (unsigned long)ws + 3 && u2 == (unsigned long)ws + 8 && u3 == (unsigned long)ws + 8);
+	CHECK(init_files.fdt == &init_files.tab && init_files.tab.max == 64);
+	CHECK(init_files.tab.fd == &init_files.fa[0] && init_files.tab.open_fds == init_files.open_init);
+	CHECK(init_files.tab.row == init_files.m[1]);
+	CHECK(d1.show == a_show && !d1.store && d2.store == a_store && !d3.store && d3.show(0) == 2);
 	CHECK(fs.tail == 77 && lone == (unsigned long)stack_top);
 	CHECK(list_of[1] == (unsigned long)other && list_of[3] == (unsigned long)other + 1 && list_of[2] == 3);
 	return 42;

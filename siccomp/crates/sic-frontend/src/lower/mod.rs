@@ -4244,6 +4244,11 @@ impl Lowerer {
             return Some(v);
         }
         match &e.kind {
+            // The selected association: a null handler in Linux's device attributes.
+            ExprKind::Generic { controlling, assocs } => {
+                let idx = self.select_generic_const(controlling, assocs)?;
+                self.eval_const_int(&assocs[idx].1)
+            }
             ExprKind::SizeofType(qt) => {
                 lower_type(qt, &self.struct_types, self.ptr_size).ok()
                     .map(|t| t.size_of(self.ptr_size) as i64)
@@ -4427,6 +4432,10 @@ impl Lowerer {
                 }
                 None
             }
+            // An array member or element decays to its address (Linux's
+            // `.open_fds = init_files.open_fds_init`).
+            ExprKind::Field { .. } | ExprKind::Arrow { .. } | ExprKind::Index { .. }
+                if matches!(self.const_expr_type(e), Some(Type::Array { .. })) => self.addr_of_reloc(e),
             // An address plus or minus a constant: elements for a pointer, bytes
             // for an integer (`(unsigned long)&stack + sizeof(stack)`).
             ExprKind::BinOp { op: op @ (BinOpKind::Add | BinOpKind::Sub), lhs, rhs } => {
