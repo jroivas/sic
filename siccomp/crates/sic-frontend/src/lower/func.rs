@@ -6982,7 +6982,7 @@ fn match_type_kinds(name: &str) -> Option<Vec<u32>> {
 fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
     match instr {
         Instr::Alloca { dest, ty, .. } => Some((*dest, Type::Pointer(Box::new(ty.clone())))),
-        Instr::Load { dest, ty, .. } => Some((*dest, ty.clone())),
+        Instr::Load { dest, ty, .. } | Instr::VolatileLoad { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::BinOp { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::UnaryOp { dest, ty, .. } => Some((*dest, ty.clone())),
         Instr::Cast { dest, to_ty, .. } => Some((*dest, to_ty.clone())),

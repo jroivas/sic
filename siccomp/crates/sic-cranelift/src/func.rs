@@ -419,6 +419,11 @@ fn terminator_successors(t: &Terminator) -> Vec<sic_ir::BlockId> {
 
 // ── Instruction emission ──────────────────────────────────────────────────────
 
+fn memory_barrier(builder: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) {
+    let sp = builder.ins().get_stack_pointer(ptr_ty);
+    builder.ins().atomic_load(ct::I8, MemFlagsData::new(), sp);
+}
+
 fn emit_instr(
     instr: &Instr,
     builder: &mut FunctionBuilder<'_>,
@@ -499,6 +504,20 @@ fn emit_instr(
             let flags = MemFlagsData::new().with_readonly().with_notrap();
             let v = builder.ins().load(cl_ty, flags, pv, 0);
             val_map.insert(dest.0, v);
+        }
+
+        // Cranelift has no volatile access: a plain one next to a barrier for its
+        // alias analysis, an atomic load, which is one `mov` of a stack byte. Before
+        // a load nothing is forwarded into it; after a store it is not dead.
+        Instr::VolatileLoad { dest, ptr, ty } => {
+            memory_barrier(builder, ptr_ty);
+            emit_instr(&Instr::Load { dest: *dest, ptr: ptr.clone(), ty: ty.clone() }, builder, val_map, callee_refs, data_refs,
+                ptr_ty, target_config, ptr_size, va_info, slot_map, var_dbg, module_ir, promoted, f80, vty, sse);
+        }
+        Instr::VolatileStore { val, ptr } => {
+            emit_instr(&Instr::Store { val: val.clone(), ptr: ptr.clone() }, builder, val_map, callee_refs, data_refs,
+                ptr_ty, target_config, ptr_size, va_info, slot_map, var_dbg, module_ir, promoted, f80, vty, sse);
+            memory_barrier(builder, ptr_ty);
         }
 
         Instr::Store { val, ptr } => {

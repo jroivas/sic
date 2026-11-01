@@ -159,6 +159,66 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_lvalue(&mut self, expr: &Expr) -> Result<LValue> {
+        let mut lv = self.lower_lvalue_inner(expr)?;
+        lv.volatile = self.is_volatile_access(expr);
+        Ok(lv)
+    }
+
+    /// The declared type of what `e` names, through members and pointers as far
+    /// as a declaration says.
+    fn access_qt(&self, e: &Expr) -> Option<crate::ast::QualType> {
+        use crate::ast::{AstType, BinOpKind};
+        let mut qt = match &e.kind {
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                let mut t = self.infer_expr_type(base).ok()?;
+                if let (ExprKind::Arrow { .. }, Type::Pointer(p)) = (&e.kind, &t) { t = (**p).clone(); }
+                let Type::Struct(st) = super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types) else {
+                    let Type::Union(u) = super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types) else { return None };
+                    return self.lowerer.field_qtypes.get(&(u.name?, name.clone())).cloned();
+                };
+                self.lowerer.field_qtypes.get(&(st.name?, name.clone())).cloned()?
+            }
+            ExprKind::Unary { op: UnOpKind::Deref, expr } | ExprKind::Index { base: expr, .. } => {
+                match self.access_qt(expr)?.ty {
+                    AstType::Pointer { base, .. } | AstType::Array { base, .. } => *base,
+                    _ => return None,
+                }
+            }
+            ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub, lhs, .. } => self.access_qt(lhs)?,
+            _ => self.lvalue_qt(e)?,
+        };
+        // `volatile typeof(x)`: the operand's type, with these qualifiers too.
+        if let AstType::Typeof(_) = qt.ty {
+            let quals = qt.qualifiers.clone();
+            qt = self.typeof_operand_qt(&qt)?;
+            qt.qualifiers.extend(quals);
+        }
+        Some(qt)
+    }
+
+    /// Whether an access to `e` is to a `volatile` object: declared so, or a member
+    /// of one.
+    pub(crate) fn is_volatile_access(&self, e: &Expr) -> bool {
+        use crate::ast::{AstType, TypeQual};
+        // Without a copy of the declaration: this is asked of every variable read.
+        if let ExprKind::Ident(n) = &e.kind {
+            if let Some(LookupResult::Local(_, vid)) = self.lookup(n) {
+                return self.vid_qtypes.get(&vid).is_some_and(|q| q.qualifiers.contains(&TypeQual::Volatile));
+            }
+            if !self.static_locals.contains_key(n) {
+                return self.lowerer.global_qtypes.get(n).is_some_and(|q| q.qualifiers.contains(&TypeQual::Volatile));
+            }
+        }
+        if self.access_qt(e).is_some_and(|q| q.qualifiers.contains(&TypeQual::Volatile)) { return true; }
+        match &e.kind {
+            ExprKind::Field { base, .. } => self.is_volatile_access(base),
+            ExprKind::Arrow { base, .. } => matches!(self.access_qt(base).map(|q| q.ty),
+                Some(AstType::Pointer { base, .. }) if base.qualifiers.contains(&TypeQual::Volatile)),
+            _ => false,
+        }
+    }
+
+    fn lower_lvalue_inner(&mut self, expr: &Expr) -> Result<LValue> {
         // A global register variable has no storage; only asm operands name it.
         if let ExprKind::Ident(n) = &expr.kind {
             if self.global_reg_var(n).is_some() {
@@ -523,7 +583,7 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::GetFieldPtr {
             dest, base: base_ptr, field_idx: 0, struct_name: None, byte_offset, result_ty,
         });
-        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic })
+        Ok(LValue { ptr: Val::Local(dest), ty: field_ty, bitfield, atomic, volatile: false })
     }
 
     /// "no field 'x' in type" with the type named — and, for a tagged enum

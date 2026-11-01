@@ -529,6 +529,7 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
     let md = |id: ValId| map_dest(id, vmap);
     match &mut n {
         Instr::Alloca { dest, .. } | Instr::Load { dest, .. } | Instr::LoadReadonly { dest, .. }
+        | Instr::VolatileLoad { dest, .. }
         | Instr::BinOp { dest, .. } | Instr::UnaryOp { dest, .. } | Instr::Cast { dest, .. }
         | Instr::Cmp { dest, .. } | Instr::GetFieldPtr { dest, .. } | Instr::GetElemPtr { dest, .. }
         | Instr::PtrOffset { dest, .. } | Instr::Select { dest, .. } | Instr::BSwap { dest, .. }
@@ -539,7 +540,7 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => { if let Some(d) = dest { *d = md(*d); } }
         Instr::DbgVar { slot, .. } => { *slot = md(*slot); }
         // No dest / no ValId field to remap (operands already handled above).
-        Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
+        Instr::Store { .. } | Instr::VolatileStore { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
         | Instr::AtomicStore { .. } | Instr::Fence | Instr::VaStart { .. } | Instr::VaEnd { .. }
         | Instr::SrcLine(_) => {}
     }

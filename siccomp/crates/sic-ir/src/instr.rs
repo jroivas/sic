@@ -156,6 +156,13 @@ pub enum Instr {
     /// Store a value to a pointer.
     Store { val: Val, ptr: Val },
 
+    /// `Load` of a `volatile` object: it happens, once, in order with the other
+    /// volatile accesses.
+    VolatileLoad { dest: ValId, ptr: Val, ty: Type },
+
+    /// `Store` of a `volatile` object.
+    VolatileStore { val: Val, ptr: Val },
+
     /// Binary operation.
     BinOp { dest: ValId, op: BinOp, lhs: Val, rhs: Val, ty: Type },
 
@@ -259,8 +266,8 @@ impl Instr {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
             | Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::Fence => {}
-            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
-            Instr::Store { val, ptr } => { f(val); f(ptr); }
+            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } | Instr::VolatileLoad { ptr, .. } => f(ptr),
+            Instr::Store { val, ptr } | Instr::VolatileStore { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
             | Instr::VecMoveMask { val, .. } => f(val),
@@ -288,8 +295,8 @@ impl Instr {
         match self {
             Instr::Alloca { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. }
             | Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::Fence => {}
-            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } => f(ptr),
-            Instr::Store { val, ptr } => { f(val); f(ptr); }
+            Instr::Load { ptr, .. } | Instr::LoadReadonly { ptr, .. } | Instr::VolatileLoad { ptr, .. } => f(ptr),
+            Instr::Store { val, ptr } | Instr::VolatileStore { val, ptr } => { f(val); f(ptr); }
             Instr::BinOp { lhs, rhs, .. } | Instr::Cmp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Instr::UnaryOp { val, .. } | Instr::Cast { val, .. } | Instr::BSwap { val, .. }
             | Instr::VecMoveMask { val, .. } => f(val),
@@ -314,7 +321,7 @@ impl Instr {
     /// The value id this instruction defines, if any.
     pub fn dest(&self) -> Option<ValId> {
         match self {
-            Instr::Alloca { dest, .. } | Instr::Load { dest, .. }
+            Instr::Alloca { dest, .. } | Instr::Load { dest, .. } | Instr::VolatileLoad { dest, .. }
             | Instr::LoadReadonly { dest, .. }
             | Instr::BinOp { dest, .. } | Instr::UnaryOp { dest, .. }
             | Instr::Cast { dest, .. } | Instr::Cmp { dest, .. }
@@ -326,7 +333,7 @@ impl Instr {
             | Instr::AtomicCas { dest, .. }
             | Instr::ReturnAddress { dest } | Instr::FrameAddress { dest } => Some(*dest),
             Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
-            Instr::Store { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
+            Instr::Store { .. } | Instr::VolatileStore { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
             | Instr::AtomicStore { .. } | Instr::Fence
             | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
             | Instr::DbgVar { .. } => None,

@@ -17,7 +17,7 @@ pub fn value_types(f: &Function) -> HashMap<u32, Type> {
         for instr in &bb.instrs {
             let r = match instr {
                 Instr::Alloca { dest, ty, .. } => Some((dest, Type::Pointer(Box::new(ty.clone())))),
-                Instr::Load { dest, ty, .. } | Instr::LoadReadonly { dest, ty, .. }
+                Instr::Load { dest, ty, .. } | Instr::LoadReadonly { dest, ty, .. } | Instr::VolatileLoad { dest, ty, .. }
                 | Instr::BinOp { dest, ty, .. } | Instr::UnaryOp { dest, ty, .. }
                 | Instr::Select { dest, ty, .. } | Instr::VaArg { dest, ty, .. }
                 | Instr::Simd { dest, ty, .. } | Instr::BSwap { dest, ty, .. }

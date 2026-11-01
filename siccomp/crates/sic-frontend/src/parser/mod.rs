@@ -120,6 +120,8 @@ pub struct Parser {
     typedef_aligns: HashMap<String, TypeQual>,
     /// A statement began with attributes, kept for a declaration.
     stmt_attrs: bool,
+    /// Typedef names that are volatile: `typedef volatile int vint;`.
+    volatile_typedefs: HashSet<String>,
     /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
     /// `private` keyword has been consumed and applies to the next aggregate.
     pending_private: bool,
@@ -197,7 +199,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -843,6 +845,8 @@ impl Parser {
                     _ => own_expr = Some(TypeQual::TypeAlignExpr(crate::ast::AlignExpr(e))),
                 }
             }
+            if ty.qualifiers.contains(&TypeQual::Volatile) { self.volatile_typedefs.insert(name.clone()); }
+            else { self.volatile_typedefs.remove(&name); }
             match own_expr.or(own).or_else(|| ty.type_align().cloned()) {
                 Some(a) => { self.typedef_aligns.insert(name.clone(), a); }
                 None => { self.typedef_aligns.remove(&name); }
@@ -1245,6 +1249,7 @@ impl Parser {
         let mut qt = qt;
         if let AstType::Named(n) = &qt.ty {
             if let Some(a) = self.typedef_aligns.get(n) { qt.qualifiers.push(a.clone()); }
+            if self.volatile_typedefs.contains(n) { qt.qualifiers.push(TypeQual::Volatile); }
         }
         Ok((qt, storage))
     }

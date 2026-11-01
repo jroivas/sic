@@ -41,6 +41,8 @@ pub struct Lowerer {
     /// sic `atomic` struct fields (sic.md §"Atomics"): `(struct name, field)`.
     /// Their lvalues load/store/RMW atomically and take `.cas`/`.swap`.
     pub atomic_fields: sic_ir::fast_hash::HashSet<(String, String)>,
+    /// Each member's declared type, by (struct or union name, member name).
+    pub field_qtypes: HashMap<(String, String), QualType>,
     /// Known enum variant values
     pub enum_consts: HashMap<String, i64>,
     /// Named struct/union types
@@ -348,6 +350,7 @@ impl Lowerer {
             global_reg_vars: HashMap::default(),
             const_global_vals: HashMap::default(),
             atomic_fields: sic_ir::fast_hash::HashSet::default(),
+            field_qtypes: HashMap::default(),
             enum_consts: HashMap::default(),
             struct_types: HashMap::default(),
             ptr_size: 8, // assume 64-bit
@@ -1368,6 +1371,7 @@ impl Lowerer {
                 }
                 let bw = f.bit_width.as_ref().map(|e| types::eval_bit_width(e, &self.struct_types, self.ptr_size)).transpose()?;
                 let fty = types::c_bitfield_field_type(fty, bw);
+                self.field_qtypes.insert((name.clone(), fname.clone()), f.ty.clone());
                 // sic `atomic int state;` field: lock-free sizes only, like locals.
                 if self.sic && f.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) && !fname.is_empty() {
                     func::FuncCtx::check_atomic_type(&fty, &f.span)?;
@@ -1453,6 +1457,7 @@ impl Lowerer {
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
+                self.field_qtypes.insert((name.clone(), fname.clone()), f.ty.clone());
                 let fty = types::union_member_type(f, lower_type(&f.ty, &self.struct_types, self.ptr_size)?, &self.struct_types, self.ptr_size)?;
                 let (falign, fpacked) = types::member_align(f, u.packed, &self.struct_types, self.ptr_size)?;
                 if falign.is_some() { any_align = true; }

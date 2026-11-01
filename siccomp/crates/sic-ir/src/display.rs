@@ -114,6 +114,10 @@ impl fmt::Display for Instr {
                 write!(f, "  %{} = load {} {}", dest.0, ty, ptr),
             Instr::LoadReadonly { dest, ptr, ty } =>
                 write!(f, "  %{} = load.readonly {} {}", dest.0, ty, ptr),
+            Instr::VolatileLoad { dest, ptr, ty } =>
+                write!(f, "  %{} = load.volatile {} {}", dest.0, ty, ptr),
+            Instr::VolatileStore { val, ptr } =>
+                write!(f, "  store.volatile {}, {}", val, ptr),
             Instr::Store { val, ptr } =>
                 write!(f, "  store {}, {}", val, ptr),
             Instr::BinOp { dest, op, lhs, rhs, ty } =>

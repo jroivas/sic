@@ -279,8 +279,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         Ok(self.coerce(x, t)?.into_int_value())
     }
 
-    /// A local declared `volatile`. An access through a pointer is not marked in
-    /// the IR at all yet.
+    /// A local declared `volatile`, whatever reached it.
     fn is_volatile(&self, ptr: &Val) -> bool {
         matches!(ptr, Val::Local(id) if self.f.volatile_slots.contains(id))
     }
@@ -313,24 +312,30 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let p8 = cx.ptr();
         match i {
             Instr::Alloca { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. } => {}
-            Instr::Load { dest, ptr, ty } | Instr::LoadReadonly { dest, ptr, ty } => {
+            Instr::Load { dest, ptr, ty } | Instr::LoadReadonly { dest, ptr, ty } | Instr::VolatileLoad { dest, ptr, ty } => {
+                let volatile = matches!(i, Instr::VolatileLoad { .. }) || self.is_volatile(ptr);
                 let p = self.ptr_of(ptr)?;
                 if *ty == Type::Float80 {
                     let x = self.load(cx.ctx.x86_f80_type().into(), p)?.into_float_value();
+                    if volatile { x.as_instruction_value().ok_or("load")?.set_volatile(true).map_err(|e| e.to_string())?; }
                     let d = self.b().build_float_trunc(x, cx.ctx.f64_type(), "")?;
                     self.set(*dest, d.into());
                 } else {
                     let v = self.load(cx.operand_type(ty), p)?;
-                    if self.is_volatile(ptr) { v.as_instruction_value().ok_or("load")?.set_volatile(true).map_err(|e| e.to_string())?; }
+                    if volatile { v.as_instruction_value().ok_or("load")?.set_volatile(true).map_err(|e| e.to_string())?; }
                     self.set(*dest, v);
                 }
             }
-            Instr::Store { val, ptr } => {
+            Instr::Store { val, ptr } | Instr::VolatileStore { val, ptr } => {
+                let volatile = matches!(i, Instr::VolatileStore { .. }) || self.is_volatile(ptr);
                 let p = self.ptr_of(ptr)?;
                 if self.is_f80_store(val, ptr) {
                     let d = self.typed(val, cx.ctx.f64_type().into())?.into_float_value();
                     let x = self.b().build_float_ext(d, cx.ctx.x86_f80_type(), "")?;
-                    return self.store(p, x.into());
+                    let ins = self.b().build_store(p, x)?;
+                    ins.set_alignment(1).map_err(|e| e.to_string())?;
+                    if volatile { ins.set_volatile(true).map_err(|e| e.to_string())?; }
+                    return Ok(());
                 }
                 let slot = if let Val::Local(id) = ptr { self.slots.get(&id.0).copied() } else { None };
                 let hint = slot.or_else(|| store_type(&self.types, val).map(|t| cx.operand_type(&t)))
@@ -341,7 +346,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 }
                 let ins = self.b().build_store(p, v)?;
                 ins.set_alignment(1).map_err(|e| e.to_string())?;
-                if self.is_volatile(ptr) { ins.set_volatile(true).map_err(|e| e.to_string())?; }
+                if volatile { ins.set_volatile(true).map_err(|e| e.to_string())?; }
             }
             Instr::AtomicLoad { dest, ptr, ty } => {
                 let p = self.ptr_of(ptr)?;

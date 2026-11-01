@@ -29,6 +29,8 @@ pub(crate) struct LValue {
     /// sic `atomic` (sic.md §"Atomics"): the location holds an atomic object, so
     /// reads/stores/RMW go through the atomic IR ops.
     atomic: bool,
+    /// The access is to a `volatile` object: it must happen, as written.
+    volatile: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -98,7 +100,7 @@ static AES_INV_SBOX: [u8; 256] = [
 ];
 
 impl LValue {
-    pub(crate) fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None, atomic: false } }
+    pub(crate) fn plain(ptr: Val, ty: Type) -> Self { LValue { ptr, ty, bitfield: None, atomic: false, volatile: false } }
 }
 
 impl<'m> FuncCtx<'m> {
@@ -460,6 +462,30 @@ impl<'m> FuncCtx<'m> {
 
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
+        let v = self.lower_expr_inner(expr)?;
+        // A read of a `volatile` object: most reads come here, not by an LValue.
+        if let (Val::Local(id), ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
+            | ExprKind::Index { .. } | ExprKind::Unary { op: UnOpKind::Deref, .. }) = (&v, &expr.kind) {
+            let id = *id;
+            if self.is_volatile_access(expr) {
+                // The load that gave `v`, or, for a bit-field, the last one: `v` is
+                // the field shifted out of it.
+                let block = self.current_block_mut();
+                let is_load = |i: &Instr, only: Option<ValId>| matches!(i, Instr::Load { dest, .. } if only.is_none_or(|d| d == *dest));
+                let found = block.instrs.iter().rposition(|i| is_load(i, Some(id)))
+                    .filter(|p| block.instrs.len() - p <= 8)
+                    .or_else(|| block.instrs.iter().rev().take(5).position(|i| is_load(i, None)).map(|p| block.instrs.len() - 1 - p));
+                if let Some(p) = found {
+                    if let Instr::Load { dest, ptr, ty } = block.instrs[p].clone() {
+                        block.instrs[p] = Instr::VolatileLoad { dest, ptr, ty };
+                    }
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    fn lower_expr_inner(&mut self, expr: &Expr) -> Result<Val> {
         // sic bitfield/enum shorthand (sic.md §"Bitfields", §"Enums"): the expected
         // strict type for a bare member reaches here through the determining sites
         // and the flag/comparison operators only. Take it now so every OTHER
@@ -6606,7 +6632,11 @@ impl<'m> FuncCtx<'m> {
                 return self.coerce(Val::Local(res), &ty);
             }
             let raw = self.alloc_val();
-            self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
+            if lv.volatile {
+                self.push_instr(Instr::VolatileLoad { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
+            } else {
+                self.push_instr(Instr::Load { dest: raw, ptr: lv.ptr.clone(), ty: ty.clone() });
+            }
             // Shift the field to the top, then back down: masks and (for signed
             // fields) sign-extends in one pair of shifts.
             let left = bits.saturating_sub(bf.bit_offset + bf.width);
@@ -6631,6 +6661,8 @@ impl<'m> FuncCtx<'m> {
         let dest = self.alloc_val();
         if lv.atomic {
             self.push_instr(Instr::AtomicLoad { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
+        } else if lv.volatile {
+            self.push_instr(Instr::VolatileLoad { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
         } else {
             self.push_instr(Instr::Load { dest, ptr: lv.ptr.clone(), ty: lv.ty.clone() });
         }
@@ -6641,11 +6673,25 @@ impl<'m> FuncCtx<'m> {
     /// Returns the value actually stored (for use as the assignment's value).
     fn store_lvalue(&mut self, lv: &LValue, val: Val) -> Result<Val> {
         if let Some(bf) = lv.bitfield {
-            return self.store_bitfield(&lv.ptr, &lv.ty, bf, val);
+            let from = self.current_block_mut().instrs.len();
+            let v = self.store_bitfield(&lv.ptr, &lv.ty, bf, val)?;
+            if lv.volatile {
+                // Its read-modify-write, in one block.
+                for i in &mut self.current_block_mut().instrs[from..] {
+                    *i = match std::mem::replace(i, Instr::Fence) {
+                        Instr::Load { dest, ptr, ty } => Instr::VolatileLoad { dest, ptr, ty },
+                        Instr::Store { val, ptr } => Instr::VolatileStore { val, ptr },
+                        other => other,
+                    };
+                }
+            }
+            return Ok(v);
         }
         let coerced = self.coerce(val, &lv.ty)?;
         if lv.atomic {
             self.push_instr(Instr::AtomicStore { ptr: lv.ptr.clone(), val: coerced.clone(), ty: lv.ty.clone() });
+        } else if lv.volatile {
+            self.push_instr(Instr::VolatileStore { val: coerced.clone(), ptr: lv.ptr.clone() });
         } else {
             self.push_instr(Instr::Store { val: coerced.clone(), ptr: lv.ptr.clone() });
         }
