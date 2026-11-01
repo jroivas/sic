@@ -8,7 +8,7 @@ pub const STRINGBUILDER_RUNTIME: &str = include_str!("stringbuilder_runtime.c");
 pub fn uses_stringbuilder(src: &str) -> bool {
     let bytes = src.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    for word in ["stringbuilder", "string.builder"] {
+    for word in ["stringbuilder", "string.builder", "string::builder"] {
         let mut i = 0;
         while let Some(pos) = src[i..].find(word) {
             let start = i + pos;

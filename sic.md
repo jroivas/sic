@@ -345,7 +345,7 @@ A `stringbuilder` collects text without copying it. Nothing is joined until
 `.build()`, which allocates once, at the exact size:
 
 ```c
-stringbuilder b;                 // or: auto b = string.builder();
+stringbuilder b;                 // or: string::builder b; or: auto b = string.builder();
 b.append("#define ");
 b += name;                       // the same as b.append(name)
 b += line[a:c];

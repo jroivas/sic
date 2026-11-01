@@ -1,0 +1,21 @@
+// `string::builder` names the type `stringbuilder`.
+import std;
+
+string join(string::builder *b, string tail)
+{
+    *b += tail;
+    return b->build();
+}
+
+int main()
+{
+    string::builder b;
+    b += "ab";
+    b += "cd";
+    stringbuilder c;
+    c += "x";
+    auto d = string.builder();
+    d += "yz";
+    string s = join(&b, "e");
+    return s.length * 10 - 8 + c.build().length + d.build().length - 3;
+}

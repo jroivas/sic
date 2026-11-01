@@ -1147,6 +1147,10 @@ impl Parser {
                         self.advance();
                         segs.push(self.expect_member_name()?);
                     }
+                    // `string::builder` is the type `stringbuilder`.
+                    if segs.len() == 2 && segs[0] == "string" && segs[1] == "builder" {
+                        segs = vec!["stringbuilder".to_string()];
+                    }
                     let last = segs.last().cloned().unwrap_or_default();
                     let builtin_generic = self.generic_enums.contains(&last)
                         || matches!(last.as_str(), "dict" | "Task" | "set" | "list");
@@ -2529,6 +2533,12 @@ impl Parser {
     /// *type* used in a declaration — `A::B::Name` followed by a declarator (`*`…
     /// then a name)? A `(` after the path means a call (`std::Open(…)`), not a decl.
     fn qualified_scope_decl(&self) -> bool {
+        if self.lang == Lang::Sic && self.peek().text == "string"
+            && self.tokens.get(self.pos + 1).map(|t| t.kind) == Some(TokenKind::ColonColon)
+            && self.tokens.get(self.pos + 2).is_some_and(|t| t.text == "builder")
+        {
+            return true;
+        }
         if self.lang != Lang::Sic || self.peek_kind() != TokenKind::Ident { return false; }
         let is_seg = |k: Option<TokenKind>| matches!(k, Some(TokenKind::Ident | TokenKind::TypeName));
         // `Ident (:: Ident)+`
