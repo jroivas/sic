@@ -853,7 +853,9 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 self.b().build_conditional_branch(c, self.blocks[&then_bb.0], self.blocks[&else_bb.0])?;
             }
             Terminator::Switch { val, default, arms } => {
-                let v = self.val(val, cx.ctx.i32_type().into());
+                // A constant has the width it needs.
+                let hint = store_type(&self.types, val).map_or(cx.ctx.i32_type().into(), |t| cx.value_type(&t));
+                let v = self.val(val, hint);
                 let v = self.as_int(v)?;
                 let mut seen = sic_ir::fast_hash::HashSet::default();
                 let mut cases = Vec::with_capacity(arms.len());
