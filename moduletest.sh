@@ -631,8 +631,8 @@ if command -v readelf >/dev/null 2>&1; then
     if SIC_CPP=cpp "$SIC" -c pa.c -o pa.o 2>err && "$SIC" -c pb.c -o pb.o 2>>err && "$CC" pa.o pb.o -o pab 2>>err; then
         want_pp="$(basename "$("$SIC" -print-prog-name=cpp)")"
         cmt="$(readelf -p .comment pab 2>/dev/null)"
-        echo "$cmt" | grep -q "sic .* (preprocessor: cpp)" \
-            && echo "$cmt" | grep -q "sic .* (preprocessor: $want_pp)" \
+        echo "$cmt" | grep -q "sic .* (preprocessor: cpp, backend: " \
+            && echo "$cmt" | grep -q "sic .* (preprocessor: $want_pp, backend: ${SIC_BACKEND:-$("$SIC" -print-backends | head -1)})" \
             && ok "comment-producer" || bad "comment-producer" "got:\n$cmt"
     else
         bad "comment-producer" "build failed: $(cat err)"
@@ -1620,6 +1620,9 @@ EOF
     printf 'long twice(long x) { return x * 2; }\n' > a.c
     printf 'long twice(long);\nint main(void) { return twice(21); }\n' > b.c
     if "$SIC" -fbackend=llvm -O2 -c a.c -o a.o 2>err && "$SIC" -fbackend=cranelift -c b.c -o b.o 2>>err && "$SIC" a.o b.o -o ab 2>>err; ./ab; [ $? -eq 42 ]; then ok "llvm-mixed"; else bad "llvm-mixed" "$(cat err)"; fi
+    # A binary says what built it: both, when both did.
+    cmt="$(readelf -p .comment ab 2>/dev/null)"
+    if echo "$cmt" | grep -q "backend: llvm)" && echo "$cmt" | grep -q "backend: cranelift)"; then ok "llvm-comment"; else bad "llvm-comment" "got: $cmt"; fi
     cd ..
 fi
 

@@ -11,6 +11,12 @@ Cranelift is built in by default and stays the default when both are. LLVM is bu
 only when asked for: it needs LLVM 21 to build, and a sic with it needs `libLLVM` to
 start at all, whichever back end it then uses. `SIC_DUMP_LLVM=1` prints the module.
 
+A binary records what built it, in `.comment`, once per distinct string, so both
+back ends show when both were used (and in DWARF's `DW_AT_producer` under `-g`):
+
+    $ readelf -p .comment a.out
+      sic 0.2.2 (preprocessor: sic-cpp, backend: llvm)
+
 ## LLVM
 
 `crates/sic-llvm`, through inkwell, in process: no LLVM tool is run. sic's own IR

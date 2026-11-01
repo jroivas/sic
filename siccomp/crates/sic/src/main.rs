@@ -1350,7 +1350,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // Record which preprocessor produced this object (`readelf -p .comment`):
     // its program name, not the full path, so objects don't encode where the
     // toolchain lives.
-    ir_module.producer = Some(producer_string());
+    ir_module.producer = Some(producer_string(args));
 
     // Typed IR optimization stage (post-lowering, pre-codegen).
     sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
@@ -1365,11 +1365,13 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
 
 /// `sic <version> (preprocessor: <name>)` — the identification sic writes
 /// into every object's `.comment` (and DWARF producer with `-g`).
-fn producer_string() -> String {
+fn producer_string(args: &Args) -> String {
     let bin = sic_frontend::preprocessor_cmd().first().cloned().unwrap_or_else(|| "sic-cpp".to_string());
     let name = std::path::Path::new(&bin).file_name()
         .map(|n| n.to_string_lossy().into_owned()).unwrap_or(bin.clone());
-    format!("sic {} (preprocessor: {})", env!("CARGO_PKG_VERSION"), name)
+    // An unknown back end is reported when it is selected to compile.
+    let backend = select_backend(args).map_or("?", |b| b.name());
+    format!("sic {} (preprocessor: {}, backend: {})", env!("CARGO_PKG_VERSION"), name, backend)
 }
 
 /// Each function in its own section (the default), unless `-fno-function-sections`.
