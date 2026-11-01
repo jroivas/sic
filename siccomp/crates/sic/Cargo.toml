@@ -8,11 +8,18 @@ rust-version.workspace = true
 name = "sic"
 path = "src/main.rs"
 
+# The back ends built in; see `./build.sh --backend`.
+[features]
+default = ["cranelift"]
+cranelift = ["dep:sic-cranelift"]
+llvm = ["dep:sic-llvm"]
+
 [dependencies]
 sic-ir        = { path = "../sic-ir" }
 sic-frontend  = { path = "../sic-frontend" }
 sic-opt       = { path = "../sic-opt" }
-sic-cranelift = { path = "../sic-cranelift" }
+sic-cranelift = { path = "../sic-cranelift", optional = true }
+sic-llvm      = { path = "../sic-llvm", optional = true }
 sic-link      = { path = "../sic-link" }
 # Reading back the backend's ELF object for `-S` (already built for Cranelift).
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }

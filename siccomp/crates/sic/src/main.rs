@@ -42,7 +42,9 @@ mod module_conf;
 mod rust_module;
 
 use clap::Parser as ClapParser;
-use sic_cranelift::CraneliftBackend;
+#[cfg(not(any(feature = "cranelift", feature = "llvm")))]
+compile_error!("sic needs a back end: the feature `cranelift` or `llvm`");
+
 use sic_frontend::{preprocess_ex, Lexer, Parser, Lowerer};
 use sic_ir::{Backend, BackendOptions, OptLevel, display::print_module};
 use sic_opt::PassConfig;
@@ -911,7 +913,12 @@ fn backend_opt_level(opt: &str) -> OptLevel {
 
 /// The back ends built into this sic: the first is the default.
 fn available_backends() -> Vec<Box<dyn Backend>> {
-    vec![Box::new(CraneliftBackend::new())]
+    let mut backends: Vec<Box<dyn Backend>> = Vec::new();
+    #[cfg(feature = "cranelift")]
+    backends.push(Box::new(sic_cranelift::CraneliftBackend::new()));
+    #[cfg(feature = "llvm")]
+    backends.push(Box::new(sic_llvm::LlvmBackend::new()));
+    backends
 }
 
 /// The back end `-fbackend=` or else `$SIC_BACKEND` names, else the default.

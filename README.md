@@ -28,6 +28,7 @@ dependency.
 library (`import std;`) into the compiler's module sysroot:
 
     ./build.sh release        # or: ./build.sh debug (default)
+    ./build.sh release --backend llvm,cranelift   # back ends built in: cranelift (default), llvm, or all
 
 That is just a wrapper around `cargo`; you can also build the compiler alone:
 

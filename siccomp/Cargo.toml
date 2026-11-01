@@ -8,6 +8,18 @@ members = [
     "crates/sic",
     "crates/cargo-sic",
     "crates/sic-rust-names",
+    "crates/sic-llvm",
+]
+# All but sic-llvm, which needs LLVM: `./build.sh --backend llvm` asks for it.
+default-members = [
+    "crates/sic-ir",
+    "crates/sic-frontend",
+    "crates/sic-opt",
+    "crates/sic-cranelift",
+    "crates/sic-link",
+    "crates/sic",
+    "crates/cargo-sic",
+    "crates/sic-rust-names",
 ]
 resolver = "2"
 

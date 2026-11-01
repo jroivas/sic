@@ -1,0 +1,11 @@
+[package]
+name = "sic-llvm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Built only when asked for, it needs LLVM: `./build.sh --backend llvm`, which sets
+# LLVM_SYS_211_PREFIX. It is no default member of the workspace.
+[dependencies]
+sic-ir = { path = "../sic-ir" }
+inkwell = { version = "0.11", features = ["llvm21-1-force-dynamic"] }

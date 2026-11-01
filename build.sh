@@ -11,16 +11,65 @@
 # Finally it builds sic-cpp, the preprocessor sic uses by default, and sic-fmt,
 # the formatter.
 #
-# Usage: ./build.sh [debug|release]   (default: debug)
+# Usage: ./build.sh [debug|release] [--backend LIST]   (default: debug)
+#
+# --backend picks the back ends built into sic: `cranelift` (the default), `llvm`,
+# a list as `llvm,cranelift`, or `all`. LLVM is built only when asked for: it takes
+# longer, and needs LLVM 21 at build time and libLLVM at run time. With both,
+# Cranelift stays the default and `-fbackend=llvm` selects LLVM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-PROFILE="${1:-debug}"
+PROFILE=debug
+BACKENDS=cranelift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        debug|release) PROFILE="$1" ;;
+        --backend=*) BACKENDS="${1#--backend=}" ;;
+        --backend)
+            [ $# -ge 2 ] || { echo "build.sh: --backend needs a value" >&2; exit 2; }
+            BACKENDS="$2"; shift ;;
+        *) echo "build.sh: unknown argument '$1'" >&2
+           echo "usage: ./build.sh [debug|release] [--backend cranelift|llvm|llvm,cranelift|all]" >&2
+           exit 2 ;;
+    esac
+    shift
+done
 CARGO_FLAGS=()
 [ "$PROFILE" = "release" ] && CARGO_FLAGS=(--release)
 
-echo ">> building the compiler ($PROFILE)"
-( cd "$ROOT/siccomp" && cargo build "${CARGO_FLAGS[@]}" )
+# The back ends as cargo features of sic.
+FEATURES=()
+[ "$BACKENDS" = all ] && BACKENDS=cranelift,llvm
+IFS=, read -r -a backend_list <<< "$BACKENDS"
+[ "${#backend_list[@]}" -gt 0 ] || { echo "build.sh: --backend needs a value" >&2; exit 2; }
+for b in "${backend_list[@]}"; do
+    case "$b" in
+        cranelift|llvm) FEATURES+=("$b") ;;
+        *) echo "build.sh: unknown back end '$b' (cranelift, llvm, all)" >&2; exit 2 ;;
+    esac
+done
+FEATURE_LIST="$(IFS=,; echo "${FEATURES[*]}")"
+if [[ ",$FEATURE_LIST," == *,llvm,* ]]; then
+    LLVM_CONFIG="$(command -v llvm-config-21 || command -v llvm-config || true)"
+    [ -n "$LLVM_CONFIG" ] || { echo "build.sh: the llvm back end needs LLVM 21: no llvm-config" >&2; exit 1; }
+    case "$("$LLVM_CONFIG" --version)" in
+        21.*) ;;
+        *) echo "build.sh: the llvm back end needs LLVM 21, $LLVM_CONFIG is $("$LLVM_CONFIG" --version)" >&2; exit 1 ;;
+    esac
+    export LLVM_SYS_211_PREFIX="$("$LLVM_CONFIG" --prefix)"
+fi
+
+# Named packages: a plain `cargo build` would build sic again, with the default
+# back ends, over this one.
+build_compiler() {
+    ( cd "$ROOT/siccomp"
+      cargo build "${CARGO_FLAGS[@]}" -p sic --no-default-features --features "$FEATURE_LIST"
+      cargo build "${CARGO_FLAGS[@]}" -p cargo-sic )
+}
+
+echo ">> building the compiler ($PROFILE, back ends: $FEATURE_LIST)"
+build_compiler
 
 SIC="$ROOT/siccomp/target/$PROFILE/sic"
 # The sysroot the compiler derives from its own path: <exe_dir>/../lib/sic.
@@ -72,7 +121,7 @@ SIC_CPP="${BOOT_CPP}" make -B -C "$ROOT/sic-cpp" SIC="$SIC"
 
 # sic builds the preprocessor into itself once it exists (crates/sic/build.rs).
 echo ">> building the compiler again, with sicpp built in"
-( cd "$ROOT/siccomp" && cargo build "${CARGO_FLAGS[@]}" )
+build_compiler
 
 if [ -n "$BOOT_CPP" ]; then
     # Stage 2: rebuild std and art with the fresh preprocessor, the one they are
@@ -80,7 +129,7 @@ if [ -n "$BOOT_CPP" ]; then
     unset SIC_CPP
     echo ">> rebuilding std + art with the new preprocessor"
     build_modules
-    ( cd "$ROOT/siccomp" && cargo build "${CARGO_FLAGS[@]}" )
+    build_compiler
 fi
 
 echo ">> building sic-fmt (the SIC formatter)"
@@ -90,4 +139,5 @@ echo ">> done. installed:"
 ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
       "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so \
       "$ROOT/sic-cpp/sic-cpp" "$ROOT/sic-fmt/sic-fmt"
+echo ">> back ends: $("$SIC" -print-backends | tr '\n' ' ')"
 echo ">> preprocessor built in: $("$SIC" -print-cpp-builtin), command: $("$SIC" -print-prog-name=cpp)"
