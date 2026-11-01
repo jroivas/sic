@@ -3936,7 +3936,8 @@ int main(int argc, char **argv)
     }
     pp.macros["__STDC_HOSTED__"] = "O|1";
     pp.macros["__SICC__"] = "O|1";
-    pp.macros["__SICC_MINOR__"] = "O|0";
+    pp.macros["__SICC_MINOR__"] = "O|2";
+    pp.macros["__SICC_PATCH__"] = "O|1";
     pp.macros["__clang__"] = "O|1";
     pp.macros["__clang_major__"] = "O|17";
     pp.macros["__clang_minor__"] = "O|0";

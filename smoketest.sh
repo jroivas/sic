@@ -19,6 +19,8 @@ rc=0
 
 step() { printf '%-16s' "$1"; }
 
+"$MYDIR/setversion.sh" --check || rc=1
+
 step "compile $OPT"
 CFLAGS="$OPT" "$MYDIR/compiletest_rust.sh" "$PROFILE" "$OUT/ct" > "$OUT/ct.log" 2>&1 || rc=1
 grep -E '^WARNING' "$OUT/ct.log"
