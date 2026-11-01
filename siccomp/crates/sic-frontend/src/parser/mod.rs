@@ -390,8 +390,10 @@ impl Parser {
                 match t.kind {
                     TokenKind::Ident => mark(&t.text),
                     TokenKind::StringLit => {
-                        for w in t.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-                            if !w.is_empty() { mark(w); }
+                        // By byte: a C string holds any bytes, so it need not be
+                        // valid UTF-8, whatever the `String` it is carried in says.
+                        for w in t.text.as_bytes().split(|b| !(b.is_ascii_alphanumeric() || *b == b'_')) {
+                            if let Ok(w) = std::str::from_utf8(w) { if !w.is_empty() { mark(w); } }
                         }
                     }
                     _ => {}

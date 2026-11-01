@@ -52,6 +52,13 @@ out:
 	return l.v + ++count;
 }
 
+// a C string holds any bytes, not UTF-8: looking through it for names must not read
+// past its end (Linux's keycode table in sysrq.c: "\201\202\203")
+const char bytes1[] = "\xf0";
+const char bytes2[] = "a\xe2";
+const char bytes3[] = "\xc3" "\xf0\x90";
+const char bytes4[] = "\000\201\202\203\204\205";
+
 // never named: not even parsed
 static inline int unused_one(int x) { return x / 0; }
 
@@ -70,5 +77,7 @@ int main(void)
 	CHECK(before_typedef(7) == 42);
 	CHECK(inner(1) == 2 && inner(1) == 3);
 	CHECK(local_enum() == 6);
+	CHECK((unsigned char)bytes1[0] == 0xf0 && (unsigned char)bytes2[1] == 0xe2);
+	CHECK((unsigned char)bytes3[2] == 0x90 && (unsigned char)bytes4[5] == 0205);
 	return 42;
 }
