@@ -7,7 +7,7 @@ The compiler (`siccomp/`, a Rust workspace) has two front ends sharing one back
 end:
 
   - a **C front end** — it compiles ordinary C, enough to build real codebases
-    (SQLite, QEMU); and
+    (SQLite, QEMU, [the Linux kernel](#linux)); and
   - a **SIC front end** — the memory-safe, undefined-behaviour-free language
     described in [sic.md](sic.md).
 
@@ -56,6 +56,19 @@ compatibility; see `sic --help`.
     ./check.sh                   # build both profiles + run every suite at every -O level
 
 Benchmarks comparing sic against gcc and rustc live in `benchmarks/` (`./benchmarks/run.sh`).
+
+## Linux
+
+`sic` builds an unmodified Linux 7.3 `defconfig`, and the kernel boots to a login
+prompt:
+
+![Linux 7.3 built with sic, logged in under QEMU, /proc/version naming the sic compiler](screenshots/boot-linux-7.3.png)
+
+    make CC=/path/to/siccomp/target/release/sic -j20
+
+So far it has run under QEMU/KVM with a small busybox system. Still missing are
+the retpoline and return-thunk mitigations, the stack protector and patchable
+function entries, so such a kernel is for testing, not for production.
 
 ## Status
 
