@@ -1162,8 +1162,11 @@ impl Parser {
                     let name = self.advance().text.clone();
                     base = Some(self.maybe_generic_type(name)?);
                 }
+                // A bare `list` or `set` is a type here too (`Fn<void(list)>`), not
+                // an implicit `int` with a declarator.
                 TokenKind::Ident if base.is_none() && signed.is_none() && long_count == 0
-                    && self.typedefs.contains(self.peek().text.as_str()) => {
+                    && (self.typedefs.contains(self.peek().text.as_str())
+                        || (self.lang == Lang::Sic && matches!(self.peek().text.as_str(), "list" | "set"))) => {
                     let name = self.advance().text.clone();
                     base = Some(self.maybe_generic_type(name)?);
                 }

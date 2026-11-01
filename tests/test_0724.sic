@@ -1,0 +1,19 @@
+// A bare `list` or `set` in `Fn<...>` is that type, not an `int`: the handle was cut
+// to 32 bits at the call (LLVM kept the cut, and std::thread::Create crashed).
+struct S { Fn<int(list)> f; list a; }
+
+int through(Fn<int(list, set)> h, list l, set t) { return h(l, t); }
+
+int main()
+{
+    S s;
+    s.a.add(1);
+    s.a.add(2);
+    s.f = [](list b) { return (int)b.length; };
+    if (s.f(s.a) != 2) return 1;
+
+    set t;
+    t.add(1);
+    if (through([](list l, set u) { return (int)l.length + (int)u.length; }, s.a, t) != 3) return 2;
+    return 42;
+}

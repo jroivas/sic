@@ -704,9 +704,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
             let at = tys.len() as u32;
             match pass {
                 Some(ParamPass::Scalar) => {
-                    // A closure's signature has no type for a `list` or `set`
-                    // parameter: a handle, a whole register.
-                    let t = if sig.params[i] == Type::Void { cx.ctx.i64_type().into() } else { cx.value_type(&sig.params[i]) };
+                    let t = cx.value_type(&sig.params[i]);
                     vals.push(self.typed(a, t)?.into());
                     tys.push(t);
                     if let Some(x) = cx.ext_attr(&sig.params[i]) { attrs.push((at, x)); }
