@@ -1,0 +1,140 @@
+// `l.pop()` removes the last element and returns it, moved out: whatever the element
+// owns goes with it, once. An empty list gives a zero value, as any read past the end.
+extern int printf(char *f, ...);
+
+int alive = 0;
+int bad = 0;
+
+void check(bool c, int line)
+{
+    if (!c) { printf("fail %d\n", line); bad = 1; }
+}
+
+struct item {
+    int v;
+    string name;
+    int *owned;
+    item() { owned = new int(1); alive++; }
+    ~item() { del owned; alive--; }
+    item clone(item *self) { item n; n.v = self->v; n.name = self->name; return n; }
+}
+
+item mk(int v) { item n; n.v = v; n.name = "n" + "ame"; return n; }
+
+struct stack {
+    list<int> vals;
+    int pop(stack *self) { return self->vals.length > 0 ? 100 + self->vals.pop() : -1; }
+}
+
+struct pt { int x; int y; }
+struct sv { string s; }
+enum shape { Circle(int), Named(string) }
+
+int sum2(int a, int b) { return a * 10 + b; }
+string join(string a, string b) { return a + "," + b; }
+list<int> make() { list<int> l; l.add(5); l.add(6); return l; }
+void drain(list<int> *p) { while (p.length > 0) p.pop(); }
+
+int main()
+{
+    // ints, as a stack
+    list<int> a;
+    for (int i = 0; i < 100; i++) a.add(i);
+    int total = 0;
+    while (a.length > 0) total += a.pop();
+    check(total == 4950, 1);
+
+    // empty: a zero value, and the list stays usable
+    check(a.pop() == 0 && a.length == 0, 2);
+    a.add(7);
+    check(a.pop() == 7, 3);
+
+    // strings: the value outlives its place in the list
+    list<string> s;
+    s.add("he" + "llo");
+    s.add("wo" + "rld");
+    string t = s.pop();
+    s.add("x" + "y");
+    check(t == "world" && s.length == 2, 4);
+    auto u = s.pop();
+    check(u == "xy", 5);
+    string e = s.pop();
+    string z = s.pop();
+    check(e == "hello" && z.size == 0 && s.length == 0, 6);
+
+    // result not used, and two in one call, in order
+    list<string> s2;
+    s2.add("a" + "1");
+    s2.add("b" + "2");
+    s2.add("c" + "3");
+    s2.pop();
+    check(s2.length == 2, 7);
+    check(join(s2.pop(), s2.pop()) == "b2,a1", 8);
+    list<int> i2;
+    i2.add(1);
+    i2.add(2);
+    check(sum2(i2.pop(), i2.pop()) == 21, 9);
+
+    // structs with a destructor: each destroyed once
+    {
+        list<item> l;
+        l.add(mk(1));
+        l.add(mk(2));
+        l.add(mk(3));
+        check(alive == 3, 10);
+        item last = l.pop();
+        check(last.v == 3 && l.length == 2, 11);
+        l.pop();
+        check(l.length == 1, 12);
+    }
+    check(alive == 0, 13);
+
+    // lists of lists, through a pointer, in a struct, and from a call
+    list<list<int>> nested;
+    nested.add(make());
+    list<int> inner = nested.pop();
+    check(inner.pop() == 6 && inner.length == 1 && nested.length == 0, 14);
+    list<int> d = make();
+    drain(&d);
+    check(d.length == 0, 15);
+    stack st;
+    st.vals.add(3);
+    check(st.pop() == 103 && st.pop() == -1, 16);
+    check(make().pop() == 6, 17);
+
+    // the other element kinds
+    list<pt> ps;
+    pt p1;
+    p1.x = 4;
+    ps.add(p1);
+    check(ps.pop().x == 4 && ps.length == 0 && ps.pop().x == 0, 19);
+    list<sv> svs;
+    sv s1;
+    s1.s = "st" + "ruct";
+    svs.add(s1);
+    sv s3 = svs.pop();
+    check(s3.s == "struct", 20);
+    list<any> anys;
+    anys.add(5);
+    anys.add("t" + "xt");
+    string got = anys.pop();
+    int n = anys.pop();
+    check(got == "txt" && n == 5 && anys.length == 0, 21);
+    list<shape> shapes;
+    shapes.add(Circle(2));
+    shapes.add(Named("n" + "1"));
+    shape sh = shapes.pop();
+    match (sh) {
+        Named(nm): check(nm == "n1", 22);
+        _: check(false, 23);
+    }
+    check(shapes.length == 1, 24);
+
+    // in an expression
+    list<int> x;
+    x.add(2);
+    x.add(3);
+    check(x.pop() + x.pop() * 10 == 23, 18);
+
+    return bad == 0 ? 42 : 1;
+}

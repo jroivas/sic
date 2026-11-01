@@ -567,6 +567,13 @@ heterogeneous list.
     xs[1] = 99;              // update in place
     usize n = xs.size;       // element count (also .length)
     for (int i = 0; i < xs.size; i++) { /* xs[i] */ }
+    int last = xs.pop();     // removes and returns the last element: 99
+
+`.pop()` moves the element out, so what it owns goes with it, and a struct's
+destructor runs once, for the new owner. On an empty list it gives a zero value,
+as any read past the end does, and the list stays empty. An `any` borrows what it
+holds, so a value popped from a `list<any>` stays valid as long as the list, like
+one read with `l[i]`. `.pop()` is not available on a list of tuples.
 
 Elements are owned by the list — string and struct elements are copied and freed
 with the list (and reclaimed when overwritten via `l[i] = …`). `l[i].field` and

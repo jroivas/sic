@@ -93,6 +93,11 @@ typedef struct __sic_list {
     unsigned long cap;
     unsigned long rc;    /* strong references (owners) */
     unsigned long wrc;   /* weak references (sic.md §"Weak"): don't keep it alive */
+    /* Boxes of `any` elements popped: an `any` only borrows, so what it points at
+       stays until the list goes, as for one read with `l[i]`. */
+    unsigned long *retired;
+    int *retired_owned;
+    unsigned long nretired;
 } __sic_list;
 
 __attribute__((weak)) __sic_list *__sic_list_new(void) {
@@ -101,6 +106,9 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
     l->len = 0;
     l->rc = 1;
     l->wrc = 0;
+    l->retired = 0;
+    l->retired_owned = 0;
+    l->nretired = 0;
     l->vty = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vslot = (unsigned long *)malloc(sizeof(unsigned long) * l->cap);
     l->vowned = (int *)malloc(sizeof(int) * l->cap);
@@ -158,6 +166,13 @@ __attribute__((weak)) void __sic_list_set(__sic_list *l, unsigned long i, unsign
 
 __attribute__((weak)) unsigned long __sic_list_len(__sic_list *l) { return l ? l->len : 0; }
 
+/* Drop the last element, if any (the second half of `l.pop()`). */
+__attribute__((weak)) void __sic_list_drop_last(__sic_list *l) {
+    if (!l || l->len == 0) return;
+    l->len--;
+    __sic_box_free(l->vslot[l->len], l->vowned[l->len]);
+}
+
 /* `.values` (sic.md §"Iterators"): a fresh list with each element BORROWED
    (vowned=0 — the source list keeps ownership). */
 __attribute__((weak)) __sic_list *__sic_list_values(__sic_list *l) {
@@ -182,6 +197,11 @@ __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     if (!l || l->rc == 0 || --l->rc != 0) return;
     for (unsigned long i = 0; i < l->len; i++)
         __sic_box_free(l->vslot[i], l->vowned[i]);
+    for (unsigned long i = 0; i < l->nretired; i++)
+        __sic_box_free(l->retired[i], l->retired_owned[i]);
+    free(l->retired);
+    free(l->retired_owned);
+    l->retired = 0; l->retired_owned = 0; l->nretired = 0;
     free(l->vty);
     free(l->vslot);
     free(l->vowned);
@@ -260,4 +280,39 @@ __attribute__((weak)) __sic_list *__sic_list_clone(__sic_list *l, const __sic_el
         __sic_list_push(r, l->vty[i], __sic_box_clone(l->vslot[i], l->vowned[i], t), l->vowned[i]);
     }
     return r;
+}
+
+/* Remove the last element of a `list<any>`, keeping its box (see `retired`). */
+__attribute__((weak)) void __sic_list_retire_last(__sic_list *l) {
+    if (!l || l->len == 0) return;
+    l->len--;
+    l->retired = (unsigned long *)realloc(l->retired, (l->nretired + 1) * sizeof(unsigned long));
+    l->retired_owned = (int *)realloc(l->retired_owned, (l->nretired + 1) * sizeof(int));
+    l->retired[l->nretired] = l->vslot[l->len];
+    l->retired_owned[l->nretired] = l->vowned[l->len];
+    l->nretired++;
+}
+
+/* Remove the last element, moved out: its bytes have a new owner, so only the box
+   goes, with no destructor. */
+__attribute__((weak)) void __sic_list_take_last(__sic_list *l) {
+    if (!l || l->len == 0) return;
+    l->len--;
+    if (l->vowned[l->len] == 8) free((void **)l->vslot[l->len] - 2);
+    else if (l->vowned[l->len] == 1) free((void *)l->vslot[l->len]);
+}
+
+/* `l.pop()`, instantiated with the list's element type: an ordinary copy of the last
+   element and an ordinary return, so every element type owns what it should. On an
+   empty list the read gives a zero value, as any read past the end does. */
+T __sic_list_pop<T>(list<T> *l) {
+    T v = (*l)[l.length - 1];
+    __sic_list_drop_last((__sic_list *)*l);
+    return v;
+}
+
+static any __sic_list_pop_any(list<any> *l) {
+    any v = (*l)[l.length - 1];
+    __sic_list_retire_last((__sic_list *)*l);
+    return v;
 }

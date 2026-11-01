@@ -2017,7 +2017,7 @@ impl<'m> FuncCtx<'m> {
             "__sic_list_get" => (vec![ptr, u64t, u64p.clone(), u64p], i32t.clone()),
             "__sic_list_set" => (vec![ptr, u64t.clone(), u64t.clone(), u64t, i32t], Type::Void),
             "__sic_list_len" => (vec![ptr], u64t),
-            "__sic_list_free" | "__sic_list_retain"
+            "__sic_list_free" | "__sic_list_retain" | "__sic_list_take_last"
             | "__sic_list_weak_retain" | "__sic_list_weak_release" => (vec![ptr.clone()], Type::Void),
             "__sic_list_upgrade" => (vec![ptr.clone()], ptr),
             // `.keys`/`.values` (sic.md §"Iterators"): list → fresh `list` handle.
@@ -2141,6 +2141,44 @@ impl<'m> FuncCtx<'m> {
         let found = self.alloc_val();
         self.push_instr(Instr::Call { dest: Some(found), func: f, args: vec![l, iv, ot.clone(), os.clone()], ret_ty: Type::i32() });
         self.container_read_value(ot, os, &elem, Some(Val::Local(found)), sp)
+    }
+
+    /// `l.pop()` of a struct element: moved out of its box into a temporary, as a
+    /// function's struct result is, so a destructor runs once, for the new owner.
+    pub(crate) fn lower_list_pop_struct(&mut self, base: &Expr, elem: &Type) -> Result<Val> {
+        let elem = &super::types::resolve_aggregate(elem, &self.lowerer.struct_types);
+        let l = self.list_handle(base)?;
+        let len_f = self.list_runtime_fn("__sic_list_len");
+        let len = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(len), func: len_f, args: vec![l.clone()], ret_ty: Type::u64() });
+        self.val_types.insert(len.0, Type::u64());
+        let last = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: last, op: BinOp::Sub, lhs: Val::Local(len), rhs: Constant::int(1), ty: Type::u64() });
+        let (ot, os) = (self.dict_out_slot(), self.dict_out_slot());
+        let get = self.list_runtime_fn("__sic_list_get");
+        let found = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(found), func: get, args: vec![l.clone(), Val::Local(last), ot.clone(), os.clone()], ret_ty: Type::i32() });
+        // The box, or on an empty list a zero value (a tagged enum's read has no
+        // such fallback, so it is made here for all).
+        let tmp = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: tmp, ty: elem.clone(), align: None });
+        self.val_types.insert(tmp.0, elem.clone());
+        let size = elem.size_of(self.ptr_size());
+        self.push_instr(Instr::MemSet { dst: Val::Local(tmp), val: Constant::zero(), size, align: elem.align_of(self.ptr_size()) });
+        let word = self.alloc_val();
+        self.push_instr(Instr::Load { dest: word, ptr: os, ty: Type::u64() });
+        self.val_types.insert(word.0, Type::u64());
+        let box_ptr = self.coerce(Val::Local(word), &Type::void_ptr())?;
+        let fallback = self.coerce(Val::Local(tmp), &Type::void_ptr())?;
+        let src = self.alloc_val();
+        self.push_instr(Instr::Select { dest: src, cond: Val::Local(found), on_true: box_ptr, on_false: fallback, ty: Type::void_ptr() });
+        self.val_types.insert(src.0, Type::void_ptr());
+        let n = self.coerce(Constant::int(size as i64), &Type::i64())?;
+        self.emit_memcpy(Val::Local(tmp), Val::Local(src), n)?;
+        let take = self.list_runtime_fn("__sic_list_take_last");
+        self.push_instr(Instr::Call { dest: None, func: take, args: vec![l], ret_ty: Type::Void });
+        self.register_struct_temp(&Val::Local(tmp), elem);
+        Ok(Val::Local(tmp))
     }
 
     /// `l[i] = x`.

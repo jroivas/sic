@@ -424,6 +424,16 @@ impl<'m> FuncCtx<'m> {
                         }
                     }
                 }
+                // `l.pop()` on a `list` gives an element (see lower_call).
+                if self.is_sic() {
+                    if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
+                        if name == "pop" {
+                            if let Some(lt) = self.list_type_of(base) {
+                                return Ok(super::super::types::list_elem(&lt, self.ptr_size()));
+                            }
+                        }
+                    }
+                }
                 // `string.create(bytes, len)` builds a `string` (see lower_call).
                 if self.is_sic() {
                     if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {

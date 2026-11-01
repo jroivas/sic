@@ -9,6 +9,8 @@ pub const LIST_RUNTIME: &str = include_str!("list_runtime.c");
 /// True if `src` uses the `list` type (so the runtime must be prepended). A crude
 /// word-boundary scan for the `list` keyword, ignoring substrings like `listen`.
 pub fn uses_list(src: &str) -> bool {
+    // A list from a module need not be named here, but `.pop()` is instantiated here.
+    if src.contains(".pop(") { return true; }
     let bytes = src.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut i = 0;

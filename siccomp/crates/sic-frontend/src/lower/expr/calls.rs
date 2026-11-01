@@ -424,10 +424,39 @@ impl<'m> FuncCtx<'m> {
             }
         }
 
-        // sic `list` methods (sic.md §"List"): `l.add(x)` / `l.push(x)` /
-        // `l.append(x)` append an element.
+        // sic `list` methods (sic.md §"List"): `l.pop()` removes the last element
+        // and returns it, moved out, by the runtime's generic function; `l.add(x)` /
+        // `l.push(x)` / `l.append(x)` append an element.
         if self.is_sic() {
             if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                if name == "pop" {
+                    if let Some(lt) = self.list_type_of(base) {
+                        if !args.is_empty() {
+                            return Err(CompileError::at("`.pop()` takes no arguments".to_string(),
+                                sp.file.clone(), sp.line, sp.col));
+                        }
+                        let elem = super::super::types::list_elem(&lt, self.ptr_size());
+                        if super::super::types::is_tuple(&elem) {
+                            return Err(CompileError::at("`.pop()` on a list of tuples is not supported: their shape is not kept in the list".to_string(),
+                                sp.file.clone(), sp.line, sp.col));
+                        }
+                        if matches!(elem, Type::Struct(_) | Type::Union(_))
+                            && !super::super::types::is_sic_string(&elem) && !super::super::types::is_any(&elem)
+                        {
+                            return self.lower_list_pop_struct(base, &elem);
+                        }
+                        let mangled = if super::super::types::is_any(&elem) { "__sic_list_pop_any".to_string() } else {
+                            self.lowerer.instantiate_generic_fn("__sic_list_pop", &[elem])
+                                .map_err(|e| if e.file.is_some() { e } else { CompileError::at(e.message, sp.file.clone(), sp.line, sp.col) })?
+                        };
+                        let is_ptr = matches!(self.infer_expr_type(base), Ok(Type::Pointer(p)) if super::super::types::is_list(&p));
+                        let arg = if is_ptr { (**base).clone() } else {
+                            Expr::new(ExprKind::Unary { op: crate::ast::UnOpKind::Addr, expr: base.clone() }, sp.clone())
+                        };
+                        let callee = Expr { kind: ExprKind::Ident(mangled), span: sp.clone() };
+                        return self.lower_call(&callee, &[arg], sp);
+                    }
+                }
                 if matches!(name.as_str(), "add" | "push" | "append")
                     && matches!(self.infer_expr_type(base), Ok(t) if super::super::types::is_list(&t)
                         || matches!(&t, Type::Pointer(i) if super::super::types::is_list(i)))
@@ -2209,6 +2238,15 @@ impl<'m> FuncCtx<'m> {
         let ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         self.push_instr(Instr::Cast { dest, op: CastOp::ZExt, val: Constant::uint(v), to_ty: ty });
         Val::Local(dest)
+    }
+
+    /// The `list` type of `e`, a list or a pointer to one.
+    pub(crate) fn list_type_of(&self, e: &Expr) -> Option<Type> {
+        match self.infer_expr_type(e).ok()? {
+            Type::Pointer(p) if super::super::types::is_list(&p) => Some(*p),
+            t if super::super::types::is_list(&t) => Some(t),
+            _ => None,
+        }
     }
 
     pub(crate) fn pointee_of(&self, ptr_ty: &Type) -> Type {

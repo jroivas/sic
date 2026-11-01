@@ -1,0 +1,2 @@
+extern int printf(char *f, ...);
+int main() { list<tuple> t; t.add((1, "a")); tuple x = t.pop(); return 0; }
