@@ -26,15 +26,13 @@ impl Feature {
             Cx16 => "__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16",
         }
     }
-    /// The Cranelift x64 setting that lets the back end use the extension
-    /// itself (None: only sic's intrinsics use it).
-    fn cranelift_flag(self) -> Option<&'static str> {
-        Some(match self {
-            Sse3 => "has_sse3", Ssse3 => "has_ssse3", Sse41 => "has_sse41", Sse42 => "has_sse42",
-            Popcnt => "has_popcnt", Avx => "has_avx", Avx2 => "has_avx2", Fma => "has_fma",
-            Cx16 => "has_cmpxchg16b",
-            F16c | Aes | Pclmul => return None,
-        })
+    /// The name a back end knows the extension by (GCC's).
+    fn backend_name(self) -> &'static str {
+        match self {
+            Sse3 => "sse3", Ssse3 => "ssse3", Sse41 => "sse4.1", Sse42 => "sse4.2",
+            Popcnt => "popcnt", Avx => "avx", Avx2 => "avx2", Fma => "fma",
+            F16c => "f16c", Aes => "aes", Pclmul => "pclmul", Cx16 => "cx16",
+        }
     }
     /// The extensions this one requires (GCC's `-m` implications).
     fn requires(self) -> &'static [Feature] {
@@ -162,11 +160,11 @@ impl Isa {
         (isa, warnings)
     }
 
-    /// The Cranelift x64 settings for the enabled extensions: the back end
-    /// uses exactly what `-march`/`-m…` allow (GCC's x86-64 baseline by
-    /// default), never more of the build machine's CPU.
-    pub fn cranelift_flags(&self) -> Vec<&'static str> {
-        self.on.iter().filter_map(|f| f.cranelift_flag()).collect()
+    /// The enabled extensions: the back end uses exactly what `-march`/`-m…`
+    /// allow (GCC's x86-64 baseline by default), never more of the build
+    /// machine's CPU.
+    pub fn backend_features(&self) -> Vec<&'static str> {
+        self.on.iter().map(|f| f.backend_name()).collect()
     }
 
     /// SSE2 is available: the floating-point and vector registers sic's back
@@ -218,12 +216,12 @@ mod tests {
     fn backend_features_follow_flags() {
         // The back end gets only what -march/-m allow (the baseline: nothing),
         // not the build machine's CPU.
-        let flags = |f: &[&str]| { let v: Vec<String> = f.iter().map(|s| s.to_string()).collect(); Isa::from_flags(&v).0.cranelift_flags() };
+        let flags = |f: &[&str]| { let v: Vec<String> = f.iter().map(|s| s.to_string()).collect(); Isa::from_flags(&v).0.backend_features() };
         assert!(flags(&[]).is_empty());
         assert!(flags(&["-march=x86-64"]).is_empty());
         let v2 = flags(&["-march=x86-64-v2"]);
-        for f in ["has_sse42", "has_popcnt", "has_cmpxchg16b"] { assert!(v2.contains(&f), "{} missing: {:?}", f, v2); }
-        assert!(!v2.contains(&"has_avx"));
+        for f in ["sse4.2", "popcnt", "cx16"] { assert!(v2.contains(&f), "{} missing: {:?}", f, v2); }
+        assert!(!v2.contains(&"avx"));
         assert!(flags(&["-mavx2", "-mno-sse"]).is_empty());
     }
 

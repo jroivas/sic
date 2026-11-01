@@ -11,7 +11,7 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_module::{DataDescription, FuncId, Linkage as CLinkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use sic_ir::{Backend, FuncRef, Linkage};
+use sic_ir::{Backend, BackendError, BackendOptions, FuncRef, Linkage, OptLevel};
 
 pub use types::cl_type;
 
@@ -25,94 +25,29 @@ pub enum CraneliftError {
     Unsupported(String),
 }
 
-pub struct CraneliftBackend {
-    pub ptr_size: u32,
-    /// Cranelift `opt_level` setting: "none", "speed", or "speed_and_size".
-    pub opt_level: String,
-    /// Emit DWARF debug info (line table + compile unit) when set (`-g`).
-    pub debug_info: bool,
-    /// Position-independent code (the default). Off (`-fno-PIE`, Linux's
-    /// `-mcmodel=kernel`): every symbol is assumed within ±2 GB, as GCC's
-    /// small/kernel code models do — direct `call`s and RIP-relative data
-    /// references, no GOT — and code holds no data (see `wide_consts`).
-    pub pic: bool,
-    /// Each function in its own section (`-ffunction-sections`, the default:
-    /// the driver links with `--gc-sections`); off, all code is in `.text`.
-    pub function_sections: bool,
-    /// SSE registers may be used (`-mno-sse` / `-mno-sse2`: not — Linux's
-    /// kernel code, which does not preserve the user's FPU state). Off, sic
-    /// emits no SSE: small copies use integer moves, a variadic function does
-    /// not save the vector argument registers, and a floating-point or vector
-    /// value is an error, as with GCC.
-    pub sse: bool,
-    /// The x87 FPU may be used (`-mno-80387`: not); sic needs it only for
-    /// `long double`.
-    pub x87: bool,
-    /// Code must hold no data (`-mcmodel=kernel`: Linux's objtool decodes all
-    /// of it): Cranelift's constant pool is avoided (`wide_consts`), and a
-    /// function that would still use one is an error. Needs non-PIC code.
-    pub no_text_data: bool,
-    /// The x64 extensions the code may use (Cranelift settings such as
-    /// `has_popcnt`, from `-march`/`-m…`): nothing of the build machine's CPU
-    /// beyond them (`cranelift_native` would enable all of its features).
-    pub isa_flags: Vec<String>,
-}
+#[derive(Default)]
+pub struct CraneliftBackend;
 
 impl CraneliftBackend {
-    pub fn new() -> Self {
-        CraneliftBackend { ptr_size: 8, opt_level: "none".to_string(), debug_info: false, pic: true, function_sections: true, sse: true, x87: true, no_text_data: false, isa_flags: Vec::new() }
-    }
-
-    /// Set the Cranelift `opt_level` ("none" | "speed" | "speed_and_size").
-    pub fn with_opt_level(mut self, opt_level: &str) -> Self {
-        self.opt_level = opt_level.to_string();
-        self
-    }
-
-    /// Enable DWARF debug-info emission.
-    pub fn with_debug_info(mut self, debug_info: bool) -> Self {
-        self.debug_info = debug_info;
-        self
-    }
-
-    /// Position-independent code or not (see `pic`).
-    pub fn with_pic(mut self, pic: bool) -> Self {
-        self.pic = pic;
-        self
-    }
-
-    /// Whether SSE and the x87 FPU may be used (see `sse`, `x87`).
-    pub fn with_float(mut self, sse: bool, x87: bool) -> Self {
-        self.sse = sse;
-        self.x87 = x87;
-        self
-    }
-
-    /// The x64 extensions the code may use (see `isa_flags`).
-    pub fn with_isa_flags(mut self, flags: Vec<String>) -> Self {
-        self.isa_flags = flags;
-        self
-    }
-
-    /// Keep data out of code (see `no_text_data`).
-    pub fn with_no_text_data(mut self, on: bool) -> Self {
-        self.no_text_data = on;
-        self
-    }
-
-    /// One section per function or all in `.text` (see `function_sections`).
-    pub fn with_function_sections(mut self, on: bool) -> Self {
-        self.function_sections = on;
-        self
-    }
+    pub fn new() -> Self { CraneliftBackend }
 }
 
 impl Backend for CraneliftBackend {
-    type Error = CraneliftError;
+    fn name(&self) -> &'static str { "cranelift" }
 
-    fn compile_module(&mut self, module: &sic_ir::Module) -> Result<Vec<u8>, CraneliftError> {
-        compile(module, self)
+    fn compile_module(&mut self, module: &sic_ir::Module, opts: &BackendOptions) -> Result<Vec<u8>, BackendError> {
+        Ok(compile(module, opts)?)
     }
+}
+
+/// Cranelift's x64 setting for an extension. `None`: only sic's intrinsics use it.
+fn isa_setting(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "sse3" => "has_sse3", "ssse3" => "has_ssse3", "sse4.1" => "has_sse41", "sse4.2" => "has_sse42",
+        "popcnt" => "has_popcnt", "avx" => "has_avx", "avx2" => "has_avx2", "fma" => "has_fma",
+        "cx16" => "has_cmpxchg16b",
+        _ => return None,
+    })
 }
 
 fn ir_linkage(l: Linkage) -> CLinkage {
@@ -127,8 +62,9 @@ fn ir_linkage(l: Linkage) -> CLinkage {
     }
 }
 
-fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>, CraneliftError> {
-    let (ptr_size, opt_level, debug_info) = (cfg.ptr_size, cfg.opt_level.as_str(), cfg.debug_info);
+fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, CraneliftError> {
+    let (ptr_size, debug_info) = (cfg.ptr_size, cfg.debug_info);
+    let opt_level = match cfg.opt { OptLevel::None => "none", OptLevel::Speed => "speed", OptLevel::Size => "speed_and_size" };
     // Build settings
     let mut flag_builder = settings::builder();
     let pic = if cfg.pic { "true" } else { "false" };
@@ -158,7 +94,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     let make_isa = |flags: settings::Flags| -> Result<cranelift_codegen::isa::OwnedTargetIsa, CraneliftError> {
         let mut b = cranelift_native::builder_with_options(false)
             .map_err(|e| CraneliftError::Unsupported(e.to_string()))?;
-        for f in &cfg.isa_flags {
+        for f in cfg.features.iter().filter_map(|f| isa_setting(f)) {
             b.enable(f).map_err(|e| CraneliftError::Unsupported(format!("{}: {}", f, e)))?;
         }
         b.finish(flags).map_err(|e| CraneliftError::Unsupported(e.to_string()))
@@ -191,7 +127,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     // Without SSSE3 Cranelift lowers a byte shuffle to a call of its
     // `X86Pshufb` libcall, which the embedder provides: define it here, local
     // to the object, when the module computes with vectors.
-    if cfg.sse && !cfg.isa_flags.iter().any(|f| f == "has_ssse3") && module_uses_simd(ir_module) {
+    if cfg.sse && !cfg.has_feature("ssse3") && module_uses_simd(ir_module) {
         define_pshufb_libcall(&mut obj_module)?;
     }
 

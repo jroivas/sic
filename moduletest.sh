@@ -1578,6 +1578,18 @@ EOF
 if env -u SIC_CPP -u CPP "$SIC" two.c three.c -o twothree 2>err && ./twothree; then ok "cpp-two-units"; else bad "cpp-two-units" "$(cat err)"; fi
 cd ..
 
+# ── which back end: -fbackend=, else $SIC_BACKEND, else the first built in ──
+mkdir -p backends && cd backends
+printf 'int main(void) { return 42; }\n' > a.c
+if "$SIC" -print-backends | grep -qx cranelift; then ok "backend-list"; else bad "backend-list" "no cranelift"; fi
+first="$("$SIC" -print-backends | head -1)"
+if "$SIC" -fbackend="$first" a.c -o a 2>err; ./a; [ $? -eq 42 ]; then ok "backend-select"; else bad "backend-select" "$(cat err)"; fi
+if "$SIC" -fbackend=nosuch -c a.c 2>err; then bad "backend-unknown" "accepted"
+elif grep -q "unknown back end 'nosuch'" err; then ok "backend-unknown"; else bad "backend-unknown" "$(cat err)"; fi
+if SIC_BACKEND=nosuch "$SIC" -c a.c 2>err; then bad "backend-env" "not honoured"
+elif SIC_BACKEND=nosuch "$SIC" -fbackend="$first" -c a.c 2>err; then ok "backend-env"; else bad "backend-env" "-fbackend should win: $(cat err)"; fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

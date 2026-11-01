@@ -44,7 +44,7 @@ mod rust_module;
 use clap::Parser as ClapParser;
 use sic_cranelift::CraneliftBackend;
 use sic_frontend::{preprocess_ex, Lexer, Parser, Lowerer};
-use sic_ir::{Backend, display::print_module};
+use sic_ir::{Backend, BackendOptions, OptLevel, display::print_module};
 use sic_opt::PassConfig;
 
 /// Value of a GCC/Clang-style `-f<name>` option.
@@ -421,6 +421,11 @@ fn handle_version_query(args: &[String]) -> bool {
             }
             // … and the linker it uses: wild built in, $SIC_LD, or the legacy
             // C driver named by $SIC_CC.
+            // The back ends this sic can use, the default first (`-fbackend=`).
+            "-print-backends" | "--print-backends" => {
+                for b in available_backends() { println!("{}", b.name()); }
+                return true;
+            }
             "-print-prog-name=ld" | "--print-prog-name=ld" => {
                 match legacy_link_driver() {
                     Some(cc) => println!("{} (legacy C driver, SIC_CC)", cc),
@@ -893,19 +898,35 @@ fn pass_config(args: &Args) -> PassConfig {
     cfg
 }
 
-/// Map a GCC-style `-O` level to a Cranelift `opt_level` setting.
-///   0/1        → none        (no Cranelift optimizer)
-///   2/3/higher → speed       (optimize for speed)
-///   s/z        → speed_and_size (optimize for size)
-fn opt_cranelift_level(opt: &str) -> &'static str {
+/// Map a GCC-style `-O` level to what a back end optimizes for.
+fn backend_opt_level(opt: &str) -> OptLevel {
     match opt {
-        "s" | "z" => "speed_and_size",
+        "s" | "z" => OptLevel::Size,
         _ => match opt.parse::<u32>() {
-            Ok(0) | Ok(1) => "none",
-            Ok(_) => "speed",
-            Err(_) => "none", // unrecognized level: stay safe
+            Ok(2..) => OptLevel::Speed,
+            _ => OptLevel::None, // unrecognized level: stay safe
         },
     }
+}
+
+/// The back ends built into this sic: the first is the default.
+fn available_backends() -> Vec<Box<dyn Backend>> {
+    vec![Box::new(CraneliftBackend::new())]
+}
+
+/// The back end `-fbackend=` or else `$SIC_BACKEND` names, else the default.
+fn select_backend(args: &Args) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    let name = match args.f_options.get("backend") {
+        Some(FOption::Value(v)) => Some(v.clone()),
+        _ => std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty()),
+    };
+    let mut backends = available_backends();
+    let Some(name) = name else { return Ok(backends.remove(0)) };
+    let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
+    let Some(i) = names.iter().position(|n| *n == name) else {
+        return Err(format!("unknown back end '{}' (this sic has: {})", name, names.join(", ")).into());
+    };
+    Ok(backends.remove(i))
 }
 
 /// Expand GCC/Clang `@file` response-file arguments into a flat argument list.
@@ -1364,15 +1385,19 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
     let kernel_model = args.machine_flags.iter().any(|m| m == "-mcmodel=kernel");
     let pic = args.pic_flag.unwrap_or(true) && !kernel_model;
     let function_sections = function_sections(args);
-    let mut backend = CraneliftBackend::new()
-        .with_opt_level(opt_cranelift_level(&args.opt))
-        .with_debug_info(args.debug_info)
-        .with_pic(pic)
-        .with_function_sections(function_sections)
-        .with_float(isa.sse2(), isa.x87())
-        .with_no_text_data(kernel_model)
-        .with_isa_flags(isa.cranelift_flags().into_iter().map(String::from).collect());
-    backend.compile_module(ir_module)
+    let opts = BackendOptions {
+        opt: backend_opt_level(&args.opt),
+        debug_info: args.debug_info,
+        pic,
+        function_sections,
+        sse: isa.sse2(),
+        x87: isa.x87(),
+        no_text_data: kernel_model,
+        features: isa.backend_features().into_iter().map(String::from).collect(),
+        ..BackendOptions::default()
+    };
+    let mut backend = select_backend(args)?;
+    backend.compile_module(ir_module, &opts)
         .map_err(|e| format!("codegen error: {}", e).into())
 }
 
