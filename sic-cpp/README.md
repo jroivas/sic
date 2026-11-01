@@ -4,6 +4,29 @@ A complete, standalone C preprocessor written entirely in [SIC](https://github.c
 Replaces the external `cpp` in the sic compiler pipeline, removing the
 dependency on a system C preprocessor.
 
+## As a module
+
+The preprocessor is the `sicpp` module in `lib/`, and the `sic-cpp` command in `src/`
+is a thin `main` over it:
+
+```c
+import sicpp;
+
+list<string> args;
+args.add("-P");
+sicpp::Output r = sicpp::RunText(args, info, "#define N 1\nint x = N;\n");
+// r.status, r.text, r.errors
+```
+
+  - `sicpp::Run(args, info)` preprocesses the input named in `args`, or standard input.
+  - `sicpp::RunText(args, info, text)` takes the input as `text` instead.
+
+`args` are the arguments of the `cpp` command, without a program name. `info` is what
+`sic -print-cpp-info` prints; with `""` it is looked for as the command does. `Output`
+holds the exit status the command would give, the output (empty with `-o`) and what it
+would print on standard error. Nothing exits the host program, and a run leaves no
+state for the next. One run at a time: it is not reentrant.
+
 ## Status
 
 This is a **first implementation** covering the core C preprocessor features

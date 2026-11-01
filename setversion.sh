@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CARGO="$ROOT/siccomp/Cargo.toml"
 MODULE="$ROOT/siccomp/crates/sic-ir/src/module.rs"
 FMT="$ROOT/sic-fmt/src/main.sic"
-CPP="$ROOT/sic-cpp/src/main.sic"
+CPP="$ROOT/sic-cpp/lib/sicpp.sic"
 
 current() { sed -n 's/^version = "\([0-9.]*\)"$/\1/p' "$CARGO" | head -n 1; }
 

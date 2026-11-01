@@ -1408,6 +1408,79 @@ else
 fi
 cd ..
 
+# ── sic-cpp as a module: `sicpp::RunText` in a program that must outlive every error,
+# run after run, with nothing carried over ──
+mkdir -p cppmod/sicpp && cd cppmod
+cp "$ROOT/sic-cpp/lib/sicpp.sic" sicpp/
+printf 'int from_header;\n' > inc.h
+printf '#include "self.h"\n' > self.h
+cat > use.sic <<'EOF'
+import std;
+import sicpp;
+extern char *getenv(char *name);
+
+i32 bad = 0;
+void check(bool c, i32 n) { if (!c) { std::Println("fail {}", n); bad = 1; } }
+
+sicpp::Output run(string text)
+{
+    string info = getenv("SICPP_INFO");
+    list<string> args;
+    args.add("-P");
+    return sicpp::RunText(args, info, text);
+}
+
+i32 main()
+{
+    sicpp::Output a = run("#define N 7\nint x = N;\n");
+    check(a.status == 0 && a.text.contains("int x = 7;") && a.errors.size == 0, 1);
+
+    // nothing carried over: no macro, and __COUNTER__ starts again
+    sicpp::Output b = run("int y = N;\nint c = __COUNTER__;\nint d = __COUNTER__;\n");
+    check(b.text.contains("int y = N;") && b.text.contains("int c = 0;") && b.text.contains("int d = 1;"), 2);
+    sicpp::Output c = run("int c = __COUNTER__;\n");
+    check(c.text.contains("int c = 0;"), 3);
+
+    // includes, and what would be standard error comes back
+    sicpp::Output d = run("#include \"inc.h\"\n#warning careful\n");
+    check(d.status == 0 && d.text.contains("int from_header;") && d.errors.contains("careful"), 4);
+
+    // every way a run fails returns to the caller, which goes on
+    sicpp::Output e = run("int before;\n#include \"no_such.h\"\nint after;\n");
+    check(e.status == 1 && e.errors.contains("no_such.h") && e.text.contains("int before;") && !e.text.contains("after"), 5);
+    sicpp::Output f = run("#error stop here\n");
+    check(f.status == 1 && f.errors.contains("stop here"), 6);
+    sicpp::Output g = run("#pragma GCC error \"bad\"\nint z;\n");
+    check(g.status == 1 && g.errors.contains("bad"), 7);
+    sicpp::Output h = run("#include \"self.h\"\n");
+    check(h.status == 1 && h.errors.size > 0, 8);
+
+    // and the next run is clean
+    sicpp::Output i = run("#define OK 1\nint ok = OK;\n");
+    check(i.status == 0 && i.text.contains("int ok = 1;") && i.errors.size == 0, 9);
+
+    // a bad command line
+    string info = getenv("SICPP_INFO");
+    list<string> args;
+    args.add("-I");
+    sicpp::Output j = sicpp::RunText(args, info, "");
+    check(j.status == 1 && j.errors.contains("missing argument"), 10);
+
+    for (i32 n = 0; n < 200; n++) {
+        sicpp::Output r = run("#define A(x) x + x\nint v = A(1);\n");
+        check(r.text.contains("int v = 1 + 1;"), 11);
+    }
+    return bad == 0 ? 42 : 1;
+}
+EOF
+if "$SIC" -O2 --emit-module sicpp 2>err && "$SIC" use.sic -I sicpp -o use 2>err; then
+    SICPP_INFO="$("$SIC" -print-cpp-info)" ./use > out 2>&1; got=$?
+    [ "$got" -eq 42 ] && ok "sicpp-api" || bad "sicpp-api" "expected 42, got $got: $(tail -3 out)"
+else
+    bad "sicpp-api" "compile failed: $(tail -3 err)"
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
