@@ -1,0 +1,75 @@
+
+extern "C" {
+    fn __sic_list_new() -> *mut c_void;
+    fn __sic_list_push(l: *mut c_void, vty: u64, vslot: u64, vowned: i32);
+    fn __sic_list_get(l: *mut c_void, i: u64, oty: *mut u64, oslot: *mut u64) -> i32;
+    fn __sic_list_len(l: *mut c_void) -> u64;
+    fn __sic_list_free(l: *mut c_void);
+}
+
+/// What a `SicList` can hold.
+pub trait SicElem: Sized {
+    #[doc(hidden)] unsafe fn push(l: *mut c_void, v: Self);
+    #[doc(hidden)] unsafe fn read(slot: u64) -> Self;
+}
+
+macro_rules! sic_elem_int {
+    ($($t:ty),*) => { $(impl SicElem for $t {
+        unsafe fn push(l: *mut c_void, v: Self) { __sic_list_push(l, 0, v as u64, 0); }
+        unsafe fn read(slot: u64) -> Self { slot as $t }
+    })* }
+}
+sic_elem_int!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+impl SicElem for SicString {
+    // An element's own block: [count][the descriptor][bytes], as the compiler boxes it.
+    unsafe fn push(l: *mut c_void, v: Self) {
+        let b = v.as_bytes();
+        let block = malloc(8 + 24 + b.len() + 1) as *mut u64;
+        *block = 1;
+        let desc = block.add(1) as *mut SicStr;
+        let text = block.add(4) as *mut u8;
+        std::ptr::copy_nonoverlapping(b.as_ptr(), text, b.len());
+        *text.add(b.len()) = 0;
+        *desc = SicStr { data: text as *const c_char, size: b.len() as u64, rc: block };
+        __sic_list_push(l, 0, desc as u64, 2);
+    }
+    unsafe fn read(slot: u64) -> Self {
+        let raw = *(slot as *const SicStr);
+        if raw.rc as usize > 1 { *raw.rc += 1; }
+        SicString::from_raw(raw)
+    }
+}
+
+/// A SIC `list<T>`, owned. Not `Send`, as `SicString`.
+pub struct SicList<T: SicElem> { handle: *mut c_void, _elem: PhantomData<T> }
+
+impl<T: SicElem> SicList<T> {
+    pub fn new() -> Self { SicList { handle: unsafe { __sic_list_new() }, _elem: PhantomData } }
+    unsafe fn from_raw(handle: *mut c_void) -> Self { SicList { handle, _elem: PhantomData } }
+    fn raw(&self) -> *mut c_void { self.handle }
+    pub fn push(&mut self, v: T) { unsafe { T::push(self.handle, v) } }
+    pub fn len(&self) -> usize { unsafe { __sic_list_len(self.handle) as usize } }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn get(&self, i: usize) -> Option<T> {
+        let (mut ty, mut slot) = (0u64, 0u64);
+        unsafe {
+            if __sic_list_get(self.handle, i as u64, &mut ty, &mut slot) == 0 { return None; }
+            Some(T::read(slot))
+        }
+    }
+}
+
+impl<T: SicElem> Default for SicList<T> { fn default() -> Self { Self::new() } }
+
+impl<T: SicElem> Drop for SicList<T> {
+    fn drop(&mut self) { unsafe { __sic_list_free(self.handle) } }
+}
+
+impl<S: AsRef<[u8]>> FromIterator<S> for SicList<SicString> {
+    fn from_iter<I: IntoIterator<Item = S>>(it: I) -> Self {
+        let mut l = SicList::new();
+        for s in it { l.push(SicString::new(s)); }
+        l
+    }
+}

@@ -365,3 +365,42 @@ consumer passes only `-I<dir>`, dynamic or `-static`. Several Rust modules can b
 linked into one program.
 
 Next: [the standard library](standard-library.md).
+
+## A SIC module as a Rust crate
+
+The other direction: `sic --emit-crate DIR` builds the folder module in `DIR`, as
+`--emit-module` does, and writes a Rust crate for it to `DIR/rust`, generated from the
+module's manifest. It depends on nothing but the module's own libraries, so another
+crate only needs a path dependency:
+
+```sh
+sic -O2 --emit-crate geom
+```
+
+```toml
+[dependencies]
+geom = { path = "geom/rust" }
+```
+
+```rust
+let g = geom::greet("rust");          // SicString
+let mut p = geom::mk(7, "pt");        // Point
+println!("{} {} {}", g, p.x, geom::sum(&mut p));
+```
+
+| SIC | Rust |
+|---|---|
+| integers, floats, `bool` | the same types |
+| `string` parameter | `impl AsRef<[u8]>`, copied into a SIC string |
+| `string` result | `SicString`: `Clone` and `Drop` count it |
+| `list<T>` of integers or `string` | `SicList<T>`: `new`, `push`, `get`, `len` |
+| struct | `#[repr(C)]` in SIC's physical field order, checked at compile time; `Drop` runs its destructor |
+| `S *` parameter | `&mut S` |
+
+A string field of a struct is a `SicStr`, a view the struct owns. A `string` need not be
+UTF-8, so `as_bytes()` is always there and `to_str()` can fail.
+
+A function with any other type (`any`, a closure, a tagged enum, a tuple) is left out,
+and named in a comment at the end of `src/bindings.rs`. Generic functions do not come
+across: only their source is in the manifest. Nothing here is `Send`, as SIC's reference
+counts are not atomic, and an uncaught SIC error ends the process, as in a C library.

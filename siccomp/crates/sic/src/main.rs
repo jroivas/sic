@@ -6,6 +6,7 @@ use std::process::Command;
 mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
+mod emit_crate;
 mod list_runtime;
 mod stringbuilder_runtime;
 mod tuple_runtime;
@@ -63,6 +64,11 @@ struct Args {
     /// (sic.md §"Imports").
     #[arg(long = "emit-module", value_name = "DIR")]
     emit_module: Option<String>,
+
+    /// sic: `--emit-module DIR`, then a Rust crate for the module in `DIR/rust`
+    /// (doc/rust-crates.md).
+    #[arg(long = "emit-crate", value_name = "DIR")]
+    emit_crate: Option<String>,
 
     /// Optimization level: 0 = none, 1 = const fold, 2/3 = + Cranelift optimizer
     /// (speed), s/z = optimize for size (Cranelift speed_and_size). A repeated `-O`
@@ -1754,6 +1760,10 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // ── Build a folder module (--emit-module DIR) ───────────────────────────────
     if let Some(dir) = args.emit_module.clone() {
         return emit_folder_module(&dir, args);
+    }
+    if let Some(dir) = args.emit_crate.clone() {
+        emit_folder_module(&dir, args)?;
+        return emit_crate::emit(&dir, 8);
     }
 
     // Split inputs into C sources (compiled) and object files (linked as-is).

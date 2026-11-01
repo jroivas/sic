@@ -1481,6 +1481,75 @@ else
 fi
 cd ..
 
+# ── a module as a Rust crate (--emit-crate): layout, ownership, and a string Rust no
+# longer has that SIC keeps ──
+if command -v cargo >/dev/null 2>&1; then
+    mkdir -p crate/geom crate/app/src && cd crate
+    cat > geom/geom.sic <<'EOF'
+module geom;
+struct point { i32 x; i32 y; string label; }
+i32 add(i32 a, i32 b) { return a + b; }
+string greet(string name) { return "hello " + name; }
+point mk(i32 x, string l) { point p; p.x = x; p.y = x * 2; p.label = l; return p; }
+i32 sum(point *p) { return p->x + p->y; }
+list<i32> upto(i32 n) { list<i32> l; for (i32 i = 0; i < n; i++) l.add(i); return l; }
+i32 total(list<i32> l) { i32 t = 0; for (i32 i = 0; i < l.length; i++) t += l[i]; return t; }
+string first(list<string> l) { return l[0]; }
+string keep_it = "";
+void keep(string s) { keep_it = s; }
+string kept() { return keep_it; }
+i32 not_for_rust(any a) { return 1; }
+EOF
+    cat > app/Cargo.toml <<'EOF'
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+geom = { path = "../geom/rust" }
+[workspace]
+EOF
+    cat > app/src/main.rs <<'EOF'
+use geom::*;
+fn main() {
+    assert_eq!(add(40, 2), 42);
+    assert_eq!(greet("rust").to_str().unwrap(), "hello rust");
+    let mut p = mk(7, "pt");
+    assert_eq!((p.x, p.y, p.label.to_str().unwrap()), (7, 14, "pt"));
+    assert_eq!(sum(&mut p), 21);
+    let l = upto(5);
+    assert_eq!((l.len(), l.get(3), l.get(9)), (5, Some(3), None));
+    let mut t = SicList::<i32>::new();
+    t.push(40);
+    t.push(2);
+    assert_eq!(total(&t), 42);
+    let s: SicList<SicString> = ["x", "y"].into_iter().collect();
+    assert_eq!(first(&s).to_str().unwrap(), "x");
+    { let tmp = String::from("gone from rust"); keep(&tmp); }
+    assert_eq!(kept().to_str().unwrap(), "gone from rust");
+    let c = greet("twice");
+    let d = c.clone();
+    drop(c);
+    assert_eq!(d.as_bytes(), b"hello twice");
+}
+EOF
+    if "$SIC" -O2 --emit-crate geom 2>err; then
+        if grep -q "not_for_rust" geom/rust/src/bindings.rs && ! grep -q "pub fn not_for_rust" geom/rust/src/bindings.rs; then
+            ok "crate-left-out"
+        else
+            bad "crate-left-out" "not_for_rust should be named as left out"
+        fi
+        if (cd app && CARGO_TARGET_DIR="$WORK/crate/target" cargo run --offline -q) >out 2>&1; then
+            ok "crate-run"
+        else
+            bad "crate-run" "$(tail -5 out)"
+        fi
+    else
+        bad "crate-run" "emit-crate failed: $(cat err)"
+    fi
+    cd ..
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

@@ -410,7 +410,8 @@ impl ModuleManifest {
                         .ok_or_else(|| format!("line {}: fn return type missing", lineno + 1))?;
                     let symbol = it.next()
                         .ok_or_else(|| format!("line {}: fn linker symbol missing", lineno + 1))?;
-                    let inner = plist.trim_start_matches('(').trim_end_matches(')');
+                    // One pair: the last type may end in its own `)`, `*@(list|i32)`.
+                    let inner = plist.strip_prefix('(').and_then(|p| p.strip_suffix(')')).unwrap_or(plist);
                     let mut variadic = false;
                     let mut params = Vec::new();
                     for tok in inner.split(',') {
