@@ -41,13 +41,31 @@ pub fn function_return_type(name: &str) -> Option<Type> {
     })
 }
 
+thread_local! {
+    static GLOBAL_ALIGNS: std::cell::RefCell<HashMap<String, u32>> = std::cell::RefCell::new(HashMap::default());
+}
+
 /// Record file-scope variable `name`'s type for constant folding.
 pub fn note_global_var(name: &str, ty: &Type) {
     GLOBAL_VAR_TYPES.with(|m| { m.borrow_mut().insert(name.to_string(), ty.clone()); });
 }
 
 /// Forget all recorded file-scope variables (start of a translation unit).
+/// `name`'s alignment, if it has its own: `aligned`, `_Alignas`, a typedef's.
+pub fn note_global_align(name: &str, align: u32) {
+    GLOBAL_ALIGNS.with(|g| {
+        let mut g = g.borrow_mut();
+        let a = g.entry(name.to_string()).or_insert(0);
+        *a = (*a).max(align);
+    });
+}
+
+pub fn global_align(name: &str) -> Option<u32> {
+    GLOBAL_ALIGNS.with(|g| g.borrow().get(name).copied())
+}
+
 pub fn clear_global_vars() {
+    GLOBAL_ALIGNS.with(|g| g.borrow_mut().clear());
     GLOBAL_VAR_TYPES.with(|m| m.borrow_mut().clear());
 }
 
@@ -1212,12 +1230,12 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e, named, ptr_size)).transpose()?;
         fty = c_bitfield_field_type(fty, bw);
         if bw.is_some() { any_bitfield = true; }
-        let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
+        let (falign, fpacked) = member_align(f, s.packed, named, ptr_size)?;
         if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
         bitfields.push(bw);
         field_aligns.push(falign);
-        field_packed.push(f.packed);
+        field_packed.push(fpacked);
     }
     let any_packed = field_packed.iter().any(|p| *p);
     Ok(Type::Struct(StructType { pack_limit: s.pack,
@@ -1242,6 +1260,17 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
 /// expression that needs type sizes (`aligned(sizeof(struct S))`, Linux's
 /// call_single_data_t), the larger of the two. An expression that does not
 /// fold is an error, as in GCC.
+/// A member's `aligned` value and whether it is packed. A typedef's alignment may
+/// be below the natural one, so such a member is packed and then aligned, which is
+/// exact either way; `packed` beats it, and `aligned` on the member only raises it.
+pub(crate) fn member_align(f: &crate::ast::FieldDecl, aggregate_packed: bool, named: &HashMap<String, Type>, ptr_size: u32) -> Result<(Option<u32>, bool)> {
+    let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
+    match f.ty.type_align() {
+        Some(a) if !f.packed && !aggregate_packed => Ok((falign.max(Some(a)), true)),
+        _ => Ok((falign, f.packed)),
+    }
+}
+
 pub(crate) fn attr_align(n: Option<u32>, e: &Option<crate::ast::BoxExpr>, named: &HashMap<String, Type>, ptr_size: u32) -> Result<Option<u32>> {
     let Some(e) = e else { return Ok(n) };
     let v = ENUM_CONSTS.with(|ec| eval_const_size(e, named, ptr_size, &ec.borrow()))
@@ -1297,6 +1326,7 @@ fn eval_const_size_typed(
             Some(size_t(c_size_of(&t, ptr_size) as i64))
         }
         ExprKind::AlignofType(qt) => {
+            if let Some(a) = qt.type_align() { return Some(size_t(a as i64)); }
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
             Some(size_t(t.align_of(ptr_size) as i64))
         }
@@ -1312,7 +1342,12 @@ fn eval_const_size_typed(
             if matches!(t, Type::Array { len: 0, .. }) { return None; }
             Some(size_t(c_size_of(&t, ptr_size) as i64))
         }
-        ExprKind::AlignofExpr(x) => Some(size_t(global_expr_type(x)?.align_of(ptr_size) as i64)),
+        ExprKind::AlignofExpr(x) => {
+            if let ExprKind::Ident(n) = &x.kind {
+                if let Some(a) = global_align(n) { return Some(size_t(a as i64)); }
+            }
+            Some(size_t(global_expr_type(x)?.align_of(ptr_size) as i64))
+        }
         // `__builtin_types_compatible_p(typeof(g), typeof(&g[0]))` (QEMU_IS_ARRAY).
         ExprKind::TypesCompatible(a, b) => {
             let ty_of = |qt: &crate::ast::QualType| match &qt.ty {
@@ -1515,11 +1550,11 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
         let fname = f.name.clone().unwrap_or_default();
         check_member_dims(&f.ty.ty, named, ptr_size)?;
         let fty = union_member_type(f, lower_type(&f.ty, named, ptr_size)?, named, ptr_size)?;
-        let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
+        let (falign, fpacked) = member_align(f, u.packed, named, ptr_size)?;
         if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));
         field_aligns.push(falign);
-        field_packed.push(f.packed);
+        field_packed.push(fpacked);
     }
     let any_packed = field_packed.iter().any(|p| *p);
     Ok(Type::Union(UnionType { pack_limit: u.pack,

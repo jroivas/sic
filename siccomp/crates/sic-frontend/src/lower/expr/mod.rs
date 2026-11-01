@@ -115,7 +115,7 @@ impl<'m> FuncCtx<'m> {
             init: Some(Constant::Bytes(bytes)),
             linkage: Linkage::Private,
             constant: true,
-            thread_local: false,
+            thread_local: false, align: None,
         };
         let gref = self.lowerer.module.add_global(g);
         let ptr_id = self.alloc_val();
@@ -1269,11 +1269,20 @@ impl<'m> FuncCtx<'m> {
             }
 
             ExprKind::AlignofType(ty) => {
-                let a = self.lower_type(ty)?.align_of(self.ptr_size());
+                if let crate::ast::AstType::Typeof(e) = &ty.ty {
+                    if let Some(a) = self.object_align(e) { return Ok(self.size_t_val(a)); }
+                }
+                let a = match ty.type_align() {
+                    Some(a) => a as u64,
+                    None => self.lower_type(ty)?.align_of(self.ptr_size()),
+                };
                 Ok(self.size_t_val(a))
             }
             ExprKind::AlignofExpr(inner) => {
-                let a = self.sizeof_operand_type(inner)?.align_of(self.ptr_size());
+                let a = match self.object_align(inner) {
+                    Some(a) => a,
+                    None => self.sizeof_operand_type(inner)?.align_of(self.ptr_size()),
+                };
                 Ok(self.size_t_val(a))
             }
 
@@ -1555,7 +1564,7 @@ impl<'m> FuncCtx<'m> {
             fn_body.push(ast::Stmt::Decl(ast::Decl::Var {
                 base_ty: auto_qt.clone(),
                 declarators: vec![ast::Declarator {
-                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, unused: false, section: None, reg: None, span: span.clone(),
+                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: span.clone(),
                 }],
                 weak: false, thread_local: false, span: span.clone(),
             }));
@@ -5570,6 +5579,29 @@ impl<'m> FuncCtx<'m> {
     /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
     /// is a struct type registered under that bare name (a type spelled as an
     /// expression), else an error.
+    /// The alignment of the object `e` names, where it can differ from its type's:
+    /// a variable's own, or a member's.
+    fn object_align(&self, e: &Expr) -> Option<u64> {
+        match &e.kind {
+            ExprKind::Ident(name) => match self.lookup(name)? {
+                LookupResult::Local(_, v) => self.local_aligns.get(&v.0).map(|a| *a as u64),
+                LookupResult::Global(_, g) =>
+                    super::types::global_align(&self.lowerer.module.globals[g.0 as usize].name).map(|a| a as u64),
+                _ => None,
+            },
+            ExprKind::Field { base, name } | ExprKind::Arrow { base, name } => {
+                let mut t = self.sizeof_operand_type(base).ok()?;
+                if let (ExprKind::Arrow { .. }, Type::Pointer(p)) = (&e.kind, &t) { t = (**p).clone(); }
+                match super::types::resolve_aggregate(&t, &self.lowerer.struct_types) {
+                    Type::Struct(s) => Some(s.member_align(s.fields.iter().position(|(n, _)| n == name)?, self.ptr_size())),
+                    Type::Union(u) => Some(u.member_align(u.fields.iter().position(|(n, _)| n == name)?, self.ptr_size())),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn sizeof_operand_type(&self, e: &Expr) -> Result<Type> {
         if let ExprKind::Ident(name) = &e.kind {
             if self.lookup(name).is_none()

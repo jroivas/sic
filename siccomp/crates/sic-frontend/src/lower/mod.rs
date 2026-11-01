@@ -695,6 +695,7 @@ impl Lowerer {
             eprintln!("sic: {}", note);
         }
 
+        for g in &mut self.module.globals { g.align = types::global_align(&g.name); }
         Ok(self.module)
     }
 
@@ -1373,12 +1374,12 @@ impl Lowerer {
                     self.atomic_fields.insert((name.clone(), fname.clone()));
                 }
                 if bw.is_some() { any_bitfield = true; }
-                let falign = types::attr_align(f.align, &f.align_expr, &self.struct_types, self.ptr_size)?;
+                let (falign, fpacked) = types::member_align(f, s.packed, &self.struct_types, self.ptr_size)?;
                 if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 bitfields.push(bw);
                 field_aligns.push(falign);
-                field_packed.push(f.packed);
+                field_packed.push(fpacked);
             }
             if !weak_fields.is_empty() {
                 self.struct_weak_fields.insert(name.clone(), weak_fields);
@@ -1453,11 +1454,11 @@ impl Lowerer {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
                 let fty = types::union_member_type(f, lower_type(&f.ty, &self.struct_types, self.ptr_size)?, &self.struct_types, self.ptr_size)?;
-                let falign = types::attr_align(f.align, &f.align_expr, &self.struct_types, self.ptr_size)?;
+                let (falign, fpacked) = types::member_align(f, u.packed, &self.struct_types, self.ptr_size)?;
                 if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));
                 field_aligns.push(falign);
-                field_packed.push(f.packed);
+                field_packed.push(fpacked);
             }
             let ir_ty = Type::Union(UnionType { pack_limit: u.pack,
                 packed: u.packed, field_packed: if field_packed.iter().any(|p| *p) { field_packed } else { Vec::new() },
@@ -1484,7 +1485,7 @@ impl Lowerer {
             init: Some(Constant::Bytes(types::wide_string_bytes(units, prefix, units.len() + 1))),
             linkage: Linkage::Private,
             constant: true,
-            thread_local: false,
+            thread_local: false, align: None,
         };
         self.module.add_global(g)
     }
@@ -1498,7 +1499,7 @@ impl Lowerer {
             init: Some(Constant::Bytes(bytes)),
             linkage: Linkage::Private,
             constant: true,
-            thread_local: false,
+            thread_local: false, align: None,
         };
         self.module.add_global(g)
     }
@@ -2032,7 +2033,7 @@ impl Lowerer {
                 name: gn,
                 ty: Type::Array { elem: Box::new(Type::i8()), len },
                 init: Some(Constant::Bytes(nb)),
-                linkage: Linkage::Private, constant: true, thread_local: false,
+                linkage: Linkage::Private, constant: true, thread_local: false, align: None,
             })
         };
         let id = t::type_id_hash(name);
@@ -2048,7 +2049,7 @@ impl Lowerer {
                 relocs: std::iter::once((t::TYPEINFO_OFF_NAME, RelocTarget::Global(name_g, 0)))
                     .chain(clone.map(|f| (t::TYPEINFO_OFF_CLONE, RelocTarget::Func(f)))).collect(),
             }),
-            linkage: Linkage::Private, constant: true, thread_local: false,
+            linkage: Linkage::Private, constant: true, thread_local: false, align: None,
         });
         self.type_info_globals.insert(key, g);
         g
@@ -2075,7 +2076,7 @@ impl Lowerer {
             name: format!(".tshape.{}", self.module.globals.len()),
             ty: Type::Array { elem: Box::new(Type::i8()), len: bytes.len().max(8) },
             init: Some(Constant::Aggregate { bytes, relocs }),
-            linkage: Linkage::Private, constant: true, thread_local: false,
+            linkage: Linkage::Private, constant: true, thread_local: false, align: None,
         });
         self.tuple_shape_globals.insert(key, g);
         g
@@ -3344,7 +3345,19 @@ impl Lowerer {
         }
     }
 
+    /// The alignment a variable's declaration asks for: `_Alignas`, `aligned`, or
+    /// its typedef's; a typedef's may be below the natural one.
+    pub(crate) fn decl_align(&self, d: &Declarator, base_ty: &QualType) -> Result<Option<u32>> {
+        let alignas = base_ty.qualifiers.iter().find_map(|q| match q {
+            crate::ast::TypeQual::Align(n) => Some(*n),
+            _ => None,
+        });
+        let attr = types::attr_align(d.align, &d.align_expr, &self.struct_types, self.ptr_size)?;
+        Ok(attr.max(alignas).max(d.ty.type_align()))
+    }
+
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {
+        if let Some(a) = self.decl_align(d, base_ty)? { types::note_global_align(&d.name, a); }
         // A weak declaration makes the symbol weak for good.
         let weak = weak || self.weak_vars.contains(&d.name);
         if weak && !self.weak_vars.contains(&d.name) { self.weak_vars.push(d.name.clone()); }
@@ -3445,7 +3458,7 @@ impl Lowerer {
             let g = Global {
                 name: d.name.clone(), ty: ir_ty.clone(), init: None,
                 linkage: placeholder_linkage, constant: type_is_const(&d.ty),
-                thread_local,
+                thread_local, align: None,
             };
             let gref = self.module.add_global(g);
             self.globals_map.insert(d.name.clone(), (ir_ty.clone(), gref));
@@ -3536,7 +3549,7 @@ impl Lowerer {
             _ => Linkage::External,
         };
         let ty_for_map = map_ty;
-        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty), thread_local };
+        let g = Global { name: d.name.clone(), ty: ir_ty, init, linkage, constant: type_is_const(&d.ty), thread_local, align: None };
         let gref = self.module.add_global(g);
         self.globals_map.insert(d.name.clone(), (ty_for_map, gref));
         Ok(())
@@ -3549,7 +3562,7 @@ impl Lowerer {
         self.note_data_section(&name, d);
         // Reserved first: the initializer may name the variable itself.
         let gref = self.module.add_global(Global { name: name.clone(), ty: ir_ty.clone(), init: None,
-            linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false });
+            linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false, align: None });
         self.scoped_statics.insert(d.name.clone(), (ir_ty.clone(), gref));
         self.global_init_unserializable = false;
         let declared_ty = ir_ty.clone();
@@ -4563,7 +4576,7 @@ impl Lowerer {
             Constant::Aggregate { bytes: buf, relocs }
         };
         let name = format!(".compound.{}", self.module.globals.len());
-        let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true, thread_local: false };
+        let g = Global { name, ty: ir_ty, init: Some(constant), linkage: Linkage::Private, constant: true, thread_local: false, align: None };
         Some(self.module.add_global(g))
     }
 

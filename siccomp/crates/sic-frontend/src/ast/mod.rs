@@ -15,6 +15,14 @@ pub struct QualType {
 impl QualType {
     pub fn new(ty: AstType) -> Self { QualType { ty, qualifiers: vec![], storage: None } }
     pub fn is_const(&self) -> bool { self.qualifiers.contains(&TypeQual::Const) }
+    /// The alignment this type has from a typedef: its own, or its element's.
+    pub fn type_align(&self) -> Option<u32> {
+        let own = self.qualifiers.iter().find_map(|q| match q { TypeQual::TypeAlign(n) => Some(*n), _ => None });
+        match &self.ty {
+            AstType::Array { base, .. } if own.is_none() => base.type_align(),
+            _ => own,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +30,10 @@ pub enum TypeQual {
     Const, Volatile, Restrict, Atomic,
     /// `_Alignas(N)` / `alignas(N)` — the requested alignment in bytes.
     Align(u32),
+    /// The alignment of a typedef name with `__attribute__((aligned(N)))`, on a
+    /// type written with that name: raises or lowers the natural one, as IR scalar
+    /// types have no alignment of their own. See `QualType::type_align`.
+    TypeAlign(u32),
     /// `inline` function specifier (carried on the decl-specifier `QualType` so
     /// function definitions can record it; see `Decl::Func::inline`).
     Inline,
@@ -279,6 +291,10 @@ pub struct Declarator {
     /// `__attribute__((cleanup(fn)))`: call `fn(&var)` when the variable goes
     /// out of scope (glib's `g_autoptr`, QEMU's `QEMU_LOCK_GUARD`).
     pub cleanup: Option<String>,
+    /// `__attribute__((aligned(N)))` on the variable (or on its whole group).
+    pub align: Option<u32>,
+    /// See `StructDef::align_expr`.
+    pub align_expr: Option<BoxExpr>,
     /// `__attribute__((unused))` / `[[maybe_unused]]`: no -Wunused-variable.
     pub unused: bool,
     /// `__attribute__((section("name")))`: the object goes in that section.

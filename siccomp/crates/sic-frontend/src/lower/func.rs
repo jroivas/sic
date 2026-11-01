@@ -337,6 +337,8 @@ pub struct FuncCtx<'m> {
     pub indirect_gotos: Vec<(BlockId, Val)>,
     /// Each label's cleanups when it was defined (see `active_cleanup_counts`).
     pub label_scopes: HashMap<String, Vec<(u32, usize)>>,
+    /// Stack slots with an alignment of their own, for `_Alignof`.
+    pub local_aligns: HashMap<u32, u32>,
     /// Last initialized local variable (for implicit return in sic)
     pub last_init_local: Option<(ValId, Type)>,
     /// The most recently registered managed-struct call temporary.
@@ -513,6 +515,7 @@ impl<'m> FuncCtx<'m> {
             addr_labels: Vec::new(),
             indirect_gotos: Vec::new(),
             label_scopes: HashMap::default(),
+            local_aligns: HashMap::default(),
             last_init_local: None,
             last_struct_temp: None,
             pretty_func: String::new(),
@@ -2889,11 +2892,6 @@ impl<'m> FuncCtx<'m> {
         match decl {
             Decl::StaticAssert { cond, msg, span } => self.lowerer.check_static_assert(cond, msg, span)?,
             Decl::Var { base_ty, declarators, .. } => {
-                // `_Alignas(N)` / `alignas(N)` requested alignment, if any.
-                let explicit_align = base_ty.qualifiers.iter().find_map(|q| match q {
-                    crate::ast::TypeQual::Align(n) => Some(*n),
-                    _ => None,
-                });
                 match &self.resolve_typeof(&base_ty.ty)? {
                     AstType::Struct(s) => {
                         self.lowerer.register_struct_type_from_def(s)?;
@@ -2965,6 +2963,7 @@ impl<'m> FuncCtx<'m> {
                         let vars = self.locals.iter().flatten().map(|(n, (t, _))| (n.clone(), t.clone())).collect();
                         super::types::set_local_var_types(vars);
                         self.lowerer.scoped_fn_name = Some(fname);
+                        if let Some(a) = self.lowerer.decl_align(d, base_ty)? { super::types::note_global_align(&gname, a); }
                         let added = self.lowerer.add_static_local_global(gname, d, ty);
                         self.lowerer.scoped_fn_name = None;
                         super::types::set_local_var_types(HashMap::default());
@@ -3187,6 +3186,8 @@ impl<'m> FuncCtx<'m> {
                         ty = Type::Array { elem, len };
                     }
                     let vid = self.alloc_val();
+                    let explicit_align = self.lowerer.decl_align(d, base_ty)?;
+                    if let Some(a) = explicit_align { self.local_aligns.insert(vid.0, a); }
                     self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: explicit_align });
 
                     // Bind the name in scope *before* lowering the initializer:
@@ -5624,14 +5625,14 @@ impl<'m> FuncCtx<'m> {
             let zero = Expr { kind: ExprKind::IntLit(0, false), span: sp.clone() };
             let idx = Decl::Var {
                 base_ty: ulong(),
-                declarators: vec![crate::ast::Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             };
             let cond = Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, lhs: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }), rhs: Box::new(len) }, span: sp.clone() };
             let post = Expr { kind: ExprKind::PreInc { inc: true, expr: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }) }, span: sp.clone() };
             let item = Stmt::Decl(Decl::Var {
                 base_ty: item_ty.clone(),
-                declarators: vec![crate::ast::Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::Block(vec![item, body], sp.clone());
@@ -5644,7 +5645,7 @@ impl<'m> FuncCtx<'m> {
             let at = QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) };
             Stmt::Decl(Decl::Var {
                 base_ty: at.clone(),
-                declarators: vec![crate::ast::Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             })
         };
@@ -5671,7 +5672,7 @@ impl<'m> FuncCtx<'m> {
                 let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))), vector: false }, qualifiers: vec![], storage: None };
                 let arr_decl = Stmt::Decl(Decl::Var {
                     base_ty: QualType::new(AstType::Int { signed: true }),
-                    declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                    declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                     weak: false, thread_local: false, span: sp.clone(),
                 });
                 // item = (enum Canon) __fe_vals_N[i]
@@ -5766,7 +5767,7 @@ impl<'m> FuncCtx<'m> {
             let sname = format!("__fe_src_{}", uid);
             let src_decl = Stmt::Decl(Decl::Var {
                 base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                declarators: vec![crate::ast::Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::ForEach { ty: ty.clone(), name: name.to_string(), iterable: ident(&sname), body: Box::new(body.clone()), span: sp.clone() };
@@ -5782,14 +5783,14 @@ impl<'m> FuncCtx<'m> {
                     // auto __fe_it = <iterable>;   (a mutable copy the loop advances)
                     let it_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![crate::ast::Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // auto __fe_step = __fe_it.next();
                     let call = mk(ExprKind::Call { func: Box::new(mk(ExprKind::Field { base: Box::new(ident(&itname)), name: "next".to_string() })), args: vec![] });
                     let step_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![crate::ast::Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // match (__fe_step) { Next(name): { body }  Stop: break; }
@@ -6672,7 +6673,7 @@ fn tco_replace(s: &mut Stmt, name: &str, params: &[AstParam], label: &str) {
                         base_ty: params[i].ty.clone(),
                         declarators: vec![crate::ast::Declarator {
                             name: tn, ty: params[i].ty.clone(),
-                            init: Some(Initializer::Expr(a.clone())), cleanup: None, unused: false, section: None, reg: None, span: sp.clone(),
+                            init: Some(Initializer::Expr(a.clone())), cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone(),
                         }],
                         weak: false, thread_local: false, span: sp.clone(),
                     }));

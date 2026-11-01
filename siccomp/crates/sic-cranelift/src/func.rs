@@ -367,6 +367,17 @@ pub fn compile_function(
                 let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
                 if let Some(req) = align { align_bytes = align_bytes.max(*req); }
                 let align_bytes = align_bytes.next_power_of_two();
+                // The frame itself is 16-aligned: above that, make room and round.
+                if align_bytes > 16 {
+                    let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                        cir::StackSlotKind::ExplicitSlot, size + align_bytes, 4,
+                    ));
+                    let base = builder.ins().stack_addr(ptr_ty, slot, 0);
+                    let up = builder.ins().iadd_imm_s(base, align_bytes as i64 - 1);
+                    let addr = builder.ins().band_imm_s(up, -(align_bytes as i64));
+                    val_map.insert(dest.0, addr);
+                    continue;
+                }
                 let align_shift = align_bytes.trailing_zeros() as u8;
                 let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
                     cir::StackSlotKind::ExplicitSlot, size, align_shift,
@@ -460,7 +471,7 @@ fn emit_instr(
             // A register-promoted scalar local has no stack slot (it is a Variable).
             if promoted.contains_key(&dest.0) { return; }
             // Already materialized in the entry block by the up-front pre-pass.
-            if slot_map.contains_key(&dest.0) { return; }
+            if val_map.contains_key(&dest.0) { return; }
             let size = ty.size_of(ptr_size).max(1) as u32;
             // `_Alignas` overrides the natural alignment (take the larger).
             let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;

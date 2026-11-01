@@ -359,7 +359,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         // Align the global to its type's natural alignment. Without this the
         // linker packs data byte-aligned, so a struct/array of pointers can land
         // on an odd address and pointer loads read straddled, garbage bytes.
-        desc.set_align(g.ty.align_of(ptr_size).max(1));
+        desc.set_align(g.ty.align_of(ptr_size).max(g.align.unwrap_or(0) as u64).max(1));
         let size = g.ty.size_of(ptr_size) as usize;
         match &g.init {
             Some(sic_ir::Constant::Bytes(b)) => {

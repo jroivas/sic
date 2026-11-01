@@ -357,7 +357,7 @@ impl FuncCtx<'_> {
                 init: Some(Constant::Bytes(bytes)),
                 linkage: Linkage::Private,
                 constant: true,
-                thread_local: false,
+                thread_local: false, align: None,
             })
         };
         Val::Global(gref)

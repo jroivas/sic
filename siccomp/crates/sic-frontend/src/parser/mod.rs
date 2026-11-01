@@ -115,6 +115,11 @@ pub struct Parser {
     /// An `aligned(EXPR)` the parser cannot evaluate (it needs type sizes):
     /// taken together with `pending_aligned`.
     pending_aligned_expr: Option<BoxExpr>,
+    /// Typedef names with an alignment of their own (`typedef long long q
+    /// __attribute__((aligned(4)))`), inherited by a typedef of one.
+    typedef_aligns: HashMap<String, u32>,
+    /// A statement began with attributes, kept for a declaration.
+    stmt_attrs: bool,
     /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
     /// `private` keyword has been consumed and applies to the next aggregate.
     pending_private: bool,
@@ -192,7 +197,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -366,6 +371,8 @@ impl Parser {
         self.pending_gnu_inline = false;
         self.pending_weak = false;
         self.pending_thread_local = false;
+        self.pending_aligned = None;
+        self.pending_aligned_expr = None;
     }
 
     /// Past the balanced `{ ... }` the parser is at.
@@ -605,6 +612,10 @@ impl Parser {
             return self.parse_typedef(base_ty, sp);
         }
 
+        // `aligned` in the specifiers is for every declarator.
+        let group_align = self.pending_aligned.take();
+        let group_align_expr = self.pending_aligned_expr.take();
+
         // Try to parse first declarator
         let (name, ty) = self.parse_declarator(base_ty.clone())?;
 
@@ -717,8 +728,10 @@ impl Parser {
             None
         };
         if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &sp)?; }
+        let align = self.pending_aligned.take().max(group_align);
+        let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
         // A `section` attribute in the specifiers applies to every declarator.
-        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, section: self.pending_section.clone(), reg: None, span: sp.clone() });
+        declarators.push(Declarator { name, ty, init, cleanup: None, align, align_expr, unused: false, section: self.pending_section.clone(), reg: None, span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
@@ -726,9 +739,11 @@ impl Parser {
             let (n, mut t) = self.parse_declarator(base_ty.clone())?;
             self.skip_decl_tail();
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
+            let align = self.pending_aligned.take().max(group_align);
+            let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
-            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, section: self.pending_section.clone(), reg: None, span: self.span() });
+            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, align, align_expr, unused: false, section: self.pending_section.clone(), reg: None, span: self.span() });
         }
         self.expect_semi("the declaration")?;
 
@@ -793,6 +808,9 @@ impl Parser {
 
     fn parse_typedef(&mut self, base_ty: QualType, sp: Span) -> Result<Decl> {
         let mut names = Vec::new();
+        // `aligned` in the specifiers is for every name.
+        let group_align = self.pending_aligned.take();
+        let group_align_expr = self.pending_aligned_expr.take();
         loop {
             // A trailing `__attribute__((vector_size(N)))` turns the typedef into
             // an N-byte SIMD vector (represented as an array — see apply_vector_size).
@@ -808,19 +826,32 @@ impl Parser {
             }
             // `typedef struct {...} Name QEMU_ALIGNED(N)`: the alignment attaches
             // to the aliased struct/union type (QEMU's CPUTLBDescFast etc.).
-            if let Some(n) = self.pending_aligned.take() {
+            // Any other type has no alignment of its own: the name keeps it.
+            let mut own = None;
+            if let Some(n) = self.pending_aligned.take().or(group_align) {
                 match &mut ty.ty {
                     AstType::Struct(sd) => sd.align = Some(sd.align.unwrap_or(0).max(n)),
                     AstType::Union(ud)  => ud.align = Some(ud.align.unwrap_or(0).max(n)),
-                    _ => {}
+                    _ => own = Some(n),
                 }
             }
-            if let Some(e) = self.pending_aligned_expr.take() {
+            if let Some(e) = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone()) {
                 match &mut ty.ty {
                     AstType::Struct(sd) => sd.align_expr = Some(e),
                     AstType::Union(ud)  => ud.align_expr = Some(e),
-                    _ => {}
+                    _ => {
+                        let v = crate::lower::eval_const_expr(&e, &sic_ir::fast_hash::HashMap::default())
+                            .ok().filter(|v| *v > 0 && (*v as u64).is_power_of_two())
+                            .ok_or_else(|| CompileError::at(
+                                format!("the `aligned` value of typedef `{}` is not supported (it needs a type size)", name),
+                                e.span.file.clone(), e.span.line, e.span.col))?;
+                        own = Some(v as u32);
+                    }
                 }
+            }
+            match own.or_else(|| ty.type_align()) {
+                Some(a) => { self.typedef_aligns.insert(name.clone(), a); }
+                None => { self.typedef_aligns.remove(&name); }
             }
             self.typedefs.insert(name.clone());
             names.push((name, ty));
@@ -1210,6 +1241,10 @@ impl Parser {
         qt.qualifiers = quals;
         qt.storage = storage.clone();
 
+        let mut qt = qt;
+        if let AstType::Named(n) = &qt.ty {
+            if let Some(a) = self.typedef_aligns.get(n) { qt.qualifiers.push(TypeQual::TypeAlign(*a)); }
+        }
         Ok((qt, storage))
     }
 
@@ -1266,7 +1301,7 @@ impl Parser {
         let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
         Ok(Decl::Var {
             base_ty: base_ty.clone(),
-            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
+            declarators: vec![Declarator { name, ty, init, cleanup: None, align: None, align_expr: None, unused: false, section: None, reg: None, span: sp.clone() }],
             weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp,
         })
     }
@@ -1556,7 +1591,8 @@ impl Parser {
             // applying to every declarator in the group) or trail an individual
             // member; capture both. `parse_declarator` runs `skip_attributes`
             // for the trailing form.
-            let group_align = self.pending_aligned.take();
+            let alignas = base_ty.qualifiers.iter().find_map(|q| match q { TypeQual::Align(n) => Some(*n), _ => None });
+            let group_align = self.pending_aligned.take().max(alignas);
             let group_align_expr = self.pending_aligned_expr.take();
             let (name, ty) = self.parse_declarator(base_ty.clone())?;
             let bit_width = if self.eat(TokenKind::Colon) {
@@ -1566,7 +1602,7 @@ impl Parser {
             };
             // Trailing field attribute, e.g. `int x __attribute__((aligned(8)));`.
             self.skip_attributes();
-            let align = self.pending_aligned.take().or(group_align);
+            let align = self.pending_aligned.take().max(group_align);
             let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
             let packed = std::mem::take(&mut self.pending_packed) || group_packed;
             fields.push(FieldDecl { name: Some(name), ty, bit_width, align, align_expr, packed, span: sp.clone() });
@@ -2349,14 +2385,23 @@ impl Parser {
             TokenKind::Extension => { self.advance(); self.parse_stmt() }
             // Statement attribute, e.g. `__attribute__((fallthrough));`.
             TokenKind::Attribute => {
+                self.pending_aligned = None;
+                self.pending_aligned_expr = None;
                 self.skip_attributes();
-                if self.eat(TokenKind::Semi) { Ok(Stmt::Null(sp)) } else { self.parse_stmt() }
+                if self.eat(TokenKind::Semi) { return Ok(Stmt::Null(sp)); }
+                // `__attribute__((aligned(N))) T x;`: it stays for the declaration.
+                self.stmt_attrs = true;
+                self.parse_stmt()
             }
             // sic guard `… else <stmt>` (sic.md §"Match"): a bind (`auto x = opt
             // else …`) or boolean (`cond else …`) early-exit. Detected by an `else`
             // at depth 0 before the statement's `;`.
             _ if self.lang == Lang::Sic && self.stmt_has_guard_else() => self.parse_guard(sp),
             _ if self.is_decl_start() => {
+                if !std::mem::take(&mut self.stmt_attrs) {
+                    self.pending_aligned = None;
+                    self.pending_aligned_expr = None;
+                }
                 let d = self.parse_local_decl()?;
                 Ok(Stmt::Decl(d))
             }
@@ -2813,6 +2858,8 @@ impl Parser {
         let init = if self.at(TokenKind::Semi) {
             self.advance(); None
         } else if self.is_decl_start() {
+            self.pending_aligned = None;
+            self.pending_aligned_expr = None;
             let d = self.parse_local_decl()?;
             Some(ForInit::Decl(d))
         } else {
@@ -3034,6 +3081,9 @@ impl Parser {
         // An `unused` attribute among the specifiers applies to every declarator.
         let spec_unused = std::mem::take(&mut self.pending_unused);
         let spec_section = self.pending_section.take();
+        // So does `aligned`.
+        let group_align = self.pending_aligned.take();
+        let group_align_expr = self.pending_aligned_expr.take();
         let mut declarators = Vec::new();
         let mut first = true;
         loop {
@@ -3050,6 +3100,8 @@ impl Parser {
                 _ => None,
             };
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
+            let align = self.pending_aligned.take().max(group_align);
+            let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
             let cleanup = self.pending_cleanup.take()
                 .or_else(|| if first { spec_cleanup.clone() } else { None });
             let unused = std::mem::take(&mut self.pending_unused) || spec_unused;
@@ -3081,7 +3133,7 @@ impl Parser {
                     self.local_decls.push((name.clone(), dsp.clone()));
                 }
                 let section = self.pending_section.take().or_else(|| spec_section.clone());
-                declarators.push(Declarator { name, ty, init, cleanup, unused, section, reg, span: dsp });
+                declarators.push(Declarator { name, ty, init, cleanup, align, align_expr, unused, section, reg, span: dsp });
             }
             if !self.eat(TokenKind::Comma) { break; }
         }
@@ -4180,9 +4232,11 @@ impl Parser {
                     } else if name == "aligned" || name == "__aligned__" {
                         // `aligned(EXPR)`: force alignment to the constant EXPR
                         // (e.g. `16`, `sizeof(void*)`, `2 * sizeof(void *)` as in
-                        // QEMU_ALIGNED). Bare `aligned` (no argument) requests the
-                        // target's max useful alignment; ignore that rare form.
-                        if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                        // QEMU_ALIGNED). Bare `aligned` is the largest alignment of
+                        // any type (`__BIGGEST_ALIGNMENT__`).
+                        if !matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
+                            self.pending_aligned = Some(self.pending_aligned.unwrap_or(0).max(16));
+                        } else {
                             if let Some(rp) = self.matching_rparen(i + 1) {
                                 if let Some(n) = self.eval_align_tokens(i + 2, rp) {
                                     self.pending_aligned =

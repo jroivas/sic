@@ -68,7 +68,7 @@ impl<'m> FuncCtx<'m> {
         // value at link time.
         let g = self.lowerer.module.add_global(sic_ir::Global {
             name: symbol.clone(), ty: ty.clone(), init: None,
-            linkage: sic_ir::Linkage::Import, constant: false, thread_local: false,
+            linkage: sic_ir::Linkage::Import, constant: false, thread_local: false, align: None,
         });
         self.lowerer.globals_map.insert(symbol.clone(), (ty.clone(), g));
         Some((g, ty))

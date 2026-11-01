@@ -18,6 +18,8 @@ pub struct Global {
     pub init: Option<Constant>,
     pub linkage: Linkage,
     pub constant: bool,   // true for const globals
+    /// `aligned` / `_Alignas` / a typedef's: the object is at least this aligned.
+    pub align: Option<u32>,
     pub thread_local: bool, // `__thread` / `_Thread_local`: per-thread storage
 }
 

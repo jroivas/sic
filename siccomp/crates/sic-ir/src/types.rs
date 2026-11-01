@@ -58,6 +58,10 @@ impl StructType {
         self.bitfields.get(idx).copied().flatten()
     }
 
+    pub fn member_align(&self, idx: usize, ptr_size: u32) -> u64 {
+        self.field_align(idx, &self.fields[idx].1, ptr_size)
+    }
+
     /// Effective alignment (bytes) of field `idx`: the max of its type's natural
     /// alignment and any `aligned(n)` override. An override wins even under
     /// `#pragma pack`/`packed` (which otherwise forces alignment 1).
@@ -452,6 +456,10 @@ fn round_up_bits(pos: u64, align: u64) -> u64 {
 }
 
 impl UnionType {
+    pub fn member_align(&self, idx: usize, ptr_size: u32) -> u64 {
+        self.field_align(idx, &self.fields[idx].1, ptr_size)
+    }
+
     /// Effective alignment of member `idx`: natural align raised by any
     /// `aligned(n)` override.
     fn field_align(&self, idx: usize, ty: &Type, ptr_size: u32) -> u64 {

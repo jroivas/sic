@@ -222,7 +222,7 @@ impl<'m> FuncCtx<'m> {
                 init: Some(Constant::Bytes(bytes)),
                 linkage: Linkage::Private,
                 constant: true,
-                thread_local: false,
+                thread_local: false, align: None,
             })
         };
         let ptr = self.alloc_val();
