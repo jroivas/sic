@@ -602,9 +602,11 @@ void add_env_dirs(list<string> *dirs, string var)
 
 // ── String building ─────────────────────────────────────────────────────────
 
-// Text built piece by piece goes through one growing buffer: `s = s + x` copies
-// all of `s` each time, quadratic in the result (`strip_comments` alone took a
-// minute on sqlite3.c).
+// Scratch text goes through one growing buffer: `s = s + x` copies all of `s` each
+// time, quadratic in the result. These buffers are for short text built and read
+// at once, in the hot paths: reused, they cost no allocation, which a
+// `stringbuilder` does (measured: 2% slower joining a line's tokens). Long text
+// made of slices, as in `strip_comments`, is what a `stringbuilder` is for.
 std::buffer::Buffer *sb_new(u64 capacity) { return std::buffer::Create(capacity > 0 ? capacity : 64); }
 
 void sb_reserve(std::buffer::Buffer *b, u64 extra)
@@ -626,21 +628,6 @@ void sb_add_bytes(std::buffer::Buffer *b, const u8 *p, i64 n)
     sb_reserve(b, n);
     memcpy(b->data + b->size, p, n);
     b->size += n;
-}
-
-void sb_spaces(std::buffer::Buffer *b, i32 n)
-{
-    sb_reserve(b, n);
-    memset(b->data + b->size, ' ', n);
-    b->size += n;
-}
-
-// The text as an owned string; the buffer is gone.
-string sb_take(std::buffer::Buffer *b)
-{
-    string out = std::buffer::Value(b).dup;
-    del b;
-    return out;
 }
 
 // Scratch buffers, reused so a small piece of text costs no allocation; a stack,
@@ -897,6 +884,14 @@ i32 directive_starts(string s, i32 i)
     return i < s.size && s[i] == '#' ? 1 : 0;
 }
 
+// `n` spaces, without copying them.
+void add_blanks(stringbuilder *out, i32 n)
+{
+    string blank = "                                                                ";
+    while (n > blank.size) { out.append(blank); n -= blank.size; }
+    out.append(blank[0:n]);
+}
+
 string strip_comments(string s)
 {
     // Each comment is replaced by SPACES of the same width (its newlines kept),
@@ -908,7 +903,7 @@ string strip_comments(string s)
     // `#define G_C_STD_CHECK_VERSION(version) ( … /* …\n … */ \` ), so there its
     // newlines become line splices — the directive stays one logical line and
     // the physical line count is kept.
-    auto out = sb_new(s.size);
+    stringbuilder out;
     i32 run = 0;   // start of the pending verbatim run
     i32 i = 0;
     i32 dir = directive_starts(s, 0);   // is the current logical line a directive?
@@ -920,19 +915,19 @@ string strip_comments(string s)
             continue;
         }
         if (c == '/' && i + 1 < s.size && s[i + 1] == '*') {
-            sb_add(out, s[run:i]);
+            out += s[run:i];
             i32 col = i;   // start of the current blanked segment
             i += 2;
             while (i + 1 < s.size && !(s[i] == '*' && s[i + 1] == '/')) {
                 if (s[i] == '\n') {
-                    sb_spaces(out, i - col);
-                    sb_add(out, dir ? "\\\n" : "\n");
+                    add_blanks(&out, i - col);
+                    out += dir ? "\\\n" : "\n";
                     col = i + 1;
                 }
                 i++;
             }
             i = i + 2 <= s.size ? i + 2 : s.size;   // skip the closing */
-            sb_spaces(out, i - col);
+            add_blanks(&out, i - col);
             run = i;
             continue;
         }
@@ -940,9 +935,9 @@ string strip_comments(string s)
             // A line comment runs to the end of the LOGICAL line: a backslash-
             // newline continues it (phase 2 splices before phase 3); each spliced
             // newline is kept so the line count survives.
-            sb_add(out, s[run:i]);
+            out += s[run:i];
             while (i < s.size && !(s[i] == '\n' && s[i - 1] != '\\')) {
-                if (s[i] == '\n') sb_add(out, "\n");
+                if (s[i] == '\n') out += "\n";
                 i++;
             }
             run = i;   // the newline itself stays in the next run
@@ -958,8 +953,8 @@ string strip_comments(string s)
         }
         i++;
     }
-    sb_add(out, s[run:s.size]);
-    return sb_take(out);
+    out += s[run:s.size];
+    return out.build();
 }
 
 // ── Tokenizer ──────────────────────────────────────────────────────────────
