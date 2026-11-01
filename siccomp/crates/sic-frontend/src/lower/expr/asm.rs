@@ -118,10 +118,13 @@ impl<'m> FuncCtx<'m> {
         // register's value; what the asm leaves in it is not written back.
         let substituted = self.substitute_reg_var_operands(a)?;
         let a = substituted.as_ref().unwrap_or(a);
-        if !a.goto && self.try_lower_asm(a)? {
+        // A `register T x asm("reg")` operand is in that register: only the
+        // operand path places operands itself.
+        let pinned = a.outputs.iter().chain(a.inputs.iter()).any(|o| self.local_reg_operand(&o.expr).is_some());
+        if !pinned && !a.goto && self.try_lower_asm(a)? {
             return Ok(());
         }
-        if self.try_lower_text_asm(a)? {
+        if !pinned && self.try_lower_text_asm(a)? {
             return Ok(());
         }
         if self.try_lower_operand_asm(a)? {
@@ -133,6 +136,15 @@ impl<'m> FuncCtx<'m> {
             a.template.escape_debug()));
         self.call_asm_helper("trap", &[], vec![], Type::Void)?;
         Ok(())
+    }
+
+    /// The register (index into `GPR`) of a local `register T x asm("reg")` operand.
+    /// The stack and frame pointers are not for a helper to load: they stay plain
+    /// operands, whose value only tells the compiler they are used.
+    fn local_reg_operand(&self, e: &Expr) -> Option<usize> {
+        let ExprKind::Ident(n) = &e.kind else { return None };
+        let Some(LookupResult::Local(_, v)) = self.lookup(n) else { return None };
+        clobbered_gpr(self.local_reg_vars.get(&v.0)?).filter(|&r| r != 6 && r != 7)
     }
 
     /// The global register variable `name` refers to, unless a local shadows
@@ -865,9 +877,9 @@ impl FuncCtx<'_> {
             if letters.chars().any(|ch| "xvYtufykh".contains(ch)) && !letters.chars().any(|ch| "rgqm".contains(ch)) {
                 return Ok(false);
             }
-            let fixed = letters.chars().find_map(|ch| match ch {
+            let fixed = self.local_reg_operand(&op.expr).or_else(|| letters.chars().find_map(|ch| match ch {
                 'a' => Some(0), 'b' => Some(1), 'c' => Some(2), 'd' => Some(3), 'S' => Some(4), 'D' => Some(5), _ => None,
-            });
+            }));
             let imm_ok = letters.chars().any(|ch| "inIJKLMNOPeZEF".contains(ch));
             if !is_out && imm_ok && fixed.is_none() {
                 if let Some(v) = self.const_operand(&op.expr, letters.contains('i'),

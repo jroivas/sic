@@ -1555,7 +1555,7 @@ impl<'m> FuncCtx<'m> {
             fn_body.push(ast::Stmt::Decl(ast::Decl::Var {
                 base_ty: auto_qt.clone(),
                 declarators: vec![ast::Declarator {
-                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, unused: false, section: None, span: span.clone(),
+                    name: cn.clone(), ty: auto_qt, init: Some(init), cleanup: None, unused: false, section: None, reg: None, span: span.clone(),
                 }],
                 weak: false, thread_local: false, span: span.clone(),
             }));

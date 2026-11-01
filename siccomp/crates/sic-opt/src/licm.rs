@@ -345,7 +345,7 @@ impl Hoister {
                 base_ty: QualType::new(AstType::Typeof(Box::new(arr_e.clone()))),
                 declarators: vec![Declarator {
                     name, ty: QualType::new(AstType::Typeof(Box::new(arr_e.clone()))),
-                    init: Some(Initializer::Expr(arr_e)), cleanup: None, unused: false, section: None, span: span.clone(),
+                    init: Some(Initializer::Expr(arr_e)), cleanup: None, unused: false, section: None, reg: None, span: span.clone(),
                 }],
                 weak: false, thread_local: false, span: span.clone(),
             };

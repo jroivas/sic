@@ -414,6 +414,8 @@ pub struct FuncCtx<'m> {
     /// extremes is hoisted before the loop instead. Entries are pushed on loop entry
     /// and truncated back on loop exit (nesting-aware via a saved length).
     pub bce_proven: Vec<(String, String)>,
+    /// Locals declared `register T x asm("reg")`: alloca → register.
+    pub local_reg_vars: HashMap<u32, String>,
     /// sic `atomic` locals (sic.md §"Atomics"): names whose declared type is
     /// atomic-qualified at top level, so loads/stores/RMW use the atomic IR ops.
     pub atomic_locals: std::collections::HashSet<String>,
@@ -538,6 +540,7 @@ impl<'m> FuncCtx<'m> {
             refined_tuple_containers: std::collections::HashSet::new(),
             tuple_decl_depth: HashMap::new(),
             bce_proven: Vec::new(),
+            local_reg_vars: HashMap::new(),
             atomic_locals: std::collections::HashSet::new(),
             moved_names: std::collections::HashSet::new(),
             deferred_tuples: std::collections::HashSet::new(),
@@ -2850,6 +2853,20 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_local_decl(&mut self, decl: &Decl) -> Result<()> {
+        self.lower_local_decl_inner(decl)?;
+        if let Decl::Var { declarators, .. } = decl {
+            for d in declarators {
+                let Some(reg) = &d.reg else { continue };
+                if let Some(LookupResult::Local(_, v)) = self.lookup(&d.name) {
+                    let id = v.0;
+                    self.local_reg_vars.insert(id, reg.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn lower_local_decl_inner(&mut self, decl: &Decl) -> Result<()> {
         match decl {
             Decl::StaticAssert { cond, msg, span } => self.lowerer.check_static_assert(cond, msg, span)?,
             Decl::Var { base_ty, declarators, .. } => {
@@ -5588,14 +5605,14 @@ impl<'m> FuncCtx<'m> {
             let zero = Expr { kind: ExprKind::IntLit(0, false), span: sp.clone() };
             let idx = Decl::Var {
                 base_ty: ulong(),
-                declarators: vec![crate::ast::Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: iname.to_string(), ty: ulong(), init: Some(Initializer::Expr(zero)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             };
             let cond = Expr { kind: ExprKind::BinOp { op: BinOpKind::Lt, lhs: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }), rhs: Box::new(len) }, span: sp.clone() };
             let post = Expr { kind: ExprKind::PreInc { inc: true, expr: Box::new(Expr { kind: ExprKind::Ident(iname.to_string()), span: sp.clone() }) }, span: sp.clone() };
             let item = Stmt::Decl(Decl::Var {
                 base_ty: item_ty.clone(),
-                declarators: vec![crate::ast::Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: name.to_string(), ty: item_ty, init: Some(Initializer::Expr(elem)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::Block(vec![item, body], sp.clone());
@@ -5608,7 +5625,7 @@ impl<'m> FuncCtx<'m> {
             let at = QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) };
             Stmt::Decl(Decl::Var {
                 base_ty: at.clone(),
-                declarators: vec![crate::ast::Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: lname.to_string(), ty: at, init: Some(Initializer::Expr(init)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             })
         };
@@ -5635,7 +5652,7 @@ impl<'m> FuncCtx<'m> {
                 let arr_ty = QualType { ty: AstType::Array { base: Box::new(QualType::new(AstType::Int { signed: true })), size: Some(Box::new(mk(ExprKind::IntLit(len as i64, false)))), vector: false }, qualifiers: vec![], storage: None };
                 let arr_decl = Stmt::Decl(Decl::Var {
                     base_ty: QualType::new(AstType::Int { signed: true }),
-                    declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                    declarators: vec![crate::ast::Declarator { name: vname.clone(), ty: arr_ty, init: Some(Initializer::List(items)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                     weak: false, thread_local: false, span: sp.clone(),
                 });
                 // item = (enum Canon) __fe_vals_N[i]
@@ -5730,7 +5747,7 @@ impl<'m> FuncCtx<'m> {
             let sname = format!("__fe_src_{}", uid);
             let src_decl = Stmt::Decl(Decl::Var {
                 base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                declarators: vec![crate::ast::Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                declarators: vec![crate::ast::Declarator { name: sname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(mk(ExprKind::Field { base: Box::new(iterable.clone()), name: "utf8".to_string() }))), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                 weak: false, thread_local: false, span: sp.clone(),
             });
             let inner = Stmt::ForEach { ty: ty.clone(), name: name.to_string(), iterable: ident(&sname), body: Box::new(body.clone()), span: sp.clone() };
@@ -5746,14 +5763,14 @@ impl<'m> FuncCtx<'m> {
                     // auto __fe_it = <iterable>;   (a mutable copy the loop advances)
                     let it_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![crate::ast::Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: itname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(iterable.clone())), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // auto __fe_step = __fe_it.next();
                     let call = mk(ExprKind::Call { func: Box::new(mk(ExprKind::Field { base: Box::new(ident(&itname)), name: "next".to_string() })), args: vec![] });
                     let step_decl = Stmt::Decl(Decl::Var {
                         base_ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) },
-                        declarators: vec![crate::ast::Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, unused: false, section: None, span: sp.clone() }],
+                        declarators: vec![crate::ast::Declarator { name: stepname.clone(), ty: QualType { ty: AstType::Int { signed: true }, qualifiers: vec![], storage: Some(StorageClass::Auto) }, init: Some(Initializer::Expr(call)), cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
                         weak: false, thread_local: false, span: sp.clone(),
                     });
                     // match (__fe_step) { Next(name): { body }  Stop: break; }
@@ -6619,7 +6636,7 @@ fn tco_replace(s: &mut Stmt, name: &str, params: &[AstParam], label: &str) {
                         base_ty: params[i].ty.clone(),
                         declarators: vec![crate::ast::Declarator {
                             name: tn, ty: params[i].ty.clone(),
-                            init: Some(Initializer::Expr(a.clone())), cleanup: None, unused: false, section: None, span: sp.clone(),
+                            init: Some(Initializer::Expr(a.clone())), cleanup: None, unused: false, section: None, reg: None, span: sp.clone(),
                         }],
                         weak: false, thread_local: false, span: sp.clone(),
                     }));

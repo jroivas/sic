@@ -606,7 +606,7 @@ impl Parser {
         };
         if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &sp)?; }
         // A `section` attribute in the specifiers applies to every declarator.
-        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, section: self.pending_section.clone(), span: sp.clone() });
+        declarators.push(Declarator { name, ty, init, cleanup: None, unused: false, section: self.pending_section.clone(), reg: None, span: sp.clone() });
 
         while self.eat(TokenKind::Comma) {
             self.skip_attributes();
@@ -616,7 +616,7 @@ impl Parser {
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
-            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, section: self.pending_section.clone(), span: self.span() });
+            declarators.push(Declarator { name: n, ty: t, init, cleanup: None, unused: false, section: self.pending_section.clone(), reg: None, span: self.span() });
         }
         self.expect_semi("the declaration")?;
 
@@ -1153,7 +1153,7 @@ impl Parser {
         let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
         Ok(Decl::Var {
             base_ty: base_ty.clone(),
-            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, section: None, span: sp.clone() }],
+            declarators: vec![Declarator { name, ty, init, cleanup: None, unused: false, section: None, reg: None, span: sp.clone() }],
             weak: self.pending_weak, thread_local: self.pending_thread_local, span: sp,
         })
     }
@@ -2932,9 +2932,10 @@ impl Parser {
             // glib g_autoptr / QEMU RCU_READ_LOCK_GUARD cleanup locals.
             self.pending_asm_label = None;
             self.skip_decl_tail();
-            if let (Some(StorageClass::Register), Some(reg)) = (&storage, self.pending_asm_label.take()) {
-                self.reg_vars.push((name.clone(), reg.trim_start_matches('%').to_string()));
-            }
+            let reg = match (&storage, self.pending_asm_label.take()) {
+                (Some(StorageClass::Register), Some(reg)) => Some(reg.trim_start_matches('%').to_string()),
+                _ => None,
+            };
             if let Some(n) = self.pending_vector_size.take() { ty = self.apply_vector_size(ty, n); }
             let cleanup = self.pending_cleanup.take()
                 .or_else(|| if first { spec_cleanup.clone() } else { None });
@@ -2967,7 +2968,7 @@ impl Parser {
                     self.local_decls.push((name.clone(), dsp.clone()));
                 }
                 let section = self.pending_section.take().or_else(|| spec_section.clone());
-                declarators.push(Declarator { name, ty, init, cleanup, unused, section, span: dsp });
+                declarators.push(Declarator { name, ty, init, cleanup, unused, section, reg, span: dsp });
             }
             if !self.eat(TokenKind::Comma) { break; }
         }

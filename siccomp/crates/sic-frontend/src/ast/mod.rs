@@ -283,6 +283,9 @@ pub struct Declarator {
     pub unused: bool,
     /// `__attribute__((section("name")))`: the object goes in that section.
     pub section: Option<String>,
+    /// `register T x asm("rax")` in a function: `x` is in that register as an asm
+    /// operand, and nowhere else.
+    pub reg: Option<String>,
     pub span: Span,
 }
 
