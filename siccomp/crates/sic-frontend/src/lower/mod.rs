@@ -4369,8 +4369,14 @@ impl Lowerer {
     /// initializers need — notably `sizeof(global_array)` for `ARRAY_SIZE`.
     fn const_expr_type(&self, e: &Expr) -> Option<Type> {
         match &e.kind {
-            ExprKind::Ident(name) => self.named_object(name).map(|(t, _)| t.clone())
-                .or_else(|| self.global_types.get(name).cloned()),
+            // A header's `extern T a[];` may come first: the complete type is the
+            // definition's, known even inside its own initializer (ACPI's tables
+            // hold `sizeof(table) / sizeof(entry)`).
+            ExprKind::Ident(name) => match self.named_object(name) {
+                Some((Type::Array { len: 0, .. }, _)) | None => self.global_types.get(name).cloned()
+                    .or_else(|| self.named_object(name).map(|(t, _)| t.clone())),
+                Some((t, _)) => Some(t.clone()),
+            },
             ExprKind::IntLit(_, wide) => Some(if *wide { Type::i64() } else { Type::i32() }),
             ExprKind::UIntLit(_, wide) => Some(if *wide { Type::Int { bits: 64, signed: false } } else { Type::u32() }),
             ExprKind::CharLit(_) => Some(Type::i32()),
