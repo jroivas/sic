@@ -878,7 +878,7 @@ static string line_comments_to_block(string text)
             continue;
         }
         if (c == '/' && i + 1 < text.size && text[i + 1] == '/') {
-            out = out + "/*" + text[i + 2:].rtrim() + " */";
+            out = out + "/*" + text[i + 2:] + "*/";
             return out;
         }
         out = out + text[i:i + 1];
@@ -1533,7 +1533,8 @@ static i64 eval_if_value(string expr, dict<string, string> *macros)
     g_eval_error = "";
     g_eval_skip = 0;
     if (expr.trim().size == 0) { eval_fail("with no expression"); return 0; }
-    string r = expr;
+    // -CC keeps comments in macro bodies, and an expansion brings them here.
+    string r = g_keep_comments == 2 ? strip_comments(expr) : expr;
     PPV val = eval_expr(&r, macros);
     skip_ws(&r);
     if (r.size > 0 && g_eval_error.size == 0) {
@@ -2835,6 +2836,16 @@ static string has_ops_in_text(Preprocessor *pp, string line)
             out = out + line[st:i];
             continue;
         }
+        // A comment kept by -C is only text.
+        if (c == '/' && i + 1 < line.size && line[i + 1] == '/') { out = out + line[i:]; break; }
+        if (c == '/' && i + 1 < line.size && line[i + 1] == '*') {
+            i32 st = i;
+            i += 2;
+            while (i + 1 < line.size && !(line[i] == '*' && line[i + 1] == '/')) i++;
+            i = i + 2 <= line.size ? i + 2 : line.size;
+            out = out + line[st:i];
+            continue;
+        }
         if (is_ident_start(c) && (i == 0 || !is_ident(line[i - 1]))) {
             i32 st = i;
             while (i < line.size && is_ident(line[i])) i++;
@@ -3411,7 +3422,11 @@ static void pp_process_line(Preprocessor *pp, string line)
     if (g_keep_comments && line.ltrim().starts_with("#")) {
         string st = strip_comments(line);
         string flat = "";
-        for (i32 k = 0; k < st.size; k++) flat = flat + (st[k] == '\n' ? " " : st[k:k + 1]);
+        for (i32 k = 0; k < st.size; k++) {
+            // A comment spanning lines left a splice for each of its newlines.
+            if (st[k] == '\\' && k + 1 < st.size && st[k + 1] == '\n') { flat = flat + " "; k++; continue; }
+            flat = flat + (st[k] == '\n' ? " " : st[k:k + 1]);
+        }
         string d = flat.ltrim()[1:].ltrim();
         // (-C keeps a #pragma's comments too: it is passed through.)
         if (d.starts_with("pragma")) {
@@ -3419,10 +3434,7 @@ static void pp_process_line(Preprocessor *pp, string line)
             for (i32 k = 0; k < line.size; k++) pc = pc + (line[k] == '\n' ? " " : line[k:k + 1]);
             line = pc.dup;
         } else if (g_keep_comments == 2 && d.starts_with("define")) {
-            string cc = "";
-            string lc = line_comments_to_block(line);
-            for (i32 k = 0; k < lc.size; k++) cc = cc + (lc[k] == '\n' ? " " : lc[k:k + 1]);
-            line = cc.dup;
+            line = line_comments_to_block(line).dup;
         } else line = flat.dup;
     }
     pp->cur_text = line;

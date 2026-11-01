@@ -123,6 +123,33 @@ if [ "$got" = ".foo1.init|" ]; then passed=$((passed + 1)); else
     failed=$((failed + 1)); echo "FAIL asm-paste: got '$got' $(head -c 200 "$WORK/err")"
 fi
 
+# Comments kept by -C and -CC never count as code: a comment spanning lines in a
+# directive, a name that means something outside one, and (-CC) one that comes
+# along with a macro body into `#if`; it stays in the text of the expansion.
+total=$((total + 1))
+cat > "$WORK/keep.c" <<'EOF'
+/* "" and
+   __has_include here */
+#if 0 /* spans
+      ** lines \ with a backslash */
+int skipped;
+#endif
+#define V 1 /* value */
+#if V == 1 /* more */
+int kept;
+#endif
+#define L 2 // line
+int a = L;
+#define B 3 /* in
+  body */
+int b = B;
+EOF
+got="$( (cd "$WORK" && timeout "$TIMEOUT" "${CPPCMD[@]}" -CC -P -nostdinc -undef keep.c) 2> "$WORK/err" | grep -v '^ *$' | tr '\n' '|')"
+want='/* "" and|   __has_include here */|int kept;|int a = 2 /* line*/;|int b = 3 /* in|  body */;|'
+if [ "$got" = "$want" ]; then passed=$((passed + 1)); else
+    failed=$((failed + 1)); echo "FAIL keep-comments: got '$got' $(head -c 200 "$WORK/err")"
+fi
+
 # The sic driver's own preprocessing of an assembler source (`sic -E` on a
 # `.S`, as Linux preprocesses its linker scripts with `-E -P -C -Ux86`): `-C`
 # and `-U` are accepted and forwarded, and `__ASSEMBLER__` is defined as GCC
