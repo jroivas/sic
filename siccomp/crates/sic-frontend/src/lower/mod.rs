@@ -1358,6 +1358,7 @@ impl Lowerer {
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
+                types::check_member_dims(&f.ty.ty, &self.struct_types, self.ptr_size)?;
                 let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
                 // sic `weak<T>` field (sic.md §"Weak"): record it so it is treated as
                 // a non-owning reference (not auto-initialized/owned).
@@ -5223,7 +5224,7 @@ fn ast_prim_int_type(ty: &crate::ast::AstType) -> Option<Type> {
     })
 }
 
-fn const_bswap_bits(n: &str) -> Option<u32> {
+pub(crate) fn const_bswap_bits(n: &str) -> Option<u32> {
     match n {
         "__builtin_bswap16" => Some(16),
         "__builtin_bswap32" => Some(32),
@@ -5233,7 +5234,7 @@ fn const_bswap_bits(n: &str) -> Option<u32> {
 }
 
 /// `__builtin_clzll` → ("clz", 64): the constant-foldable bit builtins.
-fn const_bit_builtin(n: &str) -> Option<(&'static str, u32)> {
+pub(crate) fn const_bit_builtin(n: &str) -> Option<(&'static str, u32)> {
     let r = n.strip_prefix("__builtin_")?;
     for op in ["clz", "ctz", "popcount", "parity", "ffs"] {
         if let Some(sfx) = r.strip_prefix(op) {

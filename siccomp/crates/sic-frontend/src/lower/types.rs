@@ -1207,6 +1207,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
     let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
+        check_member_dims(&f.ty.ty, named, ptr_size)?;
         let mut fty = lower_type(&f.ty, named, ptr_size)?;
         let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
         fty = c_bitfield_field_type(fty, bw);
@@ -1300,7 +1301,14 @@ fn eval_const_size_typed(
             Some(size_t(t.align_of(ptr_size) as i64))
         }
         ExprKind::SizeofExpr(x) => {
-            let t = global_expr_type(x)?;
+            let Some(t) = global_expr_type(x) else {
+                // A constant expression: its type is the folded value's
+                // (Linux's `sizeof(n) <= 4` in `ilog2(n)`). Not a call's: a
+                // bswap16 folds to `int` but has type `u16`.
+                if matches!(x.kind, ExprKind::Call { .. }) { return None; }
+                let c = eval_const_size_typed(x, named, ptr_size, enum_consts)?;
+                return Some(size_t(c.bits as i64 / 8));
+            };
             if matches!(t, Type::Array { len: 0, .. }) { return None; }
             Some(size_t(t.size_of(ptr_size) as i64))
         }
@@ -1376,9 +1384,33 @@ fn eval_const_size_typed(
                 _ => inner,
             })
         }
+        // A builtin of a value only this evaluator folds (Linux's `ilog2(2 *
+        // PAGE_SIZE / sizeof(struct page))`, `63 - __builtin_clzll(n)`).
+        ExprKind::Call { func, args } if matches!(&func.kind, ExprKind::Ident(n) if super::const_bit_builtin(n).is_some() || super::const_bswap_bits(n).is_some()) => {
+            let args = args.iter().map(|a| {
+                let c = eval_const_size_typed(a, named, ptr_size, enum_consts)?;
+                Some(crate::ast::Expr::new(ExprKind::IntLit(c.v, true), a.span.clone()))
+            }).collect::<Option<Vec<_>>>()?;
+            let call = crate::ast::Expr::new(ExprKind::Call { func: func.clone(), args }, e.span.clone());
+            super::eval_const_typed(&call, enum_consts).ok()
+        }
         // Fall back to the plain typed integer evaluator for anything else.
         _ => super::eval_const_typed(e, enum_consts).ok(),
     }
+}
+
+/// An array member's length must be a constant: an unknown one would give the
+/// member size 0 and every later member the wrong offset, with no sign of it
+/// (Linux's `vmemmap_tails[NR_VMEMMAP_TAILS]`). A flexible array has no length.
+pub(crate) fn check_member_dims(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<()> {
+    let AstType::Array { base, size, .. } = ty else { return Ok(()) };
+    if let Some(sz) = size {
+        if ENUM_CONSTS.with(|ec| eval_const_size(sz, named, ptr_size, &ec.borrow())).is_none() {
+            return Err(CompileError::at("the size of this array member is not a compile-time constant".to_string(),
+                sz.span.file.clone(), sz.span.line, sz.span.col));
+        }
+    }
+    check_member_dims(&base.ty, named, ptr_size)
 }
 
 /// Evaluate a bit-field width (a constant integer expression).
@@ -1424,6 +1456,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
     let mut any_align = false;
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
+        check_member_dims(&f.ty.ty, named, ptr_size)?;
         let fty = lower_type(&f.ty, named, ptr_size)?;
         let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
         if falign.is_some() { any_align = true; }
