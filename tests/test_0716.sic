@@ -1,0 +1,105 @@
+// `stringbuilder`: text collected without copying, joined once by `.build()`.
+extern int printf(char *fmt, ...);
+
+void emit(stringbuilder *sb, string name) { sb += name; sb.append("!"); }
+stringbuilder base() { stringbuilder b; b.append("/ret/"); return b; }
+struct holder { stringbuilder sb; int v; }
+
+i32 check(bool c, i32 line)
+{
+    if (!c) printf("fail %d\n", line);
+    return c ? 0 : 1;
+}
+
+i32 main()
+{
+    i32 bad = 0;
+
+    // the two ways to make one, append and `+=`
+    stringbuilder a;
+    a.append("one ");
+    a += "two ";
+    auto b = string.builder();
+    b += "three";
+    a += b.build();
+    bad += check(a.build() == "one two three", 1);
+    bad += check(a.length() == 13, 2);
+
+    // copies share a base without copying it, and do not see each other
+    auto sb = string.builder();
+    sb.append("/path/to/");
+    auto sb2 = sb.copy();
+    auto sb3 = sb.copy();
+    sb2.append("f1");
+    sb3.append("file2");
+    sb.append("rest");
+    bad += check(sb2.build() == "/path/to/f1", 3);
+    bad += check(sb3.build() == "/path/to/file2", 4);
+    bad += check(sb.build() == "/path/to/rest", 5);
+
+    // a copy of a copy, and appending after building
+    auto sb4 = sb2.copy();
+    sb4 += "+more";
+    sb2 += "+other";
+    bad += check(sb4.build() == "/path/to/f1+more", 6);
+    bad += check(sb2.build() == "/path/to/f1+other", 7);
+
+    // plain assignment copies too
+    stringbuilder sb5 = sb3;
+    sb5 += "!";
+    bad += check(sb3.build() == "/path/to/file2" && sb5.build() == "/path/to/file2!", 8);
+
+    // empty
+    stringbuilder e;
+    bad += check(e.build() == "" && e.length() == 0, 9);
+    e += "";
+    bad += check(e.build().size == 0, 10);
+
+    // through a pointer, returned, in a struct
+    stringbuilder p;
+    emit(&p, "via");
+    emit(&p, "ptr");
+    bad += check(p.build() == "via!ptr!", 11);
+    stringbuilder r = base();
+    r += "x";
+    bad += check(r.build() == "/ret/x", 12);
+    holder h;
+    h.sb += "field";
+    holder h2 = h;
+    h2.sb += "+2";
+    bad += check(h.sb.build() == "field" && h2.sb.build() == "field+2", 13);
+
+    // byte-at-a-time slices of one string, and many pieces through several blocks
+    string src = "hello world";
+    stringbuilder sl;
+    for (i32 i = 0; i < src.size; i++) sl += src[i:i + 1];
+    bad += check(sl.build() == src, 14);
+    string digits = "0123456789";
+    stringbuilder many;
+    for (i32 i = 0; i < 5000; i++) many += digits[i % 10:i % 10 + 1] + "";
+    string text = many.build();
+    bad += check(text.size == 5000 && text[0:12] == "012345678901" && text[4999:5000] == "9", 15);
+
+    // the source strings stay alive until `.build()`, whatever happens to them
+    stringbuilder kept;
+    for (i32 i = 0; i < 3; i++) {
+        string tmp = "<" + digits[i:i + 1] + ">";
+        kept += tmp;
+    }
+    bad += check(kept.build() == "<0><1><2>", 16);
+
+    // one owned piece needs no copy
+    string own = "o" + digits[1:2];
+    stringbuilder one;
+    one += own;
+    bad += check(one.build().data == own.data, 17);
+
+    // a builder pointer still does pointer arithmetic with an integer
+    stringbuilder arr[2];
+    stringbuilder *q = &arr[0];
+    q += 1;
+    q.append("second");
+    bad += check(arr[1].build() == "second", 18);
+
+    return bad == 0 ? 42 : 1;
+}

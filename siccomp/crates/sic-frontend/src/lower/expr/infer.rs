@@ -427,6 +427,13 @@ impl<'m> FuncCtx<'m> {
                 // `string.create(bytes, len)` builds a `string` (see lower_call).
                 if self.is_sic() {
                     if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
+                        if name == "builder" && (matches!(&base.kind, ExprKind::Ident(n) if n == "string")
+                            || matches!(&base.kind, ExprKind::TypeIdOf(qt)
+                                if matches!(&qt.ty, crate::ast::AstType::Named(n) if n == "string")))
+                        {
+                            let f = Expr::new(ExprKind::Ident("__sic_sb_new".to_string()), base.span.clone());
+                            return self.infer_expr_type(&Expr::new(ExprKind::Call { func: Box::new(f), args: vec![] }, base.span.clone()));
+                        }
                         if name == "create" && (matches!(&base.kind, ExprKind::Ident(n) if n == "string")
                             || matches!(&base.kind, ExprKind::TypeIdOf(qt)
                                 if matches!(&qt.ty, crate::ast::AstType::Named(n) if n == "string")))

@@ -4718,6 +4718,14 @@ impl<'m> FuncCtx<'m> {
         self.emit_binop(op, cur, rhs)
     }
 
+    fn is_stringbuilder_append(&mut self, lhs: &Expr, rhs: &Expr) -> bool {
+        let is_sb = |t: &Type| matches!(t, Type::Struct(s) if s.name.as_deref() == Some("stringbuilder"));
+        let Ok(lt) = self.infer_expr_type(lhs) else { return false };
+        let lt = match &lt { Type::Pointer(p) => (**p).clone(), t => t.clone() };
+        is_sb(&super::types::resolve_aggregate(&lt, &self.lowerer.struct_types))
+            && matches!(self.infer_expr_type(rhs), Ok(t) if super::types::is_sic_string(&t) || matches!(&t, Type::Pointer(_)))
+    }
+
     /// Arithmetic on a pointer whose element is itself an array: `int (*p)[5]`, or
     /// a `int m[4][5]` decayed. In IR a decayed array and a pointer to an array are
     /// both `Pointer(Array)`, and `emit_binop` steps by the array's element; only
@@ -5679,6 +5687,13 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_assign_inner(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
+        // `sb += text` on a `stringbuilder`, or through a pointer to one, is
+        // `sb.append(text)` (sic.md §"Stringbuilder").
+        if op == Some(BinOpKind::Add) && self.is_sic() && self.is_stringbuilder_append(lhs, rhs) {
+            let f = Expr::new(ExprKind::Field { base: Box::new(lhs.clone()), name: "append".to_string() }, lhs.span.clone());
+            let call = Expr::new(ExprKind::Call { func: Box::new(f), args: vec![rhs.clone()] }, lhs.span.clone());
+            return self.lower_expr(&call);
+        }
         // GCC vector extension `v op= w` on two vectors: the element-wise op, its
         // result copied back into `v` (the left side evaluated once). It used to
         // take the scalar path and `or` the operands' ADDRESSES (QEMU's

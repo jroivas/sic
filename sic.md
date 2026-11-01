@@ -339,6 +339,45 @@ separator was found, `1` when not). A `tuple t;` on its own is the empty tuple â
 The two parts are views into the original string (plain offsets, no copy), valid
 while it is.
 
+## Stringbuilder
+
+A `stringbuilder` collects text without copying it. Nothing is joined until
+`.build()`, which allocates once, at the exact size:
+
+```c
+stringbuilder b;                 // or: auto b = string.builder();
+b.append("#define ");
+b += name;                       // the same as b.append(name)
+b += line[a:c];
+string s = b.build();
+```
+
+Appending records where the text is and keeps a reference to it, so a string added
+to a builder stays alive until the builder lets go, even if its variable is gone.
+Slices that follow one another in the same string count as one piece, so appending
+`s[i:i + 1]` in a loop stays cheap. `.length()` is the length so far, and a builder
+may go on after `.build()`.
+
+`.copy()` shares what is already there, so a common prefix is held once:
+
+```c
+auto sb = string.builder();
+sb.append("/path/to/");
+auto sb2 = sb.copy();
+auto sb3 = sb.copy();
+sb2.append("f1");
+sb3.append("file2");
+string s2 = sb2.build();         // "/path/to/f1"
+string s3 = sb3.build();         // "/path/to/file2"
+```
+
+Neither side sees what the other appends afterwards, the original included. A plain
+assignment `stringbuilder c = sb;` does the same. A builder can be returned, stored
+in a struct, and passed as `stringbuilder *`, and `+=` works through that pointer.
+
+The one rule: a non-owning view from `string.create` has no reference to keep, so
+its bytes must stay valid until `.build()`.
+
 ## Empty brackets pointer
 
 This is not valid, since an array needs a size or an initializer:

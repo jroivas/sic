@@ -224,6 +224,15 @@ impl<'m> FuncCtx<'m> {
                 || matches!(&b.kind, ExprKind::TypeIdOf(qt)
                     if matches!(&qt.ty, crate::ast::AstType::Named(n) if n == "string"));
             if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func_expr.kind {
+                // `string.builder()` (sic.md §"Stringbuilder"): a new, empty builder.
+                if name == "builder" && is_string_base(base) {
+                    if !args.is_empty() {
+                        return Err(CompileError::at("string.builder() takes no arguments".to_string(),
+                            sp.file.clone(), sp.line, sp.col));
+                    }
+                    let f = Expr::new(ExprKind::Ident("__sic_sb_new".to_string()), sp.clone());
+                    return self.lower_call(&f, &[], sp);
+                }
                 if name == "create" && is_string_base(base) {
                     let [ptr_e, len_e] = args else {
                         return Err(CompileError::at(

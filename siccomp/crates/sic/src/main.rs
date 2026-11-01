@@ -7,6 +7,7 @@ mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
 mod list_runtime;
+mod stringbuilder_runtime;
 mod tuple_runtime;
 mod cpu_runtime;
 mod ia32_runtime;
@@ -1037,6 +1038,14 @@ fn parse_source(
         preprocessed = format!(
             "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
             async_runtime::ASYNC_RUNTIME, path, preprocessed
+        );
+    }
+
+    // sic `stringbuilder` (sic.md §"Stringbuilder"): prepend its runtime when used.
+    if is_sic && stringbuilder_runtime::uses_stringbuilder(&preprocessed) {
+        preprocessed = format!(
+            "#line 1 \"<sic runtime>\"\n{}\n#line 1 \"{}\"\n{}",
+            stringbuilder_runtime::STRINGBUILDER_RUNTIME, path, preprocessed
         );
     }
 
