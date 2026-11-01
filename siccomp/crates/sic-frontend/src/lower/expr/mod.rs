@@ -462,6 +462,7 @@ impl<'m> FuncCtx<'m> {
 
     /// Lower an expression, returning its rvalue.
     pub fn lower_expr(&mut self, expr: &Expr) -> Result<Val> {
+        if let Some(wrapped) = self.function_as_closure(expr)? { return self.lower_expr_inner(&wrapped); }
         let v = self.lower_expr_inner(expr)?;
         // A read of a `volatile` object: most reads come here, not by an LValue.
         if let (Val::Local(id), ExprKind::Ident(_) | ExprKind::Field { .. } | ExprKind::Arrow { .. }
@@ -483,6 +484,39 @@ impl<'m> FuncCtx<'m> {
             }
         }
         Ok(v)
+    }
+
+    /// The signature of the closure type `t`, as written: without the environment
+    /// (and the hidden result pointer before it).
+    pub(crate) fn closure_signature(&self, t: &Type) -> Option<(Type, Vec<Type>)> {
+        let Type::Pointer(p) = t else { return None };
+        let Type::Struct(hdr) = &**p else { return None };
+        let Type::Pointer(c) = &hdr.fields.first()?.1 else { return None };
+        let Type::Function(sig) = &**c else { return None };
+        let skip = 1 + sic_ir::abi::ret_in_memory(&sig.ret, self.ptr_size()) as usize;
+        Some((sig.ret.clone(), sig.params.iter().skip(skip).cloned().collect()))
+    }
+
+    /// A plain function where a closure is wanted (`Fn<int()> g = f;`): the lambda
+    /// `[](a0, …) { return f(a0, …); }`. It has no environment to call it with.
+    fn function_as_closure(&mut self, expr: &Expr) -> Result<Option<Expr>> {
+        use crate::ast::{AstType, Param, QualType, Stmt};
+        let ExprKind::Ident(name) = &expr.kind else { return Ok(None) };
+        let Some(want) = self.expected_ty.clone().filter(super::types::is_closure) else { return Ok(None) };
+        if !matches!(self.lookup(name), Some(LookupResult::Func(_))) { return Ok(None); }
+        let Some((ret, params)) = self.closure_signature(&want) else { return Ok(None) };
+        let sp = &expr.span;
+        let lowered = |t: &Type| QualType::new(AstType::Lowered(t.clone()));
+        let names: Vec<String> = (0..params.len()).map(|i| format!("__a{}", i)).collect();
+        let ps = params.iter().zip(&names).map(|(t, n)| Param { name: Some(n.clone()), ty: lowered(t), default: None, span: sp.clone() }).collect();
+        let args = names.iter().map(|n| Expr::new(ExprKind::Ident(n.clone()), sp.clone())).collect();
+        let call = Expr::new(ExprKind::Call { func: Box::new(expr.clone()), args }, sp.clone());
+        let body = if ret == Type::Void {
+            vec![Stmt::Expr(call, sp.clone())]
+        } else {
+            vec![Stmt::Return(Some(call), sp.clone())]
+        };
+        Ok(Some(Expr::new(ExprKind::Lambda { captures: vec![], params: ps, ret: Some(lowered(&ret)), body }, sp.clone())))
     }
 
     fn lower_expr_inner(&mut self, expr: &Expr) -> Result<Val> {
@@ -1521,6 +1555,11 @@ impl<'m> FuncCtx<'m> {
     /// environment holding the code pointer plus the captured values (a closure).
     fn lower_lambda(&mut self, captures: &[ast::LambdaCapture], params: &[ast::Param],
         ret: &Option<ast::QualType>, body: &[ast::Stmt], span: &crate::lexer::Span) -> Result<Val> {
+        // An inferred result: what the `Fn` it becomes returns, if it is one.
+        let wanted = self.expected_ty.as_ref().filter(|t| ret.is_none() && super::types::is_closure(t))
+            .and_then(|t| self.closure_signature(t))
+            .map(|(r, _)| ast::QualType::new(ast::AstType::Lowered(r)));
+        let ret = &ret.clone().or(wanted);
         let ret_qt = ret.clone().unwrap_or_else(|| ast::QualType::new(ast::AstType::Auto));
         // Captureless: normally a plain function pointer (zero runtime). But when the
         // context wants a closure (`Fn<…>`), box it into a closure environment (with

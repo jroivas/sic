@@ -1,0 +1,51 @@
+// A plain function where a closure is wanted is wrapped: it compiled to a call with
+// no environment and crashed. A lambda's inferred result is the `Fn`'s it becomes.
+import std;
+
+struct Big { long a, b, c; }
+struct Holder { Fn<int(int)> f; }
+
+int seven() { return 7; }
+int twice(int x) { return x * 2; }
+string greet(string s) { return "hi " + s; }
+Big big(long x) { Big b; b.a = x; b.b = x + 1; b.c = x + 2; return b; }
+list make() { list l; l.add(7); return l; }
+void note(int *p) { *p = 5; }
+
+int apply(Fn<int(int)> f, int x) { return f(x); }
+Fn<int(int)> pick() { return twice; }
+
+int main()
+{
+    Fn<int()> g = seven;
+    if (g() != 7) return 1;
+    Fn<int(int)> d = twice;
+    if (d(4) != 8) return 2;
+    if (apply(twice, 5) != 10) return 3;
+    if (pick()(6) != 12) return 4;
+    Holder h;
+    h.f = twice;
+    if (h.f(7) != 14) return 5;
+    d = twice;
+    if (d(8) != 16) return 6;
+    Fn<string(string)> s = greet;
+    if (s("you").length != 6) return 7;
+    Fn<Big(long)> b = big;
+    Big r = b(1);
+    if (r.c != 3) return 8;
+    Fn<list()> m = make;
+    list l = m();
+    if (l.length != 1) return 9;
+    int v = 0;
+    Fn<void(int *)> n = note;
+    n(&v);
+    if (v != 5) return 10;
+
+    // Inferred result.
+    Fn<list()> e = []() { list x; x.add(1); x.add(2); return x; };
+    list y = e();
+    if (y.length != 2) return 11;
+    Fn<string()> t = []() { return "ok"; };
+    if (t().length != 2) return 12;
+    return 42;
+}

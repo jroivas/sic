@@ -1557,6 +1557,15 @@ impl<'m> FuncCtx<'m> {
     /// The callee's IR parameter types (user-facing: any hidden sret pointer
     /// stripped). Empty when the callee isn't a statically-known function.
     fn callee_param_types(&self, func_expr: &Expr) -> Vec<Type> {
+        // A closure value: its `Fn` says, so that an argument is converted like
+        // one to a function (a literal to a `string`).
+        if self.is_sic() {
+            if let Ok(t) = self.infer_expr_type(func_expr) {
+                if super::super::types::is_closure(&t) {
+                    return self.closure_signature(&t).map_or(Vec::new(), |(_, p)| p);
+                }
+            }
+        }
         match &func_expr.kind {
             ExprKind::Ident(name) => match self.lookup(name) {
                 Some(LookupResult::Func(fr)) => {
@@ -1770,12 +1779,14 @@ impl<'m> FuncCtx<'m> {
             _ => return Err(CompileError::at("internal: closure `__code` is not a pointer".to_string(),
                 sp.file.clone(), sp.line, sp.col)),
         };
-        // The environment pointer is argument 0; coerce user args to params 1…N.
+        // The environment pointer, then the user args: after the hidden result
+        // pointer, which `func_ty` has first when there is one.
+        let env_at = super::super::ret_is_sret(&func_ty.ret, self.ptr_size()) as usize;
         let mut all_args = Vec::with_capacity(arg_vals.len() + 1);
-        let env_pty = func_ty.params.get(0).cloned().unwrap_or_else(|| self.val_type(&clo));
+        let env_pty = func_ty.params.get(env_at).cloned().unwrap_or_else(|| self.val_type(&clo));
         all_args.push(self.coerce(clo, &env_pty)?);
         for (i, a) in arg_vals.into_iter().enumerate() {
-            match func_ty.params.get(i + 1) {
+            match func_ty.params.get(env_at + i + 1) {
                 Some(pty) if !matches!(pty, Type::Struct(_) | Type::Union(_)) => {
                     let c = self.coerce(a, pty)?; all_args.push(c);
                 }
