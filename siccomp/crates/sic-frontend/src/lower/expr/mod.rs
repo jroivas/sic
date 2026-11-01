@@ -1227,7 +1227,7 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::SizeofType(ty) => {
                 let ir_ty = self.lower_type(ty)?;
-                let size = ir_ty.size_of(self.ptr_size());
+                let size = super::types::c_size_of(&ir_ty, self.ptr_size());
                 Ok(self.size_t_val(size))
             }
 
@@ -1246,8 +1246,12 @@ impl<'m> FuncCtx<'m> {
                 // The operand's type, without evaluating it. An unresolved name
                 // is an error — it used to infer `int`, so `sizeof(undeclared)`
                 // was silently 4.
+                // GNU: a function name here does not decay; its size is 1.
+                if !self.is_sic() && matches!(&inner.kind, ExprKind::Ident(n) if matches!(self.lookup(n), Some(super::func::LookupResult::Func(_)))) {
+                    return Ok(self.size_t_val(1));
+                }
                 let ty = self.sizeof_operand_type(inner)?;
-                let size = ty.size_of(self.ptr_size());
+                let size = super::types::c_size_of(&ty, self.ptr_size());
                 Ok(self.size_t_val(size))
             }
 
@@ -5443,7 +5447,7 @@ impl<'m> FuncCtx<'m> {
         use ExprKind::*;
         let ps = self.ptr_size();
         let lit = |v: u64| Some(Expr::new(UIntLit(v, true), e.span.clone()));
-        let sized = |t: &Type| if FuncCtx::has_runtime_dim(t) { None } else { Some(t.size_of(ps)) };
+        let sized = |t: &Type| if FuncCtx::has_runtime_dim(t) { None } else { Some(super::types::c_size_of(t, ps)) };
         let kind = match &e.kind {
             SizeofExpr(inner) | AlignofExpr(inner) => {
                 if let Ident(n) = &inner.kind {
@@ -5485,6 +5489,36 @@ impl<'m> FuncCtx<'m> {
             _ => return Some(e.clone()),
         };
         Some(Expr::new(kind, e.span.clone()))
+    }
+
+    /// The type of `c ? then : else_` with two pointer arms: a null pointer constant
+    /// takes the other arm's type, and a `void *` and another pointer make `void *`
+    /// (C11 6.5.15p6). Linux's `__is_constexpr` is built on this.
+    pub(crate) fn ternary_pointer_result(&self, then: &Expr, else_: &Expr, tty: &Type, ety: &Type) -> Option<Type> {
+        if self.is_sic() || !matches!(tty, Type::Pointer(_)) || !matches!(ety, Type::Pointer(_)) { return None; }
+        if self.is_null_pointer_constant(then) { return Some(ety.clone()); }
+        if self.is_null_pointer_constant(else_) { return Some(tty.clone()); }
+        matches!(ety, Type::Pointer(p) if matches!(**p, Type::Void)).then(|| ety.clone())
+    }
+
+    /// The type of `c ? then : else_` with two arithmetic arms: the usual
+    /// arithmetic conversions (C11 6.5.15p5), whichever arm runs.
+    pub(crate) fn ternary_arith_result(&self, tty: &Type, ety: &Type) -> Option<Type> {
+        let arith = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80);
+        (!self.is_sic() && arith(tty) && arith(ety)).then(|| usual_arith_conv(tty, ety))
+    }
+
+    /// `e` is a null pointer constant: an integer constant 0, as such or cast to
+    /// `void *` (C11 6.3.2.3p3).
+    pub(crate) fn is_null_pointer_constant(&self, e: &Expr) -> bool {
+        let inner = match &e.kind {
+            ExprKind::Cast { ty, expr } => match self.lower_type(ty) {
+                Ok(Type::Pointer(p)) if matches!(*p, Type::Void) => expr,
+                _ => return false,
+            },
+            _ => e,
+        };
+        self.eval_scoped_const(inner) == Some(0)
     }
 
     /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
@@ -6669,7 +6703,13 @@ impl<'m> FuncCtx<'m> {
                 }
                 return self.lower_aggregate_ptr(taken);
             }
-            return self.lower_expr(taken);
+            // The arm not taken still has its say in the type.
+            let rty = match (self.infer_expr_type(then), self.infer_expr_type(else_)) {
+                (Ok(t), Ok(e)) => self.ternary_arith_result(&t, &e),
+                _ => None,
+            };
+            let v = self.lower_expr(taken)?;
+            return match rty { Some(t) => self.coerce(v, &t), None => Ok(v) };
         }
         // The expected type is for the arms, not the condition (a literal in
         // `s == "x"` must stay a `string`).
@@ -6794,14 +6834,15 @@ impl<'m> FuncCtx<'m> {
             if is_managed { self.register_struct_temp(&Val::Local(slot), &aty); }
             return Ok(Val::Local(slot));
         }
-        let ty = match (&tty, &ety) {
+        let c_rule = self.ternary_pointer_result(then, else_, &tty, &ety).or_else(|| self.ternary_arith_result(&tty, &ety));
+        let ty = if let Some(t) = c_rule { t } else { match (&tty, &ety) {
             (Type::Pointer(_), _) | (Type::Void, _) => tty.clone(),
             (_, Type::Pointer(_)) => ety.clone(),
             _ if tty.is_float() => tty.clone(),
             _ if ety.is_float() => ety.clone(),
             _ if ety.size_of(self.ptr_size()) > tty.size_of(self.ptr_size()) => ety.clone(),
             _ => tty.clone(),
-        };
+        } };
 
         // Branchless fast path: when both arms are speculation-safe scalars — pure,
         // side-effect-free, and non-trapping (so evaluating BOTH is observationally
@@ -6889,14 +6930,15 @@ impl<'m> FuncCtx<'m> {
         let cond_val = self.lower_expr(cond)?;
         let cty = self.infer_expr_type(cond).unwrap_or_else(|_| Type::i32());
         let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
-        let ty = match (&cty, &ety) {
+        let c_rule = self.ternary_pointer_result(cond, else_, &cty, &ety).or_else(|| self.ternary_arith_result(&cty, &ety));
+        let ty = if let Some(t) = c_rule { t } else { match (&cty, &ety) {
             (Type::Pointer(_), _) | (Type::Void, _) => cty.clone(),
             (_, Type::Pointer(_)) => ety.clone(),
             _ if cty.is_float() => cty.clone(),
             _ if ety.is_float() => ety.clone(),
             _ if ety.size_of(self.ptr_size()) > cty.size_of(self.ptr_size()) => ety.clone(),
             _ => cty.clone(),
-        };
+        } };
         let cond_bool = self.to_bool(cond_val.clone())?;
 
         let result_ptr = self.alloc_val();

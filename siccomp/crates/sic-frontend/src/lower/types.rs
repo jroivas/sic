@@ -1294,14 +1294,14 @@ fn eval_const_size_typed(
         ExprKind::Ident(name) => enum_consts.get(name.as_str()).map(|v| super::const_int_for(*v)),
         ExprKind::SizeofType(qt) => {
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
-            Some(size_t(t.size_of(ptr_size) as i64))
+            Some(size_t(c_size_of(&t, ptr_size) as i64))
         }
         ExprKind::AlignofType(qt) => {
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
             Some(size_t(t.align_of(ptr_size) as i64))
         }
         ExprKind::SizeofExpr(x) => {
-            let Some(t) = global_expr_type(x) else {
+            let Some(t) = const_operand_type(x, named, ptr_size, enum_consts) else {
                 // A constant expression: its type is the folded value's
                 // (Linux's `sizeof(n) <= 4` in `ilog2(n)`). Not a call's: a
                 // bswap16 folds to `int` but has type `u16`.
@@ -1310,13 +1310,13 @@ fn eval_const_size_typed(
                 return Some(size_t(c.bits as i64 / 8));
             };
             if matches!(t, Type::Array { len: 0, .. }) { return None; }
-            Some(size_t(t.size_of(ptr_size) as i64))
+            Some(size_t(c_size_of(&t, ptr_size) as i64))
         }
         ExprKind::AlignofExpr(x) => Some(size_t(global_expr_type(x)?.align_of(ptr_size) as i64)),
         // `__builtin_types_compatible_p(typeof(g), typeof(&g[0]))` (QEMU_IS_ARRAY).
         ExprKind::TypesCompatible(a, b) => {
             let ty_of = |qt: &crate::ast::QualType| match &qt.ty {
-                AstType::Typeof(x) => global_expr_type(x),
+                AstType::Typeof(x) => const_operand_type(x, named, ptr_size, enum_consts),
                 other => lower_ast_type(other, named, ptr_size).ok(),
             };
             Some(ConstInt::new((ty_of(a)? == ty_of(b)?) as i64, 32, true))
@@ -1361,12 +1361,12 @@ fn eval_const_size_typed(
             let r = eval_const_size_typed(rhs, named, ptr_size, enum_consts)?;
             super::const_binop(*op, l, r)
         }
-        ExprKind::Ternary { cond, then, else_ } => {
-            if eval_const_size_typed(cond, named, ptr_size, enum_consts)?.v != 0 {
-                eval_const_size_typed(then, named, ptr_size, enum_consts)
-            } else {
-                eval_const_size_typed(else_, named, ptr_size, enum_consts)
-            }
+        ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } => {
+            let (taken, other) = if eval_const_size_typed(cond, named, ptr_size, enum_consts)?.v != 0 { (then, else_) } else { (else_, then) };
+            let c = eval_const_size_typed(taken, named, ptr_size, enum_consts)?;
+            // `__builtin_choose_expr` is the chosen arm, type and all.
+            if matches!(e.kind, ExprKind::ChooseExpr { .. }) { return Some(c); }
+            Some(super::const_conditional(c, eval_const_size_typed(other, named, ptr_size, enum_consts)))
         }
         // GNU `a ?: b`: `a` when nonzero (Linux's `__aligned((__VA_ARGS__ + 0) ? :
         // SMP_CACHE_BYTES)`).
@@ -1396,6 +1396,53 @@ fn eval_const_size_typed(
         }
         // Fall back to the plain typed integer evaluator for anything else.
         _ => super::eval_const_typed(e, enum_consts).ok(),
+    }
+}
+
+/// `sizeof` of a type. GNU: `void` and a function have size 1 (what
+/// `__is_constexpr` tells from `int`).
+pub(crate) fn c_size_of(t: &Type, ptr_size: u32) -> u64 {
+    if matches!(t, Type::Void | Type::Function(_)) { 1 } else { t.size_of(ptr_size) }
+}
+
+/// The type of `sizeof`'s operand where no object is read: a global, or an
+/// expression of casts, dereferences and members (Linux's
+/// `sizeof(*((struct s *)NULL)->member)`).
+fn const_operand_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32, enum_consts: &HashMap<String, i64>) -> Option<Type> {
+    use crate::ast::{ExprKind, UnOpKind};
+    let operand = |x: &Expr| const_operand_type(x, named, ptr_size, enum_consts);
+    let pointee = |t: Type| match t {
+        Type::Pointer(p) => Some(resolve_aggregate(&p, named)),
+        Type::Array { elem, .. } => Some(resolve_aggregate(&elem, named)),
+        _ => None,
+    };
+    let member = |agg: Type, name: &str| {
+        super::expr::resolve_field_access(&resolve_aggregate(&agg, named), name, ptr_size, named).map(|(_, t, _)| t)
+    };
+    // A null pointer constant: an integer 0, as such or cast to `void *`.
+    let is_null = |x: &Expr| {
+        let inner = match &x.kind {
+            ExprKind::Cast { ty, expr } if matches!(lower_type(ty, named, ptr_size), Ok(Type::Pointer(p)) if matches!(*p, Type::Void)) => expr,
+            _ => x,
+        };
+        eval_const_size_typed(inner, named, ptr_size, enum_consts).is_some_and(|c| c.v == 0)
+    };
+    match &e.kind {
+        ExprKind::Cast { ty, .. } => lower_type(ty, named, ptr_size).ok(),
+        ExprKind::Unary { op: UnOpKind::Deref, expr } => pointee(operand(expr)?),
+        ExprKind::Index { base, .. } => pointee(operand(base)?),
+        ExprKind::Unary { op: UnOpKind::Addr, expr } => Some(Type::Pointer(Box::new(operand(expr)?))),
+        ExprKind::Arrow { base, name } => member(pointee(operand(base)?)?, name),
+        ExprKind::Field { base, name } => member(operand(base)?, name),
+        // A null pointer constant takes the other arm's type; `void *` and another
+        // pointer make `void *` (C11 6.5.15p6): how `__is_constexpr` works.
+        ExprKind::Ternary { then, else_, .. } => {
+            if is_null(then) { return operand(else_); }
+            if is_null(else_) { return operand(then); }
+            let (t, f) = (operand(then)?, operand(else_)?);
+            if matches!(&f, Type::Pointer(p) if matches!(**p, Type::Void)) { Some(f) } else { Some(t) }
+        }
+        _ => global_expr_type(e),
     }
 }
 

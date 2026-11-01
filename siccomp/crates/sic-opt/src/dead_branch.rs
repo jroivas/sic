@@ -1,7 +1,11 @@
 //! Constant-condition / dead-code elimination. When a condition folds to a
 //! compile-time constant (run after `const-fold`, via the manager's fixpoint),
-//! the un-taken branch is removed: `if (0)`, `while (0)`, `1 ? a : b`, and the
-//! short-circuit cases of `&&`/`||`/`?:`.
+//! the un-taken branch is removed: `if (0)`, `while (0)`, and the short-circuit
+//! cases of `&&`/`||`.
+//!
+//! `1 ? a : b` goes only when both arms are literals of one type: the arm not
+//! taken has its say in the result's type (`(1 ? 1 : 2.0) / 2` is 0.5), which this
+//! pass cannot see. Lowering drops the dead arm in every other case.
 //!
 //! Only branches are dropped, never anything evaluated: a constant condition is
 //! itself side-effect-free, and `&&`/`||`/`?:` never evaluate the discarded arm
@@ -50,6 +54,10 @@ fn as_bool(e: &Expr) -> Option<bool> {
         ExprKind::Nullptr => false,
         _ => return None,
     })
+}
+
+fn same_literal_type(a: &Expr, b: &Expr) -> bool {
+    matches!((&a.kind, &b.kind), (ExprKind::IntLit(_, x), ExprKind::IntLit(_, y)) if x == y)
 }
 
 fn dummy(span: &Span) -> Expr { Expr::new(ExprKind::Nullptr, span.clone()) }
@@ -130,6 +138,8 @@ impl DeadBranch {
     fn fold_expr(&mut self, e: &mut Expr) {
         let span = e.span.clone();
         let taken: Option<Expr> = match &mut e.kind {
+            ExprKind::Ternary { then, else_, .. } if !same_literal_type(then, else_) => None,
+            ExprKind::Elvis { cond, else_ } if !same_literal_type(cond, else_) => None,
             ExprKind::Ternary { cond, then, else_ } => match as_bool(cond) {
                 Some(true) => Some(std::mem::replace(then.as_mut(), dummy(&span))),
                 Some(false) => Some(std::mem::replace(else_.as_mut(), dummy(&span))),

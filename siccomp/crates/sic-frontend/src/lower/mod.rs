@@ -5000,6 +5000,14 @@ pub(crate) fn const_unary(op: UnOpKind, a: ConstInt) -> ConstInt {
 /// (division by zero, a rotate whose width isn't known here). `LogAnd`/`LogOr`
 /// here assume both operands are known — a caller that must short-circuit a
 /// non-constant operand handles that before calling.
+/// The value of `?:`: the chosen arm, in the type both arms make (C11 6.5.15p5).
+/// An arm that does not fold says nothing.
+pub(crate) fn const_conditional(taken: ConstInt, other: Option<ConstInt>) -> ConstInt {
+    let Some(other) = other else { return taken };
+    let (bits, signed) = const_usual_arith(taken, other);
+    ConstInt::new(taken.v, bits, signed)
+}
+
 pub(crate) fn const_binop(op: BinOpKind, a: ConstInt, b: ConstInt) -> Option<ConstInt> {
     use std::cmp::Ordering;
     let int32 = |v: i64| ConstInt::new(v, 32, true);
@@ -5155,16 +5163,14 @@ pub(crate) fn eval_const_typed(e: &Expr, enum_consts: &HashMap<String, i64>) -> 
             const_binop(*op, a, b).ok_or_else(|| CompileError::new("non-constant expression"))
         }
         ExprKind::Ternary { cond, then, else_ } => {
-            if eval_const_typed(cond, enum_consts)?.v != 0 {
-                eval_const_typed(then, enum_consts)
-            } else {
-                eval_const_typed(else_, enum_consts)
-            }
+            let (taken, other) = if eval_const_typed(cond, enum_consts)?.v != 0 { (then, else_) } else { (else_, then) };
+            Ok(const_conditional(eval_const_typed(taken, enum_consts)?, eval_const_typed(other, enum_consts).ok()))
         }
         // GNU `a ?: b`: `a` when nonzero.
         ExprKind::Elvis { cond, else_ } => {
             let c = eval_const_typed(cond, enum_consts)?;
-            if c.v != 0 { Ok(c) } else { eval_const_typed(else_, enum_consts) }
+            let e = eval_const_typed(else_, enum_consts);
+            if c.v != 0 { Ok(const_conditional(c, e.ok())) } else { Ok(const_conditional(e?, Some(c))) }
         }
         // `__builtin_choose_expr(cond, a, b)` selects an arm at compile time from
         // the constant condition; the unchosen arm is discarded and never
