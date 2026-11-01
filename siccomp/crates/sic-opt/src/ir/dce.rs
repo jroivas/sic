@@ -6,7 +6,7 @@
 //! alloca, var-arg, or **load** (a load may be a volatile MMIO access in code
 //! like QEMU, which must not be elided even when its value is unused).
 
-use std::collections::HashSet;
+use sic_ir::fast_hash::HashSet;
 use sic_ir::{Module, Val, ValId};
 use crate::ir::pass::IrPass;
 
@@ -24,7 +24,7 @@ impl IrPass for Dce {
         for func in &mut m.functions {
             loop {
                 // Collect every value id used as an operand anywhere.
-                let mut used: HashSet<ValId> = HashSet::new();
+                let mut used: HashSet<ValId> = HashSet::default();
                 for b in &func.blocks {
                     for ins in &b.instrs {
                         ins.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); });

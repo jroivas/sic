@@ -13,7 +13,7 @@
 //! Unknown names are accepted silently, as real build systems pass many
 //! (QEMU compiles every file with `-Wall -Werror` and ~40 more `-W` options).
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use std::sync::Mutex;
 
 /// Which flag group turns a warning on.
@@ -80,7 +80,7 @@ static SYSTEM_FILES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Record that `file` is a system header (from a `# N "file" 1 3` marker).
 pub fn mark_system_file(file: &str) {
     let mut g = SYSTEM_FILES.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashSet::new).insert(file.to_string());
+    g.get_or_insert_with(HashSet::default).insert(file.to_string());
 }
 
 fn is_system_file(file: &str) -> bool {

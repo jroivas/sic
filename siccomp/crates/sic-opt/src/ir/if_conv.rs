@@ -127,7 +127,7 @@ fn match_inc_tail(instrs: &[Instr]) -> Option<(ValId, Val, BinOp, sic_ir::Type, 
 
     // Verify the increment value or any pure chain producing it is defined
     // entirely within this block (so moving the prefix/mid is safe)
-    let mut defs_in_block: std::collections::HashSet<ValId> = std::collections::HashSet::new();
+    let mut defs_in_block: sic_ir::fast_hash::HashSet<ValId> = sic_ir::fast_hash::HashSet::default();
     for ins in instrs {
         if let Some(d) = ins.dest() { defs_in_block.insert(d); }
     }

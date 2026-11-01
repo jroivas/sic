@@ -12,7 +12,7 @@
 //! The walk matches every expression and statement kind exhaustively so a newly
 //! added one cannot silently skip resolution.
 
-use std::collections::HashSet;
+use sic_ir::fast_hash::HashSet;
 use crate::ast::*;
 
 pub(crate) struct NsRenamer<'a> {
@@ -52,13 +52,13 @@ impl<'a> NsRenamer<'a> {
 
     /// A function (or method/lambda) body with its parameters in scope.
     pub(crate) fn function(&mut self, params: &mut [Param], body: &mut [Stmt]) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(HashSet::default());
         for p in params.iter_mut() {
             self.qual_type(&mut p.ty);
             if let Some(d) = &mut p.default { self.expr(d); }
             if let Some(n) = &p.name { let n = n.clone(); self.declare(&n); }
         }
-        self.scopes.push(HashSet::new());
+        self.scopes.push(HashSet::default());
         for s in body.iter_mut() { self.stmt(s); }
         self.scopes.pop();
         self.scopes.pop();
@@ -196,13 +196,13 @@ impl<'a> NsRenamer<'a> {
     }
 
     fn block(&mut self, stmts: &mut [Stmt]) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(HashSet::default());
         for s in stmts.iter_mut() { self.stmt(s); }
         self.scopes.pop();
     }
 
     fn scoped_stmt(&mut self, s: &mut Stmt) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(HashSet::default());
         self.stmt(s);
         self.scopes.pop();
     }
@@ -220,7 +220,7 @@ impl<'a> NsRenamer<'a> {
             Stmt::While { cond, body, .. } => { self.expr(cond); self.scoped_stmt(body); }
             Stmt::DoWhile { body, cond, .. } => { self.scoped_stmt(body); self.expr(cond); }
             Stmt::For { init, cond, post, body, .. } => {
-                self.scopes.push(HashSet::new());
+                self.scopes.push(HashSet::default());
                 match init {
                     Some(ForInit::Decl(d)) => self.local_decl(d),
                     Some(ForInit::Expr(e)) => self.expr(e),
@@ -234,7 +234,7 @@ impl<'a> NsRenamer<'a> {
             Stmt::ForEach { ty, name, iterable, body, .. } => {
                 self.qual_type(ty);
                 self.expr(iterable);
-                self.scopes.push(HashSet::new());
+                self.scopes.push(HashSet::default());
                 let n = name.clone();
                 self.declare(&n);
                 self.scoped_stmt(body);
@@ -264,7 +264,7 @@ impl<'a> NsRenamer<'a> {
 
     fn arms(&mut self, arms: &mut [MatchArm]) {
         for a in arms.iter_mut() {
-            self.scopes.push(HashSet::new());
+            self.scopes.push(HashSet::default());
             if let Some(b) = &a.binding { let b = b.clone(); self.declare(&b); }
             self.stmt(&mut a.body);
             self.scopes.pop();

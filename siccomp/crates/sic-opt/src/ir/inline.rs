@@ -35,7 +35,7 @@
 //!    as a null-pointer crash whenever inlining into a function with fat-pointer
 //!    bounds checks. See `do_inline` step 5/6.
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_ir::{Module, Function, BasicBlock, Instr, Terminator, Val, ValId, BlockId, Type};
 use super::pass::IrPass;
 
@@ -50,7 +50,7 @@ pub struct Inline {
 
 impl Inline {
     pub fn new(threshold: usize, aggressive: bool) -> Self {
-        Inline { threshold, aggressive, self_done: HashSet::new() }
+        Inline { threshold, aggressive, self_done: HashSet::default() }
     }
 }
 
@@ -112,7 +112,7 @@ fn inline_cost(f: &Function) -> usize {
     // (Approximate — we do not re-run escape analysis here; over-counting a
     // promoted slot only forgoes an inline, and under-counting an escaping one is
     // bounded by the per-caller growth cap. Inlining stays correct either way.)
-    let mut slots: std::collections::HashSet<ValId> = std::collections::HashSet::new();
+    let mut slots: sic_ir::fast_hash::HashSet<ValId> = sic_ir::fast_hash::HashSet::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, .. } = ins { slots.insert(*dest); }
@@ -258,7 +258,7 @@ impl Inline {
         // A function on a cycle is expanded once here: each copy brings its call
         // back (Linux's FSE_readNCount_body, always_inline, calls itself through
         // FSE_readNCount).
-        let mut expanded: HashSet<usize> = HashSet::new();
+        let mut expanded: HashSet<usize> = HashSet::default();
         loop {
             // Past a cap only `always_inline` callees go on (Linux's intel_pmu_init
             // passes both, and kept out-of-line `arch_static_branch` copies).
@@ -364,7 +364,7 @@ impl Inline {
         // --- 1. Build the ValId remap for the callee. -----------------------------
         // Every value the callee DEFINES (instruction dest, alloca, dbg slot) gets a
         // fresh caller ValId; every parameter sentinel maps to the matching argument.
-        let mut vmap: HashMap<ValId, Val> = HashMap::new();
+        let mut vmap: HashMap<ValId, Val> = HashMap::default();
         for (i, a) in args.iter().enumerate() {
             vmap.insert(ValId(SENTINEL + i as u32), a.clone());
         }
@@ -382,7 +382,7 @@ impl Inline {
             if let Some(Val::Local(new)) = vmap.get(s) { caller.volatile_slots.push(*new); }
         }
         // --- 2. Fresh block ids for every callee block + a continuation block. ----
-        let mut bmap: HashMap<BlockId, BlockId> = HashMap::new();
+        let mut bmap: HashMap<BlockId, BlockId> = HashMap::default();
         for b in &callee.blocks {
             bmap.insert(b.id, caller.alloc_block());
         }

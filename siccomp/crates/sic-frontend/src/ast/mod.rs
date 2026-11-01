@@ -862,7 +862,7 @@ fn direct_child_stmts(s: &Stmt) -> Vec<&Stmt> {
 }
 
 /// Count every `goto L` in `s`, per label.
-pub fn count_gotos(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
+pub fn count_gotos(s: &Stmt, out: &mut sic_ir::fast_hash::HashMap<String, usize>) {
     if let Stmt::Goto(l, _) = s { *out.entry(l.clone()).or_insert(0) += 1; }
     if let Stmt::Asm(a) = s { for l in &a.labels { *out.entry(l.clone()).or_insert(0) += 1; } }
     if let Stmt::AddrLabels(ls) = s { for (l, _) in ls { *out.entry(l.clone()).or_insert(0) += 1; } }
@@ -873,8 +873,8 @@ pub fn count_gotos(s: &Stmt, out: &mut std::collections::HashMap<String, usize>)
 /// a `case`/`default` of the enclosing switch (not inside a nested `switch`), or
 /// a label that a goto OUTSIDE `s` targets (`total` counts the function's gotos).
 /// A constant-false branch for which this holds must not be dropped.
-pub fn reachable_from_outside(s: &Stmt, total: &std::collections::HashMap<String, usize>) -> bool {
-    fn walk(s: &Stmt, in_switch: bool, labels: &mut Vec<String>, inner: &mut std::collections::HashMap<String, usize>, case: &mut bool) {
+pub fn reachable_from_outside(s: &Stmt, total: &sic_ir::fast_hash::HashMap<String, usize>) -> bool {
+    fn walk(s: &Stmt, in_switch: bool, labels: &mut Vec<String>, inner: &mut sic_ir::fast_hash::HashMap<String, usize>, case: &mut bool) {
         match s {
             Stmt::Case(..) | Stmt::CaseRange(..) | Stmt::Default(..) if !in_switch => *case = true,
             Stmt::Label(l, _, _) => labels.push(l.clone()),
@@ -885,7 +885,7 @@ pub fn reachable_from_outside(s: &Stmt, total: &std::collections::HashMap<String
         let nested = in_switch || matches!(s, Stmt::Switch { .. });
         for c in child_stmts(s) { walk(c, nested, labels, inner, case); }
     }
-    let (mut labels, mut inner, mut case) = (Vec::new(), std::collections::HashMap::new(), false);
+    let (mut labels, mut inner, mut case) = (Vec::new(), sic_ir::fast_hash::HashMap::default(), false);
     walk(s, false, &mut labels, &mut inner, &mut case);
     case || labels.iter().any(|l| total.get(l).copied().unwrap_or(0) > inner.get(l).copied().unwrap_or(0))
 }
@@ -893,8 +893,8 @@ pub fn reachable_from_outside(s: &Stmt, total: &std::collections::HashMap<String
 /// Whether `s` holds any jump target control could enter it by — a `case` of
 /// the enclosing switch or any label — without knowing where the gotos are.
 pub fn may_be_entered(s: &Stmt) -> bool {
-    let mut labels = std::collections::HashMap::new();
-    fn collect(s: &Stmt, out: &mut std::collections::HashMap<String, usize>) {
+    let mut labels = sic_ir::fast_hash::HashMap::default();
+    fn collect(s: &Stmt, out: &mut sic_ir::fast_hash::HashMap<String, usize>) {
         if let Stmt::Label(l, _, _) = s { out.insert(l.clone(), usize::MAX); }
         for c in child_stmts(s) { collect(c, out); }
     }
@@ -955,7 +955,7 @@ fn has_continue(s: &Stmt) -> bool {
 /// a `case`) starts a live one again. Apple's "goto fail" bug is the classic: a
 /// repeated `goto fail;` skipped the certificate check after it.
 pub fn unreachable_code(body: &[Stmt]) -> Vec<(&Stmt, u32)> {
-    let mut gotos = std::collections::HashMap::new();
+    let mut gotos = sic_ir::fast_hash::HashMap::default();
     for s in body { count_gotos(s, &mut gotos); }
     let mut dead = Vec::new();
     block_completes(body, &gotos, &mut dead);
@@ -963,7 +963,7 @@ pub fn unreachable_code(body: &[Stmt]) -> Vec<(&Stmt, u32)> {
 }
 
 /// Whether control can fall out of the end of `ss`; records its dead stretches.
-fn block_completes<'a>(ss: &'a [Stmt], gotos: &std::collections::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
+fn block_completes<'a>(ss: &'a [Stmt], gotos: &sic_ir::fast_hash::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
     let mut live = true;
     let mut left = 0u32;            // the line of the statement control did not pass
     let mut reported = false;
@@ -1009,7 +1009,7 @@ fn stmt_line_of(s: &Stmt) -> u32 {
 }
 
 /// Whether control can leave `s` by reaching its end; records dead code inside.
-fn stmt_completes<'a>(s: &'a Stmt, gotos: &std::collections::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
+fn stmt_completes<'a>(s: &'a Stmt, gotos: &sic_ir::fast_hash::HashMap<String, usize>, dead: &mut Vec<(&'a Stmt, u32)>) -> bool {
     match s {
         Stmt::Return(..) | Stmt::Goto(..) | Stmt::Break(_) | Stmt::Continue(_) => false,
         Stmt::Expr(e, _) => !stmt_never_returns(e),

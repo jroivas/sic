@@ -41,7 +41,7 @@
 //!     of the body, outside `?:`/`&&`/`||`): a C array read is not
 //!     bounds-checked, so a read the body might skip must not be speculated.
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_frontend::ast::*;
 use crate::pass::AstPass;
 use crate::visit::{MutVisitor, walk_expr, walk_stmt, walk_decl};
@@ -55,7 +55,7 @@ impl AstPass for Licm {
     fn run(&mut self, tu: &mut TranslationUnit) -> bool {
         self.changed = false;
         // Functions of this unit whose bodies make no calls.
-        let mut leaf_fns: HashSet<String> = HashSet::new();
+        let mut leaf_fns: HashSet<String> = HashSet::default();
         for d in &mut tu.decls {
             if let Decl::Func { name, body: Some(stmts), .. } = d {
                 let mut cf = CallFinder::default();
@@ -305,7 +305,7 @@ impl Hoister {
         if cs.out.is_empty() { return None; }
 
         // Filter to genuinely invariant, non-aliased reads and assign temp names.
-        let mut keys: HashMap<(String, String), String> = HashMap::new();
+        let mut keys: HashMap<(String, String), String> = HashMap::default();
         let mut hoists: Vec<(String, Expr)> = Vec::new(); // (tempname, arr[E])
         for (arr, k, idx_expr) in cs.out {
             if ws.written_arrays.contains(&arr) || ws.dels.contains(&arr) { continue; }
@@ -317,7 +317,7 @@ impl Hoister {
             if keys.contains_key(&key) { continue; }
             // E's variables must be loop-invariant locals/params, never address-taken.
             let e_ids = match &idx_expr.kind {
-                ExprKind::Index { index, .. } => { let mut s = HashSet::new(); collect_idents(index, &mut s); s }
+                ExprKind::Index { index, .. } => { let mut s = HashSet::default(); collect_idents(index, &mut s); s }
                 _ => continue,
             };
             let invariant = e_ids.iter().all(|n|

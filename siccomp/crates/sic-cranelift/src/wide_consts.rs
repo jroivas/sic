@@ -16,7 +16,7 @@
 //! constant used as an operand cost a memory load from the pool already; one
 //! that Cranelift would have materialized with `movabs` now costs a load too.
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use cranelift_codegen::cursor::{Cursor, FuncCursor};
 use cranelift_codegen::ir::{self as cir, types as ct, InstBuilder, InstructionData, MemFlagsData, Opcode};
 use cranelift_module::{DataDescription, DataId, Module, ModuleResult};
@@ -74,7 +74,7 @@ pub(crate) fn wide_constants_to_rodata<M: Module>(
             }
         }
     }
-    let mut gvs: HashMap<i64, cir::GlobalValue> = HashMap::new();
+    let mut gvs: HashMap<i64, cir::GlobalValue> = HashMap::default();
     let mut global = |v: i64, func: &mut cir::Function, module: &mut M| -> ModuleResult<cir::GlobalValue> {
         let did = match table.get(&v) {
             Some(&d) => d,
@@ -167,7 +167,7 @@ mod tests {
         }
         ctx.optimize(&*opt_isa, &mut Default::default()).unwrap();
         if rewrite {
-            let mut table = HashMap::new();
+            let mut table = HashMap::default();
             wide_constants_to_rodata(&mut ctx.func, &mut module, &mut table).unwrap();
         }
         ctx.want_disasm = true;

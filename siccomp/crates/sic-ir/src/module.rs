@@ -326,13 +326,13 @@ impl Module {
     /// declare hundreds of prototypes that are never used; emitting an undefined
     /// symbol for each pollutes the object and can leave unresolvable references
     /// (e.g. glibc's internal `__asinhf`), so only referenced externs matter.
-    pub fn used_externs(&self) -> std::collections::HashSet<usize> {
+    pub fn used_externs(&self) -> crate::fast_hash::HashSet<usize> {
         // Only scan functions that will actually be emitted; an extern referenced
         // solely by a dead (unemitted) internal function must not be declared, or
         // it becomes an undefined symbol that pulls archive members.
         let (reachable, live) = self.live_items();
-        let mut used = std::collections::HashSet::new();
-        let note_val = |v: &Val, used: &mut std::collections::HashSet<usize>| {
+        let mut used = crate::fast_hash::HashSet::default();
+        let note_val = |v: &Val, used: &mut crate::fast_hash::HashSet<usize>| {
             if let Val::Func(fr) = v {
                 if fr.is_extern() { used.insert(fr.index()); }
             }
@@ -372,7 +372,7 @@ impl Module {
     /// as an undefined symbol, or the linker pulls archive members to satisfy it
     /// — dragging real definitions into conflict with a unit test's stubs
     /// (QEMU's error-report.c declares `global_aio_wait` without using it).
-    pub fn used_globals(&self) -> std::collections::HashSet<u32> {
+    pub fn used_globals(&self) -> crate::fast_hash::HashSet<u32> {
         self.live_items().1
     }
 
@@ -385,14 +385,14 @@ impl Module {
     /// members into conflict with unit-test stubs. Not removing them keeps the
     /// object correct but bloated; removing them matches what a real compiler +
     /// `--gc-sections` achieve, without the archive-pull side effect.
-    pub fn reachable_functions(&self) -> std::collections::HashSet<u32> {
+    pub fn reachable_functions(&self) -> crate::fast_hash::HashSet<u32> {
         self.live_items().0
     }
 
     /// The identifiers in assembler text of this unit: what it names is used,
     /// whatever the IR says.
-    pub fn asm_names(&self) -> std::collections::HashSet<&str> {
-        let mut names = std::collections::HashSet::new();
+    pub fn asm_names(&self) -> crate::fast_hash::HashSet<&str> {
+        let mut names = crate::fast_hash::HashSet::default();
         let texts = self.asm_text_helpers.iter().map(|(_, t)| t).chain(&self.file_asm);
         for t in texts {
             names.extend(t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$')).filter(|w| !w.is_empty()));
@@ -405,13 +405,13 @@ impl Module {
     /// named section, and what assembler text names. A `static` table nothing
     /// refers to keeps nothing alive (Linux's `dm_dax_ops`, whose users a disabled
     /// config removes, points at functions calling what that config lacks).
-    pub fn live_items(&self) -> (std::collections::HashSet<u32>, std::collections::HashSet<u32>) {
-        use std::collections::HashSet;
+    pub fn live_items(&self) -> (crate::fast_hash::HashSet<u32>, crate::fast_hash::HashSet<u32>) {
+        use crate::fast_hash::HashSet;
         enum Item { Func(u32), Global(u32) }
         let asm = self.asm_names();
         let sections: HashSet<&str> = self.data_sections.iter().map(|(n, _)| n.as_str()).collect();
-        let mut funcs: HashSet<u32> = HashSet::new();
-        let mut globals: HashSet<u32> = HashSet::new();
+        let mut funcs: HashSet<u32> = HashSet::default();
+        let mut globals: HashSet<u32> = HashSet::default();
         let mut work: Vec<Item> = Vec::new();
         for (i, f) in self.functions.iter().enumerate() {
             if f.linkage != Linkage::Internal || f.constructor.is_some()

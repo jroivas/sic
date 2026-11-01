@@ -14,7 +14,7 @@
 //! store per part. Any other use (a lane read as a
 //! scalar, the address passed on) leaves the slot as it is.
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_ir::{Module, Function, Instr, Val, ValId, Type, CastOp, Constant, SimdOp};
 use super::pass::IrPass;
 
@@ -50,7 +50,7 @@ fn const_off(v: &Val) -> Option<i64> {
 
 /// Result types of the instructions whose values may be stored to a slot.
 fn value_types(f: &Function) -> HashMap<ValId, Type> {
-    let mut t = HashMap::new();
+    let mut t = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             let r = match ins {
@@ -67,7 +67,7 @@ fn value_types(f: &Function) -> HashMap<ValId, Type> {
 
 fn split_function(f: &mut Function) -> bool {
     // Candidate slots and their sizes.
-    let mut size: HashMap<ValId, u64> = HashMap::new();
+    let mut size: HashMap<ValId, u64> = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, ty, align } = ins {
@@ -80,7 +80,7 @@ fn split_function(f: &mut Function) -> bool {
     }
     if size.is_empty() { return false; }
     // Integer constants behind extensions (an index typed by a cast).
-    let mut konst: HashMap<ValId, i64> = HashMap::new();
+    let mut konst: HashMap<ValId, i64> = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Cast { dest, op: CastOp::SExt | CastOp::ZExt, val, .. } = ins {
@@ -126,8 +126,8 @@ fn split_function(f: &mut Function) -> bool {
     }
     let vt = value_types(f);
     // Reject a slot on any use other than whole-part loads/stores or whole-slot copies.
-    let mut bad: HashSet<ValId> = HashSet::new();
-    let mut rewrite: HashSet<ValId> = HashSet::new();
+    let mut bad: HashSet<ValId> = HashSet::default();
+    let mut rewrite: HashSet<ValId> = HashSet::default();
     let part_ok = |root: ValId, off: i64, size: &HashMap<ValId, u64>| off >= 0 && off % 16 == 0 && (off as u64) + 16 <= size[&root];
     for b in &f.blocks {
         for ins in &b.instrs {
@@ -179,7 +179,7 @@ fn split_function(f: &mut Function) -> bool {
     if split.is_empty() { return false; }
 
     // The parts of each split slot.
-    let mut parts: HashMap<ValId, Vec<ValId>> = HashMap::new();
+    let mut parts: HashMap<ValId, Vec<ValId>> = HashMap::default();
     for &r in &split {
         let n = size[&r] / 16;
         parts.insert(r, (0..n).map(|_| f.alloc_val()).collect());

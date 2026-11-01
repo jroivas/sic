@@ -5,7 +5,7 @@
 //! defining (pure) instruction removed; the pass manager's fixpoint lets a
 //! folded constant feed the next fold.
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use sic_ir::{Module, Val, ValId, Instr, Constant, Type, BinOp, UnOp, CmpOp, CastOp};
 use crate::ir::pass::IrPass;
 use crate::ir::{apply_replacements, prune_defs};
@@ -22,7 +22,7 @@ impl IrPass for IrFold {
     fn run(&mut self, m: &mut Module) -> bool {
         let mut changed = false;
         for func in &mut m.functions {
-            let mut repl: HashMap<ValId, Val> = HashMap::new();
+            let mut repl: HashMap<ValId, Val> = HashMap::default();
             for b in &func.blocks {
                 for ins in &b.instrs {
                     if let (Some(dest), Some(c)) = (ins.dest(), fold_instr(ins)) {

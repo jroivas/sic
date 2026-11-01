@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use crate::ast::{Decl, Stmt, Expr, ExprKind, ForInit, StorageClass, AstType, QualType, Initializer};
 use crate::ast::Param as AstParam;
 use crate::{Result, CompileError};
@@ -294,7 +294,7 @@ pub struct FuncCtx<'m> {
     pub goto_counts: HashMap<String, usize>,
     /// Blocks ended by a call that never returns (`exit(1);`): their terminator
     /// is `Unreachable`, which otherwise means "not terminated yet".
-    pub diverged: std::collections::HashSet<BlockId>,
+    pub diverged: sic_ir::fast_hash::HashSet<BlockId>,
     /// Declared (AST) types of the function's parameters and locals by name
     /// (the latest declaration wins) — see `Lowerer::global_qtypes`.
     pub decl_qtypes: HashMap<String, QualType>,
@@ -311,13 +311,13 @@ pub struct FuncCtx<'m> {
     pub immutable_vids: HashMap<ValId, bool>,
     /// Strict mode: the first-and-only assignments of immutable locals declared
     /// without an initializer (`super::strict::late_init_sites`).
-    pub late_init_ok: std::collections::HashSet<super::strict::Site>,
+    pub late_init_ok: sic_ir::fast_hash::HashSet<super::strict::Site>,
     /// Declared (AST) types of locals and parameters by slot, so `const` is
     /// known per binding (an inner declaration shadows an outer one).
     pub vid_qtypes: HashMap<ValId, QualType>,
     /// Names whose address has been taken (`&x`) so far in the function. A
     /// local outside this set cannot be changed by a call (loop-BCE).
-    pub addr_taken: std::collections::HashSet<String>,
+    pub addr_taken: sic_ir::fast_hash::HashSet<String>,
     /// Stack of (break_bb, continue_bb) for loops
     pub loop_stack: Vec<(BlockId, BlockId)>,
     /// Stack of `break` targets for *both* loops and switches, in nesting order.
@@ -328,7 +328,7 @@ pub struct FuncCtx<'m> {
     /// `case:`/`default:` labels resolve to these pre-created blocks so the
     /// `Switch` terminator's arms and the emitted case bodies share the same
     /// blocks (and C fall-through between cases works).
-    pub switch_stack: Vec<(BlockId, BlockId, std::collections::HashMap<i64, BlockId>)>,
+    pub switch_stack: Vec<(BlockId, BlockId, sic_ir::fast_hash::HashMap<i64, BlockId>)>,
     /// Pending goto stubs: label_name → Vec<(from_bb, stub_term)>
     pub pending_gotos: Vec<PendingGoto>,
     /// `Stmt::AddrLabels`, and each `goto *`'s block and value: its jump is built
@@ -370,7 +370,7 @@ pub struct FuncCtx<'m> {
     /// copy of something this frame does not own (a parameter, a field).
     pub ret_enum_retain: Option<bool>,
     /// Tagged-enum locals that own their payload (registered `EnumRelease`).
-    pub owned_enum_locals: std::collections::HashSet<ValId>,
+    pub owned_enum_locals: sic_ir::fast_hash::HashSet<ValId>,
     /// Scope depth (`cleanups.len()`) recorded per `break_stack` entry (loops and
     /// switches), so `break` runs the cleanups for the scopes it exits.
     pub break_scope_depth: Vec<usize>,
@@ -382,7 +382,7 @@ pub struct FuncCtx<'m> {
     /// so `name[i]` can be bounds-checked against the header size at
     /// `name - 2*ptr_size`. `moved_names` is the pre-scanned set of locals that
     /// ARE reassigned / incremented (and so cannot be safely checked).
-    pub fat_locals: std::collections::HashSet<String>,
+    pub fat_locals: sic_ir::fast_hash::HashSet<String>,
     /// Variable-length array locals: pointer slot → slot holding the byte size.
     pub vla_sizes: HashMap<ValId, ValId>,
     /// `any` temporaries read from a dynamically typed tuple (value id → the
@@ -393,19 +393,19 @@ pub struct FuncCtx<'m> {
     /// The function being lowered (for per-function tuple decisions).
     pub cur_fn: String,
     /// Locals declared as a plain `tuple` (their shape comes from assignments).
-    pub plain_tuple_locals: std::collections::HashSet<ValId>,
+    pub plain_tuple_locals: sic_ir::fast_hash::HashSet<ValId>,
     /// Nesting of conditionally/repeatedly executed code (if/switch/match/loop
     /// bodies, ternary arms, `&&`/`||`), and each plain tuple local's
     /// (control depth, loop depth) at its declaration: a shape change at the
     /// declaration's own level dominates every later use, so it stays static.
     pub ctrl_depth: u32,
     /// Container locals whose `tuple` element shape came from a stored tuple.
-    pub refined_tuple_containers: std::collections::HashSet<ValId>,
+    pub refined_tuple_containers: sic_ir::fast_hash::HashSet<ValId>,
     pub tuple_decl_depth: HashMap<ValId, (u32, usize)>,
     /// Plain `tuple t;` locals whose static shape came from a later assignment:
     /// a static element read checks the length (the binding may still be the
     /// empty tuple on a path that skipped that assignment).
-    pub refined_bare_tuples: std::collections::HashSet<ValId>,
+    pub refined_bare_tuples: sic_ir::fast_hash::HashSet<ValId>,
     /// Local closure variables that borrow a stack object (slot → its name).
     pub borrowing_closures: HashMap<ValId, String>,
     /// sic loop bounds-check elimination (sic.md §"Scopes"): `(array-name,
@@ -418,12 +418,12 @@ pub struct FuncCtx<'m> {
     pub local_reg_vars: HashMap<u32, String>,
     /// sic `atomic` locals (sic.md §"Atomics"): names whose declared type is
     /// atomic-qualified at top level, so loads/stores/RMW use the atomic IR ops.
-    pub atomic_locals: std::collections::HashSet<String>,
-    pub moved_names: std::collections::HashSet<String>,
+    pub atomic_locals: sic_ir::fast_hash::HashSet<String>,
+    pub moved_names: sic_ir::fast_hash::HashSet<String>,
     /// sic deferred tuple locals (`tuple t;` with no initializer, sic.md
     /// §"Tuples"): not yet allocated — the concrete type is fixed by the first
     /// assignment `t = tuple(...)`, which materializes the slot.
-    pub deferred_tuples: std::collections::HashSet<String>,
+    pub deferred_tuples: sic_ir::fast_hash::HashSet<String>,
     /// sic `bigint` temporaries created while lowering the current statement
     /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
     /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
@@ -484,35 +484,35 @@ impl<'m> FuncCtx<'m> {
         FuncCtx {
             lowerer,
             func: func as *mut Function,
-            locals: vec![HashMap::new()],
+            locals: vec![HashMap::default()],
             unroll_consts: Vec::new(),
-            enum_locals: HashMap::new(),
-            bitfield_locals: HashMap::new(),
-            weak_locals: HashMap::new(),
+            enum_locals: HashMap::default(),
+            bitfield_locals: HashMap::default(),
+            weak_locals: HashMap::default(),
             bf_ctx: BfCtx::Any,
-            static_locals: HashMap::new(),
+            static_locals: HashMap::default(),
             static_shadows: Vec::new(),
-            val_types: HashMap::new(),
+            val_types: HashMap::default(),
             current_bb: entry_id,
             ret_ty,
-            labels: HashMap::new(),
-            goto_counts: HashMap::new(),
-            diverged: std::collections::HashSet::new(),
-            decl_qtypes: HashMap::new(),
+            labels: HashMap::default(),
+            goto_counts: HashMap::default(),
+            diverged: sic_ir::fast_hash::HashSet::default(),
+            decl_qtypes: HashMap::default(),
             binding_qt: None,
             cleanup_error: None,
             strict: false,
-            immutable_vids: HashMap::new(),
-            late_init_ok: std::collections::HashSet::new(),
-            vid_qtypes: HashMap::new(),
-            addr_taken: std::collections::HashSet::new(),
+            immutable_vids: HashMap::default(),
+            late_init_ok: sic_ir::fast_hash::HashSet::default(),
+            vid_qtypes: HashMap::default(),
+            addr_taken: sic_ir::fast_hash::HashSet::default(),
             loop_stack: Vec::new(),
             break_stack: Vec::new(),
             switch_stack: Vec::new(),
             pending_gotos: Vec::new(),
             addr_labels: Vec::new(),
             indirect_gotos: Vec::new(),
-            label_scopes: HashMap::new(),
+            label_scopes: HashMap::default(),
             last_init_local: None,
             last_struct_temp: None,
             pretty_func: String::new(),
@@ -525,25 +525,25 @@ impl<'m> FuncCtx<'m> {
             moved_on_return: None,
             moved_enum_on_return: None,
             ret_enum_retain: None,
-            owned_enum_locals: std::collections::HashSet::new(),
+            owned_enum_locals: sic_ir::fast_hash::HashSet::default(),
             break_scope_depth: Vec::new(),
             continue_scope_depth: Vec::new(),
-            fat_locals: std::collections::HashSet::new(),
-            vla_sizes: HashMap::new(),
-            borrowing_closures: HashMap::new(),
-            strict_anys: HashMap::new(),
+            fat_locals: sic_ir::fast_hash::HashSet::default(),
+            vla_sizes: HashMap::default(),
+            borrowing_closures: HashMap::default(),
+            strict_anys: HashMap::default(),
             unpack_counter: 0,
             cur_fn: String::new(),
-            plain_tuple_locals: std::collections::HashSet::new(),
-            refined_bare_tuples: std::collections::HashSet::new(),
+            plain_tuple_locals: sic_ir::fast_hash::HashSet::default(),
+            refined_bare_tuples: sic_ir::fast_hash::HashSet::default(),
             ctrl_depth: 0,
-            refined_tuple_containers: std::collections::HashSet::new(),
-            tuple_decl_depth: HashMap::new(),
+            refined_tuple_containers: sic_ir::fast_hash::HashSet::default(),
+            tuple_decl_depth: HashMap::default(),
             bce_proven: Vec::new(),
-            local_reg_vars: HashMap::new(),
-            atomic_locals: std::collections::HashSet::new(),
-            moved_names: std::collections::HashSet::new(),
-            deferred_tuples: std::collections::HashSet::new(),
+            local_reg_vars: HashMap::default(),
+            atomic_locals: sic_ir::fast_hash::HashSet::default(),
+            moved_names: sic_ir::fast_hash::HashSet::default(),
+            deferred_tuples: sic_ir::fast_hash::HashSet::default(),
             bigint_temps: Vec::new(),
             list_temps: Vec::new(),
             container_temps: Vec::new(),
@@ -689,7 +689,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub fn enter_scope(&mut self) {
-        self.locals.push(HashMap::new());
+        self.locals.push(HashMap::default());
         self.cleanups.push(Vec::new());
         self.scope_ids.push(self.next_scope_id);
         self.next_scope_id += 1;
@@ -1984,7 +1984,7 @@ impl<'m> Lowerer {
     /// scanned) locals bound. First consistent shape wins.
     pub(crate) fn infer_tuple_params(&mut self, tu: &crate::ast::TranslationUnit) {
         // Which functions have tuple params, and at which positions?
-        let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut targets: HashMap<String, Vec<usize>> = HashMap::default();
         // A module's exported functions are called from units not seen here: their
         // `tuple` parameters stay dynamically typed.
         let in_module = tu.decls.iter().any(|d| matches!(d, Decl::Module(..)));
@@ -2044,14 +2044,14 @@ impl<'m> Lowerer {
     /// definitely passes a fat base.
     pub(crate) fn infer_fat_params(&mut self, tu: &crate::ast::TranslationUnit) {
         use crate::ast::{Decl, StorageClass, AstType};
-        let mut fat: HashMap<String, std::collections::HashSet<usize>> = HashMap::new();
-        let mut pnames: HashMap<String, Vec<Option<String>>> = HashMap::new();
+        let mut fat: HashMap<String, sic_ir::fast_hash::HashSet<usize>> = HashMap::default();
+        let mut pnames: HashMap<String, Vec<Option<String>>> = HashMap::default();
         for d in &tu.decls {
             if let Decl::Func { name, params, body: Some(_), storage, variadic, .. } = d {
                 let is_static = matches!(storage, Some(StorageClass::Static))
                     || self.static_funcs.contains(name);
                 if !is_static || *variadic { continue; }
-                let idxs: std::collections::HashSet<usize> = params.iter().enumerate()
+                let idxs: sic_ir::fast_hash::HashSet<usize> = params.iter().enumerate()
                     .filter(|(_, p)| matches!(&p.ty.ty, AstType::Pointer { .. }))
                     .map(|(i, _)| i).collect();
                 if !idxs.is_empty() {
@@ -2061,16 +2061,16 @@ impl<'m> Lowerer {
             }
         }
         if fat.is_empty() { return; }
-        let cand: std::collections::HashSet<String> = fat.keys().cloned().collect();
+        let cand: sic_ir::fast_hash::HashSet<String> = fat.keys().cloned().collect();
 
         // Per-function scans (bodies are fixed; only `fat` changes in the fixpoint).
-        struct Info { moved: std::collections::HashSet<String>, newloc: std::collections::HashSet<String>,
+        struct Info { moved: sic_ir::fast_hash::HashSet<String>, newloc: sic_ir::fast_hash::HashSet<String>,
                       calls: Vec<(String, Vec<Expr>)> }
         let mut infos: Vec<(String, Info)> = Vec::new();
         for d in &tu.decls {
             if let Decl::Func { name, body: Some(body), .. } = d {
                 let mut info = Info { moved: Default::default(), newloc: Default::default(), calls: Vec::new() };
-                let mut escaped: std::collections::HashSet<String> = Default::default();
+                let mut escaped: sic_ir::fast_hash::HashSet<String> = Default::default();
                 for s in body {
                     scan_mutated_stmt(s, &mut info.moved);
                     fat_prepass_stmt(s, &cand, &mut info.newloc, &mut info.calls, &mut escaped);
@@ -2088,7 +2088,7 @@ impl<'m> Lowerer {
             for (caller, info) in &infos {
                 // The caller's fat-base names: its own fat params + `new`-init locals,
                 // minus anything mutated (a reassigned pointer no longer points at the base).
-                let mut fat_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut fat_names: sic_ir::fast_hash::HashSet<String> = sic_ir::fast_hash::HashSet::default();
                 if let (Some(idxs), Some(ps)) = (fat.get(caller), pnames.get(caller)) {
                     for &i in idxs {
                         if let Some(Some(pn)) = ps.get(i) {
@@ -2967,7 +2967,7 @@ impl<'m> FuncCtx<'m> {
                         self.lowerer.scoped_fn_name = Some(fname);
                         let added = self.lowerer.add_static_local_global(gname, d, ty);
                         self.lowerer.scoped_fn_name = None;
-                        super::types::set_local_var_types(HashMap::new());
+                        super::types::set_local_var_types(HashMap::default());
                         self.lowerer.scoped_statics.clear();
                         let (gty, gref) = added?;
                         let qt = self.declared_qt(&d.ty);
@@ -4436,7 +4436,7 @@ impl<'m> FuncCtx<'m> {
     /// Fails closed (`Ok(false)`, keeping the normal loop) on anything unproven.
     fn try_delete_loop(&mut self, init: &ForInit, cond: &Expr, post: &Expr, body: &Stmt) -> Result<bool> {
         use crate::ast::{ExprKind as E, BinOpKind as B};
-        use std::collections::HashSet;
+        use sic_ir::fast_hash::HashSet;
         if !self.lowerer.loop_delete { return Ok(false); }
 
         // -- induction variable `i` (and its declared type for a `for (T i = …)`). --
@@ -4488,7 +4488,7 @@ impl<'m> FuncCtx<'m> {
             Stmt::Null(_) => Vec::new(),
             _ => return Ok(false),
         };
-        let mut assigned: HashSet<String> = HashSet::new();
+        let mut assigned: HashSet<String> = HashSet::default();
         let mut rhs_idsets: Vec<HashSet<String>> = Vec::new();
         for s in &stmts {
             let (lname, rhs) = match s {
@@ -4655,7 +4655,7 @@ impl<'m> FuncCtx<'m> {
         // -- scan the body: collect every name that could be modified/declared, and
         //    every fat-pointer affine access `arr[X + i]`. Bail on any unhandled or
         //    unsafe construct (e.g. a call, which could mutate HI/X globals). --
-        let mut mods: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut mods: sic_ir::fast_hash::HashSet<String> = sic_ir::fast_hash::HashSet::default();
         let mut accesses: Vec<(String, Expr, Option<Expr>)> = Vec::new(); // (arr, index-expr, X)
         if !self.bce_scan(body, &ivar, &mut mods, &mut accesses) { return Ok(()); }
         if accesses.is_empty() { return Ok(()); }
@@ -5492,7 +5492,7 @@ impl<'m> FuncCtx<'m> {
     /// or index depends on. Conservative by construction: an unrecognized form fails
     /// closed (keeps the per-iteration checks).
     fn bce_scan(&self, stmt: &Stmt, ivar: &str,
-        mods: &mut std::collections::HashSet<String>,
+        mods: &mut sic_ir::fast_hash::HashSet<String>,
         out: &mut Vec<(String, Expr, Option<Expr>)>) -> bool {
         match stmt {
             Stmt::Expr(e, _) => self.bce_scan_expr(e, ivar, mods, out),
@@ -5539,7 +5539,7 @@ impl<'m> FuncCtx<'m> {
     /// and affine fat-pointer accesses in `out`. Returns false (bail) on a call or
     /// any unhandled expression form.
     fn bce_scan_expr(&self, e: &Expr, ivar: &str,
-        mods: &mut std::collections::HashSet<String>,
+        mods: &mut sic_ir::fast_hash::HashSet<String>,
         out: &mut Vec<(String, Expr, Option<Expr>)>) -> bool {
         use crate::ast::{ExprKind as E, UnOpKind};
         match &e.kind {
@@ -5846,10 +5846,10 @@ impl<'m> FuncCtx<'m> {
         // the emitted case bodies must be the *same* blocks.
         let cases = collect_switch_cases(body, &|e| self.case_value(e));
         let mut arms: Vec<(i64, BlockId)> = Vec::new();
-        let mut case_blocks: std::collections::HashMap<i64, BlockId> = std::collections::HashMap::new();
+        let mut case_blocks: sic_ir::fast_hash::HashMap<i64, BlockId> = sic_ir::fast_hash::HashMap::default();
         // One block per group, so all values of a `case LOW ... HIGH:` range
         // share a single body block.
-        let mut group_blocks: std::collections::HashMap<usize, BlockId> = std::collections::HashMap::new();
+        let mut group_blocks: sic_ir::fast_hash::HashMap<usize, BlockId> = sic_ir::fast_hash::HashMap::default();
         for (case_val, group) in &cases.singles {
             // Duplicate case values shouldn't happen in valid C; keep the first.
             if case_blocks.contains_key(case_val) { continue; }
@@ -6107,7 +6107,7 @@ impl<'m> FuncCtx<'m> {
         // sic (sic.md §"Match"): a `match` must be exhaustive — every variant, or a
         // `_`. Missing variants are a compile error (not a runtime abort).
         if wildcard.is_none() {
-            let covered: std::collections::HashSet<&str> =
+            let covered: sic_ir::fast_hash::HashSet<&str> =
                 arms.iter().filter_map(|a| a.variant.as_deref()).collect();
             let missing: Vec<&str> = info.variants.iter()
                 .map(|v| v.name.as_str()).filter(|n| !covered.contains(n)).collect();
@@ -6195,7 +6195,7 @@ impl<'m> FuncCtx<'m> {
         // sic (sic.md §"Match"): exhaustiveness — cover every variant or use `_`.
         if wildcard.is_none() {
             if let Some(variants) = self.lowerer.c_enum_defs.get(ename) {
-                let covered: std::collections::HashSet<&str> =
+                let covered: sic_ir::fast_hash::HashSet<&str> =
                     arms.iter().filter_map(|a| a.variant.as_deref()).collect();
                 let missing: Vec<&str> = variants.iter()
                     .map(|(n, _)| n.as_str()).filter(|n| !covered.contains(n)).collect();
@@ -6731,9 +6731,9 @@ fn positive_int_lit(e: &Expr) -> bool {
 /// arithmetic/bitwise/shift/neg over them. Returns `None` if `e` contains anything
 /// else (a call, index, field, …); the caller then bails, so an un-analyzable loop
 /// bound or index offset is never mistaken for a loop-invariant value.
-fn simple_expr_idents(e: &Expr) -> Option<std::collections::HashSet<String>> {
+fn simple_expr_idents(e: &Expr) -> Option<sic_ir::fast_hash::HashSet<String>> {
     use crate::ast::{ExprKind as E, UnOpKind as U, BinOpKind as B};
-    fn go(e: &Expr, out: &mut std::collections::HashSet<String>) -> bool {
+    fn go(e: &Expr, out: &mut sic_ir::fast_hash::HashSet<String>) -> bool {
         match &e.kind {
             E::IntLit(..) | E::UIntLit(..) | E::CharLit(_) | E::FloatLit(_) | E::DecimalLit(_) => true,
             E::Ident(n) => { out.insert(n.clone()); true }
@@ -6744,7 +6744,7 @@ fn simple_expr_idents(e: &Expr) -> Option<std::collections::HashSet<String>> {
             _ => false,
         }
     }
-    let mut s = std::collections::HashSet::new();
+    let mut s = sic_ir::fast_hash::HashSet::default();
     if go(e, &mut s) { Some(s) } else { None }
 }
 
@@ -6887,7 +6887,7 @@ fn instr_result_type(instr: &Instr) -> Option<(ValId, Type)> {
 /// or address-taken (`&x`). A `new`/`@` pointer in this set can't be safely
 /// bounds-checked via its header (it may no longer point at the allocation base),
 /// so it is excluded from `fat_locals`.
-fn scan_mutated_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+fn scan_mutated_expr(e: &Expr, out: &mut sic_ir::fast_hash::HashSet<String>) {
     use ExprKind::*;
     // Record the mutated name at this node.
     match &e.kind {
@@ -6929,7 +6929,7 @@ fn scan_mutated_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
     }
 }
 
-fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
+fn scan_mutated_stmt(s: &Stmt, out: &mut sic_ir::fast_hash::HashSet<String>) {
     match s {
         Stmt::Decl(Decl::Var { declarators, .. }) => {
             for d in declarators {
@@ -6967,7 +6967,7 @@ fn scan_mutated_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
 }
 
 // ── Fat-parameter propagation helpers (see Lowerer::infer_fat_params) ──────────
-use std::collections::HashSet as FpSet;
+use sic_ir::fast_hash::HashSet as FpSet;
 
 /// Is `arg` a fat-pointer *base* (allocation start, so its size header sits at
 /// `p - 2*ptr`)? True for a `new` expression or an identifier holding a fat base

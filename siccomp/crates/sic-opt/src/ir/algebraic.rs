@@ -12,8 +12,8 @@
 //! Signed division/remainder by a power of two is *not* reduced (its rounding
 //! differs from a shift).
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use sic_ir::fast_hash::HashMap;
+use sic_ir::fast_hash::HashSet;
 use sic_ir::{Module, Function, Val, ValId, Instr, Constant, Type, BinOp, CmpOp, CastOp};
 use crate::ir::pass::IrPass;
 use crate::ir::fold::{as_int, as_uint, as_float, wrap_int};
@@ -40,7 +40,7 @@ impl IrPass for Algebraic {
             if srem_zero_test(func) { changed = true; }
             if exact_div_select(func) { changed = true; }
             // Step B: identity/annihilator substitutions.
-            let mut repl: HashMap<ValId, Val> = HashMap::new();
+            let mut repl: HashMap<ValId, Val> = HashMap::default();
             for b in &func.blocks {
                 for ins in &b.instrs {
                     if let Instr::BinOp { dest, op, lhs, rhs, ty } = ins {
@@ -141,12 +141,12 @@ fn identity(op: BinOp, lhs: &Val, rhs: &Val, ty: &Type) -> Option<Val> {
 /// SDiv must have no other use (its value is then irrelevant whenever the
 /// select does not pick it). The condition may come wrapped in `!= 0` / zext.
 fn exact_div_select(func: &mut Function) -> bool {
-    let mut defs: HashMap<ValId, Instr> = HashMap::new();
-    let mut uses: HashMap<ValId, usize> = HashMap::new();
+    let mut defs: HashMap<ValId, Instr> = HashMap::default();
+    let mut uses: HashMap<ValId, usize> = HashMap::default();
     // Loads of the same slot in one block with no store/call between them read
     // the same value (the IR re-loads a variable at each use): key = (ptr,
     // block index, memory epoch).
-    let mut load_key: HashMap<ValId, (Val, usize, usize)> = HashMap::new();
+    let mut load_key: HashMap<ValId, (Val, usize, usize)> = HashMap::default();
     for (bi, b) in func.blocks.iter().enumerate() {
         let mut epoch = 0usize;
         for ins in &b.instrs {
@@ -234,8 +234,8 @@ fn exact_div_select(func: &mut Function) -> bool {
 /// are, whatever the sign (`-6 % 4 == -2`, `-6 & 3 == 2`: both non-zero). Its
 /// value differs for a negative `x`, hence the all-uses-are-zero-tests guard.
 fn srem_zero_test(func: &mut Function) -> bool {
-    let mut uses: HashMap<ValId, usize> = HashMap::new();
-    let mut zero_tests: HashMap<ValId, usize> = HashMap::new();
+    let mut uses: HashMap<ValId, usize> = HashMap::default();
+    let mut zero_tests: HashMap<ValId, usize> = HashMap::default();
     for b in &func.blocks {
         for ins in &b.instrs {
             ins.for_each_val(|v| if let Val::Local(id) = v { *uses.entry(*id).or_insert(0) += 1; });

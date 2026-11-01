@@ -14,7 +14,7 @@
 //! through stack slots: a slot whose one store is the value and which is
 //! otherwise only loaded is followed.)
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_ir::*;
 
 /// Brackets an operand placeholder in a helper body (see `AsmDeferred`).
@@ -62,8 +62,8 @@ struct Resolver<'a> {
 
 impl<'a> Resolver<'a> {
     fn new(m: &'a Module, f: &'a Function) -> Self {
-        let mut defs = HashMap::new();
-        let mut at = HashMap::new();
+        let mut defs = HashMap::default();
+        let mut at = HashMap::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             for (ii, i) in b.instrs.iter().enumerate() {
                 if let Some(d) = instr_dest(i) { defs.insert(d.0, i); at.insert(d.0, (bi, ii)); }
@@ -347,7 +347,7 @@ pub fn prune_dead_blocks(m: &mut Module) {
     for f in &mut m.functions {
         let live = reachable_blocks(f);
         if live.len() == f.blocks.len() { continue; }
-        let mut used: HashSet<ValId> = HashSet::new();
+        let mut used: HashSet<ValId> = HashSet::default();
         for (bi, b) in f.blocks.iter().enumerate() {
             if !live.contains(&bi) { continue; }
             for ins in &b.instrs { ins.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); }); }
@@ -364,7 +364,7 @@ pub fn prune_dead_blocks(m: &mut Module) {
 /// Indices of the blocks reachable from the function's entry (its first block).
 fn reachable_blocks(f: &Function) -> HashSet<usize> {
     let index: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     let mut work = if f.blocks.is_empty() { vec![] } else { vec![0usize] };
     while let Some(i) = work.pop() {
         if !seen.insert(i) { continue; }
@@ -395,7 +395,7 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
     let mut rewrites: Vec<(usize, usize, usize, String, Vec<Type>, Type)> = Vec::new();
     let mut used_fns: Vec<String> = Vec::new();
     // Helpers that live (emitted, reachable) code calls.
-    let mut called: HashSet<String> = HashSet::new();
+    let mut called: HashSet<String> = HashSet::default();
     for (fi, f) in m.functions.iter().enumerate() {
         if f.linkage == Linkage::Internal && !reachable.contains(&(fi as u32)) { continue; }
         let live = reachable_blocks(f);

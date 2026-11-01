@@ -66,7 +66,7 @@ fn instructions(t: &str) -> Vec<String> {
 /// it changes no register, so the request yields its tied default value.
 /// Rotations that do not cancel are kept (the template is then not recognised).
 fn strip_native_nops(insns: Vec<String>) -> Vec<String> {
-    let mut turns: std::collections::HashMap<String, u32> = Default::default();
+    let mut turns: sic_ir::fast_hash::HashMap<String, u32> = Default::default();
     let mut rest = Vec::new();
     for i in &insns {
         if let Some((mnem, ops)) = i.split_once(' ') {

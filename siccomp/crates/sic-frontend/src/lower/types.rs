@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use std::cell::RefCell;
 use crate::ast::*;
 use crate::Result;
@@ -11,7 +11,7 @@ thread_local! {
     /// the scope-less `lower_type` path. Without this a global array sized by an
     /// enum comes out length 0 — QEMU's `init_type_list[MODULE_INIT_MAX]` then
     /// overlaps the next global and crashes at startup.
-    static ENUM_CONSTS: RefCell<HashMap<String, i64>> = RefCell::new(HashMap::new());
+    static ENUM_CONSTS: RefCell<HashMap<String, i64>> = RefCell::new(HashMap::default());
     /// A SIC source: its built-in type names (`string`, `set`, `i8`, …) are
     /// reserved. In C they are ordinary names, a typedef's first.
     static SIC_SOURCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -19,12 +19,12 @@ thread_local! {
     /// as typedefs are registered, so type-blind constant folding can apply a
     /// cast to one: `(uint8_t)(U8 + 100)` must fold to 44, not 300 (a folded
     /// `if` condition took the wrong branch).
-    static INT_TYPEDEFS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    static INT_TYPEDEFS: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::default());
     /// File-scope variable types seen so far (source order), so a struct field
     /// dimension like `int v[sizeof(g) / sizeof(g[0])]` (QEMU's ARRAY_SIZE of a
     /// global) folds in the scope-less path — it came out 0, silently.
-    static GLOBAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
-    static LOCAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    static GLOBAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::default());
+    static LOCAL_VAR_TYPES: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::default());
 }
 
 /// The current function's variables, while a `static` of it is initialized:
@@ -141,7 +141,7 @@ pub fn type_matches_generic(a: &Type, b: &Type) -> bool {
 /// non-negative (the common case).
 fn enum_is_signed(e: &EnumDef) -> bool {
     let Some(variants) = &e.variants else { return false };
-    let empty = HashMap::new();
+    let empty = HashMap::default();
     let mut next: i64 = 0;
     for v in variants {
         let val = match &v.value {
@@ -213,7 +213,7 @@ pub(crate) fn enum_int_type(e: &EnumDef) -> Type {
         return Type::Int { bits: 32, signed };
     }
     // Compute the value range to pick the smallest fitting width.
-    let empty = HashMap::new();
+    let empty = HashMap::default();
     let (mut lo, mut hi): (i64, i64) = (0, 0);
     let mut next: i64 = 0;
     if let Some(variants) = &e.variants {

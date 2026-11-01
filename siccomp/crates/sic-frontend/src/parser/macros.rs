@@ -37,7 +37,7 @@
 //! **Name reservation.** A variable or parameter may not share a macro's name:
 //! `name[…]` must never be ambiguous with indexing. Functions may (see above).
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use super::Parser;
 use crate::lexer::{Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
@@ -209,7 +209,7 @@ fn body_vars(body: &[Tm], out: &mut Vec<String>) {
 impl Parser {
     /// Register the built-in [`PRELUDE`] macros (SIC units).
     pub(super) fn load_prelude_macros(&mut self) {
-        let Ok(mut toks) = crate::lexer::Lexer::new_lang(PRELUDE, std::collections::HashSet::new(), Lang::Sic).tokenize() else { return };
+        let Ok(mut toks) = crate::lexer::Lexer::new_lang(PRELUDE, sic_ir::fast_hash::HashSet::default(), Lang::Sic).tokenize() else { return };
         for t in &mut toks { t.span.file = Some("<sic prelude>".to_string()); t.start = 0; t.end = 0; }
         let saved = std::mem::replace(&mut self.tokens, toks);
         let saved_pos = std::mem::replace(&mut self.pos, 0);
@@ -459,7 +459,7 @@ impl Parser {
 
         let mut matched = None;
         for rule in def.rules.iter().filter(|r| r.delim == delim) {
-            let mut b = Binds::new();
+            let mut b = Binds::default();
             if let Some(n) = self.match_seq(&rule.pat, args, 0, &mut b) {
                 if n == args.len() { matched = Some((rule, b)); break; }
             }
@@ -575,7 +575,7 @@ impl Parser {
                                 }
                             }
                         }
-                        let mut ib = Binds::new();
+                        let mut ib = Binds::default();
                         match self.match_seq(inner, tts, j, &mut ib) {
                             Some(k) if k > i => { iters.push(ib); i = k; }
                             _ => break,

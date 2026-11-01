@@ -9,7 +9,7 @@ mod ns_resolve;
 mod init_norm;
 pub(crate) mod libc_builtins;
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use crate::ast::*;
 use crate::{Result, CompileError};
 use sic_ir::*;
@@ -29,7 +29,7 @@ pub struct Lowerer {
     /// `_Generic` tells `const int *` from `int *`, which IR types do not.
     pub global_qtypes: HashMap<String, QualType>,
     /// sic `atomic` globals (sic.md §"Atomics"): names of atomic-qualified globals.
-    pub atomic_globals: std::collections::HashSet<String>,
+    pub atomic_globals: sic_ir::fast_hash::HashSet<String>,
     /// Register variables named after a register: (variable → register).
     pub reg_vars: HashMap<String, String>,
     /// Global register variables (file scope): variable → (type, register).
@@ -40,7 +40,7 @@ pub struct Lowerer {
     pub const_global_vals: HashMap<u32, i64>,
     /// sic `atomic` struct fields (sic.md §"Atomics"): `(struct name, field)`.
     /// Their lvalues load/store/RMW atomically and take `.cas`/`.swap`.
-    pub atomic_fields: std::collections::HashSet<(String, String)>,
+    pub atomic_fields: sic_ir::fast_hash::HashSet<(String, String)>,
     /// Known enum variant values
     pub enum_consts: HashMap<String, i64>,
     /// Named struct/union types
@@ -178,7 +178,7 @@ pub struct Lowerer {
     /// The directory of each imported module's manifest (its binding).
     pub imported_module_dirs: HashMap<String, String>,
     /// A Rust generic instance type → `(module, canonical generic key)`, so a
-    /// call `m::HashMap::new()` with that target type resolves to it.
+    /// call `m::HashMap::default()` with that target type resolves to it.
     pub rust_instance_of: HashMap<String, (String, String)>,
     /// Instances this unit needs that its bindings lack: `(binding dir, module,
     /// Rust type)`. The driver builds them (`cargo sic`) and compiles again.
@@ -191,12 +191,12 @@ pub struct Lowerer {
     /// manifest so consumers can name `mod::Type`. Excludes `private` ones.
     pub module_defined_types: Vec<String>,
     /// Type names marked `private` (module-internal), excluded from the manifest.
-    pub private_types: std::collections::HashSet<String>,
+    pub private_types: sic_ir::fast_hash::HashSet<String>,
     /// sic (sic.md §"Imports"): type/enum/struct names brought in from an *imported*
     /// module (via its manifest). When THIS unit is itself built as a module, these
     /// are excluded from its manifest — a module re-exports only what it defines, not
     /// its dependencies' symbols (a consumer imports those modules directly).
-    pub imported_type_names: std::collections::HashSet<String>,
+    pub imported_type_names: sic_ir::fast_hash::HashSet<String>,
     /// sic (sic.md §"Imports"): a plain `import module;` makes the module's symbols
     /// (enums, generics) reachable ONLY as `module::name`; using such a name bare is
     /// an error. This maps each such name → its module. `import module::name` /
@@ -236,13 +236,13 @@ pub struct Lowerer {
     pub member_dtor: HashMap<String, Option<String>>,
     /// Per function: plain `tuple` locals assigned tuples of different shapes
     /// (dynamically typed — see `FuncCtx::force_tuple_local_dynamic`).
-    pub dyn_tuple_locals: HashMap<String, std::collections::HashSet<String>>,
+    pub dyn_tuple_locals: HashMap<String, sic_ir::fast_hash::HashSet<String>>,
     /// Functions to lower again (a tuple local turned out dynamic).
-    pub tuple_restart: std::collections::HashSet<String>,
+    pub tuple_restart: sic_ir::fast_hash::HashSet<String>,
     /// Tuple shape descriptors by shape key (see `tuple_shape_global`).
     pub tuple_shape_globals: HashMap<String, GlobalRef>,
     /// The user-written destructor symbols (before implicit ones are added).
-    pub user_dtor_syms: std::collections::HashSet<String>,
+    pub user_dtor_syms: sic_ir::fast_hash::HashSet<String>,
     /// sic weak references (sic.md §"Weak"): struct name → its `weak<T>` fields as
     /// `(field name, container IR type)`. Such a field is a non-owning reference —
     /// not auto-initialized or owned; weak-retained on assignment and weak-released
@@ -264,7 +264,7 @@ pub struct Lowerer {
     /// functions (all call sites visible), so the callee can bounds-check `p[i]`.
     /// Only `static` functions qualify — an externally-visible function could be
     /// called from another unit with a raw pointer.
-    pub fat_params: HashMap<String, std::collections::HashSet<usize>>,
+    pub fat_params: HashMap<String, sic_ir::fast_hash::HashSet<usize>>,
     /// sic low-severity suggestions (below a warning): collected during lowering and
     /// printed once, deduplicated. Used to hint that a raw `list`/`dict`/`set` stored
     /// in a tuple shares it by reference, so a cycle should be broken with `weak<T>`.
@@ -341,15 +341,15 @@ impl Lowerer {
     pub fn new(name: String) -> Self {
         Lowerer {
             module: Module::new(name),
-            globals_map: HashMap::new(),
-            global_qtypes: HashMap::new(),
-            atomic_globals: std::collections::HashSet::new(),
-            reg_vars: HashMap::new(),
-            global_reg_vars: HashMap::new(),
-            const_global_vals: HashMap::new(),
-            atomic_fields: std::collections::HashSet::new(),
-            enum_consts: HashMap::new(),
-            struct_types: HashMap::new(),
+            globals_map: HashMap::default(),
+            global_qtypes: HashMap::default(),
+            atomic_globals: sic_ir::fast_hash::HashSet::default(),
+            reg_vars: HashMap::default(),
+            global_reg_vars: HashMap::default(),
+            const_global_vals: HashMap::default(),
+            atomic_fields: sic_ir::fast_hash::HashSet::default(),
+            enum_consts: HashMap::default(),
+            struct_types: HashMap::default(),
             ptr_size: 8, // assume 64-bit
             struct_order_default: crate::ast::StructOrder::Default,
             vectorize: true,
@@ -357,76 +357,76 @@ impl Lowerer {
             unroll: false,
             builtin_mem: true,
             struct_order_seed: 0,
-            emit_inline: HashSet::new(),
-            global_types: HashMap::new(),
+            emit_inline: HashSet::default(),
+            global_types: HashMap::default(),
             repl_main: true,
-            static_funcs: HashSet::new(),
+            static_funcs: HashSet::default(),
             sic: false,
             current_module: None,
-            imported_syms: HashMap::new(),
-            imported_globals: HashMap::new(),
-            imported_modules: HashMap::new(),
+            imported_syms: HashMap::default(),
+            imported_globals: HashMap::default(),
+            imported_modules: HashMap::default(),
             include_dirs: Vec::new(),
             module_dirs: Vec::new(),
             target_triple: String::new(),
             imported_links: Vec::new(),
-            enum_defs: HashMap::new(),
-            variant_enum: HashMap::new(),
-            c_enum_defs: HashMap::new(),
+            enum_defs: HashMap::default(),
+            variant_enum: HashMap::default(),
+            c_enum_defs: HashMap::default(),
             global_init_unserializable: false,
             global_init_bad_element: None,
-            scoped_statics: HashMap::new(),
-            literal_globals: HashMap::new(),
+            scoped_statics: HashMap::default(),
+            literal_globals: HashMap::default(),
             scoped_fn_name: None,
-            c_enum_variant: HashMap::new(),
-            c_enum_param: HashMap::new(),
-            bitfield_param: HashMap::new(),
-            c_enum_ret: HashMap::new(),
-            c_enum_alias: HashMap::new(),
-            struct_methods: HashMap::new(),
-            namespace_members: HashMap::new(),
-            namespace_types: HashMap::new(),
-            imported_type_paths: HashMap::new(),
+            c_enum_variant: HashMap::default(),
+            c_enum_param: HashMap::default(),
+            bitfield_param: HashMap::default(),
+            c_enum_ret: HashMap::default(),
+            c_enum_alias: HashMap::default(),
+            struct_methods: HashMap::default(),
+            namespace_members: HashMap::default(),
+            namespace_types: HashMap::default(),
+            imported_type_paths: HashMap::default(),
             typedef_aliases: Vec::new(),
-            rust_generics: HashMap::new(),
-            imported_module_dirs: HashMap::new(),
-            rust_instance_of: HashMap::new(),
+            rust_generics: HashMap::default(),
+            imported_module_dirs: HashMap::default(),
+            rust_instance_of: HashMap::default(),
             rust_instance_requests: Vec::new(),
-            rust_instance_names: HashMap::new(),
+            rust_instance_names: HashMap::default(),
             module_defined_types: Vec::new(),
-            imported_type_names: std::collections::HashSet::new(),
-            qualified_only: HashMap::new(),
-            module_ns_names: HashMap::new(),
-            private_types: std::collections::HashSet::new(),
-            struct_ctor: HashMap::new(),
-            struct_dtor: HashMap::new(),
-            const_fields: HashSet::new(),
-            vector_typedefs: HashSet::new(),
-            vector_fields: HashSet::new(),
+            imported_type_names: sic_ir::fast_hash::HashSet::default(),
+            qualified_only: HashMap::default(),
+            module_ns_names: HashMap::default(),
+            private_types: sic_ir::fast_hash::HashSet::default(),
+            struct_ctor: HashMap::default(),
+            struct_dtor: HashMap::default(),
+            const_fields: HashSet::default(),
+            vector_typedefs: HashSet::default(),
+            vector_fields: HashSet::default(),
             method_error: None,
-            strict_files: HashSet::new(),
-            immutable_globals: HashSet::new(),
-            struct_owned_fields: HashMap::new(),
-            member_dtor: HashMap::new(),
-            tuple_shape_globals: HashMap::new(),
-            dyn_tuple_locals: HashMap::new(),
-            tuple_restart: std::collections::HashSet::new(),
-            user_dtor_syms: std::collections::HashSet::new(),
-            struct_weak_fields: HashMap::new(),
+            strict_files: HashSet::default(),
+            immutable_globals: HashSet::default(),
+            struct_owned_fields: HashMap::default(),
+            member_dtor: HashMap::default(),
+            tuple_shape_globals: HashMap::default(),
+            dyn_tuple_locals: HashMap::default(),
+            tuple_restart: sic_ir::fast_hash::HashSet::default(),
+            user_dtor_syms: sic_ir::fast_hash::HashSet::default(),
+            struct_weak_fields: HashMap::default(),
             notes: Vec::new(),
-            tuple_param_types: HashMap::new(),
-            fat_params: HashMap::new(),
-            float_vararg_externs: HashSet::new(),
+            tuple_param_types: HashMap::default(),
+            fat_params: HashMap::default(),
+            float_vararg_externs: HashSet::default(),
             weak_vars: Vec::new(),
-            type_info_globals: HashMap::new(),
-            bitfield_defs: HashMap::new(),
-            bitfield_variant: HashMap::new(),
+            type_info_globals: HashMap::default(),
+            bitfield_defs: HashMap::default(),
+            bitfield_variant: HashMap::default(),
             lambda_counter: 0,
-            generic_enum_defs: HashMap::new(),
-            generic_fn_defs: HashMap::new(),
-            fn_param_names: HashMap::new(),
-            fn_param_defaults: HashMap::new(),
-            module_fn_defaults: HashMap::new(),
+            generic_enum_defs: HashMap::default(),
+            generic_fn_defs: HashMap::default(),
+            fn_param_names: HashMap::default(),
+            fn_param_defaults: HashMap::default(),
+            module_fn_defaults: HashMap::default(),
         }
     }
 
@@ -966,7 +966,7 @@ impl Lowerer {
     pub(crate) fn libc_proto_sig(&self, name: &str) -> Option<FunctionType> {
         use crate::{lexer::Lexer, parser::Parser};
         let (_, proto) = libc_builtins::LIBC_PROTOTYPES.iter().find(|(n, _)| *n == name)?;
-        let tokens = Lexer::new_lang(proto, std::collections::HashSet::new(), crate::Lang::C).tokenize().ok()?;
+        let tokens = Lexer::new_lang(proto, sic_ir::fast_hash::HashSet::default(), crate::Lang::C).tokenize().ok()?;
         let tu = Parser::new_lang(tokens, String::new(), crate::Lang::C).parse().ok()?;
         let Some(Decl::Func { ret_ty, params, variadic, .. }) = tu.decls.first() else { return None };
         let ret = lower_type(ret_ty, &self.struct_types, self.ptr_size).ok()?;
@@ -981,7 +981,7 @@ impl Lowerer {
     /// parse error yields nothing (the import simply won't offer that template).
     fn parse_generic_template(src: &str) -> Vec<Decl> {
         use crate::{lexer::Lexer, parser::Parser};
-        let mut lexer = Lexer::new_lang(src, std::collections::HashSet::new(), crate::Lang::Sic);
+        let mut lexer = Lexer::new_lang(src, sic_ir::fast_hash::HashSet::default(), crate::Lang::Sic);
         let tokens = match lexer.tokenize() { Ok(t) => t, Err(_) => return Vec::new() };
         let mut parser = Parser::new_lang(tokens, String::new(), crate::Lang::Sic);
         match parser.parse() {
@@ -1049,7 +1049,7 @@ impl Lowerer {
                     span.file.clone(), span.line, span.col,
                 ));
             }
-            let mut exports = HashMap::new();
+            let mut exports = HashMap::default();
             for e in &manifest.exports {
                 exports.insert(e.name.clone(), (e.symbol.clone(), e.ty.clone()));
             }
@@ -2806,7 +2806,7 @@ impl Lowerer {
                 };
                 // Field names, so a constructor/destructor's bare `field` reference
                 // rewrites to `self->field` (implicit `self`).
-                let fields: std::collections::HashSet<String> = sdef.fields.iter().flatten()
+                let fields: sic_ir::fast_hash::HashSet<String> = sdef.fields.iter().flatten()
                     .filter_map(|f| f.name.clone()).collect();
                 for m in &sdef.methods {
                     let (mangled, params, body) = match m.kind {
@@ -3166,7 +3166,7 @@ impl Lowerer {
                 "generic enum '{}' expects {} type argument(s), got {}",
                 name, template.type_params.len(), args.len())));
         }
-        let mut subst: HashMap<String, AstType> = HashMap::new();
+        let mut subst: HashMap<String, AstType> = HashMap::default();
         for (p, a) in template.type_params.iter().zip(args) {
             subst.insert(p.clone(), a.ty.clone());
         }
@@ -5310,14 +5310,14 @@ fn choose_cond_const(e: &Expr, enum_consts: &HashMap<String, i64>) -> i64 {
 /// which is what lets sic ignore the thousands of unused `extern __inline`
 /// SIMD intrinsics pulled in by `<immintrin.h>` and friends.
 fn compute_emitted_inlines(tu: &TranslationUnit) -> HashSet<String> {
-    let mut inline_bodies: HashMap<&str, &Vec<Stmt>> = HashMap::new();
+    let mut inline_bodies: HashMap<&str, &Vec<Stmt>> = HashMap::default();
     for d in &tu.decls {
         if let Decl::Func { name, body: Some(b), inline: true, .. } = d {
             inline_bodies.insert(name.as_str(), b);
         }
     }
     if inline_bodies.is_empty() {
-        return HashSet::new();
+        return HashSet::default();
     }
 
     // Seed with everything referenced from always-emitted code.
@@ -5337,7 +5337,7 @@ fn compute_emitted_inlines(tu: &TranslationUnit) -> HashSet<String> {
     }
 
     // Transitively pull in referenced inline functions.
-    let mut emitted: HashSet<String> = HashSet::new();
+    let mut emitted: HashSet<String> = HashSet::default();
     while let Some(name) = worklist.pop() {
         if let Some(body) = inline_bodies.get(name.as_str()) {
             if emitted.insert(name) {
@@ -5397,7 +5397,7 @@ fn decl_has_methods(d: &Decl) -> bool {
 /// `f` becomes `self->f` (sic.md §"Memory safety"). A name shadowed by a local
 /// declared in the body is left alone (it refers to the local, not the field).
 fn rewrite_implicit_self(body: &mut [Stmt], fields: &HashSet<String>) {
-    let mut local_set: HashSet<String> = HashSet::new();
+    let mut local_set: HashSet<String> = HashSet::default();
     for s in body.iter() { collect_declared_locals(s, &mut local_set); }
     let targets: HashSet<String> = fields.difference(&local_set).cloned().collect();
     if targets.is_empty() { return; }
@@ -5670,7 +5670,7 @@ fn reorder_named_args(
 fn unify_type(
     pattern: &AstType,
     concrete: &Type,
-    params: &std::collections::HashSet<String>,
+    params: &sic_ir::fast_hash::HashSet<String>,
     out: &mut HashMap<String, Type>,
     ptr_size: u32,
 ) -> Result<()> {

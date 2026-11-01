@@ -5,7 +5,7 @@ mod dwarf;
 mod wide_consts;
 pub mod abi;
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use cranelift_codegen::ir as cir;
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -139,6 +139,8 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     // wide constants it leaves are moved to read-only data before lowering
     // (`wide_consts`); `opt_level` affects nothing but that optimizer pass.
     flag_builder.set("opt_level", "none").unwrap();
+    // Cranelift checks its own IR after every step: for debug builds of sic.
+    flag_builder.set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" }).unwrap();
     // Allow `i128` in function signatures (args/returns) — the SysV ABI passes a
     // 128-bit integer in a register pair. Needed for C `__int128` (QEMU's Int128).
     flag_builder.set("enable_llvm_abi_extensions", "true").unwrap();
@@ -166,7 +168,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         flag_builder.set("opt_level", opt_level).unwrap();
         Some(make_isa(settings::Flags::new(flag_builder))?)
     };
-    let mut wide_consts: HashMap<i64, cranelift_module::DataId> = HashMap::new();
+    let mut wide_consts: HashMap<i64, cranelift_module::DataId> = HashMap::default();
 
     let mut obj_builder = ObjectBuilder::new(
         isa,
@@ -194,7 +196,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     }
 
     // ── Declare all functions first ──────────────────────────────────────────
-    let mut func_ids: HashMap<u32, FuncId> = HashMap::new();
+    let mut func_ids: HashMap<u32, FuncId> = HashMap::default();
 
     // An `internal` (static) function unreachable from any external entry,
     // constructor, or global function-pointer is dead — don't emit it. sic can
@@ -319,7 +321,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     // symbol the code never uses (see `used_globals`). Defined globals are always
     // declared (they are this module's definitions).
     let used_globals = ir_module.used_globals();
-    let mut global_ids: HashMap<u32, cranelift_module::DataId> = HashMap::new();
+    let mut global_ids: HashMap<u32, cranelift_module::DataId> = HashMap::default();
     for (i, g) in ir_module.globals.iter().enumerate() {
         if matches!(g.linkage, Linkage::Import | Linkage::Internal | Linkage::Private) && !used_globals.contains(&(i as u32)) {
             continue;
@@ -471,19 +473,19 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
         ctx.func.signature = build_cl_sig_def(&f.sig, ptr_size, obj_module.target_config().default_call_conv, cfg.sse);
         ctx.func.name = cir::UserFuncName::user(0, fid.as_u32());
 
-        let ft = std::time::Instant::now();
+        let ft = dbg_timing.then(std::time::Instant::now);
         let mut var_dbg: Vec<func::VarDbg> = Vec::new();
         func::compile_function(
             f, ir_module, &mut obj_module, &func_ids, &global_ids, &mut ctx.func, ptr_size,
             &mut var_dbg, f80_fns, cfg.sse,
         )?;
         if !cfg.sse { check_no_float(&ctx.func, &f.name)?; }
-        if dbg_timing {
+        if let Some(ft) = ft {
             let e = ft.elapsed();
             if e.as_millis() > 100 { eprintln!("[timing] compile_function '{}': {:?}", f.name, e); }
         }
 
-        let dt = std::time::Instant::now();
+        let dt = dbg_timing.then(std::time::Instant::now);
         if let Some(oi) = &opt_isa {
             ctx.optimize(&**oi, &mut cranelift_codegen::control::ControlPlane::default())
                 .map_err(CraneliftError::Codegen)?;
@@ -518,7 +520,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
                     "internal: function '{}' would keep constant data inside its code (non-PIC code must not): `{}`", f.name, insn)));
             }
         }
-        if dbg_timing {
+        if let Some(dt) = dt {
             let e = dt.elapsed();
             if e.as_millis() > 100 { eprintln!("[timing] define_function '{}': {:?}", f.name, e); }
         }
@@ -628,7 +630,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &CraneliftBackend) -> Result<Vec<u8>
     }
     // Several variables in one named section: one ELF section, as a tool reading
     // the object expects (Linux's modpost reads one `.modinfo`).
-    let named: std::collections::HashSet<&str> = ir_module.data_sections.iter().map(|(_, s)| s.as_str()).collect();
+    let named: sic_ir::fast_hash::HashSet<&str> = ir_module.data_sections.iter().map(|(_, s)| s.as_str()).collect();
     let shared_section = named.len() < ir_module.data_sections.len();
     if ir_module.fn_sections.is_empty() && cfg.function_sections && ro_sections.is_empty()
         && !shared_section && !cfg.no_text_data { return Ok(bytes); }
@@ -661,7 +663,7 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
         }
     }
     // Placements, then the rest of the per-function code into `.text`.
-    let mut placed = std::collections::HashSet::new();
+    let mut placed = sic_ir::fast_hash::HashSet::default();
     for (func, sec) in placements {
         let Some(id) = b.symbols.iter().find(|s| s.name.as_slice() == func.as_bytes()).and_then(|s| s.section) else { continue };
         b.sections.get_mut(id).name = sec.as_bytes().to_vec().into();
@@ -699,14 +701,14 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
             None => groups.push((name, id, Vec::new())),
         }
     }
-    let mut moved: std::collections::HashMap<usize, (object::build::elf::SectionId, u64)> = Default::default();
+    let mut moved: sic_ir::fast_hash::HashMap<usize, (object::build::elf::SectionId, u64)> = Default::default();
     for (_, first, rest) in &groups { for &(o, base) in rest { moved.insert(o.index(), (*first, base)); } }
     if !moved.is_empty() {
         // The surviving section's own section symbol, for references to a merged one.
-        let sec_sym: std::collections::HashMap<_, _> = b.symbols.iter()
+        let sec_sym: sic_ir::fast_hash::HashMap<_, _> = b.symbols.iter()
             .filter(|s| s.st_info.st_type() == elf::STT_SECTION && s.section.is_some())
             .map(|s| (s.section.unwrap().index(), s.id())).collect();
-        let mut sym_rebase = std::collections::HashMap::new();
+        let mut sym_rebase = sic_ir::fast_hash::HashMap::default();
         for sym in b.symbols.iter_mut() {
             let Some(sec) = sym.section else { continue };
             let Some(&(to, base)) = moved.get(&sec.index()) else { continue };
@@ -721,7 +723,7 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
         // Relocations: those of a merged section move to the survivor's
         // relocation section (or it becomes that), offsets rebased; references
         // to a merged section's symbol go to the survivor's, addend rebased.
-        let mut rela_of = std::collections::HashMap::new();
+        let mut rela_of = sic_ir::fast_hash::HashMap::default();
         for s in b.sections.iter() {
             if let (SectionData::Relocation(_), Some(t)) = (&s.data, s.sh_info_section) { rela_of.insert(t.index(), s.id()); }
         }
@@ -757,7 +759,7 @@ fn finish_code_sections(obj: &[u8], placements: &[(String, String)], one_text: b
         // Debug info and other non-code sections referring to a merged section's
         // symbol were handled above (all relocation sections were rewritten).
     }
-    let referenced: std::collections::HashSet<usize> = b.sections.iter()
+    let referenced: sic_ir::fast_hash::HashSet<usize> = b.sections.iter()
         .filter_map(|s| match &s.data { SectionData::Relocation(r) => Some(r), _ => None })
         .flatten().filter_map(|r| r.symbol.map(|s| s.index())).collect();
     for sym in b.symbols.iter_mut() {

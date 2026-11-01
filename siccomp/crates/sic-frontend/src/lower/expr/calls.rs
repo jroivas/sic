@@ -1769,10 +1769,10 @@ impl<'m> FuncCtx<'m> {
                     sp.file.clone(), sp.line, sp.col)),
             }
         };
-        let params_set: std::collections::HashSet<String> = type_params.iter().cloned().collect();
+        let params_set: sic_ir::fast_hash::HashSet<String> = type_params.iter().cloned().collect();
 
         // Infer each type parameter from the corresponding argument's type.
-        let mut subst: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
+        let mut subst: sic_ir::fast_hash::HashMap<String, Type> = sic_ir::fast_hash::HashMap::default();
         for (i, pat) in param_tys.iter().enumerate() {
             if let Some(arg) = args.get(i) {
                 let at = self.infer_expr_type(arg)?;

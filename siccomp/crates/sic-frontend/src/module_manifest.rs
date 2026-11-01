@@ -114,7 +114,7 @@ impl ModuleManifest {
     pub fn from_ir(ir: &Module, module: &str, triple: &str, links: &[String], ptr_size: u32) -> Self {
         let prefix = format!("{}_", module);
         let mut exports = Vec::new();
-        let tagenums: std::collections::HashMap<&str, Vec<&Type>> = ir.sic_tagenum_exports.iter()
+        let tagenums: sic_ir::fast_hash::HashMap<&str, Vec<&Type>> = ir.sic_tagenum_exports.iter()
             .map(|(n, vs)| (n.as_str(), vs.iter().filter_map(|(_, _, p)| p.as_ref()).collect()))
             .collect();
 
@@ -352,7 +352,7 @@ impl ModuleManifest {
         // Aggregate records decoded so far, keyed by name; later records and
         // exports resolve `@name` tokens against this (records are emitted in
         // dependency order, so a reference is always already present).
-        let mut registry: std::collections::HashMap<String, Type> = std::collections::HashMap::new();
+        let mut registry: sic_ir::fast_hash::HashMap<String, Type> = sic_ir::fast_hash::HashMap::default();
 
         for (lineno, raw) in text.lines().enumerate() {
             let line = raw.trim();
@@ -614,7 +614,7 @@ fn unescape_line(s: &str) -> String {
 /// tagged-enum payloads; a pointer stops the walk) can be reconstructed by a
 /// consumer: a compiler-known marker, an exported tagged enum, or a type whose
 /// manifest record encodes completely.
-fn by_value_ok(ty: &Type, tagenums: &std::collections::HashMap<&str, Vec<&Type>>, ptr_size: u32) -> bool {
+fn by_value_ok(ty: &Type, tagenums: &sic_ir::fast_hash::HashMap<&str, Vec<&Type>>, ptr_size: u32) -> bool {
     match ty {
         Type::Struct(s) => {
             let Some(name) = s.name.as_deref() else { return false };
@@ -723,7 +723,7 @@ fn decode_aggregate_record<'a>(
     is_union: bool,
     field_toks: impl Iterator<Item = &'a str>,
     ptr_size: u32,
-    registry: &std::collections::HashMap<String, Type>,
+    registry: &sic_ir::fast_hash::HashMap<String, Type>,
 ) -> Option<Type> {
     if let Some(t) = known_marker(name, ptr_size) { return Some(t); }
     let mut fields = Vec::new();
@@ -840,7 +840,7 @@ pub fn encode_type(ty: &Type) -> Option<String> {
 
 /// Decode a manifest type token back to an IR type. `registry` resolves `@name`
 /// aggregate references to their (already-decoded) type.
-pub fn decode_type(tok: &str, ptr_size: u32, registry: &std::collections::HashMap<String, Type>) -> Option<Type> {
+pub fn decode_type(tok: &str, ptr_size: u32, registry: &sic_ir::fast_hash::HashMap<String, Type>) -> Option<Type> {
     if let Some(rest) = tok.strip_prefix('[') {
         let (n, elem) = rest.split_once(']')?;
         let len: usize = n.parse().ok()?;
@@ -879,11 +879,11 @@ pub fn decode_type(tok: &str, ptr_size: u32, registry: &std::collections::HashMa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use sic_ir::fast_hash::HashMap;
 
     #[test]
     fn roundtrip_types() {
-        let reg = HashMap::new();
+        let reg = HashMap::default();
         for ty in [
             Type::Void, Type::Bool, Type::Int { bits: 32, signed: true },
             Type::Int { bits: 64, signed: false }, Type::Float64,

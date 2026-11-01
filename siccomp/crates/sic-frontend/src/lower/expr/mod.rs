@@ -7581,7 +7581,7 @@ pub(crate) fn resolve_field_access(
     ty: &Type,
     name: &str,
     ptr_size: u32,
-    named: &std::collections::HashMap<String, Type>,
+    named: &sic_ir::fast_hash::HashMap<String, Type>,
 ) -> Option<(u64, Type, Option<BitField>)> {
     let resolved = super::types::resolve_aggregate(ty, named);
     match &resolved {

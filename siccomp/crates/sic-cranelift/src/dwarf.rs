@@ -7,7 +7,7 @@
 //! `get_srclocs_sorted`); we synthesize the DWARF here with `gimli` and attach
 //! the sections + relocations to the object with the `object` crate.
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use std::path::Path;
 
 use gimli::write::{
@@ -211,7 +211,7 @@ pub fn emit_dwarf(
     }
 
     // ── One subprogram DIE per function (name, range, params, locals) ──────────
-    let mut type_cache: HashMap<String, UnitEntryId> = HashMap::new();
+    let mut type_cache: HashMap<String, UnitEntryId> = HashMap::default();
     for (fidx, f) in funcs.iter().enumerate() {
         let sp = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
         {
@@ -253,7 +253,7 @@ pub fn emit_dwarf(
     dwarf.write(&mut sections).map_err(|e| format!("dwarf write: {}", e))?;
 
     // First pass: add each non-empty section to the object and remember its id.
-    let mut section_map: HashMap<SectionId, object::write::SectionId> = HashMap::new();
+    let mut section_map: HashMap<SectionId, object::write::SectionId> = HashMap::default();
     sections
         .for_each(|id: SectionId, w: &WriterRelocate| -> Result<(), String> {
             let data = w.writer.slice();

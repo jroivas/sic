@@ -14,7 +14,8 @@
 //! `volatile` slots stay as they are, and so does all of a function that can
 //! return twice (`setjmp`): a value may change behind the code's back.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_ir::*;
 use super::inline::SENTINEL;
 use super::asm_imm::prune_dead_blocks;
@@ -161,7 +162,7 @@ fn scalar(t: &Type) -> bool {
 
 /// The types of the values defined in `f`, where an instruction states one.
 fn value_types(f: &Function) -> HashMap<ValId, Type> {
-    let mut types = HashMap::new();
+    let mut types = HashMap::default();
     for (i, p) in f.params.iter().enumerate() { types.insert(ValId(SENTINEL + i as u32), p.ty.clone()); }
     for b in &f.blocks {
         for ins in &b.instrs {
@@ -206,7 +207,7 @@ struct SlotUse {
 /// lose their stores.
 fn forward_stored(f: &mut Function) -> bool {
     let volatile: HashSet<ValId> = f.volatile_slots.iter().copied().collect();
-    let mut slots: HashMap<ValId, (SlotUse, Type)> = HashMap::new();
+    let mut slots: HashMap<ValId, (SlotUse, Type)> = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, ty, .. } = ins {
@@ -242,13 +243,13 @@ fn forward_stored(f: &mut Function) -> bool {
     let types = value_types(f);
     // The back end emits blocks in list order and knows a value from its
     // definition on, so a use may not move to a block listed before it.
-    let mut def_block: HashMap<ValId, usize> = HashMap::new();
+    let mut def_block: HashMap<ValId, usize> = HashMap::default();
     for (bi, b) in f.blocks.iter().enumerate() {
         for ins in &b.instrs { if let Some(d) = ins.dest() { def_block.insert(d, bi); } }
     }
-    let mut repl: HashMap<ValId, Val> = HashMap::new();
-    let mut gone: HashSet<ValId> = HashSet::new();
-    let mut dead_loads: HashSet<ValId> = HashSet::new();
+    let mut repl: HashMap<ValId, Val> = HashMap::default();
+    let mut gone: HashSet<ValId> = HashSet::default();
+    let mut dead_loads: HashSet<ValId> = HashSet::default();
     for (slot, (u, ty)) in &slots {
         if u.escaped { continue; }
         if u.loads.is_empty() {
@@ -266,7 +267,7 @@ fn forward_stored(f: &mut Function) -> bool {
     if repl.is_empty() && gone.is_empty() { return false; }
     replace_uses(f, &repl);
     // A constant stays stored where a `Store` needed its width: such a load lives.
-    let mut still: HashSet<ValId> = HashSet::new();
+    let mut still: HashSet<ValId> = HashSet::default();
     for b in &f.blocks {
         for ins in &b.instrs { ins.for_each_val(|v| if let Val::Local(id) = v { still.insert(*id); }); }
         b.terminator.for_each_val(|v| if let Val::Local(id) = v { still.insert(*id); });
@@ -305,7 +306,7 @@ fn ptr_pointee(t: &Type) -> Option<Type> {
 
 fn tracked_locs(f: &Function) -> Option<Tracked> {
     let volatile: HashSet<ValId> = f.volatile_slots.iter().copied().collect();
-    let mut ptrs: HashMap<ValId, (Loc, Type)> = HashMap::new();
+    let mut ptrs: HashMap<ValId, (Loc, Type)> = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, ty, .. } = ins {
@@ -335,8 +336,8 @@ fn tracked_locs(f: &Function) -> Option<Tracked> {
         }
         if ptrs.len() == before { break; }
     }
-    let mut bad: HashSet<ValId> = HashSet::new();
-    let mut access: HashMap<ValId, Vec<(u64, u64)>> = HashMap::new();
+    let mut bad: HashSet<ValId> = HashSet::default();
+    let mut access: HashMap<ValId, Vec<(u64, u64)>> = HashMap::default();
     let slot_of = |v: &Val| match v { Val::Local(id) => ptrs.get(id).map(|(l, t)| (*l, t.clone())), _ => None };
     for b in &f.blocks {
         for ins in &b.instrs {
@@ -373,9 +374,9 @@ fn tracked_locs(f: &Function) -> Option<Tracked> {
     // Only a location some constant reaches can be narrowed: one written with a
     // constant, by a `memset`, or copied from another slot.
     let constants = constant_defs(f);
-    let mut seeded: HashSet<Loc> = HashSet::new();
-    let mut zeroed: HashSet<ValId> = HashSet::new();
-    let mut copied: HashSet<ValId> = HashSet::new();
+    let mut seeded: HashSet<Loc> = HashSet::default();
+    let mut zeroed: HashSet<ValId> = HashSet::default();
+    let mut copied: HashSet<ValId> = HashSet::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             match ins {
@@ -392,7 +393,7 @@ fn tracked_locs(f: &Function) -> Option<Tracked> {
             }
         }
     }
-    let mut locs: HashMap<Loc, (usize, u32)> = HashMap::new();
+    let mut locs: HashMap<Loc, (usize, u32)> = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             let Instr::Load { ptr, ty: Type::Int { bits, .. }, .. } = ins else { continue };
@@ -425,7 +426,7 @@ fn const_int(v: &Val) -> Option<i64> {
 
 /// Integer constants in value form: a constant cast to a type.
 fn constant_defs(f: &Function) -> HashMap<ValId, i64> {
-    let mut defs = HashMap::new();
+    let mut defs = HashMap::default();
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Cast { dest, op: op @ (CastOp::BitCast | CastOp::ZExt | CastOp::SExt), val, to_ty: Type::Int { bits, signed } } = ins {
@@ -471,8 +472,8 @@ impl Flow<'_> {
     fn transfer(&self, f: &Function, bi: usize, mut state: Vec<Values>,
                 mut visit: impl FnMut(usize, &Instr, &[Values], &HashMap<ValId, usize>, &HashMap<ValId, (usize, bool, i64)>)) -> BlockEnd {
         let loc_bits = &self.loc_bits;
-        let mut copies: HashMap<ValId, usize> = HashMap::new();
-        let mut conds: HashMap<ValId, (usize, bool, i64)> = HashMap::new();
+        let mut copies: HashMap<ValId, usize> = HashMap::default();
+        let mut conds: HashMap<ValId, (usize, bool, i64)> = HashMap::default();
         for (ii, ins) in f.blocks[bi].instrs.iter().enumerate() {
             visit(ii, ins, &state, &copies, &conds);
             match ins {
@@ -622,7 +623,7 @@ fn narrow_values(f: &mut Function) -> bool {
             }
         }
     }
-    let mut repl: HashMap<ValId, Val> = HashMap::new();
+    let mut repl: HashMap<ValId, Val> = HashMap::default();
     let mut arms_left: Vec<(usize, Vec<(i64, BlockId)>)> = Vec::new();
     for &bi in &order {
         let Some(state) = entry[bi].clone() else { continue };
@@ -695,7 +696,7 @@ fn constant_params(m: &mut Module) -> bool {
             }
         }
     }
-    let mut args: HashMap<usize, Vec<Option<Option<i64>>>> = HashMap::new();
+    let mut args: HashMap<usize, Vec<Option<Option<i64>>>> = HashMap::default();
     for f in &m.functions {
         let constants = constant_defs(f);
         for b in &f.blocks {
@@ -732,7 +733,7 @@ fn constant_params(m: &mut Module) -> bool {
             if !used { continue; }
             let d = f.alloc_val();
             let to_ty = f.params[i].ty.clone();
-            let repl = HashMap::from([(sentinel, Val::Local(d))]);
+            let repl = [(sentinel, Val::Local(d))].into_iter().collect();
             replace_uses(f, &repl);
             f.blocks[0].instrs.insert(0, Instr::Cast { dest: d, op: CastOp::BitCast, val: Val::Const(Constant::Int(c)), to_ty });
             changed = true;

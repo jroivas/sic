@@ -13,7 +13,7 @@
 //! the downstream positional cursor cannot drift (unnamed bit-fields, which a
 //! positional value skips, sit between them).
 
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use crate::ast::{Designator, Expr, ExprKind, InitItem, Initializer};
 use sic_ir::Type;
 use super::types::resolve_aggregate;

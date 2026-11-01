@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use sic_ir::fast_hash::HashMap;
 use cranelift_codegen::ir::{self as cir, InstBuilder, MemFlagsData};
 use cranelift_codegen::ir::types as ct;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -59,7 +59,7 @@ fn f80_temp(b: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
 /// pointers to their slot type), plus its parameter sentinels — the backend's
 /// view of which values are `long double`.
 fn value_types(f: &Function) -> HashMap<u32, Type> {
-    let mut m = HashMap::new();
+    let mut m = HashMap::default();
     for (i, p) in f.params.iter().enumerate() { m.insert(0x10000 + i as u32, p.ty.clone()); }
     for bb in &f.blocks {
         for instr in &bb.instrs {
@@ -141,7 +141,7 @@ pub fn compile_function(
 
     // Pre-declare all callees and globals inside this function's IR.
     // Sort by key for deterministic ordering (avoids HashMap non-determinism).
-    let mut callee_refs: HashMap<u32, cir::FuncRef> = HashMap::new();
+    let mut callee_refs: HashMap<u32, cir::FuncRef> = HashMap::default();
     let mut sorted_funcs: Vec<(u32, FuncId)> = func_ids.iter().map(|(&k, &v)| (k, v)).collect();
     sorted_funcs.sort_by_key(|(k, _)| *k);
     for (fref_idx, func_id) in sorted_funcs {
@@ -154,8 +154,8 @@ pub fn compile_function(
         st0: obj_module.declare_func_in_func(h.st0, builder.func),
         ret: obj_module.declare_func_in_func(h.ret, builder.func),
     });
-    let vty = if f80.is_some() { value_types(f) } else { HashMap::new() };
-    let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::new();
+    let vty = if f80.is_some() { value_types(f) } else { HashMap::default() };
+    let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::default();
     let mut sorted_globals: Vec<(u32, DataId)> = global_ids.iter().map(|(&k, &v)| (k, v)).collect();
     sorted_globals.sort_by_key(|(k, _)| *k);
     for (gidx, data_id) in sorted_globals {
@@ -164,7 +164,7 @@ pub fn compile_function(
     }
 
     // Create all CL blocks.
-    let mut bb_map: HashMap<u32, cir::Block> = HashMap::new();
+    let mut bb_map: HashMap<u32, cir::Block> = HashMap::default();
     for bb in &f.blocks {
         let cl_bb = builder.create_block();
         bb_map.insert(bb.id.0, cl_bb);
@@ -175,7 +175,7 @@ pub fn compile_function(
     builder.append_block_params_for_function_params(entry_cl);
     builder.switch_to_block(entry_cl);
 
-    let mut val_map: HashMap<u32, cir::Value> = HashMap::new();
+    let mut val_map: HashMap<u32, cir::Value> = HashMap::default();
 
     // Map param sentinels ValId(0x10000+i) → actual entry-block param values.
     // For variadic functions the signature was padded with extra trailing i64
@@ -285,7 +285,7 @@ pub fn compile_function(
     // Emit all blocks.
     // ValId → stack slot (for `Alloca`s), so `DbgVar` can resolve a variable's
     // storage to a Cranelift stack slot for the DWARF location.
-    let mut slot_map: HashMap<u32, cir::StackSlot> = HashMap::new();
+    let mut slot_map: HashMap<u32, cir::StackSlot> = HashMap::default();
 
     // mem2reg for pointer locals (register promotion). An `Alloca` of pointer type
     // whose address never escapes — its ValId is used ONLY as the `ptr` of a
@@ -298,7 +298,7 @@ pub fn compile_function(
     // `def_var` always sees a `ptr_ty`-typed value (sound without tracking every
     // stored value's type). A local with no initializer is zero-set with `MemSet`,
     // which uses the slot address → it escapes and stays a stack slot.
-    let mut escaped: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut escaped: sic_ir::fast_hash::HashSet<u32> = sic_ir::fast_hash::HashSet::default();
     for bb in &f.blocks {
         for instr in &bb.instrs {
             match instr {
@@ -317,7 +317,7 @@ pub fn compile_function(
     let slot_clty = |t: &Type| if matches!(t, Type::Pointer(_)) { Some(ptr_ty) }
         else if let Some(vt) = vector_clty(t) { Some(vt) }
         else { cl_type(t, ptr_size) };
-    let mut promoted: HashMap<u32, (Variable, cir::Type)> = HashMap::new();
+    let mut promoted: HashMap<u32, (Variable, cir::Type)> = HashMap::default();
     for bb in &f.blocks {
         for instr in &bb.instrs {
             if let Instr::Alloca { dest, ty, .. } = instr {
@@ -384,7 +384,7 @@ pub fn compile_function(
     // header params for loop-INVARIANT promoted variables — redundant together,
     // not one by one, so they survived — and regalloc shuffled them between
     // registers on every back edge (`mov; mov; jmp`).
-    let mut pending: HashMap<u32, usize> = HashMap::new();
+    let mut pending: HashMap<u32, usize> = HashMap::default();
     for bb in &f.blocks {
         for s in terminator_successors(&bb.terminator) { *pending.entry(s.0).or_insert(0) += 1; }
     }

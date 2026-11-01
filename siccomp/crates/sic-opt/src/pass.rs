@@ -1,6 +1,6 @@
 //! AST optimization pass framework: a pass trait plus a fixpoint-driven manager.
 
-use std::collections::HashSet;
+use sic_ir::fast_hash::HashSet;
 use sic_frontend::ast::TranslationUnit;
 
 /// An AST→AST optimization pass. `run` rewrites the translation unit in place

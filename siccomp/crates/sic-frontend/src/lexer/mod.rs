@@ -1,7 +1,7 @@
 mod token;
 pub use token::{Token, TokenKind, Span};
 
-use std::collections::HashSet;
+use sic_ir::fast_hash::HashSet;
 use crate::{Result, CompileError};
 
 /// Source language being compiled. Chosen from the input file's extension.

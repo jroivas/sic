@@ -11,7 +11,7 @@
 //! back edge — so an assignment repeated by the loop is caught. A function with
 //! `goto` gets no late initialization (its paths are not followed).
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use crate::ast::*;
 
 /// The declared object may be changed: `mut` on its declaration (`mut int x`,
@@ -78,10 +78,10 @@ struct Walk {
 /// The first-and-only assignments of the uninitialized immutable locals of a
 /// strict function's `body`.
 pub(crate) fn late_init_sites(params: &[Param], body: &[Stmt]) -> HashSet<Site> {
-    if body.iter().any(stmt_has_goto) { return HashSet::new(); }
+    if body.iter().any(stmt_has_goto) { return HashSet::default(); }
     let mut w = Walk {
         scopes: vec![params.iter().filter_map(|p| p.name.clone().map(|n| (n, None))).collect()],
-        next: 0, ok: HashSet::new(), bad: HashSet::new(),
+        next: 0, ok: HashSet::default(), bad: HashSet::default(),
         breaks: vec![], conts: vec![], cases: vec![], in_defer: false,
     };
     w.block(body, Some(vec![]));
@@ -132,7 +132,7 @@ impl Walk {
     }
 
     fn block(&mut self, v: &[Stmt], mut st: Option<State>) -> Option<State> {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(HashMap::default());
         for s in v { st = self.stmt(s, st); }
         self.scopes.pop();
         st
@@ -203,7 +203,7 @@ impl Walk {
             Stmt::While { cond, body, .. } => self.looped(Some(cond), body, None, false, st),
             Stmt::DoWhile { body, cond, .. } => self.looped(Some(cond), body, None, true, st),
             Stmt::For { init, cond, post, body, .. } => {
-                self.scopes.push(HashMap::new());
+                self.scopes.push(HashMap::default());
                 let st = match init {
                     Some(ForInit::Decl(d)) => self.decl(d, st),
                     Some(ForInit::Expr(e)) => self.expr(e, st),
@@ -215,7 +215,7 @@ impl Walk {
             }
             Stmt::ForEach { name, iterable, body, .. } => {
                 let mut st = self.expr(iterable, st);
-                self.scopes.push(HashMap::new());
+                self.scopes.push(HashMap::default());
                 self.bind(name, false, &mut st);
                 let r = self.looped(None, body, None, false, st.clone());
                 self.scopes.pop();
@@ -266,7 +266,7 @@ impl Walk {
                 let st = self.expr(scrutinee, st);
                 let mut out = None;
                 for a in arms {
-                    self.scopes.push(HashMap::new());
+                    self.scopes.push(HashMap::default());
                     let mut s = st.clone();
                     if let Some(b) = &a.binding { self.bind(b, false, &mut s); }
                     let r = self.stmt(&a.body, s);
@@ -345,7 +345,7 @@ impl Walk {
                 let st = self.expr(scrutinee, st);
                 let mut out = None;
                 for a in arms {
-                    self.scopes.push(HashMap::new());
+                    self.scopes.push(HashMap::default());
                     let mut s = st.clone();
                     if let Some(b) = &a.binding { self.bind(b, false, &mut s); }
                     let r = self.stmt(&a.body, s);

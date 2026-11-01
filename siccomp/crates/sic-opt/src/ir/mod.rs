@@ -9,7 +9,7 @@
 //! (only `dce` may remove it, and only when it is pure). So these passes need no
 //! AST-style purity check on operands.
 
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use sic_ir::{Module, Function, Instr, Val, ValId};
 use crate::pass::PassConfig;
 pub mod devirtual;
@@ -91,7 +91,7 @@ pub(crate) fn apply_replacements(func: &mut Function, repl: &HashMap<ValId, Val>
 /// only ever pass ids of *pure* defs.
 pub(crate) fn prune_defs(func: &mut Function, dead: &HashMap<ValId, Val>) {
     if dead.is_empty() { return; }
-    let mut used: HashSet<ValId> = HashSet::new();
+    let mut used: HashSet<ValId> = HashSet::default();
     for b in &func.blocks {
         for ins in &b.instrs {
             ins.for_each_val(|v| if let Val::Local(id) = v { used.insert(*id); });

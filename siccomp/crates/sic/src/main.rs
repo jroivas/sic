@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fs;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
@@ -842,7 +841,7 @@ fn pass_config(args: &Args) -> PassConfig {
     // Vector slots need vector registers (a 16-byte struct that is only copied
     // qualifies, not just GCC vectors).
     if !isa::Isa::from_flags(&args.machine_flags).0.sse2() { enabled.remove("vec-split"); }
-    let mut cfg = PassConfig::new(enabled, args.debug);
+    let mut cfg = PassConfig::new(enabled.into_iter().collect(), args.debug);
     // Inliner budget: the threshold bounds the size of a callee that gets spliced
     // in. Modest at -O2 (small helpers like a `min3`/`edge`); at -O3+ a much larger
     // gate AND always-inline (`inline_aggressive` — every eligible callee regardless
@@ -1069,7 +1068,7 @@ fn parse_source(
         );
     }
 
-    let mut lexer = Lexer::new_lang(&preprocessed, HashSet::new(), lang);
+    let mut lexer = Lexer::new_lang(&preprocessed, Default::default(), lang);
     lexer.set_c23_keywords(std_has_c23_keywords(&args.std));
     let tokens = lexer.tokenize().map_err(|e| format!("{}", e))?;
 
@@ -1265,6 +1264,8 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
         .unwrap_or("module")
         .to_string();
     let mut ir_module = lower_tu(&tu, lang, &module_name, args)?;
+    // Nothing reads the AST again, and this process is short: leave it.
+    std::mem::forget(tu);
     // `-Werror` / `-Werror=<w>`: a promoted warning fails the compilation.
     let errs = sic_frontend::diag::promoted_errors();
     if errs > 0 {
@@ -1829,6 +1830,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(modname) = &ir_module.sic_module {
                 emit_module_manifest(&ir_module, modname, &obj_path, args)?;
             }
+            // The process is about to end: freeing every node takes time for nothing.
+            std::mem::forget(ir_module);
         }
         return Ok(());
     }

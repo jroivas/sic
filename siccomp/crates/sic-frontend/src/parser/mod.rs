@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use sic_ir::fast_hash::{HashMap, HashSet};
 use crate::ast::*;
 use crate::lexer::{Lang, Token, TokenKind, Span};
 use crate::{Result, CompileError};
@@ -144,8 +144,8 @@ impl Parser {
     }
 
     pub fn new_lang(tokens: Vec<Token>, source_file: String, lang: Lang) -> Self {
-        let mut typedefs = HashSet::new();
-        let mut generic_enums = HashSet::new();
+        let mut typedefs = HashSet::default();
+        let mut generic_enums = HashSet::default();
         // sic prelude (sic.md §"Match"): `Option`/`Result` are always available as
         // generic enums, so `Option<int>` parses as an instantiation and the names
         // are usable as types without a user declaration. A user `enum Option<T>`
@@ -159,8 +159,8 @@ impl Parser {
         // sic generic functions (sic.md §"Generics"): pre-scan for `name<T,…>(`
         // headers so their type parameters parse as types (the `<T>` list follows
         // the return type / name in the source) and calls can be recognized later.
-        let mut generic_fns = HashSet::new();
-        let mut generic_type_params = HashSet::new();
+        let mut generic_fns = HashSet::default();
+        let mut generic_type_params = HashSet::default();
         if lang == Lang::Sic {
             scan_generic_fns(&tokens, &mut generic_fns, &mut generic_type_params);
             // Make each type parameter parse as a type name everywhere in the unit,
@@ -180,7 +180,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::new(), pending_decls: Vec::new(), macros: HashMap::new(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::new(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::new(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -838,7 +838,7 @@ impl Parser {
                     } else {
                         // Constant alignment expression.
                         let e = self.parse_assign_expr()?;
-                        crate::lower::eval_const_expr(&e, &std::collections::HashMap::new())
+                        crate::lower::eval_const_expr(&e, &sic_ir::fast_hash::HashMap::default())
                             .map_err(|_| CompileError::at("this `_Alignas` expression is not supported (it needs type sizes)".to_string(),
                                 e.span.file.clone(), e.span.line, e.span.col))?
                             .max(0) as u32
@@ -2501,11 +2501,11 @@ impl Parser {
     fn warn_unused_locals(&self, start: usize, end: usize, mut decls: Vec<(String, Span)>) {
         decls.sort_by(|a, b| (a.1.line, a.1.col, &a.0).cmp(&(b.1.line, b.1.col, &b.0)));
         decls.dedup_by(|a, b| a.0 == b.0 && a.1.line == b.1.line && a.1.col == b.1.col);
-        let mut seen: HashMap<&str, usize> = HashMap::new();
+        let mut seen: HashMap<&str, usize> = HashMap::default();
         for t in &self.tokens[start..end.min(self.tokens.len())] {
             if t.kind == TokenKind::Ident { *seen.entry(t.text.as_str()).or_default() += 1; }
         }
-        let mut declared: HashMap<&str, usize> = HashMap::new();
+        let mut declared: HashMap<&str, usize> = HashMap::default();
         for (n, _) in &decls { *declared.entry(n.as_str()).or_default() += 1; }
         for (name, sp) in &decls {
             if name.starts_with("__sicm") { continue; } // macro-hygienic local
@@ -2542,7 +2542,7 @@ impl Parser {
     /// dot), and everything after the parser sees ordinary labels.
     fn parse_local_labels(&mut self) -> Result<()> {
         self.advance();
-        let mut scope = HashMap::new();
+        let mut scope = HashMap::default();
         loop {
             let name = self.expect_name()?;
             self.local_label_count += 1;
@@ -4330,7 +4330,7 @@ impl Parser {
     /// also declares it without `inline` (C11 6.7.4p7; EXPORT_SYMBOL's
     /// `extern typeof(sym) sym;`).
     fn external_inlines(&self, decls: &mut [Decl]) {
-        let mut external: std::collections::HashSet<String> = self.gnu_inline.iter().cloned().collect();
+        let mut external: sic_ir::fast_hash::HashSet<String> = self.gnu_inline.iter().cloned().collect();
         for d in decls.iter() {
             match d {
                 Decl::Func { name, body: None, inline: false, storage, .. }
