@@ -520,6 +520,13 @@ impl<'m> FuncCtx<'m> {
                 // module signature; an indirect call takes the pointee function
                 // type's return. Without this a call defaults to i32 and a
                 // pointer-returning call in a ternary gets truncated to 32 bits.
+                // A skipped inline is no function of the module, but its signature
+                // is known (`typeof(f())` names it and nothing calls it).
+                if let ExprKind::Ident(name) = &func.kind {
+                    if self.lookup(name).is_none() && self.lowerer.module.func_ref_by_name(name).is_none() {
+                        if let Some(t) = super::super::types::function_return_type(name) { return Ok(t); }
+                    }
+                }
                 if let ExprKind::Ident(name) = &func.kind {
                     if let Some(LookupResult::Func(fref)) = self.lookup(name) {
                         return Ok(self.lowerer.module.func_sig(fref).ret.clone());

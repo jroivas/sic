@@ -5336,6 +5336,9 @@ fn compute_emitted_inlines(tu: &TranslationUnit) -> HashSet<String> {
         }
     }
 
+    // `__attribute__((used))`: emitted whatever refers to it (asm text, say).
+    worklist.extend(tu.used_fns.iter().cloned());
+
     // Transitively pull in referenced inline functions.
     let mut emitted: HashSet<String> = HashSet::default();
     while let Some(name) = worklist.pop() {

@@ -6,7 +6,19 @@ use crate::{Result, CompileError};
 mod macros;
 use macros::{MacroDef, MacroPos};
 
+/// A `static inline` body not parsed yet (see `parse_lazy_bodies`).
+struct LazyBody {
+    name: String,
+    span: Span,
+    /// The whole definition and its `{`, as token positions.
+    decl_start: usize,
+    body_start: usize,
+    end: usize,
+    params: HashSet<String>,
+}
+
 pub struct Parser {
+    lazy_bodies: Vec<LazyBody>,
     tokens: Vec<Token>,
     pos: usize,
     typedefs: HashSet<String>,
@@ -180,7 +192,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -332,6 +344,7 @@ impl Parser {
                 ));
             }
         }
+        self.parse_lazy_bodies(&mut decls)?;
         if self.lang != Lang::Sic { self.external_inlines(&mut decls); }
         Ok(TranslationUnit { decls, source_file: self.source_file.clone(), expr_types: std::mem::take(&mut self.expr_types),
             strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline),
@@ -340,6 +353,80 @@ impl Parser {
             file_asm: std::mem::take(&mut self.file_asm),
             used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
             reg_vars: std::mem::take(&mut self.reg_vars) })
+    }
+
+    /// Past the balanced `{ ... }` the parser is at.
+    fn skip_balanced_braces(&mut self) {
+        let mut depth = 0usize;
+        loop {
+            match self.peek().kind {
+                TokenKind::LBrace => depth += 1,
+                TokenKind::RBrace => depth -= 1,
+                TokenKind::Eof => return,
+                _ => {}
+            }
+            self.advance();
+            if depth == 0 { return; }
+        }
+    }
+
+    /// Headers define thousands of `static inline` functions and a file uses few.
+    /// Their bodies were skipped: parse the ones some code names, and those they
+    /// name in turn. A name counts anywhere: an operand, or inside a string (`asm`
+    /// text, `alias("f")`). The rest stay prototypes, as nothing can reach them.
+    fn parse_lazy_bodies(&mut self, decls: &mut [Decl]) -> Result<()> {
+        if self.lazy_bodies.is_empty() { return Ok(()); }
+        let lazy = std::mem::take(&mut self.lazy_bodies);
+        let index: HashMap<&str, usize> = lazy.iter().enumerate().map(|(i, b)| (b.name.as_str(), i)).collect();
+        let mut wanted = vec![false; lazy.len()];
+        let mut work: Vec<usize> = Vec::new();
+        let scan = |tokens: &[Token], wanted: &mut Vec<bool>, work: &mut Vec<usize>| {
+            let mut mark = |name: &str| {
+                if let Some(&i) = index.get(name) {
+                    if !wanted[i] { wanted[i] = true; work.push(i); }
+                }
+            };
+            for t in tokens {
+                match t.kind {
+                    TokenKind::Ident => mark(&t.text),
+                    TokenKind::StringLit => {
+                        for w in t.text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+                            if !w.is_empty() { mark(w); }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        // Everything outside the skipped definitions.
+        let mut at = 0;
+        for b in &lazy {
+            scan(&self.tokens[at..b.decl_start], &mut wanted, &mut work);
+            at = b.end;
+        }
+        scan(&self.tokens[at..], &mut wanted, &mut work);
+        let mut bodies: Vec<Option<Vec<Stmt>>> = (0..lazy.len()).map(|_| None).collect();
+        let save = self.pos;
+        while let Some(i) = work.pop() {
+            let b = &lazy[i];
+            scan(&self.tokens[b.decl_start..b.end], &mut wanted, &mut work);
+            self.pos = b.body_start;
+            self.func_vars = b.params.clone();
+            let body = self.parse_function_body()?;
+            self.func_vars.clear();
+            bodies[i] = Some(body);
+        }
+        self.pos = save;
+        for d in decls.iter_mut() {
+            if let Decl::Func { name, span, body, .. } = d {
+                if let Some(&i) = index.get(name.as_str()) {
+                    if lazy[i].span.line == span.line && lazy[i].span.col == span.col && lazy[i].span.file == span.file {
+                        *body = bodies[i].take();
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     // ─── External declarations ────────────────────────────────────────────────
@@ -529,7 +616,8 @@ impl Parser {
             if self.pending_weak { self.weak_fns.push(name.clone()); }
             if self.pending_gnu_inline { self.gnu_inline.push(name.clone()); }
             self.take_alias(&name, &storage);
-            if std::mem::take(&mut self.pending_used) { self.used_fns.push(name.clone()); }
+            let used = std::mem::take(&mut self.pending_used);
+            if used { self.used_fns.push(name.clone()); }
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
 
             // K&R (old-style) definition: the parameter list held only names,
@@ -548,6 +636,21 @@ impl Parser {
                 return Ok(Decl::Func {
                     name, ret_ty, params, variadic, type_params, template_src,
                     body: Some(body), storage, inline: is_inline, constructor: ctor, is_async: std::mem::take(&mut self.pending_async), span: sp,
+                });
+            }
+
+            if self.lang == Lang::C && self.at(TokenKind::LBrace) && is_inline && !used && ctor.is_none()
+                && matches!(storage, Some(StorageClass::Static)) && self.pending_type_params.is_empty()
+            {
+                let body_start = self.pos;
+                self.skip_balanced_braces();
+                self.lazy_bodies.push(LazyBody {
+                    name: name.clone(), span: sp.clone(), decl_start: decl_start_tok, body_start, end: self.pos,
+                    params: params.iter().filter_map(|p| p.name.clone()).collect(),
+                });
+                return Ok(Decl::Func {
+                    name, ret_ty, params, variadic, type_params: Vec::new(), template_src: None,
+                    body: None, storage, inline: is_inline, constructor: ctor, is_async: false, span: sp,
                 });
             }
 
