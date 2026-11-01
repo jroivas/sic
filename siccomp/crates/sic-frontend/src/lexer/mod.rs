@@ -22,7 +22,7 @@ pub struct Lexer {
     line: u32,
     col: u32,
     /// File name from the most recent line marker.
-    file: Option<String>,
+    file: Option<std::rc::Rc<str>>,
     /// Typedef names to distinguish from plain identifiers.
     pub typedefs: HashSet<String>,
     /// Source language (affects Rust-style type-alias keywords).
@@ -190,7 +190,7 @@ impl Lexer {
             let mut flags = String::new();
             while p < self.src.len() && self.src[p] != '\n' { flags.push(self.src[p]); p += 1; }
             if flags.split_whitespace().any(|f| f == "3") { crate::diag::mark_system_file(&name); }
-            self.file = Some(name);
+            if self.file.as_deref() != Some(name.as_str()) { self.file = Some(name.as_str().into()); }
         }
         // Skip the rest of the directive line *including* its newline, then set
         // the line counter — so the following content is line `target_line`

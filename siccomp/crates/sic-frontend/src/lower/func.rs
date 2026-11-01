@@ -2363,7 +2363,7 @@ impl<'m> Lowerer {
         if fc.is_sic() {
             let file = body.first().and_then(|s| stmt_loc(s).0);
             fc.strict = super::strict::qt_is_strict(ret_ty)
-                || file.map_or(false, |f| fc.lowerer.strict_files.contains(&f));
+                || file.as_deref().map_or(false, |f| fc.lowerer.strict_files.contains(f));
             if fc.strict { fc.late_init_sites(params, body); }
         }
         fc.async_elem = async_elem;
@@ -7140,7 +7140,7 @@ fn stmt_line(stmt: &Stmt) -> u32 {
 }
 
 /// The source location of a statement: (file, line, column).
-fn stmt_loc(stmt: &Stmt) -> (Option<String>, u32, u32) {
+fn stmt_loc(stmt: &Stmt) -> (Option<std::rc::Rc<str>>, u32, u32) {
     let s = match stmt {
         Stmt::Decl(d) => return super::decl_loc(d),
         Stmt::Expr(_, s) | Stmt::Block(_, s) | Stmt::Return(_, s)

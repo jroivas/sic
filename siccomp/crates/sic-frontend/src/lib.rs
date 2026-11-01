@@ -16,7 +16,7 @@ pub use module_manifest::{ModuleManifest, Export as ManifestExport};
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub message: String,
-    pub file: Option<String>,
+    pub file: Option<std::rc::Rc<str>>,
     pub line: u32,
     pub col: u32,
 }
@@ -25,7 +25,7 @@ impl CompileError {
     pub fn new(msg: impl Into<String>) -> Self {
         CompileError { message: msg.into(), file: None, line: 0, col: 0 }
     }
-    pub fn at(msg: impl Into<String>, file: Option<String>, line: u32, col: u32) -> Self {
+    pub fn at(msg: impl Into<String>, file: Option<std::rc::Rc<str>>, line: u32, col: u32) -> Self {
         CompileError { message: msg.into(), file, line, col }
     }
 }

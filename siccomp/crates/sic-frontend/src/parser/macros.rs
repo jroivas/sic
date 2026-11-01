@@ -210,7 +210,7 @@ impl Parser {
     /// Register the built-in [`PRELUDE`] macros (SIC units).
     pub(super) fn load_prelude_macros(&mut self) {
         let Ok(mut toks) = crate::lexer::Lexer::new_lang(PRELUDE, sic_ir::fast_hash::HashSet::default(), Lang::Sic).tokenize() else { return };
-        for t in &mut toks { t.span.file = Some("<sic prelude>".to_string()); t.start = 0; t.end = 0; }
+        for t in &mut toks { t.span.file = Some("<sic prelude>".into()); t.start = 0; t.end = 0; }
         let saved = std::mem::replace(&mut self.tokens, toks);
         let saved_pos = std::mem::replace(&mut self.pos, 0);
         while let Ok(true) = self.try_macro_definition() {}
@@ -729,7 +729,7 @@ impl Parser {
                     out.push(tok(TokenKind::StringLit, &s, &ctx.call));
                 }
                 Tm::File => {
-                    let f = ctx.call.file.clone().unwrap_or_else(|| self.source_file.clone());
+                    let f = ctx.call.file.as_deref().map(String::from).unwrap_or_else(|| self.source_file.clone());
                     out.push(tok(TokenKind::StringLit, &f, &ctx.call));
                 }
                 Tm::Line => out.push(tok(TokenKind::IntLit, &ctx.call.line.to_string(), &ctx.call)),

@@ -40,7 +40,7 @@ pub(crate) fn qt_is_strict(qt: &QualType) -> bool {
 }
 
 /// Where an assignment is: its target's span.
-pub(crate) type Site = (Option<String>, u32, u32);
+pub(crate) type Site = (Option<std::rc::Rc<str>>, u32, u32);
 
 pub(crate) fn site_of(e: &Expr) -> Site { (e.span.file.clone(), e.span.line, e.span.col) }
 

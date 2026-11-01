@@ -304,7 +304,7 @@ impl<'m> FuncCtx<'m> {
             if !deferred.is_empty() {
                 self.lowerer.module.asm_deferred.push(sic_ir::AsmDeferred {
                     helper: sym.clone(), first_imm, int_only: deferred.iter().map(|(_, n)| *n).collect(),
-                    file: a.span.file.clone(), line: a.span.line, col: a.span.col,
+                    file: a.span.file.as_deref().map(String::from), line: a.span.line, col: a.span.col,
                 });
             }
             self.lowerer.module.asm_text_helpers.push((sym, body));

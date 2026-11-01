@@ -3362,7 +3362,7 @@ impl Lowerer {
         self.global_qtypes.insert(d.name.clone(), d.ty.clone());
         // sic strict mode (sic.md §"Strict mode"): a strict file's globals are
         // immutable unless `mut`.
-        if self.sic && d.span.file.as_ref().map_or(false, |f| self.strict_files.contains(f))
+        if self.sic && d.span.file.as_deref().map_or(false, |f| self.strict_files.contains(f))
             && !strict::qt_is_mut(&d.ty) && !matches!(d.ty.ty, AstType::Function { .. })
         {
             self.immutable_globals.insert(d.name.clone());
@@ -5985,7 +5985,7 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
 /// Give an error raised without a location (e.g. "unknown type" from type
 /// lowering) the location of the statement/declaration being lowered. An error
 /// that already has one keeps it.
-pub(crate) fn locate_error(mut e: CompileError, file: Option<String>, line: u32, col: u32) -> CompileError {
+pub(crate) fn locate_error(mut e: CompileError, file: Option<std::rc::Rc<str>>, line: u32, col: u32) -> CompileError {
     if e.file.is_none() && e.line == 0 && line > 0 {
         e.file = file;
         e.line = line;
@@ -5996,7 +5996,7 @@ pub(crate) fn locate_error(mut e: CompileError, file: Option<String>, line: u32,
 
 /// The source location of a declaration, where its span records one:
 /// (file, line, column).
-pub(crate) fn decl_loc(d: &Decl) -> (Option<String>, u32, u32) {
+pub(crate) fn decl_loc(d: &Decl) -> (Option<std::rc::Rc<str>>, u32, u32) {
     match d {
         Decl::Var { span, .. } | Decl::Func { span, .. } | Decl::TypeDef { span, .. }
         | Decl::ExprStmt(_, span) | Decl::Import { span, .. } | Decl::Namespace { span, .. }

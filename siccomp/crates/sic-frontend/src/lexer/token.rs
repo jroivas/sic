@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Span {
-    pub file: Option<String>,
+    /// Shared: every token and AST node holds one.
+    pub file: Option<std::rc::Rc<str>>,
     pub line: u32,
     pub col: u32,
 }

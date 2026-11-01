@@ -381,7 +381,7 @@ impl Parser {
             && self.tokens.get(self.pos + 2).map(|t| t.kind) == Some(TokenKind::Semi)
         {
             self.pos += 3;
-            let f = sp.file.clone().unwrap_or_default();
+            let f = sp.file.as_deref().unwrap_or_default().to_string();
             if !self.strict_files.contains(&f) { self.strict_files.push(f); }
             return Ok(Decl::TypeDef { names: vec![], span: sp });
         }
