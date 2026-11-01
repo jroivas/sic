@@ -1466,7 +1466,10 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         "--emit-module: no `.sic` file in '{}' declares a `module`", dir))?;
 
     // Lower the combined unit once so intra-module references across files resolve.
-    let ir_module = lower_tu(&combined, sic_frontend::Lang::Sic, &name, args)?;
+    let mut ir_module = lower_tu(&combined, sic_frontend::Lang::Sic, &name, args)?;
+    // A module is optimized like any other unit: `-O2 --emit-module`.
+    sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
+    sic_opt::ir::asm_imm::specialize_asm(&mut ir_module)?;
 
     // Codegen to a temp object and archive it into `lib<name>.a`.
     let obj_bytes = compile_ir(&ir_module, args, &name)?;

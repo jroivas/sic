@@ -1389,6 +1389,25 @@ else
 fi
 cd ..
 
+# ── a folder module is optimized like any other unit: -O2 inlines a static helper
+# (`--emit-module` lowered without running the IR passes, whatever -O said) ──
+mkdir -p optmod/fast && cd optmod
+cat > fast/fast.sic <<'EOF'
+module fast;
+static int helper(int x) { return x + 1; }
+int outer(int x) { return helper(x) * 2; }
+EOF
+if "$SIC" -O2 --emit-module fast 2>err; then
+    if objdump -d fast/libfast.a 2>/dev/null | grep -A12 '<fast_outer>:' | grep -q 'call'; then
+        bad "module-optimized" "fast_outer still calls its helper at -O2"
+    else
+        ok "module-optimized"
+    fi
+else
+    bad "module-optimized" "emit-module failed: $(cat err)"
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
