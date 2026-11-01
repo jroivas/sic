@@ -3947,9 +3947,15 @@ impl Parser {
                 self.advance();
                 if self.at(TokenKind::LParen) {
                     // `asm("name")`: a symbol rename, or a register variable's register.
-                    if matches!(self.tokens.get(self.pos + 1).map(|t| t.kind), Some(TokenKind::StringLit))
-                        && matches!(self.tokens.get(self.pos + 2).map(|t| t.kind), Some(TokenKind::RParen)) {
-                        self.pending_asm_label = Some(self.tokens[self.pos + 1].text.clone());
+                    // Adjacent strings concatenate: Linux's `asm("%"_ASM_AX)`.
+                    let mut label = String::new();
+                    let mut k = self.pos + 1;
+                    while matches!(self.tokens.get(k).map(|t| t.kind), Some(TokenKind::StringLit)) {
+                        label.push_str(&self.tokens[k].text);
+                        k += 1;
+                    }
+                    if k > self.pos + 1 && matches!(self.tokens.get(k).map(|t| t.kind), Some(TokenKind::RParen)) {
+                        self.pending_asm_label = Some(label);
                     }
                     self.skip_balanced_parens();
                 }

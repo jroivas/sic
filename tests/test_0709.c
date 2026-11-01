@@ -17,6 +17,19 @@ static long via_helper(long x)
 	return ret;
 }
 
+// The register name in two strings, as Linux spells it: `asm("%"_ASM_AX)`. The stack
+// pointer operand takes the first free register, %rax if the variable is not there.
+#define AX "rax"
+static long split_name(long x)
+{
+	long ret, other;
+	void *p = 0;
+	register long val asm("%" AX);
+	val = x;
+	asm volatile("call helper_rax" : "=c"(ret), "=r"(other) : "0"(p), "r"(val) : "ebx", "memory");
+	return ret;
+}
+
 // The same name in another register, in another function.
 static long other_reg(long x)
 {
@@ -64,6 +77,7 @@ int main(void)
 {
 	CHECK(via_helper(12345) == 12345);
 	CHECK(via_helper(-1) == -1);
+	CHECK(split_name(4321) == 4321);
 	CHECK(other_reg(777) == 777);
 	CHECK(in_rdi(21) == 21);
 	CHECK(output() == 55);
