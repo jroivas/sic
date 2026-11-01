@@ -355,6 +355,19 @@ impl Parser {
             reg_vars: std::mem::take(&mut self.reg_vars) })
     }
 
+    /// What attributes left for the declaration they belong to.
+    fn reset_decl_attrs(&mut self) {
+        self.pending_constructor = None;
+        self.pending_always_inline = false;
+        self.pending_noinline = false;
+        self.pending_used = false;
+        self.pending_section = None;
+        self.pending_alias = None;
+        self.pending_gnu_inline = false;
+        self.pending_weak = false;
+        self.pending_thread_local = false;
+    }
+
     /// Past the balanced `{ ... }` the parser is at.
     fn skip_balanced_braces(&mut self) {
         let mut depth = 0usize;
@@ -413,6 +426,8 @@ impl Parser {
             let b = &lazy[i];
             scan(&self.tokens[b.decl_start..b.end], &mut wanted, &mut work);
             self.pos = b.body_start;
+            // What the end of the file left must not reach the body's first variable.
+            self.reset_decl_attrs();
             self.func_vars = b.params.clone();
             let body = self.parse_function_body()?;
             self.func_vars.clear();
@@ -454,15 +469,7 @@ impl Parser {
 
         // Reset per-declaration attribute state, then parse a leading
         // `__attribute__((constructor))` (captured by `skip_attributes`).
-        self.pending_constructor = None;
-        self.pending_always_inline = false;
-        self.pending_noinline = false;
-        self.pending_used = false;
-        self.pending_section = None;
-        self.pending_alias = None;
-        self.pending_gnu_inline = false;
-        self.pending_weak = false;
-        self.pending_thread_local = false;
+        self.reset_decl_attrs();
         // sic strict mode (sic.md §"Strict mode"): `using strict;` makes every
         // function this file defines strict.
         if self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "using"

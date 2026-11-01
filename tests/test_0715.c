@@ -65,8 +65,15 @@ static inline int unused_one(int x) { return x / 0; }
 // a constant of an enum declared in a body
 static inline int local_enum(void) { enum { A = 5, B }; return B; }
 
+// A static in a delayed body, with the file's last declaration in a section: it stayed
+// pending, and `__key` landed in Linux's discarded `.exitcall.exit`.
+static inline int *get_key(void) { static int __key; return &__key; }
+extern char __start_lastsec[], __stop_lastsec[];
+
 int main(void)
 {
+	char *key = (char *)get_key();
+	CHECK(key < __start_lastsec || key >= __stop_lastsec);
 	CHECK(top(1) == 7);
 	CHECK(even(10) == 1 && odd(7) == 1);
 	CHECK(fp() == 7 && table[1]() == 8);
@@ -81,3 +88,5 @@ int main(void)
 	CHECK((unsigned char)bytes3[2] == 0x90 && (unsigned char)bytes4[5] == 0205);
 	return 42;
 }
+
+static int last_decl __attribute__((used, section("lastsec"))) = 1;
