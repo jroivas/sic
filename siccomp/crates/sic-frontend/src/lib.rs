@@ -7,7 +7,7 @@ pub mod lower;
 pub mod module_manifest;
 pub mod diag;
 
-pub use preprocess::{preprocess, preprocess_ex, preprocessor_bin};
+pub use preprocess::{preprocess, preprocess_ex, preprocessor_bin, preprocessor_cmd, set_builtin, BuiltinOutput};
 pub use lexer::{Lexer, Lang};
 pub use parser::Parser;
 pub use lower::Lowerer;

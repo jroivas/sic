@@ -37,7 +37,7 @@ case "${CPPCMD[0]}" in
     sic-cpp)
         CPPCMD=("$MYDIR/sic-cpp/sic-cpp" "${CPPCMD[@]:1}")
         if [ ! -x "${CPPCMD[0]}" ]; then echo "no sic-cpp at ${CPPCMD[0]} — build it: ./build.sh"; exit 2; fi
-        newer="$(find "$MYDIR/sic-cpp/src" -newer "${CPPCMD[0]}" -print -quit 2>/dev/null)"
+        newer="$(find "$MYDIR/sic-cpp/src" "$MYDIR/sic-cpp/lib/sicpp.sic" -newer "${CPPCMD[0]}" -print -quit 2>/dev/null)"
         [ -n "$newer" ] && echo "WARNING: ${CPPCMD[0]} is older than $newer — rebuild it (make -C sic-cpp)" >&2
         ;;
     global) CPPCMD=(cpp "${CPPCMD[@]:1}") ;;

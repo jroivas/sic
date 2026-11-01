@@ -27,6 +27,22 @@ holds the exit status the command would give, the output (empty with `-o`) and w
 would print on standard error. Nothing exits the host program, and a run leaves no
 state for the next. One run at a time: it is not reentrant.
 
+## In sic
+
+`sic` preprocesses in process when the module is built into it. It looks in this order:
+
+  1. `$SIC_CPP`, a command;
+  2. `$CPP`, a command with arguments if it has any, unless it names `sic` itself
+     (build systems export `CPP = $(CC) -E`);
+  3. the module built in;
+  4. `sic-cpp` on `PATH`, or next to the sic repository;
+  5. `cpp`.
+
+`crates/sic/build.rs` builds the module in when `lib/libsicpp.a`, the crate
+`sic --emit-crate lib` wrote to `lib/rust`, and `libstd.a` exist, and sic builds without
+them otherwise: `build.sh` builds the compiler again once they do. `SIC_NO_BUILTIN_CPP=1`
+leaves the module out. `sic -print-cpp-builtin` says whether it is in use.
+
 ## Status
 
 This is a **first implementation** covering the core C preprocessor features

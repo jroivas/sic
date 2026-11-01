@@ -7,6 +7,29 @@ mod bigint_runtime;
 mod dict_runtime;
 mod async_runtime;
 mod emit_crate;
+
+/// The `sicpp` module, built in when it is there (see build.rs), through the crate
+/// `sic --emit-crate` wrote for it.
+#[cfg(builtin_cpp)]
+#[allow(dead_code, unused_imports, clippy::all)]
+mod sicpp {
+    include!(env!("SICPP_BINDINGS"));
+}
+
+#[cfg(builtin_cpp)]
+fn builtin_cpp(args: &[String], info: &str, text: Option<&[u8]>) -> sic_frontend::BuiltinOutput {
+    let list: sicpp::SicList<sicpp::SicString> = args.iter().collect();
+    let out = match text {
+        Some(t) => sicpp::run_text(&list, info, t),
+        None => sicpp::run(&list, info),
+    };
+    sic_frontend::BuiltinOutput {
+        status: out.status,
+        text: out.text.as_bytes().to_vec(),
+        errors: out.errors.as_bytes().to_vec(),
+    }
+}
+
 mod list_runtime;
 mod stringbuilder_runtime;
 mod tuple_runtime;
@@ -390,6 +413,12 @@ fn handle_version_query(args: &[String]) -> bool {
                 println!("{}", sic_frontend::preprocessor_bin());
                 return true;
             }
+            // Whether preprocessing happens in this process: the module built in,
+            // and neither $SIC_CPP nor $CPP chose a command.
+            "-print-cpp-builtin" | "--print-cpp-builtin" => {
+                println!("{}", if sic_frontend::preprocessor_cmd().is_empty() { "yes" } else { "no" });
+                return true;
+            }
             // … and the linker it uses: wild built in, $SIC_LD, or the legacy
             // C driver named by $SIC_CC.
             "-print-prog-name=ld" | "--print-prog-name=ld" => {
@@ -472,6 +501,8 @@ fn delegate_non_64bit(args: &[String]) {
 }
 
 fn main() {
+    #[cfg(builtin_cpp)]
+    sic_frontend::set_builtin(builtin_cpp);
     let raw_args: Vec<String> = std::env::args().collect();
     if handle_version_query(&raw_args) {
         return;
@@ -1307,7 +1338,7 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
 /// `sic <version> (preprocessor: <name>)` — the identification sic writes
 /// into every object's `.comment` (and DWARF producer with `-g`).
 fn producer_string() -> String {
-    let bin = sic_frontend::preprocessor_bin();
+    let bin = sic_frontend::preprocessor_cmd().first().cloned().unwrap_or_else(|| "sic-cpp".to_string());
     let name = std::path::Path::new(&bin).file_name()
         .map(|n| n.to_string_lossy().into_owned()).unwrap_or(bin.clone());
     format!("sic {} (preprocessor: {})", env!("CARGO_PKG_VERSION"), name)

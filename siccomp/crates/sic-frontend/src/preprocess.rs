@@ -13,24 +13,66 @@ use crate::{Result, CompileError};
 /// (`cpp -DNAME[=val] -UNAME -Idir -std=std [-undef] … file`) and write the
 /// preprocessed text to stdout.
 pub fn preprocessor_bin() -> String {
-    static BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
+    let cmd = preprocessor_cmd();
+    if cmd.is_empty() { external_cmd().join(" ") } else { cmd.join(" ") }
+}
+
+/// What a preprocessor built into sic gives (`sicpp`, see the `sic` crate).
+pub struct BuiltinOutput {
+    pub status: i32,
+    pub text: Vec<u8>,
+    pub errors: Vec<u8>,
+}
+
+/// Arguments, sic's info text, and the input if not from the arguments.
+pub type BuiltinCpp = fn(&[String], &str, Option<&[u8]>) -> BuiltinOutput;
+
+static BUILTIN: std::sync::OnceLock<BuiltinCpp> = std::sync::OnceLock::new();
+
+/// Give the front end the preprocessor built into this sic.
+pub fn set_builtin(f: BuiltinCpp) {
+    let _ = BUILTIN.set(f);
+}
+
+/// The value of `$CPP`, unless it is this compiler: a build system's `CPP = $(CC) -E`
+/// (Linux exports that) would have sic start itself.
+fn env_cpp() -> Option<Vec<String>> {
+    let v = std::env::var("CPP").ok()?;
+    let words: Vec<String> = v.split_whitespace().map(String::from).collect();
+    let first = std::path::Path::new(words.first()?);
+    let is_sic = first.file_name().is_some_and(|n| n == "sic")
+        || (first.canonicalize().ok().is_some() && first.canonicalize().ok() == std::env::current_exe().ok());
+    if is_sic { None } else { Some(words) }
+}
+
+/// The preprocessor to use: `$SIC_CPP`, `$CPP`, the one built in (an empty command),
+/// `sic-cpp` on PATH or next to this sic, `cpp`.
+pub fn preprocessor_cmd() -> Vec<String> {
+    static CMD: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    CMD.get_or_init(|| {
         if let Some(v) = std::env::var("SIC_CPP").ok().filter(|s| !s.is_empty()) {
-            return v;
+            return vec![v];
         }
-        if let Some(p) = find_in_path("sic-cpp") {
-            return p;
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                let cand = dir.join("../../../sic-cpp/sic-cpp");
-                if is_executable(&cand) {
-                    if let Ok(c) = cand.canonicalize() { return c.to_string_lossy().into_owned(); }
-                }
+        if let Some(c) = env_cpp() { return c; }
+        if BUILTIN.get().is_some() { return vec![]; }
+        external_cmd()
+    }).clone()
+}
+
+/// The command to fall back on: `sic-cpp` on PATH or next to this sic, else `cpp`.
+fn external_cmd() -> Vec<String> {
+    if let Some(p) = find_in_path("sic-cpp") {
+        return vec![p];
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let cand = dir.join("../../../sic-cpp/sic-cpp");
+            if is_executable(&cand) {
+                if let Ok(c) = cand.canonicalize() { return vec![c.to_string_lossy().into_owned()]; }
             }
         }
-        "cpp".to_string()
-    }).clone()
+    }
+    vec!["cpp".to_string()]
 }
 
 /// Whether `bin` is sic's own preprocessor (by file name), which provides the
@@ -194,20 +236,19 @@ pub fn preprocess_ex(
              (sic and sic-cpp would call each other recursively)",
             file, crate::cpp_info::RECURSION_ENV)));
     }
-    let bin = preprocessor_bin();
+    let prog = preprocessor_cmd();
+    let builtin = prog.is_empty();
+    // (The built-in preprocessor is sic-cpp.)
+    let bin = if builtin { "sic-cpp".to_string() } else { prog.join(" ") };
+    let mut args: Vec<String> = Vec::new();
 
-    let mut cmd = Command::new(&bin);
-    // Everything the preprocessor needs, from sic itself (sic-cpp then runs no
-    // host-compiler queries); and the recursion marker for anything it starts.
-    cmd.env(crate::cpp_info::INFO_ENV, crate::cpp_info::info_text());
-    cmd.env(crate::cpp_info::RECURSION_ENV, "1");
-    cmd.arg("-undef");
+    args.push("-undef".to_string());
     // Default to C23 so newer library features (e.g. C23's `timespec_get`
     // bases like `TIME_MONOTONIC`) are exposed by the system headers. Callers
     // can request an older standard via `-std=` (e.g. `c99`, `c11`).
-    cmd.arg(format!("-std={}", std));
+    args.push(format!("-std={}", std));
     // Define common macros that tests rely on
-    cmd.arg("-DNULL=((void*)0)");
+    args.push("-DNULL=((void*)0)".to_string());
     // NB: `__attribute__` is NOT stripped — the parser skips attributes in every
     // position itself (`skip_attributes`) and captures `vector_size(N)` to size
     // SIMD vector types. Most attributes are parsed then discarded.
@@ -217,7 +258,7 @@ pub fn preprocess_ex(
     // variant. Re-supply the ones describing *this* build's target so the
     // headers resolve to the matching (64-bit) stubs instead of stubs-32.h.
     for m in target_predefines() {
-        cmd.arg(format!("-D{}", m));
+        args.push(format!("-D{}", m));
     }
 
     // When using the system `cpp`, also re-supply host numeric predefines
@@ -226,24 +267,24 @@ pub fn preprocess_ex(
     // redefinition noise).
     if !is_sic_cpp(&bin) {
         for (name, value) in host_numeric_predefines(std) {
-            cmd.arg(format!("-D{}={}", name, value));
+            args.push(format!("-D{}={}", name, value));
         }
         for (name, value) in compiler_identity_predefines() {
-            cmd.arg(format!("-D{}={}", name, value));
+            args.push(format!("-D{}={}", name, value));
         }
     }
 
     for d in defines {
-        cmd.arg(format!("-D{}", d));
+        args.push(format!("-D{}", d));
     }
     // Now that we advertise `__GNUC__`, glibc would turn on `_FORTIFY_SOURCE`,
     // rewriting libc calls into `__*_chk` builtins (`__builtin_object_size`,
     // `__builtin___memcpy_chk`, …) that sic doesn't implement. Force fortify off
     // (after user `-D` so it wins). The unfortified calls are equivalent.
-    cmd.arg("-U_FORTIFY_SOURCE");
-    cmd.arg("-D_FORTIFY_SOURCE=0");
+    args.push("-U_FORTIFY_SOURCE".to_string());
+    args.push("-D_FORTIFY_SOURCE=0".to_string());
     for i in include_dirs {
-        cmd.arg(format!("-I{}", i));
+        args.push(format!("-I{}", i));
     }
 
     // A SIC source with multiline strings goes in protected (through standard
@@ -257,44 +298,60 @@ pub fn preprocess_ex(
         let dir = std::path::Path::new(file).parent()
             .map(|d| d.to_string_lossy().into_owned()).filter(|d| !d.is_empty())
             .unwrap_or_else(|| ".".to_string());
-        cmd.arg("-iquote");
-        cmd.arg(dir);
+        args.push("-iquote".to_string());
+        args.push(dir);
     }
 
     for f in extra_flags {
-        cmd.arg(f);
+        args.push(f.to_string());
     }
 
-    let output = if let Some(text) = &protected {
-        cmd.arg("-");
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
-        let input = format!("#line 1 \"{}\"\n{}", file.replace('\\', "\\\\").replace('"', "\\\""), text);
-        let mut stdin = child.stdin.take().expect("piped stdin");
-        let writer = std::thread::spawn(move || {
-            use std::io::Write;
-            let _ = stdin.write_all(input.as_bytes());
-        });
-        let out = child.wait_with_output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
-        let _ = writer.join();
-        out
+    let input = protected.as_ref().map(|text| {
+        format!("#line 1 \"{}\"\n{}", file.replace('\\', "\\\\").replace('"', "\\\""), text)
+    });
+    args.push(if input.is_some() { "-".to_string() } else { file.to_string() });
+
+    let (ok, stdout, stderr) = if builtin {
+        let run = BUILTIN.get().expect("the built-in preprocessor");
+        let o = run(&args, &crate::cpp_info::info_text(), input.as_ref().map(|s| s.as_bytes()));
+        (o.status == 0, o.text, o.errors)
     } else {
-        cmd.arg(file);
-        // For `-` (read from standard input), the preprocessor must see our stdin.
-        if file == "-" {
-            cmd.stdin(std::process::Stdio::inherit());
-        }
-        cmd.output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?
+        let mut cmd = Command::new(&prog[0]);
+        cmd.args(&prog[1..]);
+        // Everything the preprocessor needs, from sic itself (sic-cpp then runs no
+        // host-compiler queries); and the recursion marker for anything it starts.
+        cmd.env(crate::cpp_info::INFO_ENV, crate::cpp_info::info_text());
+        cmd.env(crate::cpp_info::RECURSION_ENV, "1");
+        cmd.args(&args);
+        let output = if let Some(input) = input {
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+            let mut child = cmd.spawn().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            let writer = std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = stdin.write_all(input.as_bytes());
+            });
+            let out = child.wait_with_output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?;
+            let _ = writer.join();
+            out
+        } else {
+            // For `-` (read from standard input), the preprocessor must see our stdin.
+            if file == "-" {
+                cmd.stdin(std::process::Stdio::inherit());
+            }
+            cmd.output().map_err(|e| CompileError::new(format!("failed to run {}: {}", bin, e)))?
+        };
+        (output.status.success(), output.stdout, output.stderr)
     };
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !ok {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(CompileError::new(format!("preprocessor ({}) error:\n{}", bin, stderr)));
     }
 
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut text = String::from_utf8_lossy(&stdout).into_owned();
     if protected.is_some() {
         // The dependencies were read from standard input: name the source.
         let mf = extra_flags.iter().position(|f| *f == "-MF").and_then(|k| extra_flags.get(k + 1).map(|s| s.to_string()))

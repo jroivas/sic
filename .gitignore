@@ -3,3 +3,4 @@
 *.times.log
 sic-cpp/lib/libsicpp.*
 sic-cpp/lib/module_sicpp.*
+sic-cpp/lib/rust/

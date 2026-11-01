@@ -1550,6 +1550,34 @@ EOF
     cd ..
 fi
 
+# ── which preprocessor: $SIC_CPP, $CPP unless it is sic itself, the built-in one,
+# sic-cpp, cpp ──
+mkdir -p cpporder && cd cpporder
+printf '#!/bin/sh\nprintf "int from_wrapper;\\n"\n' > mycpp
+chmod +x mycpp
+printf 'int from_source;\n' > a.c
+printf 'int second;\n' > b.c
+if SIC_CPP="$PWD/mycpp" CPP=cpp "$SIC" -E a.c | grep -q from_wrapper; then ok "cpp-order-sic-cpp-first"; else bad "cpp-order-sic-cpp-first" "SIC_CPP not used"; fi
+if env -u SIC_CPP CPP="$PWD/mycpp" "$SIC" -E a.c | grep -q from_wrapper; then ok "cpp-order-env"; else bad "cpp-order-env" "CPP not used"; fi
+if env -u SIC_CPP CPP="$SIC -E" "$SIC" -E a.c | grep -q from_source; then ok "cpp-order-env-self"; else bad "cpp-order-env-self" "CPP naming sic itself should be ignored"; fi
+if env -u SIC_CPP CPP="cc -E" "$SIC" -E a.c | grep -q from_source; then ok "cpp-order-env-words"; else bad "cpp-order-env-words" "CPP with arguments"; fi
+if [ "$(SIC_CPP="$PWD/mycpp" "$SIC" -print-cpp-builtin)" = no ]; then ok "cpp-builtin-off"; else bad "cpp-builtin-off" "SIC_CPP should turn it off"; fi
+if printf 'int on_stdin;\n' | env -u SIC_CPP -u CPP "$SIC" -E - | grep -q on_stdin; then ok "cpp-stdin"; else bad "cpp-stdin" "input on stdin"; fi
+env -u SIC_CPP -u CPP "$SIC" -c a.c 2>err && env -u SIC_CPP -u CPP "$SIC" -c b.c 2>>err
+if [ -f a.o ] && [ -f b.o ]; then ok "cpp-sources"; else bad "cpp-sources" "$(cat err)"; fi
+cat > two.c <<'EOF'
+#define ONLY_HERE 1
+int one(void) { return ONLY_HERE; }
+EOF
+cat > three.c <<'EOF'
+#ifdef ONLY_HERE
+#error a macro of the file before
+#endif
+int main(void) { return __COUNTER__; }
+EOF
+if env -u SIC_CPP -u CPP "$SIC" two.c three.c -o twothree 2>err && ./twothree; then ok "cpp-two-units"; else bad "cpp-two-units" "$(cat err)"; fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

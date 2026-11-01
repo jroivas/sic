@@ -70,12 +70,17 @@ echo ">> building sic-cpp (sic's default preprocessor)"
 # earlier build can never break building the new one.
 SIC_CPP="${BOOT_CPP}" make -B -C "$ROOT/sic-cpp" SIC="$SIC"
 
+# sic builds the preprocessor into itself once it exists (crates/sic/build.rs).
+echo ">> building the compiler again, with sicpp built in"
+( cd "$ROOT/siccomp" && cargo build "${CARGO_FLAGS[@]}" )
+
 if [ -n "$BOOT_CPP" ]; then
-    # Stage 2: rebuild std and art with the fresh sic-cpp, the preprocessor
-    # they are normally built with (the system cpp only bootstrapped them).
+    # Stage 2: rebuild std and art with the fresh preprocessor, the one they are
+    # normally built with (the system cpp only bootstrapped them).
     unset SIC_CPP
-    echo ">> rebuilding std + art with the new sic-cpp"
+    echo ">> rebuilding std + art with the new preprocessor"
     build_modules
+    ( cd "$ROOT/siccomp" && cargo build "${CARGO_FLAGS[@]}" )
 fi
 
 echo ">> building sic-fmt (the SIC formatter)"
@@ -85,4 +90,4 @@ echo ">> done. installed:"
 ls -1 "$SYSROOT"/module_std.smod "$SYSROOT"/libstd.a "$SYSROOT"/libstd.so \
       "$SYSROOT"/module_art.smod "$SYSROOT"/libart.a "$SYSROOT"/libart.so \
       "$ROOT/sic-cpp/sic-cpp" "$ROOT/sic-fmt/sic-fmt"
-echo ">> preprocessor: $("$SIC" -print-prog-name=cpp)"
+echo ">> preprocessor built in: $("$SIC" -print-cpp-builtin), command: $("$SIC" -print-prog-name=cpp)"
