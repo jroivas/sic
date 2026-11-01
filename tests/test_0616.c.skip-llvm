@@ -1,0 +1,1 @@
+LLVM folds an operation on constants to a NaN of positive sign, x86 computes a negative one; IEEE leaves the sign open (all 13 differences in these tests)

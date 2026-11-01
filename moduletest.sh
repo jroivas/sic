@@ -1590,6 +1590,39 @@ if SIC_BACKEND=nosuch "$SIC" -c a.c 2>err; then bad "backend-env" "not honoured"
 elif SIC_BACKEND=nosuch "$SIC" -fbackend="$first" -c a.c 2>err; then ok "backend-env"; else bad "backend-env" "-fbackend should win: $(cat err)"; fi
 cd ..
 
+# ── the LLVM back end, when this sic has it ──
+if "$SIC" -print-backends | grep -qx llvm; then
+    mkdir -p llvm && cd llvm
+    # A variable named only by asm or by its section stays, an alias is its target.
+    cat > keep.c <<'EOF'
+#include <setjmp.h>
+static int table[2] __attribute__((used)) = { 1, 2 };
+extern int same[2] __attribute__((alias("table")));
+static int by_asm = 40;
+int in_sec __attribute__((section("sic_mine"))) = 2;
+extern int __start_sic_mine[];
+int main(void)
+{
+    jmp_buf j;
+    volatile int a = 0;
+    int v;
+    __asm__("movl by_asm(%%rip), %0" : "=r"(v));
+    if (&same[0] != &table[0]) return 1;
+    if (setjmp(j)) return a;
+    a = v + *__start_sic_mine;
+    longjmp(j, 1);
+}
+EOF
+    for o in -O0 -O2; do
+        if "$SIC" -fbackend=llvm $o -w keep.c -o keep 2>err; ./keep; [ $? -eq 42 ]; then ok "llvm-keep$o"; else bad "llvm-keep$o" "$(cat err)"; fi
+    done
+    # Objects of both back ends in one program.
+    printf 'long twice(long x) { return x * 2; }\n' > a.c
+    printf 'long twice(long);\nint main(void) { return twice(21); }\n' > b.c
+    if "$SIC" -fbackend=llvm -O2 -c a.c -o a.o 2>err && "$SIC" -fbackend=cranelift -c b.c -o b.o 2>>err && "$SIC" a.o b.o -o ab 2>>err; ./ab; [ $? -eq 42 ]; then ok "llvm-mixed"; else bad "llvm-mixed" "$(cat err)"; fi
+    cd ..
+fi
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]
