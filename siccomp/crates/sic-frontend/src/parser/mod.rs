@@ -1416,6 +1416,12 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RBrace)?;
+            if methods.iter().any(|m| m.kind == MethodKind::Dtor) {
+                let count = QualType::new(AstType::Long { signed: false });
+                fields.push(FieldDecl { name: Some(crate::ast::STRUCT_RC_FIELD.to_string()),
+                    ty: QualType::new(AstType::Pointer { base: Box::new(count), quals: vec![] }),
+                    bit_width: None, align: None, align_expr: None, packed: false, span: self.span() });
+            }
             // Trailing `struct T {...} __attribute__((packed/__order__/aligned))`;
             // an alignment there raises the type's (Linux's struct page
             // `} _struct_page_alignment;`).

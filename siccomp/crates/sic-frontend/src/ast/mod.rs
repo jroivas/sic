@@ -32,6 +32,9 @@ impl QualType {
 pub struct AlignExpr(pub BoxExpr);
 impl PartialEq for AlignExpr { fn eq(&self, _: &AlignExpr) -> bool { true } }
 impl Eq for AlignExpr {}
+/// The hidden member of a struct with a `~S()`: its objects' shared count
+/// (sic.md §"Copying"). Every copy of the object holds the same block.
+pub const STRUCT_RC_FIELD: &str = "__sic_rc";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeQual {

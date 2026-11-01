@@ -1,0 +1,106 @@
+/* A struct with a destructor is reference counted: a copy shares it and the last
+ * owner runs ~S(); a write gives the writer its own data, through clone() if there
+ * is one. Returns 42. */
+#include <stdlib.h>
+
+i32 made = 0;
+i32 ended = 0;
+
+// A resource with no count of its own.
+struct raw {
+    char *p;
+    raw() { p = (char *)malloc(16); made++; }
+    ~raw() { free(p); ended++; }
+}
+
+struct data {
+    int *p;
+    i32 n;
+    data() { p = new int(2); p[0] = 1; made++; }
+    ~data() { if (p != NULL) { del p; ended++; } }
+    data clone(data *self) { data c; c.p[0] = self->p[0]; c.n = self->n; return c; }
+    void set(data *self, i32 v) { self->p[0] = v; }
+}
+
+struct noclone {
+    int *p;
+    int *q;
+    noclone() { p = new int(1); q = new int(1); made++; }
+    ~noclone() { del p; del q; ended++; }
+}
+
+struct holder { data d; string s; }
+
+data mk(i32 v) { data d; d.p[0] = v; return d; }
+void by_value(raw r) { }
+
+i32 sharing()
+{
+    raw a;
+    raw b = a;
+    raw c;
+    c = a;
+    b = b;
+    by_value(a);
+    list<raw> l;
+    l.add(a);
+    raw e = l[0];
+    dict<i32, raw> d;
+    d[1] = a;
+    raw *h = new raw;
+    *h = a;
+    del h;
+    Option<raw> o = Option::Some(a);
+    return made == 3 && ended == 2 ? 0 : 1;     // c's and *h's first objects
+}
+
+i32 writing()
+{
+    data a;
+    data b = a;
+    b.p[0] = 7;                 // through a pointer
+    if (a.p[0] != 1 || b.p[0] != 7) return 1;
+    data c = a;
+    c.set(5);                   // in a method
+    if (a.p[0] != 1 || c.p[0] != 5) return 2;
+    data d = a;
+    d.n++;
+    if (a.n != 0 || d.n != 1) return 3;
+    holder h;
+    h.d = a;
+    holder i = h;
+    i.d.p[0] = 3;               // nested
+    if (h.d.p[0] != 1 || i.d.p[0] != 3) return 4;
+    data e = a;
+    data f = e;                 // e and f stay one object
+    if (e.p != f.p) return 5;
+    data g = mk(9);             // a result moves
+    if (g.p[0] != 9) return 6;
+    return 0;
+}
+
+i32 without_clone()
+{
+    noclone a;
+    noclone b = a;
+    b.p[0] = 2;                 // shared, as a list is
+    if (a.p[0] != 2) return 1;
+    b.p = new int(1);           // replaced: b leaves, and keeps q in common
+    b.p[0] = 3;
+    if (a.p[0] != 2 || b.p[0] != 3 || a.q != b.q) return 2;
+    return 0;
+}
+
+int main()
+{
+    i32 r = sharing();
+    if (r) return 10 + r;
+    if (made != ended) return 20;
+    r = writing();
+    if (r) return 30 + r;
+    if (made != ended) return 21;
+    r = without_clone();
+    if (r) return 50 + r;
+    if (ended != made + 1) return 22;       // two objects from one constructor
+    return 42;
+}

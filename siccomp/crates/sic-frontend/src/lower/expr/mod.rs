@@ -697,8 +697,14 @@ impl<'m> FuncCtx<'m> {
                 self.lower_unary(*op, inner)
             }
 
-            ExprKind::PreInc { inc, expr: inner } => self.lower_pre_inc(*inc, inner),
-            ExprKind::PostInc { inc, expr: inner } => self.lower_post_inc(*inc, inner),
+            ExprKind::PreInc { inc, expr: inner } => {
+                self.own_before_write(inner)?;
+                self.lower_pre_inc(*inc, inner)
+            }
+            ExprKind::PostInc { inc, expr: inner } => {
+                self.own_before_write(inner)?;
+                self.lower_post_inc(*inc, inner)
+            }
 
             ExprKind::Ternary { cond, then, else_ } => self.lower_ternary(cond, then, else_),
             ExprKind::Elvis { cond, else_ } => self.lower_elvis(cond, else_),
@@ -3753,7 +3759,7 @@ impl<'m> FuncCtx<'m> {
     /// Emit `malloc(n)` and return the result typed as `char*`. Used by the
     /// native-string ops (`.ptr` copy, concat); the block is not freed yet —
     /// reclamation waits on the ownership/refcount milestone.
-    fn emit_malloc(&mut self, n: Val) -> Result<Val> {
+    pub(crate) fn emit_malloc(&mut self, n: Val) -> Result<Val> {
         let voidp = Type::void_ptr();
         let fref = self.lowerer.module.func_ref_by_name("malloc").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
@@ -4478,6 +4484,8 @@ impl<'m> FuncCtx<'m> {
         let resolved = super::types::resolve_aggregate(struct_ty, &self.lowerer.struct_types);
         let sname = match &resolved { Type::Struct(st) => st.name.clone(), _ => return Ok(()) };
         let fieldtys = match &resolved { Type::Struct(st) => st.fields.clone(), _ => return Ok(()) };
+        let counted = Self::struct_counted(&resolved);
+        if counted { self.struct_count_retain(&ptr, &resolved)?; }
         // Retain exactly the fields this struct's destructor `del`s — its owned,
         // refcounted resources. A borrowed pointer field (one the dtor leaves alone)
         // is never touched, so its (non-refcount) memory is not corrupted.
@@ -4499,7 +4507,8 @@ impl<'m> FuncCtx<'m> {
                 continue;
             }
             let managed = self.lowerer.managed_value_type(&fty);
-            let owned_ptr = matches!(&fty, Type::Pointer(_)) && !managed && owned.iter().any(|o| o == &fname);
+            // A counted struct's `del`s run once, for the last owner.
+            let owned_ptr = !counted && matches!(&fty, Type::Pointer(_)) && !managed && owned.iter().any(|o| o == &fname);
             if !managed && !owned_ptr { continue; }
             let flv = self.field_ptr_from(LValue::plain(ptr.clone(), resolved.clone()), &fname, false, &crate::lexer::Span::default())?;
             if managed {
@@ -5730,8 +5739,103 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(dest))
     }
 
+    /// A write through `lhs` modifies the structs on its way, and a counted struct
+    /// with a `clone()` that is shared takes its own copy first (sic.md §"Copying").
+    /// Without a `clone()` it stays shared.
+    fn own_before_write(&mut self, lhs: &Expr) -> Result<()> {
+        if !self.is_sic() { return Ok(()); }
+        fn pure(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Ident(_) | ExprKind::IntLit { .. } => true,
+                ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } => pure(base),
+                ExprKind::Unary { op: UnOpKind::Deref, expr } => pure(expr),
+                ExprKind::Index { base, index } => pure(base) && pure(index),
+                _ => false,
+            }
+        }
+        let mut owners = Vec::new();
+        let mut cur = lhs;
+        loop {
+            cur = match &cur.kind {
+                ExprKind::Field { base, .. } => { owners.push((**base).clone()); base }
+                ExprKind::Arrow { base, .. } => {
+                    owners.push(Expr::new(ExprKind::Unary { op: UnOpKind::Deref, expr: base.clone() }, base.span.clone()));
+                    base
+                }
+                ExprKind::Index { base, .. } => base,
+                ExprKind::Unary { op: UnOpKind::Deref, expr } => expr,
+                _ => break,
+            };
+        }
+        for pl in owners.into_iter().rev() {
+            let Ok(t) = self.infer_expr_type(&pl) else { continue };
+            let rt = super::types::resolve_aggregate(&t, &self.lowerer.struct_types);
+            if !Self::struct_counted(&rt) || !pure(&pl) { continue; }
+            let Type::Struct(st) = &rt else { continue };
+            let Some(sname) = st.name.clone() else { continue };
+            // A `clone()` builds the copy: its own writes are to that.
+            let this_fn = unsafe { (*self.func).name.clone() };
+            if self.lowerer.struct_methods.get(&(sname.clone(), "clone".to_string())) == Some(&this_fn) { continue; }
+            if !self.lowerer.struct_methods.contains_key(&(sname.clone(), "clone".to_string())) {
+                self.own_replaced_field(lhs, &pl, &sname, &rt)?;
+                continue;
+            }
+            let lv = self.lower_lvalue(&pl)?;
+            let (_, rc) = self.struct_count_at(&lv.ptr, &rt)?;
+            let nn = self.is_nonnull(rc.clone());
+            let done = self.branch_if(nn);
+            let n = self.alloc_val();
+            self.push_instr(Instr::Load { dest: n, ptr: rc, ty: Type::u64() });
+            let shared = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: shared, op: CmpOp::IUGt, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
+            let not_shared = self.branch_if(Val::Local(shared));
+            let span = pl.span.clone();
+            let call = Expr::new(ExprKind::Call { func: Box::new(Expr::new(
+                ExprKind::Field { base: Box::new(pl.clone()), name: "clone".to_string() }, span.clone())), args: vec![] }, span);
+            self.lower_assign(None, &pl, &call)?;
+            self.set_terminator(Terminator::Jump(not_shared));
+            self.switch_to_block(not_shared);
+            self.set_terminator(Terminator::Jump(done));
+            self.switch_to_block(done);
+        }
+        Ok(())
+    }
+
+    /// No `clone()`, but `lhs` replaces a pointer the destructor `del`s: this copy
+    /// leaves the shared object. `del`'d memory is counted by itself, so the two
+    /// objects can hold what they still have in common, and each runs its `~S()`.
+    fn own_replaced_field(&mut self, lhs: &Expr, owner: &Expr, sname: &str, rt: &Type) -> Result<()> {
+        let (ExprKind::Field { name, .. } | ExprKind::Arrow { name, .. }) = &lhs.kind else { return Ok(()) };
+        let owned = self.lowerer.struct_owned_fields.get(sname).cloned().unwrap_or_default();
+        if !owned.contains(name) { return Ok(()); }
+        let lv = self.lower_lvalue(owner)?;
+        let (at, rc) = self.struct_count_at(&lv.ptr, rt)?;
+        let nn = self.is_nonnull(rc.clone());
+        let done = self.branch_if(nn);
+        let n = self.alloc_val();
+        self.push_instr(Instr::Load { dest: n, ptr: rc.clone(), ty: Type::u64() });
+        let shared = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: shared, op: CmpOp::IUGt, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
+        let not_shared = self.branch_if(Val::Local(shared));
+        let left = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: left, op: sic_ir::BinOp::Sub, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
+        self.push_instr(Instr::Store { ptr: rc, val: Val::Local(left) });
+        self.struct_count_new(&at)?;
+        for f in owned.iter().filter(|f| *f != name) {
+            let flv = self.field_ptr_from(LValue::plain(lv.ptr.clone(), rt.clone()), f, false, &crate::lexer::Span::default())?;
+            let v = self.load_lvalue(&flv)?;
+            self.emit_rc_retain(v)?;
+        }
+        self.set_terminator(Terminator::Jump(not_shared));
+        self.switch_to_block(not_shared);
+        self.set_terminator(Terminator::Jump(done));
+        self.switch_to_block(done);
+        Ok(())
+    }
+
     fn lower_assign(&mut self, op: Option<BinOpKind>, lhs: &Expr, rhs: &Expr) -> Result<Val> {
         self.check_writable(lhs)?;
+        self.own_before_write(lhs)?;
         // A borrowing closure may be assigned to a local closure variable (which
         // is then tracked), never to a field, global, `*p` or element.
         if op.is_none() {

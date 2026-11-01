@@ -1167,6 +1167,40 @@ impl<'m> FuncCtx<'m> {
         self.lowerer.decl_align(&plain, base_ty)
     }
 
+    /// The start of a `~S()`: drop this owner, and only the last goes on to the body.
+    /// Any other returns here, after releasing what each copy holds by itself.
+    fn struct_dtor_prologue(&mut self, dtor: &str, mdtor: Option<String>) -> Result<()> {
+        let Some(sname) = self.lowerer.struct_dtor.iter().find(|(_, d)| d.as_str() == dtor).map(|(s, _)| s.clone()) else { return Ok(()) };
+        let Some(sty) = self.lowerer.struct_types.get(&sname).cloned() else { return Ok(()) };
+        if !Self::struct_counted(&sty) { return Ok(()); }
+        let Some((_, slot)) = self.locals.last().and_then(|sc| sc.get("self")).cloned() else { return Ok(()) };
+        let selfp = self.alloc_val();
+        let pty = Type::Pointer(Box::new(sty.clone()));
+        self.push_instr(Instr::Load { dest: selfp, ptr: Val::Local(slot), ty: pty.clone() });
+        self.val_types.insert(selfp.0, pty);
+        let (at, rc) = self.struct_count_at(&Val::Local(selfp), &sty)?;
+        let nn = self.is_nonnull(rc.clone());
+        let body = self.branch_if(nn);
+        let n = self.alloc_val();
+        self.push_instr(Instr::Load { dest: n, ptr: rc.clone(), ty: Type::u64() });
+        let left = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: left, op: sic_ir::BinOp::Sub, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
+        self.push_instr(Instr::Store { ptr: rc.clone(), val: Val::Local(left) });
+        let shared = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: shared, op: CmpOp::INe, lhs: Val::Local(left), rhs: Val::Const(Constant::UInt(0)), ty: Type::u64() });
+        let last = self.branch_if(Val::Local(shared));
+        if let Some(m) = mdtor {
+            self.emit_cleanup_call(Val::Local(selfp), &m);
+        }
+        self.set_terminator(Terminator::Ret(None));
+        self.switch_to_block(last);
+        self.emit_free(rc)?;
+        self.push_instr(Instr::Store { ptr: at, val: Val::Const(Constant::Null) });
+        self.set_terminator(Terminator::Jump(body));
+        self.switch_to_block(body);
+        Ok(())
+    }
+
     pub(crate) fn struct_has_dtor(&self, ty: &Type) -> bool {
         matches!(ty, Type::Struct(st) if st.name.as_deref().map_or(false, |n| self.lowerer.struct_dtor.contains_key(n)))
     }
@@ -2490,6 +2524,7 @@ impl<'m> Lowerer {
         if fc.is_sic() && fc.lowerer.user_dtor_syms.contains(name) {
             let mdtor = fc.lowerer.struct_dtor.iter().find(|(_, d)| d.as_str() == name)
                 .and_then(|(s, _)| fc.lowerer.member_dtor.get(s).cloned().flatten());
+            fc.struct_dtor_prologue(name, mdtor.clone())?;
             if let (Some(mdtor), Some((_, slot))) = (mdtor, fc.locals.last().and_then(|sc| sc.get("self")).cloned()) {
                 let sp = fc.alloc_val();
                 fc.push_instr(Instr::Load { dest: sp, ptr: Val::Local(slot), ty: Type::void_ptr() });
@@ -3852,10 +3887,81 @@ impl<'m> FuncCtx<'m> {
     /// `t` (by value) holds a `list`/`dict`/`set` handle somewhere: itself, a
     /// struct field, or an array element (recursively; unions are skipped — only
     /// one member is live).
+    /// Whether objects of the (resolved) struct `t` share a count: it has a `~S()`.
+    pub(crate) fn struct_counted(t: &Type) -> bool {
+        matches!(t, Type::Struct(st) if st.fields.iter().any(|(n, _)| n == crate::ast::STRUCT_RC_FIELD))
+    }
+
+    /// `self.__sic_rc` of the struct of type `ty` at `ptr`: its address and value.
+    pub(crate) fn struct_count_at(&mut self, ptr: &Val, ty: &Type) -> Result<(Val, Val)> {
+        let flv = self.field_ptr_from(super::expr::LValue::plain(ptr.clone(), ty.clone()),
+            crate::ast::STRUCT_RC_FIELD, false, &crate::lexer::Span::default())?;
+        let at = flv.ptr.clone();
+        Ok((at, self.load_lvalue(&flv)?))
+    }
+
+    /// Branch on `cond`: the current block continues in a new block when it holds,
+    /// and the returned block is where it goes otherwise.
+    pub(crate) fn branch_if(&mut self, cond: Val) -> sic_ir::BlockId {
+        let then_bb = self.new_block_after_current();
+        let else_bb = self.new_block_after_current();
+        self.set_terminator(Terminator::CondJump { cond, then_bb, else_bb });
+        self.switch_to_block(then_bb);
+        else_bb
+    }
+
+    pub(crate) fn is_nonnull(&mut self, v: Val) -> Val {
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest, op: CmpOp::INe, lhs: v, rhs: Val::Const(Constant::Null), ty: Type::void_ptr() });
+        Val::Local(dest)
+    }
+
+    /// One more owner of a counted struct; a block of its own is a new object's.
+    pub(crate) fn struct_count_retain(&mut self, ptr: &Val, ty: &Type) -> Result<()> {
+        let (_, rc) = self.struct_count_at(ptr, ty)?;
+        let nn = self.is_nonnull(rc.clone());
+        let done = self.branch_if(nn);
+        let n = self.alloc_val();
+        self.push_instr(Instr::Load { dest: n, ptr: rc.clone(), ty: Type::u64() });
+        let up = self.alloc_val();
+        self.push_instr(Instr::BinOp { dest: up, op: sic_ir::BinOp::Add, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
+        self.push_instr(Instr::Store { ptr: rc, val: Val::Local(up) });
+        self.set_terminator(Terminator::Jump(done));
+        self.switch_to_block(done);
+        Ok(())
+    }
+
+    /// A new block in the count slot `at`, with this one owner.
+    pub(crate) fn struct_count_new(&mut self, at: &Val) -> Result<()> {
+        let block = self.emit_malloc(Val::Const(Constant::UInt(8)))?;
+        let one = self.coerce(Constant::uint(1), &Type::u64())?;
+        self.push_instr(Instr::Store { ptr: block.clone(), val: one });
+        self.push_instr(Instr::Store { ptr: at.clone(), val: block });
+        Ok(())
+    }
+
+    /// The count of a new object of the counted struct `ty` at `base`.
+    fn struct_count_init(&mut self, base: &Val, ty: &Type, only_null: bool) -> Result<()> {
+        let (at, rc) = self.struct_count_at(base, ty)?;
+        let done = if only_null {
+            let nn = self.is_nonnull(rc);
+            let is_null = self.alloc_val();
+            self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: nn, rhs: Val::Const(Constant::Bool(false)), ty: Type::Bool });
+            Some(self.branch_if(Val::Local(is_null)))
+        } else { None };
+        self.struct_count_new(&at)?;
+        if let Some(done) = done {
+            self.set_terminator(Terminator::Jump(done));
+            self.switch_to_block(done);
+        }
+        Ok(())
+    }
+
     pub(crate) fn holds_container(&self, t: &Type) -> bool {
         let rt = super::types::resolve_aggregate(t, &self.lowerer.struct_types);
         if super::types::is_list(&rt) || super::types::is_dict(&rt) || super::types::is_set(&rt) { return true; }
         match &rt {
+            Type::Struct(_) if Self::struct_counted(&rt) => true,
             Type::Struct(st) if !self.is_tagged_enum_struct(&rt) => st.fields.iter().any(|(_, ft)| self.holds_container(ft)),
             Type::Array { elem, .. } => self.holds_container(elem),
             _ => false,
@@ -3899,6 +4005,7 @@ impl<'m> FuncCtx<'m> {
         match &rt {
             Type::Struct(st) if !self.is_tagged_enum_struct(&rt) => {
                 let st = st.clone();
+                if Self::struct_counted(&rt) { self.struct_count_init(base, &rt, only_null)?; }
                 let weak = st.name.as_ref()
                     .and_then(|n| self.lowerer.struct_weak_fields.get(n).cloned())
                     .unwrap_or_default();

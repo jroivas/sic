@@ -1110,6 +1110,50 @@ its fields would duplicate — a file descriptor, a lock, a handle from a C
 library — so it is never cloned field by field: it must define `clone()`. Cloning
 it without one, or cloning a container of it, is a compile error.
 
+### Structs are reference counted
+
+A struct with a destructor is one object, however many copies of it there are.
+`b = a`, a by-value argument, `l[i]` and `l.add(a)` copy no data: they add an owner.
+Each owner going away takes one off the count, and only the last runs `~S()`, so
+it can `free`, `close` or `del` what it holds, exactly once. Fields that release
+themselves (`string`, containers, a nested struct) are counted one by one as well.
+
+```sic
+struct file {
+    int fd;
+    file() { fd = open("log", O_RDONLY); }
+    ~file() { close(fd); }
+}
+
+file a;
+file b = a;     // the same file, two owners
+                // close(fd) runs once, when the second one goes
+```
+
+A write makes the data the writer's own. A struct with a `clone()` that is shared
+is cloned just before the write, so the others keep what they had:
+
+```sic
+data a;
+data b = a;     // shared
+b.p[0] = 7;     // b.clone() first: a.p[0] does not change
+b.set(5);       // the same for a write in a method
+```
+
+This holds for writes through the struct: `b.x = 1`, `b.p[i] = 1`, `b.x++`, and
+`self->x = 1` in a method. A pointer taken out first (`int *q = b.p; q[0] = 1;`)
+writes wherever it points.
+
+Without a `clone()` there is no way to copy what the struct holds, so it stays
+shared, as a shared list does: `b.p[0] = 7` is seen through `a`. A plain field is
+in each copy and does not change the other's (`b.n = 1`), and `~S()` sees the last
+owner's. Replacing a pointer the destructor `del`s (`b.p = new int`) gives `b` an
+object of its own: `del` counts its memory, so both then run `~S()`.
+
+The count is a hidden member, so `sizeof` of a struct with a destructor includes
+it. A plain struct, and a C struct, has none: it is copied byte by byte as in C,
+and a struct with only `string` or container fields has nothing that needs one.
+
     struct File {
         int fd;
         string name;
