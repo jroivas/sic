@@ -5,25 +5,11 @@
 
 use cranelift_codegen::ir::{types as ct, AbiParam, ArgumentPurpose, InstBuilder, MemFlagsData, Type as ClType, Value};
 use cranelift_frontend::FunctionBuilder;
-use sic_ir::abi::{classify_struct_union, AggClass, Chunk, RegClass};
+pub use sic_ir::abi::{classify_param, ParamPass};
+use sic_ir::abi::{Chunk, RegClass};
 use sic_ir::Type;
 
 use crate::types::cl_type;
-
-/// How one IR parameter/argument is passed at the Cranelift level.
-pub enum ParamPass {
-    /// An ordinary scalar (also `Array`/vector, kept on the pointer path): one
-    /// `AbiParam` of this type.
-    Scalar(ClType),
-    /// A small aggregate passed in registers: one `AbiParam` per eightbyte.
-    Direct(Vec<Chunk>),
-    /// A MEMORY-class aggregate: one `StructArgument(size)` param (by value on
-    /// the stack); the value at the boundary is a pointer. `(size, align)`.
-    ByValStack(u32, u32),
-    /// `long double` (X87 class → MEMORY): 16 bytes on the stack, 16-aligned, in
-    /// x87 format. The IR value is an `f64`; the boundary converts (sic_ir::f80).
-    X87,
-}
 
 /// One Cranelift-level argument, for [`stack_pads`]: a register-sized value of
 /// this type, or a by-value stack block.
@@ -32,15 +18,13 @@ pub enum ArgKind {
     Stack { size: u32, align: u32 },
 }
 
-impl ParamPass {
-    /// The Cranelift arguments this parameter becomes.
-    pub fn kinds(&self) -> Vec<ArgKind> {
-        match self {
-            ParamPass::Scalar(t) => vec![ArgKind::Reg(*t)],
-            ParamPass::Direct(chunks) => chunks.iter().map(|c| ArgKind::Reg(chunk_cl_type(c))).collect(),
-            ParamPass::ByValStack(size, align) => vec![ArgKind::Stack { size: (size + 7) & !7, align: *align }],
-            ParamPass::X87 => vec![ArgKind::Stack { size: 16, align: 16 }],
-        }
+/// The Cranelift arguments a parameter of type `ty` becomes.
+pub fn param_kinds(pass: &ParamPass, ty: &Type, ptr_size: u32) -> Vec<ArgKind> {
+    match pass {
+        ParamPass::Scalar => vec![ArgKind::Reg(cl_type(ty, ptr_size).unwrap_or(ct::I64))],
+        ParamPass::Direct(chunks) => chunks.iter().map(|c| ArgKind::Reg(chunk_cl_type(c))).collect(),
+        ParamPass::ByValStack(size, align) => vec![ArgKind::Stack { size: (size + 7) & !7, align: *align }],
+        ParamPass::X87 => vec![ArgKind::Stack { size: 16, align: 16 }],
     }
 }
 
@@ -85,19 +69,6 @@ pub fn pad_abi_param(ptr_ty: ClType) -> AbiParam {
     AbiParam::special(ptr_ty, ArgumentPurpose::StructArgument(8))
 }
 
-/// Classify one IR parameter type for the System V ABI.
-pub fn classify_param(ty: &Type, ptr_size: u32) -> ParamPass {
-    match ty {
-        Type::Struct(_) | Type::Union(_) => match classify_struct_union(ty, ptr_size) {
-            AggClass::Regs(chunks) => ParamPass::Direct(chunks),
-            AggClass::Memory(size) => ParamPass::ByValStack(size, ty.align_of(ptr_size) as u32),
-        },
-        Type::Float80 => ParamPass::X87,
-        // Scalars, pointers, and `Array` (vectors) keep the single-value mapping.
-        other => ParamPass::Scalar(cl_type(other, ptr_size).unwrap_or(ct::I64)),
-    }
-}
-
 /// The Cranelift value type carrying one eightbyte. INTEGER eightbytes always
 /// travel in a full 64-bit GPR (upper bytes are don't-care for partial ones);
 /// SSE eightbytes are a single or double float.
@@ -129,12 +100,12 @@ pub fn scalar_abi_param(ty: &Type, ptr_size: u32) -> AbiParam {
 /// alignment pads of [`stack_pads`].
 pub fn params_abi(tys: &[Type], ptr_size: u32, ptr_ty: ClType) -> Vec<AbiParam> {
     let tys: Vec<&Type> = tys.iter().filter(|t| !matches!(t, Type::Void)).collect();
-    let kinds: Vec<ArgKind> = tys.iter().flat_map(|t| classify_param(t, ptr_size).kinds()).collect();
+    let kinds: Vec<ArgKind> = tys.iter().flat_map(|t| param_kinds(&classify_param(t, ptr_size), t, ptr_size)).collect();
     let (pads, _) = stack_pads(&kinds);
     let mut out = Vec::new();
     let mut k = 0usize;
     for t in tys {
-        let n = classify_param(t, ptr_size).kinds().len();
+        let n = param_kinds(&classify_param(t, ptr_size), t, ptr_size).len();
         if n > 0 && pads[k] { out.push(pad_abi_param(ptr_ty)); }
         k += n;
         push_param_abi(t, ptr_size, ptr_ty, &mut out);
@@ -146,7 +117,7 @@ pub fn params_abi(tys: &[Type], ptr_size: u32, ptr_ty: ClType) -> Vec<AbiParam> 
 pub fn push_param_abi(ty: &Type, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<AbiParam>) {
     match classify_param(ty, ptr_size) {
         ParamPass::X87 => out.push(AbiParam::special(ptr_ty, ArgumentPurpose::StructArgument(16))),
-        ParamPass::Scalar(_) => out.push(scalar_abi_param(ty, ptr_size)),
+        ParamPass::Scalar => out.push(scalar_abi_param(ty, ptr_size)),
         ParamPass::Direct(chunks) => {
             for c in &chunks {
                 out.push(AbiParam::new(chunk_cl_type(c)));

@@ -164,6 +164,32 @@ fn contains_x87(ty: &Type) -> bool {
     }
 }
 
+/// How one IR parameter is passed.
+pub enum ParamPass {
+    /// A scalar, or an `Array` (vector, kept on the pointer path): one value.
+    Scalar,
+    /// A small aggregate in registers: one value per eightbyte.
+    Direct(Vec<Chunk>),
+    /// A MEMORY-class aggregate, by value on the stack; the value at the boundary
+    /// is a pointer. `(size, align)`.
+    ByValStack(u32, u32),
+    /// `long double` (X87 class → MEMORY): 16 bytes on the stack, 16-aligned, in
+    /// x87 format. The IR value is an `f64`; the boundary converts (`f80`).
+    X87,
+}
+
+/// Classify one IR parameter type for the System V ABI.
+pub fn classify_param(ty: &Type, ptr_size: u32) -> ParamPass {
+    match ty {
+        Type::Struct(_) | Type::Union(_) => match classify_struct_union(ty, ptr_size) {
+            AggClass::Regs(chunks) => ParamPass::Direct(chunks),
+            AggClass::Memory(size) => ParamPass::ByValStack(size, ty.align_of(ptr_size) as u32),
+        },
+        Type::Float80 => ParamPass::X87,
+        _ => ParamPass::Scalar,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

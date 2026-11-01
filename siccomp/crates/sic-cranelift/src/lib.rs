@@ -883,8 +883,8 @@ pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize,
         // A Direct aggregate consumes one register per eightbyte (by class); a
         // ByValStack aggregate is on the stack and consumes none.
         match abi::classify_param(p, ptr_size) {
-            abi::ParamPass::Scalar(t) => {
-                if t.is_float() { n_fp += 1 } else { n_gp += 1 }
+            abi::ParamPass::Scalar => {
+                if cl_type(p, ptr_size).is_some_and(|t| t.is_float()) { n_fp += 1 } else { n_gp += 1 }
             }
             abi::ParamPass::Direct(chunks) => {
                 for c in &chunks {
@@ -902,7 +902,7 @@ pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize,
 pub fn named_stack_bytes(sig: &sic_ir::FunctionType, ptr_size: u32) -> u32 {
     let kinds: Vec<abi::ArgKind> = sig.params.iter()
         .filter(|t| !matches!(t, sic_ir::Type::Void))
-        .flat_map(|t| abi::classify_param(t, ptr_size).kinds()).collect();
+        .flat_map(|t| abi::param_kinds(&abi::classify_param(t, ptr_size), t, ptr_size)).collect();
     abi::stack_pads(&kinds).1
 }
 

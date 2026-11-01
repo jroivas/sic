@@ -6,6 +6,7 @@ pub mod module;
 pub mod backend;
 pub mod display;
 pub mod abi;
+pub mod analysis;
 pub mod asm_helpers;
 pub mod f80;
 

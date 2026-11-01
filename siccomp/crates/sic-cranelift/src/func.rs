@@ -55,32 +55,6 @@ fn f80_temp(b: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
     b.ins().stack_addr(ptr_ty, slot, 0)
 }
 
-/// IR type of every value a function's instructions produce (allocas as
-/// pointers to their slot type), plus its parameter sentinels — the backend's
-/// view of which values are `long double`.
-fn value_types(f: &Function) -> HashMap<u32, Type> {
-    let mut m = HashMap::default();
-    for (i, p) in f.params.iter().enumerate() { m.insert(0x10000 + i as u32, p.ty.clone()); }
-    for bb in &f.blocks {
-        for instr in &bb.instrs {
-            let r = match instr {
-                Instr::Alloca { dest, ty, .. } => Some((dest, Type::Pointer(Box::new(ty.clone())))),
-                Instr::Load { dest, ty, .. } | Instr::LoadReadonly { dest, ty, .. }
-                | Instr::BinOp { dest, ty, .. } | Instr::UnaryOp { dest, ty, .. }
-                | Instr::Select { dest, ty, .. } | Instr::VaArg { dest, ty, .. } => Some((dest, ty.clone())),
-                Instr::Cast { dest, to_ty, .. } => Some((dest, to_ty.clone())),
-                Instr::Call { dest: Some(d), ret_ty, .. }
-                | Instr::CallIndirect { dest: Some(d), ret_ty, .. } => Some((d, ret_ty.clone())),
-                Instr::GetFieldPtr { dest, result_ty, .. }
-                | Instr::GetElemPtr { dest, result_ty, .. } => Some((dest, result_ty.clone())),
-                _ => None,
-            };
-            if let Some((d, t)) = r { m.insert(d.0, t); }
-        }
-    }
-    m
-}
-
 fn is_f80(vty: &HashMap<u32, Type>, v: &Val) -> bool {
     matches!(v, Val::Local(id) if vty.get(&id.0) == Some(&Type::Float80))
 }
@@ -154,7 +128,7 @@ pub fn compile_function(
         st0: obj_module.declare_func_in_func(h.st0, builder.func),
         ret: obj_module.declare_func_in_func(h.ret, builder.func),
     });
-    let vty = if f80.is_some() { value_types(f) } else { HashMap::default() };
+    let vty = if f80.is_some() { sic_ir::analysis::value_types(f) } else { HashMap::default() };
     let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::default();
     let mut sorted_globals: Vec<(u32, DataId)> = global_ids.iter().map(|(&k, &v)| (k, v)).collect();
     sorted_globals.sort_by_key(|(k, _)| *k);
@@ -194,12 +168,13 @@ pub fn compile_function(
         // 16-byte stack alignment pads (abi::stack_pads) are extra block params.
         let passes: Vec<crate::abi::ParamPass> = f.params.iter()
             .map(|p| crate::abi::classify_param(&p.ty, ptr_size)).collect();
-        let kinds: Vec<crate::abi::ArgKind> = passes.iter().flat_map(|p| p.kinds()).collect();
+        let kinds_of = |i: usize| crate::abi::param_kinds(&passes[i], &f.params[i].ty, ptr_size);
+        let kinds: Vec<crate::abi::ArgKind> = (0..passes.len()).flat_map(kinds_of).collect();
         let (pads, named_stack) = crate::abi::stack_pads(&kinds);
         let mut kcur = 0usize;
         for i in 0..named {
             let pty = &f.params[i].ty;
-            let nk = passes[i].kinds().len();
+            let nk = kinds_of(i).len();
             if nk > 0 && pads[kcur] { bp += 1; }
             kcur += nk;
             match crate::abi::classify_param(pty, ptr_size) {
@@ -214,7 +189,7 @@ pub fn compile_function(
                     }
                     bp += 1;
                 }
-                crate::abi::ParamPass::Scalar(_) | crate::abi::ParamPass::ByValStack(..) => {
+                crate::abi::ParamPass::Scalar | crate::abi::ParamPass::ByValStack(..) => {
                     if bp < params.len() {
                         val_map.insert(0x10000 + i as u32, params[bp]);
                     }
@@ -359,34 +334,30 @@ pub fn compile_function(
     // declared in a `switch` case), whose address would otherwise be referenced
     // from sibling blocks it does not dominate. The current fill block here is
     // still the entry block.
-    for bb in &f.blocks {
-        for instr in &bb.instrs {
-            if let Instr::Alloca { dest, ty, align } = instr {
-                if promoted.contains_key(&dest.0) { continue; }
-                let size = ty.size_of(ptr_size).max(1) as u32;
-                let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
-                if let Some(req) = align { align_bytes = align_bytes.max(*req); }
-                let align_bytes = align_bytes.next_power_of_two();
-                // The frame itself is 16-aligned: above that, make room and round.
-                if align_bytes > 16 {
-                    let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
-                        cir::StackSlotKind::ExplicitSlot, size + align_bytes, 4,
-                    ));
-                    let base = builder.ins().stack_addr(ptr_ty, slot, 0);
-                    let up = builder.ins().iadd_imm_s(base, align_bytes as i64 - 1);
-                    let addr = builder.ins().band_imm_s(up, -(align_bytes as i64));
-                    val_map.insert(dest.0, addr);
-                    continue;
-                }
-                let align_shift = align_bytes.trailing_zeros() as u8;
-                let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
-                    cir::StackSlotKind::ExplicitSlot, size, align_shift,
-                ));
-                let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
-                slot_map.insert(dest.0, slot);
-                val_map.insert(dest.0, addr);
-            }
+    for (dest, ty, align) in f.allocas() {
+        if promoted.contains_key(&dest.0) { continue; }
+        let size = ty.size_of(ptr_size).max(1) as u32;
+        let mut align_bytes = ty.align_of(ptr_size).max(1) as u32;
+        if let Some(req) = align { align_bytes = align_bytes.max(req); }
+        let align_bytes = align_bytes.next_power_of_two();
+        // The frame itself is 16-aligned: above that, make room and round.
+        if align_bytes > 16 {
+            let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+                cir::StackSlotKind::ExplicitSlot, size + align_bytes, 4,
+            ));
+            let base = builder.ins().stack_addr(ptr_ty, slot, 0);
+            let up = builder.ins().iadd_imm_s(base, align_bytes as i64 - 1);
+            let addr = builder.ins().band_imm_s(up, -(align_bytes as i64));
+            val_map.insert(dest.0, addr);
+            continue;
         }
+        let align_shift = align_bytes.trailing_zeros() as u8;
+        let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(
+            cir::StackSlotKind::ExplicitSlot, size, align_shift,
+        ));
+        let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+        slot_map.insert(dest.0, slot);
+        val_map.insert(dest.0, addr);
     }
 
     // Seal each block as soon as all its predecessors have been emitted (only a
@@ -1064,7 +1035,8 @@ fn marshal_args(
         };
         let mut g = Vec::new();
         match pass {
-            Some(ParamPass::Scalar(t)) => {
+            Some(ParamPass::Scalar) => {
+                let t = cl_type(&ir_params[i], ptr_size).unwrap_or(ct::I64);
                 let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, t);
                 let v = coerce(v, t, builder, ptr_ty);
                 g.push((v, crate::abi::scalar_abi_param(&ir_params[i], ptr_size), ArgKind::Reg(t)));

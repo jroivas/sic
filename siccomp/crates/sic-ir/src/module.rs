@@ -81,6 +81,15 @@ pub struct Function {
 }
 
 impl Function {
+    /// Every stack object of the function, wherever its `Alloca` is: an alloca
+    /// is a fixed slot of the frame, also in a non-entry block or a loop.
+    pub fn allocas(&self) -> impl Iterator<Item = (ValId, &Type, Option<u32>)> {
+        self.blocks.iter().flat_map(|b| b.instrs.iter()).filter_map(|i| match i {
+            Instr::Alloca { dest, ty, align } => Some((*dest, ty, *align)),
+            _ => None,
+        })
+    }
+
     pub fn new(name: String, sig: FunctionType, params: Vec<Param>, linkage: Linkage) -> Self {
         Function {
             name, sig, params, blocks: Vec::new(), linkage,
