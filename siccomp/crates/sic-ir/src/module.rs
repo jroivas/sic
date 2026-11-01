@@ -168,7 +168,7 @@ pub struct Module {
     pub source_file: Option<String>,
     /// Producer identification written into the object: the ELF `.comment`
     /// section and, with `-g`, DWARF `DW_AT_producer` — e.g.
-    /// `sic 0.1.0 (preprocessor: sic-cpp)`. `None` = the backend's default.
+    /// `sic 0.2.0 (preprocessor: sic-cpp)`. `None` = the backend's default.
     pub producer: Option<String>,
     /// sic module system (sic.md §"Imports"): `Some(name)` when this unit declared
     /// `module name;` — the driver emits a `module_<name>.smod` manifest for it.
