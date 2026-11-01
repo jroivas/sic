@@ -1365,7 +1365,7 @@ impl Lowerer {
                 if let AstType::Weak(_) = &f.ty.ty {
                     weak_fields.push((fname.clone(), fty.clone()));
                 }
-                let bw = f.bit_width.as_ref().map(|e| eval_const_expr(e, &self.enum_consts).unwrap_or(0) as u32);
+                let bw = f.bit_width.as_ref().map(|e| types::eval_bit_width(e, &self.struct_types, self.ptr_size)).transpose()?;
                 let fty = types::c_bitfield_field_type(fty, bw);
                 // sic `atomic int state;` field: lock-free sizes only, like locals.
                 if self.sic && f.ty.qualifiers.contains(&crate::ast::TypeQual::Atomic) && !fname.is_empty() {
@@ -3644,10 +3644,10 @@ impl Lowerer {
         for item in items {
             match item.designators.first() {
                 Some(Designator::Index(e)) => {
-                    cursor = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                    cursor = self.eval_const_int(e).unwrap_or(0).max(0) as usize;
                 }
                 Some(Designator::IndexRange(_, hi)) => {
-                    cursor = eval_const_expr(hi, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                    cursor = self.eval_const_int(hi).unwrap_or(0).max(0) as usize;
                 }
                 // A field designator at array top level isn't valid C; treat the
                 // element as positional.
@@ -3928,6 +3928,7 @@ impl Lowerer {
         let plain = |t: &Type| self.plain_aggregate(t);
         let n = init_norm::InitNorm {
             named: &self.struct_types, enum_consts: &self.enum_consts,
+            ptr_size: self.ptr_size,
             plain_aggregate: &plain, is_aggregate_value,
         };
         Initializer::List(n.braced(ty, items))
@@ -4014,7 +4015,7 @@ impl Lowerer {
                     return false;
                 }
                 let Initializer::List(items) = init else { return false };
-                let items = expand_init_ranges(items, &self.enum_consts);
+                let items = expand_init_ranges(items, &self.enum_consts, &self.struct_types, self.ptr_size);
                 let mut cursor = 0usize;
                 for item in &items {
                     let (target, next) =
@@ -4141,7 +4142,7 @@ impl Lowerer {
                 }
             }
             Some(Designator::Index(e)) => {
-                let i = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                let i = self.eval_const_int(e).unwrap_or(0).max(0) as usize;
                 (member_at(self, agg, i, base), i)
             }
             Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
@@ -4158,7 +4159,7 @@ impl Lowerer {
                     }
                 }
                 Designator::Index(e) => {
-                    let i = eval_const_expr(e, &self.enum_consts).unwrap_or(0).max(0) as usize;
+                    let i = self.eval_const_int(e).unwrap_or(0).max(0) as usize;
                     let Some((o, t, sub_bf)) = member_at(self, &cur_ty, i, off) else { return (None, top_index + 1); };
                     off = o; cur_ty = t; bf = sub_bf;
                 }
@@ -4822,15 +4823,15 @@ fn type_is_const(qt: &QualType) -> bool {
 /// `Index` item per index. Ranges are (nearly) always the sole/first designator,
 /// so only the first designator is expanded; the rest of the chain is preserved.
 /// Non-range items are returned unchanged.
-pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<String, i64>) -> Vec<InitItem> {
+pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<String, i64>, named: &HashMap<String, Type>, ptr_size: u32) -> Vec<InitItem> {
     if !items.iter().any(|it| matches!(it.designators.first(), Some(Designator::IndexRange(..)))) {
         return items.to_vec();
     }
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         if let Some(Designator::IndexRange(lo, hi)) = item.designators.first() {
-            let lo = eval_const_expr(lo, enum_consts).unwrap_or(0).max(0);
-            let hi = eval_const_expr(hi, enum_consts).unwrap_or(lo);
+            let lo = types::eval_const_size(lo, named, ptr_size, enum_consts).unwrap_or(0).max(0);
+            let hi = types::eval_const_size(hi, named, ptr_size, enum_consts).unwrap_or(lo);
             let rest = &item.designators[1..];
             let mut i = lo;
             while i <= hi {

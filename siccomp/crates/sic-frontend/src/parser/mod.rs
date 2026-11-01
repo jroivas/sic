@@ -839,7 +839,8 @@ impl Parser {
                         // Constant alignment expression.
                         let e = self.parse_assign_expr()?;
                         crate::lower::eval_const_expr(&e, &std::collections::HashMap::new())
-                            .unwrap_or(0)
+                            .map_err(|_| CompileError::at("this `_Alignas` expression is not supported (it needs type sizes)".to_string(),
+                                e.span.file.clone(), e.span.line, e.span.col))?
                             .max(0) as u32
                     };
                     self.expect(TokenKind::RParen)?;

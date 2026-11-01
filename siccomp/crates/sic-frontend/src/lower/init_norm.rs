@@ -21,6 +21,7 @@ use super::types::resolve_aggregate;
 pub(crate) struct InitNorm<'a> {
     pub named: &'a HashMap<String, Type>,
     pub enum_consts: &'a HashMap<String, i64>,
+    pub ptr_size: u32,
     /// `T` takes part in brace elision (a C struct/union/array — not a sic
     /// built-in carried as a struct, such as `string` or a tagged enum).
     pub plain_aggregate: &'a dyn Fn(&Type) -> bool,
@@ -53,7 +54,7 @@ impl<'a> InitNorm<'a> {
                             slots.iter().position(|s| s.name.as_deref() == Some(n.as_str())),
                         _ => None,
                     },
-                    Designator::Index(e) => super::eval_const_expr(e, self.enum_consts).ok()
+                    Designator::Index(e) => super::types::eval_const_size(e, self.named, self.ptr_size, self.enum_consts)
                         .filter(|&k| k >= 0).map(|k| k as usize),
                     Designator::IndexRange(..) => None,
                 };

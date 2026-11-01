@@ -1209,7 +1209,7 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
         let fname = f.name.clone().unwrap_or_default();
         check_member_dims(&f.ty.ty, named, ptr_size)?;
         let mut fty = lower_type(&f.ty, named, ptr_size)?;
-        let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e));
+        let bw = f.bit_width.as_ref().map(|e| eval_bit_width(e, named, ptr_size)).transpose()?;
         fty = c_bitfield_field_type(fty, bw);
         if bw.is_some() { any_bitfield = true; }
         let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
@@ -1474,13 +1474,10 @@ pub(crate) fn c_bitfield_field_type(fty: Type, bw: Option<u32>) -> Type {
     fty
 }
 
-fn eval_bit_width(e: &crate::ast::Expr) -> u32 {
-    use crate::ast::ExprKind;
-    match &e.kind {
-        ExprKind::IntLit(v, _) => *v as u32,
-        ExprKind::UIntLit(v, _) => *v as u32,
-        _ => super::eval_const_expr(e, &HashMap::new()).unwrap_or(0) as u32,
-    }
+pub(crate) fn eval_bit_width(e: &crate::ast::Expr, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<u32> {
+    ENUM_CONSTS.with(|ec| eval_const_size(e, named, ptr_size, &ec.borrow())).map(|v| v as u32)
+        .ok_or_else(|| CompileError::at("bit-field width is not an integer constant".to_string(),
+            e.span.file.clone(), e.span.line, e.span.col))
 }
 
 fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {

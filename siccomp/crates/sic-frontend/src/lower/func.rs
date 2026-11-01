@@ -1944,7 +1944,9 @@ impl<'m> FuncCtx<'m> {
         };
         let fields = |fs: &Option<Vec<crate::ast::FieldDecl>>| -> Result<Option<Vec<crate::ast::FieldDecl>>> {
             let Some(fs) = fs else { return Ok(None) };
-            fs.iter().map(|f| Ok(crate::ast::FieldDecl { ty: qual(&f.ty)?, ..f.clone() })).collect::<Result<Vec<_>>>().map(Some)
+            fs.iter().map(|f| Ok(crate::ast::FieldDecl { ty: qual(&f.ty)?,
+                bit_width: f.bit_width.as_ref().map(|w| self.subst_scoped_consts(w).map_or_else(|| w.clone(), Box::new)),
+                ..f.clone() })).collect::<Result<Vec<_>>>().map(Some)
         };
         Ok(match ty {
             A::Typeof(e) => A::Lowered(self.infer_expr_type(e)?),
@@ -2746,7 +2748,7 @@ impl<'m> FuncCtx<'m> {
                 }
                 // Switch to the block the enclosing switch pre-created for this
                 // case value; falling through from the previous case jumps here.
-                let const_val = eval_const_expr(val, &self.lowerer.enum_consts).unwrap_or(0);
+                let const_val = self.required_case_value(val)?;
                 let case_bb = self.switch_stack.last()
                     .and_then(|(_, _, cases)| cases.get(&const_val).copied())
                     .unwrap_or_else(|| self.new_block_after_current());
@@ -2766,7 +2768,7 @@ impl<'m> FuncCtx<'m> {
                 // as an arm pointing to a single shared block (see `lower_switch`
                 // / `collect_cases_in`). Look it up by the low value and lower the
                 // body into it once.
-                let low_val = eval_const_expr(lo, &self.lowerer.enum_consts).unwrap_or(0);
+                let low_val = self.required_case_value(lo)?;
                 let case_bb = self.switch_stack.last()
                     .and_then(|(_, _, cases)| cases.get(&low_val).copied())
                     .unwrap_or_else(|| self.new_block_after_current());
@@ -2850,6 +2852,23 @@ impl<'m> FuncCtx<'m> {
                 sp.file.clone(), sp.line, sp.col,
             ))
         }
+    }
+
+    /// An integer constant expression in a function: `sizeof`, `offsetof` and casts
+    /// included (Linux's `case TCGETS2:` holds a `sizeof`).
+    fn case_value(&self, e: &Expr) -> Option<i64> {
+        self.lowerer.eval_const_int(e).or_else(|| self.eval_scoped_const(e))
+    }
+
+    /// A `case` label's value. One that does not fold must not vanish: its case
+    /// would never be reached, and the switch would go to `default`.
+    fn required_case_value(&self, e: &Expr) -> Result<i64> {
+        if let Some(v) = self.case_value(e) { return Ok(v); }
+        if !self.is_sic() {
+            return Err(CompileError::at("case label does not reduce to an integer constant".to_string(),
+                e.span.file.clone(), e.span.line, e.span.col));
+        }
+        Ok(0)
     }
 
     fn lower_local_decl(&mut self, decl: &Decl) -> Result<()> {
@@ -3790,7 +3809,7 @@ impl<'m> FuncCtx<'m> {
                         align: ty.align_of(self.ptr_size()),
                     });
                 }
-                let items = super::expand_init_ranges(items, &self.lowerer.enum_consts);
+                let items = super::expand_init_ranges(items, &self.lowerer.enum_consts, &self.lowerer.struct_types, self.lowerer.ptr_size);
                 let mut cursor = 0usize;
                 for item in &items {
                     let (target, next) =
@@ -3978,7 +3997,7 @@ impl<'m> FuncCtx<'m> {
                 (Some((self.gep_offset(base, off, &fty), fty, bf)), top_field_index(agg, name, &self.lowerer.struct_types))
             }
             Some(Designator::Index(e)) => {
-                let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
+                let i = self.case_value(e).unwrap_or(0).max(0) as usize;
                 (self.member_at(base, agg, i), i)
             }
             Some(Designator::IndexRange(..)) => unreachable!("ranges expanded before resolution"),
@@ -4001,7 +4020,7 @@ impl<'m> FuncCtx<'m> {
                     bf = sub_bf;
                 }
                 Designator::Index(e) => {
-                    let i = eval_const_expr(e, &self.lowerer.enum_consts).unwrap_or(0).max(0) as usize;
+                    let i = self.case_value(e).unwrap_or(0).max(0) as usize;
                     let Some((p, ety, sub_bf)) = self.member_at(&ptr, &cur_ty, i) else {
                         return Ok((None, top_index + 1));
                     };
@@ -5801,15 +5820,31 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_switch(&mut self, val: &Expr, body: &Stmt) -> Result<()> {
+        // The controlling expression keeps its promoted type, and each label is
+        // converted to it (C11 6.8.4.2p5): a `u64` switch has 64-bit labels, and
+        // `case 0x802c542a:` on an `unsigned` matches.
         let v = self.lower_expr(val)?;
-        let v_i32 = self.coerce(v, &Type::i32())?;
+        let vty = match self.val_type(&v).integer_promote() {
+            t @ Type::Int { .. } => t,
+            _ => Type::i32(),
+        };
+        let wide = matches!(vty, Type::Int { bits: 64, .. });
+        let unsigned = matches!(vty, Type::Int { signed: false, .. });
+        let label = |k: i64| if wide { k } else if unsigned { k as u32 as i64 } else { k as i32 as i64 };
+        let mut v_i32 = self.coerce(v, &vty)?;
+        // The back end takes a constant's width from the switch: keep 64 bits.
+        if wide && matches!(v_i32, Val::Const(_)) {
+            let d = self.alloc_val();
+            self.push_instr(Instr::BinOp { dest: d, op: BinOp::Add, lhs: v_i32, rhs: Constant::int(0), ty: vty.clone() });
+            v_i32 = Val::Local(d);
+        }
 
         let end_bb = self.new_block_after_current();
         let default_bb = self.new_block_after_current();
 
         // Pre-create one block per case value; the `Switch` terminator's arms and
         // the emitted case bodies must be the *same* blocks.
-        let cases = collect_switch_cases(body, &self.lowerer.enum_consts);
+        let cases = collect_switch_cases(body, &|e| self.case_value(e));
         let mut arms: Vec<(i64, BlockId)> = Vec::new();
         let mut case_blocks: std::collections::HashMap<i64, BlockId> = std::collections::HashMap::new();
         // One block per group, so all values of a `case LOW ... HIGH:` range
@@ -5826,7 +5861,7 @@ impl<'m> FuncCtx<'m> {
                     bb
                 }
             };
-            arms.push((*case_val, case_bb));
+            arms.push((label(*case_val), case_bb));
             case_blocks.insert(*case_val, case_bb);
         }
         // Ranges: bounds checks emitted before the switch dispatch. Each range's
@@ -5852,9 +5887,10 @@ impl<'m> FuncCtx<'m> {
             for (idx, (lo, hi, bb)) in range_arms.iter().enumerate() {
                 let next_bb = if idx + 1 < n { self.new_block_after_current() } else { switch_bb };
                 let ge = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: ge, op: CmpOp::ISGe, lhs: v_i32.clone(), rhs: Constant::int(*lo), ty: Type::i32() });
+                let (ge_op, le_op) = if unsigned { (CmpOp::IUGe, CmpOp::IULe) } else { (CmpOp::ISGe, CmpOp::ISLe) };
+                self.push_instr(Instr::Cmp { dest: ge, op: ge_op, lhs: v_i32.clone(), rhs: Constant::int(label(*lo)), ty: vty.clone() });
                 let le = self.alloc_val();
-                self.push_instr(Instr::Cmp { dest: le, op: CmpOp::ISLe, lhs: v_i32.clone(), rhs: Constant::int(*hi), ty: Type::i32() });
+                self.push_instr(Instr::Cmp { dest: le, op: le_op, lhs: v_i32.clone(), rhs: Constant::int(label(*hi)), ty: vty.clone() });
                 let both = self.alloc_val();
                 self.push_instr(Instr::BinOp { dest: both, op: BinOp::And, lhs: Val::Local(ge), rhs: Val::Local(le), ty: Type::Bool });
                 self.set_terminator(Terminator::CondJump { cond: Val::Local(both), then_bb: *bb, else_bb: next_bb });
@@ -7146,10 +7182,14 @@ fn contains_typeof(ty: &AstType) -> bool {
         A::Pointer { base, .. } | A::Array { base, .. } => contains_typeof(&base.ty),
         A::Function { ret, params, .. } =>
             contains_typeof(&ret.ty) || params.iter().any(|p| contains_typeof(&p.ty.ty)),
-        A::Struct(s) => s.fields.iter().flatten().any(|f| member_needs_scope(&f.ty.ty)),
-        A::Union(u) => u.fields.iter().flatten().any(|f| member_needs_scope(&f.ty.ty)),
+        A::Struct(s) => s.fields.iter().flatten().any(field_needs_scope),
+        A::Union(u) => u.fields.iter().flatten().any(field_needs_scope),
         _ => false,
     }
+}
+
+fn field_needs_scope(f: &crate::ast::FieldDecl) -> bool {
+    member_needs_scope(&f.ty.ty) || f.bit_width.as_ref().is_some_and(|w| sizeof_of_expr(w))
 }
 
 /// A struct member's type says something only a function's scope can answer: a
@@ -7168,7 +7208,7 @@ fn member_needs_scope(ty: &AstType) -> bool {
 fn sizeof_of_expr(e: &Expr) -> bool {
     use crate::ast::ExprKind::*;
     match &e.kind {
-        SizeofExpr(_) | AlignofExpr(_) => true,
+        SizeofExpr(_) | AlignofExpr(_) | TypesCompatible(..) => true,
         SizeofType(qt) | AlignofType(qt) => contains_typeof(&qt.ty),
         BinOp { lhs, rhs, .. } => sizeof_of_expr(lhs) || sizeof_of_expr(rhs),
         Unary { expr, .. } | Cast { expr, .. } => sizeof_of_expr(expr),
@@ -7205,46 +7245,46 @@ pub(super) struct SwitchCases {
     pub ranges: Vec<(i64, i64, usize)>,    // (lo, hi, group)
 }
 
-fn collect_switch_cases(stmt: &Stmt, enum_consts: &HashMap<String, i64>) -> SwitchCases {
+fn collect_switch_cases(stmt: &Stmt, eval: &dyn Fn(&Expr) -> Option<i64>) -> SwitchCases {
     let mut cases = SwitchCases::default();
     let mut group = 0usize;
-    collect_cases_in(stmt, enum_consts, &mut cases, &mut group);
+    collect_cases_in(stmt, eval, &mut cases, &mut group);
     cases
 }
 
-fn collect_cases_in(stmt: &Stmt, enum_consts: &HashMap<String, i64>, out: &mut SwitchCases, group: &mut usize) {
+fn collect_cases_in(stmt: &Stmt, eval: &dyn Fn(&Expr) -> Option<i64>, out: &mut SwitchCases, group: &mut usize) {
     match stmt {
         Stmt::Case(val, body, _) => {
-            if let Ok(v) = eval_const_expr(val, enum_consts) {
+            if let Some(v) = eval(val) {
                 out.singles.push((v, *group));
             }
             *group += 1;
-            collect_cases_in(body, enum_consts, out, group);
+            collect_cases_in(body, eval, out, group);
         }
         Stmt::CaseRange(lo, hi, body, _) => {
             // Record the range as a bounds check — NOT enumerated. QEMU uses huge
             // ranges (`case 0xF0000000 ... 0xFFFFFFFF:`), so enumerating them
             // produces hundreds of millions of switch arms (and hangs codegen).
-            if let (Ok(l), Ok(h)) = (eval_const_expr(lo, enum_consts), eval_const_expr(hi, enum_consts)) {
+            if let (Some(l), Some(h)) = (eval(lo), eval(hi)) {
                 if l <= h { out.ranges.push((l, h, *group)); }
             }
             *group += 1;
-            collect_cases_in(body, enum_consts, out, group);
+            collect_cases_in(body, eval, out, group);
         }
         Stmt::Block(stmts, _) => {
-            for s in stmts { collect_cases_in(s, enum_consts, out, group); }
+            for s in stmts { collect_cases_in(s, eval, out, group); }
         }
-        Stmt::Label(_, inner, _) => collect_cases_in(inner, enum_consts, out, group),
-        Stmt::Default(inner, _)  => collect_cases_in(inner, enum_consts, out, group),
+        Stmt::Label(_, inner, _) => collect_cases_in(inner, eval, out, group),
+        Stmt::Default(inner, _)  => collect_cases_in(inner, eval, out, group),
         // A label may sit inside any nested statement of the switch body, not
         // only at its top (Duff's device: cases inside a `do … while`). A nested
         // `switch` owns its own labels, so it is not entered.
         Stmt::If { then, else_, .. } => {
-            collect_cases_in(then, enum_consts, out, group);
-            if let Some(e) = else_ { collect_cases_in(e, enum_consts, out, group); }
+            collect_cases_in(then, eval, out, group);
+            if let Some(e) = else_ { collect_cases_in(e, eval, out, group); }
         }
         Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } =>
-            collect_cases_in(body, enum_consts, out, group),
+            collect_cases_in(body, eval, out, group),
         _ => {}
     }
 }

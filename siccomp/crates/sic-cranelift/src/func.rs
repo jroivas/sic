@@ -1163,7 +1163,10 @@ fn emit_terminator(
             for (arm_val, arm_bb) in arms {
                 let arm_cl = bb_map[&arm_bb.0];
                 let next_bb = builder.create_block();
-                let eq = builder.ins().icmp_imm_s(cir::condcodes::IntCC::Equal, v, *arm_val);
+                // A label is the value in its type; the comparison has that width.
+                let bits = builder.func.dfg.value_type(v).bits();
+                let imm = if bits < 64 { (*arm_val << (64 - bits)) >> (64 - bits) } else { *arm_val };
+                let eq = builder.ins().icmp_imm_s(cir::condcodes::IntCC::Equal, v, imm);
                 builder.ins().brif(eq, arm_cl, &[], next_bb, &[]);
                 builder.seal_block(next_bb);
                 builder.switch_to_block(next_bb);
