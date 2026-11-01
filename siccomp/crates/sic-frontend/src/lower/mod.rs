@@ -1452,7 +1452,7 @@ impl Lowerer {
             for f in fields {
                 self.register_nested_struct_defs(&f.ty.ty)?;
                 let fname = f.name.clone().unwrap_or_default();
-                let fty = lower_type(&f.ty, &self.struct_types, self.ptr_size)?;
+                let fty = types::union_member_type(f, lower_type(&f.ty, &self.struct_types, self.ptr_size)?, &self.struct_types, self.ptr_size)?;
                 let falign = types::attr_align(f.align, &f.align_expr, &self.struct_types, self.ptr_size)?;
                 if falign.is_some() { any_align = true; }
                 ir_fields.push((fname, fty));

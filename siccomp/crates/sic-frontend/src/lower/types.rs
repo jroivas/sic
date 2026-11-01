@@ -1474,6 +1474,19 @@ pub(crate) fn c_bitfield_field_type(fty: Type, bw: Option<u32>) -> Type {
     fty
 }
 
+/// A union member's type. An unnamed bit-field holds its bytes, without the
+/// alignment of its declared type (SysV ABI).
+pub(crate) fn union_member_type(f: &crate::ast::FieldDecl, fty: Type, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
+    let unnamed = f.name.as_deref().unwrap_or("").is_empty();
+    match &f.bit_width {
+        Some(w) if unnamed => {
+            let bits = eval_bit_width(w, named, ptr_size)? as usize;
+            Ok(Type::Array { elem: Box::new(Type::Int { bits: 8, signed: false }), len: (bits + 7) / 8 })
+        }
+        _ => Ok(fty),
+    }
+}
+
 pub(crate) fn eval_bit_width(e: &crate::ast::Expr, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<u32> {
     ENUM_CONSTS.with(|ec| eval_const_size(e, named, ptr_size, &ec.borrow())).map(|v| v as u32)
         .ok_or_else(|| CompileError::at("bit-field width is not an integer constant".to_string(),
@@ -1501,7 +1514,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
     for f in fields {
         let fname = f.name.clone().unwrap_or_default();
         check_member_dims(&f.ty.ty, named, ptr_size)?;
-        let fty = lower_type(&f.ty, named, ptr_size)?;
+        let fty = union_member_type(f, lower_type(&f.ty, named, ptr_size)?, named, ptr_size)?;
         let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
         if falign.is_some() { any_align = true; }
         ir_fields.push((fname, fty));

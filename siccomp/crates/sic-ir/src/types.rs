@@ -246,7 +246,8 @@ impl StructType {
             let size = ty.size_of(ptr_size);
             match self.bitfield_width(i) {
                 Some(width) => {
-                    max_align = max_align.max(align);
+                    // An unnamed bit-field does not align the struct (SysV ABI).
+                    if !self.fields[i].0.is_empty() { max_align = max_align.max(align); }
                     let width = width as u64;
                     if width == 0 {
                         // Zero-width bit-field: align the next field to `align`.
@@ -300,10 +301,12 @@ impl StructType {
     pub fn align_of(&self, ptr_size: u32) -> u64 {
         // Even a `packed` struct is aligned to any explicit member `aligned(n)`
         // override, so compute from `field_align` (which folds packed in). A
-        // type-level `aligned(n)` raises it further.
+        // type-level `aligned(n)` raises it further. An unnamed bit-field counts
+        // for nothing (see `layout_full`).
         self.fields
             .iter()
             .enumerate()
+            .filter(|(i, (n, _))| !(n.is_empty() && self.bitfield_width(*i).is_some()))
             .map(|(i, (_, t))| self.field_align(i, t, ptr_size))
             .max()
             .unwrap_or(1)
