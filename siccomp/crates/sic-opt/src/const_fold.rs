@@ -3,14 +3,18 @@
 //! untyped AST (width-sensitive folding is left to the typed IR `ir-fold` pass).
 
 use sic_frontend::ast::*;
+use sic_frontend::ast::fold::fold_string;
 use crate::pass::AstPass;
 use crate::visit::{MutVisitor, walk_expr};
 
 #[derive(Default)]
-pub struct ConstFold { changed: bool }
+pub struct ConstFold { changed: bool, sic: bool }
 
 impl ConstFold {
-    pub fn new() -> Self { ConstFold { changed: false } }
+    pub fn new() -> Self { ConstFold { changed: false, sic: false } }
+
+    /// With sic's strings: what is written with literals only is a literal.
+    pub fn for_sic(sic: bool) -> Self { ConstFold { changed: false, sic } }
 }
 
 impl AstPass for ConstFold {
@@ -46,6 +50,22 @@ impl ConstFold {
     }
 
     fn fold(&mut self, e: &mut Expr) {
+        if self.sic {
+            if let Some(k) = fold_string(e) { return self.set(e, k); }
+        }
+        // A constant condition, when the two sides are of one kind: the usual
+        // conversions may otherwise give the result a type neither has.
+        if let ExprKind::Ternary { cond, then, else_ } = &e.kind {
+            if std::mem::discriminant(&then.kind) == std::mem::discriminant(&else_.kind)
+                && matches!(then.kind, ExprKind::IntLit(..) | ExprKind::UIntLit(..) | ExprKind::FloatLit(_)
+                    | ExprKind::CharLit(_) | ExprKind::BoolLit(_) | ExprKind::StringLit(_))
+            {
+                if let Some(c) = truth(cond) {
+                    let k = if c { then.kind.clone() } else { else_.kind.clone() };
+                    return self.set(e, k);
+                }
+            }
+        }
         match &e.kind {
             ExprKind::BinOp { op, lhs, rhs } => {
                 let op = *op;
@@ -86,6 +106,16 @@ impl ConstFold {
             }
             _ => {}
         }
+    }
+}
+
+fn truth(e: &Expr) -> Option<bool> {
+    match &e.kind {
+        ExprKind::IntLit(v, _) => Some(*v != 0),
+        ExprKind::UIntLit(v, _) => Some(*v != 0),
+        ExprKind::CharLit(v) => Some(*v != 0),
+        ExprKind::BoolLit(b) => Some(*b),
+        _ => None,
     }
 }
 

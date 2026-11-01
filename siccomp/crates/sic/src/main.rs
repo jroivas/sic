@@ -95,7 +95,7 @@ struct Args {
     #[arg(long = "emit-crate", value_name = "DIR")]
     emit_crate: Option<String>,
 
-    /// Optimization level: 0 = none, 1 = const fold, 2/3 = + Cranelift optimizer
+    /// Optimization level: 0 = constants folded only, 2/3 = + the back end's optimizer
     /// (speed), s/z = optimize for size (Cranelift speed_and_size). A repeated `-O`
     /// takes the last value (as in gcc/clang), so `-O2 -O0` means `-O0`.
     #[arg(short = 'O', long = "opt", default_value = "0", value_name = "LEVEL", overrides_with = "opt")]
@@ -857,16 +857,14 @@ fn resolves_to_self(prog: &str) -> bool {
 fn pass_config(args: &Args) -> PassConfig {
     const ALL: [&str; 10] = ["const-fold", "dead-branch", "ir-fold", "algebraic", "dce", "tree-rec", "inline", "devirtual", "licm", "vec-split"];
     let o = args.opt.as_str();
-    let level1 = o != "0";
     let level2 = matches!(o, "2" | "3" | "s" | "z")
         || o.parse::<u32>().map_or(false, |n| n >= 2);
     // `-O3` and higher: more aggressive inlining (bigger callees, always-inline).
     let level3 = o.parse::<u32>().map_or(false, |n| n >= 3);
 
     let mut enabled: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if level1 {
-        for p in ["const-fold", "dead-branch", "ir-fold"] { enabled.insert(p.to_string()); }
-    }
+    // A constant is a constant at every level.
+    for p in ["const-fold", "dead-branch", "ir-fold"] { enabled.insert(p.to_string()); }
     if level2 {
         for p in ["algebraic", "dce", "tree-rec", "inline", "devirtual", "licm", "vec-split"] { enabled.insert(p.to_string()); }
     }
@@ -1156,7 +1154,9 @@ fn parse_source(
         eprintln!("{:#?}", tu);
     }
 
-    sic_opt::run_ast_passes(&mut tu, &pass_config(args));
+    let mut passes = pass_config(args);
+    passes.sic = lang == sic_frontend::Lang::Sic;
+    sic_opt::run_ast_passes(&mut tu, &passes);
     Ok((tu, lang))
 }
 

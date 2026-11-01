@@ -1560,7 +1560,7 @@ impl Parser {
         let sp = self.span();
         self.expect(TokenKind::StaticAssert)?;
         self.expect(TokenKind::LParen)?;
-        let cond = self.parse_assign_expr()?;
+        let cond = self.parse_constant_expr()?;
         let mut msg = None;
         if self.eat(TokenKind::Comma) {
             let mut text = String::new();
@@ -1569,6 +1569,14 @@ impl Parser {
         }
         self.expect(TokenKind::RParen)?;
         Ok(Decl::StaticAssert { cond, msg, span: sp })
+    }
+
+    /// An expression that must be a constant before the fold pass runs: it is in a
+    /// type, or checked as it is parsed.
+    fn parse_constant_expr(&mut self) -> Result<Expr> {
+        let mut e = self.parse_assign_expr()?;
+        if self.lang == Lang::Sic { crate::ast::fold::fold_strings(&mut e); }
+        Ok(e)
     }
 
     fn parse_struct_field(&mut self) -> Result<Vec<FieldDecl>> {
@@ -1608,7 +1616,7 @@ impl Parser {
             let group_align_expr = self.pending_aligned_expr.take();
             let (name, ty) = self.parse_declarator(base_ty.clone())?;
             let bit_width = if self.eat(TokenKind::Colon) {
-                Some(Box::new(self.parse_assign_expr()?))
+                Some(Box::new(self.parse_constant_expr()?))
             } else {
                 None
             };
@@ -1832,7 +1840,7 @@ impl Parser {
                 // Enumerator attributes (`NAME __attribute__((...)) = val`), e.g.
                 // glib's `GLIB_AVAILABLE_ENUMERATOR_IN_*` deprecation markers.
                 self.skip_attributes();
-                let value = if self.eat(TokenKind::Eq) { Some(Box::new(self.parse_assign_expr()?)) } else { None };
+                let value = if self.eat(TokenKind::Eq) { Some(Box::new(self.parse_constant_expr()?)) } else { None };
                 vs.push(EnumVariant { name: vname, value, payload, span: vsp });
                 if !self.eat(TokenKind::Comma) { break; }
             }
@@ -2073,7 +2081,7 @@ impl Parser {
                         self.advance(); // `[*]`
                         None
                     } else {
-                        Some(Box::new(self.parse_assign_expr()?))
+                        Some(Box::new(self.parse_constant_expr()?))
                     };
                     self.expect(TokenKind::RBracket)?;
                     suffixes.push(Suffix::Array(size));
@@ -4357,7 +4365,7 @@ impl Parser {
         if lo >= hi { return None; }
         let save = self.pos;
         self.pos = lo;
-        let e = self.parse_assign_expr();
+        let e = self.parse_constant_expr();
         let end = self.pos;
         self.pos = save;
         match e { Ok(e) if end == hi => Some(e), _ => None }

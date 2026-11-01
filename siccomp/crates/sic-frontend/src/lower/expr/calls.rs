@@ -1899,9 +1899,14 @@ impl<'m> FuncCtx<'m> {
             dest: None,
             fptr,
             args: coerced,
-            ret_ty,
+            ret_ty: ret_ty.clone(),
             func_ty: Box::new(func_ty),
         });
+        // As for a direct call: the temporary holds a reference.
+        if self.is_sic() && super::super::types::is_sic_string(&ret_ty) {
+            self.register_scope_exit(super::super::func::Cleanup::StringRelease { addr: slot.clone() });
+        }
+        self.register_struct_temp(&slot, &ret_ty);
         Ok(slot)
     }
 

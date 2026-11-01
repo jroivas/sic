@@ -1590,6 +1590,22 @@ if SIC_BACKEND=nosuch "$SIC" -c a.c 2>err; then bad "backend-env" "not honoured"
 elif SIC_BACKEND=nosuch "$SIC" -fbackend="$first" -c a.c 2>err; then ok "backend-env"; else bad "backend-env" "-fbackend should win: $(cat err)"; fi
 cd ..
 
+# ── a constant is a constant, at -O0 too; -fno-const-fold is there to compare ──
+mkdir -p folded && cd folded
+printf 'int main() { return "h\xc3\xa9llo".length + ("a" + "b").length + ("x").size; }\n' > f.sic
+"$SIC" -O0 --emit-ir f.sic > ir 2>err
+if awk '/^fn main/,/^}/' ir | grep -qE 'call .*@f|malloc' ; then bad "fold-O0" "main still calls: $(awk '/^fn main/,/^}/' ir | grep -E 'call' | head -2)"
+else ok "fold-O0"; fi
+"$SIC" -O0 -fno-const-fold f.sic -o g 2>err; ./g; a=$?
+"$SIC" -O0 f.sic -o h 2>err; ./h; b=$?
+if [ "$a" -eq 8 ] && [ "$b" -eq 8 ]; then ok "fold-same-value"; else bad "fold-same-value" "unfolded $a, folded $b"; fi
+# In a type, an enum, an assertion: each is its own parse.
+printf 'enum E { A = "abcd".length, B }\nstruct S { unsigned f : "abc".length; int a["ab".size]; }\nint x __attribute__((aligned("abcd".size)));\n_Static_assert(sizeof(struct S) == 12, "s");\nint main() { S s; s.f = 15; return (int)E::B * 8 + s.f - 5; }\n' > c.sic
+if "$SIC" -O0 c.sic -o c 2>err; ./c; [ $? -eq 42 ]; then ok "fold-contexts"; else bad "fold-contexts" "$(cat err)"; fi
+printf '_Static_assert("ab".length == 3, "x");\nint main() { return 0; }\n' > d.sic
+if "$SIC" -c d.sic -o d.o 2>err; then bad "fold-assert" "a false assertion passed"; else ok "fold-assert"; fi
+cd ..
+
 # ── the LLVM back end, when this sic has it ──
 if "$SIC" -print-backends | grep -qx llvm; then
     mkdir -p llvm && cd llvm

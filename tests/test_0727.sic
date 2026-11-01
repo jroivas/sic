@@ -1,0 +1,52 @@
+// What is written with literals only is a constant, at every level: in a global's
+// initializer, an array size, a case label. Each result is compared with the same
+// operation at run time, on a variable the compiler cannot see through.
+import std;
+
+string joined = "ab" + "cd";
+int sized["abc".length];
+const int n = "héllo".size;
+
+string runtime(string s) { return s; }
+
+int main()
+{
+    if (joined != "abcd" || joined.length != 4) return 1;
+    if (sized.length != 3) return 2;
+    if (n != 6) return 3;
+
+    string u = runtime("héllo");
+    if ("héllo".length != u.length || "héllo".length != 5) return 4;
+    if ("héllo".size != u.size || ("héllo").size != 6) return 5;
+    if (("you").length != 3) return 6;
+
+    string p = runtime(" \t\n x y \r\f\v");
+    if (" \t\n x y \r\f\v".trim() != p.trim()) return 7;
+    if (" \t\n x y \r\f\v".ltrim() != p.ltrim()) return 8;
+    if (" \t\n x y \r\f\v".rtrim() != p.rtrim()) return 9;
+    string e = runtime("   ");
+    if ("   ".trim() != e.trim() || "   ".trim().length != 0) return 10;
+    if ("   ".ltrim() != e.ltrim() || "   ".rtrim() != e.rtrim()) return 11;
+
+    string h = runtime("hello");
+    if ("hello".find("ll") != h.find("ll") || "hello".find("zz") != h.find("zz")) return 12;
+    if ("hello".find("") != h.find("")) return 13;
+    if ("hello".starts_with("he") != h.starts_with("he")) return 14;
+    if ("hello".ends_with("he") != h.ends_with("he")) return 15;
+    if ("hello".contains("ell") != h.contains("ell")) return 16;
+    if ("hello".contains("") != h.contains("")) return 17;
+    if (("he" + "llo") != h) return 18;
+    if (("he" + "llo").length != 5) return 19;
+    if ("a" == "b" || !("a" == "a") || "a" != "a") return 20;
+
+    switch (2) {
+        case "ab".length: break;
+        default: return 21;
+    }
+    string c = 1 ? "yes" : "no";
+    if (c != "yes") return 22;
+    if ((0 ? 1 : 2) != 2) return 23;
+    double d = 1 ? 1 : 2.5;     // of two kinds: not folded, and a double
+    if (d != 1.0) return 24;
+    return 42;
+}

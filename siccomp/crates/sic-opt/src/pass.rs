@@ -15,6 +15,8 @@ pub trait AstPass {
 #[derive(Debug, Clone)]
 pub struct PassConfig {
     enabled: HashSet<String>,
+    /// The source is SIC: its string operations are language, not an error.
+    pub sic: bool,
     pub debug: bool,
     pub max_iters: usize,
     /// Inliner size budget: a called function of at most this many IR instructions
@@ -28,7 +30,7 @@ pub struct PassConfig {
 
 impl PassConfig {
     pub fn new(enabled: HashSet<String>, debug: bool) -> Self {
-        PassConfig { enabled, debug, max_iters: 8, inline_threshold: 0, inline_aggressive: false }
+        PassConfig { enabled, sic: false, debug, max_iters: 8, inline_threshold: 0, inline_aggressive: false }
     }
     pub fn is_enabled(&self, name: &str) -> bool { self.enabled.contains(name) }
 }

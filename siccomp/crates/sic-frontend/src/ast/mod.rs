@@ -1,3 +1,5 @@
+pub mod fold;
+
 use crate::lexer::Span;
 
 pub type BoxExpr = Box<Expr>;
