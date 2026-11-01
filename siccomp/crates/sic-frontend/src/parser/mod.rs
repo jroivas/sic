@@ -117,7 +117,7 @@ pub struct Parser {
     pending_aligned_expr: Option<BoxExpr>,
     /// Typedef names with an alignment of their own (`typedef long long q
     /// __attribute__((aligned(4)))`), inherited by a typedef of one.
-    typedef_aligns: HashMap<String, u32>,
+    typedef_aligns: HashMap<String, TypeQual>,
     /// A statement began with attributes, kept for a declaration.
     stmt_attrs: bool,
     /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
@@ -828,28 +828,22 @@ impl Parser {
             // to the aliased struct/union type (QEMU's CPUTLBDescFast etc.).
             // Any other type has no alignment of its own: the name keeps it.
             let mut own = None;
+            let mut own_expr = None;
             if let Some(n) = self.pending_aligned.take().or(group_align) {
                 match &mut ty.ty {
                     AstType::Struct(sd) => sd.align = Some(sd.align.unwrap_or(0).max(n)),
                     AstType::Union(ud)  => ud.align = Some(ud.align.unwrap_or(0).max(n)),
-                    _ => own = Some(n),
+                    _ => own = Some(TypeQual::TypeAlign(n)),
                 }
             }
             if let Some(e) = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone()) {
                 match &mut ty.ty {
                     AstType::Struct(sd) => sd.align_expr = Some(e),
                     AstType::Union(ud)  => ud.align_expr = Some(e),
-                    _ => {
-                        let v = crate::lower::eval_const_expr(&e, &sic_ir::fast_hash::HashMap::default())
-                            .ok().filter(|v| *v > 0 && (*v as u64).is_power_of_two())
-                            .ok_or_else(|| CompileError::at(
-                                format!("the `aligned` value of typedef `{}` is not supported (it needs a type size)", name),
-                                e.span.file.clone(), e.span.line, e.span.col))?;
-                        own = Some(v as u32);
-                    }
+                    _ => own_expr = Some(TypeQual::TypeAlignExpr(crate::ast::AlignExpr(e))),
                 }
             }
-            match own.or_else(|| ty.type_align()) {
+            match own_expr.or(own).or_else(|| ty.type_align().cloned()) {
                 Some(a) => { self.typedef_aligns.insert(name.clone(), a); }
                 None => { self.typedef_aligns.remove(&name); }
             }
@@ -1247,7 +1241,7 @@ impl Parser {
 
         let mut qt = qt;
         if let AstType::Named(n) = &qt.ty {
-            if let Some(a) = self.typedef_aligns.get(n) { qt.qualifiers.push(TypeQual::TypeAlign(*a)); }
+            if let Some(a) = self.typedef_aligns.get(n) { qt.qualifiers.push(a.clone()); }
         }
         Ok((qt, storage))
     }

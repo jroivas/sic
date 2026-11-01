@@ -3353,7 +3353,7 @@ impl Lowerer {
             _ => None,
         });
         let attr = types::attr_align(d.align, &d.align_expr, &self.struct_types, self.ptr_size)?;
-        Ok(attr.max(alignas).max(d.ty.type_align()))
+        Ok(attr.max(alignas).max(types::type_align_of(&d.ty, &self.struct_types, self.ptr_size)?))
     }
 
     fn lower_global_var(&mut self, d: &Declarator, base_ty: &QualType, weak: bool, thread_local: bool) -> Result<()> {

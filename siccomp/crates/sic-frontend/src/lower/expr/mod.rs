@@ -1272,7 +1272,7 @@ impl<'m> FuncCtx<'m> {
                 if let crate::ast::AstType::Typeof(e) = &ty.ty {
                     if let Some(a) = self.object_align(e) { return Ok(self.size_t_val(a)); }
                 }
-                let a = match ty.type_align() {
+                let a = match super::types::type_align_of(ty, &self.lowerer.struct_types, self.ptr_size())? {
                     Some(a) => a as u64,
                     None => self.lower_type(ty)?.align_of(self.ptr_size()),
                 };

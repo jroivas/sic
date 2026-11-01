@@ -1265,9 +1265,18 @@ fn lower_struct(s: &StructDef, named: &HashMap<String, Type>, ptr_size: u32) -> 
 /// exact either way; `packed` beats it, and `aligned` on the member only raises it.
 pub(crate) fn member_align(f: &crate::ast::FieldDecl, aggregate_packed: bool, named: &HashMap<String, Type>, ptr_size: u32) -> Result<(Option<u32>, bool)> {
     let falign = attr_align(f.align, &f.align_expr, named, ptr_size)?;
-    match f.ty.type_align() {
+    match type_align_of(&f.ty, named, ptr_size)? {
         Some(a) if !f.packed && !aggregate_packed => Ok((falign.max(Some(a)), true)),
         _ => Ok((falign, f.packed)),
+    }
+}
+
+/// The value of `qt`'s alignment from a typedef, see `QualType::type_align`.
+pub(crate) fn type_align_of(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> Result<Option<u32>> {
+    match qt.type_align() {
+        Some(crate::ast::TypeQual::TypeAlign(n)) => Ok(Some(*n)),
+        Some(crate::ast::TypeQual::TypeAlignExpr(e)) => attr_align(None, &Some(e.0.clone()), named, ptr_size),
+        _ => Ok(None),
     }
 }
 
@@ -1326,7 +1335,7 @@ fn eval_const_size_typed(
             Some(size_t(c_size_of(&t, ptr_size) as i64))
         }
         ExprKind::AlignofType(qt) => {
-            if let Some(a) = qt.type_align() { return Some(size_t(a as i64)); }
+            if let Some(a) = type_align_of(qt, named, ptr_size).ok()? { return Some(size_t(a as i64)); }
             let t = lower_ast_type(&qt.ty, named, ptr_size).ok()?;
             Some(size_t(t.align_of(ptr_size) as i64))
         }

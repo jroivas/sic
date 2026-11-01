@@ -16,14 +16,22 @@ impl QualType {
     pub fn new(ty: AstType) -> Self { QualType { ty, qualifiers: vec![], storage: None } }
     pub fn is_const(&self) -> bool { self.qualifiers.contains(&TypeQual::Const) }
     /// The alignment this type has from a typedef: its own, or its element's.
-    pub fn type_align(&self) -> Option<u32> {
-        let own = self.qualifiers.iter().find_map(|q| match q { TypeQual::TypeAlign(n) => Some(*n), _ => None });
+    /// `TypeAlign` or `TypeAlignExpr`; `lower::types::type_align_of` has the value.
+    pub fn type_align(&self) -> Option<&TypeQual> {
+        let own = self.qualifiers.iter().find(|q| matches!(q, TypeQual::TypeAlign(_) | TypeQual::TypeAlignExpr(_)));
         match &self.ty {
             AstType::Array { base, .. } if own.is_none() => base.type_align(),
             _ => own,
         }
     }
 }
+
+/// An alignment expression as a qualifier. Qualifiers are compared to find the
+/// plain ones; these two never decide anything, so they compare equal.
+#[derive(Debug, Clone)]
+pub struct AlignExpr(pub BoxExpr);
+impl PartialEq for AlignExpr { fn eq(&self, _: &AlignExpr) -> bool { true } }
+impl Eq for AlignExpr {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeQual {
@@ -34,6 +42,9 @@ pub enum TypeQual {
     /// type written with that name: raises or lowers the natural one, as IR scalar
     /// types have no alignment of their own. See `QualType::type_align`.
     TypeAlign(u32),
+    /// As `TypeAlign`, for a value that needs type sizes (`__alignof__(u32)`):
+    /// evaluated when lowering.
+    TypeAlignExpr(AlignExpr),
     /// `inline` function specifier (carried on the decl-specifier `QualType` so
     /// function definitions can record it; see `Decl::Func::inline`).
     Inline,
