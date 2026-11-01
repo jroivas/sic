@@ -851,6 +851,7 @@ impl FuncCtx<'_> {
         // Fixed registers of plain outputs (no `+`, no `&`): one input may
         // share each, as `[err] "=a"(err) : "a"(lmask)` in Linux's XSTATE_OP.
         let mut shareable = [false; 16];
+        let mut pinned_var: [Option<String>; 16] = Default::default();
         for c in &a.clobbers { if let Some(r) = clobbered_gpr(c) { used[r] = true; } }
         let mut ops: Vec<Option<OpInfo>> = (0..all.len()).map(|_| None).collect();
         // Pass 1: fixed registers, constants, flags; note what needs a pool register.
@@ -890,7 +891,13 @@ impl FuncCtx<'_> {
                 if !letters.chars().any(|ch| "rgqmoVXp".contains(ch)) { return Ok(false); }
             }
             if let Some(r) = fixed {
-                if used[r] && !(!is_out && shareable[r]) { return Ok(false); }
+                // One register variable twice is one register (Linux's
+                // call_on_stack: `"+r" (tos)` and `[tos] "r" (tos)`).
+                let pinned = self.local_reg_operand(&op.expr).is_some();
+                let same_var = pinned && matches!((&op.expr.kind, &pinned_var[r]),
+                    (ExprKind::Ident(a), Some(b)) if a == b);
+                if pinned { if let ExprKind::Ident(v) = &op.expr.kind { pinned_var[r] = Some(v.clone()); } }
+                if used[r] && !(!is_out && shareable[r]) && !same_var { return Ok(false); }
                 used[r] = true;
                 shareable[r] = is_out && !c.rw && !raw.contains('&');
                 ops[n] = Some(OpInfo { loc: OpLoc::Reg(r), size, load: !is_out || c.rw });
