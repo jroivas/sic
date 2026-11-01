@@ -1181,13 +1181,12 @@ impl<'m> FuncCtx<'m> {
         let (at, rc) = self.struct_count_at(&Val::Local(selfp), &sty)?;
         let nn = self.is_nonnull(rc.clone());
         let body = self.branch_if(nn);
-        let n = self.alloc_val();
-        self.push_instr(Instr::Load { dest: n, ptr: rc.clone(), ty: Type::u64() });
-        let left = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: left, op: sic_ir::BinOp::Sub, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
-        self.push_instr(Instr::Store { ptr: rc.clone(), val: Val::Local(left) });
+        // Copies may be on other threads.
+        let one = self.coerce(Constant::uint(1), &Type::u64())?;
+        let old = self.alloc_val();
+        self.push_instr(Instr::AtomicRmw { dest: old, op: sic_ir::AtomicOp::Sub, ptr: rc.clone(), val: one, ty: Type::u64() });
         let shared = self.alloc_val();
-        self.push_instr(Instr::Cmp { dest: shared, op: CmpOp::INe, lhs: Val::Local(left), rhs: Val::Const(Constant::UInt(0)), ty: Type::u64() });
+        self.push_instr(Instr::Cmp { dest: shared, op: CmpOp::INe, lhs: Val::Local(old), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
         let last = self.branch_if(Val::Local(shared));
         if let Some(m) = mdtor {
             self.emit_cleanup_call(Val::Local(selfp), &m);
@@ -3476,13 +3475,9 @@ impl<'m> FuncCtx<'m> {
                                 self.init_containers_at(&Val::Local(vid), &ty, true, only_null)?;
                             }
                         }
+                        if d.init.is_none() { self.construct_at(&Val::Local(vid), &ty)?; }
                         if let Type::Struct(st) = &ty {
                             if let Some(sn) = st.name.clone() {
-                                if d.init.is_none() {
-                                    if let Some(ctor) = self.lowerer.struct_ctor.get(&sn).cloned() {
-                                        self.emit_cleanup_call(Val::Local(vid), &ctor);
-                                    }
-                                }
                                 if let Some(dtor) = self.lowerer.struct_dtor.get(&sn).cloned() {
                                     self.register_scope_exit(Cleanup::AttrFn { addr: Val::Local(vid), fn_name: dtor });
                                 }
@@ -3921,11 +3916,9 @@ impl<'m> FuncCtx<'m> {
         let (_, rc) = self.struct_count_at(ptr, ty)?;
         let nn = self.is_nonnull(rc.clone());
         let done = self.branch_if(nn);
-        let n = self.alloc_val();
-        self.push_instr(Instr::Load { dest: n, ptr: rc.clone(), ty: Type::u64() });
-        let up = self.alloc_val();
-        self.push_instr(Instr::BinOp { dest: up, op: sic_ir::BinOp::Add, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
-        self.push_instr(Instr::Store { ptr: rc, val: Val::Local(up) });
+        let one = self.coerce(Constant::uint(1), &Type::u64())?;
+        let old = self.alloc_val();
+        self.push_instr(Instr::AtomicRmw { dest: old, op: sic_ir::AtomicOp::Add, ptr: rc, val: one, ty: Type::u64() });
         self.set_terminator(Terminator::Jump(done));
         self.switch_to_block(done);
         Ok(())
@@ -3953,6 +3946,51 @@ impl<'m> FuncCtx<'m> {
         if let Some(done) = done {
             self.set_terminator(Terminator::Jump(done));
             self.switch_to_block(done);
+        }
+        Ok(())
+    }
+
+    /// Whether an object of type `t` runs any constructor when it is created.
+    pub(crate) fn has_constructor(&self, t: &Type) -> bool {
+        match super::types::resolve_aggregate(t, &self.lowerer.struct_types) {
+            Type::Array { elem, .. } => self.has_constructor(&elem),
+            Type::Struct(st) if !self.is_tagged_enum_struct(&Type::Struct(st.clone())) => {
+                st.name.as_ref().is_some_and(|n| self.lowerer.struct_ctor.contains_key(n))
+                    || st.fields.iter().any(|(_, f)| !matches!(f, Type::Pointer(_)) && self.has_constructor(f))
+            }
+            _ => false,
+        }
+    }
+
+    /// Construct the object of type `ty` at `base`, as C++ does: each array element,
+    /// and members before the struct they are in.
+    pub(crate) fn construct_at(&mut self, base: &Val, ty: &Type) -> Result<()> {
+        if !self.has_constructor(ty) { return Ok(()); }
+        let rt = super::types::resolve_aggregate(ty, &self.lowerer.struct_types);
+        match &rt {
+            Type::Array { elem, len } => {
+                let n = self.coerce(Constant::int(*len as i64), &Type::i64())?;
+                self.emit_elem_loop(base, elem, n, |fc, ep, t| fc.construct_at(ep, t))?;
+            }
+            Type::Struct(st) => {
+                self.construct_members(base, &rt)?;
+                if let Some(ctor) = st.name.as_ref().and_then(|n| self.lowerer.struct_ctor.get(n)).cloned() {
+                    self.emit_cleanup_call(base.clone(), &ctor);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// The members of the struct at `base`, before its own constructor runs.
+    pub(crate) fn construct_members(&mut self, base: &Val, ty: &Type) -> Result<()> {
+        let Type::Struct(st) = super::types::resolve_aggregate(ty, &self.lowerer.struct_types) else { return Ok(()) };
+        for (i, (_, fty)) in st.fields.iter().enumerate() {
+            if matches!(fty, Type::Pointer(_)) || !self.has_constructor(fty) { continue; }
+            let off = st.field_offset(i, self.ptr_size());
+            let fp = self.gep_offset(base, off, fty);
+            self.construct_at(&fp, fty)?;
         }
         Ok(())
     }

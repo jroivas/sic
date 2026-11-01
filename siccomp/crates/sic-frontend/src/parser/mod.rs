@@ -2154,6 +2154,8 @@ impl Parser {
                 }
                 Err(e) => return Err(e),
             };
+            let mut ty = ty;
+            typeof_earlier_param(&mut ty, &params);
             if !name.is_empty() { self.check_not_macro(&name, &first.span)?; }
             // Parameter attribute, e.g. `f(const T *cfg __attribute__((unused)))`.
             self.skip_attributes();
@@ -3820,6 +3822,10 @@ impl Parser {
                     if is_plain_decimal && digits.parse::<u64>().is_err() {
                         return Ok(Expr::new(ExprKind::BigIntLit(digits.to_string()), sp));
                     }
+                    // Past `long`, it still fits `u64`, and a bigint wants its value.
+                    if is_plain_decimal && digits.parse::<i64>().is_err() {
+                        if let Ok(v) = digits.parse::<u64>() { return Ok(Expr::new(ExprKind::UIntLit(v, true), sp)); }
+                    }
                 }
                 let (val, is_u, is_64) = parse_int_literal(&text);
                 let kind = if is_u { ExprKind::UIntLit(val as u64, is_64) } else { ExprKind::IntLit(val, is_64) };
@@ -4590,6 +4596,22 @@ fn is_aggregate_definition(ty: &AstType) -> bool {
         AstType::Union(ud) => ud.fields.is_some(),
         AstType::Enum(ed) => ed.variants.is_some(),
         _ => false,
+    }
+}
+
+/// `int f(int n, typeof(n) m)`: an earlier parameter's type. Parameters have no
+/// scope when they are lowered, so it is resolved here.
+fn typeof_earlier_param(qt: &mut QualType, earlier: &[Param]) {
+    match &mut qt.ty {
+        AstType::Pointer { base, .. } | AstType::Array { base, .. } => typeof_earlier_param(base, earlier),
+        AstType::Typeof(e) => {
+            let ExprKind::Ident(n) = &e.kind else { return };
+            let Some(p) = earlier.iter().find(|p| p.name.as_deref() == Some(n.as_str())) else { return };
+            let quals = std::mem::take(&mut qt.qualifiers);
+            *qt = p.ty.clone();
+            qt.qualifiers.extend(quals);
+        }
+        _ => {}
     }
 }
 

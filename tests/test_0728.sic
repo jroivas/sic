@@ -1,0 +1,61 @@
+// Constructors run for every object: array elements and members, members first.
+// A literal past `long` keeps its value in a bigint, and a `u64` converts unsigned.
+import std;
+
+i32 made = 0;
+i32 order = 0;
+
+struct item {
+    int v;
+    item() { v = 7; made++; }
+    ~item() { made += 100; }
+}
+struct outer {
+    item a;
+    item b;
+    int c;
+    outer() { c = a.v + b.v; }
+}
+struct takes {
+    item a;
+    int c;
+    takes(int k) { c = a.v + k; }
+}
+
+int locals()
+{
+    item arr[3];
+    outer o;
+    item nest[2][2];
+    if (arr[2].v != 7 || nest[1][1].v != 7 || o.c != 14) return 1;
+    return made == 9 ? 0 : 2;
+}
+
+int heap()
+{
+    made = 0;
+    item *p = new item[3];
+    if (p[2].v != 7 || made != 3) return 1;
+    del p;
+    outer *q = new outer;
+    if (q->c != 14) return 2;
+    del q;
+    takes *r = new takes(3);
+    if (r->c != 10) return 3;
+    del r;
+    return 0;
+}
+
+int main()
+{
+    if (locals() != 0) return 1;
+    if (made != 9 + 900) return 2;
+    if (heap() != 0) return 3;
+
+    bigint b = 12345678901234567890;
+    u64 u = 12345678901234567890;
+    bigint c = u;
+    if (b != c) return 4;
+    if (b.str != "12345678901234567890") return 5;
+    return 42;
+}

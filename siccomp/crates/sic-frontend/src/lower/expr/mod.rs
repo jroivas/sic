@@ -4215,8 +4215,15 @@ impl<'m> FuncCtx<'m> {
             let et = elem_ty.clone();
             self.emit_elem_loop(&Val::Local(data), &et, count_val.clone(), |fc, ep, t| fc.init_containers_at(ep, t, true, false))?;
         }
-        // Run the constructor `__sic_ctor_<S>(data, args…)` on the zeroed object.
-        if let Some(ctor) = ctor {
+        // Each element is constructed, its members first. With arguments the one
+        // object takes them, after its members.
+        if args.is_empty() || array {
+            if self.is_sic() && self.has_constructor(&elem_ty) {
+                let et = elem_ty.clone();
+                self.emit_elem_loop(&Val::Local(data), &et, count_val.clone(), |fc, ep, t| fc.construct_at(ep, t))?;
+            }
+        } else if let Some(ctor) = ctor {
+            if self.is_sic() { self.construct_members(&Val::Local(data), &elem_ty)?; }
             let fref = self.lowerer.module.func_ref_by_name(&ctor).ok_or_else(|| CompileError::new(
                 format!("internal: constructor '{}' not lowered", ctor)))?;
             let params = self.lowerer.module.func_sig(fref).params.clone();

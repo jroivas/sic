@@ -143,7 +143,12 @@ impl<'m> FuncCtx<'m> {
             return self.lower_expr(e);
         }
         // An integer expression → widen to a temporary bigint.
+        let unsigned_64 = matches!(self.infer_expr_type(e), Ok(Type::Int { bits: 64, signed: false }));
         let v = self.lower_expr(e)?;
+        if unsigned_64 {
+            let u = self.coerce(v, &Type::u64())?;
+            return self.call_bigint_new("__sic_bi_from_u64", vec![u]);
+        }
         let i64v = self.coerce(v, &Type::i64())?;
         self.call_bigint_new("__sic_bi_from_i64", vec![i64v])
     }

@@ -1355,7 +1355,8 @@ fn eval_const_size_typed(
             if let ExprKind::Ident(n) = &x.kind {
                 if let Some(a) = global_align(n) { return Some(size_t(a as i64)); }
             }
-            Some(size_t(global_expr_type(x)?.align_of(ptr_size) as i64))
+            let t = global_expr_type(x).or_else(|| typeof_expr_type(x, named, ptr_size))?;
+            Some(size_t(t.align_of(ptr_size) as i64))
         }
         // `__builtin_types_compatible_p(typeof(g), typeof(&g[0]))` (QEMU_IS_ARRAY).
         ExprKind::TypesCompatible(a, b) => {
@@ -1586,6 +1587,11 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
         super::expr::resolve_field_access(&resolved, name, ptr_size, named).map(|(_, t, _)| t)
     };
     Some(match &e.kind {
+        ExprKind::ChooseExpr { cond, then, else_ } => {
+            // An undecided condition: the first, as for a ternary.
+            let c = ENUM_CONSTS.with(|ec| eval_const_size(cond, named, ptr_size, &ec.borrow())).unwrap_or(1);
+            return typeof_expr_type(if c != 0 { then } else { else_ }, named, ptr_size);
+        }
         ExprKind::Nullptr | ExprKind::LabelAddr(_) => Type::void_ptr(),
         ExprKind::CharLit(_) => Type::i32(),
         ExprKind::IntLit(_, is64) => if *is64 { Type::i64() } else { Type::i32() },
@@ -1649,7 +1655,7 @@ fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> O
             sic_ir::types::usual_arith_conv(&l, &r)
         }
         // Both arms the same is all this path can type without the conversions.
-        ExprKind::Ternary { then, else_, .. } | ExprKind::ChooseExpr { then, else_, .. } => {
+        ExprKind::Ternary { then, else_, .. } => {
             let t = typeof_expr_type(then, named, ptr_size)?;
             if t != typeof_expr_type(else_, named, ptr_size)? { return None; }
             t
