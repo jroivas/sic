@@ -5579,6 +5579,12 @@ impl<'m> FuncCtx<'m> {
     /// The type of a `sizeof`/`_Alignof` operand. An identifier that names nothing
     /// is a struct type registered under that bare name (a type spelled as an
     /// expression), else an error.
+    /// The value of `__alignof__(expr)`, if `e` is one.
+    pub(crate) fn alignof_operand(&self, e: &Expr) -> Option<u64> {
+        let ExprKind::AlignofExpr(x) = &e.kind else { return None };
+        self.object_align(x).or_else(|| Some(self.sizeof_operand_type(x).ok()?.align_of(self.ptr_size())))
+    }
+
     /// The alignment of the object `e` names, where it can differ from its type's:
     /// a variable's own, or a member's.
     fn object_align(&self, e: &Expr) -> Option<u64> {

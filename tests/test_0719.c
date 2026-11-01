@@ -39,6 +39,7 @@ _Static_assert(sizeof(sb) == 100, "size");
 struct S { char c; char m __attribute__((aligned(64))); };
 int noalign __attribute__((aligned(1)));
 long lowered __attribute__((aligned(2)));
+typedef struct { long v; } item_t;
 void leaf(int depth) {
     int a __attribute__((aligned(64)));
     char pad[depth % 37 + 1];
@@ -48,6 +49,8 @@ void leaf(int depth) {
     c64 d; a16 e;
     int f __attribute__((aligned(4096)));
     __attribute__((aligned(256))) char x1, x2;
+    item_t *ip = 0; item_t il; char y1[8] __attribute__((aligned(__alignof__(*ip)))); char y2[8] __attribute__((aligned(__alignof__(il))));
+    CK(y1,8); CK(y2,8); (void)il;
     a = c = 0; b[0] = 1; d = 1; e = 2; f = 3; x1 = x2 = 0; pad[0] = 0;
     CK(&a,64); CK(b,128); CK(&c,32); CK(&st,512); CK(&d,64); CK(&e,16); CK(&f,4096); CK(&x1,256); CK(&x2,256);
     *(volatile int *)&a = 1; *(volatile char *)b = 2;

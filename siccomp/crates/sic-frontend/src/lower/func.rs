@@ -1157,6 +1157,16 @@ impl<'m> FuncCtx<'m> {
     }
 
     /// `ty` is a sic struct with a destructor (a managed struct).
+    /// `Lowerer::decl_align` of a local: its `aligned` value may name other locals
+    /// (`__alignof__(*p)`), which only expression lowering can see.
+    fn local_decl_align(&mut self, d: &crate::ast::Declarator, base_ty: &crate::ast::QualType) -> Result<Option<u32>> {
+        let Some(v) = d.align_expr.as_ref().and_then(|e| self.alignof_operand(e)) else {
+            return self.lowerer.decl_align(d, base_ty);
+        };
+        let plain = crate::ast::Declarator { align: d.align.max(Some(v as u32)), align_expr: None, ..d.clone() };
+        self.lowerer.decl_align(&plain, base_ty)
+    }
+
     pub(crate) fn struct_has_dtor(&self, ty: &Type) -> bool {
         matches!(ty, Type::Struct(st) if st.name.as_deref().map_or(false, |n| self.lowerer.struct_dtor.contains_key(n)))
     }
@@ -2963,7 +2973,7 @@ impl<'m> FuncCtx<'m> {
                         let vars = self.locals.iter().flatten().map(|(n, (t, _))| (n.clone(), t.clone())).collect();
                         super::types::set_local_var_types(vars);
                         self.lowerer.scoped_fn_name = Some(fname);
-                        if let Some(a) = self.lowerer.decl_align(d, base_ty)? { super::types::note_global_align(&gname, a); }
+                        if let Some(a) = self.local_decl_align(d, base_ty)? { super::types::note_global_align(&gname, a); }
                         let added = self.lowerer.add_static_local_global(gname, d, ty);
                         self.lowerer.scoped_fn_name = None;
                         super::types::set_local_var_types(HashMap::default());
@@ -3186,7 +3196,7 @@ impl<'m> FuncCtx<'m> {
                         ty = Type::Array { elem, len };
                     }
                     let vid = self.alloc_val();
-                    let explicit_align = self.lowerer.decl_align(d, base_ty)?;
+                    let explicit_align = self.local_decl_align(d, base_ty)?;
                     if let Some(a) = explicit_align { self.local_aligns.insert(vid.0, a); }
                     self.push_instr(Instr::Alloca { dest: vid, ty: ty.clone(), align: explicit_align });
 
