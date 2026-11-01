@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 # Cranelift 0.136 needs Rust 1.96 (libwild, the built-in linker, 1.94).
 rust-version = "1.96"

@@ -4005,7 +4005,7 @@ static Output run(list<string> args, string given_info, string given_text, i32 h
     pp.macros["__STDC_HOSTED__"] = "O|1";
     pp.macros["__SICC__"] = "O|1";
     pp.macros["__SICC_MINOR__"] = "O|2";
-    pp.macros["__SICC_PATCH__"] = "O|1";
+    pp.macros["__SICC_PATCH__"] = "O|2";
     pp.macros["__clang__"] = "O|1";
     pp.macros["__clang_major__"] = "O|17";
     pp.macros["__clang_minor__"] = "O|0";
