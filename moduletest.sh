@@ -1644,6 +1644,25 @@ if "$SIC" -print-backends | grep -qx llvm; then
 fi
 cd ..
 
+# ── non-PIC code reaches every symbol directly: Linux's link rejects a GOT entry ──
+mkdir -p nogot && cd nogot
+cat > a.c <<'EOF'
+extern int x;
+extern int w __attribute__((weak));
+int d = 1;
+extern void h(void);
+extern void wf(void) __attribute__((weak));
+int f(void) { h(); if (wf) wf(); return x + d + (&w != 0); }
+EOF
+for b in $("$SIC" -print-backends); do
+    for fl in -fno-PIE -mcmodel=kernel; do
+        "$SIC" -fbackend=$b -O2 $fl -w -c a.c -o a.o 2>err
+        got="$(readelf -rW a.o | grep -c GOT)"
+        if [ -s a.o ] && [ "$got" = 0 ]; then ok "no-got-$b$fl"; else bad "no-got-$b$fl" "$(readelf -rW a.o | grep GOT; cat err)"; fi
+    done
+done
+cd ..
+
 # ── an array parameter is a pointer, in a function type too: not a vector under
 # -mno-sse. Linux's dm.c: u8 id[16] in a struct's function pointer. ──
 mkdir -p nosse && cd nosse

@@ -61,6 +61,29 @@ fn target_features(opts: &BackendOptions) -> String {
     f.join(",")
 }
 
+/// Non-PIC code (`-fno-PIE`, `-mcmodel=kernel`): every symbol is within reach, as in
+/// GCC's small and kernel code models. `RelocMode::Static` does not say so: LLVM goes
+/// through the GOT unless a symbol is `dso_local` (Linux's link rejects any GOT entry),
+/// and its C API has no setter. Giving a symbol non-default visibility sets the flag,
+/// which then stays; an external weak one only while it is not weak. A thread-local
+/// symbol keeps its TLS access, an intrinsic is no symbol.
+fn assume_local(module: &inkwell::module::Module) {
+    let mark = |g: GlobalValue| {
+        let (visibility, linkage) = (g.get_visibility(), g.get_linkage());
+        if matches!(linkage, LLinkage::Internal | LLinkage::Private) { return; }
+        if linkage == LLinkage::ExternalWeak { g.set_linkage(LLinkage::External); }
+        g.set_visibility(GlobalVisibility::Hidden);
+        g.set_visibility(visibility);
+        g.set_linkage(linkage);
+    };
+    for f in module.get_functions() {
+        if !f.get_name().to_bytes().starts_with(b"llvm.") { mark(f.as_global_value()); }
+    }
+    for g in module.get_globals() {
+        if !g.is_thread_local() { mark(g); }
+    }
+}
+
 fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     Target::initialize_x86(&InitializationConfig::default());
     let triple = TargetMachine::get_default_triple();
@@ -97,6 +120,7 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
         asm.push_str(&format!(".pushsection .comment,\"MS\",@progbits,1\n.asciz \"{}\"\n.popsection\n", p.replace('\\', "\\\\").replace('"', "\\\"")));
     }
     if !asm.is_empty() { module.set_inline_assembly(&asm); }
+    if !opts.pic { assume_local(&module); }
 
     module.verify().map_err(|e| format!("LLVM rejected the module: {}", e.to_string()))?;
     let pipeline = match opts.opt { OptLevel::None => None, OptLevel::Speed => Some("default<O2>"), OptLevel::Size => Some("default<Os>") };
