@@ -4297,6 +4297,8 @@ impl Lowerer {
             }
             ExprKind::Ternary { cond, then, else_ } | ExprKind::ChooseExpr { cond, then, else_ } =>
                 self.eval_const_int(if self.const_truth(cond)? { then } else { else_ }),
+            ExprKind::TypesCompatible(..) =>
+                types::eval_const_size(e, &self.struct_types, self.ptr_size, &self.enum_consts),
             // A builtin of what only this evaluator can fold (Linux's
             // `__builtin_ctzll(mask)`, the mask built with sizeof and casts).
             ExprKind::Call { func, args } => {
