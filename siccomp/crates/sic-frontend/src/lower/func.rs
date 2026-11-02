@@ -3008,7 +3008,10 @@ impl<'m> FuncCtx<'m> {
                         super::types::set_local_var_types(vars);
                         self.lowerer.scoped_fn_name = Some(fname);
                         if let Some(a) = self.local_decl_align(d, base_ty)? { super::types::note_global_align(&gname, a); }
-                        let added = self.lowerer.add_static_local_global(gname, d, ty);
+                        // The size of a local is a constant, which only this scope knows.
+                        let mut scoped = d.clone();
+                        if let Some(i) = &mut scoped.init { self.subst_scoped_init(i); }
+                        let added = self.lowerer.add_static_local_global(gname, &scoped, ty);
                         self.lowerer.scoped_fn_name = None;
                         super::types::set_local_var_types(HashMap::default());
                         self.lowerer.scoped_statics.clear();

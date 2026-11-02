@@ -5579,6 +5579,16 @@ impl<'m> FuncCtx<'m> {
         super::eval_const_expr(&folded, &self.lowerer.enum_consts).ok()
     }
 
+    /// [`Self::subst_scoped_consts`] over an initializer; what is no constant stays.
+    pub(crate) fn subst_scoped_init(&self, init: &mut crate::ast::Initializer) {
+        match init {
+            crate::ast::Initializer::Expr(e) => { if let Some(x) = self.subst_scoped_consts(e) { *e = x; } }
+            crate::ast::Initializer::List(items) => {
+                for item in items { self.subst_scoped_init(&mut item.init); }
+            }
+        }
+    }
+
     pub(crate) fn subst_scoped_consts(&self, e: &Expr) -> Option<Expr> {
         use ExprKind::*;
         let ps = self.ptr_size();
