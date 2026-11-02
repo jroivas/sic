@@ -1676,6 +1676,13 @@ for b in $("$SIC" -print-backends); do
 done
 cd ..
 
+# ── --version names the back end in use (Linux's /proc/version), and `clang` ──
+for b in $("$SIC" -print-backends); do
+    case $b in llvm) want=LLVM ;; *) want=Cranelift ;; esac
+    v="$(SIC_BACKEND=$b "$SIC" --version | head -1)"
+    case "$v" in *"clang compatible, $want)"*) ok "version-$b" ;; *) bad "version-$b" "$v" ;; esac
+done
+
 # ── an array parameter is a pointer, in a function type too: not a vector under
 # -mno-sse. Linux's dm.c: u8 id[16] in a struct's function pointer. ──
 mkdir -p nosse && cd nosse
