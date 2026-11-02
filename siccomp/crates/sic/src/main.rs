@@ -1411,6 +1411,8 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
         sse: isa.sse2(),
         x87: isa.x87(),
         no_text_data: kernel_model,
+        no_red_zone: args.machine_flags.iter().rev()
+            .find(|m| *m == "-mno-red-zone" || *m == "-mred-zone").is_some_and(|m| m == "-mno-red-zone"),
         features: isa.backend_features().into_iter().map(String::from).collect(),
         ..BackendOptions::default()
     };

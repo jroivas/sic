@@ -153,6 +153,7 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         let attr = |k| lf.add_attribute(AttributeLoc::Function, k);
         attr(enum_attr(cx.ctx, "nounwind", 0));
         attr(cx.ctx.create_string_attribute("frame-pointer", "all"));
+        if cx.opts.no_red_zone { attr(enum_attr(cx.ctx, "noredzone", 0)); }
         if f.noinline { attr(enum_attr(cx.ctx, "noinline", 0)); }
         if f.always_inline { attr(enum_attr(cx.ctx, "alwaysinline", 0)); }
         match ir.fn_sections.iter().find(|(n, _)| *n == f.name) {

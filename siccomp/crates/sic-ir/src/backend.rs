@@ -33,6 +33,9 @@ pub struct BackendOptions {
     /// of it): a backend's constant pool is avoided, and a function that would
     /// still use one is an error. Needs non-PIC code.
     pub no_text_data: bool,
+    /// Nothing may be kept below the stack pointer (`-mno-red-zone`: in Linux an
+    /// interrupt uses the same stack).
+    pub no_red_zone: bool,
     /// The x64 extensions the code may use, from `-march`/`-m…`, by GCC's names
     /// (`sse4.2`, `popcnt`, `avx2`): nothing of the build machine's CPU beyond them.
     pub features: Vec<String>,
@@ -41,7 +44,7 @@ pub struct BackendOptions {
 impl Default for BackendOptions {
     fn default() -> Self {
         BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true,
-            function_sections: true, sse: true, x87: true, no_text_data: false, features: Vec::new() }
+            function_sections: true, sse: true, x87: true, no_text_data: false, no_red_zone: false, features: Vec::new() }
     }
 }
 

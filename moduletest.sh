@@ -1663,6 +1663,19 @@ for b in $("$SIC" -print-backends); do
 done
 cd ..
 
+# ── -mno-red-zone: nothing below the stack pointer (in Linux an interrupt writes
+# there). A leaf function is what would use it. ──
+mkdir -p redzone && cd redzone
+cat > a.c <<'EOF'
+int f(int n) { volatile int a[16]; for (int i = 0; i < 16; i++) a[i] = n + i; return a[n & 15]; }
+EOF
+for b in $("$SIC" -print-backends); do
+    "$SIC" -fbackend=$b -O2 -mno-red-zone -w -c a.c -o a.o 2>err
+    objdump -d --no-show-raw-insn a.o > d
+    if grep -q 'sub .*,%rsp' d; then ok "no-red-zone-$b"; else bad "no-red-zone-$b" "$(cat err d | head -20)"; fi
+done
+cd ..
+
 # ── an array parameter is a pointer, in a function type too: not a vector under
 # -mno-sse. Linux's dm.c: u8 id[16] in a struct's function pointer. ──
 mkdir -p nosse && cd nosse
