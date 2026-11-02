@@ -3798,7 +3798,11 @@ impl Lowerer {
                 if ir_ty.is_float() {
                     return self.eval_const_float(e).map(Constant::Float);
                 }
-                match self.eval_const_int(e).ok_or(()) {
+                let value = match &*ir_ty {
+                    t @ (Type::Int { .. } | Type::Bool) => self.eval_const_to_int(e, t),
+                    _ => self.eval_const_int(e),
+                };
+                match value.ok_or(()) {
                     Ok(v) => Some(Constant::Int(v)),
                     Err(_) => {
                         // A pointer global initialized with a symbolic address:
@@ -3890,6 +3894,34 @@ impl Lowerer {
     /// literals, integer constant expressions (C's integer arithmetic first:
     /// `10 / 4` is 2), and `+ - * /` / unary minus / casts over them with at
     /// least one floating operand. None if not a compile-time constant.
+    /// A constant expression of floating type: arithmetic on it is not integer
+    /// arithmetic, so `(double)1 / 2` is 0.5.
+    fn const_is_float(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::FloatLit(_) | ExprKind::DecimalLit(_) => true,
+            ExprKind::Cast { ty, .. } => matches!(lower_type(ty, &self.struct_types, self.ptr_size),
+                Ok(Type::Float32 | Type::Float64 | Type::Float80)),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.const_is_float(expr),
+            ExprKind::BinOp { op: BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div, lhs, rhs } =>
+                self.const_is_float(lhs) || self.const_is_float(rhs),
+            ExprKind::Ternary { then, else_, .. } | ExprKind::Elvis { cond: then, else_ } =>
+                self.const_is_float(then) || self.const_is_float(else_),
+            _ => false,
+        }
+    }
+
+    /// `e` has a floating operand anywhere, whatever its own type.
+    fn const_has_float(&self, e: &Expr) -> bool {
+        self.const_is_float(e) || match &e.kind {
+            ExprKind::Unary { expr, .. } | ExprKind::Cast { expr, .. } => self.const_has_float(expr),
+            ExprKind::BinOp { lhs, rhs, .. } => self.const_has_float(lhs) || self.const_has_float(rhs),
+            ExprKind::Ternary { cond, then, else_ } =>
+                [cond, then, else_].iter().any(|x| self.const_has_float(x)),
+            ExprKind::Elvis { cond, else_ } => self.const_has_float(cond) || self.const_has_float(else_),
+            _ => false,
+        }
+    }
+
     fn eval_const_float(&self, e: &Expr) -> Option<f64> {
         match &e.kind {
             ExprKind::FloatLit(f) => return Some(*f),
@@ -3923,6 +3955,8 @@ impl Lowerer {
                     _ => None,
                 }
             }
+            ExprKind::Ternary { cond, then, else_ } =>
+                self.eval_const_float(if self.const_truth(cond)? { then } else { else_ }),
             _ => None,
         }
     }
@@ -4200,7 +4234,7 @@ impl Lowerer {
         let bits = bf.bit_offset as usize + bf.width as usize;
         size = size.min(bits.div_ceil(8));
         if size == 0 || size > 8 || base + size > buf.len() { return false; }
-        let v = match self.eval_const_int(e) {
+        let v = match self.eval_const_to_int(e, ty) {
             Some(v) => v as u64,
             None => {
                 if self.global_init_bad_element.is_none() { self.global_init_bad_element = Some(e.span.clone()); }
@@ -4262,7 +4296,7 @@ impl Lowerer {
                         return true;
                     }
                 }
-                match self.eval_const_int(e) {
+                match self.eval_const_to_int(e, ty) {
                     Some(v) => { buf[base..base + size].copy_from_slice(&v.to_le_bytes()[..size]); true }
                     None => false,
                 }
@@ -4270,23 +4304,37 @@ impl Lowerer {
         }
     }
 
+    /// The value of a constant arithmetic expression for an object of the integer
+    /// type `ty`: a floating one converts, truncating (`int t = 96.0 / 4;`).
+    fn eval_const_to_int(&self, e: &Expr, ty: &Type) -> Option<i64> {
+        self.eval_const_int(e).or_else(|| Some(float_to_int(self.eval_const_float(e)?, ty)))
+    }
+
     /// Evaluate a constant integer expression, extending [`eval_const_expr`] with
     /// type-dependent operators (`sizeof`) that need the type table. Recurses so
     /// `sizeof(T)` nested in arithmetic still folds.
     fn eval_const_int(&self, e: &Expr) -> Option<i64> {
+        if self.const_is_float(e) { return None; }
         // A cast to a narrower integer type truncates to that width and re-signs.
         // Handle it before the type-blind `eval_const_expr`, so `(uint32_t)-1`
         // folds to 0xFFFFFFFF instead of a 64-bit -1 — QEMU's DEFINE_PROP_UNSIGNED
         // stores `.defval.u = (uint32_t)_defval`, and a 0xFFFFFFFFFFFFFFFF default
         // (guest-phys-bits = -1) then failed QAPI's uint32 range check at boot.
         if let ExprKind::Cast { ty, expr } = &e.kind {
-            let inner = self.eval_const_int(expr)?;
-            return Some(match lower_type(ty, &self.struct_types, self.ptr_size) {
+            let target = lower_type(ty, &self.struct_types, self.ptr_size);
+            let inner = match (self.eval_const_int(expr), &target) {
+                (Some(v), _) => v,
+                (None, Ok(t @ (Type::Int { .. } | Type::Bool))) => float_to_int(self.eval_const_float(expr)?, t),
+                (None, _) => return None,
+            };
+            return Some(match target {
                 Ok(t) => apply_int_cast(inner, &t),
                 Err(_) => inner,
             });
         }
-        if let Ok(v) = eval_const_expr(e, &self.enum_consts) {
+        // The plain evaluators know no floating point: `(double)1 / 2 > 0`.
+        let float = self.const_has_float(e);
+        if let (false, Ok(v)) = (float, eval_const_expr(e, &self.enum_consts)) {
             return Some(v);
         }
         match &e.kind {
@@ -4338,22 +4386,28 @@ impl Lowerer {
             ExprKind::Cast { expr, .. } => self.eval_const_int(expr),
             ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_int(expr).map(|v| v.wrapping_neg()),
             ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_int(expr).map(|v| !v),
-            ExprKind::Unary { op: UnOpKind::Not, expr } => self.eval_const_int(expr).map(|v| (v == 0) as i64),
+            ExprKind::Unary { op: UnOpKind::Not, expr } => self.const_truth(expr).map(|t| !t as i64),
             // `&&` / `||` short-circuit: the other side need not be constant.
             ExprKind::BinOp { op: BinOpKind::LogAnd, lhs, rhs } => {
-                if self.eval_const_int(lhs)? == 0 { Some(0) } else { Some((self.eval_const_int(rhs)? != 0) as i64) }
+                if !self.const_truth(lhs)? { Some(0) } else { Some(self.const_truth(rhs)? as i64) }
             }
             ExprKind::BinOp { op: BinOpKind::LogOr, lhs, rhs } => {
-                if self.eval_const_int(lhs)? != 0 { Some(1) } else { Some((self.eval_const_int(rhs)? != 0) as i64) }
+                if self.const_truth(lhs)? { Some(1) } else { Some(self.const_truth(rhs)? as i64) }
             }
             // Comparisons depend on C's operand types (`sizeof(int) - 5 < 0`
             // is false: the left side is unsigned), which the typed evaluator
             // applies; plain integers compare as written otherwise.
             ExprKind::BinOp { op: op @ (BinOpKind::Eq | BinOpKind::Ne | BinOpKind::Lt | BinOpKind::Le | BinOpKind::Gt | BinOpKind::Ge), lhs, rhs } => {
-                if let Some(v) = types::eval_const_size(e, &self.struct_types, self.ptr_size, &self.enum_consts) {
+                if let (false, Some(v)) = (float, types::eval_const_size(e, &self.struct_types, self.ptr_size, &self.enum_consts)) {
                     return Some(v);
                 }
-                let (l, r) = (self.eval_const_int(lhs)?, self.eval_const_int(rhs)?);
+                let Some((l, r)) = self.eval_const_int(lhs).zip(self.eval_const_int(rhs)) else {
+                    let (l, r) = (self.eval_const_float(lhs)?, self.eval_const_float(rhs)?);
+                    return Some(match op {
+                        BinOpKind::Eq => l == r, BinOpKind::Ne => l != r, BinOpKind::Lt => l < r,
+                        BinOpKind::Le => l <= r, BinOpKind::Gt => l > r, _ => l >= r,
+                    } as i64);
+                };
                 Some(match op {
                     BinOpKind::Eq => l == r, BinOpKind::Ne => l != r, BinOpKind::Lt => l < r,
                     BinOpKind::Le => l <= r, BinOpKind::Gt => l > r, _ => l >= r,
@@ -4664,7 +4718,8 @@ impl Lowerer {
         match &e.kind {
             ExprKind::StringLit(_) | ExprKind::WideStringLit(..) => Some(true),
             ExprKind::Unary { op: UnOpKind::Addr, expr } if self.base_addr(expr).is_some() => Some(true),
-            _ => self.eval_const_int(e).map(|v| v != 0),
+            _ => self.eval_const_int(e).map(|v| v != 0)
+                .or_else(|| self.eval_const_float(e).map(|f| f != 0.0)),
         }
     }
 
@@ -5102,6 +5157,15 @@ pub(crate) fn const_binop(op: BinOpKind, a: ConstInt, b: ConstInt) -> Option<Con
             ConstInt::new(res as i64, cbits, csigned)
         }
     })
+}
+
+/// C's conversion of a floating value to the integer type `ty`.
+fn float_to_int(f: f64, ty: &Type) -> i64 {
+    match ty {
+        Type::Bool => (f != 0.0) as i64,
+        Type::Int { signed: false, .. } => f as u64 as i64,
+        _ => f as i64,
+    }
 }
 
 pub fn eval_const_expr(e: &Expr, enum_consts: &HashMap<String, i64>) -> Result<i64> {
