@@ -1644,6 +1644,21 @@ if "$SIC" -print-backends | grep -qx llvm; then
 fi
 cd ..
 
+# ── an array parameter is a pointer, in a function type too: not a vector under
+# -mno-sse. Linux's dm.c: u8 id[16] in a struct's function pointer. ──
+mkdir -p nosse && cd nosse
+cat > a.c <<'EOF'
+typedef unsigned char u8;
+typedef int ints[4];
+struct ops { int (*get)(void *d, u8 id[16]); int (*four)(ints a); };
+int f(struct ops *o, u8 *x, int *y) { return o->get(o, x) + o->four(y); }
+int h(ints a) { return a[1]; }
+EOF
+for b in $("$SIC" -print-backends); do
+    if "$SIC" -fbackend=$b -O2 -mno-sse -mno-mmx -mno-sse2 -w -c a.c -o a.o 2>err; then ok "array-param-nosse-$b"; else bad "array-param-nosse-$b" "$(cat err)"; fi
+done
+cd ..
+
 # ── the LLVM back end, when this sic has it ──
 if "$SIC" -print-backends | grep -qx llvm; then
     mkdir -p llvm && cd llvm

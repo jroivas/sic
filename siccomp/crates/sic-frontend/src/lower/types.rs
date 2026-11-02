@@ -927,7 +927,7 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Function { ret, params, variadic } => {
             let ret_ty = lower_type(ret, named, ptr_size)?;
             let param_tys: crate::Result<Vec<_>> = params.iter().map(|p| {
-                lower_type(&p.ty, named, ptr_size)
+                lower_param_type(&p.ty, named, ptr_size)
             }).collect();
             // Apply the aggregate-return sret ABI so function-pointer types match
             // the (sret-lowered) functions assigned to them and called indirectly.
