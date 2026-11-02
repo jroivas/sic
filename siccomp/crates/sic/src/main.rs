@@ -389,7 +389,8 @@ fn handle_version_query(args: &[String]) -> bool {
             "--version" => {
                 // clang-like banner.
                 // Linux shows this line in /proc/version, and needs `clang` in it.
-                let backend = match std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty()) {
+                let flag = args.iter().rev().find_map(|a| a.strip_prefix("-fbackend=")).map(String::from);
+                let backend = match flag.or_else(|| std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty())) {
                     Some(v) if available_backends().iter().any(|b| b.name() == v) => v,
                     _ => available_backends()[0].name().to_string(),
                 };

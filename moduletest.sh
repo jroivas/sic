@@ -1681,6 +1681,8 @@ for b in $("$SIC" -print-backends); do
     case $b in llvm) want=LLVM ;; *) want=Cranelift ;; esac
     v="$(SIC_BACKEND=$b "$SIC" --version | head -1)"
     case "$v" in *"clang compatible, $want)"*) ok "version-$b" ;; *) bad "version-$b" "$v" ;; esac
+    v="$(SIC_BACKEND=nonsense "$SIC" -fbackend=$b --version | head -1)"
+    case "$v" in *"clang compatible, $want)"*) ok "version-flag-$b" ;; *) bad "version-flag-$b" "$v" ;; esac
 done
 
 # ── an array parameter is a pointer, in a function type too: not a vector under
