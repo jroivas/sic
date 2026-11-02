@@ -136,6 +136,10 @@ pub struct Lowerer {
     /// Set by `build_global_init` when an aggregate initializer could not be
     /// serialized and was zero-filled ([`Lowerer::check_global_init`]).
     pub global_init_unserializable: bool,
+    /// Serializing a static initializer: an object's `const` value counts as
+    /// constant here, as GCC and Clang take it, but not where C wants a constant
+    /// expression (`int a[k]` stays a VLA).
+    in_static_init: std::cell::Cell<bool>,
     /// The `static`s of the function being lowered, which a static initializer
     /// may name: its own (a list head pointing at itself) and its neighbours'.
     pub scoped_statics: HashMap<String, (Type, GlobalRef)>,
@@ -377,6 +381,7 @@ impl Lowerer {
             variant_enum: HashMap::default(),
             c_enum_defs: HashMap::default(),
             global_init_unserializable: false,
+            in_static_init: std::cell::Cell::new(false),
             global_init_bad_element: None,
             scoped_statics: HashMap::default(),
             literal_globals: HashMap::default(),
@@ -3698,6 +3703,13 @@ impl Lowerer {
     }
 
     fn build_global_init(&mut self, d: &Declarator, ir_ty: &mut Type) -> Option<Constant> {
+        self.in_static_init.set(true);
+        let init = self.build_global_init_inner(d, ir_ty);
+        self.in_static_init.set(false);
+        init
+    }
+
+    fn build_global_init_inner(&mut self, d: &Declarator, ir_ty: &mut Type) -> Option<Constant> {
         // `char a[] = { "str" }` — a brace list wrapping a single string literal —
         // is equivalent to `char a[] = "str"` (C11 6.7.9p14). Rewrite to the bare
         // string initializer so it sizes/fills the array (QEMU's
@@ -4371,12 +4383,10 @@ impl Lowerer {
             }
             // `sizeof(expr)` — notably `ARRAY_SIZE(global_array)` in static
             // initializers, which needs the operand's (global) type.
-            ExprKind::SizeofExpr(inner) => {
-                self.const_expr_type(inner).map(|t| t.size_of(self.ptr_size) as i64)
-            }
-            ExprKind::AlignofExpr(inner) => {
-                self.const_expr_type(inner).map(|t| t.align_of(self.ptr_size) as i64)
-            }
+            ExprKind::SizeofExpr(inner) => self.const_expr_type(inner)
+                .map(|t| types::resolve_elements(&t, &self.struct_types).size_of(self.ptr_size) as i64),
+            ExprKind::AlignofExpr(inner) => self.const_expr_type(inner)
+                .map(|t| types::resolve_elements(&t, &self.struct_types).align_of(self.ptr_size) as i64),
             // `offsetof(...)` — so `offsetofend` (= offsetof + sizeof(member)) and
             // other offsetof-based enum values fold. Delegates to the size-aware
             // evaluator which knows the member layout.
@@ -4437,8 +4447,45 @@ impl Lowerer {
                 let c = self.eval_const_int(cond)?;
                 if c != 0 { Some(c) } else { self.eval_const_int(else_) }
             }
+            ExprKind::Ident(_) | ExprKind::Index { .. } | ExprKind::Field { .. } if self.in_static_init.get() =>
+                self.read_const_object(e),
             _ => None,
         }
+    }
+
+    /// The integer `e` names in a `const` object's initializer (QEMU's
+    /// `memmap[UART1].addr`). An address in it is the linker's, no constant.
+    fn read_const_object(&self, e: &Expr) -> Option<i64> {
+        // A bit-field is not its bytes.
+        if let ExprKind::Field { base, name } = &e.kind {
+            let st = types::resolve_aggregate(&self.base_addr(base)?.2, &self.struct_types);
+            let (_, _, bits) = crate::lower::expr::resolve_field_access(&st, name, self.ptr_size, &self.struct_types)?;
+            if bits.is_some() { return None; }
+        }
+        let (g, off, ty) = self.base_addr(e)?;
+        let g = &self.module.globals[g.0 as usize];
+        if !g.constant || off < 0 { return None; }
+        let (bits, signed) = match ty {
+            Type::Int { bits, signed } if bits <= 64 => (bits, signed),
+            Type::Bool => (8, false),
+            _ => return None,
+        };
+        let (off, size) = (off as usize, bits as usize / 8);
+        let bytes = match g.init.as_ref()? {
+            Constant::Int(v) if off == 0 => return Some(*v),
+            Constant::Zeroinit => return Some(0),
+            Constant::Bytes(b) => b,
+            Constant::Aggregate { bytes, relocs } => {
+                if relocs.iter().any(|(at, _)| *at < off + size && off < *at + self.ptr_size as usize) { return None; }
+                bytes
+            }
+            _ => return None,
+        };
+        let mut v = [0u8; 8];
+        v[..size].copy_from_slice(bytes.get(off..off + size)?);
+        let v = u64::from_le_bytes(v);
+        let shift = 64 - bits;
+        Some(if signed { ((v << shift) as i64) >> shift } else { v as i64 })
     }
 
     /// Best-effort type of a constant expression at file scope, using the global

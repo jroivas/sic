@@ -1349,14 +1349,14 @@ fn eval_const_size_typed(
                 return Some(size_t(c.bits as i64 / 8));
             };
             if matches!(t, Type::Array { len: 0, .. }) { return None; }
-            Some(size_t(c_size_of(&t, ptr_size) as i64))
+            Some(size_t(c_size_of(&resolve_elements(&t, named), ptr_size) as i64))
         }
         ExprKind::AlignofExpr(x) => {
             if let ExprKind::Ident(n) = &x.kind {
                 if let Some(a) = global_align(n) { return Some(size_t(a as i64)); }
             }
             let t = global_expr_type(x).or_else(|| typeof_expr_type(x, named, ptr_size))?;
-            Some(size_t(t.align_of(ptr_size) as i64))
+            Some(size_t(resolve_elements(&t, named).align_of(ptr_size) as i64))
         }
         // `__builtin_types_compatible_p(typeof(g), typeof(&g[0]))` (QEMU_IS_ARRAY).
         ExprKind::TypesCompatible(a, b) => {
@@ -1446,6 +1446,15 @@ fn eval_const_size_typed(
 
 /// `sizeof` of a type. GNU: `void` and a function have size 1 (what
 /// `__is_constexpr` tells from `int`).
+/// `t` with its array elements complete: a type taken when its struct was only
+/// declared (GLib's `typedef struct _T T;` before the definition) has none in it.
+pub(crate) fn resolve_elements(t: &Type, named: &HashMap<String, Type>) -> Type {
+    match t {
+        Type::Array { elem, len } => Type::Array { elem: Box::new(resolve_elements(elem, named)), len: *len },
+        other => resolve_aggregate(other, named),
+    }
+}
+
 pub(crate) fn c_size_of(t: &Type, ptr_size: u32) -> u64 {
     if matches!(t, Type::Void | Type::Function(_)) { 1 } else { t.size_of(ptr_size) }
 }
