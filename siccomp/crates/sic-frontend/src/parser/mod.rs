@@ -1424,6 +1424,19 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RBrace)?;
+            // sic has no overloading: a second one silently replaced the first.
+            for (i, m) in methods.iter().enumerate() {
+                if let Some(first) = methods[..i].iter().find(|p| p.kind == m.kind && p.name == m.name) {
+                    let what = match m.kind {
+                        MethodKind::Ctor => "constructor".to_string(),
+                        MethodKind::Dtor => "destructor".to_string(),
+                        MethodKind::Method => format!("method `{}`", m.name),
+                    };
+                    return Err(CompileError::at(
+                        format!("a second {} (the first is at line {}): a struct has no overloads", what, first.span.line),
+                        m.span.file.clone(), m.span.line, m.span.col));
+                }
+            }
             if methods.iter().any(|m| m.kind == MethodKind::Dtor) {
                 let count = QualType::new(AstType::Long { signed: false });
                 fields.push(FieldDecl { name: Some(crate::ast::STRUCT_RC_FIELD.to_string()),

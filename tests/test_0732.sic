@@ -1,0 +1,2 @@
+struct S { int v; int get(S *self) { return 1; } int get(S *self, int k) { return k; } }
+int main() { S s; return s.get(); }

@@ -1,0 +1,2 @@
+struct S { int v; S() { v = 1; } S(int k) { v = k; } }
+int main() { S s; return s.v; }
