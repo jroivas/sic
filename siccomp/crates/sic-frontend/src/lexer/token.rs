@@ -22,12 +22,14 @@ pub struct Token {
     pub start: u32,
     /// `#pragma pack` in force here: the maximum member alignment, 0 for none.
     pub pack: u8,
+    /// Inside `#pragma GCC visibility push(hidden)`.
+    pub hidden: bool,
     pub end: u32,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, text: String, span: Span) -> Self {
-        Token { kind, text, span, start: 0, pack: 0, end: 0 }
+        Token { kind, text, span, start: 0, pack: 0, hidden: false, end: 0 }
     }
 
     pub fn is(&self, kind: TokenKind) -> bool { self.kind == kind }

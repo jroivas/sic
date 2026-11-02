@@ -16,7 +16,7 @@ use inkwell::passes::PassBuilderOptions;
 use inkwell::targets::{CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine};
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
-use inkwell::{AddressSpace, OptimizationLevel};
+use inkwell::{AddressSpace, GlobalVisibility, OptimizationLevel};
 use sic_ir::fast_hash::HashMap;
 use sic_ir::{Backend, BackendError, BackendOptions, Constant, FuncRef, Global, Linkage, Module, OptLevel, RelocTarget, RunAt};
 
@@ -136,6 +136,9 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
             None if cx.opts.function_sections => lf.as_global_value().set_section(Some(&format!(".text.{}", f.name))),
             None => {}
         }
+        if ir.hidden_symbols.contains(&f.name) && lf.get_linkage() != LLinkage::Internal {
+            lf.as_global_value().set_visibility(GlobalVisibility::Hidden);
+        }
         cx.funcs.insert(i as u32, lf);
     }
     let used = ir.used_externs();
@@ -149,6 +152,9 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         }
         let lf = cx.module.get_function(&e.name).unwrap_or_else(|| types::declare(cx, &e.name, &e.sig, None));
         if ir.weak_externs.contains(&e.name) { lf.set_linkage(LLinkage::ExternalWeak); }
+        if ir.hidden_symbols.contains(&e.name) && lf.get_linkage() != LLinkage::Internal {
+            lf.as_global_value().set_visibility(GlobalVisibility::Hidden);
+        }
         if RETURNS_TWICE.contains(&e.name.as_str()) { lf.add_attribute(AttributeLoc::Function, enum_attr(cx.ctx, "returns_twice", 0)); }
         cx.funcs.insert(FuncRef::extern_(i).0, lf);
     }
@@ -237,6 +243,9 @@ fn declare_globals<'ctx>(cx: &mut Cx<'ctx, '_>) {
             lg.set_linkage(fn_linkage(g.linkage));
             lg.set_alignment(g.ty.align_of(ptr_size).max(g.align.unwrap_or(0) as u64).max(1) as u32);
             lg.set_constant(g.constant && !g.thread_local);
+        }
+        if ir.hidden_symbols.contains(&g.name) && lg.get_linkage() != LLinkage::Internal {
+            lg.set_visibility(GlobalVisibility::Hidden);
         }
         if g.thread_local { lg.set_thread_local(true); }
         if !g.thread_local {

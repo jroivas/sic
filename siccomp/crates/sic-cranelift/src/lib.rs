@@ -50,6 +50,17 @@ fn isa_setting(feature: &str) -> Option<&'static str> {
     })
 }
 
+/// A hidden symbol defined here. An undefined one stays an import, which is marked
+/// on the finished object: Cranelift wants its `Hidden` defined. PIC code still
+/// reaches it through the GOT (Cranelift's x64 emitter does, for any symbol), a load
+/// the linker turns into `lea`.
+fn visible_linkage(l: CLinkage, name: &str, m: &sic_ir::Module) -> CLinkage {
+    match l {
+        CLinkage::Export if m.hidden_symbols.contains(name) => CLinkage::Hidden,
+        l => l,
+    }
+}
+
 fn ir_linkage(l: Linkage) -> CLinkage {
     match l {
         Linkage::External => CLinkage::Export,
@@ -147,7 +158,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, 
             continue;
         }
         let sig = build_cl_sig(&f.sig, ptr_size, obj_module.target_config().default_call_conv);
-        let linkage = ir_linkage(f.linkage);
+        let linkage = visible_linkage(ir_linkage(f.linkage), &f.name, ir_module);
         let fid = obj_module.declare_function(&f.name, linkage, &sig)?;
         func_ids.insert(i as u32, fid);
     }
@@ -173,6 +184,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, 
             continue;
         }
         let linkage = if ir_module.weak_externs.contains(&e.name) { CLinkage::Preemptible } else { CLinkage::Import };
+        let linkage = visible_linkage(linkage, &e.name, ir_module);
         let fid = obj_module.declare_function(&e.name, linkage, &sig)?;
         func_ids.insert(FuncRef::extern_(i).0, fid);
     }
@@ -266,6 +278,7 @@ fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, 
             Linkage::Import if ir_module.weak_externs.contains(&g.name) => CLinkage::Preemptible,
             l => ir_linkage(l),
         };
+        let linkage = visible_linkage(linkage, &g.name, ir_module);
         // A `__thread` global is TLS: writable and declared with the tls flag so
         // the backend emits it into .tdata/.tbss and accesses go through the TLS
         // ABI (see `tls_value` in func.rs).
@@ -545,6 +558,12 @@ fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, 
     // a mergeable-strings section, which the linker keeps (merged) in the final
     // executable — `readelf -p .comment a.out` shows which compiler and
     // preprocessor built it.
+    for name in &ir_module.hidden_symbols {
+        if let Some(id) = product.object.symbol_id(name.as_bytes()) {
+            let sym = product.object.symbol_mut(id);
+            if sym.scope != object::SymbolScope::Compilation { sym.scope = object::SymbolScope::Linkage; }
+        }
+    }
     if let Some(producer) = &ir_module.producer {
         let id = product.object.add_section(Vec::new(), b".comment".to_vec(), object::SectionKind::OtherString);
         let mut bytes = producer.as_bytes().to_vec();

@@ -16,6 +16,8 @@ pub enum Lang {
 
 pub struct Lexer {
     pack: u8,
+    /// `#pragma GCC visibility`: what is pushed; the top is in force.
+    visibility: Vec<bool>,
     pack_stack: Vec<u8>,
     src: Vec<char>,
     pos: usize,
@@ -44,6 +46,7 @@ impl Lexer {
     pub fn new_lang(source: &str, typedefs: HashSet<String>, lang: Lang) -> Self {
         Lexer {
             pack: 0,
+            visibility: Vec::new(),
             pack_stack: Vec::new(),
             src: source.chars().collect(),
             pos: 0,
@@ -82,6 +85,7 @@ impl Lexer {
             tok.start = start as u32;
             tok.end = self.pos as u32;
             tok.pack = self.pack;
+            tok.hidden = self.visibility.last().copied().unwrap_or(false);
             tokens.push(tok);
         }
         Ok(tokens)
@@ -161,6 +165,14 @@ impl Lexer {
             let rest = rest.trim_start();
             if let Some(args) = rest.strip_prefix("pack").map(str::trim_start).and_then(|r| r.strip_prefix('(')) {
                 if let Some(args) = args.split(')').next() { self.pragma_pack(args); }
+            }
+            if let Some(v) = rest.strip_prefix("GCC").map(str::trim_start)
+                .and_then(|r| r.strip_prefix("visibility")).map(str::trim_start)
+            {
+                if v.starts_with("pop") { self.visibility.pop(); }
+                else if let Some(k) = v.strip_prefix("push").map(str::trim_start).and_then(|r| r.strip_prefix('(')) {
+                    self.visibility.push(matches!(k.split(')').next().map(str::trim), Some("hidden" | "internal")));
+                }
             }
         }
         // consume '#'

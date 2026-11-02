@@ -1352,6 +1352,15 @@ fn build_ir(path: &str, args: &Args) -> Result<sic_ir::Module, Box<dyn std::erro
     // toolchain lives.
     ir_module.producer = Some(producer_string(args));
 
+    // `-fvisibility=hidden`: what is defined here, unless a declaration says otherwise.
+    if matches!(args.f_options.get("visibility"), Some(FOption::Value(v)) if v == "hidden" || v == "internal") {
+        let m = &mut ir_module;
+        let defined: Vec<String> = m.functions.iter().map(|f| f.name.clone())
+            .chain(m.globals.iter().filter(|g| g.linkage != sic_ir::Linkage::Import).map(|g| g.name.clone()))
+            .filter(|n| !m.visible_symbols.contains(n)).collect();
+        m.hidden_symbols.extend(defined);
+    }
+
     // Typed IR optimization stage (post-lowering, pre-codegen).
     sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
 
@@ -1500,7 +1509,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), reg_vars: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), reg_vars: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1527,6 +1536,8 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         combined.strict_files.extend(tu.strict_files);
         combined.always_inline.extend(tu.always_inline);
         combined.weak_fns.extend(tu.weak_fns);
+        combined.hidden.extend(tu.hidden);
+        combined.visible.extend(tu.visible);
         combined.file_asm.extend(tu.file_asm);
         combined.used_fns.extend(tu.used_fns);
         combined.fn_sections.extend(tu.fn_sections);

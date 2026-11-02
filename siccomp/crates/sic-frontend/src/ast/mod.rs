@@ -794,6 +794,10 @@ pub struct TranslationUnit {
     pub file_asm: Vec<String>,
     /// Functions declared `__attribute__((weak))`, by a definition or a prototype.
     pub weak_fns: Vec<String>,
+    /// Symbols declared with hidden visibility (attribute or pragma).
+    pub hidden: Vec<String>,
+    /// Symbols with an explicit `visibility("default")`: `-fvisibility=` leaves them.
+    pub visible: Vec<String>,
     /// Functions declared `__attribute__((used))`: emitted even if nothing in
     /// the C code calls them (asm or a linker script may).
     pub used_fns: Vec<String>,

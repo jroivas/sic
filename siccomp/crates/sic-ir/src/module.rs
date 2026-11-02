@@ -196,6 +196,11 @@ pub struct Module {
     pub file_asm: Vec<String>,
     /// Externs declared weak: undefined at link time resolves to address 0.
     pub weak_externs: Vec<String>,
+    /// Symbols of hidden visibility: in this linkage unit wherever they are defined,
+    /// so reached directly, and no GOT or PLT entry is needed for them.
+    pub hidden_symbols: crate::fast_hash::HashSet<String>,
+    /// Symbols with an explicit `visibility("default")`.
+    pub visible_symbols: crate::fast_hash::HashSet<String>,
     /// Inline-assembly helpers given as assembler text (symbol, body): a C
     /// `asm` statement whose operands are all constants becomes a call of one.
     /// The driver assembles them with the system assembler (`-S` writes the
@@ -260,6 +265,8 @@ impl Module {
             imported_links: Vec::new(),
             float_vararg_externs: Vec::new(),
             weak_externs: Vec::new(),
+            hidden_symbols: Default::default(),
+            visible_symbols: Default::default(),
             file_asm: Vec::new(),
             asm_text_helpers: Vec::new(),
             asm_deferred: Vec::new(),

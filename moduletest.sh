@@ -1606,6 +1606,44 @@ printf '_Static_assert("ab".length == 3, "x");\nint main() { return 0; }\n' > d.
 if "$SIC" -c d.sic -o d.o 2>err; then bad "fold-assert" "a false assertion passed"; else ok "fold-assert"; fi
 cd ..
 
+# ── hidden visibility: attribute, pragma, -fvisibility=; reached without a GOT, on
+# every back end. Linux's vDSO links with no dynamic relocation only so. ──
+mkdir -p visible && cd visible
+cat > h.c <<'EOF'
+extern int hid __attribute__((visibility("hidden")));
+extern int dflt;
+__attribute__((visibility("hidden"))) int hdef = 1;
+#pragma GCC visibility push(hidden)
+extern int pr;
+#pragma GCC visibility pop
+int after;
+int f(void) { return hid + dflt + hdef + pr + after; }
+EOF
+printf 'int shown __attribute__((visibility("default"))) = 1;\nint gone = 1;\nint fn(void) { return shown + gone; }\n' > g.c
+cat > v.c <<'EOF'
+extern const char data[] __attribute__((visibility("hidden")));
+extern const char page[] __attribute__((visibility("hidden")));
+int get(void) { return data[0] + (page == data); }
+EOF
+printf 'SECTIONS { PROVIDE(data = . - 0x6000); page = data + 0x1000; . = SIZEOF_HEADERS; .hash : { *(.hash) } .dynsym : { *(.dynsym) } .dynstr : { *(.dynstr) } .text : { *(.text*) } .dynamic : { *(.dynamic) } }\n' > v.lds
+for b in $("$SIC" -print-backends); do
+    "$SIC" -fbackend=$b -O2 -fpic -w -c h.c -o h.o 2>err
+    hid="$(readelf -sW h.o | awk '$6=="HIDDEN"{print $8}' | sort | tr '\n' ' ')"
+    if [ "$hid" = "hdef hid pr " ]; then ok "visibility-$b"; else bad "visibility-$b" "hidden: $hid; $(cat err)"; fi
+    "$SIC" -fbackend=$b -fvisibility=hidden -fpic -w -c g.c -o g.o 2>err
+    hid="$(readelf -sW g.o | awk '$6=="HIDDEN"{print $8}' | sort | tr '\n' ' ')"
+    if [ "$hid" = "fn gone " ]; then ok "fvisibility-$b"; else bad "fvisibility-$b" "hidden: $hid; $(cat err)"; fi
+    # As Linux's vDSO: linker-script symbols, and no dynamic relocation.
+    "$SIC" -fbackend=$b -O2 -fpic -w -c v.c -o v.o 2>err
+    if ld -o v.so -shared -Bsymbolic -T v.lds v.o 2>>err && [ "$(readelf -rW v.so | grep -c 'R_X86')" = 0 ]; then ok "visibility-link-$b"; else bad "visibility-link-$b" "$(readelf -rW v.so | grep 'R_X86'; cat err)"; fi
+done
+if "$SIC" -print-backends | grep -qx llvm; then
+    "$SIC" -fbackend=llvm -O2 -fpic -w -c h.c -o h.o 2>err
+    got="$(readelf -rW h.o | awk '/GOTPCREL/{print $5}' | sort | tr '\n' ' ')"
+    if [ "$got" = "after dflt " ]; then ok "visibility-no-got"; else bad "visibility-no-got" "GOT: $got"; fi
+fi
+cd ..
+
 # ── the LLVM back end, when this sic has it ──
 if "$SIC" -print-backends | grep -qx llvm; then
     mkdir -p llvm && cd llvm

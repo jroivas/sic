@@ -68,6 +68,12 @@ pub struct Parser {
     pending_noinline: bool,
     noinline: Vec<String>,
     weak_fns: Vec<String>,
+    /// `visibility("…")` seen for the current declaration: hidden or not.
+    pending_visibility: Option<bool>,
+    /// The first token of the current declaration is in a hidden pragma scope.
+    decl_hidden: bool,
+    hidden: HashSet<String>,
+    visible: HashSet<String>,
     file_asm: Vec<String>,
     /// `__attribute__((used))` / `section("…")` seen for the current declaration.
     pending_used: bool,
@@ -199,7 +205,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -357,6 +363,8 @@ impl Parser {
             strict_files: std::mem::take(&mut self.strict_files), always_inline: std::mem::take(&mut self.always_inline),
             noinline: std::mem::take(&mut self.noinline),
             weak_fns: std::mem::take(&mut self.weak_fns),
+            hidden: std::mem::take(&mut self.hidden).into_iter().collect(),
+            visible: std::mem::take(&mut self.visible).into_iter().collect(),
             file_asm: std::mem::take(&mut self.file_asm),
             used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
             reg_vars: std::mem::take(&mut self.reg_vars) })
@@ -373,6 +381,7 @@ impl Parser {
         self.pending_gnu_inline = false;
         self.pending_weak = false;
         self.pending_thread_local = false;
+        self.pending_visibility = None;
         self.pending_aligned = None;
         self.pending_aligned_expr = None;
     }
@@ -473,8 +482,20 @@ impl Parser {
         Ok(d)
     }
 
+    /// Record the visibility of the declared `name`: its attribute, or the pragma in
+    /// force. A later plain declaration does not undo an earlier hidden one.
+    fn note_visibility(&mut self, name: &str) {
+        match self.pending_visibility {
+            Some(true) => { self.hidden.insert(name.to_string()); }
+            Some(false) => { self.hidden.remove(name); self.visible.insert(name.to_string()); }
+            None if self.decl_hidden => { self.hidden.insert(name.to_string()); }
+            None => {}
+        }
+    }
+
     fn parse_external_decl_inner(&mut self) -> Result<Decl> {
         let sp = self.span();
+        self.decl_hidden = self.peek().hidden;
 
         // Reset per-declaration attribute state, then parse a leading
         // `__attribute__((constructor))` (captured by `skip_attributes`).
@@ -636,6 +657,7 @@ impl Parser {
             }
             if std::mem::take(&mut self.pending_noinline) { self.noinline.push(name.clone()); }
             if self.pending_weak { self.weak_fns.push(name.clone()); }
+            self.note_visibility(&name);
             if self.pending_gnu_inline { self.gnu_inline.push(name.clone()); }
             self.take_alias(&name, &storage);
             let used = std::mem::take(&mut self.pending_used);
@@ -732,6 +754,7 @@ impl Parser {
         if !matches!(ty.ty, AstType::Function { .. }) { self.check_not_macro(&name, &sp)?; }
         let align = self.pending_aligned.take().max(group_align);
         let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
+        self.note_visibility(&name);
         // A `section` attribute in the specifiers applies to every declarator.
         declarators.push(Declarator { name, ty, init, cleanup: None, align, align_expr, unused: false, section: self.pending_section.clone(), reg: None, span: sp.clone() });
 
@@ -743,6 +766,7 @@ impl Parser {
             if let Some(vs) = self.pending_vector_size.take() { t = self.apply_vector_size(t, vs); }
             let align = self.pending_aligned.take().max(group_align);
             let align_expr = self.pending_aligned_expr.take().or_else(|| group_align_expr.clone());
+            self.note_visibility(&n);
             let init = if self.eat(TokenKind::Eq) { Some(self.parse_initializer()?) } else { None };
             if !matches!(t.ty, AstType::Function { .. }) { self.check_not_macro(&n, &self.span())?; }
             declarators.push(Declarator { name: n, ty: t, init, cleanup: None, align, align_expr, unused: false, section: self.pending_section.clone(), reg: None, span: self.span() });
@@ -1297,6 +1321,7 @@ impl Parser {
         self.skip_decl_tail();
         if let AstType::Function { params, variadic, ret } = ty.ty.clone() {
             if self.pending_weak { self.weak_fns.push(name.clone()); }
+            self.note_visibility(&name);
             self.take_alias(&name, storage);
             return Ok(Decl::Func {
                 name, ret_ty: *ret, params, variadic,
@@ -4226,6 +4251,12 @@ impl Parser {
                             j += 1;
                         }
                         if !target.is_empty() { self.pending_alias = Some(target); }
+                    } else if name == "visibility" || name == "__visibility__" {
+                        // `protected` is visible to the linker's output as `default`
+                        // is; only a hidden symbol changes how it is reached.
+                        if let Some(t) = self.tokens.get(i + 2).filter(|t| t.kind == TokenKind::StringLit) {
+                            self.pending_visibility = Some(matches!(t.text.as_str(), "hidden" | "internal"));
+                        }
                     } else if name == "section" || name == "__section__" {
                         // `section("name")` (adjacent string literals concatenate).
                         if matches!(self.tokens.get(i + 1).map(|t| t.kind), Some(TokenKind::LParen)) {
