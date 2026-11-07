@@ -925,6 +925,12 @@ fn backend_opt_level(opt: &str) -> OptLevel {
     }
 }
 
+/// `-ffreestanding`: no hosted environment (`__STDC_HOSTED__` is 0, the
+/// preprocessor's business too).
+fn freestanding(args: &Args) -> bool {
+    matches!(args.f_options.get("freestanding"), Some(FOption::Enabled))
+}
+
 /// The back ends built into this sic: the first is the default.
 fn available_backends() -> Vec<Box<dyn Backend>> {
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
@@ -1060,6 +1066,7 @@ fn parse_source(
     }
     let isa_defs = isa_defines(args);
     extra.extend(isa_defs.iter().map(|s| s.as_str()));
+    if freestanding(args) { extra.push("-ffreestanding"); }
     let mut preprocessed = preprocess_ex(path, &args.defines, &args.includes, &args.std, &extra)
         .map_err(|e| format!("{}", e))?;
 
@@ -1331,7 +1338,7 @@ fn lower_tu_once(
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled))
         && isa::Isa::from_flags(&args.machine_flags).0.sse2();
     lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
-        && !matches!(args.f_options.get("freestanding"), Some(FOption::Enabled));
+        && !freestanding(args);
     // Dead counted-loop elimination: default on at -O2+, overridable via -f.
     {
         let o = args.opt.as_str();
@@ -1884,6 +1891,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         if args.pthread { extra.push("-D_REENTRANT"); }
         let isa_defs = isa_defines(args);
         extra.extend(isa_defs.iter().map(|s| s.as_str()));
+        if freestanding(args) { extra.push("-ffreestanding"); }
         let mut out_text = String::new();
         for src in &sources {
             // Assembler source with the C preprocessor (`.S`): GCC defines

@@ -4096,7 +4096,7 @@ static Output run(list<string> args, string given_info, string given_text, i32 h
         pp.macros["__STDC_UTF_16__"] = "O|1";
         pp.macros["__STDC_UTF_32__"] = "O|1";
     }
-    pp.macros["__STDC_HOSTED__"] = "O|1";
+    pp.macros["__STDC_HOSTED__"] = freestanding ? "O|0" : "O|1";
     pp.macros["__SICC__"] = "O|1";
     pp.macros["__SICC_MINOR__"] = "O|2";
     pp.macros["__SICC_PATCH__"] = "O|2";
