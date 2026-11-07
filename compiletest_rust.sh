@@ -110,29 +110,29 @@ dotest() {
     # reserved Rust-style type alias as an identifier). A non-empty marker's
     # first line is the expected diagnostic: it must appear in sic's output.
     if [ -f "$test.xfail" ]; then
-        if env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
+        if env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>"$outfolder/$base.err"; then
             echo "FAIL $base: expected compile failure but it compiled"
             return 1
         fi
         local want
         want="$(head -n 1 "$test.xfail")"
-        if [ -n "$want" ] && ! grep -qF -- "$want" /tmp/sic_err_$base; then
+        if [ -n "$want" ] && ! grep -qF -- "$want" "$outfolder/$base.err"; then
             echo "FAIL $base: expected the diagnostic: $want"
-            head -n 3 /tmp/sic_err_$base
+            head -n 3 "$outfolder/$base.err"
             return 1
         fi
         echo "PASS $base (expected compile failure)"
         return 0
     fi
 
-    if ! env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>/tmp/sic_err_$base; then
+    if ! env $envs "$SIC" -c "$test" -o "$obj_file" $flags ${CFLAGS} 2>"$outfolder/$base.err"; then
         echo "FAIL $base: compile error"
-        cat /tmp/sic_err_$base
+        cat "$outfolder/$base.err"
         return 1
     fi
-    if ! $LINKER "$obj_file" -o "$bin_file" -lm $flags 2>/tmp/link_err_$base; then
+    if ! $LINKER "$obj_file" -o "$bin_file" -lm $flags 2>"$outfolder/$base.link.err"; then
         echo "FAIL $base: link error"
-        cat /tmp/link_err_$base
+        cat "$outfolder/$base.link.err"
         return 1
     fi
 

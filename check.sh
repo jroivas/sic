@@ -9,6 +9,7 @@
 #      (-O0 -O1 -O2 -O3 -Os -Oz);
 #   4. run the module-test suite (moduletest_rust.sh) with BOTH profiles.
 # Steps 2-4 run once per back end (SIC_BACKEND=cranelift, SIC_BACKEND=llvm).
+# The compile tests run JOBS at a time (default: nproc); JOBS=1 runs them in turn.
 # The LLVM back end needs LLVM 21; without it the build step fails.
 #
 # BAILS OUT on the first failure (build error, or any test not passing) and prints
@@ -28,6 +29,8 @@ REL="$ROOT/siccomp/target/release/sic"
 # Every back end is checked: each suite runs once per back end.
 BACKENDS=(cranelift llvm)
 BUILD_BACKENDS="$(IFS=,; echo "${BACKENDS[*]}")"
+# Compile tests run this many at once (results are reported in test order).
+export JOBS="${JOBS:-$(nproc)}"
 # Append one timing record per successful run here (git-ignored) — a history to
 # watch for build/compile-time regressions.
 TIMES_FILE="$ROOT/.check_times.log"
