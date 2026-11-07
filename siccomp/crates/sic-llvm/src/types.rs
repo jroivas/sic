@@ -67,6 +67,11 @@ impl<'ctx> Cx<'ctx, '_> {
     /// What a function returns at the C ABI, if anything: a small aggregate as its
     /// eightbytes. A MEMORY aggregate has the frontend's hidden pointer instead.
     pub fn return_type(&self, ret: &Type) -> Option<BasicTypeEnum<'ctx>> {
+        // `_Complex long double` comes back in `st(0)` and `st(1)`.
+        if sic_ir::abi::is_complex_x87(ret) {
+            let f = self.ctx.x86_f80_type().into();
+            return Some(self.ctx.struct_type(&[f, f], false).into());
+        }
         match ret {
             Type::Struct(_) | Type::Union(_) => match classify_struct_union(ret, self.opts.ptr_size) {
                 AggClass::Regs(chunks) if chunks.len() == 1 => Some(self.chunk_type(&chunks[0])),

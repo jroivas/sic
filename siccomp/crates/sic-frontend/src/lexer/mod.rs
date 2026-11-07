@@ -391,8 +391,14 @@ impl Lexer {
         // suffixes: u, l, ll, f, ul, ull, etc. (consume but store in text). A
         // float `f`/`F` may carry a C23 `_FloatN` width — `0.0f16`, `1.0f128` —
         // so consume any digits that follow it.
-        while self.pos < self.src.len() && matches!(self.src[self.pos], 'u'|'U'|'l'|'L'|'f'|'F') {
+        // GNU imaginary constants: an `i` or `j` among the suffixes (`1.0fi`, `2i`).
+        let mut imaginary = false;
+        while self.pos < self.src.len() && (matches!(self.src[self.pos], 'u'|'U'|'l'|'L'|'f'|'F')
+            || (!imaginary && matches!(self.src[self.pos], 'i'|'j'|'I'|'J')
+                && !self.src.get(self.pos + 1).map_or(false, |c| c.is_ascii_alphanumeric() && !matches!(c, 'f'|'F'|'l'|'L'|'u'|'U'))))
+        {
             let c = self.advance();
+            if matches!(c, 'i'|'j'|'I'|'J') { imaginary = true; }
             text.push(c);
             if matches!(c, 'f' | 'F') {
                 is_float = true;

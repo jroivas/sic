@@ -3730,6 +3730,13 @@ impl Lowerer {
                 return self.build_global_init(&d2, ir_ty);
             }
         }
+        if types::is_complex(ir_ty) {
+            let init = d.init.as_ref()?;
+            let ty = ir_ty.clone();
+            let mut buf = vec![0u8; ty.size_of(self.ptr_size) as usize];
+            let mut relocs = Vec::new();
+            return self.serialize_const(init, &ty, &mut buf, 0, &mut relocs).then_some(Constant::Bytes(buf));
+        }
         match &d.init {
             // sic `string g = "..."` at file scope: a `{ data, size }` slice
             // descriptor — pointer reloc to the cstring + the byte length.
@@ -3934,6 +3941,53 @@ impl Lowerer {
         }
     }
 
+    /// The value of a constant complex (or real) expression as `(re, im)`.
+    fn eval_const_complex(&self, e: &Expr) -> Option<(f64, f64)> {
+        let finite = |(r, i): (f64, f64)| (r.is_finite() && i.is_finite()).then_some((r, i));
+        match &e.kind {
+            ExprKind::Call { func, args } if matches!(&func.kind, ExprKind::Ident(n) if n == "__sic_imaginary") =>
+                Some((0.0, self.eval_const_float(args.first()?)?)),
+            ExprKind::Call { func, args } if matches!(&func.kind, ExprKind::Ident(n) if n == "__builtin_complex") && args.len() == 2 =>
+                Some((self.eval_const_float(&args[0])?, self.eval_const_float(&args[1])?)),
+            ExprKind::Unary { op: UnOpKind::Neg, expr } => self.eval_const_complex(expr).map(|(r, i)| (-r, -i)),
+            ExprKind::Unary { op: UnOpKind::BitNot, expr } => self.eval_const_complex(expr).map(|(r, i)| (r, -i)),
+            ExprKind::Cast { ty, expr } => {
+                let t = lower_type(ty, &self.struct_types, self.ptr_size).ok()?;
+                let round = |v: f64, t: &Type| match t {
+                    Type::Float32 => Some(v as f32 as f64),
+                    Type::Float64 | Type::Float80 => Some(v),
+                    Type::Int { .. } | Type::Bool => self.eval_const_float(&Expr::new(ExprKind::Cast {
+                        ty: QualType::new(AstType::Lowered(t.clone())),
+                        expr: Box::new(Expr::new(ExprKind::FloatLit(v), e.span.clone())) }, e.span.clone())),
+                    _ => None,
+                };
+                let (r, i) = self.eval_const_complex(expr)?;
+                match types::complex_elem(&t) {
+                    Some(el) => Some((round(r, el)?, round(i, el)?)),
+                    None => Some((round(r, &t)?, 0.0)),
+                }
+            }
+            ExprKind::BinOp { op, lhs, rhs } if matches!(op, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div) => {
+                let ((a, b), (c, d)) = (self.eval_const_complex(lhs)?, self.eval_const_complex(rhs)?);
+                if b == 0.0 && d == 0.0 { return self.eval_const_float(e).map(|v| (v, 0.0)); }
+                finite(match op {
+                    BinOpKind::Add => (a + c, b + d),
+                    BinOpKind::Sub => (a - c, b - d),
+                    // A real factor scales each part (no `0 * inf` from a zero part).
+                    BinOpKind::Mul if d == 0.0 => (a * c, b * c),
+                    BinOpKind::Mul if b == 0.0 => (a * c, a * d),
+                    BinOpKind::Mul => (a * c - b * d, a * d + b * c),
+                    BinOpKind::Div if d == 0.0 => (a / c, b / c),
+                    _ => {
+                        let den = c * c + d * d;
+                        ((a * c + b * d) / den, (b * c - a * d) / den)
+                    }
+                })
+            }
+            _ => self.eval_const_float(e).map(|v| (v, 0.0)),
+        }
+    }
+
     fn eval_const_float(&self, e: &Expr) -> Option<f64> {
         match &e.kind {
             ExprKind::FloatLit(f) => return Some(*f),
@@ -3980,7 +4034,7 @@ impl Lowerer {
             Type::Array { .. } | Type::Union(_) => true,
             Type::Struct(st) => !(types::is_sic_string(t) || types::is_any(t) || types::is_va_array(t)
                 || types::is_fixed(t) || types::is_type_info(t) || types::is_task(t)
-                || types::is_tuple(t) || types::is_closure(t) || types::is_weak_ref(t)
+                || types::is_tuple(t) || types::is_closure(t) || types::is_weak_ref(t) || types::is_complex(t)
                 || st.name.as_ref().map_or(false, |n| self.enum_defs.contains_key(n))),
             _ => false,
         }
@@ -4047,6 +4101,23 @@ impl Lowerer {
             buf[base + ps..base + ps * 2].copy_from_slice(&size_le[..ps]);
             relocs.push((base, RelocTarget::Global(gref, 0)));
             return true;
+        }
+        // `_Complex T`: a constant complex expression, or `{ x }`.
+        if let Some(elem) = types::complex_elem(&ty).cloned() {
+            let e = match init {
+                Initializer::Expr(e) => e,
+                Initializer::List(items) => match items.as_slice() {
+                    [] => return true,
+                    [InitItem { designators, init: Initializer::Expr(e) }] if designators.is_empty() => e,
+                    _ => return false,
+                },
+            };
+            let Some((re, im)) = self.eval_const_complex(e) else { return false };
+            let esz = elem.size_of(self.ptr_size) as usize;
+            let part = |v: f64| if elem.is_float() { Expr::new(ExprKind::FloatLit(v), e.span.clone()) }
+                else { Expr::new(ExprKind::IntLit(v as i64, true), e.span.clone()) };
+            return self.serialize_scalar(&part(re), &elem, buf, base, relocs)
+                && self.serialize_scalar(&part(im), &elem, buf, base + esz, relocs);
         }
         // An aggregate initialized by a compound literal of its type
         // (`struct S g = (struct S){1, 2};`, a `(struct S){…}` member value):

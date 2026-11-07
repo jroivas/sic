@@ -219,6 +219,7 @@ impl<'m> FuncCtx<'m> {
     }
 
     fn lower_lvalue_inner(&mut self, expr: &Expr) -> Result<LValue> {
+        if let Some(lv) = self.complex_part_lvalue(expr)? { return Ok(lv); }
         // A global register variable has no storage; only asm operands name it.
         if let ExprKind::Ident(n) = &expr.kind {
             if self.global_reg_var(n).is_some() {

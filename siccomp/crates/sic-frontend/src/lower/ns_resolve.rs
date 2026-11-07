@@ -153,7 +153,7 @@ impl<'a> NsRenamer<'a> {
             }
             AstType::Void | AstType::Char { .. } | AstType::Short { .. } | AstType::Int { .. }
             | AstType::Long { .. } | AstType::LongLong { .. } | AstType::Float | AstType::Double
-            | AstType::LongDouble | AstType::Bool | AstType::Complex | AstType::Bitfield(_)
+            | AstType::LongDouble | AstType::Bool | AstType::Complex(_) | AstType::Bitfield(_)
             | AstType::Builtin(_) | AstType::Tuple | AstType::Fixed { .. }
             | AstType::Auto | AstType::Lowered(_) => {}
         }

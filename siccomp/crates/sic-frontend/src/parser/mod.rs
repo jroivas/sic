@@ -131,6 +131,9 @@ pub struct Parser {
     /// Typedefs of an array (not a vector), with the element type: a parameter of
     /// such a type is a pointer, as one written `T a[N]`.
     array_typedefs: HashMap<String, QualType>,
+    /// Typedef names whose type involves `_Complex`: a typedef alone (glibc's
+    /// `__cfloat128`) is no use of a complex type, a declaration with one is.
+    complex_typedefs: HashSet<String>,
     /// sic `private struct`/`union`/`enum` (sic.md §"Namespace"): set while the
     /// `private` keyword has been consumed and applies to the next aggregate.
     pending_private: bool,
@@ -208,7 +211,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -887,6 +890,8 @@ impl Parser {
                 Some(e) => { self.array_typedefs.insert(name.clone(), e); }
                 None => { self.array_typedefs.remove(&name); }
             }
+            if self.mentions_complex(&ty.ty) { self.complex_typedefs.insert(name.clone()); }
+            else { self.complex_typedefs.remove(&name); }
             self.typedefs.insert(name.clone());
             names.push((name, ty));
             if !self.eat(TokenKind::Comma) { break; }
@@ -925,6 +930,7 @@ impl Parser {
         let mut base: Option<AstType> = None;
         let mut long_count = 0u32;
         let mut long_span: Option<Span> = None;
+        let mut complex = false;
 
         // sic `@T` / `@mut T` reference type (sic.md §"References"): a leading `@`
         // marks the whole declared type as a scoped reference.
@@ -1055,7 +1061,7 @@ impl Parser {
                 TokenKind::Float    => { base = Some(AstType::Float); self.advance(); }
                 TokenKind::Double   => { base = Some(AstType::Double); self.advance(); }
                 TokenKind::Bool     => { base = Some(AstType::Bool); self.advance(); }
-                TokenKind::Complex  => { base = Some(AstType::Complex); self.advance(); }
+                TokenKind::Complex  => { complex = true; self.advance(); }
                 // sic `private struct/union/enum` (sic.md §"Namespace"): withhold
                 // the following aggregate type from the module manifest.
                 TokenKind::Ident if self.lang == Lang::Sic && self.peek().text == "private"
@@ -1277,6 +1283,14 @@ impl Parser {
             qt.qualifiers = quals;
             return Ok((qt, None));
         }
+        // `_Complex T` (alone, `_Complex double`, as GCC).
+        if complex {
+            base = Some(AstType::Complex(Box::new(base.unwrap_or(AstType::Double))));
+        }
+        // A complex type in anything but a typedef: complex operations may follow.
+        if !matches!(storage, Some(StorageClass::Typedef)) && base.as_ref().map_or(false, |b| self.mentions_complex(b)) {
+            crate::lower::types::note_complex();
+        }
         let ty = base.unwrap_or(AstType::Int { signed: true });
         let mut qt = QualType::new(ty);
         qt.qualifiers = quals;
@@ -1288,6 +1302,19 @@ impl Parser {
             if self.volatile_typedefs.contains(n) { qt.qualifiers.push(TypeQual::Volatile); }
         }
         Ok((qt, storage))
+    }
+
+    /// Whether `t` is or reaches a `_Complex` type (through pointers, arrays,
+    /// functions, and typedef names).
+    fn mentions_complex(&self, t: &AstType) -> bool {
+        match t {
+            AstType::Complex(_) => true,
+            AstType::Named(n) => self.complex_typedefs.contains(n),
+            AstType::Pointer { base, .. } | AstType::Array { base, .. } => self.mentions_complex(&base.ty),
+            AstType::Function { ret, params, .. } =>
+                self.mentions_complex(&ret.ty) || params.iter().any(|p| self.mentions_complex(&p.ty.ty)),
+            _ => false,
+        }
     }
 
     // ─── Struct / union / enum ────────────────────────────────────────────────
@@ -3476,7 +3503,7 @@ impl Parser {
             | TokenKind::Long | TokenKind::Float | TokenKind::Double | TokenKind::Signed
             | TokenKind::Unsigned | TokenKind::Bool | TokenKind::Struct | TokenKind::Union
             | TokenKind::Enum | TokenKind::Bitfield | TokenKind::Const | TokenKind::Volatile
-            | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Attribute)
+            | TokenKind::Typeof | TokenKind::Alignas | TokenKind::Attribute | TokenKind::Complex)
         {
             return true;
         }
@@ -3503,7 +3530,7 @@ impl Parser {
         match self.tokens.get(self.pos + 2) {
             Some(t2) => matches!(t2.kind,
                 TokenKind::RParen | TokenKind::Star | TokenKind::LBracket | TokenKind::LParen
-                | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict),
+                | TokenKind::Const | TokenKind::Volatile | TokenKind::Restrict | TokenKind::Complex),
             None => true,
         }
     }
@@ -3688,6 +3715,18 @@ impl Parser {
                 // SIMD intrinsic bodies) handles the leading cast / compound literal.
                 self.parse_cast()
             }
+            // GNU `__real__ z` / `__imag__ z`: a unary operator, lowered as a
+            // builtin of that name.
+            TokenKind::Ident if self.lang != Lang::Sic
+                && matches!(self.peek().text.as_str(), "__real__" | "__real" | "__imag__" | "__imag") =>
+            {
+                let sp = self.span();
+                let name = if self.advance().text.starts_with("__real") { "__real__" } else { "__imag__" };
+                let operand = self.parse_cast()?;
+                crate::lower::types::note_complex();
+                let f = Expr::new(ExprKind::Ident(name.to_string()), sp.clone());
+                Ok(Expr::new(ExprKind::Call { func: Box::new(f), args: vec![operand] }, sp))
+            }
             _ => self.parse_postfix()
         }
     }
@@ -3846,6 +3885,16 @@ impl Parser {
             let (ty, _) = self.parse_decl_specifiers()?;
             let (_, ty) = self.parse_declarator(ty)?;
             return Ok(Expr::new(ExprKind::TypeIdOf(ty), sp));
+        }
+        // A GNU imaginary constant (`1.0fi`): `__sic_imaginary` of the real one.
+        if matches!(self.peek_kind(), TokenKind::IntLit | TokenKind::FloatLit) {
+            if let Some(text) = imaginary_real_text(&self.peek().text) {
+                self.tokens[self.pos].text = text;
+                let lit = self.parse_primary()?;
+                crate::lower::types::note_complex();
+                let f = Expr::new(ExprKind::Ident("__sic_imaginary".to_string()), sp.clone());
+                return Ok(Expr::new(ExprKind::Call { func: Box::new(f), args: vec![lit] }, sp));
+            }
         }
         match self.peek_kind() {
             // sic lambda `[captures](params) { … }` / `=> expr` (sic.md §"Lambdas").
@@ -4826,6 +4875,20 @@ pub(crate) fn kind_spelling(k: TokenKind) -> String {
 }
 
 /// The suffix makes a `float` (not `double`/`long double`) constant.
+/// A number token with an imaginary suffix (`i`/`j`, GNU) without it, else None.
+fn imaginary_real_text(text: &str) -> Option<String> {
+    let hex = text.starts_with("0x") || text.starts_with("0X");
+    let digits_end = text.char_indices()
+        .find(|&(_, c)| !(c.is_ascii_hexdigit() && hex || c.is_ascii_digit() || matches!(c, '.' | 'x' | 'X' | 'p' | 'P' | '+' | '-')
+            || (!hex && matches!(c, 'e' | 'E'))))
+        .map_or(text.len(), |(i, _)| i);
+    let suffix = &text[digits_end..];
+    let pos = suffix.find(|c| matches!(c, 'i' | 'j' | 'I' | 'J'))?;
+    let mut t = text.to_string();
+    t.remove(digits_end + pos);
+    Some(t)
+}
+
 fn is_float_suffix(suf: &str) -> bool {
     matches!(suf, "f" | "F" | "f32" | "F32")
 }

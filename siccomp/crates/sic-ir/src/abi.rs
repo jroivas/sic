@@ -86,11 +86,22 @@ pub fn classify_struct_union(ty: &Type, ptr_size: u32) -> AggClass {
     AggClass::Regs(chunks)
 }
 
+/// The name prefix of the frontend's `_Complex T` structs (`{ re, im }`).
+pub const COMPLEX_PREFIX: &str = "_Complex ";
+
+/// `_Complex long double`: System V's COMPLEX_X87 class. Passed in memory like
+/// any x87 aggregate, but returned in `st(0)` (real part) and `st(1)` (imaginary).
+pub fn is_complex_x87(ty: &Type) -> bool {
+    matches!(ty, Type::Struct(s) if s.name.as_deref().map_or(false, |n| n.starts_with(COMPLEX_PREFIX))
+        && s.fields.len() == 2 && s.fields.iter().all(|(_, t)| *t == Type::Float80))
+}
+
 /// True if the aggregate's SysV return uses the hidden sret pointer (MEMORY
 /// class). `Array` (vectors) keep the sret path for now.
 pub fn ret_in_memory(ty: &Type, ptr_size: u32) -> bool {
     match ty {
         Type::Array { .. } => true,
+        _ if is_complex_x87(ty) => false,
         Type::Struct(_) | Type::Union(_) => {
             matches!(classify_struct_union(ty, ptr_size), AggClass::Memory(_))
         }

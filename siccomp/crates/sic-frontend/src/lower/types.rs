@@ -702,6 +702,43 @@ pub const U8CHAR_MARKER: &str = "__sic_u8char";
 /// The `u8char` value type — a Unicode scalar held in 32 bits (a `{ u32 cp }`
 /// struct so it is a distinct type). `sizeof(u8char) == 4` (storage), while
 /// `c.size` is the value's UTF-8 encoded byte length (1..4, computed at runtime).
+// ─── `_Complex T` ──────────────────────────────────────────────────────────────
+//
+// A struct of a real and an imaginary `T` under a name C cannot spell: its layout
+// and its System V passing (`_Complex float` in one SSE register, `_Complex
+// double` in two, an integer one in general registers) are those of the struct.
+
+pub const COMPLEX_MARKER: &str = sic_ir::abi::COMPLEX_PREFIX;
+
+thread_local! {
+    /// Whether this translation unit has a complex type or an imaginary constant:
+    /// until it does, no expression needs the complex checks.
+    static COMPLEX_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn note_complex() { COMPLEX_SEEN.with(|c| c.set(true)); }
+pub fn complex_seen() -> bool { COMPLEX_SEEN.with(|c| c.get()) }
+
+/// The `_Complex elem` type.
+pub fn complex_type(elem: Type) -> Type {
+    let name = format!("{}{}", COMPLEX_MARKER, elem);
+    Type::Struct(StructType::plain(Some(name), vec![
+        ("re".to_string(), elem.clone()),
+        ("im".to_string(), elem),
+    ], false))
+}
+
+/// The element type of a `_Complex` type, else None.
+pub fn complex_elem(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with(COMPLEX_MARKER))
+            && st.fields.len() == 2 => Some(&st.fields[0].1),
+        _ => None,
+    }
+}
+
+pub fn is_complex(t: &Type) -> bool { complex_elem(t).is_some() }
+
 pub fn u8char_type() -> Type {
     Type::Struct(StructType::plain(Some(U8CHAR_MARKER.to_string()), vec![
         ("cp".to_string(), Type::Int { bits: 32, signed: false }),
@@ -886,7 +923,13 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Float       => Type::Float32,
         AstType::Double      => Type::Float64,
         AstType::LongDouble  => Type::Float80,
-        AstType::Complex     => Type::Float64, // simplified
+        AstType::Complex(t)  => {
+            let elem = lower_type(&QualType::new((**t).clone()), named, ptr_size)?;
+            if !matches!(elem, Type::Int { .. } | Type::Float32 | Type::Float64 | Type::Float80) {
+                return Err(CompileError::new("_Complex needs an arithmetic type"));
+            }
+            complex_type(elem)
+        }
         AstType::Pointer { base, .. } => {
             let inner = lower_type(base, named, ptr_size)?;
             // A container handle (`dict`/`list`/`set`) is ALREADY a heap pointer, so
@@ -1181,6 +1224,8 @@ fn mangle_type_name(t: &Type) -> String {
 /// recovered on demand with [`resolve_aggregate`].
 pub fn opaque_aggregate(t: Type) -> Type {
     match t {
+        // `_Complex T` has no entry in the type table: it stays whole.
+        Type::Struct(_) if is_complex(&t) => t,
         Type::Struct(st) if st.name.is_some() =>
             Type::Struct(StructType::plain(st.name, vec![], st.packed)),
         Type::Union(u) if u.name.is_some() =>

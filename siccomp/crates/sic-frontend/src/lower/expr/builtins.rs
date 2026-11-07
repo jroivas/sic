@@ -357,6 +357,7 @@ impl<'m> FuncCtx<'m> {
     /// it), or `None` when it is none sic lowers itself.
     pub(crate) fn builtin_result_type(&self, name: &str, args: &[Expr]) -> Option<Type> {
         if let Some(t) = self.ia32_result_type(name, args) { return Some(t); }
+        if let Some(t) = self.complex_builtin_type(name, args) { return Some(t); }
         let arg = |i: usize| args.get(i).and_then(|a| self.infer_expr_type(a).ok());
         let pointee = || match arg(0) { Some(Type::Pointer(t)) => Some(crate::lower::types::resolve_aggregate(&t, &self.lowerer.struct_types)), _ => None };
         let u = |bits| Type::Int { bits, signed: false };

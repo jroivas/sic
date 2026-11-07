@@ -755,6 +755,16 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let cx = self.cx;
         let Some(v) = site.try_as_basic_value().basic() else { return Ok(()) };
         let ptr_size = cx.opts.ptr_size;
+        if sic_ir::abi::is_complex_x87(ret) {
+            let addr = self.slot(32, 16)?;
+            for i in 0..2u32 {
+                let part = self.b().build_extract_value(v.into_struct_value(), i, "")?;
+                let at = self.gep_const(addr, 16 * i as u64)?;
+                self.store(at, part)?;
+            }
+            self.vals.insert(d, addr.into());
+            return Ok(());
+        }
         if matches!(ret, Type::Struct(_) | Type::Union(_)) {
             if let AggClass::Regs(chunks) = classify_struct_union(ret, ptr_size) {
                 let addr = self.slot(ret.size_of(ptr_size) as u32, ret.align_of(ptr_size).max(1) as u32)?;
@@ -831,7 +841,14 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     return Ok(());
                 };
                 let ret = &self.f.sig.ret;
-                if *ret == Type::Float80 {
+                if sic_ir::abi::is_complex_x87(ret) {
+                    let base = self.ptr_of(v)?;
+                    let f80 = cx.ctx.x86_f80_type().into();
+                    let re = self.load(f80, base)?;
+                    let im_at = self.gep_const(base, 16)?;
+                    let im = self.load(f80, im_at)?;
+                    self.b().build_aggregate_return(&[re, im])?;
+                } else if *ret == Type::Float80 {
                     let d = self.typed(v, cx.ctx.f64_type().into())?.into_float_value();
                     let x = self.b().build_float_ext(d, cx.ctx.x86_f80_type(), "")?;
                     self.b().build_return(Some(&x))?;

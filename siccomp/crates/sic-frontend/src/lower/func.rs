@@ -223,14 +223,15 @@ pub(crate) fn type_desc(t: &Type) -> String {
     }
 }
 
-/// The source symbol for a binary operator, for enum-arithmetic diagnostics.
+/// The source symbol for a binary operator, for diagnostics.
 pub(crate) fn op_symbol(op: crate::ast::BinOpKind) -> &'static str {
     use crate::ast::BinOpKind::*;
     match op {
         Add => "+", Sub => "-", Mul => "*", Div => "/", Rem => "%",
         BitAnd => "&", BitOr => "|", BitXor => "^",
         Shl => "<<", Shr => ">>", RotL => "<<<", RotR => ">>>",
-        _ => "op",
+        Lt => "<", Gt => ">", Le => "<=", Ge => ">=", Eq => "==", Ne => "!=",
+        LogAnd => "&&", LogOr => "||",
     }
 }
 
@@ -794,6 +795,8 @@ impl<'m> FuncCtx<'m> {
                     let rc = if self.needs_copy_on_escape(e) { Self::RC_LOCAL_SENTINEL } else { 0 };
                     let v = self.lower_expr(e)?;
                     self.cstr_to_string_rc(v, rc)?
+                } else if super::types::is_complex(&agg_ty) {
+                    self.lower_complex_as(e, &agg_ty)?
                 } else {
                     let p = self.lower_aggregate_ptr(e)?;
                     // `return f();` moves the call's managed-struct result out.
@@ -850,6 +853,9 @@ impl<'m> FuncCtx<'m> {
                     } else {
                         Some(p)
                     }
+                } else if super::types::is_complex(&self.ret_ty) {
+                    let rty = self.ret_ty.clone();
+                    Some(self.lower_complex_as(e, &rty)?)
                 } else if self.is_sic() && super::types::is_u8char(&self.ret_ty)
                     && !matches!(self.infer_expr_type(e), Ok(t) if super::types::is_u8char(&t))
                 {
@@ -895,10 +901,19 @@ impl<'m> FuncCtx<'m> {
                 // Expected-type context (sic.md §"Lambdas"): returning a
                 // captureless lambda as `Fn<…>` boxes it into a closure.
                 let prev_exp = self.expected_ty.replace(rt.clone());
-                let v = self.lower_expr(e);
+                let complex = self.complex_type_of(e);
+                let v = if complex.is_some() { self.lower_aggregate_ptr(e) } else { self.lower_expr(e) };
                 self.expected_ty = prev_exp;
                 let v = v?;
                 let expected = self.ret_ty.clone();
+                let v = match complex {
+                    Some(st) => match self.complex_coerce(v, &st, &expected)? {
+                        Some(v) => v,
+                        None => return Err(CompileError::at(format!("cannot return a complex value as `{}`", expected),
+                            e.span.file.clone(), e.span.line, e.span.col)),
+                    },
+                    None => v,
+                };
                 let c = self.coerce(v, &expected)?;
                 // sic tuple / closure return (sic.md §"Tuples"/§"Lambdas"):
                 // retain the shared block before scope-exit releases run, so
@@ -3755,6 +3770,24 @@ impl<'m> FuncCtx<'m> {
                 }
                 return Ok(());
             }
+            // `_Complex T z = <expr>`: converted as by assignment.
+            Initializer::Expr(e) if super::types::is_complex(ty) => {
+                let src = self.lower_complex_as(e, ty)?;
+                let size = ty.size_of(self.ptr_size());
+                let align = ty.align_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: ptr, src, size, align });
+                return Ok(());
+            }
+            // A complex value for a scalar: its real part (or for `_Bool` its truth).
+            Initializer::Expr(e) if matches!(ty, Type::Int { .. } | Type::Bool | Type::Float32 | Type::Float64 | Type::Float80)
+                && self.complex_type_of(e).is_some() =>
+            {
+                let st = self.complex_type_of(e).unwrap();
+                let p = self.lower_aggregate_ptr(e)?;
+                let v = self.complex_to_scalar(p, &st, ty)?;
+                self.push_instr(Instr::Store { val: v, ptr });
+                return Ok(());
+            }
             // sic `any a = <expr>` (sic.md std): box the value unless the RHS is
             // already an `any` (then it copies below like any aggregate).
             Initializer::Expr(e)
@@ -4295,8 +4328,7 @@ impl<'m> FuncCtx<'m> {
         }
         self.enter_scope();
         let mark = self.temp_mark();
-        let v = self.lower_expr(cond)?;
-        let b = self.to_bool(v)?;
+        let b = self.lower_truth(cond)?;
         self.flush_temps_from(mark);
         self.exit_scope();
         self.set_terminator(Terminator::CondJump { cond: b, then_bb, else_bb });
@@ -7669,7 +7701,7 @@ fn ast_type_string(t: &AstType) -> String {
         AstType::Double => "double".to_string(),
         AstType::LongDouble => "long double".to_string(),
         AstType::Bool => "_Bool".to_string(),
-        AstType::Complex => "_Complex".to_string(),
+        AstType::Complex(t) => format!("_Complex {}", c_type_string(&QualType::new((**t).clone()))),
         AstType::Pointer { base, .. } => format!("{} *", c_type_string(base)),
         AstType::Array { base, .. } => format!("{} []", c_type_string(base)),
         AstType::Named(n) => n.clone(),

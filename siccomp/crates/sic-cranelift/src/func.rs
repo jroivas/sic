@@ -384,8 +384,9 @@ pub fn compile_function(
                 &mut slot_map, var_dbg, module_ir, &promoted, f80, &vty, sse,
             );
         }
-        let f80_ret = if f.sig.ret == Type::Float80 { f80 } else { None };
-        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref(), f80_ret);
+        let f80_ret = if f.sig.ret == Type::Float80 || sic_ir::abi::is_complex_x87(&f.sig.ret) { f80 } else { None };
+        let x87_complex = sic_ir::abi::is_complex_x87(&f.sig.ret);
+        emit_terminator(&bb.terminator, &mut builder, &val_map, &callee_refs, &data_refs, &bb_map, ptr_ty, ret_chunks.as_deref(), f80_ret, x87_complex);
         for s in terminator_successors(&bb.terminator) {
             if let Some(n) = pending.get_mut(&s.0) {
                 *n -= 1;
@@ -727,6 +728,10 @@ fn emit_instr(
             };
             let mut results = builder.inst_results(inst).to_vec();
             if let (Type::Float80, Some(h)) = (ret_ty, f80) { results = vec![h.st0(builder)]; }
+            if let Some(h) = f80.filter(|_| sic_ir::abi::is_complex_x87(ret_ty)) {
+                bind_x87_complex(dest, h, builder, ptr_ty, val_map);
+                return;
+            }
             bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
@@ -746,6 +751,10 @@ fn emit_instr(
             let inst = builder.ins().call_indirect(sig_ref, fp, &arg_vals);
             let mut results = builder.inst_results(inst).to_vec();
             if let (Type::Float80, Some(h)) = (ret_ty, f80) { results = vec![h.st0(builder)]; }
+            if let Some(h) = f80.filter(|_| sic_ir::abi::is_complex_x87(ret_ty)) {
+                bind_x87_complex(dest, h, builder, ptr_ty, val_map);
+                return;
+            }
             bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
         }
 
@@ -1017,6 +1026,25 @@ fn bind_call_result(
     val_map.insert(d.0, results[0]);
 }
 
+/// A call's `_Complex long double` result, popped from `st(0)` (real part) and
+/// `st(1)` into a stack temporary in x87 format; the destination is its address.
+fn bind_x87_complex(
+    dest: &Option<ValId>,
+    h: F80Refs,
+    builder: &mut FunctionBuilder<'_>,
+    ptr_ty: cir::Type,
+    val_map: &mut HashMap<u32, cir::Value>,
+) {
+    let re = h.st0(builder);
+    let im = h.st0(builder);
+    let slot = builder.create_sized_stack_slot(cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, 32, 4));
+    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    h.store(builder, addr, re, ptr_ty);
+    let im_at = builder.ins().iadd_imm_s(addr, 16);
+    h.store(builder, im_at, im, ptr_ty);
+    if let Some(d) = dest { val_map.insert(d.0, addr); }
+}
+
 /// Marshal IR call arguments into Cranelift values per the System V ABI:
 /// a small aggregate (Direct) is loaded from its pointer into one value per
 /// eightbyte; a MEMORY aggregate (ByValStack) is passed as a pointer (Cranelift
@@ -1124,11 +1152,22 @@ fn emit_terminator(
     ptr_ty: cir::Type,
     ret_chunks: Option<&[sic_ir::abi::Chunk]>,
     f80_ret: Option<F80Refs>,
+    x87_complex: bool,
 ) {
     match term {
         Terminator::Ret(None) => { builder.ins().return_(&[]); }
         Terminator::Ret(Some(v)) => {
-            if let Some(h) = f80_ret {
+            if let Some(h) = f80_ret.filter(|_| x87_complex) {
+                // `_Complex long double` result: the real part in `st(0)`, the
+                // imaginary in `st(1)` (pushed first).
+                let base = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                let re = h.load(builder, base);
+                let im_at = builder.ins().iadd_imm_s(base, 16);
+                let im = h.load(builder, im_at);
+                builder.ins().call(h.ret, &[im]);
+                builder.ins().call(h.ret, &[re]);
+                builder.ins().return_(&[]);
+            } else if let Some(h) = f80_ret {
                 // `long double` result: leave it in x87 `st(0)` (C convention).
                 let rv = rval(v, val_map, callee_refs, data_refs, builder, ptr_ty, ct::F64);
                 let rv = coerce(rv, ct::F64, builder, ptr_ty);

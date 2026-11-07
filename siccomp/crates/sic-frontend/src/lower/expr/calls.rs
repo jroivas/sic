@@ -1413,6 +1413,7 @@ impl<'m> FuncCtx<'m> {
             let param_tys = param_types.clone();
             for (i, pval) in arg_vals.iter_mut().enumerate() {
                 if let Some(pty) = param_tys.get(i) {
+                    if let Some(v) = self.complex_arg(pval, args.get(i), pty)? { *pval = v; continue; }
                     if matches!(pty, Type::Struct(_) | Type::Union(_)) {
                         if self.transparent_union_arg(pval, pty, args.get(i))? { continue; }
                         if self.build_enum_arg(pval, pty, sp)? { continue; }
@@ -1456,6 +1457,7 @@ impl<'m> FuncCtx<'m> {
                 if super::super::types::is_va_array(pty) || super::super::types::is_va_dict(pty) {
                     continue;
                 }
+                if let Some(v) = self.complex_arg(pval, args.get(i), pty)? { *pval = v; continue; }
                 // Struct/union args are already lowered to a pointer to the value
                 // (by-value ABI); leave them as-is.
                 if matches!(pty, Type::Struct(_) | Type::Union(_)) {

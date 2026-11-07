@@ -5,6 +5,7 @@ use super::func::{FuncCtx, LookupResult};
 
 mod numeric;
 mod simd;
+mod complex;
 mod ia32;
 mod enums;
 pub(crate) use enums::PayloadOwn;
@@ -526,6 +527,7 @@ impl<'m> FuncCtx<'m> {
         // expression kind starts with no context — a bare member never resolves by
         // leaking through an unrelated parent (a call arg, an index, …).
         let bf_ctx = std::mem::take(&mut self.bf_ctx);
+        if let Some(v) = self.try_lower_complex(expr)? { return Ok(v); }
         match &expr.kind {
             ExprKind::Generic { controlling, assocs } => {
                 let idx = self.select_generic(controlling, assocs)?;
@@ -5770,8 +5772,7 @@ impl<'m> FuncCtx<'m> {
         let zero = Constant::zero();
         let one = Constant::int(1);
 
-        let lhs_val = self.lower_expr(lhs)?;
-        let lhs_bool = self.to_bool(lhs_val)?;
+        let lhs_bool = self.lower_truth(lhs)?;
 
         let rhs_bb = self.new_block_after_current();
         let end_bb  = self.new_block_after_current();
@@ -5805,8 +5806,7 @@ impl<'m> FuncCtx<'m> {
         // container temps the same way.
         self.enter_scope();
         let rhs_mark = self.temp_mark();
-        let rhs_val = self.lower_expr(rhs)?;
-        let rhs_bool = self.to_bool(rhs_val)?;
+        let rhs_bool = self.lower_truth(rhs)?;
         self.flush_temps_from(rhs_mark);
         self.exit_scope();
         // Store 0 or 1 based on rhs bool
@@ -7011,9 +7011,9 @@ impl<'m> FuncCtx<'m> {
         // The expected type is for the arms, not the condition (a literal in
         // `s == "x"` must stay a `string`).
         let expected = self.expected_ty.take();
-        let cond_val = self.lower_expr(cond);
+        let cond_bool = self.lower_truth(cond);
         self.expected_ty = expected;
-        let cond_bool = self.to_bool(cond_val?)?;
+        let cond_bool = cond_bool?;
 
         // Result type of `a ? b : c`: prefer a pointer/float/wider branch so the
         // value (and its type — needed for a following `->`, `*`, arithmetic)

@@ -603,6 +603,7 @@ impl<'m> FuncCtx<'m> {
                 // Mirror lower_ternary/lower_elvis's result-type selection.
                 let tty = self.infer_expr_type(then).unwrap_or_else(|_| Type::i32());
                 let ety = self.infer_expr_type(else_).unwrap_or_else(|_| Type::i32());
+                if let Some(t) = Self::complex_result(&tty, &ety) { return Ok(t); }
                 if let Some(t) = super::ternary_array_result(&tty, &ety) { return Ok(t); }
                 if let Some(t) = self.ternary_pointer_result(then, else_, &tty, &ety) { return Ok(t); }
                 if let Some(t) = self.ternary_arith_result(&tty, &ety) { return Ok(t); }
@@ -668,6 +669,9 @@ impl<'m> FuncCtx<'m> {
                 // each child roughly four times.
                 let lt = self.infer_expr_type(lhs).unwrap_or_else(|_| Type::i32());
                 let rt = self.infer_expr_type(rhs).unwrap_or_else(|_| Type::i32());
+                if let Some(t) = Self::complex_result(&lt, &rt) {
+                    return Ok(if matches!(op, Eq | Ne | Lt | Gt | Le | Ge | LogAnd | LogOr) { Type::i32() } else { t });
+                }
                 // GCC vector extension: an arithmetic/bitwise/comparison operator on
                 // two vector (array) operands is element-wise and yields a vector of
                 // the same shape (a comparison yields a same-width integer mask

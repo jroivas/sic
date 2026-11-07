@@ -81,7 +81,8 @@ pub enum AstType {
     Double,
     LongDouble,
     Bool,
-    Complex,
+    /// `_Complex T`: a real and an imaginary `T`.
+    Complex(Box<AstType>),
     Pointer { base: Box<QualType>, quals: Vec<TypeQual> },
     /// `vector`: a GCC `vector_size` vector (operators act element-wise and it
     /// does not decay), rather than a C array.
