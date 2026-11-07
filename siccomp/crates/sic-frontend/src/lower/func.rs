@@ -2934,7 +2934,12 @@ impl<'m> FuncCtx<'m> {
 
     fn lower_local_decl_inner(&mut self, decl: &Decl) -> Result<()> {
         match decl {
-            Decl::StaticAssert { cond, msg, span } => self.lowerer.check_static_assert(cond, msg, span)?,
+            // In this scope: a parameter or local hides a global of its name (Linux's
+            // `page_offset` parameter and `page_offset()`). Not a constant (a VLA's
+            // size): not checked.
+            Decl::StaticAssert { cond, msg, span } => {
+                if let Some(cond) = self.subst_scoped_consts(cond) { self.lowerer.check_static_assert(&cond, msg, span)?; }
+            }
             Decl::Var { base_ty, declarators, .. } => {
                 match &self.resolve_typeof(&base_ty.ty)? {
                     AstType::Struct(s) => {
