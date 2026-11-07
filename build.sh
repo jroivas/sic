@@ -99,7 +99,7 @@ build_modules() {
     cp "$ROOT"/siccomp/lib/std/*.sic "$SYSROOT/"
     # The module's build settings (link flags, pkg-config packages, cflags).
     [ -f "$ROOT/siccomp/lib/std/module.conf" ] && cp "$ROOT/siccomp/lib/std/module.conf" "$SYSROOT/"
-    "$SIC" --emit-module "$SYSROOT"
+    "$SIC" -O2 --emit-module "$SYSROOT"
 
     echo ">> building + installing art (async runtime) into $SYSROOT"
     # art declares its own module, so it can't share std's emit dir (one module per
@@ -108,7 +108,7 @@ build_modules() {
     ART_BUILD="$ROOT/siccomp/target/art_build"
     rm -rf "$ART_BUILD"; mkdir -p "$ART_BUILD"
     cp "$ROOT"/siccomp/lib/art/*.sic "$ART_BUILD/"
-    "$SIC" --emit-module "$ART_BUILD"
+    "$SIC" -O2 --emit-module "$ART_BUILD"
     cp "$ART_BUILD"/libart.* "$SYSROOT/"
     sed "s|$ART_BUILD|$SYSROOT|g" "$ART_BUILD/module_art.smod" > "$SYSROOT/module_art.smod"
     [ -f "$ART_BUILD/module_art.h" ] && cp "$ART_BUILD/module_art.h" "$SYSROOT/"
