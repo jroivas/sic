@@ -3,35 +3,69 @@
 sic lowers to its own IR and hands that to a back end, which returns an object file.
 Which back ends exist is decided when sic is built, which one runs when it is run:
 
-    ./build.sh release --backend all    # cranelift (default), llvm, llvm,cranelift, all
-    sic -print-backends                 # what this sic has, the default first
-    sic -fbackend=llvm -O2 a.c          # or $SIC_BACKEND; the option wins
+    ./build.sh release --backend cranelift,llvm   # cranelift (the default), llvm, a list, all
+    sic -print-backends                           # what this sic has, the default first
+    sic -fbackend=llvm -O2 a.c                    # or $SIC_BACKEND; the option wins
 
-Cranelift is built in by default and stays the default when both are. LLVM is built
-only when asked for: it needs LLVM 21 to build, and a sic with it needs `libLLVM` to
-start at all, whichever back end it then uses. `SIC_DUMP_LLVM=1` prints the module.
+The first back end in `--backend` is the default: `cranelift,llvm` compiles with
+Cranelift unless asked, `llvm,cranelift` with LLVM. `all` is `cranelift,llvm`, and a
+build without `--backend` has Cranelift alone. LLVM is built only when asked for: it
+needs LLVM 21 to build, and a sic with it needs `libLLVM` to start at all, whichever
+back end it then uses. `SIC_DUMP_LLVM=1` prints the module.
 
-A binary records what built it, in `.comment`, once per distinct string, so both
-back ends show when both were used (and in DWARF's `DW_AT_producer` under `-g`):
+`sic --version` names the back end a compile would use (the option, then
+`$SIC_BACKEND`, then the default). A binary records what built it, in `.comment`,
+once per distinct string, so both back ends show when both were used (and in
+DWARF's `DW_AT_producer` under `-g`):
 
     $ readelf -p .comment a.out
-      sic 0.2.2 (preprocessor: sic-cpp, backend: llvm)
+      sic 0.3.0 (preprocessor: sic-cpp, backend: llvm)
 
 ## LLVM
 
 `crates/sic-llvm`, through inkwell, in process: no LLVM tool is run. sic's own IR
-passes run first, then `default<O2>` (`default<Os>` for `-Os`/`-Oz`).
+passes run first, then LLVM's: `default<O1>` at `-O1`, `default<O2>` at `-O2` and
+`-O3`, `default<Os>` at `-Os`/`-Oz`. At `-O0` it still inlines `always_inline`
+functions and folds branches on constants, as clang does (an inline-asm `"i"`
+operand is a constant only then, and asm in an arm a constant `switch` rules out is
+not assembled).
 
 Objects of both back ends link together, and `std` built with one works with code
 built with the other.
 
 Differences from Cranelift:
 
+- A variable-length array is on the stack, released at the end of its scope, and
+  `alloca` too, as with GCC. Cranelift has no dynamic stack allocation: a VLA of up
+  to 512 bytes takes a fixed stack slot, a larger one `calloc`, and `alloca` is
+  `malloc`ed and never freed.
 - `setjmp` with a `volatile` local is correct at `-O2`; Cranelift's is not.
 - `long double` is a real `x86_fp80` at memory and calls, but arithmetic is still
   sic's `double`, as the IR computes in `double`.
 - A NaN computed from constants may have the other sign (IEEE leaves it open): the
   tests with a `.skip-llvm` marker pin x86's at `-O1` and above.
+- Non-PIC code reaches every symbol directly (no GOT), and a hidden symbol is
+  reached without one under PIC too, as Linux's link and vDSO need.
 
-Not there yet: `-g` is ignored, and the kernel's flags (return thunks, retpolines,
-`-mcmodel=kernel` details, `-mno-red-zone`, stack protector) are not passed on.
+Not there yet: `-g` is ignored, and the kernel's mitigation flags (return thunks,
+retpolines, stack protector, patchable function entries) are not passed on.
+
+## `-m32`
+
+i386 code is compiled with the LLVM back end whenever sic has it, whatever the
+default. A sic without LLVM hands `-m32` (and `-m16`, `-mx32` in any case) to clang or
+gcc on `PATH`, as before.
+
+- The System V i386 ABI: 4-byte `long`, pointers and `size_t`; `long long` and
+  `double` 4-aligned in structs; a 12-byte `long double`; every struct passed on the
+  stack and returned through the hidden pointer the callee pops (`_Complex float`
+  in `edx:eax`, as clang); `va_list` a `char *`. The predefined macros are i386's
+  (`__i386__`, `__ILP32__`, …), with SSE2 floating point as clang's `pentium4`.
+- Inline assembly is LLVM's own, the GCC template and constraints translated as
+  clang does, `asm goto` included; file-scope `asm` goes into the module.
+- The system C driver links (`cc -m32`), so 32-bit libraries must be installed
+  (`gcc-multilib`).
+
+Not there yet: `_Generic` and `__builtin_types_compatible_p` cannot tell `int` from
+`long` (both are the same 32-bit type in sic's IR, as `long` and `long long` are on
+x86-64), and the SIC language's `std` is not built for i386.

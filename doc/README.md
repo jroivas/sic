@@ -54,6 +54,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
     conversion guide with ✗/✓ examples.
 18. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
     wrapping, comments): what `sic-fmt` produces.
+19. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
+    `-fbackend=`, how they differ, and `-m32`.
 
 ## Design goals
 

@@ -12,8 +12,9 @@ end:
     described in [sic.md](sic.md).
 
 Both lower to a typed IR (`sic-ir`), are optimized by `sic-opt`, and are compiled
-to native code by a **Cranelift** back end (`sic-cranelift`). There is no LLVM
-dependency.
+to native code by a **Cranelift** back end (`sic-cranelift`), or by an optional
+**LLVM** back end (`sic-llvm`), built in only when asked for. See
+[doc/backends.md](doc/backends.md).
 
 ## Dependencies
 
@@ -21,6 +22,8 @@ dependency.
   - A **C compiler / linker** (`cc`, gcc or clang) — `sic` links object files
     through it, and it is the bootstrapping compiler.
   - A system libc with headers, for compiling C and for some tests.
+  - Optionally **LLVM 21**, for the LLVM back end (`--backend llvm`); a sic built
+    with it needs `libLLVM` at run time.
 
 ## Build
 
@@ -28,7 +31,8 @@ dependency.
 library (`import std;`) into the compiler's module sysroot:
 
     ./build.sh release        # or: ./build.sh debug (default)
-    ./build.sh release --backend llvm,cranelift   # back ends built in: cranelift (default), llvm, or all
+    ./build.sh release --backend cranelift,llvm   # back ends built in: cranelift (default), llvm, a list, or all;
+                                                  # the first listed is the default
 
 That is just a wrapper around `cargo`; you can also build the compiler alone:
 
@@ -46,6 +50,8 @@ The binary lands at `siccomp/target/release/sic` (or `.../debug/sic`).
     sic -S foo.c                 # write GNU assembler text (foo.s), as gcc -S does
     sic --emit-ir foo.sic        # dump sic's textual IR instead of compiling
     sic -O2 foo.c -o foo         # optimize (0 | 1 | 2 | 3 | s | z)
+    sic -fbackend=llvm foo.c     # pick a built-in back end (or $SIC_BACKEND)
+    sic -m32 -c foo.c            # i386, with the LLVM back end when sic has it
 
 `sic` accepts the usual `-o -c -O -D -I -l -L -W` flags for gcc/clang
 compatibility; see `sic --help`.
@@ -54,7 +60,8 @@ compatibility; see `sic --help`.
 
     ./compiletest_rust.sh        # the compile/run test suite (tests/)
     ./moduletest.sh              # the module-system tests
-    ./check.sh                   # build both profiles + run every suite at every -O level
+    ./check.sh                   # build both profiles and both back ends, run every suite
+                                 # with each back end and the compile tests at every -O level
 
 Benchmarks comparing sic against gcc and rustc live in `benchmarks/` (`./benchmarks/run.sh`).
 
@@ -66,6 +73,7 @@ prompt:
 ![Linux 7.3 built with sic, logged in under QEMU, /proc/version naming the sic compiler](screenshots/boot-linux-7.3.png)
 
     make CC=/path/to/siccomp/target/release/sic -j20
+    SIC_BACKEND=llvm make CC=/path/to/siccomp/target/release/sic -j20   # with the LLVM back end
 
 So far it has run under QEMU/KVM with a small busybox system. Still missing are
 the retpoline and return-thunk mitigations, the stack protector and patchable

@@ -4,7 +4,7 @@ Slightly Improved C is a programming language that borrows a lot from C,
 but is not afraid to introduce breaking changes in order to improve it.
 
 **STATUS** Most of the features described here are implemented in the current
-compiler (Rust front end, Cranelift back end). They are active for SIC-mode
+compiler (Rust front end, Cranelift or LLVM back end). They are active for SIC-mode
 sources (`.sic` files); the same compiler also builds ordinary C (it compiles real
 C codebases such as SQLite and QEMU). A few items remain partial or planned, noted
 inline where relevant: compile-time enforced error handling (§"Errors and exceptions"), and a cross-module generic
