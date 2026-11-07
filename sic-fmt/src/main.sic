@@ -2238,7 +2238,7 @@ int main(int argc, char **argv)
         } else if (a == "-q" || a == "--quiet") {
             r.quiet = true;
         } else if (a == "-V" || a == "--version") {
-            std::Println("sic-fmt 0.2.2");
+            std::Println("sic-fmt 0.3.0-dev");
             return 0;
         } else if (a == "-h" || a == "--help") {
             usage();
