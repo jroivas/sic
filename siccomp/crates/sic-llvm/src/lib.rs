@@ -258,7 +258,11 @@ fn declare_globals<'ctx>(cx: &mut Cx<'ctx, '_>) {
         let lg = match cx.module.get_global(&g.name) {
             Some(lg) => lg,
             None => {
-                let ty = if imported { cx.ctx.i8_type().into() } else { global_type(cx, g, size) };
+                // An import is as large as its type says: LLVM takes that for the
+                // object's extent. Of unknown size (`extern T a[]`), it is empty,
+                // and may be where another object is: Linux's `__start_x` and
+                // `__end_x` are one address when the section is empty.
+                let ty = if imported { cx.ctx.i8_type().array_type(size as u32).into() } else { global_type(cx, g, size) };
                 cx.module.add_global(ty, None, &g.name)
             }
         };
