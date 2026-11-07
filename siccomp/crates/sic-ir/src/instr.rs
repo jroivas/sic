@@ -132,6 +132,11 @@ pub enum CastOp {
     Typed,
 }
 
+/// An operand of [`Instr::InlineAsm`]: the value, its type, and for an indirect
+/// (memory) operand the type of the object it addresses.
+#[derive(Debug, Clone)]
+pub struct AsmArg { pub val: Val, pub ty: Type, pub elem: Option<Type> }
+
 /// Atomic read-modify-write operation (sic `atomic` types). Maps directly to the
 /// backend's atomic-rmw ops; all are single lock-free instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +242,14 @@ pub enum Instr {
     /// Cranelift: `malloc`, never freed).
     DynAlloca { dest: ValId, size: Val, malloc: FuncRef },
 
+    /// GNU inline assembly in LLVM's form (`-m32`: the LLVM back end only).
+    /// `template` is in LLVM's syntax (`$0`, `${1:k}`), `constraints` its
+    /// comma-separated list: the outputs in order, then the inputs, then the
+    /// clobbers. Each register output's value is stored through its pointer in
+    /// `outputs`; `args` are the other operands in order — an indirect (memory)
+    /// one is an address, with the type it points to.
+    InlineAsm { template: String, constraints: String, outputs: Vec<(Val, Type)>, args: Vec<AsmArg> },
+
     /// Byte-swap an integer value.
     BSwap { dest: ValId, val: Val, ty: Type },
 
@@ -300,6 +313,10 @@ impl Instr {
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
             Instr::VlaAlloc { size, .. } | Instr::DynAlloca { size, .. } => f(size),
             Instr::VlaFree { ptr, .. } => f(ptr),
+            Instr::InlineAsm { outputs, args, .. } => {
+                for (p, _) in outputs { f(p); }
+                for a in args { f(&a.val); }
+            }
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
             Instr::AtomicLoad { ptr, .. } => f(ptr),
@@ -331,6 +348,10 @@ impl Instr {
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
             Instr::VlaAlloc { size, .. } | Instr::DynAlloca { size, .. } => f(size),
             Instr::VlaFree { ptr, .. } => f(ptr),
+            Instr::InlineAsm { outputs, args, .. } => {
+                for (p, _) in outputs { f(p); }
+                for a in args { f(&mut a.val); }
+            }
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
             Instr::AtomicLoad { ptr, .. } => f(ptr),
@@ -359,7 +380,7 @@ impl Instr {
             Instr::Store { .. } | Instr::VolatileStore { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
             | Instr::AtomicStore { .. } | Instr::Fence
             | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
-            | Instr::DbgVar { .. } | Instr::VlaFree { .. } => None,
+            | Instr::DbgVar { .. } | Instr::VlaFree { .. } | Instr::InlineAsm { .. } => None,
         }
     }
 

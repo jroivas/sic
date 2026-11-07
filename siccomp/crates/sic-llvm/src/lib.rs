@@ -93,7 +93,7 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
         (TargetMachine::get_default_triple(), "x86-64")
     };
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
-    let level = match opts.opt { OptLevel::None => OptimizationLevel::None, _ => OptimizationLevel::Default };
+    let level = match opts.opt { OptLevel::None => OptimizationLevel::None, OptLevel::Basic => OptimizationLevel::Less, _ => OptimizationLevel::Default };
     let reloc = if opts.pic { RelocMode::PIC } else { RelocMode::Static };
     let model = if opts.no_text_data { CodeModel::Kernel } else { CodeModel::Default };
     let machine = target.create_target_machine(&triple, cpu, &target_features(opts), level, reloc, model)
@@ -121,6 +121,11 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     }
     keep(&cx, "llvm.used", &used);
     keep(&cx, "llvm.compiler.used", &named_elsewhere(&cx));
+    // i386: file-scope `asm(...)` is the module's assembly (on x86-64 the driver
+    // adds it, with the inline-asm text helpers).
+    if opts.ptr_size == 4 {
+        for t in &ir.file_asm { asm.push_str(t); asm.push('\n'); }
+    }
     if let Some(p) = &ir.producer {
         asm.push_str(&format!(".pushsection .comment,\"MS\",@progbits,1\n.asciz \"{}\"\n.popsection\n", p.replace('\\', "\\\\").replace('"', "\\\"")));
     }
@@ -128,7 +133,16 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     if !opts.pic { assume_local(&module); }
 
     module.verify().map_err(|e| format!("LLVM rejected the module: {}", e.to_string()))?;
-    let pipeline = match opts.opt { OptLevel::None => None, OptLevel::Speed => Some("default<O2>"), OptLevel::Size => Some("default<Os>") };
+    // Unoptimized, `always_inline` functions are still inlined, as clang's -O0
+    // (an inline-asm `"i"` operand is a constant only then), and a branch on a
+    // constant is folded (clang does not emit the arms a constant `switch` rules
+    // out: Linux's cmpxchg has an asm per operand size there).
+    let pipeline = match opts.opt {
+        OptLevel::None => Some("always-inline,function(simplifycfg)"),
+        OptLevel::Basic => Some("default<O1>"),
+        OptLevel::Speed => Some("default<O2>"),
+        OptLevel::Size => Some("default<Os>"),
+    };
     if std::env::var("SIC_DUMP_LLVM").is_ok() { eprintln!("{}", module.print_to_string().to_string()); }
     if let Some(p) = pipeline {
         module.run_passes(p, &machine, PassBuilderOptions::create()).map_err(|e| e.to_string())?;

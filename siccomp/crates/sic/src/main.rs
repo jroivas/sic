@@ -926,6 +926,7 @@ fn backend_opt_level(opt: &str) -> OptLevel {
         "s" | "z" => OptLevel::Size,
         _ => match opt.parse::<u32>() {
             Ok(2..) => OptLevel::Speed,
+            Ok(1) => OptLevel::Basic,
             _ => OptLevel::None, // unrecognized level: stay safe
         },
     }
@@ -1433,10 +1434,9 @@ fn function_sections(args: &Args) -> bool {
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
     if ir_module.asm_text_helpers.is_empty() && ir_module.file_asm.is_empty() { return Ok(obj); }
-    // The text helpers are x86-64 code.
-    if sic_frontend::target::is_i386() {
-        return Err(format!("{}: inline assembly is not supported with -m32 yet", src).into());
-    }
+    // i386: inline assembly is LLVM's own, file-scope `asm` in the module's
+    // assembly (`Instr::InlineAsm`; the text helpers are x86-64 code).
+    if sic_frontend::target::is_i386() { return Ok(obj); }
     merge_asm_helpers(&obj, ir_module, src, function_sections(args))
 }
 

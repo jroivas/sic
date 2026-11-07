@@ -162,6 +162,8 @@ impl fmt::Display for Instr {
             Instr::VlaAlloc { dest, size, .. } => write!(f, "  %{} = vla_alloc {}", dest.0, size),
             Instr::VlaFree { alloc, ptr, .. } => write!(f, "  vla_free %{}, {}", alloc.0, ptr),
             Instr::DynAlloca { dest, size, .. } => write!(f, "  %{} = dyn_alloca {}", dest.0, size),
+            Instr::InlineAsm { template, constraints, .. } =>
+                write!(f, "  inline_asm {:?}, {:?}", template, constraints),
             Instr::BSwap { dest, val, ty } =>
                 write!(f, "  %{} = bswap {} {}", dest.0, ty, val),
             Instr::VaStart { list_ptr } => write!(f, "  va_start {}", list_ptr),

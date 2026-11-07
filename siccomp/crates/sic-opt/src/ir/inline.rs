@@ -547,7 +547,7 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         // No dest / no ValId field to remap (operands already handled above).
         Instr::Store { .. } | Instr::VolatileStore { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
         | Instr::AtomicStore { .. } | Instr::Fence | Instr::VaStart { .. } | Instr::VaEnd { .. }
-        | Instr::SrcLine(_) => {}
+        | Instr::SrcLine(_) | Instr::InlineAsm { .. } => {}
     }
     n
 }

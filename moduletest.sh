@@ -1731,6 +1731,32 @@ if "$SIC" -m32 -O2 -ffreestanding -fno-pic -c prog.c -o prog.o 2>err && as --32 
     ./prog; rc=$?
     if [ "$rc" = 42 ]; then ok "m32-run"; else bad "m32-run" "rc=$rc"; fi
 else bad "m32-run" "$(head -5 err)"; fi
+# Inline assembly is LLVM's own (the operand-passing helpers are x86-64 code).
+cat > asm.c <<'EOF'
+static int add(int a, int b) { __asm__("addl %1, %0" : "+r"(a) : "rm"(b) : "cc"); return a; }
+static int named(int x) { int r; __asm__("leal 1(%[in]), %[out]" : [out] "=r"(r) : [in] "r"(x)); return r; }
+static void inc(int *p) { __asm__ volatile("incl %0" : "+m"(*p)); }
+static int low(unsigned x) { unsigned char b; __asm__("movb %b1, %0" : "=q"(b) : "q"(x)); return b; }
+static int zero(int x) { _Bool z; __asm__("testl %1, %1" : "=@ccz"(z) : "r"(x)); return z; }
+static unsigned long long wide(unsigned long long v) { __asm__("addl $1, %%eax; adcl $0, %%edx" : "+A"(v)); return v; }
+static int jump(int x) { __asm__ goto("testl %0, %0\n\tjnz %l[yes]" : : "r"(x) : "cc" : yes); return 1; yes: return 2; }
+static int getpid(void) { int r; __asm__ volatile("int $0x80" : "=a"(r) : "a"(20) : "memory"); return r; }
+__asm__(".globl seven\nseven:\n\tmovl $7, %eax\n\tret\n");
+int seven(void);
+int main(void) {
+    int m = 41; inc(&m);
+    if (add(40, 2) != 42 || named(41) != 42 || m != 42 || low(0x1234) != 0x34) return 1;
+    if (!zero(0) || zero(3) || wide(0xffffffffULL) != 0x100000000ULL) return 2;
+    if (jump(0) != 1 || jump(5) != 2 || getpid() <= 0 || seven() != 7) return 3;
+    return 42;
+}
+EOF
+for o in -O0 -O2; do
+    if "$SIC" -m32 $o -ffreestanding -fno-pic -c asm.c -o asm.o 2>err && ld -m elf_i386 -static -nostdlib -o asmprog start.o asm.o 2>>err; then
+        ./asmprog; rc=$?
+        if [ "$rc" = 42 ]; then ok "m32-asm$o"; else bad "m32-asm$o" "rc=$rc"; fi
+    else bad "m32-asm$o" "$(head -5 err)"; fi
+done
 cd ..
 fi
 

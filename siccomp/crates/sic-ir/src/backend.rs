@@ -5,7 +5,14 @@ pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
 /// How hard to optimize, as far as the backend goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OptLevel { None, Speed, Size }
+pub enum OptLevel {
+    None,
+    /// `-O1`: light optimization (what a backend without the level does
+    /// unoptimized).
+    Basic,
+    Speed,
+    Size,
+}
 
 /// The target and code shape a module is compiled for. Nothing here is specific
 /// to one backend.

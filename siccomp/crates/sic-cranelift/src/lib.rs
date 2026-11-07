@@ -75,7 +75,7 @@ fn ir_linkage(l: Linkage) -> CLinkage {
 
 fn compile(ir_module: &sic_ir::Module, cfg: &BackendOptions) -> Result<Vec<u8>, CraneliftError> {
     let (ptr_size, debug_info) = (cfg.ptr_size, cfg.debug_info);
-    let opt_level = match cfg.opt { OptLevel::None => "none", OptLevel::Speed => "speed", OptLevel::Size => "speed_and_size" };
+    let opt_level = match cfg.opt { OptLevel::None | OptLevel::Basic => "none", OptLevel::Speed => "speed", OptLevel::Size => "speed_and_size" };
     // Build settings
     let mut flag_builder = settings::builder();
     let pic = if cfg.pic { "true" } else { "false" };

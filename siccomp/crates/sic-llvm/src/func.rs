@@ -4,7 +4,7 @@ use crate::{Cx, R};
 use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock;
 use inkwell::intrinsics::Intrinsic;
-use inkwell::types::BasicTypeEnum;
+use inkwell::types::{AnyType, BasicType, BasicTypeEnum};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FunctionValue, IntValue, PointerValue,
 };
@@ -84,6 +84,63 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         p.as_instruction_value().ok_or("alloca")?.set_alignment(align).map_err(|e| e.to_string())?;
         if let Some(bb) = here { self.b().position_at_end(bb); }
         Ok(p)
+    }
+
+    /// The type of an object of `ty` in memory (`long double` is x87, an
+    /// aggregate its bytes).
+    fn mem_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
+        let cx = self.cx;
+        match ty {
+            Type::Float80 => cx.ctx.x86_f80_type().into(),
+            Type::Struct(_) | Type::Union(_) | Type::Array { .. } =>
+                cx.ctx.i8_type().array_type(ty.size_of(cx.opts.ptr_size).max(1) as u32).into(),
+            _ => cx.value_type(ty),
+        }
+    }
+
+    /// GNU inline assembly as LLVM's: a call of the asm, whose register outputs
+    /// (one value, or a struct of them) are stored through `outputs`.
+    fn inline_asm(&mut self, template: &str, constraints: &str, outputs: &[(Val, Type)], args: &[sic_ir::AsmArg]) -> R<()> {
+        let cx = self.cx;
+        let out_tys: Vec<BasicTypeEnum> = outputs.iter().map(|(_, t)| self.mem_type(t)).collect();
+        let mut tys: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
+        let mut vals: Vec<BasicMetadataValueEnum> = Vec::new();
+        for a in args {
+            if a.elem.is_some() {
+                tys.push(cx.ptr().into());
+                vals.push(self.ptr_of(&a.val)?.into());
+            } else {
+                let t = self.mem_type(&a.ty);
+                let v = if a.ty == Type::Float80 {
+                    let d = self.typed(&a.val, cx.ctx.f64_type().into())?.into_float_value();
+                    self.b().build_float_ext(d, cx.ctx.x86_f80_type(), "")?.into()
+                } else { self.typed(&a.val, t)? };
+                tys.push(t.into());
+                vals.push(v.into());
+            }
+        }
+        let fn_ty = match out_tys.len() {
+            0 => cx.ctx.void_type().fn_type(&tys, false),
+            1 => out_tys[0].fn_type(&tys, false),
+            _ => cx.ctx.struct_type(&out_tys, false).fn_type(&tys, false),
+        };
+        let asm = cx.ctx.create_inline_asm(fn_ty, template.to_string(), constraints.to_string(), true, false,
+            Some(inkwell::InlineAsmDialect::ATT), false);
+        let site = self.b().build_indirect_call(fn_ty, asm, &vals, "")?;
+        let kind = Attribute::get_named_enum_kind_id("elementtype");
+        for (i, a) in args.iter().enumerate() {
+            if let Some(e) = &a.elem {
+                let t: inkwell::types::AnyTypeEnum = self.mem_type(e).as_any_type_enum();
+                site.add_attribute(AttributeLoc::Param(i as u32), cx.ctx.create_type_attribute(kind, t));
+            }
+        }
+        let Some(r) = site.try_as_basic_value().basic() else { return Ok(()) };
+        for (i, (p, _)) in outputs.iter().enumerate() {
+            let v = if outputs.len() == 1 { r } else { self.b().build_extract_value(r.into_struct_value(), i as u32, "")? };
+            let at = self.ptr_of(p)?;
+            self.b().build_store(at, v)?;
+        }
+        Ok(())
     }
 
     /// The slot of the VLA `id`'s saved stack pointer, null from function entry.
@@ -520,6 +577,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 self.b().build_unconditional_branch(join)?;
                 self.b().position_at_end(join);
             }
+            Instr::InlineAsm { template, constraints, outputs, args } => self.inline_asm(template, constraints, outputs, args)?,
             // `alloca`: until the function returns.
             Instr::DynAlloca { dest, size, .. } => {
                 let n = self.typed(size, cx.ctx.i64_type().into())?.into_int_value();

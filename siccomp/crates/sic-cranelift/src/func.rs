@@ -912,6 +912,9 @@ fn emit_instr(
             builder.switch_to_block(join);
         }
 
+        // LLVM's inline assembly (`-m32`, which LLVM compiles): never here.
+        Instr::InlineAsm { .. } => { builder.ins().trap(cir::TrapCode::unwrap_user(1)); }
+
         // `alloca`: heap storage (never freed), as there is no dynamic stack.
         Instr::DynAlloca { dest, size, malloc } => {
             let sz = rval(size, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
