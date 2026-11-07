@@ -1590,7 +1590,7 @@ fn lower_union(u: &UnionDef, named: &HashMap<String, Type>, ptr_size: u32) -> cr
 /// available. Covers the constant/literal cases that appear in system headers
 /// (notably `typeof(nullptr)` in C23 `<stddef.h>`); unknown expressions fall
 /// back to `int`.
-fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Option<Type> {
+pub(crate) fn typeof_expr_type(e: &Expr, named: &HashMap<String, Type>, ptr_size: u32) -> Option<Type> {
     let member = |agg: &Type, name: &str| {
         let resolved = resolve_aggregate(agg, named);
         super::expr::resolve_field_access(&resolved, name, ptr_size, named).map(|(_, t, _)| t)

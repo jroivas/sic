@@ -1961,7 +1961,7 @@ impl<'m> FuncCtx<'m> {
             return lower_type(&QualType::new(ty.clone()), &self.lowerer.struct_types, self.lowerer.ptr_size);
         }
         match ty {
-            A::Typeof(e) => self.infer_expr_type(e),
+            A::Typeof(e) => self.typeof_type(e),
             A::Pointer { base, .. } => {
                 let inner = self.lower_ast_type_scoped(&base.ty)?;
                 Ok(Type::Pointer(Box::new(super::types::opaque_aggregate(inner))))
@@ -1982,6 +1982,26 @@ impl<'m> FuncCtx<'m> {
     /// `ty` with every `typeof` in it (struct members too, which the standalone
     /// lowerer reaches with no scope) resolved here, and the `sizeof`s of a
     /// member's array dimension.
+    /// `typeof(f)` and `typeof(&f)` of a function `f` no local hides: its type, and a
+    /// pointer to it. As a value `f` decays, which is not its type (Linux's
+    /// `__builtin_types_compatible_p(typeof(&__sysvec_x), void (*)(struct pt_regs *))`).
+    fn typeof_type(&self, e: &Expr) -> Result<Type> {
+        match self.typeof_function(e) {
+            Some(t) => Ok(t),
+            None => self.infer_expr_type(e),
+        }
+    }
+
+    fn typeof_function(&self, e: &Expr) -> Option<Type> {
+        let name = match &e.kind {
+            ExprKind::Ident(n) => n,
+            ExprKind::Unary { op: crate::ast::UnOpKind::Addr, expr } => match &expr.kind { ExprKind::Ident(n) => n, _ => return None },
+            _ => return None,
+        };
+        if !matches!(self.lookup(name), Some(LookupResult::Func(_))) { return None; }
+        super::types::typeof_expr_type(e, &self.lowerer.struct_types, self.ptr_size())
+    }
+
     fn resolve_typeof(&self, ty: &AstType) -> Result<AstType> {
         use crate::ast::AstType as A;
         if !member_needs_scope(ty) { return Ok(ty.clone()); }
@@ -1995,7 +2015,7 @@ impl<'m> FuncCtx<'m> {
                 ..f.clone() })).collect::<Result<Vec<_>>>().map(Some)
         };
         Ok(match ty {
-            A::Typeof(e) => A::Lowered(self.infer_expr_type(e)?),
+            A::Typeof(e) => A::Lowered(self.typeof_type(e)?),
             A::Pointer { base, quals } => A::Pointer { base: Box::new(qual(base)?), quals: quals.clone() },
             A::Array { base, size, vector } => A::Array {
                 base: Box::new(qual(base)?),
