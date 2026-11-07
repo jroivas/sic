@@ -73,6 +73,9 @@ pub struct Lowerer {
     /// constant-size calls are expanded inline. `-fno-builtin` and
     /// `-ffreestanding` turn it off for the plain names.
     pub builtin_mem: bool,
+    /// The back end allocates on the stack at run time (LLVM): `alloca` is a
+    /// real dynamic allocation. Without (Cranelift) it is a fixed slot or `malloc`.
+    pub dynamic_stack: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -363,6 +366,7 @@ impl Lowerer {
             loop_delete: false,
             unroll: false,
             builtin_mem: true,
+            dynamic_stack: false,
             struct_order_seed: 0,
             emit_inline: HashSet::default(),
             global_types: HashMap::default(),

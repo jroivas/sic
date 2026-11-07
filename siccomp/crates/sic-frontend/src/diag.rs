@@ -49,7 +49,20 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     // gcc -Wpedantic: ISO C diagnostics for GNU extensions in use. Only when
     // asked for (`-Wpedantic`, `-pedantic`), as in gcc; C and SIC alike.
     ("pedantic", Group::Explicit, false),
+    // sic: an option it accepts but does not implement (`-fstack-protector`,
+    // return thunks, `-g` with the LLVM back end, …).
+    ("ignored-option", Group::Default, false),
+    // sic: an attribute it does not implement (`ms_abi`, i386 `regparm`).
+    ("unsupported-attribute", Group::Default, false),
+    // sic: `alloca` without a dynamic stack (Cranelift): `malloc`ed and never
+    // freed, or a fixed slot the stack pointer does not move by.
+    ("unsupported-alloca", Group::Default, false),
 ];
+
+/// Warnings about what sic does not do, not about the code: plain `-Werror` does
+/// not make them errors (Linux and QEMU build with it, and every file would fail),
+/// only `-Werror=<name>`.
+const NOT_BY_WERROR: &[&str] = &["ignored-option", "unsupported-attribute", "unsupported-alloca"];
 
 #[derive(Default)]
 struct Config {
@@ -162,13 +175,32 @@ pub fn warn(name: &'static str, file: Option<&str>, line: u32, col: u32, msg: &s
     let out = with(|c| {
         if !is_enabled(c, name) { return None; }
         if !c.seen.insert((file.to_string(), line, col, name)) { return None; }
-        let as_error = c.error.get(name).copied().unwrap_or(c.werror);
+        let as_error = c.error.get(name).copied().unwrap_or(c.werror && !NOT_BY_WERROR.contains(&name));
         c.printed += 1;
         if as_error {
             c.promoted += 1;
             Some(format!("{}:{}:{}: error: {} [-Werror={}]", file, line, col, msg, name))
         } else {
             Some(format!("{}:{}:{}: warning: {} [-W{}]", file, line, col, msg, name))
+        }
+    });
+    if let Some(line) = out { eprintln!("{}", line); }
+}
+
+/// Emit warning `name` about the command line (no source location): `sic:
+/// warning: msg [-Wname]`, once per message.
+pub fn warn_driver(name: &'static str, msg: &str) {
+    debug_assert!(WARNINGS.iter().any(|w| w.0 == name), "unregistered warning {name}");
+    let out = with(|c| {
+        if !is_enabled(c, name) { return None; }
+        if !c.seen.insert((msg.to_string(), 0, 0, name)) { return None; }
+        let as_error = c.error.get(name).copied().unwrap_or(c.werror && !NOT_BY_WERROR.contains(&name));
+        c.printed += 1;
+        if as_error {
+            c.promoted += 1;
+            Some(format!("sic: error: {} [-Werror={}]", msg, name))
+        } else {
+            Some(format!("sic: warning: {} [-W{}]", msg, name))
         }
     });
     if let Some(line) = out { eprintln!("{}", line); }

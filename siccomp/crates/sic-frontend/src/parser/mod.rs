@@ -66,6 +66,10 @@ pub struct Parser {
     pending_always_inline: bool,
     /// `__attribute__((noinline))` seen for the current declaration.
     pending_noinline: bool,
+    /// A calling-convention attribute sic does not implement (`ms_abi`): its
+    /// warning, given when a function DEFINITION has it (a type that only
+    /// mentions it, as Linux's efi.h's, is not compiled code).
+    pending_cc: Option<(String, Span)>,
     noinline: Vec<String>,
     weak_fns: Vec<String>,
     /// `visibility("…")` seen for the current declaration: hidden or not.
@@ -211,7 +215,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -381,6 +385,7 @@ impl Parser {
         self.pending_constructor = None;
         self.pending_always_inline = false;
         self.pending_noinline = false;
+        self.pending_cc = None;
         self.pending_used = false;
         self.pending_section = None;
         self.pending_alias = None;
@@ -669,6 +674,11 @@ impl Parser {
             let used = std::mem::take(&mut self.pending_used);
             if used { self.used_fns.push(name.clone()); }
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
+            if let Some((what, at)) = self.pending_cc.take() {
+                if !self.at(TokenKind::Semi) && !self.at(TokenKind::Comma) && !self.at(TokenKind::Eof) {
+                    crate::diag::warn("unsupported-attribute", at.file.as_deref(), at.line, at.col, &what);
+                }
+            }
 
             // K&R (old-style) definition: the parameter list held only names,
             // and their declarations follow before the `{` body, e.g.
@@ -4391,6 +4401,11 @@ impl Parser {
                                 }
                             }
                         }
+                    } else if let Some(what) = unsupported_attribute(name, || {
+                        // `regparm(0)` asks for the default.
+                        self.tokens.get(i + 2).map(|t| t.text.clone())
+                    }) {
+                        self.pending_cc = Some((what, self.tokens[i].span.clone()));
                     } else if name == "weak" || name == "__weak__" {
                         self.pending_weak = true;
                     } else if name == "always_inline" || name == "__always_inline__" {
@@ -4877,6 +4892,23 @@ pub(crate) fn kind_spelling(k: TokenKind) -> String {
 }
 
 /// The suffix makes a `float` (not `double`/`long double`) constant.
+/// The warning for an attribute sic accepts but does not implement, if `name` is
+/// one: `ms_abi` (the System V convention is used), and on i386 the calling
+/// conventions that pass arguments in registers or pop them (`arg` is the
+/// attribute's first argument token, for `regparm(N)`).
+fn unsupported_attribute(name: &str, arg: impl FnOnce() -> Option<String>) -> Option<String> {
+    let name = name.trim_start_matches("__").trim_end_matches("__");
+    let i386 = crate::target::is_i386();
+    match name {
+        "ms_abi" => Some("the `ms_abi` calling convention is not implemented: the function uses the System V one".into()),
+        "regparm" if i386 && arg().as_deref() != Some("0") =>
+            Some("`regparm` is not implemented: all arguments are passed on the stack".into()),
+        "stdcall" | "fastcall" | "thiscall" | "vectorcall" if i386 =>
+            Some(format!("the `{}` calling convention is not implemented: the function uses cdecl", name)),
+        _ => None,
+    }
+}
+
 /// A number token with an imaginary suffix (`i`/`j`, GNU) without it, else None.
 fn imaginary_real_text(text: &str) -> Option<String> {
     let hex = text.starts_with("0x") || text.starts_with("0X");

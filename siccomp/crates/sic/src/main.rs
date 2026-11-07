@@ -188,6 +188,10 @@ struct Args {
     #[arg(skip)]
     link_order: Vec<String>,
 
+    /// Every argument as given (see `warn_ignored_options`).
+    #[arg(skip)]
+    given: Vec<String>,
+
     /// Inputs named after `-x <language>` (not `none`), with that language: a
     /// source whatever its suffix.
     #[arg(skip)]
@@ -566,7 +570,10 @@ fn main() {
     if let Some(arg0) = iter.next() {
         argv.push(arg0);
     }
+    // Every argument as given, for the options sic accepts but does not do.
+    let mut given: Vec<String> = Vec::new();
     while let Some(a) = iter.next() {
+        given.push(a.clone());
         if a == "-pedantic" || a == "-pedantic-errors" {
             // gcc spellings of -Wpedantic (+ -Werror=pedantic); single-dash long
             // options clap cannot parse.
@@ -788,6 +795,7 @@ fn main() {
     args.dep_flags = dep_flags;
     args.cpp_include_flags = cpp_include_flags;
     args.link_order = link_order;
+    args.given = given;
     args.x_inputs = x_inputs;
     args.pthread = pthread;
     args.machine_flags = machine_flags;
@@ -1353,6 +1361,7 @@ fn lower_tu_once(
     // keep C-mode codegen scalar while validating SQLite/QEMU).
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled))
         && isa::Isa::from_flags(&args.machine_flags).0.sse2();
+    lowerer.dynamic_stack = select_backend(args).is_ok_and(|b| b.name() == "llvm");
     lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
         && !freestanding(args);
     // Dead counted-loop elimination: default on at -O2+, overridable via -f.
@@ -1773,6 +1782,59 @@ fn configure_warnings(args: &Args) {
         .filter(|w| !(w.starts_with("l,") || w.starts_with("p,") || w.starts_with("a,")))
         .collect();
     sic_frontend::diag::configure(&warn_flags, args.no_warnings);
+    warn_ignored_options(args);
+}
+
+/// What an option sic accepts but does not implement asks for: its kind (the
+/// last of a kind wins) and whether it asks for anything (`-mfunction-return=keep`,
+/// `-fno-stack-protector` do not).
+fn unimplemented_option(a: &str) -> Option<(&'static str, bool)> {
+    let i386 = sic_frontend::target::is_i386();
+    let val = |p: &str| a.strip_prefix(p);
+    Some(match a {
+        _ if a.starts_with("-fstack-protector") => ("stack-protector", true),
+        "-fno-stack-protector" => ("stack-protector", false),
+        _ if val("-mfunction-return=").is_some() => ("function-return", val("-mfunction-return=") != Some("keep")),
+        _ if val("-mindirect-branch=").is_some() => ("indirect-branch", val("-mindirect-branch=") != Some("keep")),
+        "-mindirect-branch-register" | "-mindirect-branch-cs-prefix" | "-mretpoline" | "-mretpoline-external-thunk" =>
+            ("indirect-branch-extra", true),
+        _ if val("-mharden-sls=").is_some() => ("harden-sls", val("-mharden-sls=") != Some("none")),
+        _ if a == "-fcf-protection" || val("-fcf-protection=").is_some() => ("cf-protection", val("-fcf-protection=") != Some("none")),
+        _ if val("-fpatchable-function-entry=").is_some() =>
+            ("patchable", !val("-fpatchable-function-entry=").is_some_and(|v| v == "0" || v.starts_with("0,"))),
+        _ if val("-fzero-call-used-regs=").is_some() => ("zero-call-used-regs", val("-fzero-call-used-regs=") != Some("skip")),
+        _ if val("-fsanitize=").is_some() => ("sanitize", true),
+        "-fno-sanitize=all" => ("sanitize", false),
+        "-mfentry" | "-mrecord-mcount" | "-mnop-mcount" | "-finstrument-functions" => ("instrument", true),
+        _ if val("-mstack-alignment=").is_some() => ("stack-alignment", val("-mstack-alignment=") != Some("16")),
+        _ if val("-mpreferred-stack-boundary=").is_some() => ("stack-alignment", val("-mpreferred-stack-boundary=") != Some("4")),
+        _ if i386 && val("-mregparm=").is_some() => ("regparm", val("-mregparm=") != Some("0")),
+        "-mrtd" if i386 => ("rtd", true),
+        _ => return None,
+    })
+}
+
+/// Warn about the options sic accepts without doing what they ask (kernel
+/// mitigations, the stack protector, sanitizers, …), and `-g` where the back
+/// end emits no debug information.
+fn warn_ignored_options(args: &Args) {
+    let mut last: Vec<(&'static str, bool, &str)> = Vec::new();
+    for a in &args.given {
+        let Some((kind, on)) = unimplemented_option(a) else { continue };
+        last.retain(|(k, _, _)| *k != kind);
+        last.push((kind, on, a));
+    }
+    // One warning for them all: a kernel build passes several to every file.
+    let ignored: Vec<String> = last.iter().filter(|(_, on, _)| *on).map(|(_, _, a)| format!("`{}`", a)).collect();
+    if !ignored.is_empty() {
+        let what = if ignored.len() == 1 { "is" } else { "are" };
+        sic_frontend::diag::warn_driver("ignored-option",
+            &format!("{} {} ignored: sic does not implement {}", ignored.join(", "), what, if ignored.len() == 1 { "it" } else { "them" }));
+    }
+    if args.debug_info && select_backend(args).is_ok_and(|b| b.name() == "llvm") {
+        sic_frontend::diag::warn_driver("ignored-option",
+            "`-g` is ignored: the LLVM back end does not emit debug information yet");
+    }
 }
 
 /// Apply a folder module's `module.conf` cflags (incl. pkg-config `--cflags`) to

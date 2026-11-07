@@ -1760,6 +1760,37 @@ done
 cd ..
 fi
 
+# ── what sic accepts but does not do is a warning: options (one line, the last of
+# a kind wins), attributes on a definition, alloca without a dynamic stack. Plain
+# -Werror does not make them errors (Linux and QEMU build with it), -Werror=name
+# does. ──
+mkdir -p ignored && cd ignored
+printf 'int f(void) { return 1; }\n' > a.c
+"$SIC" -Werror -fstack-protector-strong -mfunction-return=thunk-extern -fsanitize=address -c a.c -o a.o 2>err; rc=$?
+if [ "$rc" = 0 ] && [ "$(grep -c 'ignored-option' err)" = 1 ] && grep -q 'fstack-protector-strong' err && grep -q 'mfunction-return' err; then
+    ok "ignored-option"; else bad "ignored-option" "rc=$rc $(cat err)"; fi
+"$SIC" -fstack-protector-strong -fno-stack-protector -mfunction-return=keep -c a.c -o a.o 2>err
+"$SIC" -fsanitize=address -Wno-ignored-option -c a.c -o a.o 2>>err
+if [ ! -s err ]; then ok "ignored-option-off"; else bad "ignored-option-off" "$(cat err)"; fi
+if ! "$SIC" -fsanitize=address -Werror=ignored-option -c a.c -o a.o 2>/dev/null; then ok "ignored-option-werror"; else bad "ignored-option-werror" "compiled"; fi
+cat > attr.c <<'EOF'
+typedef int (__attribute__((ms_abi)) *efi_fn)(int);
+struct st { efi_fn f; };
+int __attribute__((ms_abi)) proto(int);
+__attribute__((ms_abi)) int entry(int a) { return a; }
+EOF
+"$SIC" -Werror -c attr.c -o attr.o 2>err; rc=$?
+if [ "$rc" = 0 ] && [ "$(grep -c 'unsupported-attribute' err)" = 1 ] && grep -q 'attr.c:4:' err; then
+    ok "unsupported-attribute"; else bad "unsupported-attribute" "rc=$rc $(cat err)"; fi
+printf 'int f(int n) { char *p = __builtin_alloca(n); p[0] = 1; return p[0]; }\n' > al.c
+for b in $("$SIC" -print-backends); do
+    "$SIC" -fbackend=$b -Werror -c al.c -o al.o 2>err; rc=$?
+    n=$(grep -c 'unsupported-alloca' err)
+    case $b in llvm) want=0 ;; *) want=1 ;; esac
+    if [ "$rc" = 0 ] && [ "$n" = "$want" ]; then ok "unsupported-alloca-$b"; else bad "unsupported-alloca-$b" "rc=$rc $(cat err)"; fi
+done
+cd ..
+
 # ── binary input given as C (`-x c`) is an error, not an abort of the built-in
 # preprocessor: a lone \x05 byte (its internal "pending macro" mark) indexed an
 # empty name. ──

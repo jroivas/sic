@@ -42,6 +42,14 @@
   `#if`; `-ffreestanding` makes `__STDC_HOSTED__` 0.
 - Driver: an input without a source suffix is a linker input, as with gcc (libtool's
   `.lo`); `-x <language>` is honoured.
+- What sic accepts but does not do is a warning, which plain `-Werror` leaves a
+  warning (`-Werror=<name>` makes it an error):
+  - `-Wignored-option`: the mitigation and hardening options (`-fstack-protector*`,
+    `-mfunction-return=`, `-mindirect-branch=`, `-fcf-protection`,
+    `-fpatchable-function-entry=`, `-fsanitize=`, …), and `-g` with LLVM;
+  - `-Wunsupported-attribute`: a function defined `ms_abi`, and on i386 `regparm`,
+    `stdcall`, `fastcall`;
+  - `-Wunsupported-alloca`: `alloca` on Cranelift (LLVM's is on the stack).
 
 ### SIC
 

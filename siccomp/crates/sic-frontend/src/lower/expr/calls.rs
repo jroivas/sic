@@ -785,16 +785,23 @@ impl<'m> FuncCtx<'m> {
                 "__builtin_alloca" | "alloca" | "__builtin_alloca_with_align" => {
                     if let [size_expr, ..] = args {
                         let voidp = Type::void_ptr();
+                        let sp = &size_expr.span;
                         // A size with a known bound, outside a loop: a stack slot
                         // of the bound, which needs no allocator (Linux's kernel
                         // stack offset, `x & 0x3f8`, where there is no `malloc`).
-                        if let (Some(bound), true) = (self.alloca_bound(size_expr), self.loop_stack.is_empty()) {
+                        if let (Some(bound), true, false) = (self.alloca_bound(size_expr), self.loop_stack.is_empty(), self.lowerer.dynamic_stack) {
+                            crate::diag::warn("unsupported-alloca", sp.file.as_deref(), sp.line, sp.col,
+                                "`alloca` is a fixed stack slot of its largest size here: the stack pointer does not move by the size (the Cranelift back end has no dynamic stack allocation)");
                             self.lower_expr(size_expr)?;
                             let dest = self.alloc_val();
                             let ty = Type::Array { elem: Box::new(Type::Int { bits: 8, signed: false }), len: bound as usize };
                             self.push_instr(Instr::Alloca { dest, ty, align: Some(16) });
                             self.val_types.insert(dest.0, voidp);
                             return Ok(Val::Local(dest));
+                        }
+                        if !self.lowerer.dynamic_stack {
+                            crate::diag::warn("unsupported-alloca", sp.file.as_deref(), sp.line, sp.col,
+                                "`alloca` is `malloc`ed and never freed here (the Cranelift back end has no dynamic stack allocation)");
                         }
                         let malloc = self.libc_fn("malloc", vec![Type::u64()], voidp.clone());
                         let sz = self.lower_expr(size_expr)?;
