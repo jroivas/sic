@@ -8,6 +8,8 @@ use std::path::Path;
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(builtin_cpp)");
     println!("cargo:rerun-if-env-changed=SIC_NO_BUILTIN_CPP");
+    // The back ends' order (build.sh's `--backend`): the first is the default.
+    println!("cargo:rerun-if-env-changed=SIC_BACKEND_ORDER");
     println!("cargo:rerun-if-changed=build.rs");
     let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let root = Path::new(&manifest).join("../../..");

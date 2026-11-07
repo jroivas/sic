@@ -14,9 +14,11 @@
 # Usage: ./build.sh [debug|release] [--backend LIST]   (default: debug)
 #
 # --backend picks the back ends built into sic: `cranelift` (the default), `llvm`,
-# a list as `llvm,cranelift`, or `all`. LLVM is built only when asked for: it takes
-# longer, and needs LLVM 21 at build time and libLLVM at run time. With both,
-# Cranelift stays the default and `-fbackend=llvm` selects LLVM.
+# a list as `llvm,cranelift`, or `all` (`cranelift,llvm`). LLVM is built only when
+# asked for: it takes longer, and needs LLVM 21 at build time and libLLVM at run
+# time. The first in the list is the default; `-fbackend=` (or $SIC_BACKEND)
+# selects another: `cranelift,llvm` compiles with Cranelift unless asked,
+# `llvm,cranelift` with LLVM.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -50,6 +52,8 @@ for b in "${backend_list[@]}"; do
     esac
 done
 FEATURE_LIST="$(IFS=,; echo "${FEATURES[*]}")"
+# The order sic lists its back ends in (and so its default), built into it.
+export SIC_BACKEND_ORDER="$FEATURE_LIST"
 if [[ ",$FEATURE_LIST," == *,llvm,* ]]; then
     LLVM_CONFIG="$(command -v llvm-config-21 || command -v llvm-config || true)"
     [ -n "$LLVM_CONFIG" ] || { echo "build.sh: the llvm back end needs LLVM 21: no llvm-config" >&2; exit 1; }

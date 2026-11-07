@@ -948,6 +948,10 @@ fn available_backends() -> Vec<Box<dyn Backend>> {
     backends.push(Box::new(sic_cranelift::CraneliftBackend::new()));
     #[cfg(feature = "llvm")]
     backends.push(Box::new(sic_llvm::LlvmBackend::new()));
+    // In the order sic was built with (`SIC_BACKEND_ORDER`, from build.sh's
+    // `--backend llvm,cranelift`); one it does not name keeps its place after.
+    let order = option_env!("SIC_BACKEND_ORDER").unwrap_or("");
+    backends.sort_by_key(|b| order.split(',').position(|n| n == b.name()).unwrap_or(usize::MAX));
     backends
 }
 
