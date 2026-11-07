@@ -1760,6 +1760,16 @@ done
 cd ..
 fi
 
+# ── binary input given as C (`-x c`) is an error, not an abort of the built-in
+# preprocessor: a lone \x05 byte (its internal "pending macro" mark) indexed an
+# empty name. ──
+mkdir -p binin && cd binin
+printf 'int x;\005\n\177ELF\001\001\001\005\n' > bin.o
+"$SIC" -x c -E bin.o -o out.i 2>err; rc=$?
+"$SIC" -x c -c bin.o -o out.o 2>>err; rc2=$?
+if [ "$rc" -le 1 ] && [ "$rc2" = 1 ] && ! grep -q "bounds check" err; then ok "binary-input"; else bad "binary-input" "rc=$rc/$rc2 $(head -3 err)"; fi
+cd ..
+
 # ── an input without a source suffix is a linker input (gcc): musl links its
 # libtool-style `.lo` objects, which sic preprocessed as C; `-x c` makes one a
 # source whatever its suffix. ──

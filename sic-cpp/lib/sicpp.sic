@@ -1920,8 +1920,10 @@ static Toks *expand_tokens(Toks *tokens, dict<string, string> *macros,
 
         // Macro lookup. A macro already being expanded is emitted painted — never
         // re-expanded, in this pass or a later one — so recursive macros terminate.
-        if (tok[0] == 5) tok = tok[1:];   // a pending name is considered afresh here
-        string enc = tok[0] == 4 ? "" : macros[tok];
+        // A pending name is considered afresh here. A lone \x05 byte is no mark but
+        // a stray byte of the source (binary input), passed through as gcc does.
+        if (tok[0] == 5 && tok.size > 1) tok = tok[1:];
+        string enc = tok[0] == 4 || tok[0] == 5 ? "" : macros[tok];
         if (enc.size >= 2 && name_active(active, tok)) { tok = arena_marked(4, tok); enc = ""; }
         if (enc.size >= 2) {
             // The expansion of this macro hides its own name.
