@@ -1036,6 +1036,16 @@ static Toks *tokenize(string input)
             if (g_keep_comments) toks_add(tokens, input[st:i].rtrim());
             continue;
         }
+        i32 pre = encoding_prefix(input, i);
+        if (pre > 0) {
+            i32 start = i;
+            i32 q = input[i + pre];
+            i += pre + 1;
+            while (i < input.size && input[i] != q) { if (input[i] == '\\') i++; i++; }
+            if (i < input.size && input[i] == q) i++;
+            toks_add(tokens, input[start:i]);
+            continue;
+        }
         if (is_ident_start(ch)) {
             i32 start = i;
             while (i < input.size && is_ident(input[i])) i++;
@@ -1147,6 +1157,21 @@ static Toks *tokenize(string input)
 static i32 is_ident_start(i32 c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 static i32 is_ident(i32 c) { return is_ident_start(c) || (c >= '0' && c <= '9'); }
 
+// The length of the encoding prefix of a character constant or string literal at
+// `i` (`L'x'`, `u"s"`, `u8"s"`), else 0: the prefix and literal are one token, not an
+// identifier. `u8` prefixes a character constant only in C23.
+static i32 g_u8_char = 0;
+static i32 encoding_prefix(string s, i32 i)
+{
+    i32 n = 0;
+    if (i + 1 < s.size && s[i] == 'u' && s[i + 1] == '8') n = 2;
+    else if (i < s.size && (s[i] == 'L' || s[i] == 'u' || s[i] == 'U')) n = 1;
+    if (n == 0 || i + n >= s.size) return 0;
+    if (s[i + n] == '"') return n;
+    if (s[i + n] == '\'' && (n == 1 || g_u8_char)) return n;
+    return 0;
+}
+
 static i32 peek(string r) { return r.size > 0 ? r[0] : 0; }
 static i32 peek2(string r) { return r.size > 1 ? r[1] : 0; }
 static void skip_ws(string *r) { *r = (*r).ltrim(); }
@@ -1183,6 +1208,84 @@ static i32 g_if_true_false = 0;
 // > 0 while parsing an operand that is not evaluated (`0 && x`, `1 || x`, the
 // other arm of `?:`): its division by zero is no error (C11 6.5.13/14/15).
 static i32 g_eval_skip = 0;
+
+static i32 hex_digit(i32 c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// One character of a character constant at `*r` (an escape, or for a prefixed
+// constant a UTF-8 sequence), consumed.
+static u64 char_value(string *r, i32 kind)
+{
+    u64 v = (u64)(u8)(*r)[0];
+    *r = (*r)[1:];
+    if (v == '\\' && (*r).size > 0) {
+        i32 e = (*r)[0];
+        *r = (*r)[1:];
+        if (e >= '0' && e <= '7') {
+            v = (u64)(e - '0');
+            for (i32 k = 0; k < 2 && peek(*r) >= '0' && peek(*r) <= '7'; k++) {
+                v = v * 8 + (u64)(peek(*r) - '0');
+                *r = (*r)[1:];
+            }
+            return v;
+        }
+        if (e == 'x' || e == 'u' || e == 'U') {
+            i32 max = e == 'x' ? 1 << 30 : e == 'u' ? 4 : 8;
+            v = 0;
+            for (i32 k = 0; k < max && hex_digit(peek(*r)) >= 0; k++) {
+                v = v * 16 + (u64)hex_digit(peek(*r));
+                *r = (*r)[1:];
+            }
+            return v;
+        }
+        if (e == 'n') return 10;
+        if (e == 't') return 9;
+        if (e == 'r') return 13;
+        if (e == 'a') return 7;
+        if (e == 'b') return 8;
+        if (e == 'f') return 12;
+        if (e == 'v') return 11;
+        if (e == 'e' || e == 'E') return 27;
+        return (u64)e;   // \\ \' \" \?
+    }
+    // A wide constant holds one character per code point.
+    if (kind != 0 && kind != '8' && v >= 0xc0) {
+        i32 more = v >= 0xf0 ? 3 : v >= 0xe0 ? 2 : 1;
+        v = v & (u64)(0x3f >> more);
+        for (i32 k = 0; k < more && (*r).size > 0 && ((*r)[0] & 0xc0) == 0x80; k++) {
+            v = (v << 6) | (u64)((*r)[0] & 0x3f);
+            *r = (*r)[1:];
+        }
+    }
+    return v;
+}
+
+// A character constant after its opening quote, as gcc evaluates it: a plain one
+// is an `int` of its chars, 8 bits each (one char is a signed char); `L` is the
+// last char as a signed 32-bit wchar_t; `u`, `U` and `u8` are the last char,
+// unsigned, in 16, 32 and 8 bits.
+static PPV char_constant(string *r, i32 kind)
+{
+    u64 val = 0;
+    i32 n = 0;
+    while ((*r).size > 0 && (*r)[0] != '\'') {
+        u64 ch = char_value(r, kind);
+        val = kind == 0 ? (val << 8) | (ch & 0xff) : ch;
+        n++;
+    }
+    if (peek(*r) == '\'') *r = (*r)[1:];
+    if (n == 0) eval_fail("empty character constant");
+    if (kind == 0) return ppv(n == 1 ? (i64)(i8)val : (i64)(i32)val, 0);
+    if (kind == 'L') return ppv((i64)(i32)val, 0);
+    if (kind == 'u') return ppv((i64)(val & 0xffff), 1);
+    if (kind == 'U') return ppv((i64)(val & 0xffffffff), 1);
+    return ppv((i64)(val & 0xff), 1);
+}
 
 static PPV eval_primary(string *r, dict<string, string> *macros)
 {
@@ -1255,23 +1358,12 @@ static PPV eval_primary(string *r, dict<string, string> *macros)
         return ppv((i64)val, uns);
     }
 
-    // Char constant (an `int`).
-    if (c == '\'') {
-        *r = (*r)[1:];
-        i64 val = 0;
-        if (peek(*r) == '\\') {
-            *r = (*r)[1:];
-            i32 e = peek(*r);
-            if (e == 'n') val = 10;
-            else if (e == 't') val = 9;
-            else if (e == 'r') val = 13;
-            else if (e == '0') val = 0;
-            else val = e;
-            if ((*r).size > 0) *r = (*r)[1:];
-        } else if ((*r).size > 0) { val = (i64)(i8)(*r)[0]; *r = (*r)[1:]; }
-        while ((*r).size > 0 && (*r)[0] != '\'') *r = (*r)[1:];
-        if (peek(*r) == '\'') *r = (*r)[1:];
-        return ppv(val, 0);
+    // A character constant, plain (an `int`) or with an encoding prefix.
+    i32 pre = encoding_prefix(*r, 0);
+    if (c == '\'' || (pre > 0 && (*r)[pre] == '\'')) {
+        i32 kind = pre == 0 ? 0 : pre == 2 ? '8' : c;
+        *r = (*r)[pre + 1:];
+        return char_constant(r, kind);
     }
 
     // An identifier left after expansion is 0 (C), except C23's true/false.
@@ -3734,6 +3826,7 @@ static Output run(list<string> args, string given_info, string given_text, i32 h
     g_eval_error = "";
     g_expand_error = "";
     g_if_true_false = 0;
+    g_u8_char = 0;
     g_eval_skip = 0;
     arena_reset();
     free_macro_defs();
@@ -3996,6 +4089,7 @@ static Output run(list<string> args, string given_info, string given_text, i32 h
     pp.macros["__STDC__"] = "O|1";
     if (stdc_version.size > 0) pp.macros["__STDC_VERSION__"] = "O|" + stdc_version;
     g_if_true_false = stdc_version == "202311L";   // C23: `#if true`
+    g_u8_char = g_if_true_false;                   // C23: `u8'c'`
     if (strict && !undef) pp.macros["__STRICT_ANSI__"] = "O|1";
     // char16_t/char32_t are UTF-16/-32 from C11 on.
     if (stdc_version.size > 0 && stdc_version != "199409L" && stdc_version != "199901L") {
