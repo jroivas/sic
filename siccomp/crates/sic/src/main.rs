@@ -188,6 +188,11 @@ struct Args {
     #[arg(skip)]
     link_order: Vec<String>,
 
+    /// Inputs named after `-x <language>` (not `none`), with that language: a
+    /// source whatever its suffix.
+    #[arg(skip)]
+    x_inputs: std::collections::HashMap<String, String>,
+
     /// Dependency-only mode (`-M` / `-MM`): emit make rules and don't compile.
     #[arg(skip)]
     deps_only: bool,
@@ -535,6 +540,9 @@ fn main() {
     // `-Wl,--start-group <archives> -Wl,--end-group` must keep the archives
     // between the group markers, or circular inter-archive deps don't resolve.
     let mut link_order: Vec<String> = Vec::new();
+    // The language `-x` sets for the inputs after it (`-x none`: by suffix again).
+    let mut x_lang: Option<String> = None;
+    let mut x_inputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut deps_only = false;
     let mut pthread = false;
     let mut machine_flags: Vec<String> = Vec::new();
@@ -642,12 +650,11 @@ fn main() {
             // in macro expansions): Linux preprocesses its linker scripts with
             // `-E -P -C`. Forwarded to cpp.
             dep_flags.push(a.clone());
-        } else if a == "-x" {
-            // `-x <lang>` selects the input language. sic only handles C, so
-            // accept and ignore the language argument (consume it).
-            let _lang = iter.next();
-        } else if a.starts_with("-x") && a.len() > 2 {
-            // Attached form `-xc` — likewise ignored.
+        } else if a == "-x" || (a.starts_with("-x") && a.len() > 2) {
+            // `-x <lang>` (or `-xc`): the inputs after it are sources in that
+            // language whatever their suffix, until `-x none`.
+            let lang = if a == "-x" { iter.next().unwrap_or_default() } else { a[2..].to_string() };
+            x_lang = (lang != "none").then_some(lang);
         } else if a == "-isystem" || a == "-iquote" || a == "-idirafter" {
             // GCC include-path variants — forward to cpp VERBATIM (as flag + dir).
             // They must NOT collapse to `-I`: an `-iquote` dir is only searched for
@@ -762,6 +769,7 @@ fn main() {
             // beginning with `-` are not link inputs.
             if !a.starts_with('-') {
                 link_order.push(a.clone());
+                if let Some(l) = &x_lang { x_inputs.insert(a.clone(), l.clone()); }
             }
             argv.push(a);
         }
@@ -774,6 +782,7 @@ fn main() {
     args.dep_flags = dep_flags;
     args.cpp_include_flags = cpp_include_flags;
     args.link_order = link_order;
+    args.x_inputs = x_inputs;
     args.pthread = pthread;
     args.machine_flags = machine_flags;
     args.pic_flag = pic_flag;
@@ -995,18 +1004,24 @@ fn tokenize_response(s: &str) -> Vec<String> {
     toks
 }
 
-/// An input file is a linker input (object/archive/shared lib) rather than a
-/// C source to compile, based on its extension.
-fn is_link_input(path: &str) -> bool {
-    let lower = path.to_ascii_lowercase();
-    lower.ends_with(".o") || lower.ends_with(".a") || lower.ends_with(".so")
-        || lower.contains(".so.") // versioned shared libs, e.g. libfoo.so.1
+/// An input file is a linker input rather than a source to compile: as gcc, any
+/// file without a source suffix (`.c`, `.i`, `.sic`, `.s`, `.S`, `.sx`, `.h`)
+/// that no `-x` names — an object, an archive, a shared library, libtool's `.lo`
+/// (musl links its `.lo` objects; they were preprocessed as C).
+fn is_link_input(path: &str, args: &Args) -> bool {
+    if args.x_inputs.contains_key(path) || path == "-" { return false; }
+    let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("");
+    !matches!(ext, "c" | "i" | "h" | "sic" | "s" | "S" | "sx")
 }
 
-/// An assembly source (`.s` = plain, `.S` = needs the C preprocessor). sic has
-/// no assembler; these are handed to the system compiler driver as-is.
-fn is_assembly(path: &str) -> bool {
-    path.ends_with(".s") || path.ends_with(".S")
+/// An assembly source (`.s` = plain, `.S`/`.sx` = needs the C preprocessor, or
+/// one `-x assembler…` names). sic has no assembler; these are handed to the
+/// system compiler driver as-is.
+fn is_assembly(path: &str, args: &Args) -> bool {
+    match args.x_inputs.get(path) {
+        Some(l) => l.starts_with("assembler"),
+        None => path.ends_with(".s") || path.ends_with(".S") || path.ends_with(".sx"),
+    }
 }
 
 /// Assemble a `.s`/`.S` source to an object file via the system compiler driver
@@ -1015,6 +1030,7 @@ fn is_assembly(path: &str) -> bool {
 fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let cc = resolve_assembler();
     let mut cmd = Command::new(&cc);
+    if let Some(l) = args.x_inputs.get(src) { cmd.arg("-x").arg(l); }
     cmd.arg("-c").arg(src).arg("-o").arg(obj);
     for d in &args.defines { cmd.arg(format!("-D{}", d)); }
     for i in &args.includes { cmd.arg(format!("-I{}", i)); }
@@ -1852,8 +1868,8 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Split inputs into C sources (compiled) and object files (linked as-is).
-    let sources: Vec<&String> = args.filenames.iter().filter(|f| !is_link_input(f)).collect();
-    let objects: Vec<&String> = args.filenames.iter().filter(|f| is_link_input(f)).collect();
+    let sources: Vec<&String> = args.filenames.iter().filter(|f| !is_link_input(f, args)).collect();
+    let objects: Vec<&String> = args.filenames.iter().filter(|f| is_link_input(f, args)).collect();
 
     // ── Preprocess only (-E / -dM ...) or dependency-only (-M / -MM) ────────────
     if args.preprocess_only || args.deps_only || args.dump_flag.is_some() {
@@ -1925,7 +1941,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 // default: foo.c → foo.o
                 None => PathBuf::from(src).with_extension("o").to_string_lossy().into_owned(),
             };
-            if is_assembly(src) {
+            if is_assembly(src, args) {
                 assemble_source(src, &obj_path, args)?;
                 continue;
             }
@@ -1971,7 +1987,7 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut module_link_flags: Vec<String> = Vec::new();
     for src in &sources {
         let mut tmp = tempfile::Builder::new().suffix(".o").tempfile()?;
-        if is_assembly(src) {
+        if is_assembly(src, args) {
             assemble_source(src, &tmp.path().to_string_lossy(), args)?;
         } else {
             let ir_module = build_ir(src, args)?;

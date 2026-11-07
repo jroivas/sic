@@ -1676,6 +1676,17 @@ for b in $("$SIC" -print-backends); do
 done
 cd ..
 
+# ── an input without a source suffix is a linker input (gcc): musl links its
+# libtool-style `.lo` objects, which sic preprocessed as C; `-x c` makes one a
+# source whatever its suffix. ──
+mkdir -p linkinput && cd linkinput
+printf 'int seven(void) { return 7; }\n' > lib.c
+printf 'int seven(void);\nint main(void) { return seven(); }\n' > main.txt
+"$SIC" -c lib.c -o lib.lo 2>err
+"$SIC" -x c main.txt -x none lib.lo -o prog 2>>err && ./prog; rc=$?
+if [ "$rc" = 7 ]; then ok "lo-link-input"; else bad "lo-link-input" "rc=$rc $(head -5 err)"; fi
+cd ..
+
 # ── --version names the back end in use (Linux's /proc/version), and `clang` ──
 for b in $("$SIC" -print-backends); do
     case $b in llvm) want=LLVM ;; *) want=Cranelift ;; esac
