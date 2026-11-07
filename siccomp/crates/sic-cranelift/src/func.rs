@@ -1519,7 +1519,7 @@ fn emit_cast(
             if dst.bits() < src.bits() { builder.ins().ireduce(dst, val) }
             else { coerce(val, dst, builder, ptr_ty) }
         }
-        CastOp::BitCast | CastOp::IntToPtr | CastOp::PtrToInt => coerce(val, dst, builder, ptr_ty),
+        CastOp::BitCast | CastOp::IntToPtr | CastOp::PtrToInt | CastOp::Typed => coerce(val, dst, builder, ptr_ty),
         // x64 float<->int conversions require the GPR side to be 32 or 64 bits.
         // For narrower ints (i8/i16) widen to i32 first / reduce afterwards.
         CastOp::SIToFP  => {

@@ -230,6 +230,8 @@ fn fold_cast(op: CastOp, v: &Constant, to_ty: &Type) -> Option<Constant> {
             || matches!(v, Constant::UInt(x) if *x <= 127) => wrap_int(vi?, to_ty),
         // Other SExt / ZExt (need source width) and pointer casts: leave to codegen.
         SExt | ZExt | IntToPtr | PtrToInt | BitCast => return None,
+        // Kept by definition.
+        Typed => return None,
     })
 }
 

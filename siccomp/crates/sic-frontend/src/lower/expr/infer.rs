@@ -24,7 +24,7 @@ impl<'m> FuncCtx<'m> {
                 let idx = self.select_generic(controlling, assocs)?;
                 self.infer_expr_type(&assocs[idx].1)
             }
-            ExprKind::OffsetOf { .. } => Ok(Type::u64()),
+            ExprKind::OffsetOf { .. } => Ok(self.size_ty()),
             ExprKind::CharLit(_) => Ok(Type::i32()),
             // sic `true`/`false` is `bool` (so `any b = true` boxes with BOOL kind).
             ExprKind::BoolLit(_) => Ok(Type::Bool),
@@ -91,7 +91,7 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::TypesCompatible(..) => Ok(Type::i32()),
             ExprKind::SizeofType(_) | ExprKind::SizeofExpr(_)
-            | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Ok(Type::u64()),
+            | ExprKind::AlignofType(_) | ExprKind::AlignofExpr(_) => Ok(self.size_ty()),
             // sic bigint `-a` / `~a` keep the bigint type.
             ExprKind::Unary { op: UnOpKind::Neg | UnOpKind::BitNot, expr: inner }
                 if self.is_sic() && self.is_bigint_operand(inner) =>
@@ -746,6 +746,12 @@ impl<'m> FuncCtx<'m> {
     /// Result type of an arithmetic binary operator (the C usual-arithmetic /
     /// pointer-arithmetic rules), factored out so the sic array/string special
     /// cases can fall back to it.
+    /// `size_t`: unsigned, pointer-wide.
+    pub(crate) fn size_ty(&self) -> Type { Type::Int { bits: self.ptr_size() * 8, signed: false } }
+
+    /// `ptrdiff_t`: signed, pointer-wide.
+    pub(crate) fn ptrdiff_ty(&self) -> Type { Type::Int { bits: self.ptr_size() * 8, signed: true } }
+
     fn arith_result_type(&self, op: &BinOpKind, lt: Type, rt: Type) -> Type {
         let decay = |t: Type| match t {
             Type::Array { elem, .. } => Type::Pointer(elem),
@@ -754,7 +760,7 @@ impl<'m> FuncCtx<'m> {
         let lt = decay(lt);
         let rt = decay(rt);
         match (&lt, &rt) {
-            (Type::Pointer(_), Type::Pointer(_)) if *op == BinOpKind::Sub => Type::i64(),
+            (Type::Pointer(_), Type::Pointer(_)) if *op == BinOpKind::Sub => self.ptrdiff_ty(),
             (Type::Pointer(_), _) => lt,
             (_, Type::Pointer(_)) => rt,
             // Arithmetic operands: C's usual arithmetic conversions, as the
@@ -775,8 +781,13 @@ impl<'m> FuncCtx<'m> {
     /// `va_list` (the builtin array, or a user-defined struct aliased to
     /// `va_list`) needs its own address; a `va_list` *parameter* has already
     /// decayed to a `__va_list_tag*`, so its value is that address.
+    /// On i386 a `va_list` is a `char *` object, which `va_start`/`va_arg` update:
+    /// its address.
     pub(crate) fn lower_va_list_ptr(&mut self, list: &Expr) -> Result<Val> {
         let ty = self.infer_expr_type(list).unwrap_or_else(|_| Type::void_ptr());
+        if sic_ir::target::is_i386() {
+            return Ok(self.lower_lvalue(list)?.ptr);
+        }
         if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {
             if let Ok(lv) = self.lower_lvalue(list) {
                 return Ok(lv.ptr);

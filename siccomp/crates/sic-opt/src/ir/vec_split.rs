@@ -71,7 +71,7 @@ fn split_function(f: &mut Function) -> bool {
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::Alloca { dest, ty, align } = ins {
-                let s = ty.size_of(8);
+                let s = ty.size_of(sic_ir::target::ptr_size());
                 if s >= 16 && s <= 256 && s % 16 == 0 && align.map_or(true, |a| a <= 16) {
                     size.insert(*dest, s);
                 }

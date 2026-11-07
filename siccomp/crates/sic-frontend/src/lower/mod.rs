@@ -357,7 +357,7 @@ impl Lowerer {
             field_qtypes: HashMap::default(),
             enum_consts: HashMap::default(),
             struct_types: HashMap::default(),
-            ptr_size: 8, // assume 64-bit
+            ptr_size: crate::target::ptr_size(),
             struct_order_default: crate::ast::StructOrder::Default,
             vectorize: true,
             loop_delete: false,

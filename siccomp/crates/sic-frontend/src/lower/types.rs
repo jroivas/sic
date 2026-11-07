@@ -119,7 +119,12 @@ pub fn set_enum_consts(m: &HashMap<String, i64>) {
 /// `{u32 gp_offset; u32 fp_offset; void* overflow_arg_area; void* reg_save_area;}`
 /// (24 bytes). Modeling it as a one-element array gives the correct C decay:
 /// passing `ap` yields `&ap[0]`, matching what glibc's `vfprintf` expects.
+///
+/// On i386 it is a `char *` walking the stack arguments.
 pub fn va_list_type() -> Type {
+    if sic_ir::target::is_i386() {
+        return Type::Pointer(Box::new(Type::Int { bits: 8, signed: true }));
+    }
     let tag = Type::Struct(StructType::plain(
         Some("__va_list_tag".to_string()),
         vec![

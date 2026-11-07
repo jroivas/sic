@@ -111,7 +111,8 @@ impl Type {
             Type::Int { bits, .. } => (*bits as u64 + 7) / 8,
             Type::Float32 => 4,
             Type::Float64 => 8,
-            Type::Float80 => 16,
+            // i386: 10 bytes padded to 12 (System V i386 ABI).
+            Type::Float80 => if ptr_size == 4 { 12 } else { 16 },
             Type::Pointer(_) => ptr_size as u64,
             Type::Array { elem, len } => elem.size_of(ptr_size) * (*len as u64),
             Type::Struct(s) => s.size_of(ptr_size),
@@ -129,10 +130,13 @@ impl Type {
             // `.min(ptr_size)` here would wrongly cap it to 8, mis-laying out
             // every struct with an `Int128` (QEMU's MemoryRegion et al.) and
             // breaking 128-bit atomics.
+            // On i386 (System V i386 ABI) no scalar aligns past 4: `long long`,
+            // `double` and `long double` are 4-aligned (in a struct too).
+            Type::Int { bits, .. } if ptr_size == 4 => ((*bits as u64 + 7) / 8).min(4),
             Type::Int { bits, .. } => ((*bits as u64 + 7) / 8).min(16),
             Type::Float32 => 4,
-            Type::Float64 => 8,
-            Type::Float80 => 16,
+            Type::Float64 => if ptr_size == 4 { 4 } else { 8 },
+            Type::Float80 => if ptr_size == 4 { 4 } else { 16 },
             Type::Pointer(_) => ptr_size as u64,
             Type::Array { elem, .. } => elem.align_of(ptr_size),
             Type::Struct(s) => s.align_of(ptr_size),

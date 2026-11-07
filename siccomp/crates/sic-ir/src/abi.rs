@@ -54,6 +54,15 @@ const MAX_REG_AGG: u64 = 16;
 pub fn classify_struct_union(ty: &Type, ptr_size: u32) -> AggClass {
     debug_assert!(matches!(ty, Type::Struct(_) | Type::Union(_)));
     let size = ty.size_of(ptr_size);
+    // i386 (System V i386 ABI, Linux): every aggregate is passed on the stack and
+    // returned through the hidden pointer, but for `_Complex float`, which comes
+    // back in `edx:eax` (as clang; on the stack, it is the same 8 bytes).
+    if ptr_size == 4 {
+        if is_complex_f32(ty) {
+            return AggClass::Regs(vec![Chunk { class: RegClass::Int, offset: 0, bytes: 8 }]);
+        }
+        return AggClass::Memory(size as u32);
+    }
     // Empty aggregate (GNU extension): treat as MEMORY(0) — harmless, avoids
     // producing zero register chunks.
     if size == 0 {
@@ -96,12 +105,22 @@ pub fn is_complex_x87(ty: &Type) -> bool {
         && s.fields.len() == 2 && s.fields.iter().all(|(_, t)| *t == Type::Float80))
 }
 
+/// A `_Complex long double` return in `st(0)`/`st(1)`: x86-64 only (i386 returns
+/// it through the hidden pointer).
+pub fn ret_in_x87_pair(ty: &Type, ptr_size: u32) -> bool { ptr_size == 8 && is_complex_x87(ty) }
+
+/// `_Complex float`.
+fn is_complex_f32(ty: &Type) -> bool {
+    matches!(ty, Type::Struct(s) if s.name.as_deref().map_or(false, |n| n.starts_with(COMPLEX_PREFIX))
+        && s.fields.len() == 2 && s.fields.iter().all(|(_, t)| *t == Type::Float32))
+}
+
 /// True if the aggregate's SysV return uses the hidden sret pointer (MEMORY
 /// class). `Array` (vectors) keep the sret path for now.
 pub fn ret_in_memory(ty: &Type, ptr_size: u32) -> bool {
     match ty {
         Type::Array { .. } => true,
-        _ if is_complex_x87(ty) => false,
+        _ if is_complex_x87(ty) && ptr_size == 8 => false,
         Type::Struct(_) | Type::Union(_) => {
             matches!(classify_struct_union(ty, ptr_size), AggClass::Memory(_))
         }
@@ -196,6 +215,7 @@ pub fn classify_param(ty: &Type, ptr_size: u32) -> ParamPass {
             AggClass::Regs(chunks) => ParamPass::Direct(chunks),
             AggClass::Memory(size) => ParamPass::ByValStack(size, ty.align_of(ptr_size) as u32),
         },
+        // i386: on the stack, 12 bytes, 4-aligned.
         Type::Float80 => ParamPass::X87,
         _ => ParamPass::Scalar,
     }

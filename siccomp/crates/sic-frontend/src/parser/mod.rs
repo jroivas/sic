@@ -4784,7 +4784,9 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
     // only ever picks SIGNED types (`int`→`long`→`long long`); a HEX/OCTAL/BINARY
     // literal without `u` may fall through to an UNSIGNED type when the value does
     // not fit the signed one (so `0xFFFFFFFF` is `unsigned int`, not a signed -1).
-    // A `u` suffix forces unsigned; an `l` suffix forces at least 64-bit.
+    // A `u` suffix forces unsigned; an `l` suffix forces at least `long` (64 bits,
+    // 32 on i386), `ll` 64 bits.
+    let suffix_l = if sic_ir::target::is_i386() { lower.contains("ll") } else { suffix_l };
     let (is_u, is_64) = if suffix_u {
         (true, suffix_l || raw > u32::MAX as u64)
     } else if !suffix_l && raw <= i32::MAX as u64 {

@@ -716,7 +716,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 else { b.build_int_z_extend(i, t, "")?.into() }
             }
             CastOp::SExt | CastOp::ZExt | CastOp::BoolToInt | CastOp::Trunc
-            | CastOp::BitCast | CastOp::IntToPtr | CastOp::PtrToInt => self.coerce(v, dst)?,
+            | CastOp::BitCast | CastOp::IntToPtr | CastOp::PtrToInt | CastOp::Typed => self.coerce(v, dst)?,
             CastOp::SIToFP => b.build_signed_int_to_float(self.as_int(v)?, dst.into_float_type(), "")?.into(),
             CastOp::UIToFP => b.build_unsigned_int_to_float(self.as_int(v)?, dst.into_float_type(), "")?.into(),
             CastOp::FPToSI => self.float_to_int(v, dst, true)?,
@@ -751,7 +751,14 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let mut named_tys = 0usize;
         for (i, a) in args.iter().enumerate() {
             let is_named = !sig.variadic || i < named;
+            // A variadic aggregate (typed so by the frontend) is passed as a named
+            // one of its type would be.
+            let agg = match a {
+                Val::Local(id) => self.types.get(&id.0).filter(|t| matches!(t, Type::Struct(_) | Type::Union(_))).cloned(),
+                _ => None,
+            };
             let pass = if is_named && i < named { Some(classify_param(&sig.params[i], ptr_size)) }
+                else if let Some(t) = &agg { Some(classify_param(t, ptr_size)) }
                 else if self.is_f80(a) { Some(ParamPass::X87) } else { None };
             let at = tys.len() as u32;
             match pass {
@@ -793,6 +800,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let fn_ty = if sig.variadic { cx.fn_type(&sig.ret, &tys[..named_tys], true) } else { cx.fn_type(&sig.ret, &tys, false) };
         let site = self.b().build_indirect_call(fn_ty, callee, &vals, "")?;
         for (i, a) in attrs { site.add_attribute(AttributeLoc::Param(i), a); }
+        if let Some(a) = cx.sret_attr(&sig.ret) { site.add_attribute(AttributeLoc::Param(0), a); }
         if let Some(a) = cx.ext_attr(&sig.ret) { site.add_attribute(AttributeLoc::Return, a); }
         self.bind_result(site, &sig.ret, dest)
     }
@@ -802,7 +810,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let cx = self.cx;
         let Some(v) = site.try_as_basic_value().basic() else { return Ok(()) };
         let ptr_size = cx.opts.ptr_size;
-        if sic_ir::abi::is_complex_x87(ret) {
+        if sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
             let addr = self.slot(32, 16)?;
             for i in 0..2u32 {
                 let part = self.b().build_extract_value(v.into_struct_value(), i, "")?;
@@ -841,6 +849,21 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let cx = self.cx;
         let b = self.b();
         let lp = self.ptr_of(list)?;
+        // i386: the `char *` at `list` walks the stack arguments, each in 4-byte
+        // slots; an aggregate is its address there.
+        if cx.opts.ptr_size == 4 {
+            let p = cx.ptr();
+            let at = self.load(p, lp)?.into_pointer_value();
+            let size = (ty.size_of(4) + 3) & !3;
+            let next = self.gep_const(at, size)?;
+            self.store(lp, next.into())?;
+            if matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) { return Ok(at.into()); }
+            if *ty == Type::Float80 {
+                let x = self.load(cx.ctx.x86_f80_type().into(), at)?.into_float_value();
+                return Ok(b.build_float_trunc(x, cx.ctx.f64_type(), "")?.into());
+            }
+            return self.load(cx.value_type(ty), at);
+        }
         let (i32t, i64t, p) = (cx.ctx.i32_type(), cx.ctx.i64_type(), cx.ptr());
         let ovf_at = self.gep_const(lp, 8)?;
         let overflow = self.load(p, ovf_at)?.into_pointer_value();
@@ -888,7 +911,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     return Ok(());
                 };
                 let ret = &self.f.sig.ret;
-                if sic_ir::abi::is_complex_x87(ret) {
+                if sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
                     let base = self.ptr_of(v)?;
                     let f80 = cx.ctx.x86_f80_type().into();
                     let re = self.load(f80, base)?;

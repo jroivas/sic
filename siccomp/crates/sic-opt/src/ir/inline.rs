@@ -200,7 +200,7 @@ fn on_cycle(m: &Module, info: &[FnInfo]) -> Vec<bool> {
 fn analyze(f: &Function, self_idx: usize) -> FnInfo {
     // A declaration (no body), a variadic, or an aggregate-return function is never
     // a candidate. Scan for the disqualifiers below.
-    let ret_ok = !is_aggregate(&f.sig.ret) || sic_ir::abi::ret_in_memory(&f.sig.ret, 8);
+    let ret_ok = !is_aggregate(&f.sig.ret) || sic_ir::abi::ret_in_memory(&f.sig.ret, sic_ir::target::ptr_size());
     let mut eligible = !f.blocks.is_empty() && !f.sig.variadic && ret_ok && !f.noinline;
     let mut ret_val_count = 0;
     let mut self_rec = false;

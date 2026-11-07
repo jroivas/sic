@@ -126,6 +126,10 @@ pub enum CastOp {
     FPExt,     // float32 → float64
     FPTrunc,   // float64 → float32
     BoolToInt, // bool (i1) → integer
+    /// The value, of type `to_ty`, which folding keeps: an integer or pointer
+    /// passed to `...`, whose width a constant alone does not tell (on i386 every
+    /// argument has its own size on the stack).
+    Typed,
 }
 
 /// Atomic read-modify-write operation (sic `atomic` types). Maps directly to the

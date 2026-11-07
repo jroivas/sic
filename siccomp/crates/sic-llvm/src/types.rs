@@ -68,7 +68,7 @@ impl<'ctx> Cx<'ctx, '_> {
     /// eightbytes. A MEMORY aggregate has the frontend's hidden pointer instead.
     pub fn return_type(&self, ret: &Type) -> Option<BasicTypeEnum<'ctx>> {
         // `_Complex long double` comes back in `st(0)` and `st(1)`.
-        if sic_ir::abi::is_complex_x87(ret) {
+        if sic_ir::abi::ret_in_x87_pair(ret, self.opts.ptr_size) {
             let f = self.ctx.x86_f80_type().into();
             return Some(self.ctx.struct_type(&[f, f], false).into());
         }
@@ -97,11 +97,23 @@ impl<'ctx> Cx<'ctx, '_> {
         }
     }
 
-    /// A by-value stack block: 8-byte slots, and what the type asks beyond that.
+    /// A by-value stack block: stack slots (8 bytes, 4 on i386), and what the
+    /// type asks beyond that.
     pub fn byval_attrs(&self, size: u32, align: u32) -> Vec<Attribute> {
-        let block: AnyTypeEnum = self.ctx.i8_type().array_type((size + 7) & !7).into();
+        let slot = self.opts.ptr_size;
+        let block: AnyTypeEnum = self.ctx.i8_type().array_type((size + slot - 1) & !(slot - 1)).into();
         let kind = Attribute::get_named_enum_kind_id("byval");
-        vec![self.ctx.create_type_attribute(kind, block), enum_attr(self.ctx, "align", align.max(8) as u64)]
+        vec![self.ctx.create_type_attribute(kind, block), enum_attr(self.ctx, "align", align.max(slot) as u64)]
+    }
+
+    /// The hidden result pointer of an aggregate returned in memory is `sret`: the
+    /// callee returns it in `rax` (x86-64) or pops it (`ret $4`, i386).
+    pub fn sret_attr(&self, ret: &Type) -> Option<Attribute> {
+        if !matches!(ret, Type::Struct(_) | Type::Union(_)) || !sic_ir::abi::ret_in_memory(ret, self.opts.ptr_size) {
+            return None;
+        }
+        let block: AnyTypeEnum = self.ctx.i8_type().array_type(ret.size_of(self.opts.ptr_size).max(1) as u32).into();
+        Some(self.ctx.create_type_attribute(Attribute::get_named_enum_kind_id("sret"), block))
     }
 
     /// A narrow integer is extended to 32 bits at the boundary (SysV, gcc).
@@ -132,5 +144,6 @@ pub fn declare<'ctx>(cx: &Cx<'ctx, '_>, name: &str, sig: &FunctionType, linkage:
         for a in attrs { lf.add_attribute(AttributeLoc::Param(i as u32), *a); }
     }
     if let Some(a) = cx.ext_attr(&sig.ret) { lf.add_attribute(AttributeLoc::Return, a); }
+    if let Some(a) = cx.sret_attr(&sig.ret) { lf.add_attribute(AttributeLoc::Param(0), a); }
     lf
 }

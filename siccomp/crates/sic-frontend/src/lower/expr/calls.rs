@@ -2229,6 +2229,33 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Load { dest: cp, ptr: cptr, ty: Type::Int { bits: 32, signed: false } });
             return Ok(Val::Local(cp));
         }
+        // i386: each argument has its own size on the stack, and a constant
+        // alone does not tell it (`5LL` folds to 5): pin the argument's C type.
+        if sic_ir::target::is_i386() {
+            if let Some(t) = arg.and_then(|e| self.infer_expr_type(e).ok()) {
+                let t = match t {
+                    Type::Bool => Type::i32(),
+                    Type::Int { bits, .. } if bits < 32 => Type::i32(),
+                    Type::Array { elem, .. } => Type::Pointer(elem),
+                    Type::Function(_) => Type::void_ptr(),
+                    t => t,
+                };
+                // A struct or union goes by value (its address is the IR value):
+                // the back end copies it onto the stack.
+                if matches!(t, Type::Struct(_) | Type::Union(_)) {
+                    let t = super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types);
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::Cast { dest, op: CastOp::Typed, val: v, to_ty: t });
+                    return Ok(Val::Local(dest));
+                }
+                if matches!(t, Type::Int { .. } | Type::Pointer(_)) {
+                    let v = self.coerce(v, &t)?;
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::Cast { dest, op: CastOp::Typed, val: v, to_ty: t });
+                    return Ok(Val::Local(dest));
+                }
+            }
+        }
         match self.val_type(&v) {
             Type::Bool => self.coerce(v, &Type::i32()),
             Type::Int { bits, .. } if bits < 32 => self.coerce(v, &Type::i32()),

@@ -178,7 +178,8 @@ pub fn system_include_dirs() -> Vec<String> {
 pub fn target_macros() -> Vec<(&'static str, String)> {
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     {
-        X86_64_LINUX.iter().map(|(n, v)| (*n, v.to_string())).collect()
+        let table = if crate::target::is_i386() { I386_LINUX } else { X86_64_LINUX };
+        table.iter().map(|(n, v)| (*n, v.to_string())).collect()
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
     {
@@ -205,6 +206,7 @@ pub fn target_macros() -> Vec<(&'static str, String)> {
 }
 
 include!("cpp_info_x86_64_linux.rs");
+include!("cpp_info_i386_linux.rs");
 
 // ── `__has_*` answers ───────────────────────────────────────────────────────
 

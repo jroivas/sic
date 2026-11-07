@@ -1676,6 +1676,64 @@ for b in $("$SIC" -print-backends); do
 done
 cd ..
 
+# ── -m32: i386 with the LLVM back end (whatever the default back end): the
+# System V i386 data model and calling convention. Run freestanding (no 32-bit
+# libc needed): `_start` and the exit syscall in assembly, linked by ld. ──
+if "$SIC" -print-backends | grep -qx llvm; then
+mkdir -p m32 && cd m32
+cat > sizes.c <<'EOF'
+struct S { char c; double d; long long l; };
+struct L { char c; long double v; };
+_Static_assert(sizeof(long) == 4 && sizeof(void *) == 4 && sizeof(long double) == 12, "data model");
+_Static_assert(sizeof(struct S) == 20 && _Alignof(double) == 4 && sizeof(struct L) == 16, "layout");
+_Static_assert(sizeof(__builtin_va_list) == 4 && sizeof(sizeof 0) == 4 && sizeof((char *)0 - (char *)0) == 4, "types");
+_Static_assert(sizeof(1L) == 4 && sizeof(1LL) == 8 && sizeof(3000000000) == 8 && sizeof(0xffffffff) == 4, "literals");
+#if !defined(__i386__) || defined(__x86_64__) || __SIZEOF_POINTER__ != 4 || !defined(__ILP32__)
+#error "i386 macros"
+#endif
+EOF
+if "$SIC" -m32 -c sizes.c -o sizes.o 2>err && file sizes.o | grep -qE "ELF 32-bit.*(80386|i386)"; then ok "m32-data-model"; else bad "m32-data-model" "$(head -5 err; file sizes.o)"; fi
+cat > start.s <<'EOF'
+	.globl _start
+_start:
+	call main
+	movl %eax, %ebx
+	movl $1, %eax
+	int $0x80
+EOF
+cat > prog.c <<'EOF'
+#include <stdarg.h>
+struct S { char c; double d; long long l; };
+struct Big { long long x[3]; char c; };
+__attribute__((noinline)) static struct S mk(int x) { struct S s = { 1, x, x * 2LL }; return s; }
+__attribute__((noinline)) static struct Big add(struct Big a, struct Big b) { for (int i = 0; i < 3; i++) a.x[i] += b.x[i]; a.c ^= b.c; return a; }
+__attribute__((noinline)) static long long sum(int n, ...) {
+    va_list ap; va_start(ap, n); long long s = 0;
+    for (int i = 0; i < n; i++) { s += va_arg(ap, int); s += va_arg(ap, long long); s += (long long)va_arg(ap, double); }
+    struct S t = va_arg(ap, struct S); va_end(ap);
+    return s + t.c + t.l;
+}
+__attribute__((noinline)) static long double third(long double v) { return v / 3; }
+int main(void) {
+    struct S s = mk(21);
+    struct Big a = { { 1, 2, 3 }, 'a' }, b = { { 10LL << 33, 20, 30 }, 3 };
+    struct Big c = add(a, b);
+    long long v = sum(2, 1, 1LL << 33, 2.5, -2, 5LL, 4.0, s);
+    if (s.c != 1 || s.d != 21 || s.l != 42) return 1;
+    if (c.x[0] != (10LL << 33) + 1 || c.x[2] != 33 || c.c != ('a' ^ 3)) return 2;
+    if (v != (1LL << 33) + 53) return 3;
+    if (third(9.0L) != 3.0L) return 4;
+    return 42;
+}
+EOF
+if "$SIC" -m32 -O2 -ffreestanding -fno-pic -c prog.c -o prog.o 2>err && as --32 start.s -o start.o 2>>err \
+    && ld -m elf_i386 -static -nostdlib -o prog start.o prog.o 2>>err; then
+    ./prog; rc=$?
+    if [ "$rc" = 42 ]; then ok "m32-run"; else bad "m32-run" "rc=$rc"; fi
+else bad "m32-run" "$(head -5 err)"; fi
+cd ..
+fi
+
 # ── an input without a source suffix is a linker input (gcc): musl links its
 # libtool-style `.lo` objects, which sic preprocessed as C; `-x c` makes one a
 # source whatever its suffix. ──

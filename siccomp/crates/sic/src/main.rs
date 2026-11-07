@@ -497,6 +497,12 @@ fn delegate_non_64bit(args: &[String]) {
     let expanded = expand_response_files(args.iter().cloned());
     let last = expanded.iter().skip(1).rev().find(|a| matches!(a.as_str(), "-m16" | "-m32" | "-mx32" | "-m64"));
     let Some(flag) = last.filter(|a| a.as_str() != "-m64") else { return };
+    // i386 is the LLVM back end's, when this sic has it: all `-m32` code is
+    // compiled with it, whatever the default back end.
+    if flag == "-m32" && has_llvm_backend() {
+        sic_frontend::target::set_i386();
+        return;
+    }
     let Some(cc) = system_compiler() else {
         eprintln!("sic: error: '{}' needs clang or gcc on PATH (sic only generates 64-bit x86-64)", flag);
         std::process::exit(1);
@@ -711,8 +717,8 @@ fn main() {
         } else if a == "-m64" {
             // sic targets x86-64; `-m64` is the default. Accept as a no-op.
         } else if a == "-m32" || a == "-mx32" || a == "-m16" {
-            // An earlier `-m32` overridden by a later `-m64` (see
-            // `delegate_non_64bit`, which took the last): the code is 64-bit.
+            // The target the last of these picked (see `delegate_non_64bit`):
+            // i386 with `-m32` there, else 64-bit (a later `-m64`).
         } else if a.starts_with("-m") && a.len() > 2 {
             // Other machine-dependent flags: the instruction-set ones (`-mavx2`,
             // `-mno-sse4.1`, `-march=...`) set the x86 feature macros; tuning
@@ -931,6 +937,9 @@ fn freestanding(args: &Args) -> bool {
     matches!(args.f_options.get("freestanding"), Some(FOption::Enabled))
 }
 
+/// Whether this sic has the LLVM back end (which compiles `-m32`).
+fn has_llvm_backend() -> bool { cfg!(feature = "llvm") }
+
 /// The back ends built into this sic: the first is the default.
 fn available_backends() -> Vec<Box<dyn Backend>> {
     let mut backends: Vec<Box<dyn Backend>> = Vec::new();
@@ -948,6 +957,8 @@ fn select_backend(args: &Args) -> Result<Box<dyn Backend>, Box<dyn std::error::E
         _ => std::env::var("SIC_BACKEND").ok().filter(|v| !v.is_empty()),
     };
     let mut backends = available_backends();
+    // `-m32`: LLVM, the back end with i386 (see `delegate_non_64bit`).
+    let name = if sic_frontend::target::is_i386() { Some("llvm".to_string()) } else { name };
     let Some(name) = name else { return Ok(backends.remove(0)) };
     let names: Vec<&str> = backends.iter().map(|b| b.name()).collect();
     let Some(i) = names.iter().position(|n| *n == name) else {
@@ -1422,6 +1433,10 @@ fn function_sections(args: &Args) -> bool {
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
     if ir_module.asm_text_helpers.is_empty() && ir_module.file_asm.is_empty() { return Ok(obj); }
+    // The text helpers are x86-64 code.
+    if sic_frontend::target::is_i386() {
+        return Err(format!("{}: inline assembly is not supported with -m32 yet", src).into());
+    }
     merge_asm_helpers(&obj, ir_module, src, function_sections(args))
 }
 
@@ -1434,6 +1449,7 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
     let pic = args.pic_flag.unwrap_or(true) && !kernel_model;
     let function_sections = function_sections(args);
     let opts = BackendOptions {
+        ptr_size: sic_frontend::target::ptr_size(),
         opt: backend_opt_level(&args.opt),
         debug_info: args.debug_info,
         pic,
@@ -2009,6 +2025,39 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let out_path = args.output.as_deref().unwrap_or("a.out");
+
+    // i386: the system C driver links (`-m32`), as it knows the 32-bit start
+    // files and libraries.
+    if sic_frontend::target::is_i386() {
+        let Some(cc) = system_compiler() else {
+            return Err("linking -m32 code needs clang or gcc on PATH".into());
+        };
+        let mut link = Command::new(&cc);
+        link.arg("-m32");
+        if args.shared { link.arg("-shared"); }
+        if args.static_link { link.arg("-static"); }
+        match args.pie {
+            Some(true) if args.static_link => { link.arg("-static-pie"); }
+            Some(true) => { link.arg("-pie"); }
+            Some(false) => { link.arg("-no-pie"); }
+            None => {}
+        }
+        if !args.shared { link.arg("-Wl,--gc-sections"); }
+        link.arg("-o").arg(out_path);
+        let src_obj: std::collections::HashMap<&str, std::path::PathBuf> = sources.iter()
+            .zip(&tmp_objs)
+            .map(|(s, t)| (s.as_str(), t.path().to_path_buf()))
+            .collect();
+        for tok in &args.link_order {
+            match src_obj.get(tok.as_str()) {
+                Some(obj) => { link.arg(obj); }
+                None => { link.arg(tok); }
+            }
+        }
+        let status = link.status()?;
+        return if status.success() { Ok(()) }
+            else { Err(format!("linker failed with exit code {:?}", status.code()).into()) };
+    }
 
     // sic as the driver (default): the same inputs, in the same order, handed to
     // sic-link, which adds the system part (start files, loader, libc, …).

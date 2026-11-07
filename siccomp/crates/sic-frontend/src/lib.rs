@@ -6,6 +6,7 @@ pub mod parser;
 pub mod lower;
 pub mod module_manifest;
 pub mod diag;
+pub use sic_ir::target;
 
 pub use preprocess::{preprocess, preprocess_ex, preprocessor_bin, preprocessor_cmd, set_builtin, BuiltinOutput};
 pub use lexer::{Lexer, Lang};

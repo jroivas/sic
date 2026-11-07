@@ -1,3 +1,4 @@
+pub mod target;
 pub mod fast_hash;
 pub mod types;
 pub mod value;

@@ -86,12 +86,17 @@ fn assume_local(module: &inkwell::module::Module) {
 
 fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     Target::initialize_x86(&InitializationConfig::default());
-    let triple = TargetMachine::get_default_triple();
+    // i386 (`-m32`) as clang's: `i386-pc-linux-gnu`, CPU `pentium4` (SSE2).
+    let (triple, cpu) = if opts.ptr_size == 4 {
+        (inkwell::targets::TargetTriple::create("i386-pc-linux-gnu"), "pentium4")
+    } else {
+        (TargetMachine::get_default_triple(), "x86-64")
+    };
     let target = Target::from_triple(&triple).map_err(|e| e.to_string())?;
     let level = match opts.opt { OptLevel::None => OptimizationLevel::None, _ => OptimizationLevel::Default };
     let reloc = if opts.pic { RelocMode::PIC } else { RelocMode::Static };
     let model = if opts.no_text_data { CodeModel::Kernel } else { CodeModel::Default };
-    let machine = target.create_target_machine(&triple, "x86-64", &target_features(opts), level, reloc, model)
+    let machine = target.create_target_machine(&triple, cpu, &target_features(opts), level, reloc, model)
         .ok_or("LLVM has no target machine for this configuration")?;
 
     let ctx = Context::create();
@@ -172,6 +177,8 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         // A recognised inline-asm template is a call of a helper whose machine
         // code is known (sic_ir::asm_helpers): local to the object.
         if let Some(code) = sic_ir::asm_helpers::asm_helper_code(&e.name) {
+            // The helpers are x86-64 machine code.
+            if cx.opts.ptr_size == 4 { return Err("inline assembly is not supported with -m32 yet".into()); }
             let bytes: Vec<String> = code.iter().map(|b| b.to_string()).collect();
             asm.push_str(&format!(".pushsection .text.{0},\"ax\",@progbits\n.p2align 4\n.type {0},@function\n{0}:\n.byte {1}\n.popsection\n", e.name, bytes.join(",")));
         }
@@ -189,7 +196,7 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
 /// A global's initializer in pieces: bytes, and pointers between them.
 enum Piece<'a> { Bytes(&'a [u8]), Reloc(&'a RelocTarget) }
 
-fn pieces<'a>(bytes: &'a [u8], relocs: &'a [(usize, RelocTarget)]) -> Vec<Piece<'a>> {
+fn pieces<'a>(bytes: &'a [u8], relocs: &'a [(usize, RelocTarget)], ptr_size: usize) -> Vec<Piece<'a>> {
     // The last of several at one offset: `[0 ... 3] = a, [0] = b`.
     let mut last = std::collections::BTreeMap::new();
     for (off, t) in relocs { last.insert(*off, t); }
@@ -197,7 +204,7 @@ fn pieces<'a>(bytes: &'a [u8], relocs: &'a [(usize, RelocTarget)]) -> Vec<Piece<
     for (off, t) in last {
         if off > pos { out.push(Piece::Bytes(&bytes[pos..off])); }
         out.push(Piece::Reloc(t));
-        pos = off + 8;
+        pos = off + ptr_size;
     }
     if pos < bytes.len() { out.push(Piece::Bytes(&bytes[pos..])); }
     out
@@ -237,7 +244,7 @@ fn global_type<'ctx>(cx: &Cx<'ctx, '_>, g: &Global, size: usize) -> BasicTypeEnu
         Some(Constant::GlobalAddr(_)) => ptr.into(),
         Some(Constant::Aggregate { bytes, relocs }) => {
             let data = padded(bytes, size);
-            let fields: Vec<BasicTypeEnum> = pieces(&data, relocs).iter().map(|p| match p {
+            let fields: Vec<BasicTypeEnum> = pieces(&data, relocs, cx.opts.ptr_size as usize).iter().map(|p| match p {
                 Piece::Bytes(b) => i8t.array_type(b.len() as u32).into(),
                 Piece::Reloc(_) => ptr.into(),
             }).collect();
@@ -335,7 +342,7 @@ fn define_globals(cx: &Cx<'_, '_>) -> R<()> {
             }
             Some(Constant::Aggregate { bytes, relocs }) => {
                 let data = padded(bytes, size);
-                let vals: Vec<BasicValueEnum> = pieces(&data, relocs).iter().map(|p| match p {
+                let vals: Vec<BasicValueEnum> = pieces(&data, relocs, cx.opts.ptr_size as usize).iter().map(|p| match p {
                     Piece::Bytes(b) => cx.ctx.const_string(b, false).into(),
                     Piece::Reloc(t) => reloc_value(cx, t),
                 }).collect();
@@ -366,7 +373,7 @@ fn constructors<'ctx>(cx: &Cx<'ctx, '_>) -> R<Vec<PointerValue<'ctx>>> {
         let g = cx.module.add_global(ptr, None, &format!(".ctor_dtor.entry.{}", f.name));
         g.set_linkage(LLinkage::Internal);
         g.set_section(Some(&section));
-        g.set_alignment(8);
+        g.set_alignment(cx.opts.ptr_size);
         g.set_initializer(&lf.as_global_value().as_pointer_value());
         out.push(g.as_pointer_value());
     }

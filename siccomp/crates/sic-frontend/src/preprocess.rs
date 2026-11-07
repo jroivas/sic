@@ -373,8 +373,11 @@ pub fn preprocess_ex(
 pub(crate) fn target_predefines() -> Vec<&'static str> {
     let mut defs = Vec::new();
 
+    // `-m32`: i386 (with the LLVM back end).
     #[cfg(target_arch = "x86_64")]
-    {
+    if crate::target::is_i386() {
+        defs.extend(["__i386__", "__i386", "i386", "__ILP32__", "_ILP32"]);
+    } else {
         defs.push("__x86_64__");
         defs.push("__x86_64");
         defs.push("__amd64__");

@@ -545,9 +545,12 @@ impl<'m> FuncCtx<'m> {
                 let c = Constant::int(*v);
                 if *is64 { self.coerce(c, &Type::i64()) } else { Ok(c) }
             }
+            // An `unsigned int` past INT_MAX (`3000000000u`): its own width, which
+            // its value alone would make 64 bits.
             ExprKind::UIntLit(v, is64) => {
                 let c = Constant::uint(*v);
-                if *is64 { self.coerce(c, &Type::Int { bits: 64, signed: false }) } else { Ok(c) }
+                if *is64 { self.coerce(c, &Type::Int { bits: 64, signed: false }) }
+                else { self.coerce(c, &Type::u32()) }
             }
             // sic `true`/`false`: a `bool`-typed constant (its `val_type` is `Bool`).
             // Any conversion to int happens later at a use site via `coerce`.
@@ -3510,14 +3513,15 @@ impl<'m> FuncCtx<'m> {
                     let inner = match elem.as_ref() { Type::Array { elem: e, .. } => (**e).clone(), t => t.clone() };
                     let inner = super::types::resolve_aggregate(&inner, &self.lowerer.struct_types);
                     let elem_size = inner.size_of(self.ptr_size()) as i64;
-                    let lp = self.coerce(l, &Type::i64())?;
-                    let rp = self.coerce(r, &Type::i64())?;
+                    let pd = self.ptrdiff_ty();
+                    let lp = self.coerce(l, &pd)?;
+                    let rp = self.coerce(r, &pd)?;
                     let diff = self.alloc_val();
-                    self.push_instr(Instr::BinOp { dest: diff, op: BinOp::Sub, lhs: lp, rhs: rp, ty: Type::i64() });
+                    self.push_instr(Instr::BinOp { dest: diff, op: BinOp::Sub, lhs: lp, rhs: rp, ty: pd.clone() });
                     if elem_size > 1 {
                         let elem_size_val = Constant::int(elem_size);
                         let quot = self.alloc_val();
-                        self.push_instr(Instr::BinOp { dest: quot, op: BinOp::SDiv, lhs: Val::Local(diff), rhs: elem_size_val, ty: Type::i64() });
+                        self.push_instr(Instr::BinOp { dest: quot, op: BinOp::SDiv, lhs: Val::Local(diff), rhs: elem_size_val, ty: pd });
                         return Ok(Val::Local(quot));
                     }
                     return Ok(Val::Local(diff));

@@ -344,14 +344,14 @@ fn tracked_locs(f: &Function) -> Option<Tracked> {
             match ins {
                 Instr::Load { ptr, ty, .. } => {
                     if let Some((l, _)) = slot_of(ptr) {
-                        if scalar(ty) { access.entry(l.slot).or_default().push((l.off, ty.size_of(8))); }
+                        if scalar(ty) { access.entry(l.slot).or_default().push((l.off, ty.size_of(sic_ir::target::ptr_size()))); }
                         else { bad.insert(l.slot); }
                     }
                 }
                 Instr::Store { val, ptr } => {
                     if let Some((l, _)) = slot_of(val) { bad.insert(l.slot); }
                     if let Some((l, t)) = slot_of(ptr) {
-                        if scalar(&t) { access.entry(l.slot).or_default().push((l.off, t.size_of(8))); }
+                        if scalar(&t) { access.entry(l.slot).or_default().push((l.off, t.size_of(sic_ir::target::ptr_size()))); }
                         else { bad.insert(l.slot); }
                     }
                 }
