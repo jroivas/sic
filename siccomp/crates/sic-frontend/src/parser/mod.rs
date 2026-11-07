@@ -3555,11 +3555,13 @@ impl Parser {
                 self.advance();
                 let e = self.parse_cast()?;
                 // C unary plus applies the integer promotions (`sizeof(+c)` is
-                // sizeof(int) for a char): `0 + e` has exactly that type and value.
+                // sizeof(int) for a char): `-(-e)` has exactly that type and value,
+                // a negative zero's sign and a NaN's too (`0 + e` made `+(-0.0)`
+                // positive: musl's cimag(z) lost the sign of a zero part).
                 // sic keeps it a no-op.
                 if self.lang == Lang::Sic { return Ok(e); }
-                let zero = Expr::new(ExprKind::IntLit(0, false), sp.clone());
-                Ok(Expr::new(ExprKind::BinOp { op: BinOpKind::Add, lhs: Box::new(zero), rhs: Box::new(e) }, sp))
+                let neg = |e: Expr| Expr::new(ExprKind::Unary { op: UnOpKind::Neg, expr: Box::new(e) }, sp.clone());
+                Ok(neg(neg(e)))
             }
             TokenKind::Minus => {
                 self.advance();
