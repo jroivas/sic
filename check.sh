@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 #
 # check.sh — "check it all". Full verification of the sic compiler:
-#   1. build the compiler in BOTH profiles (./build.sh release, ./build.sh debug),
-#      each of which also rebuilds + installs the std/art sysroot for that profile;
+#   1. build the compiler in BOTH profiles (./build.sh release, ./build.sh debug)
+#      with BOTH back ends (Cranelift and LLVM), each of which also rebuilds +
+#      installs the std/art sysroot for that profile;
 #   2. run the compile-test suite (compiletest_rust.sh) with BOTH profiles;
 #   3. run that suite with the RELEASE compiler at every optimization level
 #      (-O0 -O1 -O2 -O3 -Os -Oz);
 #   4. run the module-test suite (moduletest_rust.sh) with BOTH profiles.
+# Steps 2-4 run once per back end (SIC_BACKEND=cranelift, SIC_BACKEND=llvm).
+# The LLVM back end needs LLVM 21; without it the build step fails.
 #
 # BAILS OUT on the first failure (build error, or any test not passing) and prints
 # the tail of that step's log. The suites run with FAILFAST=1 so they stop and exit
@@ -22,6 +25,9 @@ cd "$ROOT"
 LOGDIR="$(mktemp -d /tmp/sic_check.XXXXXX)"
 DBG="$ROOT/siccomp/target/debug/sic"
 REL="$ROOT/siccomp/target/release/sic"
+# Every back end is checked: each suite runs once per back end.
+BACKENDS=(cranelift llvm)
+BUILD_BACKENDS="$(IFS=,; echo "${BACKENDS[*]}")"
 # Append one timing record per successful run here (git-ignored) — a history to
 # watch for build/compile-time regressions.
 TIMES_FILE="$ROOT/.check_times.log"
@@ -74,26 +80,42 @@ step() {
 echo "sic check-it-all — logs in $LOGDIR"
 echo ""
 
+# has_backends <sic> — the compiler has every back end in BACKENDS.
+has_backends() {
+    local have; have="$("$1" -print-backends)" || return 1
+    local b
+    for b in "${BACKENDS[@]}"; do
+        grep -qx "$b" <<< "$have" || { echo "$1 has no back end '$b' (has: $have)"; return 1; }
+    done
+}
+
 # ── Release profile ───────────────────────────────────────────────────────────
 echo "== RELEASE =="
-step "build compiler + sysroot (release)" ./build.sh release
-step "moduletest (release)" \
-    env SIC="$REL" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_release"
-# Compile-test suite at every optimization level with the release compiler — covers
-# both "compiletest with release" and the optimization-level sweep.
-for opt in -O0 -O1 -O2 -O3 -Os -Oz; do
-    step "compiletest (release, $opt)" \
-        env SIC="$REL" CFLAGS="$opt" FAILFAST=1 ./compiletest_rust.sh "$LOGDIR/ct_release$opt"
+step "build compiler + sysroot (release)" ./build.sh release --backend "$BUILD_BACKENDS"
+step "back ends (release)" has_backends "$REL"
+for be in "${BACKENDS[@]}"; do
+    step "moduletest (release, $be)" \
+        env SIC="$REL" SIC_BACKEND="$be" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_release_$be"
+    # Compile-test suite at every optimization level with the release compiler —
+    # covers both "compiletest with release" and the optimization-level sweep.
+    for opt in -O0 -O1 -O2 -O3 -Os -Oz; do
+        step "compiletest (release, $be, $opt)" \
+            env SIC="$REL" SIC_BACKEND="$be" CFLAGS="$opt" FAILFAST=1 \
+                ./compiletest_rust.sh "$LOGDIR/ct_release_$be$opt"
+    done
 done
 
 # ── Debug profile ───────────────────────────────────────────────────────────
 echo ""
 echo "== DEBUG =="
-step "build compiler + sysroot (debug)" ./build.sh debug
-step "compiletest (debug, -O0)" \
-    env SIC="$DBG" FAILFAST=1 ./compiletest_rust.sh "$LOGDIR/ct_debug"
-step "moduletest (debug)" \
-    env SIC="$DBG" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_debug"
+step "build compiler + sysroot (debug)" ./build.sh debug --backend "$BUILD_BACKENDS"
+step "back ends (debug)" has_backends "$DBG"
+for be in "${BACKENDS[@]}"; do
+    step "compiletest (debug, $be, -O0)" \
+        env SIC="$DBG" SIC_BACKEND="$be" FAILFAST=1 ./compiletest_rust.sh "$LOGDIR/ct_debug_$be"
+    step "moduletest (debug, $be)" \
+        env SIC="$DBG" SIC_BACKEND="$be" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_debug_$be"
+done
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 ELAPSED=$(( $(date +%s) - START ))
@@ -102,12 +124,13 @@ ELAPSED=$(( $(date +%s) - START ))
 # creeping build/compile-time regression is visible run over run.
 PREV=""
 if [ -f "$TIMES_FILE" ]; then
-    PREV="$(grep -oE 'total=[0-9]+' "$TIMES_FILE" | tail -1 | cut -d= -f2)"
+    # Only runs over the same back ends compare.
+    PREV="$(grep -F " backends=$BUILD_BACKENDS " "$TIMES_FILE" | grep -oE 'total=[0-9]+' | tail -1 | cut -d= -f2)"
 fi
 
 TSTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-printf '%s commit=%s total=%d%s\n' "$TSTAMP" "$COMMIT" "$ELAPSED" "$RECORD" >> "$TIMES_FILE"
+printf '%s commit=%s backends=%s total=%d%s\n' "$TSTAMP" "$COMMIT" "$BUILD_BACKENDS" "$ELAPSED" "$RECORD" >> "$TIMES_FILE"
 
 echo ""
 echo "================================================================"
