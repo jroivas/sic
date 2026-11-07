@@ -31,7 +31,8 @@ pub fn value_types(f: &Function) -> HashMap<u32, Type> {
                 Instr::GetFieldPtr { dest, result_ty, .. }
                 | Instr::GetElemPtr { dest, result_ty, .. } => Some((dest, result_ty.clone())),
                 Instr::PtrOffset { dest, .. } | Instr::ReturnAddress { dest }
-                | Instr::FrameAddress { dest } => Some((dest, Type::void_ptr())),
+                | Instr::FrameAddress { dest } | Instr::VlaAlloc { dest, .. }
+                | Instr::DynAlloca { dest, .. } => Some((dest, Type::void_ptr())),
                 _ => None,
             };
             if let Some((d, t)) = r { m.insert(d.0, t); }

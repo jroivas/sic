@@ -49,6 +49,15 @@ impl F80Refs {
     }
 }
 
+/// The largest VLA kept on the stack (see `Instr::VlaAlloc`).
+const VLA_SLOT: u32 = 512;
+
+/// The fixed stack slot of the VLA allocated as `id`.
+fn vla_slot(id: ValId, slot_map: &mut HashMap<u32, cir::StackSlot>, b: &mut FunctionBuilder<'_>) -> cir::StackSlot {
+    *slot_map.entry(id.0).or_insert_with(|| b.create_sized_stack_slot(
+        cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, VLA_SLOT, 4)))
+}
+
 /// A 16-byte, 16-aligned stack temporary for one x87 value.
 fn f80_temp(b: &mut FunctionBuilder<'_>, ptr_ty: cir::Type) -> cir::Value {
     let slot = b.create_sized_stack_slot(cir::StackSlotData::new(cir::StackSlotKind::ExplicitSlot, 16, 4));
@@ -853,6 +862,65 @@ fn emit_instr(
                 let szv = builder.ins().iconst(ptr_ty, *size as i64);
                 builder.call_memset(target_config, dv, vb, szv);
             }
+        }
+
+        // A VLA: Cranelift has no dynamic stack allocation, so a fixed stack slot
+        // holds one of up to `VLA_SLOT` bytes (no allocator needed: musl's dynamic
+        // linker has a VLA before it can call `calloc`), and `calloc` a larger one.
+        Instr::VlaAlloc { dest, size, calloc } => {
+            let slot = vla_slot(*dest, slot_map, builder);
+            let sz = rval(size, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let sz = coerce(sz, ptr_ty, builder, ptr_ty);
+            let fits = builder.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, sz, VLA_SLOT as i64);
+            let small = builder.create_block();
+            let big = builder.create_block();
+            let join = builder.create_block();
+            let res = builder.append_block_param(join, ptr_ty);
+            builder.ins().brif(fits, small, &[], big, &[]);
+            builder.switch_to_block(small);
+            let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+            let zero = builder.ins().iconst(ct::I8, 0);
+            builder.call_memset(target_config, addr, zero, sz);
+            builder.ins().jump(join, &[addr.into()]);
+            builder.switch_to_block(big);
+            let p = match callee_refs.get(&calloc.0) {
+                Some(&f) => {
+                    let one = builder.ins().iconst(ptr_ty, 1);
+                    let c = builder.ins().call(f, &[one, sz]);
+                    builder.inst_results(c)[0]
+                }
+                None => builder.ins().iconst(ptr_ty, 0),
+            };
+            builder.ins().jump(join, &[p.into()]);
+            builder.switch_to_block(join);
+            val_map.insert(dest.0, res);
+        }
+
+        // The end of a VLA's scope: a `calloc`ed one is freed.
+        Instr::VlaFree { alloc, ptr, free } => {
+            let slot = vla_slot(*alloc, slot_map, builder);
+            let p = rval(ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let p = coerce(p, ptr_ty, builder, ptr_ty);
+            let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+            let heap = builder.ins().icmp(IntCC::NotEqual, p, addr);
+            let release = builder.create_block();
+            let join = builder.create_block();
+            builder.ins().brif(heap, release, &[], join, &[]);
+            builder.switch_to_block(release);
+            if let Some(&f) = callee_refs.get(&free.0) { builder.ins().call(f, &[p]); }
+            builder.ins().jump(join, &[]);
+            builder.switch_to_block(join);
+        }
+
+        // `alloca`: heap storage (never freed), as there is no dynamic stack.
+        Instr::DynAlloca { dest, size, malloc } => {
+            let sz = rval(size, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+            let sz = coerce(sz, ptr_ty, builder, ptr_ty);
+            let p = match callee_refs.get(&malloc.0) {
+                Some(&f) => { let c = builder.ins().call(f, &[sz]); builder.inst_results(c)[0] }
+                None => builder.ins().iconst(ptr_ty, 0),
+            };
+            val_map.insert(dest.0, p);
         }
 
         Instr::BSwap { dest, val, ty } => {

@@ -42,6 +42,9 @@ pub enum Cleanup {
     /// sic transient `string.ptr` C-string copy: `free` the pointer held in
     /// `slot` (a `char*` slot, NULL when `.ptr` needed no copy) at scope exit.
     FreePtr { slot: Val },
+    /// A C variable-length array allocated as `alloc` (a `VlaAlloc` dest), its
+    /// pointer in `slot`: released at scope exit.
+    VlaFree { alloc: ValId, slot: Val },
     /// sic `@` reference: release (decrement + free at 0) the referent pointer
     /// held in `slot` at scope exit (sic.md §"References").
     RefRelease { slot: Val },
@@ -1026,9 +1029,21 @@ impl<'m> FuncCtx<'m> {
         false
     }
 
+    /// The libc function `name`, declared with this signature if it is not yet.
+    pub(crate) fn libc_fn(&mut self, name: &str, params: Vec<Type>, ret: Type) -> sic_ir::FuncRef {
+        match self.lowerer.module.func_ref_by_name(name) {
+            Some(f) => f,
+            None => self.lowerer.module.add_extern(sic_ir::ExternFunc {
+                name: name.to_string(),
+                sig: sic_ir::FunctionType { ret, params, variadic: false },
+            }),
+        }
+    }
+
     /// Declare the variable-length array `name` of `count` elements of `elem`
-    /// (see the local-declaration path): heap storage freed at scope exit, the
-    /// local a pointer to it, its byte size kept for `sizeof`.
+    /// (see the local-declaration path): zeroed storage (`VlaAlloc`: on the
+    /// stack where the back end can) released at scope exit, the local a pointer
+    /// to it, its byte size kept for `sizeof`.
     fn lower_vla(&mut self, name: &str, elem: &Type, count: &Expr, sp: &crate::lexer::Span) -> Result<()> {
         if Self::has_runtime_dim(elem) {
             return Err(CompileError::at(
@@ -1044,14 +1059,17 @@ impl<'m> FuncCtx<'m> {
         let size_slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: size_slot, ty: i64t.clone(), align: None });
         self.push_instr(Instr::Store { val: Val::Local(bytes), ptr: Val::Local(size_slot) });
-        let block = self.emit_calloc(Val::Local(bytes))?;
+        let calloc = self.libc_fn("calloc", vec![Type::u64(), Type::u64()], Type::void_ptr());
+        let alloc = self.alloc_val();
+        self.push_instr(Instr::VlaAlloc { dest: alloc, size: Val::Local(bytes), calloc });
+        self.val_types.insert(alloc.0, Type::void_ptr());
         let pty = Type::Pointer(Box::new(elem.clone()));
-        let block = self.coerce(block, &pty)?;
+        let block = self.coerce(Val::Local(alloc), &pty)?;
         let vid = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: vid, ty: pty.clone(), align: None });
         self.push_instr(Instr::Store { val: block, ptr: Val::Local(vid) });
         self.define_local(name.to_string(), pty.clone(), vid);
-        self.register_scope_exit(Cleanup::FreePtr { slot: Val::Local(vid) });
+        self.register_scope_exit(Cleanup::VlaFree { alloc, slot: Val::Local(vid) });
         self.vla_sizes.insert(vid, size_slot);
         if !name.is_empty() {
             self.push_instr(Instr::DbgVar { name: name.to_string(), ty: pty, slot: vid, is_param: false });
@@ -1390,6 +1408,12 @@ impl<'m> FuncCtx<'m> {
             }
             Cleanup::StringRelease { addr } => self.emit_string_release_at(addr),
             Cleanup::FreePtr { slot } => self.emit_free_ptr_slot(slot),
+            Cleanup::VlaFree { alloc, slot } => {
+                let p = self.alloc_val();
+                self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::void_ptr() });
+                let free = self.libc_fn("free", vec![Type::void_ptr()], Type::Void);
+                self.push_instr(Instr::VlaFree { alloc, ptr: Val::Local(p), free });
+            }
             Cleanup::RefRelease { slot } => {
                 let p = self.alloc_val();
                 self.push_instr(Instr::Load { dest: p, ptr: slot, ty: Type::char_ptr() });

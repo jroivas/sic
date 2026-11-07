@@ -27,6 +27,9 @@ pub(crate) struct Fx<'ctx, 'a, 'c> {
     /// The type of each scalar stack slot: a store is at that width, whatever the
     /// value's (`store 0` in an `i64` local is 8 bytes).
     slots: HashMap<u32, BasicTypeEnum<'ctx>>,
+    /// Each VLA's saved stack pointer (null until it is allocated), by its
+    /// `VlaAlloc` dest.
+    vla_saves: HashMap<u32, PointerValue<'ctx>>,
 }
 
 /// Floating point and vectors need SSE here: as with GCC, it is an error without.
@@ -45,7 +48,7 @@ pub fn emit<'ctx>(cx: &Cx<'ctx, '_>, f: &Function, lf: FunctionValue<'ctx>) -> R
     let entry = cx.ctx.append_basic_block(lf, "entry");
     let mut blocks = HashMap::default();
     for b in &f.blocks { blocks.insert(b.id.0, cx.ctx.append_basic_block(lf, "")); }
-    let mut fx = Fx { cx, f, lf, entry, blocks, vals: HashMap::default(), types: value_types(f), slots: HashMap::default() };
+    let mut fx = Fx { cx, f, lf, entry, blocks, vals: HashMap::default(), types: value_types(f), slots: HashMap::default(), vla_saves: HashMap::default() };
     if !cx.opts.sse { check_no_float(f, &fx.types)?; }
     cx.builder.position_at_end(entry);
     for (dest, ty, align) in f.allocas() {
@@ -80,6 +83,18 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let p = self.b().build_alloca(self.cx.ctx.i8_type().array_type(size), "")?;
         p.as_instruction_value().ok_or("alloca")?.set_alignment(align).map_err(|e| e.to_string())?;
         if let Some(bb) = here { self.b().position_at_end(bb); }
+        Ok(p)
+    }
+
+    /// The slot of the VLA `id`'s saved stack pointer, null from function entry.
+    fn vla_save(&mut self, id: sic_ir::ValId) -> R<PointerValue<'ctx>> {
+        if let Some(&p) = self.vla_saves.get(&id.0) { return Ok(p); }
+        let p = self.slot(8, 8)?;
+        let here = self.b().get_insert_block();
+        self.b().position_at_end(self.entry);
+        self.b().build_store(p, self.cx.ptr().into_pointer_type().const_null())?;
+        if let Some(bb) = here { self.b().position_at_end(bb); }
+        self.vla_saves.insert(id.0, p);
         Ok(p)
     }
 
@@ -479,6 +494,38 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 let d = self.ptr_of(dst)?;
                 let v = self.typed(val, cx.ctx.i8_type().into())?.into_int_value();
                 self.b().build_memset(d, 1, v, cx.ctx.i64_type().const_int(*size, false)).map_err(|e| e.to_string())?;
+            }
+            // A VLA on the stack, as GCC: the stack pointer saved before it is
+            // restored at the end of its scope (`VlaFree`).
+            Instr::VlaAlloc { dest, size, .. } => {
+                let save = self.vla_save(*dest)?;
+                let sp = self.call_intrinsic("llvm.stacksave", &[cx.ptr().into()], &[])?;
+                self.store(save, sp)?;
+                let n = self.typed(size, cx.ctx.i64_type().into())?.into_int_value();
+                let p = self.b().build_array_alloca(cx.ctx.i8_type(), n, "")?;
+                p.as_instruction_value().ok_or("alloca")?.set_alignment(16).map_err(|e| e.to_string())?;
+                self.b().build_memset(p, 16, cx.ctx.i8_type().const_zero(), n).map_err(|e| e.to_string())?;
+                self.set(*dest, p.into());
+            }
+            Instr::VlaFree { alloc, .. } => {
+                let save = self.vla_save(*alloc)?;
+                let sp = self.load(cx.ptr().into(), save)?.into_pointer_value();
+                let set = self.b().build_is_not_null(sp, "")?;
+                let restore = cx.ctx.append_basic_block(self.lf, "");
+                let join = cx.ctx.append_basic_block(self.lf, "");
+                self.b().build_conditional_branch(set, restore, join)?;
+                self.b().position_at_end(restore);
+                let f = self.intrinsic("llvm.stackrestore", &[cx.ptr().into()])?;
+                self.b().build_call(f, &[sp.into()], "")?;
+                self.b().build_unconditional_branch(join)?;
+                self.b().position_at_end(join);
+            }
+            // `alloca`: until the function returns.
+            Instr::DynAlloca { dest, size, .. } => {
+                let n = self.typed(size, cx.ctx.i64_type().into())?.into_int_value();
+                let p = self.b().build_array_alloca(cx.ctx.i8_type(), n, "")?;
+                p.as_instruction_value().ok_or("alloca")?.set_alignment(16).map_err(|e| e.to_string())?;
+                self.set(*dest, p.into());
             }
             Instr::BSwap { dest, val, ty } => {
                 let t = cx.value_type(ty);

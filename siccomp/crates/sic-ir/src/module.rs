@@ -361,8 +361,12 @@ impl Module {
             }
             for bb in &f.blocks {
                 for instr in &bb.instrs {
-                    if let Instr::Call { func, .. } = instr {
-                        if func.is_extern() { used.insert(func.index()); }
+                    match instr {
+                        Instr::Call { func, .. } | Instr::VlaAlloc { calloc: func, .. }
+                        | Instr::VlaFree { free: func, .. } | Instr::DynAlloca { malloc: func, .. } => {
+                            if func.is_extern() { used.insert(func.index()); }
+                        }
+                        _ => {}
                     }
                     instr.for_each_val(|v| note_val(v, &mut used));
                 }
@@ -459,8 +463,12 @@ impl Module {
                     let Some(f) = self.functions.get(fi as usize) else { continue };
                     for bb in &f.blocks {
                         for instr in &bb.instrs {
-                            if let Instr::Call { func, .. } = instr {
-                                if !func.is_extern() { fs.push(func.index() as u32); }
+                            match instr {
+                                Instr::Call { func, .. } | Instr::VlaAlloc { calloc: func, .. }
+                                | Instr::VlaFree { free: func, .. } | Instr::DynAlloca { malloc: func, .. } => {
+                                    if !func.is_extern() { fs.push(func.index() as u32); }
+                                }
+                                _ => {}
                             }
                             instr.for_each_val(|v| note(v, &mut fs, &mut gs));
                         }

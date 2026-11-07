@@ -211,7 +211,10 @@ fn analyze(f: &Function, self_idx: usize) -> FnInfo {
                     // Frame-sensitive intrinsics change meaning when moved into the
                     // caller's frame.
                     Instr::ReturnAddress { .. } | Instr::FrameAddress { .. } | Instr::VaStart { .. }
-                    | Instr::VaArg { .. } | Instr::VaEnd { .. } => { eligible = false; break 'scan; }
+                    | Instr::VaArg { .. } | Instr::VaEnd { .. }
+                    // Dynamic stack storage: inlined into a loop it would pile up
+                    // (GCC does not inline these either).
+                    | Instr::VlaAlloc { .. } | Instr::VlaFree { .. } | Instr::DynAlloca { .. } => { eligible = false; break 'scan; }
                     // Directly self-recursive: inlining it into itself never
                     // terminates (and into others it just re-expands to the caps).
                     Instr::Call { func, .. } if !func.is_extern() && func.index() == self_idx => {
@@ -536,7 +539,9 @@ fn remap_instr(ins: &Instr, vmap: &HashMap<ValId, Val>) -> Instr {
         | Instr::VecMoveMask { dest, .. } | Instr::Simd { dest, .. }
         | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. } | Instr::AtomicCas { dest, .. }
         | Instr::VaArg { dest, .. } | Instr::ReturnAddress { dest }
-        | Instr::FrameAddress { dest } => { *dest = md(*dest); }
+        | Instr::FrameAddress { dest } | Instr::DynAlloca { dest, .. } => { *dest = md(*dest); }
+        Instr::VlaAlloc { dest, .. } => { *dest = md(*dest); }
+        Instr::VlaFree { alloc, .. } => { *alloc = md(*alloc); }
         Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => { if let Some(d) = dest { *d = md(*d); } }
         Instr::DbgVar { slot, .. } => { *slot = md(*slot); }
         // No dest / no ValId field to remap (operands already handled above).

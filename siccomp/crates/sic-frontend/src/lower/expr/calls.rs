@@ -768,11 +768,6 @@ impl<'m> FuncCtx<'m> {
                 "__builtin_ia32_aesimc128" => {
                     if let [s] = args { return self.lower_aes(s, None, AesMode::Imc); }
                 }
-                // `alloca(n)` / `__builtin_alloca(n)`: sic has no dynamic stack
-                // allocation (cranelift stack slots are static-size). Emulate with
-                // `malloc` so the code links and yields correct storage. NOTE:
-                // this leaks (the block is not freed on function return); adequate
-                // for bounded uses, but a proper dynamic stack alloca is a TODO.
                 // `__builtin_strcmp` of two literals is a constant: Linux tells
                 // operators apart with it, and the unmatched arm must vanish.
                 "__builtin_strcmp" => {
@@ -784,6 +779,9 @@ impl<'m> FuncCtx<'m> {
                         }));
                     }
                 }
+                // `alloca(n)` / `__builtin_alloca(n)`: a `DynAlloca`, stack storage
+                // on LLVM; Cranelift has no dynamic stack allocation and takes it
+                // from `malloc` (never freed).
                 "__builtin_alloca" | "alloca" | "__builtin_alloca_with_align" => {
                     if let [size_expr, ..] = args {
                         let voidp = Type::void_ptr();
@@ -798,17 +796,11 @@ impl<'m> FuncCtx<'m> {
                             self.val_types.insert(dest.0, voidp);
                             return Ok(Val::Local(dest));
                         }
-                        let fref = match self.lowerer.module.func_ref_by_name("malloc") {
-                            Some(f) => f,
-                            None => self.lowerer.module.add_extern(ExternFunc {
-                                name: "malloc".to_string(),
-                                sig: FunctionType { ret: voidp.clone(), params: vec![Type::u64()], variadic: false },
-                            }),
-                        };
+                        let malloc = self.libc_fn("malloc", vec![Type::u64()], voidp.clone());
                         let sz = self.lower_expr(size_expr)?;
                         let sz = self.coerce(sz, &Type::u64())?;
                         let dest = self.alloc_val();
-                        self.push_instr(Instr::Call { dest: Some(dest), func: fref, args: vec![sz], ret_ty: voidp.clone() });
+                        self.push_instr(Instr::DynAlloca { dest, size: sz, malloc });
                         self.val_types.insert(dest.0, voidp);
                         return Ok(Val::Local(dest));
                     }

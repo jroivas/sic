@@ -219,6 +219,20 @@ pub enum Instr {
     /// MemSet (used for zeroinit).
     MemSet { dst: Val, val: Val, size: u64, align: u64 },
 
+    /// A C99 variable-length array: `size` bytes, zeroed and 16-aligned, valid
+    /// until the `VlaFree` of `dest`. On the stack where the back end can (LLVM:
+    /// an alloca after a stack save, as GCC); Cranelift, which has no dynamic stack
+    /// allocation, takes a fixed stack slot when `size` fits it and `calloc` beyond.
+    VlaAlloc { dest: ValId, size: Val, calloc: FuncRef },
+
+    /// The end of the scope of the VLA allocated as `alloc` (a `VlaAlloc` dest),
+    /// whose pointer is `ptr`: its storage is released.
+    VlaFree { alloc: ValId, ptr: Val, free: FuncRef },
+
+    /// `alloca(size)`: storage until the function returns (LLVM: a dynamic alloca;
+    /// Cranelift: `malloc`, never freed).
+    DynAlloca { dest: ValId, size: Val, malloc: FuncRef },
+
     /// Byte-swap an integer value.
     BSwap { dest: ValId, val: Val, ty: Type },
 
@@ -280,6 +294,8 @@ impl Instr {
             Instr::Select { cond, on_true, on_false, .. } => { f(cond); f(on_true); f(on_false); }
             Instr::MemCopy { dst, src, .. } => { f(dst); f(src); }
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
+            Instr::VlaAlloc { size, .. } | Instr::DynAlloca { size, .. } => f(size),
+            Instr::VlaFree { ptr, .. } => f(ptr),
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
             Instr::AtomicLoad { ptr, .. } => f(ptr),
@@ -309,6 +325,8 @@ impl Instr {
             Instr::Select { cond, on_true, on_false, .. } => { f(cond); f(on_true); f(on_false); }
             Instr::MemCopy { dst, src, .. } => { f(dst); f(src); }
             Instr::MemSet { dst, val, .. } => { f(dst); f(val); }
+            Instr::VlaAlloc { size, .. } | Instr::DynAlloca { size, .. } => f(size),
+            Instr::VlaFree { ptr, .. } => f(ptr),
             Instr::VaStart { list_ptr } | Instr::VaEnd { list_ptr } => f(list_ptr),
             Instr::VaArg { list_ptr, .. } => f(list_ptr),
             Instr::AtomicLoad { ptr, .. } => f(ptr),
@@ -331,12 +349,13 @@ impl Instr {
             | Instr::Simd { dest, .. }
             | Instr::AtomicLoad { dest, .. } | Instr::AtomicRmw { dest, .. }
             | Instr::AtomicCas { dest, .. }
-            | Instr::ReturnAddress { dest } | Instr::FrameAddress { dest } => Some(*dest),
+            | Instr::ReturnAddress { dest } | Instr::FrameAddress { dest }
+            | Instr::VlaAlloc { dest, .. } | Instr::DynAlloca { dest, .. } => Some(*dest),
             Instr::Call { dest, .. } | Instr::CallIndirect { dest, .. } => *dest,
             Instr::Store { .. } | Instr::VolatileStore { .. } | Instr::MemCopy { .. } | Instr::MemSet { .. }
             | Instr::AtomicStore { .. } | Instr::Fence
             | Instr::VaStart { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_)
-            | Instr::DbgVar { .. } => None,
+            | Instr::DbgVar { .. } | Instr::VlaFree { .. } => None,
         }
     }
 
