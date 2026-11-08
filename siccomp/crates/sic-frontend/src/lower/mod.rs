@@ -76,6 +76,8 @@ pub struct Lowerer {
     /// The back end allocates on the stack at run time (LLVM): `alloca` is a
     /// real dynamic allocation. Without (Cranelift) it is a fixed slot or `malloc`.
     pub dynamic_stack: bool,
+    /// `-g`: the module keeps its struct and union types (`Module::debug_types`).
+    pub debug_info: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
     /// Unreferenced inline definitions (e.g. the thousands of `extern __inline`
     /// SIMD intrinsics in `<immintrin.h>`) are skipped — see GNU inline rules.
@@ -367,6 +369,7 @@ impl Lowerer {
             unroll: false,
             builtin_mem: true,
             dynamic_stack: false,
+            debug_info: false,
             struct_order_seed: 0,
             emit_inline: HashSet::default(),
             global_types: HashMap::default(),
@@ -579,6 +582,11 @@ impl Lowerer {
         // Surface module metadata to the driver: the module name (→ manifest
         // emission) and any link flags pulled in from imported manifests.
         self.module.sic_module = self.current_module.clone();
+        if self.debug_info {
+            self.module.debug_types = self.struct_types.iter()
+                .filter(|(_, t)| matches!(t, Type::Struct(_) | Type::Union(_)))
+                .map(|(n, t)| (n.clone(), t.clone())).collect();
+        }
         // sic module type export: publish this module's public aggregate types so a
         // consumer can name `mod::Type`. `private` types are withheld.
         if self.current_module.is_some() {

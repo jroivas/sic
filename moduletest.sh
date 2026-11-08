@@ -1825,6 +1825,40 @@ if [ -z "$why" ]; then ok "mitigations-llvm"; else bad "mitigations-llvm" "$why 
 cd ..
 fi
 
+# ── -g: DWARF lines and functions on both back ends; with LLVM also the
+# parameters, locals and types (a struct through a pointer too). Run in gdb when
+# there is one. ──
+mkdir -p dbg && cd dbg
+cat > g.c <<'EOF'
+struct pt { int x; double y; char name[8]; struct pt *next; };
+__attribute__((noinline)) int work(struct pt *p, int k) {
+    int sum = p->x * k;
+    return sum + (int)p->y;
+}
+int main(int argc, char **argv) {
+    struct pt a = { 3, 1.5, "abc", 0 };
+    (void)argv;
+    return work(&a, argc + 4) == 16 ? 0 : 1;
+}
+EOF
+for b in $("$SIC" -print-backends); do
+    "$SIC" -fbackend=$b -g -O0 g.c -o g 2>err || { bad "debug-info-$b" "$(head -3 err)"; continue; }
+    if ! readelf -S g | grep -q '\.debug_line' || ! readelf --debug-dump=info g 2>/dev/null | grep -q 'DW_TAG_subprogram'; then
+        bad "debug-info-$b" "no DWARF"; continue; fi
+    if command -v gdb >/dev/null; then
+        out="$(gdb -batch -ex 'break work' -ex run -ex 'bt' -ex 'print k' -ex 'print p->name' -ex 'next' -ex 'print sum' ./g 2>&1)"
+        why=""
+        echo "$out" | grep -q '^#1 .* in main .* at g.c:9' || why="$why bt;"
+        if [ "$b" = llvm ]; then
+            echo "$out" | grep -q '= 5$' || why="$why k;"
+            echo "$out" | grep -q '"abc' || why="$why p->name;"
+            echo "$out" | grep -q '= 15$' || why="$why sum;"
+        fi
+        if [ -z "$why" ]; then ok "debug-info-$b"; else bad "debug-info-$b" "$why $(echo "$out" | tail -6)"; fi
+    else ok "debug-info-$b"; fi
+done
+cd ..
+
 # ── binary input given as C (`-x c`) is an error, not an abort of the built-in
 # preprocessor: a lone \x05 byte (its internal "pending macro" mark) indexed an
 # empty name. ──

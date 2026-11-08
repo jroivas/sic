@@ -30,6 +30,9 @@ pub(crate) struct Fx<'ctx, 'a, 'c> {
     /// Each VLA's saved stack pointer (null until it is allocated), by its
     /// `VlaAlloc` dest.
     vla_saves: HashMap<u32, PointerValue<'ctx>>,
+    /// `-g`: the function's subprogram, and the parameters declared so far.
+    scope: Option<inkwell::debug_info::DIScope<'ctx>>,
+    params_seen: u32,
 }
 
 /// Floating point and vectors need SSE here: as with GCC, it is an error without.
@@ -48,7 +51,14 @@ pub fn emit<'ctx>(cx: &Cx<'ctx, '_>, f: &Function, lf: FunctionValue<'ctx>) -> R
     let entry = cx.ctx.append_basic_block(lf, "entry");
     let mut blocks = HashMap::default();
     for b in &f.blocks { blocks.insert(b.id.0, cx.ctx.append_basic_block(lf, "")); }
-    let mut fx = Fx { cx, f, lf, entry, blocks, vals: HashMap::default(), types: value_types(f), slots: HashMap::default(), vla_saves: HashMap::default() };
+    let mut fx = Fx { cx, f, lf, entry, blocks, vals: HashMap::default(), types: value_types(f), slots: HashMap::default(), vla_saves: HashMap::default(), scope: None, params_seen: 0 };
+    // `-g`: the subprogram, and its first line for what comes before a line mark
+    // (LLVM wants a location on every call in a function with debug information).
+    if let Some(d) = &cx.debug {
+        let sp = d.subprogram(f, lf);
+        let scope = crate::debug::Debug::scope(sp);
+        fx.scope = Some(scope);
+    }
     if !cx.opts.sse { check_no_float(f, &fx.types)?; }
     cx.builder.position_at_end(entry);
     for (dest, ty, align) in f.allocas() {
@@ -63,6 +73,9 @@ pub fn emit<'ctx>(cx: &Cx<'ctx, '_>, f: &Function, lf: FunctionValue<'ctx>) -> R
         }
     }
     fx.bind_params()?;
+    // Nothing has a line before the body's first (`SrcLine`): the parameters'
+    // stores are prologue, as clang's, so a breakpoint on the function stops
+    // after them. A call there takes the first line (see `instr`).
     for b in &f.blocks {
         cx.builder.position_at_end(fx.blocks[&b.id.0]);
         for i in &b.instrs { fx.instr(i)?; }
@@ -70,6 +83,7 @@ pub fn emit<'ctx>(cx: &Cx<'ctx, '_>, f: &Function, lf: FunctionValue<'ctx>) -> R
     }
     cx.builder.position_at_end(entry);
     cx.builder.build_unconditional_branch(fx.blocks[&f.blocks[0].id.0])?;
+    if cx.debug.is_some() { cx.builder.unset_current_debug_location(); }
     Ok(())
 }
 
@@ -84,6 +98,36 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         p.as_instruction_value().ok_or("alloca")?.set_alignment(align).map_err(|e| e.to_string())?;
         if let Some(bb) = here { self.b().position_at_end(bb); }
         Ok(p)
+    }
+
+    /// `-g`: the variable `name` of `ty`, at the stack slot `slot`. One the IR
+    /// passes took out of memory (no slot left) is not described.
+    /// `-g`: a call needs a location; before the first line mark it takes the
+    /// function's first line.
+    fn ensure_location(&mut self) {
+        let cx = self.cx;
+        let (Some(d), Some(scope)) = (&cx.debug, self.scope) else { return };
+        if self.b().get_current_debug_location().is_none() {
+            self.b().set_current_debug_location(d.di.create_debug_location(cx.ctx, crate::debug::first_line(self.f), 0, scope, None));
+        }
+    }
+
+    fn declare_var(&mut self, name: &str, ty: &Type, slot: sic_ir::ValId, is_param: bool) {
+        let cx = self.cx;
+        let (Some(d), Some(scope)) = (&cx.debug, self.scope) else { return };
+        if is_param { self.params_seen += 1; }
+        let Some(BasicValueEnum::PointerValue(p)) = self.vals.get(&slot.0).copied() else { return };
+        let Some(t) = d.ty(ty) else { return };
+        let Some(block) = self.b().get_insert_block() else { return };
+        let loc = self.b().get_current_debug_location()
+            .unwrap_or_else(|| d.di.create_debug_location(cx.ctx, 0, 0, scope, None));
+        let flags = <inkwell::debug_info::DIFlags as inkwell::debug_info::DIFlagsConstants>::ZERO;
+        let var = if is_param {
+            d.di.create_parameter_variable(scope, name, self.params_seen, d.file, loc.get_line(), t, true, flags)
+        } else {
+            d.di.create_auto_variable(scope, name, d.file, loc.get_line(), t, true, flags, 0)
+        };
+        d.di.insert_declare_at_end(p, Some(var), None, loc, block);
     }
 
     /// The type of an object of `ty` in memory (`long double` is x87, an
@@ -382,8 +426,16 @@ impl<'ctx> Fx<'ctx, '_, '_> {
     fn instr(&mut self, i: &Instr) -> R<()> {
         let cx = self.cx;
         let p8 = cx.ptr();
+        if matches!(i, Instr::Call { .. } | Instr::CallIndirect { .. } | Instr::InlineAsm { .. }) { self.ensure_location(); }
         match i {
-            Instr::Alloca { .. } | Instr::VaEnd { .. } | Instr::SrcLine(_) | Instr::DbgVar { .. } => {}
+            Instr::Alloca { .. } | Instr::VaEnd { .. } => {}
+            Instr::SrcLine(line) => {
+                if let (Some(d), Some(scope)) = (&cx.debug, self.scope) {
+                    let loc = d.di.create_debug_location(cx.ctx, *line, 0, scope, None);
+                    self.b().set_current_debug_location(loc);
+                }
+            }
+            Instr::DbgVar { name, ty, slot, is_param } => self.declare_var(name, ty, *slot, *is_param),
             Instr::Load { dest, ptr, ty } | Instr::LoadReadonly { dest, ptr, ty } | Instr::VolatileLoad { dest, ptr, ty } => {
                 let volatile = matches!(i, Instr::VolatileLoad { .. }) || self.is_volatile(ptr);
                 let p = self.ptr_of(ptr)?;

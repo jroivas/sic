@@ -9,6 +9,7 @@
   run time with `-fbackend=` or `$SIC_BACKEND`; `-print-backends` lists them. The
   first one given to `--backend` is the default. See [doc/backends.md](doc/backends.md).
 - `--version`, `.comment` and `DW_AT_producer` name the back end that compiled.
+- LLVM: `-g` (DWARF lines, functions, parameters, locals and their types).
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),
@@ -72,8 +73,9 @@
 
 ### Known limitations
 
-- The LLVM back end ignores `-g`; the Cranelift back end ignores Linux's mitigation
-  options (both warn).
+- `-g`: lines of the main source file only, without columns; no global variables;
+  Cranelift's has no variables. The Cranelift back end ignores Linux's mitigation
+  options (it warns).
 - `_Generic` and `__builtin_types_compatible_p` cannot tell `int` from `long` on i386
   (nor `long` from `long long` on x86-64).
 - `long double`, `_Complex long double` included, is computed in double precision;

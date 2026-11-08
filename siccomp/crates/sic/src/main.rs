@@ -1373,6 +1373,7 @@ fn lower_tu_once(
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled))
         && isa::Isa::from_flags(&args.machine_flags).0.sse2();
     lowerer.dynamic_stack = select_backend(args).is_ok_and(|b| b.name() == "llvm");
+    lowerer.debug_info = args.debug_info;
     lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
         && !freestanding(args);
     // Dead counted-loop elimination: default on at -O2+, overridable via -f.
@@ -1891,8 +1892,7 @@ fn mitigations(args: &Args) -> sic_ir::Mitigations {
 }
 
 /// Warn about the options sic accepts without doing what they ask (kernel
-/// mitigations on Cranelift, sanitizers, …), and `-g` where the back end emits no
-/// debug information.
+/// mitigations on Cranelift, sanitizers, …).
 fn warn_ignored_options(args: &Args) {
     let backend = select_backend(args).ok();
     let does = backend.as_ref().is_some_and(|b| b.mitigations());
@@ -1905,10 +1905,6 @@ fn warn_ignored_options(args: &Args) {
         let by = match &backend { Some(b) if b.name() != "llvm" => format!("the {} back end does not implement", b.name()), _ => "sic does not implement".to_string() };
         sic_frontend::diag::warn_driver("ignored-option",
             &format!("{} {} ignored: {} {}", ignored.join(", "), what, by, if ignored.len() == 1 { "it" } else { "them" }));
-    }
-    if args.debug_info && backend.as_ref().is_some_and(|b| b.name() == "llvm") {
-        sic_frontend::diag::warn_driver("ignored-option",
-            "`-g` is ignored: the LLVM back end does not emit debug information yet");
     }
 }
 

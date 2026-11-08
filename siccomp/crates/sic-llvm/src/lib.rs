@@ -4,6 +4,7 @@
 //! rest of the C ABI to LLVM: `long double` is a real `x86_fp80` at memory and call
 //! boundaries, a variadic function is a variadic function.
 
+mod debug;
 mod func;
 mod simd;
 mod types;
@@ -50,6 +51,8 @@ pub(crate) struct Cx<'ctx, 'a> {
     pub funcs: HashMap<u32, FunctionValue<'ctx>>,
     /// By `GlobalRef`.
     pub globals: HashMap<u32, GlobalValue<'ctx>>,
+    /// `-g`.
+    pub debug: Option<debug::Debug<'ctx>>,
 }
 
 /// Functions that return twice: a caller must not keep state in registers or
@@ -130,7 +133,8 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     module.set_triple(&triple);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     let builder = ctx.create_builder();
-    let mut cx = Cx { ctx: &ctx, module: &module, builder: &builder, ir, opts, funcs: HashMap::default(), globals: HashMap::default() };
+    let debug = opts.debug_info.then(|| debug::Debug::new(&ctx, &module, ir, opts.ptr_size, opts.opt != OptLevel::None));
+    let mut cx = Cx { ctx: &ctx, module: &module, builder: &builder, ir, opts, funcs: HashMap::default(), globals: HashMap::default(), debug };
 
     let mut asm = String::new();
     mitigation_flags(&cx);
@@ -158,6 +162,7 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     }
     if !asm.is_empty() { module.set_inline_assembly(&asm); }
     if !opts.pic { assume_local(&module); }
+    if let Some(d) = &cx.debug { d.di.finalize(); }
 
     module.verify().map_err(|e| format!("LLVM rejected the module: {}", e.to_string()))?;
     // Unoptimized, `always_inline` functions are still inlined, as clang's -O0

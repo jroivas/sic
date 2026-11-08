@@ -57,7 +57,12 @@ the `no_stack_protector` attribute), call padding (`-fpatchable-function-entry=`
 with it, sic warns that they are ignored (`-Wignored-option`), as for any option it
 does not implement.
 
-Not there yet: `-g` is ignored (a warning says so).
+`-g` gives DWARF for the lines, the functions, their parameters and locals, and
+their types (scalars, pointers, arrays, structs; a union without its members), so
+a debugger breaks, steps, shows a backtrace and prints variables. Cranelift's
+`-g` has the lines and functions, not the variables. Lines are those of the main
+source file only, without columns (code from a header shows its line in the main
+file), and global variables are not described yet.
 
 ## `-m32`
 
