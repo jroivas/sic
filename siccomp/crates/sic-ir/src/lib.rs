@@ -15,4 +15,4 @@ pub use types::*;
 pub use value::*;
 pub use instr::*;
 pub use module::*;
-pub use backend::{Backend, BackendError, BackendOptions, OptLevel};
+pub use backend::{Backend, BackendError, BackendOptions, Mitigations, OptLevel, StackProtector};

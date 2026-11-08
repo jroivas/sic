@@ -788,6 +788,13 @@ fn main() {
         }
     }
     let mut args = Args::parse_from(argv);
+    // An optimization level is a number, `s`, `z`, `g` or `fast`, as gcc's: anything
+    // else was taken silently for -O0.
+    let level_ok = args.opt.is_empty() || args.opt.parse::<u32>().is_ok() || matches!(args.opt.as_str(), "s" | "z" | "g" | "fast");
+    if !level_ok {
+        eprintln!("sic: error: argument to '-O' should be a non-negative integer, 's', 'z', 'g' or 'fast', not '{}'", args.opt);
+        std::process::exit(1);
+    }
     args.debug_info = want_debug;
     args.preprocess_only = preprocess_only;
     args.dump_flag = dump_flag;
@@ -932,6 +939,10 @@ fn pass_config(args: &Args) -> PassConfig {
 fn backend_opt_level(opt: &str) -> OptLevel {
     match opt {
         "s" | "z" => OptLevel::Size,
+        // `-Ofast` is -O3 (and fast math, which sic does not do), `-Og` close to
+        // -O1, a bare `-O` is -O1.
+        "fast" => OptLevel::Speed,
+        "g" | "" => OptLevel::Basic,
         _ => match opt.parse::<u32>() {
             Ok(2..) => OptLevel::Speed,
             Ok(1) => OptLevel::Basic,
@@ -1473,6 +1484,7 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
         no_red_zone: args.machine_flags.iter().rev()
             .find(|m| *m == "-mno-red-zone" || *m == "-mred-zone").is_some_and(|m| m == "-mno-red-zone"),
         features: isa.backend_features().into_iter().map(String::from).collect(),
+        mitigations: mitigations(args),
         ..BackendOptions::default()
     };
     let mut backend = select_backend(args)?;
@@ -1570,7 +1582,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), reg_vars: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), no_stack_protector: Vec::new(), patchable_entry: Vec::new(), reg_vars: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1602,6 +1614,8 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         combined.file_asm.extend(tu.file_asm);
         combined.used_fns.extend(tu.used_fns);
         combined.fn_sections.extend(tu.fn_sections);
+        combined.no_stack_protector.extend(tu.no_stack_protector);
+        combined.patchable_entry.extend(tu.patchable_entry);
         used_files.push(ps);
     }
 
@@ -1785,53 +1799,114 @@ fn configure_warnings(args: &Args) {
     warn_ignored_options(args);
 }
 
-/// What an option sic accepts but does not implement asks for: its kind (the
-/// last of a kind wins) and whether it asks for anything (`-mfunction-return=keep`,
-/// `-fno-stack-protector` do not).
-fn unimplemented_option(a: &str) -> Option<(&'static str, bool)> {
+/// One of the mitigation, hardening and instrumentation options: its kind (the
+/// last of a kind wins), whether it asks for anything (`-mfunction-return=keep`,
+/// `-fno-stack-protector` do not), and whether a back end with [`Mitigations`]
+/// (LLVM) does it.
+fn mitigation_option(a: &str) -> Option<(&'static str, bool, bool)> {
     let i386 = sic_frontend::target::is_i386();
     let val = |p: &str| a.strip_prefix(p);
     Some(match a {
-        _ if a.starts_with("-fstack-protector") => ("stack-protector", true),
-        "-fno-stack-protector" => ("stack-protector", false),
-        _ if val("-mfunction-return=").is_some() => ("function-return", val("-mfunction-return=") != Some("keep")),
-        _ if val("-mindirect-branch=").is_some() => ("indirect-branch", val("-mindirect-branch=") != Some("keep")),
-        "-mindirect-branch-register" | "-mindirect-branch-cs-prefix" | "-mretpoline" | "-mretpoline-external-thunk" =>
-            ("indirect-branch-extra", true),
-        _ if val("-mharden-sls=").is_some() => ("harden-sls", val("-mharden-sls=") != Some("none")),
-        _ if a == "-fcf-protection" || val("-fcf-protection=").is_some() => ("cf-protection", val("-fcf-protection=") != Some("none")),
+        "-fno-stack-protector" => ("stack-protector", false, true),
+        "-fstack-protector-explicit" => ("stack-protector", true, false),
+        _ if a.starts_with("-fstack-protector") => ("stack-protector", true, true),
+        _ if val("-mfunction-return=").is_some() => {
+            let v = val("-mfunction-return=");
+            ("function-return", v != Some("keep"), v == Some("thunk-extern"))
+        }
+        _ if val("-mindirect-branch=").is_some() => ("indirect-branch", val("-mindirect-branch=") != Some("keep"), true),
+        "-mretpoline" | "-mretpoline-external-thunk" => ("indirect-branch", true, true),
+        "-mindirect-branch-cs-prefix" => ("cs-prefix", true, true),
+        "-mindirect-branch-register" => ("indirect-branch-register", true, true),
+        _ if val("-mharden-sls=").is_some() => ("harden-sls", val("-mharden-sls=") != Some("none"), true),
+        _ if a == "-fcf-protection" || val("-fcf-protection=").is_some() => ("cf-protection", val("-fcf-protection=") != Some("none"), true),
         _ if val("-fpatchable-function-entry=").is_some() =>
-            ("patchable", !val("-fpatchable-function-entry=").is_some_and(|v| v == "0" || v.starts_with("0,"))),
-        _ if val("-fzero-call-used-regs=").is_some() => ("zero-call-used-regs", val("-fzero-call-used-regs=") != Some("skip")),
-        _ if val("-fsanitize=").is_some() => ("sanitize", true),
-        "-fno-sanitize=all" => ("sanitize", false),
-        "-mfentry" | "-mrecord-mcount" | "-mnop-mcount" | "-finstrument-functions" => ("instrument", true),
-        _ if val("-mstack-alignment=").is_some() => ("stack-alignment", val("-mstack-alignment=") != Some("16")),
-        _ if val("-mpreferred-stack-boundary=").is_some() => ("stack-alignment", val("-mpreferred-stack-boundary=") != Some("4")),
-        _ if i386 && val("-mregparm=").is_some() => ("regparm", val("-mregparm=") != Some("0")),
-        "-mrtd" if i386 => ("rtd", true),
+            ("patchable", !val("-fpatchable-function-entry=").is_some_and(|v| v == "0" || v.starts_with("0,")), true),
+        _ if val("-fzero-call-used-regs=").is_some() => ("zero-call-used-regs", val("-fzero-call-used-regs=") != Some("skip"), true),
+        _ if val("-fsanitize=").is_some() => ("sanitize", true, false),
+        "-fno-sanitize=all" => ("sanitize", false, false),
+        "-mfentry" | "-mrecord-mcount" | "-mnop-mcount" | "-finstrument-functions" => ("instrument", true, false),
+        _ if val("-mstack-alignment=").is_some() => ("stack-alignment", val("-mstack-alignment=") != Some("16"), true),
+        _ if val("-mpreferred-stack-boundary=").is_some() => ("stack-alignment", val("-mpreferred-stack-boundary=") != Some("4"), true),
+        _ if i386 && val("-mregparm=").is_some() => ("regparm", val("-mregparm=") != Some("0"), false),
+        "-mrtd" if i386 => ("rtd", true, false),
         _ => return None,
     })
 }
 
-/// Warn about the options sic accepts without doing what they ask (kernel
-/// mitigations, the stack protector, sanitizers, …), and `-g` where the back
-/// end emits no debug information.
-fn warn_ignored_options(args: &Args) {
-    let mut last: Vec<(&'static str, bool, &str)> = Vec::new();
+/// The mitigation options in effect: the last of each kind (see
+/// [`mitigation_option`]), as (option, asks, a back end with mitigations does it).
+fn mitigation_options(args: &Args) -> Vec<(&str, bool, bool)> {
+    let mut last: Vec<(&'static str, &str, bool, bool)> = Vec::new();
     for a in &args.given {
-        let Some((kind, on)) = unimplemented_option(a) else { continue };
-        last.retain(|(k, _, _)| *k != kind);
-        last.push((kind, on, a));
+        let Some((kind, on, done)) = mitigation_option(a) else { continue };
+        last.retain(|(k, ..)| *k != kind);
+        last.push((kind, a, on, done));
     }
+    last.into_iter().map(|(_, a, on, done)| (a, on, done)).collect()
+}
+
+/// What the mitigation options ask the back end for.
+fn mitigations(args: &Args) -> sic_ir::Mitigations {
+    let mut m = sic_ir::Mitigations::default();
+    for (a, on, _) in mitigation_options(args) {
+        if !on { continue; }
+        let val = |p: &str| a.strip_prefix(p);
+        match a {
+            "-fstack-protector" => m.stack_protector = sic_ir::StackProtector::On,
+            "-fstack-protector-strong" => m.stack_protector = sic_ir::StackProtector::Strong,
+            "-fstack-protector-all" => m.stack_protector = sic_ir::StackProtector::All,
+            "-mfunction-return=thunk-extern" => m.return_thunk = true,
+            "-mindirect-branch=thunk-extern" | "-mretpoline-external-thunk" => m.retpoline_external = true,
+            "-mindirect-branch=thunk" | "-mindirect-branch=thunk-inline" | "-mretpoline" => m.retpoline = true,
+            "-mindirect-branch-cs-prefix" => m.indirect_branch_cs_prefix = true,
+            "-fcf-protection" | "-fcf-protection=full" => { m.cf_branch = true; m.cf_return = true; }
+            "-fcf-protection=branch" => m.cf_branch = true,
+            "-fcf-protection=return" => m.cf_return = true,
+            _ if val("-mharden-sls=").is_some() => {
+                let v = val("-mharden-sls=").unwrap();
+                m.harden_sls_ret = matches!(v, "all" | "return");
+                m.harden_sls_ijmp = matches!(v, "all" | "indirect-jmp");
+            }
+            _ if val("-fpatchable-function-entry=").is_some() => {
+                let v = val("-fpatchable-function-entry=").unwrap();
+                let mut it = v.split(',').map(|n| n.parse::<u32>().unwrap_or(0));
+                m.patchable_entry = Some((it.next().unwrap_or(0), it.next().unwrap_or(0)));
+            }
+            _ if val("-fzero-call-used-regs=").is_some() => m.zero_call_used_regs = val("-fzero-call-used-regs=").map(String::from),
+            _ if val("-mstack-alignment=").is_some() => m.stack_alignment = val("-mstack-alignment=").and_then(|v| v.parse().ok()),
+            _ if val("-mpreferred-stack-boundary=").is_some() =>
+                m.stack_alignment = val("-mpreferred-stack-boundary=").and_then(|v| v.parse::<u32>().ok()).map(|k| 1 << k.min(12)),
+            _ => {}
+        }
+    }
+    // Where the stack protector's guard is (no kind of their own: the last wins).
+    for a in &args.given {
+        if let Some(v) = a.strip_prefix("-mstack-protector-guard=") { m.stack_guard = Some(v.to_string()); }
+        if let Some(v) = a.strip_prefix("-mstack-protector-guard-reg=") { m.stack_guard_reg = Some(v.to_string()); }
+        if let Some(v) = a.strip_prefix("-mstack-protector-guard-symbol=") { m.stack_guard_symbol = Some(v.to_string()); }
+        if let Some(v) = a.strip_prefix("-mstack-protector-guard-offset=") { m.stack_guard_offset = v.parse().ok(); }
+    }
+    m
+}
+
+/// Warn about the options sic accepts without doing what they ask (kernel
+/// mitigations on Cranelift, sanitizers, …), and `-g` where the back end emits no
+/// debug information.
+fn warn_ignored_options(args: &Args) {
+    let backend = select_backend(args).ok();
+    let does = backend.as_ref().is_some_and(|b| b.mitigations());
     // One warning for them all: a kernel build passes several to every file.
-    let ignored: Vec<String> = last.iter().filter(|(_, on, _)| *on).map(|(_, _, a)| format!("`{}`", a)).collect();
+    let ignored: Vec<String> = mitigation_options(args).into_iter()
+        .filter(|(_, on, done)| *on && !(does && *done))
+        .map(|(a, _, _)| format!("`{}`", a)).collect();
     if !ignored.is_empty() {
         let what = if ignored.len() == 1 { "is" } else { "are" };
+        let by = match &backend { Some(b) if b.name() != "llvm" => format!("the {} back end does not implement", b.name()), _ => "sic does not implement".to_string() };
         sic_frontend::diag::warn_driver("ignored-option",
-            &format!("{} {} ignored: sic does not implement {}", ignored.join(", "), what, if ignored.len() == 1 { "it" } else { "them" }));
+            &format!("{} {} ignored: {} {}", ignored.join(", "), what, by, if ignored.len() == 1 { "it" } else { "them" }));
     }
-    if args.debug_info && select_backend(args).is_ok_and(|b| b.name() == "llvm") {
+    if args.debug_info && backend.as_ref().is_some_and(|b| b.name() == "llvm") {
         sic_frontend::diag::warn_driver("ignored-option",
             "`-g` is ignored: the LLVM back end does not emit debug information yet");
     }

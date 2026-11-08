@@ -682,6 +682,13 @@ impl Lowerer {
         for name in &tu.always_inline {
             for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.always_inline = true; }
         }
+        for name in &tu.no_stack_protector {
+            if !self.module.no_stack_protector.contains(name) { self.module.no_stack_protector.push(name.clone()); }
+        }
+        for p in &tu.patchable_entry {
+            self.module.patchable_entry.retain(|q| q.0 != p.0);
+            self.module.patchable_entry.push(p.clone());
+        }
         // `noinline` (sic ignored it): the kernel keeps such a function's own
         // frame and return address (`rest_init`, stack-depth checks).
         for name in &tu.noinline {

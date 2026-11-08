@@ -213,6 +213,11 @@ pub struct Module {
     /// `section("…")` placements: (global symbol, section) and (function, section).
     pub data_sections: Vec<(String, String)>,
     pub fn_sections: Vec<(String, String)>,
+    /// Functions that get no stack protector (`no_stack_protector`).
+    pub no_stack_protector: Vec<String>,
+    /// Per-function patchable entry padding: (function, N bytes, M of them before
+    /// the entry), over `-fpatchable-function-entry=`.
+    pub patchable_entry: Vec<(String, u32, u32)>,
     /// Internal functions to emit even when nothing calls them (`used`).
     pub used_functions: Vec<String>,
     /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
@@ -272,6 +277,8 @@ impl Module {
             asm_deferred: Vec::new(),
             data_sections: Vec::new(),
             fn_sections: Vec::new(),
+            no_stack_protector: Vec::new(),
+            patchable_entry: Vec::new(),
             used_functions: Vec::new(),
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),

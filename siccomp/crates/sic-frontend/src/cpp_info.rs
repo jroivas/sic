@@ -227,7 +227,7 @@ const ATTRIBUTES: &[&str] = &[
     "hot", "indirect_return", "leaf", "malloc", "may_alias", "no_address_safety_analysis", "no_icf",
     "no_instrument_function", "no_profile_instrument_function", "no_reorder",
     "no_sanitize", "no_sanitize_address", "no_sanitize_thread", "no_sanitize_undefined",
-    "no_split_stack", "no_stack_protector", "noclone", "noinline", "noipa", "nonnull",
+    "no_split_stack", "no_stack_protector", "patchable_function_entry", "noclone", "noinline", "noipa", "nonnull",
     "nonstring", "noplt", "noreturn", "nothrow", "optimize", "pure", "retain",
     "returns_nonnull", "returns_twice", "sentinel", "target", "unavailable",
     "uninitialized", "unused", "used", "visibility", "warn_if_not_aligned",

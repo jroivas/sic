@@ -35,6 +35,8 @@ impl Backend for LlvmBackend {
     fn compile_module(&mut self, module: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
         compile(module, opts)
     }
+
+    fn mitigations(&self) -> bool { true }
 }
 
 /// Shared by everything emitted for one module.
@@ -58,7 +60,31 @@ fn target_features(opts: &BackendOptions) -> String {
     let mut f: Vec<String> = opts.features.iter().map(|n| format!("+{}", n)).collect();
     if !opts.sse { f.extend(["-mmx", "-sse", "-sse2"].map(String::from)); }
     if !opts.x87 { f.push("-x87".to_string()); }
+    let m = &opts.mitigations;
+    if m.retpoline || m.retpoline_external {
+        f.extend(["+retpoline-indirect-calls", "+retpoline-indirect-branches"].map(String::from));
+    }
+    if m.retpoline_external { f.push("+retpoline-external-thunk".to_string()); }
+    if m.harden_sls_ret { f.push("+harden-sls-ret".to_string()); }
+    if m.harden_sls_ijmp { f.push("+harden-sls-ijmp".to_string()); }
     f.join(",")
+}
+
+/// The module-wide part of the mitigations, as LLVM's module flags (clang's).
+fn mitigation_flags(cx: &Cx<'_, '_>) {
+    use inkwell::module::FlagBehavior;
+    let m = &cx.opts.mitigations;
+    let i32t = cx.ctx.i32_type();
+    let int = |key: &str, v: u64| cx.module.add_basic_value_flag(key, FlagBehavior::Override, i32t.const_int(v, false));
+    let text = |key: &str, v: &str| cx.module.add_metadata_flag(key, FlagBehavior::Error, cx.ctx.metadata_string(v));
+    if m.indirect_branch_cs_prefix { int("indirect_branch_cs_prefix", 1); }
+    if m.cf_branch { int("cf-protection-branch", 1); }
+    if m.cf_return { int("cf-protection-return", 1); }
+    if let Some(g) = &m.stack_guard { text("stack-protector-guard", g); }
+    if let Some(r) = &m.stack_guard_reg { text("stack-protector-guard-reg", r); }
+    if let Some(s) = &m.stack_guard_symbol { text("stack-protector-guard-symbol", s); }
+    if let Some(o) = m.stack_guard_offset { int("stack-protector-guard-offset", o as u64); }
+    if let Some(a) = m.stack_alignment { int("override-stack-alignment", a as u64); }
 }
 
 /// Non-PIC code (`-fno-PIE`, `-mcmodel=kernel`): every symbol is within reach, as in
@@ -107,6 +133,7 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     let mut cx = Cx { ctx: &ctx, module: &module, builder: &builder, ir, opts, funcs: HashMap::default(), globals: HashMap::default() };
 
     let mut asm = String::new();
+    mitigation_flags(&cx);
     declare_functions(&mut cx, &mut asm)?;
     declare_globals(&mut cx);
     resolve_aliases(&mut cx);
@@ -175,6 +202,24 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         if cx.opts.no_red_zone { attr(enum_attr(cx.ctx, "noredzone", 0)); }
         if f.noinline { attr(enum_attr(cx.ctx, "noinline", 0)); }
         if f.always_inline { attr(enum_attr(cx.ctx, "alwaysinline", 0)); }
+        // The per-function part of the mitigations (clang's attributes).
+        let m = &cx.opts.mitigations;
+        if m.return_thunk { attr(enum_attr(cx.ctx, "fn_ret_thunk_extern", 0)); }
+        if !ir.no_stack_protector.contains(&f.name) {
+            match m.stack_protector {
+                sic_ir::StackProtector::None => {}
+                sic_ir::StackProtector::On => attr(enum_attr(cx.ctx, "ssp", 0)),
+                sic_ir::StackProtector::Strong => attr(enum_attr(cx.ctx, "sspstrong", 0)),
+                sic_ir::StackProtector::All => attr(enum_attr(cx.ctx, "sspreq", 0)),
+            }
+        }
+        // `patchable_function_entry(N, M)` (Linux's `notrace`: 0, 0) over the option.
+        let patch = ir.patchable_entry.iter().find(|p| p.0 == f.name).map(|p| (p.1, p.2)).or(m.patchable_entry);
+        if let Some((n, prefix)) = patch.filter(|p| p.0 > 0) {
+            attr(cx.ctx.create_string_attribute("patchable-function-entry", &(n - prefix.min(n)).to_string()));
+            if prefix > 0 { attr(cx.ctx.create_string_attribute("patchable-function-prefix", &prefix.to_string())); }
+        }
+        if let Some(z) = &m.zero_call_used_regs { attr(cx.ctx.create_string_attribute("zero-call-used-regs", z)); }
         match ir.fn_sections.iter().find(|(n, _)| *n == f.name) {
             Some((_, sec)) => lf.as_global_value().set_section(Some(sec)),
             None if cx.opts.function_sections => lf.as_global_value().set_section(Some(&format!(".text.{}", f.name))),

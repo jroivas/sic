@@ -47,8 +47,17 @@ Differences from Cranelift:
 - Non-PIC code reaches every symbol directly (no GOT), and a hidden symbol is
   reached without one under PIC too, as Linux's link and vDSO need.
 
-Not there yet: `-g` is ignored, and the kernel's mitigation flags (return thunks,
-retpolines, stack protector, patchable function entries) are not passed on.
+Linux's mitigation and hardening options are LLVM's, as with clang: return thunks
+(`-mfunction-return=thunk-extern`), retpolines (`-mretpoline[-external-thunk]`,
+`-mindirect-branch=`, `-mindirect-branch-cs-prefix`), the stack protector
+(`-fstack-protector[-strong|-all]`, `-mstack-protector-guard[-reg|-symbol|-offset]=`,
+the `no_stack_protector` attribute), call padding (`-fpatchable-function-entry=`,
+`patchable_function_entry`, so `notrace`), `-mharden-sls=`, `-fcf-protection=`,
+`-fzero-call-used-regs=` and `-mstack-alignment=`. Cranelift has none of them:
+with it, sic warns that they are ignored (`-Wignored-option`), as for any option it
+does not implement.
+
+Not there yet: `-g` is ignored (a warning says so).
 
 ## `-m32`
 

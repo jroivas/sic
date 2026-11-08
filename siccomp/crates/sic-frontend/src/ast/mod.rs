@@ -804,6 +804,12 @@ pub struct TranslationUnit {
     pub used_fns: Vec<String>,
     /// Functions with `__attribute__((section("name")))`: (function, section).
     pub fn_sections: Vec<(String, String)>,
+    /// Functions declared `__attribute__((no_stack_protector))` (Linux's code
+    /// that runs before the guard is set up).
+    pub no_stack_protector: Vec<String>,
+    /// `__attribute__((patchable_function_entry(N, M)))`: (function, N, M) — N
+    /// bytes of padding, M of them before the entry (Linux's `notrace` is 0, 0).
+    pub patchable_entry: Vec<(String, u32, u32)>,
     /// Register variables named after a register (`register T x asm("rsp")`):
     /// (variable, register). At file scope one is a global register variable —
     /// the register itself, with no storage (Linux's `current_stack_pointer`).

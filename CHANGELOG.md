@@ -9,6 +9,12 @@
   run time with `-fbackend=` or `$SIC_BACKEND`; `-print-backends` lists them. The
   first one given to `--backend` is the default. See [doc/backends.md](doc/backends.md).
 - `--version`, `.comment` and `DW_AT_producer` name the back end that compiled.
+- LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
+  external thunks with the `cs` prefix, the stack protector with Linux's guard and
+  `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),
+  `-mharden-sls`, `-fcf-protection`, `-fzero-call-used-regs`, `-mstack-alignment`.
+- An unknown `-O` level is an error (it was `-O0`); `-Ofast` optimizes as `-O3`,
+  `-Og` and a bare `-O` as `-O1`.
 - LLVM: non-PIC code reaches symbols without the GOT, `-mno-red-zone` is honoured,
   imports are declared at their size, `-O1` is LLVM's O1, and at `-O0`
   `always_inline` functions are inlined and constant branches folded, as clang does.
@@ -66,8 +72,8 @@
 
 ### Known limitations
 
-- The LLVM back end ignores `-g` and Linux's mitigation flags (return thunks,
-  retpolines, stack protector, patchable function entries).
+- The LLVM back end ignores `-g`; the Cranelift back end ignores Linux's mitigation
+  options (both warn).
 - `_Generic` and `__builtin_types_compatible_p` cannot tell `int` from `long` on i386
   (nor `long` from `long long` on x86-64).
 - `long double`, `_Complex long double` included, is computed in double precision;

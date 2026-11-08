@@ -1766,13 +1766,18 @@ fi
 # does. ──
 mkdir -p ignored && cd ignored
 printf 'int f(void) { return 1; }\n' > a.c
-"$SIC" -Werror -fstack-protector-strong -mfunction-return=thunk-extern -fsanitize=address -c a.c -o a.o 2>err; rc=$?
-if [ "$rc" = 0 ] && [ "$(grep -c 'ignored-option' err)" = 1 ] && grep -q 'fstack-protector-strong' err && grep -q 'mfunction-return' err; then
+# Cranelift implements none of the mitigations (LLVM: see mitigations-llvm).
+CL=""; "$SIC" -print-backends | grep -qx cranelift && CL="-fbackend=cranelift"
+"$SIC" $CL -Werror -fstack-protector-strong -mfunction-return=thunk-extern -fsanitize=address -c a.c -o a.o 2>err; rc=$?
+if [ "$rc" = 0 ] && [ "$(grep -c 'ignored-option' err)" = 1 ] && grep -q 'fsanitize=address' err \
+    && { [ -z "$CL" ] || { grep -q 'fstack-protector-strong' err && grep -q 'mfunction-return' err; }; }; then
     ok "ignored-option"; else bad "ignored-option" "rc=$rc $(cat err)"; fi
 "$SIC" -fstack-protector-strong -fno-stack-protector -mfunction-return=keep -c a.c -o a.o 2>err
 "$SIC" -fsanitize=address -Wno-ignored-option -c a.c -o a.o 2>>err
 if [ ! -s err ]; then ok "ignored-option-off"; else bad "ignored-option-off" "$(cat err)"; fi
 if ! "$SIC" -fsanitize=address -Werror=ignored-option -c a.c -o a.o 2>/dev/null; then ok "ignored-option-werror"; else bad "ignored-option-werror" "compiled"; fi
+# An optimization level sic does not know is an error (it was -O0, silently).
+if ! "$SIC" -Ofoo -c a.c -o a.o 2>/dev/null && "$SIC" -Ofast -c a.c -o a.o && "$SIC" -Og -c a.c -o a.o; then ok "opt-level"; else bad "opt-level" "-Ofoo accepted or -Ofast/-Og refused"; fi
 cat > attr.c <<'EOF'
 typedef int (__attribute__((ms_abi)) *efi_fn)(int);
 struct st { efi_fn f; };
@@ -1790,6 +1795,35 @@ for b in $("$SIC" -print-backends); do
     if [ "$rc" = 0 ] && [ "$n" = "$want" ]; then ok "unsupported-alloca-$b"; else bad "unsupported-alloca-$b" "rc=$rc $(cat err)"; fi
 done
 cd ..
+
+# ── Linux's mitigations with the LLVM back end (as clang): return thunks,
+# retpolines through the external thunks with the cs prefix, the stack protector
+# with Linux's guard (none where `no_stack_protector`), and the call padding
+# (none where `notrace`). ──
+if "$SIC" -print-backends | grep -qx llvm; then
+mkdir -p mitig && cd mitig
+cat > k.c <<'EOF'
+extern void use(char *);
+int call(int (*f)(int), int x) { return f(x) + 1; }
+int arr(int n) { char buf[64]; buf[n & 63] = 1; use(buf); return buf[0]; }
+__attribute__((patchable_function_entry(0, 0))) int traced_not(int x) { return x * 3; }
+__attribute__((no_stack_protector)) int early(int n) { char b[32]; b[n & 31] = 2; use(b); return b[1]; }
+EOF
+"$SIC" -fbackend=llvm -O2 -mcmodel=kernel -fno-PIE -mno-red-zone -mretpoline-external-thunk -mindirect-branch-cs-prefix \
+    -mfunction-return=thunk-extern -fstack-protector-strong -mstack-protector-guard-reg=gs \
+    -mstack-protector-guard-symbol=__ref_stack_chk_guard -fpatchable-function-entry=16,16 -Werror -c k.c -o k.o 2>err
+objdump -dr --no-show-raw-insn k.o > d 2>>err
+fn() { awk -v f="<$1>:" '$2 == f {on=1; next} /^[0-9a-f]+ </ {on=0} on' d; }
+why=""
+grep -q "ignored-option" err && why="$why warned;"
+fn call | grep -q "cs call" && fn call | grep -q "__x86_indirect_thunk_r11" || why="$why no retpoline;"
+[ "$(grep -c '__x86_return_thunk' d)" = 4 ] && ! grep -qw "ret" d || why="$why returns;"
+fn arr | grep -q "%gs:" && fn arr | grep -q "__stack_chk_fail" || why="$why no guard;"
+fn early | grep -q "__stack_chk_fail" && why="$why guard in no_stack_protector;"
+[ "$(readelf -rW k.o | grep -A20 __patchable_function_entries | grep -c 'R_X86_64_64')" = 3 ] || why="$why padding;"
+if [ -z "$why" ]; then ok "mitigations-llvm"; else bad "mitigations-llvm" "$why $(head -3 err)"; fi
+cd ..
+fi
 
 # ── binary input given as C (`-x c`) is an error, not an abort of the built-in
 # preprocessor: a lone \x05 byte (its internal "pending macro" mark) indexed an
