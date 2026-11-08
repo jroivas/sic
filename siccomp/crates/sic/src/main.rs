@@ -1641,8 +1641,12 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     sic_opt::run_ir_passes(&mut ir_module, &pass_config(args));
     sic_opt::ir::asm_imm::specialize_asm(&mut ir_module)?;
 
-    // Codegen to a temp object and archive it into `lib<name>.a`.
-    let obj_bytes = compile_ir(&ir_module, args, &name)?;
+    // Codegen to a temp object and archive it into `lib<name>.a`. The object
+    // also goes into `lib<name>.so`: code for a shared library (`-fPIC`), whose
+    // definitions may be preempted (a weak runtime function is reached through
+    // the PLT, not directly as in an executable).
+    let lib_args = Args { pic_library: true, ..args.clone() };
+    let obj_bytes = compile_ir(&ir_module, &lib_args, &name)?;
     let mut obj = tempfile::Builder::new().suffix(".o").tempfile()?;
     obj.write_all(&obj_bytes)?;
     let archive = dirp.join(format!("lib{}.a", name));
@@ -1671,7 +1675,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     // Also link a shared object `lib<name>.so` for dynamic linking (the default;
     // `-static` consumers pick the archive instead). Its own weak runtime is in
     // the object; libc symbols (malloc/write/…) stay undefined and resolve at load
-    // time. `-fPIC` is not needed — sic emits position-independent code.
+    // time. The object is `-fPIC` code (above) without being asked.
     let shared = dirp.join(format!("lib{}.so", name));
     let _ = fs::remove_file(&shared);
     // The module's own link flags go into the shared object itself, so it records

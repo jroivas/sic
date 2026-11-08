@@ -165,6 +165,23 @@ EOF
     fi
 fi
 
+# 6b. A module's shared object with sic's weak runtime functions (here the
+#     stringbuilder's), with every back end: its code is -fPIC code, so a
+#     definition that may be preempted is not reached directly (LLVM made it
+#     a PC32 relocation the link of libsbm.so refused).
+for b in $("$SIC" -print-backends); do
+    mkdir -p "sbm-$b"
+    cat > "sbm-$b/sbm.sic" <<'EOF'
+module sbm;
+int joined(int n) { stringbuilder b; b.append("ab"); b.append("cd"); string s = b.build(); return (int)s.size + n; }
+EOF
+    if "$SIC" -fbackend=$b --emit-module "sbm-$b" 2>err && [ -f "sbm-$b/libsbm.so" ]; then
+        ok "module-weak-runtime-$b"
+    else
+        bad "module-weak-runtime-$b" "$(head -3 err)"
+    fi
+done
+
 # 7. A C translation unit consumes the module through the generated header.
 cat > cuser.c <<'EOF'
 #include "module_geo.h"
