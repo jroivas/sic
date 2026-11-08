@@ -1,7 +1,7 @@
-//! GNU inline assembly as LLVM's own (`-m32`, which the LLVM back end
-//! compiles): the template and constraints translated to LLVM's syntax, as
-//! clang does, and one `Instr::InlineAsm`. The out-of-line helpers of `asm.rs`
-//! are x86-64 code.
+//! GNU inline assembly as LLVM's own (the LLVM back end, `-m32` included): the
+//! template and constraints translated to LLVM's syntax, as clang does, and one
+//! `Instr::InlineAsm` in the function. The out-of-line helpers of `asm.rs` are
+//! for Cranelift, which has no inline assembly.
 use crate::ast::AsmStmt;
 use crate::{CompileError, Result};
 use super::super::func::FuncCtx;
@@ -103,9 +103,15 @@ impl<'m> FuncCtx<'m> {
         self.local_reg_vars.get(&v.0).map(|r| format!("{{{}}}", r.trim_start_matches('%')))
     }
 
-    /// An input operand's value (arrays decayed, of its own type).
-    fn asm_input_value(&mut self, e: &Expr) -> Result<(Val, Type)> {
+    /// An input operand's value (arrays decayed, of its own type). A
+    /// `vector_size` value stays a vector, as it does for an SSE register
+    /// (`vector_reg`: no C array is one).
+    fn asm_input_value(&mut self, e: &Expr, vector_reg: bool) -> Result<(Val, Type)> {
         let t = match self.infer_expr_type(e)? {
+            t @ Type::Array { .. } if vector_reg || !self.is_c_array_object(e) => {
+                let v = self.lower_aggregate_ptr(e)?;
+                return Ok((v, t));
+            }
             Type::Array { elem, .. } => Type::Pointer(elem),
             Type::Function(_) => Type::void_ptr(),
             t => t,
@@ -119,7 +125,7 @@ impl<'m> FuncCtx<'m> {
     /// temporary holding its value.
     fn asm_memory_operand(&mut self, e: &Expr) -> Result<(Val, Type)> {
         if let Ok(lv) = self.lower_lvalue(e) { return Ok((lv.ptr, lv.ty)); }
-        let (v, t) = self.asm_input_value(e)?;
+        let (v, t) = self.asm_input_value(e, false)?;
         let slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: slot, ty: t.clone(), align: None });
         self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
@@ -132,6 +138,14 @@ impl<'m> FuncCtx<'m> {
         let names: Vec<Option<String>> = a.outputs.iter().chain(&a.inputs).map(|o| o.name.clone()).collect();
         let labels: Vec<String> = a.labels.iter().map(|l| l.split('.').next().unwrap_or(l).to_string()).collect();
         let mut template = llvm_template(&a.template, &names, &labels).map_err(at)?;
+        // An instruction naming %ah (`%h0`) has no REX prefix: its other register
+        // operands must be ones without (GCC's `Q` for a byte, `R` wider). LLVM
+        // took any, and `movb %ah, %r9b` cannot be encoded.
+        let high_byte = template.contains(":h}");
+        let legacy = |l: String, ty: &Type| -> String {
+            if !high_byte || !l.chars().all(|c| matches!(c, 'r' | 'q')) { return l; }
+            if ty.size_of(8) == 1 { "Q".to_string() } else { "R".to_string() }
+        };
         let mut cons: Vec<String> = Vec::new();
         let mut outputs: Vec<(Val, Type)> = Vec::new();
         let mut args: Vec<AsmArg> = Vec::new();
@@ -155,7 +169,7 @@ impl<'m> FuncCtx<'m> {
                 args.push(AsmArg { val: lv.ptr, ty: Type::void_ptr(), elem: Some(ty) });
                 continue;
             }
-            let l = self.pinned_constraint(&o.expr).unwrap_or_else(|| register_letters(&letters));
+            let l = self.pinned_constraint(&o.expr).unwrap_or_else(|| legacy(register_letters(&letters), &ty));
             cons.push(format!("={}{}", if early { "&" } else { "" }, l));
             if rw {
                 let cur = self.load_lvalue(&lv)?;
@@ -168,7 +182,7 @@ impl<'m> FuncCtx<'m> {
             if let Ok(n) = letters.parse::<usize>() {
                 // Matching constraint: in output N's place, of its type.
                 let ty = outputs.get(n).map(|(_, t)| t.clone());
-                let (v, t) = self.asm_input_value(&inp.expr)?;
+                let (v, t) = self.asm_input_value(&inp.expr, false)?;
                 let ty = ty.unwrap_or(t);
                 let v = self.coerce(v, &ty)?;
                 cons.push(letters);
@@ -187,9 +201,9 @@ impl<'m> FuncCtx<'m> {
                         let t = if matches!(t, Type::Int { .. }) { t } else { Type::i32() };
                         (self.coerce(Constant::int(c), &t)?, t)
                     }
-                    _ => self.asm_input_value(&inp.expr)?,
+                    _ => self.asm_input_value(&inp.expr, letters.chars().any(|c| matches!(c, 'x' | 'v' | 'Y')))?,
                 };
-                cons.push(l);
+                cons.push(if self.pinned_constraint(&inp.expr).is_some() { l } else { legacy(l, &t) });
                 args.push(AsmArg { val: v, ty: t, elem: None });
             }
         }
@@ -218,7 +232,8 @@ impl<'m> FuncCtx<'m> {
         }
         // As clang: the direction flag, the x87 status and the flags.
         cons.extend(["~{dirflag}", "~{fpsr}", "~{flags}"].map(String::from));
-        self.push_instr(Instr::InlineAsm { template, constraints: cons.join(","), outputs, args });
+        let place = format!("{}:{}:{}", a.span.file.as_deref().unwrap_or("<input>"), a.span.line, a.span.col);
+        self.push_instr(Instr::InlineAsm { template, constraints: cons.join(","), outputs, args, at: place });
         if let Some(slot) = taken {
             let r = self.alloc_val();
             self.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: Type::i32() });
@@ -232,19 +247,19 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::InlineAsm {
             template: String::new(),
             constraints: "~{memory},~{dirflag},~{fpsr},~{flags}".to_string(),
-            outputs: Vec::new(), args: Vec::new(),
+            outputs: Vec::new(), args: Vec::new(), at: String::new(),
         });
     }
 
-    /// The stack pointer's value (`register unsigned long sp asm("esp")`).
+    /// The stack pointer's value (`register unsigned long sp asm("rsp")`).
     pub(crate) fn native_stack_pointer(&mut self, ty: &Type) -> Result<Val> {
         let slot = self.alloc_val();
         let pt = Type::Int { bits: self.ptr_size() * 8, signed: false };
         self.push_instr(Instr::Alloca { dest: slot, ty: pt.clone(), align: None });
         self.push_instr(Instr::InlineAsm {
-            template: "mov %esp, $0".to_string(),
+            template: if self.ptr_size() == 4 { "mov %esp, $0" } else { "mov %rsp, $0" }.to_string(),
             constraints: "=r,~{dirflag},~{fpsr},~{flags}".to_string(),
-            outputs: vec![(Val::Local(slot), pt.clone())], args: Vec::new(),
+            outputs: vec![(Val::Local(slot), pt.clone())], args: Vec::new(), at: String::new(),
         });
         let v = self.alloc_val();
         self.push_instr(Instr::Load { dest: v, ptr: Val::Local(slot), ty: pt });

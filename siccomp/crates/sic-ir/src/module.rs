@@ -213,6 +213,9 @@ pub struct Module {
     /// `section("…")` placements: (global symbol, section) and (function, section).
     pub data_sections: Vec<(String, String)>,
     pub fn_sections: Vec<(String, String)>,
+    /// Functions that do not return (`noreturn`): a back end emits nothing after
+    /// a call of one (Linux's objtool checks that `panic()` is not followed).
+    pub noreturn: Vec<String>,
     /// `-g`: every named struct and union, for the debug information of a pointer
     /// whose pointee the IR keeps by name.
     pub debug_types: Vec<(String, Type)>,
@@ -282,6 +285,7 @@ impl Module {
             fn_sections: Vec::new(),
             no_stack_protector: Vec::new(),
             debug_types: Vec::new(),
+            noreturn: Vec::new(),
             patchable_entry: Vec::new(),
             used_functions: Vec::new(),
             sic_enum_exports: Vec::new(),

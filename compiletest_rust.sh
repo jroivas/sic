@@ -82,6 +82,9 @@ echo "preprocessor: ${pp_name:-unknown ($SIC predates -print-prog-name; rebuild 
 outfolder="${1:-/tmp/sic_rust_tests}"
 mkdir -p "$outfolder"
 
+# The back end the tests compile with: $SIC_BACKEND, else sic's default.
+BACKEND="${SIC_BACKEND:-$("$SIC" -print-backends 2>/dev/null | head -1)}"
+
 tests=0; success=0; failed_list=()
 
 dotest() {
@@ -95,6 +98,12 @@ dotest() {
     local envs=""
     [ -f "$test.env" ] && envs=$(cat "$test.env")
 
+    # `.cranelift-only`: what only the Cranelift back end does (a limitation of
+    # its out-of-line inline assembly): the first line says what.
+    if [ "$BACKEND" != cranelift ] && [ -f "$test.cranelift-only" ]; then
+        echo "PASS $base (Cranelift only)"
+        return 0
+    fi
     # `.skip-llvm`: optimized code from LLVM differs where C allows it; the first
     # line says how.
     if [ "${SIC_BACKEND:-}" = llvm ] && [ -f "$test.skip-llvm" ] && [[ " ${CFLAGS:-} " != *" -O0 "* ]]; then

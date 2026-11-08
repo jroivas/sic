@@ -76,6 +76,9 @@ pub struct Lowerer {
     /// The back end allocates on the stack at run time (LLVM): `alloca` is a
     /// real dynamic allocation. Without (Cranelift) it is a fixed slot or `malloc`.
     pub dynamic_stack: bool,
+    /// Inline assembly is the back end's own (`Instr::InlineAsm`, LLVM), not an
+    /// out-of-line helper (Cranelift).
+    pub native_asm: bool,
     /// `-g`: the module keeps its struct and union types (`Module::debug_types`).
     pub debug_info: bool,
     /// Names of `inline` functions that are reachable and must be emitted.
@@ -370,6 +373,7 @@ impl Lowerer {
             builtin_mem: true,
             dynamic_stack: false,
             debug_info: false,
+            native_asm: false,
             struct_order_seed: 0,
             emit_inline: HashSet::default(),
             global_types: HashMap::default(),
@@ -689,6 +693,9 @@ impl Lowerer {
         }
         for name in &tu.always_inline {
             for f in self.module.functions.iter_mut().filter(|f| &f.name == name) { f.always_inline = true; }
+        }
+        for name in &tu.noreturn {
+            if !self.module.noreturn.contains(name) { self.module.noreturn.push(name.clone()); }
         }
         for name in &tu.no_stack_protector {
             if !self.module.no_stack_protector.contains(name) { self.module.no_stack_protector.push(name.clone()); }

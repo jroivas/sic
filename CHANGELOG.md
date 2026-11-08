@@ -10,6 +10,9 @@
   first one given to `--backend` is the default. See [doc/backends.md](doc/backends.md).
 - `--version`, `.comment` and `DW_AT_producer` name the back end that compiled.
 - LLVM: `-g` (DWARF lines, functions, parameters, locals and their types).
+- LLVM: inline assembly is LLVM's own on x86-64 too (not sic's out-of-line
+  helpers, whose plain `ret`s objtool reported under return thunks);
+  `noreturn` is passed on; definitions in a PIE are reached directly.
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),

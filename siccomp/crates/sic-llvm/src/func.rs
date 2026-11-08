@@ -134,6 +134,8 @@ impl<'ctx> Fx<'ctx, '_, '_> {
     /// aggregate its bytes).
     fn mem_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
         let cx = self.cx;
+        // A `vector_size` value is a vector (an SSE/AVX register operand).
+        if let Some(v) = cx.vector_type(ty) { return v; }
         match ty {
             Type::Float80 => cx.ctx.x86_f80_type().into(),
             Type::Struct(_) | Type::Union(_) | Type::Array { .. } =>
@@ -155,7 +157,11 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 vals.push(self.ptr_of(&a.val)?.into());
             } else {
                 let t = self.mem_type(&a.ty);
-                let v = if a.ty == Type::Float80 {
+                let v = if matches!(a.ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {
+                    // An aggregate (a vector) is its address in the IR: its value.
+                    let p = self.ptr_of(&a.val)?;
+                    self.load(t, p)?
+                } else if a.ty == Type::Float80 {
                     let d = self.typed(&a.val, cx.ctx.f64_type().into())?.into_float_value();
                     self.b().build_float_ext(d, cx.ctx.x86_f80_type(), "")?.into()
                 } else { self.typed(&a.val, t)? };
@@ -629,7 +635,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 self.b().build_unconditional_branch(join)?;
                 self.b().position_at_end(join);
             }
-            Instr::InlineAsm { template, constraints, outputs, args } => self.inline_asm(template, constraints, outputs, args)?,
+            Instr::InlineAsm { template, constraints, outputs, args, .. } => self.inline_asm(template, constraints, outputs, args)?,
             // `alloca`: until the function returns.
             Instr::DynAlloca { dest, size, .. } => {
                 let n = self.typed(size, cx.ctx.i64_type().into())?.into_int_value();

@@ -96,10 +96,15 @@ fn mitigation_flags(cx: &Cx<'_, '_>) {
 /// and its C API has no setter. Giving a symbol non-default visibility sets the flag,
 /// which then stays; an external weak one only while it is not weak. A thread-local
 /// symbol keeps its TLS access, an intrinsic is no symbol.
-fn assume_local(module: &inkwell::module::Module) {
+///
+/// A position-independent executable (`definitions_only`) has its own
+/// definitions within reach too, as clang's: they cannot be preempted, so an
+/// `"i"` asm operand may name one (`&global`).
+fn assume_local(module: &inkwell::module::Module, definitions_only: bool) {
     let mark = |g: GlobalValue| {
         let (visibility, linkage) = (g.get_visibility(), g.get_linkage());
         if matches!(linkage, LLinkage::Internal | LLinkage::Private) { return; }
+        if definitions_only && (g.is_declaration() || matches!(linkage, LLinkage::ExternalWeak)) { return; }
         if linkage == LLinkage::ExternalWeak { g.set_linkage(LLinkage::External); }
         g.set_visibility(GlobalVisibility::Hidden);
         g.set_visibility(visibility);
@@ -152,16 +157,13 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     }
     keep(&cx, "llvm.used", &used);
     keep(&cx, "llvm.compiler.used", &named_elsewhere(&cx));
-    // i386: file-scope `asm(...)` is the module's assembly (on x86-64 the driver
-    // adds it, with the inline-asm text helpers).
-    if opts.ptr_size == 4 {
-        for t in &ir.file_asm { asm.push_str(t); asm.push('\n'); }
-    }
+    // File-scope `asm(...)` is the module's assembly.
+    for t in &ir.file_asm { asm.push_str(t); asm.push('\n'); }
     if let Some(p) = &ir.producer {
         asm.push_str(&format!(".pushsection .comment,\"MS\",@progbits,1\n.asciz \"{}\"\n.popsection\n", p.replace('\\', "\\\\").replace('"', "\\\"")));
     }
     if !asm.is_empty() { module.set_inline_assembly(&asm); }
-    if !opts.pic { assume_local(&module); }
+    if !opts.pic || opts.pie { assume_local(&module, opts.pic); }
     if let Some(d) = &cx.debug { d.di.finalize(); }
 
     module.verify().map_err(|e| format!("LLVM rejected the module: {}", e.to_string()))?;
@@ -206,6 +208,7 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         attr(cx.ctx.create_string_attribute("frame-pointer", "all"));
         if cx.opts.no_red_zone { attr(enum_attr(cx.ctx, "noredzone", 0)); }
         if f.noinline { attr(enum_attr(cx.ctx, "noinline", 0)); }
+        if ir.noreturn.contains(&f.name) { attr(enum_attr(cx.ctx, "noreturn", 0)); }
         if f.always_inline { attr(enum_attr(cx.ctx, "alwaysinline", 0)); }
         // The per-function part of the mitigations (clang's attributes).
         let m = &cx.opts.mitigations;
@@ -252,6 +255,7 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
             lf.as_global_value().set_visibility(GlobalVisibility::Hidden);
         }
         if RETURNS_TWICE.contains(&e.name.as_str()) { lf.add_attribute(AttributeLoc::Function, enum_attr(cx.ctx, "returns_twice", 0)); }
+        if ir.noreturn.contains(&e.name) { lf.add_attribute(AttributeLoc::Function, enum_attr(cx.ctx, "noreturn", 0)); }
         cx.funcs.insert(FuncRef::extern_(i).0, lf);
     }
     Ok(())

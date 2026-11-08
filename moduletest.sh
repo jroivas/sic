@@ -1808,6 +1808,9 @@ int call(int (*f)(int), int x) { return f(x) + 1; }
 int arr(int n) { char buf[64]; buf[n & 63] = 1; use(buf); return buf[0]; }
 __attribute__((patchable_function_entry(0, 0))) int traced_not(int x) { return x * 3; }
 __attribute__((no_stack_protector)) int early(int n) { char b[32]; b[n & 31] = 2; use(b); return b[1]; }
+unsigned tsc(void) { unsigned lo, hi; asm volatile("rdtsc" : "=a"(lo), "=d"(hi)); asm volatile("" ::: "memory"); return lo ^ hi; }
+void panic(const char *, ...) __attribute__((__noreturn__));
+int checked(int x) { if (x < 0) panic("neg"); return x + 1; }
 EOF
 "$SIC" -fbackend=llvm -O2 -mcmodel=kernel -fno-PIE -mno-red-zone -mretpoline-external-thunk -mindirect-branch-cs-prefix \
     -mfunction-return=thunk-extern -fstack-protector-strong -mstack-protector-guard-reg=gs \
@@ -1817,10 +1820,14 @@ fn() { awk -v f="<$1>:" '$2 == f {on=1; next} /^[0-9a-f]+ </ {on=0} on' d; }
 why=""
 grep -q "ignored-option" err && why="$why warned;"
 fn call | grep -q "cs call" && fn call | grep -q "__x86_indirect_thunk_r11" || why="$why no retpoline;"
-[ "$(grep -c '__x86_return_thunk' d)" = 4 ] && ! grep -qw "ret" d || why="$why returns;"
+[ "$(grep -c '__x86_return_thunk' d)" = 6 ] && ! grep -qw "ret" d || why="$why returns;"
+# Inline assembly is LLVM's own: no helper function (and its naked `ret`).
+grep -q "__sic_asm" d && why="$why asm helper;"
+# Nothing after a call of a noreturn function (objtool: "missing __noreturn").
+fn checked | grep -v '^\s*$' | tail -1 | grep -q 'R_X86_64_PLT32.*panic' || why="$why code after noreturn;"
 fn arr | grep -q "%gs:" && fn arr | grep -q "__stack_chk_fail" || why="$why no guard;"
 fn early | grep -q "__stack_chk_fail" && why="$why guard in no_stack_protector;"
-[ "$(readelf -rW k.o | grep -A20 __patchable_function_entries | grep -c 'R_X86_64_64')" = 3 ] || why="$why padding;"
+[ "$(readelf -rW k.o | grep -A20 __patchable_function_entries | grep -c 'R_X86_64_64')" = 5 ] || why="$why padding;"
 if [ -z "$why" ]; then ok "mitigations-llvm"; else bad "mitigations-llvm" "$why $(head -3 err)"; fi
 cd ..
 fi

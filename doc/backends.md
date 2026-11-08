@@ -45,7 +45,15 @@ Differences from Cranelift:
 - A NaN computed from constants may have the other sign (IEEE leaves it open): the
   tests with a `.skip-llvm` marker pin x86's at `-O1` and above.
 - Non-PIC code reaches every symbol directly (no GOT), and a hidden symbol is
-  reached without one under PIC too, as Linux's link and vDSO need.
+  reached without one under PIC too, as Linux's link and vDSO need. In a
+  position-independent executable (the default, `-fpie`) a definition is reached
+  directly too, as with clang.
+- Inline assembly is LLVM's own, the GCC template and constraints translated as
+  clang does (`asm goto` too). Cranelift has none: there a statement runs out of
+  line, in a helper function the call stands for, and vector-register (`"x"`)
+  operands are not supported.
+- A `noreturn` function (`_Noreturn`, `__attribute__((noreturn))`) is one to
+  LLVM: nothing follows a call of it.
 
 Linux's mitigation and hardening options are LLVM's, as with clang: return thunks
 (`-mfunction-return=thunk-extern`), retpolines (`-mretpoline[-external-thunk]`,

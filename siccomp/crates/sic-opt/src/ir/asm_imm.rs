@@ -85,6 +85,8 @@ impl<'a> Resolver<'a> {
             if let Instr::Store { val, ptr } = i {
                 if *ptr == sv { return Some(val.clone()); }
             }
+            // An asm's register output stored there: no value known here.
+            if writes_output(i, &sv) { return None; }
         }
         self.slot_value(slot)
     }
@@ -97,6 +99,7 @@ impl<'a> Resolver<'a> {
                 match i {
                     Instr::Load { ptr, .. } if *ptr == sv => continue,
                     Instr::Store { val, ptr } if *ptr == sv && *val != sv => continue,
+                    _ if only_output(i, &sv) => continue,
                     _ => {}
                 }
                 let mut esc = false;
@@ -120,6 +123,8 @@ impl<'a> Resolver<'a> {
                 match i {
                     Instr::Load { ptr, .. } if *ptr == sv => continue,
                     Instr::Store { val, ptr } if *ptr == sv && *val != sv => { n += 1; stored = Some(val.clone()); continue; }
+                    // A store of what the asm leaves there: not one value.
+                    _ if only_output(i, &sv) => { n += 2; continue; }
                     _ => {}
                 }
                 let mut esc = false;
@@ -255,6 +260,17 @@ impl<'a> Resolver<'a> {
     }
 }
 
+/// `i` is an `InlineAsm` that stores a register output into `slot`.
+fn writes_output(i: &Instr, slot: &Val) -> bool {
+    matches!(i, Instr::InlineAsm { outputs, .. } if outputs.iter().any(|(p, _)| p == slot))
+}
+
+/// `i` uses `slot` only as an asm register output: a store, its address kept.
+fn only_output(i: &Instr, slot: &Val) -> bool {
+    let Instr::InlineAsm { outputs, args, .. } = i else { return false };
+    outputs.iter().any(|(p, _)| p == slot) && !args.iter().any(|a| a.val == *slot)
+}
+
 fn int_bits(ty: &Type) -> u32 {
     match ty { Type::Int { bits, .. } => *bits, Type::Bool => 1, _ => 64 }
 }
@@ -383,9 +399,83 @@ fn reachable_blocks(f: &Function) -> HashSet<usize> {
 /// branches, specialize every deferred helper call in reachable code of the
 /// functions that are emitted, and keep only the helpers such code still
 /// calls (a helper of dead code may not even assemble).
+/// The arguments of an `Instr::InlineAsm` that its constraints want as
+/// immediates (`i`, `n`, …): the constraint of each argument, in order (the
+/// register outputs have none, the clobbers come last).
+fn immediate_args(constraints: &str) -> Vec<bool> {
+    constraints.split(',')
+        .filter(|c| !c.starts_with('~') && !(c.starts_with('=') && !c.starts_with("=*")))
+        .map(|c| !c.is_empty() && c.chars().all(|ch| "inIJKLMNeZ".contains(ch)))
+        .collect()
+}
+
+/// LLVM's inline assembly (`Instr::InlineAsm`): an immediate operand is the
+/// constant, or `symbol + offset`, the value resolves to (as for the helpers
+/// above): unoptimized, an `always_inline` function's parameter still goes
+/// through its stack slot, which LLVM would not see through. One that does not
+/// resolve, in code that is emitted, is GCC's "impossible constraint".
+pub fn resolve_inline_asm(m: &mut Module) -> Result<(), String> {
+    let mut rewrites: Vec<(usize, usize, usize, usize, Imm)> = Vec::new();
+    let mut used_fns: Vec<String> = Vec::new();
+    let reachable = m.reachable_functions();
+    for (fi, f) in m.functions.iter().enumerate() {
+        if f.linkage == Linkage::Internal && !reachable.contains(&(fi as u32)) { continue; }
+        let live = reachable_blocks(f);
+        let mut r = Resolver::new(m, f);
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if !live.contains(&bi) { continue; }
+            for (ii, ins) in b.instrs.iter().enumerate() {
+                let Instr::InlineAsm { constraints, args, at, .. } = ins else { continue };
+                for (k, imm) in immediate_args(constraints).into_iter().enumerate() {
+                    let Some(a) = args.get(k).filter(|_| imm) else { continue };
+                    if matches!(a.val, Val::Const(_) | Val::Global(_) | Val::Func(_)) { continue; }
+                    match r.resolve(&a.val, 0) {
+                        Some(v) => rewrites.push((fi, bi, ii, k, v)),
+                        None => return Err(format!(
+                            "{}: error: impossible constraint in asm: an \"i\" operand is not a constant (or a symbol's address) after optimization (in '{}')",
+                            at, f.name)),
+                    }
+                }
+            }
+        }
+        used_fns.extend(r.used_fns);
+    }
+    // Insert from the end, so the indices of earlier instructions stay right.
+    rewrites.sort_by(|a, b| (b.0, b.1, b.2).cmp(&(a.0, a.1, a.2)));
+    // Offsets already inserted before the instruction at (fi, bi, ii).
+    let mut moved: (usize, usize, usize, usize) = (usize::MAX, 0, 0, 0);
+    for (fi, bi, ii, k, v) in rewrites {
+        if (moved.0, moved.1, moved.2) != (fi, bi, ii) { moved = (fi, bi, ii, 0); }
+        let target = match &v {
+            Imm::Int(i) => Some((Val::Const(Constant::Int(*i)), 0)),
+            Imm::Sym(name, off) => {
+                let g = m.globals.iter().position(|g| g.name == *name).map(|i| Val::Global(GlobalRef(i as u32)));
+                let f = || m.functions.iter().position(|f| f.name == *name).map(FuncRef::defined)
+                    .or_else(|| m.externs.iter().position(|e| e.name == *name).map(FuncRef::extern_)).map(Val::Func);
+                g.or_else(f).map(|v| (v, *off))
+            }
+        };
+        let Some((val, off)) = target else { continue };
+        let func = &mut m.functions[fi];
+        let val = if off == 0 { val } else {
+            // `symbol + offset`: an address computation LLVM folds into a constant.
+            let d = func.alloc_val();
+            func.blocks[bi].instrs.insert(ii, Instr::PtrOffset { dest: d, base: val, offset: Constant::int(off) });
+            Val::Local(d)
+        };
+        if off != 0 { moved.3 += 1; }
+        if let Instr::InlineAsm { args, .. } = &mut func.blocks[bi].instrs[ii + moved.3] { args[k].val = val; }
+    }
+    for n in used_fns { if !m.used_functions.contains(&n) { m.used_functions.push(n); } }
+    Ok(())
+}
+
 pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
+    // An asm on a branch a constant rules out is not assembled (nor resolved).
+    let native = m.functions.iter().any(|f| f.blocks.iter().any(|b| b.instrs.iter().any(|i| matches!(i, Instr::InlineAsm { .. }))));
+    if native || !m.asm_text_helpers.is_empty() { fold_constant_branches(m); }
+    resolve_inline_asm(m)?;
     if m.asm_text_helpers.is_empty() { return Ok(()); }
-    fold_constant_branches(m);
     let deferred: HashMap<String, AsmDeferred> = m.asm_deferred.iter().map(|d| (d.helper.clone(), d.clone())).collect();
     let bodies: HashMap<String, String> = m.asm_text_helpers.iter()
         .filter(|(n, _)| deferred.contains_key(n)).cloned().collect();

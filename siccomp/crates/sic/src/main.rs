@@ -216,6 +216,11 @@ struct Args {
     #[arg(skip)]
     pic_flag: Option<bool>,
 
+    /// The last of those was `-fpic`/`-fPIC`: code for a shared library, whose
+    /// global definitions may be preempted (not `-fpie`, the default).
+    #[arg(skip)]
+    pic_library: bool,
+
     /// `-shared`: produce a shared object (`.so`) instead of an executable.
     /// Passed through to the linker; implies position-independent code.
     #[arg(skip)]
@@ -557,6 +562,7 @@ fn main() {
     let mut pthread = false;
     let mut machine_flags: Vec<String> = Vec::new();
     let mut pic_flag: Option<bool> = None;
+    let mut pic_library = false;
     let mut shared = false;
     let mut static_link = false;
     let mut pie: Option<bool> = None;
@@ -706,6 +712,8 @@ fn main() {
             if let Some((name, value)) = parse_f_option(&a) {
                 if matches!(name.as_str(), "pic" | "PIC" | "pie" | "PIE") {
                     pic_flag = Some(!matches!(value, FOption::Disabled));
+                    // `-fpic` is for a shared library, `-fpie` an executable.
+                    pic_library = matches!(name.as_str(), "pic" | "PIC") && !matches!(value, FOption::Disabled);
                 }
                 f_options.insert(name, value);
             }
@@ -807,6 +815,7 @@ fn main() {
     args.pthread = pthread;
     args.machine_flags = machine_flags;
     args.pic_flag = pic_flag;
+    args.pic_library = pic_library;
     args.shared = shared;
     args.static_link = static_link;
     args.pie = pie;
@@ -1373,6 +1382,7 @@ fn lower_tu_once(
     lowerer.vectorize = !matches!(args.f_options.get("vectorize"), Some(FOption::Disabled))
         && isa::Isa::from_flags(&args.machine_flags).0.sse2();
     lowerer.dynamic_stack = select_backend(args).is_ok_and(|b| b.name() == "llvm");
+    lowerer.native_asm = lowerer.dynamic_stack;
     lowerer.debug_info = args.debug_info;
     lowerer.builtin_mem = !matches!(args.f_options.get("builtin"), Some(FOption::Disabled))
         && !freestanding(args);
@@ -1459,9 +1469,9 @@ fn function_sections(args: &Args) -> bool {
 fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let obj = compile_ir_code(ir_module, args)?;
     if ir_module.asm_text_helpers.is_empty() && ir_module.file_asm.is_empty() { return Ok(obj); }
-    // i386: inline assembly is LLVM's own, file-scope `asm` in the module's
-    // assembly (`Instr::InlineAsm`; the text helpers are x86-64 code).
-    if sic_frontend::target::is_i386() { return Ok(obj); }
+    // LLVM: inline assembly is its own (`Instr::InlineAsm`), file-scope `asm` in
+    // the module's assembly; the text helpers are Cranelift's.
+    if select_backend(args).is_ok_and(|b| b.name() == "llvm") { return Ok(obj); }
     merge_asm_helpers(&obj, ir_module, src, function_sections(args))
 }
 
@@ -1475,6 +1485,7 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
     let function_sections = function_sections(args);
     let opts = BackendOptions {
         ptr_size: sic_frontend::target::ptr_size(),
+        pie: pic && !args.pic_library && !args.shared,
         opt: backend_opt_level(&args.opt),
         debug_info: args.debug_info,
         pic,
@@ -1583,7 +1594,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), no_stack_protector: Vec::new(), patchable_entry: Vec::new(), reg_vars: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), no_stack_protector: Vec::new(), patchable_entry: Vec::new(), noreturn: Vec::new(), reg_vars: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1617,6 +1628,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         combined.fn_sections.extend(tu.fn_sections);
         combined.no_stack_protector.extend(tu.no_stack_protector);
         combined.patchable_entry.extend(tu.patchable_entry);
+        combined.noreturn.extend(tu.noreturn);
         used_files.push(ps);
     }
 

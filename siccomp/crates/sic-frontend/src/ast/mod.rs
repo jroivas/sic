@@ -810,6 +810,8 @@ pub struct TranslationUnit {
     /// `__attribute__((patchable_function_entry(N, M)))`: (function, N, M) — N
     /// bytes of padding, M of them before the entry (Linux's `notrace` is 0, 0).
     pub patchable_entry: Vec<(String, u32, u32)>,
+    /// Functions declared `_Noreturn` / `__attribute__((noreturn))`.
+    pub noreturn: Vec<String>,
     /// Register variables named after a register (`register T x asm("rsp")`):
     /// (variable, register). At file scope one is a global register variable —
     /// the register itself, with no storage (Linux's `current_stack_pointer`).

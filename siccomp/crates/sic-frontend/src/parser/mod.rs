@@ -98,6 +98,8 @@ pub struct Parser {
     no_stack_protector: Vec<String>,
     pending_patchable: Option<(u32, u32)>,
     patchable_entry: Vec<(String, u32, u32)>,
+    pending_noreturn: bool,
+    noreturn: Vec<String>,
     /// The functions so declared.
     always_inline: Vec<String>,
     /// `__attribute__((weak))` seen while parsing the current declaration; the
@@ -219,7 +221,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_noreturn: false, noreturn: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -383,6 +385,7 @@ impl Parser {
             used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
             no_stack_protector: std::mem::take(&mut self.no_stack_protector),
             patchable_entry: std::mem::take(&mut self.patchable_entry),
+            noreturn: std::mem::take(&mut self.noreturn),
             reg_vars: std::mem::take(&mut self.reg_vars) })
     }
 
@@ -394,6 +397,7 @@ impl Parser {
         self.pending_cc = None;
         self.pending_no_ssp = false;
         self.pending_patchable = None;
+        self.pending_noreturn = false;
         self.pending_used = false;
         self.pending_section = None;
         self.pending_alias = None;
@@ -684,6 +688,7 @@ impl Parser {
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
             if std::mem::take(&mut self.pending_no_ssp) { self.no_stack_protector.push(name.clone()); }
             if let Some((n, m)) = self.pending_patchable.take() { self.patchable_entry.push((name.clone(), n, m)); }
+            if std::mem::take(&mut self.pending_noreturn) && !self.noreturn.contains(&name) { self.noreturn.push(name.clone()); }
             if let Some((what, at)) = self.pending_cc.take() {
                 if !self.at(TokenKind::Semi) && !self.at(TokenKind::Comma) && !self.at(TokenKind::Eof) {
                     crate::diag::warn("unsupported-attribute", at.file.as_deref(), at.line, at.col, &what);
@@ -1054,7 +1059,7 @@ impl Parser {
                 TokenKind::Inline   => { quals.push(TypeQual::Inline); self.advance(); }
                 // C11 `_Noreturn` function specifier: like GNU
                 // `__attribute__((noreturn))`, a promise with no codegen effect.
-                TokenKind::Noreturn => { self.advance(); }
+                TokenKind::Noreturn => { self.pending_noreturn = true; self.advance(); }
                 // signedness
                 TokenKind::Signed   => { signed = Some(true);  self.advance(); }
                 TokenKind::Unsigned => { signed = Some(false); self.advance(); }
@@ -4422,6 +4427,8 @@ impl Parser {
                         self.pending_always_inline = true;
                     } else if name == "noinline" || name == "__noinline__" {
                         self.pending_noinline = true;
+                    } else if name == "noreturn" || name == "__noreturn__" {
+                        self.pending_noreturn = true;
                     } else if name == "no_stack_protector" || name == "__no_stack_protector__" {
                         self.pending_no_ssp = true;
                     } else if name == "patchable_function_entry" || name == "__patchable_function_entry__" {

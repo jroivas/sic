@@ -118,8 +118,8 @@ impl<'m> FuncCtx<'m> {
         // register's value; what the asm leaves in it is not written back.
         let substituted = self.substitute_reg_var_operands(a)?;
         let a = substituted.as_ref().unwrap_or(a);
-        // i386 (`-m32`, the LLVM back end): LLVM's own inline assembly.
-        if sic_ir::target::is_i386() { return self.lower_native_asm(a); }
+        // The LLVM back end (`-m32` too): LLVM's own inline assembly.
+        if self.lowerer.native_asm { return self.lower_native_asm(a); }
         // A `register T x asm("reg")` operand is in that register: only the
         // operand path places operands itself.
         let pinned = a.outputs.iter().chain(a.inputs.iter()).any(|o| self.local_reg_operand(&o.expr).is_some());
@@ -166,7 +166,7 @@ impl<'m> FuncCtx<'m> {
                 format!("global register variable `{}` in `{}` is not supported (only the stack pointer)", name, reg),
                 sp.file.clone(), sp.line, sp.col));
         }
-        if sic_ir::target::is_i386() { return self.native_stack_pointer(&ty).map(Some); }
+        if self.lowerer.native_asm { return self.native_stack_pointer(&ty).map(Some); }
         let v = self.call_asm_helper("rsp", &[], vec![], Type::u64())?;
         Ok(Some(self.coerce(v, &ty)?))
     }
@@ -551,7 +551,7 @@ impl<'m> FuncCtx<'m> {
         match order & 0xffff { // the upper bits are x86 HLE hints
             0 => {}
             5 if !signal => self.push_instr(Instr::Fence),
-            _ if sic_ir::target::is_i386() => self.native_barrier(),
+            _ if self.lowerer.native_asm => self.native_barrier(),
             _ => { self.call_asm_helper("barrier", &[], vec![], Type::Void)?; }
         }
         Ok(())

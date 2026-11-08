@@ -248,7 +248,8 @@ pub enum Instr {
     /// clobbers. Each register output's value is stored through its pointer in
     /// `outputs`; `args` are the other operands in order — an indirect (memory)
     /// one is an address, with the type it points to.
-    InlineAsm { template: String, constraints: String, outputs: Vec<(Val, Type)>, args: Vec<AsmArg> },
+    /// `at` is the statement's `file:line:col`, for an error about it.
+    InlineAsm { template: String, constraints: String, outputs: Vec<(Val, Type)>, args: Vec<AsmArg>, at: String },
 
     /// Byte-swap an integer value.
     BSwap { dest: ValId, val: Val, ty: Type },
