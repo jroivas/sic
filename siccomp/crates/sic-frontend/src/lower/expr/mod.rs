@@ -5733,6 +5733,10 @@ impl<'m> FuncCtx<'m> {
                 if let Some(t) = self.lowerer.struct_types.get(&key) { return Ok(t.clone()); }
             }
         }
+        // C: a string literal is a `char[N]` until it decays (it was 8).
+        if let ExprKind::StringLit(s) = &e.kind {
+            if !self.is_sic() { return Ok(Type::Array { elem: Box::new(Type::i8()), len: s.len() + 1 }); }
+        }
         self.infer_expr_type(e)
     }
 
