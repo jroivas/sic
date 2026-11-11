@@ -151,6 +151,9 @@ impl<'m> FuncCtx<'m> {
         let mut args: Vec<AsmArg> = Vec::new();
         // `+` operands: an input tied to the output, after all the others.
         let mut tied: Vec<(String, AsmArg)> = Vec::new();
+        // Outputs widened to a wider tied input: (wide slot, its type, the
+        // output's place and type), stored back narrowed after the asm.
+        let mut widened: Vec<(Val, Type, Val, Type)> = Vec::new();
         for (i, o) in a.outputs.iter().enumerate() {
             let (letters, rw, early) = split_constraint(&o.constraint);
             let lv = self.lower_lvalue(&o.expr)?;
@@ -180,10 +183,24 @@ impl<'m> FuncCtx<'m> {
         for inp in &a.inputs {
             let (letters, _, _) = split_constraint(&inp.constraint);
             if let Ok(n) = letters.parse::<usize>() {
-                // Matching constraint: in output N's place, of its type.
-                let ty = outputs.get(n).map(|(_, t)| t.clone());
+                // Matching constraint: in output N's place, of its type. A wider
+                // input widens the output instead, as clang does (GCC passes the
+                // whole input): Linux's put_user ties a 64-bit pointer to an
+                // `int` result in `%rcx`, and narrowing it cut the address.
                 let (v, t) = self.asm_input_value(&inp.expr, false)?;
-                let ty = ty.unwrap_or(t);
+                let scalar = |t: &Type| matches!(t, Type::Int { .. } | Type::Bool | Type::Pointer(_));
+                let ps = crate::target::ptr_size();
+                let ty = match outputs.get(n).map(|(_, o)| o.clone()) {
+                    Some(o) if scalar(&o) && scalar(&t) && t.size_of(ps) > o.size_of(ps) => {
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: t.clone(), align: None });
+                        let (place, out_ty) = std::mem::replace(&mut outputs[n], (Val::Local(slot), t.clone()));
+                        widened.push((Val::Local(slot), t.clone(), place, out_ty));
+                        t
+                    }
+                    Some(o) => o,
+                    None => t,
+                };
                 let v = self.coerce(v, &ty)?;
                 cons.push(letters);
                 args.push(AsmArg { val: v, ty, elem: None });
@@ -234,6 +251,12 @@ impl<'m> FuncCtx<'m> {
         cons.extend(["~{dirflag}", "~{fpsr}", "~{flags}"].map(String::from));
         let place = format!("{}:{}:{}", a.span.file.as_deref().unwrap_or("<input>"), a.span.line, a.span.col);
         self.push_instr(Instr::InlineAsm { template, constraints: cons.join(","), outputs, args, at: place });
+        for (slot, wide, place, out_ty) in widened {
+            let w = self.alloc_val();
+            self.push_instr(Instr::Load { dest: w, ptr: slot, ty: wide });
+            let v = self.coerce(Val::Local(w), &out_ty)?;
+            self.push_instr(Instr::Store { val: v, ptr: place });
+        }
         if let Some(slot) = taken {
             let r = self.alloc_val();
             self.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: Type::i32() });

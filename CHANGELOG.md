@@ -22,6 +22,10 @@
   into the code after the switch.
 - The inliner leaves calls of `noreturn` functions alone, and judges a
   function by its size after its own inlining.
+- LLVM: an asm input tied to a narrower output (`"=c"(int)`, `"0"(ptr)`)
+  widens the output, as clang does; the input was cut to the output's width
+  (Linux's `put_user` lost the user address's upper half: exec failed with
+  EFAULT).
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),
