@@ -15,6 +15,13 @@
   `noreturn` is passed on; definitions in a PIE are reached directly.
 - LLVM: `-S` is LLVM's own assembly, inline asm as written (Linux's
   `asm-offsets.h` and `devicetable-offsets.h` come from it).
+- LLVM: `-fno-delete-null-pointer-checks` (Linux) is honoured.
+- `-m32`: `.S` files are assembled as i386; `sizeof(long)` and pointer
+  sizes in attribute arguments (`aligned(2 * sizeof(long))`) are i386's.
+- Fixed: a `switch`'s `default:` ending in `__builtin_unreachable()` ran on
+  into the code after the switch.
+- The inliner leaves calls of `noreturn` functions alone, and judges a
+  function by its size after its own inlining.
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),
