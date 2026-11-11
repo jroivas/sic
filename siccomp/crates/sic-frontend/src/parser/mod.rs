@@ -4495,7 +4495,10 @@ impl Parser {
             return None;
         }
         let toks = &self.tokens[lo + 1..hi - 1];
-        if toks.iter().any(|t| t.kind == TokenKind::Star) { return Some(8); }
+        // The target's sizes (`-m32`: 4-byte pointers and `long`, Linux's
+        // `__aligned(2 * sizeof(unsigned long))` on struct page).
+        let ptr = crate::target::ptr_size() as u32;
+        if toks.iter().any(|t| t.kind == TokenKind::Star) { return Some(ptr); }
         let mut longs = 0;
         let mut base: Option<u32> = None;
         for t in toks {
@@ -4512,8 +4515,9 @@ impl Parser {
             }
         }
         Some(match (base, longs) {
-            (Some(8), 1) => 16,          // long double
-            (Some(4) | None, 1..) => 8,  // long, long long
+            (Some(8), 1) => if ptr == 4 { 12 } else { 16 }, // long double
+            (Some(4) | None, 1) => ptr,  // long
+            (Some(4) | None, 2..) => 8,  // long long
             (Some(b), _) => b,
             (None, _) => 4,              // `unsigned` alone
         })
@@ -4851,7 +4855,7 @@ fn parse_int_literal(text: &str) -> (i64, bool, bool) {
 /// (`0x1p64`, `0x1.8p-3`) which Rust's `str::parse` rejects.
 /// Strip a floating-point literal's suffix, including C23 `_FloatN` widths
 /// (`f16`/`f32`/`f64`/`f128`, `bf16`) and the plain `f`/`F`/`l`/`L`.
-/// Byte size of a primitive `AstType` (64-bit target), used to size a
+/// Byte size of a primitive `AstType` (on the target), used to size a
 /// `vector_size(N)` vector as an array of `N / size` elements. Non-primitive
 /// bases default to 1 (byte granularity), which still gives the right total size.
 fn ast_type_byte_size(ty: &AstType) -> u32 {
@@ -4859,8 +4863,8 @@ fn ast_type_byte_size(ty: &AstType) -> u32 {
         AstType::Char { .. } | AstType::Bool => 1,
         AstType::Short { .. } => 2,
         AstType::Int { .. } | AstType::Float => 4,
-        AstType::Long { .. } | AstType::LongLong { .. } | AstType::Double => 8,
-        AstType::Pointer { .. } => 8,
+        AstType::LongLong { .. } | AstType::Double => 8,
+        AstType::Long { .. } | AstType::Pointer { .. } => crate::target::ptr_size() as u32,
         AstType::Named(n) => match n.as_str() {
             "int8" | "i8" | "uint8" | "u8" => 1,
             "int16" | "i16" | "uint16" | "u16" | "_Float16" | "__bf16" | "__fp16" => 2,
