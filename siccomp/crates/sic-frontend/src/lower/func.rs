@@ -6176,8 +6176,10 @@ impl<'m> FuncCtx<'m> {
         self.switch_stack.pop();
 
         // A switch with no `default:` leaves the default block empty — route it
-        // straight to the end.
-        if matches!(self.func_mut().block_mut(default_bb).terminator, Terminator::Unreachable) {
+        // straight to the end. (One whose `default:` ends unreachable, Linux's
+        // `default: BUG();`, stays so: objtool checks nothing follows the ud2.)
+        let b = self.func_mut().block_mut(default_bb);
+        if matches!(b.terminator, Terminator::Unreachable) && b.label.as_deref() != Some("default") {
             self.func_mut().block_mut(default_bb).terminator = Terminator::Jump(end_bb);
         }
 
