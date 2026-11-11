@@ -1992,6 +1992,82 @@ for b in $("$SIC" -print-backends); do
 done
 cd ..
 
+# ── What objtool and Linux's i386 vDSO need (every back end where it applies):
+# a `default: BUG();` stays unreachable; -fno-delete-null-pointer-checks keeps
+# the code after a WARN that a NULL write follows (LLVM); a noreturn function,
+# and one grown by its own inlining, are not inlined as small; `-m32` `.S`
+# files are i386, and `aligned(2 * sizeof(long))` is the target's. ──
+mkdir -p objtool && cd objtool
+cat > sw.c <<'EOF'
+struct vq { int layout; };
+int fa(const struct vq *), fb(const struct vq *);
+#define BUG() do { asm volatile("nop\n1:\tud2"); __builtin_unreachable(); } while (0)
+int more(const struct vq *q) { int ret; switch (q->layout) { case 0: ret = fa(q); break; case 1: ret = fb(q); break; default: BUG(); break; } return ret; }
+EOF
+cat > nul.c <<'EOF'
+void *pop(void **s) { if (__builtin_expect(!*s, 0)) { asm volatile("nop\n1:\tud2\n\tnop"); return 0; } return *s; }
+void fill(void **s, int v) { int *n = pop(s); __builtin_memset(n, 0, 64); n[1] = v; }
+EOF
+cat > inl.c <<'EOF'
+struct regs { long r15, r14, r13, r12, rbp, rbx, r11, r10, r9, r8, rax, rcx, rdx, rsi, rdi, flags; };
+extern long img; extern int *hdr; void save(void), load(void), shutdown(struct regs *), kexec(long); int trylock(void); void unlock(void);
+static inline __attribute__((always_inline)) void setup(struct regs *n, struct regs *o) {
+    if (o) { *n = *o; return; }
+    asm volatile("movq %%r15,%0" : "=m"(n->r15));
+    asm volatile("movq %%r14,%0" : "=m"(n->r14));
+    asm volatile("movq %%r13,%0" : "=m"(n->r13));
+    asm volatile("movq %%r12,%0" : "=m"(n->r12));
+    asm volatile("movq %%rbp,%0" : "=m"(n->rbp));
+    asm volatile("movq %%rbx,%0" : "=m"(n->rbx));
+    asm volatile("movq %%r11,%0" : "=m"(n->r11));
+    asm volatile("movq %%r10,%0" : "=m"(n->r10));
+    asm volatile("movq %%r9,%0" : "=m"(n->r9));
+    asm volatile("movq %%r8,%0" : "=m"(n->r8));
+    asm volatile("movq %%rax,%0" : "=m"(n->rax));
+    asm volatile("movq %%rcx,%0" : "=m"(n->rcx));
+    asm volatile("movq %%rdx,%0" : "=m"(n->rdx));
+    asm volatile("movq %%rsi,%0" : "=m"(n->rsi));
+    asm volatile("movq %%rdi,%0" : "=m"(n->rdi));
+    asm volatile("pushf; pop %0" : "=m"(n->flags));
+}
+void crash_inner(struct regs *r) { if (trylock()) { if (img) { struct regs f; setup(&f, r); save(); shutdown(&f); kexec(img); } unlock(); } }
+void crash(struct regs *r) { if (img) crash_inner(r); }
+void __attribute__((noreturn)) restart(unsigned t) { load(); asm volatile("ljmpl *%0" : : "m"(hdr[4]), "D"(t)); __builtin_unreachable(); }
+void emergency(int m) { if (m == 3) restart(0); load(); }
+EOF
+fn() { objdump -d --no-show-raw-insn "$1" | awk -v f="<$2>:" '$2 == f {on=1; next} /^$/ {on=0} on'; }
+for b in $("$SIC" -print-backends); do
+    why=""
+    "$SIC" -fbackend=$b -O2 -fno-PIE -c sw.c -o sw.o 2>err || why="$why sw: $(head -2 err);"
+    # After the asm's ud2 only a trap may follow (objtool: "unreachable instruction").
+    fn sw.o more | awk '/ud2/{seen=1; next} seen && !/ud2|^\s*$/{bad=1} END{exit !bad}' && why="$why code after BUG();"
+    "$SIC" -fbackend=$b -O2 -fno-PIE -c inl.c -o inl.o 2>err || why="$why inl: $(head -2 err);"
+    fn inl.o crash | grep -q "r12," && why="$why grown function inlined;"
+    fn inl.o emergency | grep -q "ljmp" && why="$why noreturn function inlined;"
+    if [ "$b" = llvm ]; then
+        "$SIC" -fbackend=llvm -O2 -fno-delete-null-pointer-checks -fno-PIE -c nul.c -o nul.o 2>err || why="$why nul: $(head -2 err);"
+        fn nul.o fill | grep -q "mov *%esi,0x4(%r" || why="$why code after WARN dropped;"
+    fi
+    if [ -z "$why" ]; then ok "objtool-shapes-$b"; else bad "objtool-shapes-$b" "$why"; fi
+done
+if "$SIC" -print-backends | grep -qx llvm; then
+    printf '#ifdef __x86_64__\n#error not i386\n#endif\n\t.text\n\t.globl f\nf:\tpushl %%ecx\n\tpopl %%ecx\n\tret\n' > s32.S
+    cat > al.c <<'EOF'
+struct list_head { struct list_head *next, *prev; };
+struct page { unsigned long flags; struct list_head lru; int ref; } __attribute__((__aligned__(2 * sizeof(unsigned long))));
+struct folio { union { struct { unsigned long flags; struct list_head lru; }; struct page page; }; };
+_Static_assert(sizeof(struct page) == 4 * sizeof(long), "page size");
+_Static_assert(_Alignof(struct page) == 2 * sizeof(long), "page align");
+_Static_assert(__builtin_offsetof(struct folio, lru) == sizeof(long), "lru");
+EOF
+    why=""
+    "$SIC" -m32 -c s32.S -o s32.o 2>err && readelf -h s32.o | grep -q "Intel 80386" || why="$why .S: $(head -2 err);"
+    "$SIC" -m32 -c al.c -o al.o 2>err || why="$why aligned: $(head -2 err);"
+    "$SIC" -c al.c -o al64.o 2>err || why="$why aligned 64: $(head -2 err);"
+    if [ -z "$why" ]; then ok "m32-kernel-shapes"; else bad "m32-kernel-shapes" "$why"; fi
+fi
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

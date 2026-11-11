@@ -1082,8 +1082,12 @@ fn assemble_source(src: &str, obj: &str, args: &Args) -> Result<(), Box<dyn std:
     let mut cmd = Command::new(&cc);
     if let Some(l) = args.x_inputs.get(src) { cmd.arg("-x").arg(l); }
     cmd.arg("-c").arg(src).arg("-o").arg(obj);
+    // i386 code (Linux's vdso32 `.S` files): preprocessed and assembled as such.
+    if sic_frontend::target::is_i386() { cmd.arg("-m32"); }
     for d in &args.defines { cmd.arg(format!("-D{}", d)); }
     for i in &args.includes { cmd.arg(format!("-I{}", i)); }
+    // `-nostdinc`, `-isystem`, `-iquote`, … as for C.
+    cmd.args(&args.cpp_include_flags);
     if args.pthread { cmd.arg("-pthread"); }
     for f in effective_dep_flags(args) { cmd.arg(f); }
     let status = cmd.status()?;
