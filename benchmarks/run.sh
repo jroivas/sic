@@ -57,8 +57,9 @@ min_time() {
     echo "$best"
 }
 
-# ratio <time> <baseline> — "<t>s  (N.NNx <label>)"
-ratio() { awk -v t="$1" -v c="$2" -v l="$3" 'BEGIN{printf "%7ss  (%.2fx %s)", t, t/c, l}'; }
+# ratio <time> <baseline> — "<t>s  (N.NNx <label>)". A baseline under the
+# timer's 0.01s resolution has no ratio.
+ratio() { awk -v t="$1" -v c="$2" -v l="$3" 'BEGIN{ if (c > 0) printf "%7ss  (%.2fx %s)", t, t/c, l; else printf "%7ss  (n/a, %s under 0.01s)", t, l }'; }
 
 printf "sic benchmarks — RUNS=%s, sic=%s (%s, backend %s)\n\n" "$RUNS" "$SIC" "$VERSION" "$BACKEND"
 
@@ -105,7 +106,7 @@ for name in "${benches[@]}"; do
     # use bounds-checked `new T[]` arrays while the C versions use raw malloc, so a
     # gap here reflects that safety feature, not frontend codegen quality (see README).
     printf "  sic·SIC vs sic·C: %s\n" \
-        "$(awk -v s="$t_ss" -v c="$t_sc" 'BEGIN{ r=s/c; printf "%.2fx (%s)", r, (r>1.02)?"slower":((r<0.98)?"faster":"on par") }')"
+        "$(awk -v s="$t_ss" -v c="$t_sc" 'BEGIN{ if (c <= 0) { printf "n/a (sic·C under 0.01s)"; exit } r=s/c; printf "%.2fx (%s)", r, (r>1.02)?"slower":((r<0.98)?"faster":"on par") }')"
 
     # Append this run's times to benchmarks/.<name>.times.log, and (if there is a
     # prior run) report the sic·SIC delta so a speed regression is visible run over run.
