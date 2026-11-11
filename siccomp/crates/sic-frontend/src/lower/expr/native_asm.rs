@@ -49,8 +49,9 @@ fn goto_stub(k: usize) -> String { format!(".Lsic_goto${{:uid}}_{}", k) }
 
 /// The template in LLVM's syntax: `%N`/`%[name]` (with modifiers, `%k0`) is
 /// `${N:k}`, `%%` a `%`, `%=` a unique number, and a `$` is `$$`. An `asm goto`
-/// label (`%l[name]`, `%lN` numbered after the operands) is its stub.
-fn llvm_template(t: &str, names: &[Option<String>], labels: &[String]) -> std::result::Result<String, String> {
+/// label (`%l[name]`, `%lN` numbered after the operands) is its stub. Operands
+/// from `shift` on are one further (`asm goto` puts its own output there).
+fn llvm_template(t: &str, names: &[Option<String>], labels: &[String], shift: usize) -> std::result::Result<String, String> {
     let mut out = String::new();
     let cs: Vec<char> = t.chars().collect();
     let mut i = 0;
@@ -89,6 +90,7 @@ fn llvm_template(t: &str, names: &[Option<String>], labels: &[String]) -> std::r
             return Err(format!("invalid `%{}` in the template", mods));
         };
         if label { out.push_str(&goto_stub(index)); continue; }
+        let index = if index >= shift { index + 1 } else { index };
         if mods.is_empty() { out.push_str(&format!("${{{}}}", index)); }
         else { out.push_str(&format!("${{{}:{}}}", index, mods)); }
     }
@@ -137,7 +139,9 @@ impl<'m> FuncCtx<'m> {
         let at = |m: String| CompileError::at(m, a.span.file.clone(), a.span.line, a.span.col);
         let names: Vec<Option<String>> = a.outputs.iter().chain(&a.inputs).map(|o| o.name.clone()).collect();
         let labels: Vec<String> = a.labels.iter().map(|l| l.split('.').next().unwrap_or(l).to_string()).collect();
-        let mut template = llvm_template(&a.template, &names, &labels).map_err(at)?;
+        // `asm goto`: which label was taken is an output after the C ones.
+        let shift = if a.goto { a.outputs.len() } else { usize::MAX };
+        let mut template = llvm_template(&a.template, &names, &labels, shift).map_err(at)?;
         // An instruction naming %ah (`%h0`) has no REX prefix: its other register
         // operands must be ones without (GCC's `Q` for a byte, `R` wider). LLVM
         // took any, and `movb %ah, %r9b` cannot be encoded.
@@ -225,21 +229,22 @@ impl<'m> FuncCtx<'m> {
             }
         }
         for (c, arg) in tied { cons.push(c); args.push(arg); }
-        // `asm goto`: each label's stub stores the label's number + 1 (0: the asm
-        // fell through) in a slot, whose address is the last input; the C code
-        // then goes to the label.
+        // `asm goto`: each label's stub sets an output to the label's number + 1
+        // (0: the asm fell through), which the C code then goes by. An output,
+        // not a store through an input pointer: LLVM may give an input's register
+        // to an output (Linux's unsafe_get_user loaded into the pointer's).
         let taken = if a.goto {
             let slot = self.alloc_val();
             self.push_instr(Instr::Alloca { dest: slot, ty: Type::i32(), align: None });
-            let k = cons.len();
+            let k = a.outputs.len();
             let end = goto_stub(labels.len());
-            template.push_str(&format!("\n\tmovl $$0, (${{{k}}})\n\tjmp {end}"));
+            template.push_str(&format!("\n\tmovl $$0, ${{{k}:k}}\n\tjmp {end}"));
             for i in 0..labels.len() {
-                template.push_str(&format!("\n{}:\n\tmovl $${}, (${{{k}}})\n\tjmp {end}", goto_stub(i), i + 1));
+                template.push_str(&format!("\n{}:\n\tmovl $${}, ${{{k}:k}}\n\tjmp {end}", goto_stub(i), i + 1));
             }
             template.push_str(&format!("\n{end}:"));
-            cons.push("r".to_string());
-            args.push(AsmArg { val: Val::Local(slot), ty: Type::void_ptr(), elem: None });
+            cons.insert(k, "=r".to_string());
+            outputs.push((Val::Local(slot), Type::i32()));
             cons.push("~{memory}".to_string());
             Some(slot)
         } else { None };

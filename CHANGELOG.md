@@ -26,6 +26,9 @@
   widens the output, as clang does; the input was cut to the output's width
   (Linux's `put_user` lost the user address's upper half: exec failed with
   EFAULT).
+- LLVM: `asm goto` with outputs (Linux's `unsafe_get_user`): which label was
+  taken is an output of the asm, not a store through a pointer that an
+  output's register could overwrite.
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),
