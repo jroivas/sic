@@ -83,6 +83,8 @@
   result type comes from its `Fn`.
 - Constants fold at every level, strings and ternaries too.
 - A second constructor, destructor or same-named method is an error.
+- The last owner of a reference-counted struct clears its whole count
+  pointer, not the low 4 bytes of it.
 
 ### Tools
 

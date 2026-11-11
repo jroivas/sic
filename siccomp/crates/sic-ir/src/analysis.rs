@@ -44,7 +44,7 @@ pub fn value_types(f: &Function) -> HashMap<u32, Type> {
 /// What `Store { val, .. }` writes. The store has no type of its own, and the
 /// pointer's does not count (`*(int *)p = v` through a `long *`): it is the
 /// value's. A constant is an `int` unless it needs more, as a frontend that
-/// means a wider store must make it one.
+/// means a wider store must make it one; `null` is a pointer.
 pub fn store_type(types: &HashMap<u32, Type>, val: &Val) -> Option<Type> {
     let int_fit = |fits: bool| if fits { Type::i32() } else { Type::i64() };
     match val {
@@ -55,7 +55,8 @@ pub fn store_type(types: &HashMap<u32, Type>, val: &Val) -> Option<Type> {
             Constant::UInt(v) => int_fit(*v <= u32::MAX as u64),
             Constant::Float(_) => Type::Float64,
             Constant::Bool(_) => Type::Bool,
-            Constant::Null | Constant::Undef | Constant::Zeroinit => Type::i32(),
+            Constant::Null => Type::void_ptr(),
+            Constant::Undef | Constant::Zeroinit => Type::i32(),
             _ => Type::void_ptr(),
         }),
     }
@@ -73,6 +74,7 @@ mod tests {
         assert_eq!(t(Constant::Int(0)), Some(Type::i32()));
         assert_eq!(t(Constant::Int(-1)), Some(Type::i32()));
         assert_eq!(t(Constant::Int(1 << 40)), Some(Type::i64()));
+        assert_eq!(t(Constant::Null), Some(Type::void_ptr()));
         assert_eq!(t(Constant::UInt(u32::MAX as u64)), Some(Type::i32()));
         assert_eq!(t(Constant::UInt(1 << 32)), Some(Type::i64()));
     }

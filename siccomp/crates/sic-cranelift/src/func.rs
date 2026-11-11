@@ -550,9 +550,12 @@ fn emit_instr(
                 return;
             }
             // Infer hint from existing value if available
-            let hint = if let Val::Local(id) = val {
-                val_map.get(&id.0).map(|&v| builder.func.dfg.value_type(v)).unwrap_or(ct::I32)
-            } else { ct::I32 };
+            let hint = match val {
+                Val::Local(id) => val_map.get(&id.0).map(|&v| builder.func.dfg.value_type(v)).unwrap_or(ct::I32),
+                // `null` is a pointer: all of it is written.
+                Val::Const(Constant::Null) => ptr_ty,
+                _ => ct::I32,
+            };
             let sv = rval(val, val_map, callee_refs, data_refs, builder, ptr_ty, hint);
             builder.ins().store(MemFlagsData::new(), sv, pv, 0);
         }
