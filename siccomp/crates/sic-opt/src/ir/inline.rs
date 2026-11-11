@@ -239,11 +239,21 @@ impl IrPass for Inline {
 
     fn run(&mut self, m: &mut Module) -> bool {
         let n = m.functions.len();
-        let info: Vec<FnInfo> = (0..n).map(|i| analyze(&m.functions[i], i)).collect();
+        let mut info: Vec<FnInfo> = (0..n).map(|i| analyze(&m.functions[i], i)).collect();
+        // A call of a `noreturn` function is a cold path, which GCC and clang do
+        // not inline into (Linux's machine_real_restart, STACK_FRAME_NON_STANDARD
+        // for objtool, would bring its far jump into the caller).
+        for (i, fi) in info.iter_mut().enumerate() {
+            if !fi.always && m.noreturn.contains(&m.functions[i].name) { fi.eligible = false; }
+        }
         let cycle = on_cycle(m, &info);
         let mut changed = false;
         for caller in 0..n {
             changed |= self.inline_into(m, caller, &info, &cycle);
+            // A later caller copies this body as it is now: judge it by that size,
+            // not its size before its own callees came in (Linux's __crash_kexec
+            // grew by crash_setup_regs' asm and was still inlined as small).
+            info[caller].size = inline_cost(&m.functions[caller]);
         }
         for f in 0..n {
             changed |= self.self_inline(m, f, &info);
