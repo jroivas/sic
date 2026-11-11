@@ -30,6 +30,10 @@ pub struct BackendOptions {
     /// `-S`: assembler text instead of an object, from a back end that
     /// [writes it](Backend::writes_assembly).
     pub assembly: bool,
+    /// `-fno-delete-null-pointer-checks` (Linux): memory at address 0 may be
+    /// accessed, so a dereference does not prove a pointer non-null, nor is a
+    /// write through NULL undefined (code after it is not dropped).
+    pub null_pointer_valid: bool,
     /// One section per function (`-ffunction-sections`, the default, which the
     /// driver links with `--gc-sections`); off, all code is in `.text`.
     pub function_sections: bool,
@@ -101,7 +105,7 @@ pub enum StackProtector { #[default] None, On, Strong, All }
 
 impl Default for BackendOptions {
     fn default() -> Self {
-        BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true, pie: true, assembly: false,
+        BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true, pie: true, assembly: false, null_pointer_valid: false,
             function_sections: true, sse: true, x87: true, no_text_data: false, no_red_zone: false, features: Vec::new(),
             mitigations: Mitigations::default() }
     }

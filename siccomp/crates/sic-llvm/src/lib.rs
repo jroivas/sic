@@ -217,6 +217,8 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
         attr(cx.ctx.create_string_attribute("frame-pointer", "all"));
         if cx.opts.no_red_zone { attr(enum_attr(cx.ctx, "noredzone", 0)); }
         if f.noinline { attr(enum_attr(cx.ctx, "noinline", 0)); }
+        // As clang's `-fno-delete-null-pointer-checks`.
+        if cx.opts.null_pointer_valid { attr(enum_attr(cx.ctx, "null_pointer_is_valid", 0)); }
         if ir.noreturn.contains(&f.name) { attr(enum_attr(cx.ctx, "noreturn", 0)); }
         if f.always_inline { attr(enum_attr(cx.ctx, "alwaysinline", 0)); }
         // The per-function part of the mitigations (clang's attributes).

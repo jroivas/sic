@@ -1503,6 +1503,7 @@ fn compile_ir_output(ir_module: &sic_ir::Module, args: &Args, assembly: bool) ->
             .find(|m| *m == "-mno-red-zone" || *m == "-mred-zone").is_some_and(|m| m == "-mno-red-zone"),
         features: isa.backend_features().into_iter().map(String::from).collect(),
         mitigations: mitigations(args),
+        null_pointer_valid: matches!(args.f_options.get("delete-null-pointer-checks"), Some(FOption::Disabled)),
         ..BackendOptions::default()
     };
     let mut backend = select_backend(args)?;
