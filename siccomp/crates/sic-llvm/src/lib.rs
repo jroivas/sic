@@ -38,6 +38,8 @@ impl Backend for LlvmBackend {
     }
 
     fn mitigations(&self) -> bool { true }
+
+    fn writes_assembly(&self) -> bool { true }
 }
 
 /// Shared by everything emitted for one module.
@@ -135,6 +137,8 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
 
     let ctx = Context::create();
     let module = ctx.create_module(&ir.name);
+    // `-S` names the source in `.file`, as GCC and clang do.
+    if let Some(f) = &ir.source_file { module.set_source_file_name(f); }
     module.set_triple(&triple);
     module.set_data_layout(&machine.get_target_data().get_data_layout());
     let builder = ctx.create_builder();
@@ -160,7 +164,9 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     // File-scope `asm(...)` is the module's assembly.
     for t in &ir.file_asm { asm.push_str(t); asm.push('\n'); }
     if let Some(p) = &ir.producer {
-        asm.push_str(&format!(".pushsection .comment,\"MS\",@progbits,1\n.asciz \"{}\"\n.popsection\n", p.replace('\\', "\\\\").replace('"', "\\\"")));
+        // `.ident`, not a `.comment` section of its own: GNU `as` (`-S` output)
+        // warns about the latter's attributes.
+        asm.push_str(&format!(".ident \"{}\"\n", p.replace('\\', "\\\\").replace('"', "\\\"")));
     }
     if !asm.is_empty() { module.set_inline_assembly(&asm); }
     if !opts.pic || opts.pie { assume_local(&module, opts.pic); }
@@ -181,7 +187,10 @@ fn compile(ir: &Module, opts: &BackendOptions) -> R<Vec<u8>> {
     if let Some(p) = pipeline {
         module.run_passes(p, &machine, PassBuilderOptions::create()).map_err(|e| e.to_string())?;
     }
-    let buf = machine.write_to_memory_buffer(&module, FileType::Object).map_err(|e| e.to_string())?;
+    // `-S`: LLVM's own assembly, inline asm in it as written (kbuild reads the
+    // `.ascii "->SYM value"` lines of asm-offsets.s).
+    let kind = if opts.assembly { FileType::Assembly } else { FileType::Object };
+    let buf = machine.write_to_memory_buffer(&module, kind).map_err(|e| e.to_string())?;
     Ok(buf.as_slice().to_vec())
 }
 

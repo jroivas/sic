@@ -13,6 +13,8 @@
 - LLVM: inline assembly is LLVM's own on x86-64 too (not sic's out-of-line
   helpers, whose plain `ret`s objtool reported under return thunks);
   `noreturn` is passed on; definitions in a PIE are reached directly.
+- LLVM: `-S` is LLVM's own assembly, inline asm as written (Linux's
+  `asm-offsets.h` and `devicetable-offsets.h` come from it).
 - LLVM: Linux's mitigations, as clang: return thunks, retpolines through the
   external thunks with the `cs` prefix, the stack protector with Linux's guard and
   `no_stack_protector`, call padding (`-fpatchable-function-entry`, `notrace`),

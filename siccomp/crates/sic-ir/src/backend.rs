@@ -27,6 +27,9 @@ pub struct BackendOptions {
     /// The code is for an executable (PIE: `-fpie`, the default, not `-fpic` or
     /// `-shared`): its own definitions cannot be preempted.
     pub pie: bool,
+    /// `-S`: assembler text instead of an object, from a back end that
+    /// [writes it](Backend::writes_assembly).
+    pub assembly: bool,
     /// One section per function (`-ffunction-sections`, the default, which the
     /// driver links with `--gc-sections`); off, all code is in `.text`.
     pub function_sections: bool,
@@ -98,7 +101,7 @@ pub enum StackProtector { #[default] None, On, Strong, All }
 
 impl Default for BackendOptions {
     fn default() -> Self {
-        BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true, pie: true,
+        BackendOptions { ptr_size: 8, opt: OptLevel::None, debug_info: false, pic: true, pie: true, assembly: false,
             function_sections: true, sse: true, x87: true, no_text_data: false, no_red_zone: false, features: Vec::new(),
             mitigations: Mitigations::default() }
     }
@@ -119,4 +122,8 @@ pub trait Backend {
     /// Whether it implements [`Mitigations`] (else the driver warns they are
     /// ignored).
     fn mitigations(&self) -> bool { false }
+
+    /// Whether it writes assembler text when [`BackendOptions::assembly`] asks
+    /// (else the driver writes the object back as text).
+    fn writes_assembly(&self) -> bool { false }
 }

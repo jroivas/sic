@@ -1964,6 +1964,34 @@ EOF
     cd ..
 fi
 
+# ── `-S` keeps inline assembly as text: kbuild makes asm-offsets.h and
+# devicetable-offsets.h from the `.ascii "->SYM value"` lines (with LLVM they
+# were bytes of an object written back, and every OFF_* was missing). The `.s`
+# assembles without warnings, with the producer in `.comment`. ──
+mkdir -p asmout && cd asmout
+cat > off.c <<'EOF'
+#include <stddef.h>
+struct dev_id { unsigned short flags, vendor; void *data; };
+#define DEFINE(sym, val) asm volatile("\n.ascii \"->" #sym " %0 " #val "\"" : : "i" (val))
+int main(void) { DEFINE(SIZE_dev_id, sizeof(struct dev_id)); DEFINE(OFF_dev_id_data, offsetof(struct dev_id, data)); return 0; }
+EOF
+for b in $("$SIC" -print-backends); do
+    for o in -O0 -O2; do
+        why=""
+        if "$SIC" -fbackend=$b $o -S off.c -o off.s 2>err; then
+            defs="$(sed -ne 's:^[[:space:]]*\.ascii[[:space:]]*"\(.*\)".*:\1:; /^->/{s:^->\([^ ]*\) [\$#]*\([^ ]*\) .*:#define \1 \2:; p;}' off.s | tr '\n' ' ')"
+            [ "$defs" = "#define SIZE_dev_id 16 #define OFF_dev_id_data 8 " ] || why="$why offsets: '$defs';"
+            "$CC" -c off.s -o off.o 2>err || why="$why assembling: $(head -2 err);"
+            [ -s err ] && why="$why as warned: $(head -2 err);"
+            readelf -p .comment off.o 2>/dev/null | grep -q "backend: $b)" || why="$why no producer;"
+        else
+            why="$(head -3 err)"
+        fi
+        if [ -z "$why" ]; then ok "asm-text-$b$o"; else bad "asm-text-$b$o" "$why"; fi
+    done
+done
+cd ..
+
 echo
 echo "Passed $pass/$((pass+fail))"
 [ "$fail" -eq 0 ]

@@ -1477,6 +1477,12 @@ fn compile_ir(ir_module: &sic_ir::Module, args: &Args, src: &str) -> Result<Vec<
 
 /// The backend's object for `ir_module`, without the text inline-asm helpers.
 fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    compile_ir_output(ir_module, args, false).map(|(o, _)| o)
+}
+
+/// The backend's output for `ir_module`: an object, or with `assembly` the
+/// assembler text of a back end that writes it (then `true`).
+fn compile_ir_output(ir_module: &sic_ir::Module, args: &Args, assembly: bool) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
     // Position-independent unless `-fno-PIE`/`-fno-pic` (the last such flag
     // wins) or the kernel code model, which is never PIC.
     let (isa, _) = isa::Isa::from_flags(&args.machine_flags);
@@ -1500,8 +1506,11 @@ fn compile_ir_code(ir_module: &sic_ir::Module, args: &Args) -> Result<Vec<u8>, B
         ..BackendOptions::default()
     };
     let mut backend = select_backend(args)?;
-    backend.compile_module(ir_module, &opts)
-        .map_err(|e| format!("codegen error: {}", e).into())
+    let text = assembly && backend.writes_assembly();
+    let opts = BackendOptions { assembly: text, ..opts };
+    let out = backend.compile_module(ir_module, &opts)
+        .map_err(|e| format!("codegen error: {}", e))?;
+    Ok((out, text))
 }
 
 /// Add the C inline-assembly helpers given as text (`Module::asm_text_helpers`)
@@ -2083,8 +2092,9 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     if args.emit_asm {
         for src in &sources {
             let ir_module = build_ir(src, args)?;
-            let obj = compile_ir_code(&ir_module, args)?;
-            let text = asm_out::object_to_asm(&obj, &ir_module, src, function_sections(args))?;
+            let (out, is_text) = compile_ir_output(&ir_module, args, true)?;
+            let text = if is_text { String::from_utf8(out)? }
+                else { asm_out::object_to_asm(&out, &ir_module, src, function_sections(args))? };
             let out = match &args.output {
                 Some(o) if sources.len() == 1 => o.clone(),
                 _ => PathBuf::from(src).with_extension("s").to_string_lossy().into_owned(),

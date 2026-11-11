@@ -52,6 +52,9 @@ Differences from Cranelift:
   clang does (`asm goto` too). Cranelift has none: there a statement runs out of
   line, in a helper function the call stands for, and vector-register (`"x"`)
   operands are not supported.
+- `-S` writes LLVM's own assembly, inline asm in it as written. Cranelift's is
+  the object written back as directives (`.byte`, `.reloc`), with the inline
+  asm statements as text.
 - A `noreturn` function (`_Noreturn`, `__attribute__((noreturn))`) is one to
   LLVM: nothing follows a call of it.
 
