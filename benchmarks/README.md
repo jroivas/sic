@@ -132,8 +132,11 @@ Each run also appends one line per benchmark to `benchmarks/.<name>.times.log`
 delta versus the previous run:
 
 ```
-2026-09-19T20:30:48Z commit=10de755 gcc=0.24 rustc=0.45 sicc=1.34 sicsic=1.34
+2026-11-11T20:09:46Z commit=c557fc22 gcc=0.24 rustc=0.50 sicc=0.44 sicsic=0.44 version=0.3.0-dev backend=llvm
 ```
+
+`version` is `sic -dumpversion`, `backend` the back end sic compiled with (`$SIC_BACKEND`,
+else its default). Lines from before these two fields were added end at `sicsic`.
 
 ## A representative result
 

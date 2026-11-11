@@ -8,7 +8,7 @@
 #   sic·C    sic -O2      main.c      the sic compiler, C frontend
 #   sic·SIC  sic -O2      main.sic    the sic compiler, SIC frontend
 #
-# The last two go through the same Cranelift back end, so comparing sic·C with
+# The last two go through the same sic back end, so comparing sic·C with
 # sic·SIC isolates any difference between sic's C and SIC frontends for the same
 # algorithm. Wall-clock time is the minimum of several runs (least noise).
 #
@@ -31,6 +31,16 @@ if [ ! -x "$SIC" ]; then
     echo "error: sic not found at $SIC (build it: ./build.sh release)" >&2
     exit 1
 fi
+# sic's version and the back end it compiles with: $SIC_BACKEND when this sic
+# has it, else its default (the first of -print-backends), as sic decides.
+VERSION="$("$SIC" -dumpversion 2>/dev/null)"
+VERSION="${VERSION:-unknown}"
+BACKENDS="$("$SIC" -print-backends 2>/dev/null)"
+BACKEND="${BACKENDS%%$'\n'*}"
+if [ -n "${SIC_BACKEND:-}" ] && grep -qx -- "$SIC_BACKEND" <<<"$BACKENDS"; then
+    BACKEND="$SIC_BACKEND"
+fi
+BACKEND="${BACKEND:-unknown}"
 
 benches=("$@")
 if [ ${#benches[@]} -eq 0 ]; then
@@ -50,7 +60,7 @@ min_time() {
 # ratio <time> <baseline> — "<t>s  (N.NNx <label>)"
 ratio() { awk -v t="$1" -v c="$2" -v l="$3" 'BEGIN{printf "%7ss  (%.2fx %s)", t, t/c, l}'; }
 
-printf "sic benchmarks — RUNS=%s, sic=%s\n\n" "$RUNS" "$SIC"
+printf "sic benchmarks — RUNS=%s, sic=%s (%s, backend %s)\n\n" "$RUNS" "$SIC" "$VERSION" "$BACKEND"
 
 for name in "${benches[@]}"; do
     dir="$ROOT/$name"
@@ -102,8 +112,10 @@ for name in "${benches[@]}"; do
     local_log="$ROOT/.$name.times.log"
     prev_ss=""
     [ -f "$local_log" ] && prev_ss="$(grep -oE 'sicsic=[0-9.]+' "$local_log" | tail -1 | cut -d= -f2)"
-    printf '%s commit=%s gcc=%s rustc=%s sicc=%s sicsic=%s\n' \
-        "$TSTAMP" "$COMMIT" "$t_gcc" "$t_rs" "$t_sc" "$t_ss" >> "$local_log"
+    # version= and backend= go last: older lines lack them, and readers match
+    # fields by name.
+    printf '%s commit=%s gcc=%s rustc=%s sicc=%s sicsic=%s version=%s backend=%s\n' \
+        "$TSTAMP" "$COMMIT" "$t_gcc" "$t_rs" "$t_sc" "$t_ss" "$VERSION" "$BACKEND" >> "$local_log"
     if [ -n "$prev_ss" ]; then
         printf "  sic·SIC vs previous run: %s\n\n" \
             "$(awk -v n="$t_ss" -v p="$prev_ss" 'BEGIN{ d=n-p; r=(p>0)?d/p*100:0; printf "%+.2fs (%+.0f%%)%s", d, r, (r>=10)?"  ⚠ slower":"" }')"
