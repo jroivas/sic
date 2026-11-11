@@ -2517,6 +2517,7 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(16), elem_size: 1,
                 result_ty: Type::Pointer(Box::new(v.clone())) });
             let n = self.coerce(Constant::int(bytes), &Type::i64())?;
+            if !super::func::is_fresh_struct_expr(val) { self.share_counted_at(&src, v)?; }
             self.emit_memcpy(Val::Local(data), src.clone(), n)?;
             if super::func::is_place_expr(val) {
                 self.retain_struct_owned_fields(Val::Local(data), v)?;
@@ -5907,7 +5908,8 @@ impl<'m> FuncCtx<'m> {
         let left = self.alloc_val();
         self.push_instr(Instr::BinOp { dest: left, op: sic_ir::BinOp::Sub, lhs: Val::Local(n), rhs: Val::Const(Constant::UInt(1)), ty: Type::u64() });
         self.push_instr(Instr::Store { ptr: rc, val: Val::Local(left) });
-        self.struct_count_new(&at)?;
+        // Now the one owner of its object: no count.
+        self.push_instr(Instr::Store { ptr: at, val: Val::Const(Constant::Null) });
         for f in owned.iter().filter(|f| *f != name) {
             let flv = self.field_ptr_from(LValue::plain(lv.ptr.clone(), rt.clone()), f, false, &crate::lexer::Span::default())?;
             let v = self.load_lvalue(&flv)?;
@@ -6262,6 +6264,7 @@ impl<'m> FuncCtx<'m> {
             }
             let src = self.lower_aggregate_ptr(rhs)?;
             if src == lv.ptr { return Ok(lv.ptr); }               // `o = o`
+            if super::func::is_place_expr(rhs) { self.share_counted_at(&src, &lv.ty)?; }
             // Acquire on a copy (a `fixed`/`bigint` payload's acquire clones it in
             // place — on the source it would leave both sharing one block), then
             // release the old value and install the copy.
@@ -6445,6 +6448,7 @@ impl<'m> FuncCtx<'m> {
                 let same = matches!(&src, s if *s == lv.ptr);
                 if !same {
                     self.emit_cleanup_call(lv.ptr.clone(), &dtor);
+                    if super::func::is_place_expr(rhs) { self.share_counted_at(&src, &lv.ty)?; }
                     let src_v = src.clone();
                     self.push_instr(Instr::MemCopy { dst: lv.ptr.clone(), src, size, align });
                     // A copy of an existing object shares its resources; a call's
@@ -6996,6 +7000,7 @@ impl<'m> FuncCtx<'m> {
                         let tp = self.lower_aggregate_ptr(taken)?;
                         let size = aty.size_of(self.ptr_size());
                         let align = aty.align_of(self.ptr_size());
+                        self.share_counted_at(&tp, &aty)?;
                         self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
                         self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
                         self.flush_temps_from(m); self.exit_scope();
@@ -7103,6 +7108,7 @@ impl<'m> FuncCtx<'m> {
                 self.flush_temps_from(m); self.exit_scope();
             } else if is_managed { self.enter_scope(); let m = self.temp_mark();
                 let tp = self.lower_aggregate_ptr(then)?;
+                self.share_counted_at(&tp, &aty)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
                 self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
                 self.flush_temps_from(m); self.exit_scope();
@@ -7120,6 +7126,7 @@ impl<'m> FuncCtx<'m> {
                 self.flush_temps_from(m); self.exit_scope();
             } else if is_managed { self.enter_scope(); let m = self.temp_mark();
                 let ep = self.lower_aggregate_ptr(else_)?;
+                self.share_counted_at(&ep, &aty)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
                 self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
                 self.flush_temps_from(m); self.exit_scope();
@@ -7483,6 +7490,8 @@ impl<'m> FuncCtx<'m> {
         }
         if matches!(aty, Type::Struct(_) | Type::Union(_)) {
             if let Ok(lv) = self.lower_lvalue(a) {
+                // The callee's parameter is a copy that retains.
+                self.share_counted_at(&lv.ptr, &aty)?;
                 return Ok(lv.ptr);
             }
             // Non-lvalue aggregate (e.g. a struct returned by value): its rvalue

@@ -818,6 +818,9 @@ impl<'m> FuncCtx<'m> {
                     let ps = self.ptr_size();
                     let size = agg_ty.size_of(ps);
                     let align = agg_ty.align_of(ps) as u64;
+                    if enum_retain.is_some() || self.returns_managed_copy(e, &agg_ty) {
+                        self.share_counted_at(&src, &agg_ty)?;
+                    }
                     self.push_instr(Instr::MemCopy { dst: sret_ptr.clone(), src, size, align });
                     if let Some(structs_only) = enum_retain {
                         self.enum_payload_op(sret_ptr.clone(), &agg_ty, true, structs_only)?;
@@ -850,6 +853,7 @@ impl<'m> FuncCtx<'m> {
                     let rty = self.ret_ty.clone();
                     let p = self.enum_value_ptr(e, &rty, &e.span)?;
                     if let Some(structs_only) = self.ret_enum_retain {
+                        self.share_counted_at(&p, &rty)?;
                         let c = self.aggregate_copy(&p, &rty);
                         self.enum_payload_op(c.clone(), &rty, true, structs_only)?;
                         Some(c)
@@ -870,6 +874,7 @@ impl<'m> FuncCtx<'m> {
                     if is_fresh_struct_expr(e) { self.take_struct_temp(&p); }
                     let rty = self.ret_ty.clone();
                     if self.returns_managed_copy(e, &rty) {
+                        self.share_counted_at(&p, &rty)?;
                         let c = self.aggregate_copy(&p, &rty);
                         self.retain_struct_owned_fields(c.clone(), &rty)?;
                         Some(c)
@@ -3892,6 +3897,8 @@ impl<'m> FuncCtx<'m> {
                     };
                     let size = ty.size_of(self.ptr_size());
                     let align = ty.align_of(self.ptr_size());
+                    // `S b = a;`: a copy of an existing object shares its count.
+                    if is_place_expr(e) { self.share_counted_at(&src, ty)?; }
                     self.push_instr(Instr::MemCopy { dst: ptr.clone(), src, size, align });
                     // A `string` binding acquires a reference to the shared
                     // buffer → retain. (Concat/slice temps register their own
@@ -4009,29 +4016,103 @@ impl<'m> FuncCtx<'m> {
         Ok(())
     }
 
-    /// A new block in the count slot `at`, with this one owner.
-    pub(crate) fn struct_count_new(&mut self, at: &Val) -> Result<()> {
-        let block = self.emit_malloc(Val::Const(Constant::UInt(8)))?;
-        let one = self.coerce(Constant::uint(1), &Type::u64())?;
-        self.push_instr(Instr::Store { ptr: block.clone(), val: one });
-        self.push_instr(Instr::Store { ptr: at.clone(), val: block });
+    /// A new object of the counted struct `ty` at `base` has one owner: no
+    /// count (NULL) until it is first copied (`share_counted_at`). With
+    /// `only_null` the slot is zeroed already.
+    fn struct_count_init(&mut self, base: &Val, ty: &Type, only_null: bool) -> Result<()> {
+        if only_null { return Ok(()); }
+        let (at, _) = self.struct_count_at(base, ty)?;
+        self.push_instr(Instr::Store { ptr: at, val: Val::Const(Constant::Null) });
         Ok(())
     }
 
-    /// The count of a new object of the counted struct `ty` at `base`.
-    fn struct_count_init(&mut self, base: &Val, ty: &Type, only_null: bool) -> Result<()> {
-        let (at, rc) = self.struct_count_at(base, ty)?;
-        let done = if only_null {
-            let nn = self.is_nonnull(rc);
-            let is_null = self.alloc_val();
-            self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: nn, rhs: Val::Const(Constant::Bool(false)), ty: Type::Bool });
-            Some(self.branch_if(Val::Local(is_null)))
-        } else { None };
-        self.struct_count_new(&at)?;
-        if let Some(done) = done {
-            self.set_terminator(Terminator::Jump(done));
-            self.switch_to_block(done);
+    /// Whether a value of type `t` holds a counted struct by value: itself, a
+    /// member, an element, or an enum payload.
+    pub(crate) fn holds_counted(&self, t: &Type) -> bool {
+        let rt = super::types::resolve_aggregate(t, &self.lowerer.struct_types);
+        if self.is_tagged_enum_struct(&rt) {
+            return self.managed_variants(&rt).iter().any(|(_, pty, own)|
+                matches!(own, super::expr::PayloadOwn::Managed(_)) && self.holds_counted(pty));
         }
+        match &rt {
+            Type::Struct(st) => Self::struct_counted(&rt) || st.fields.iter().any(|(_, f)| self.holds_counted(f)),
+            Type::Array { elem, .. } => self.holds_counted(elem),
+            _ => false,
+        }
+    }
+
+    /// `src` (of type `ty`) is about to be copied: each counted struct in it
+    /// that has no count yet, one owner, gets one at 1, so the copy's retain
+    /// (`struct_count_retain`) makes it 2 and both share it.
+    pub(crate) fn share_counted_at(&mut self, src: &Val, ty: &Type) -> Result<()> {
+        if !self.is_sic() || !self.holds_counted(ty) { return Ok(()); }
+        let rt = super::types::resolve_aggregate(ty, &self.lowerer.struct_types);
+        if self.is_tagged_enum_struct(&rt) {
+            let vars: Vec<(i64, Type)> = self.managed_variants(&rt).into_iter()
+                .filter(|(_, pty, own)| matches!(own, super::expr::PayloadOwn::Managed(_)) && self.holds_counted(pty))
+                .map(|(tag, pty, _)| (tag, pty)).collect();
+            let sp = crate::lexer::Span::default();
+            let tag = self.load_enum_tag(src.clone(), &rt, &sp)?;
+            let data = self.enum_data_ptr(src.clone(), &rt, &sp)?;
+            for (vtag, pty) in vars {
+                let eq = self.alloc_val();
+                self.push_instr(Instr::Cmp { dest: eq, op: CmpOp::IEq, lhs: tag.clone(), rhs: Constant::int(vtag), ty: Type::i32() });
+                let next = self.branch_if(Val::Local(eq));
+                self.share_counted_at(&data, &pty)?;
+                self.set_terminator(Terminator::Jump(next));
+                self.switch_to_block(next);
+            }
+            return Ok(());
+        }
+        match &rt {
+            Type::Struct(st) => {
+                let st = st.clone();
+                if Self::struct_counted(&rt) { self.struct_count_share(src, &rt)?; }
+                for (i, (_, fty)) in st.fields.iter().enumerate() {
+                    if !self.holds_counted(fty) { continue; }
+                    let fp = self.gep_offset(src, st.field_offset(i, self.ptr_size()), fty);
+                    self.share_counted_at(&fp, fty)?;
+                }
+                Ok(())
+            }
+            Type::Array { elem, len } => {
+                let elem = (**elem).clone();
+                if *len <= super::MANAGED_ARRAY_UNROLL {
+                    let esz = elem.size_of(self.ptr_size());
+                    for i in 0..*len {
+                        let ep = self.gep_offset(src, i as u64 * esz, &elem);
+                        self.share_counted_at(&ep, &elem)?;
+                    }
+                    return Ok(());
+                }
+                self.emit_elem_loop(src, &elem, Constant::int(*len as i64), |fc, ep, et| fc.share_counted_at(ep, et))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The count of the counted struct `ty` at `ptr`, made if it has none: a
+    /// block holding 1, installed with a compare-and-swap, as another thread
+    /// may copy the same object (its block wins, and this one is freed).
+    fn struct_count_share(&mut self, ptr: &Val, ty: &Type) -> Result<()> {
+        let (at, rc) = self.struct_count_at(ptr, ty)?;
+        let is_null = self.alloc_val();
+        self.push_instr(Instr::Cmp { dest: is_null, op: CmpOp::IEq, lhs: rc, rhs: Val::Const(Constant::Null), ty: Type::void_ptr() });
+        let done = self.branch_if(Val::Local(is_null));
+        let block = self.emit_malloc(Val::Const(Constant::UInt(8)))?;
+        let one = self.coerce(Constant::uint(1), &Type::u64())?;
+        self.push_instr(Instr::Store { ptr: block.clone(), val: one });
+        let desired = self.alloc_val();
+        self.push_instr(Instr::Cast { dest: desired, op: CastOp::PtrToInt, val: block.clone(), to_ty: Type::u64() });
+        self.val_types.insert(desired.0, Type::u64());
+        let zero = self.coerce(Constant::uint(0), &Type::u64())?;
+        let (_, ok) = self.emit_atomic_cas(at, zero, Val::Local(desired), &Type::u64());
+        let lost = self.branch_if(ok);
+        self.set_terminator(Terminator::Jump(done));
+        self.switch_to_block(lost);
+        self.emit_free(block)?;
+        self.set_terminator(Terminator::Jump(done));
+        self.switch_to_block(done);
         Ok(())
     }
 

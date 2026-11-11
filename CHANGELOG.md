@@ -85,6 +85,9 @@
 - A second constructor, destructor or same-named method is an error.
 - The last owner of a reference-counted struct clears its whole count
   pointer, not the low 4 bytes of it.
+- A reference-counted struct gets its count at its first copy: one never
+  copied allocates nothing for it (binarytrees made twice the allocations
+  of C).
 
 ### Tools
 

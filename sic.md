@@ -1118,6 +1118,9 @@ Each owner going away takes one off the count, and only the last runs `~S()`, so
 it can `free`, `close` or `del` what it holds, exactly once. Fields that release
 themselves (`string`, containers, a nested struct) are counted one by one as well.
 
+An object that was never copied has no count and costs nothing for it: the first
+copy makes the count, at one, and then adds itself as any copy does.
+
 ```sic
 struct file {
     int fd;

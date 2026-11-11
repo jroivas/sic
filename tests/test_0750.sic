@@ -1,0 +1,43 @@
+/* A struct with a destructor gets its count at its first copy (an object
+ * never copied has none). Every way to copy one still shares a single count:
+ * ~S() runs once per object, for the last owner, and the counts are freed.
+ * Returns 42. */
+#include <malloc.h>
+int log[64];
+int n = 0;
+struct S { int id; ~S() { log[n++] = id; } };
+struct W { S s; int k; ~W() { } };
+
+int take(S s) { return s.id; }
+S copy_of(S *p) { return *p; }
+S pick(S *a, S *b, int k) { return k ? *a : *b; }
+
+int shapes() {
+    int bad = 0;
+    { S a; a.id = 1; }                                          // never copied
+    { S a; a.id = 2; S b = a; }                                 // init
+    { S a; a.id = 3; S b; b.id = 99; b = a; }                   // assign: 99, then 3
+    { S a; a.id = 4; if (take(a) != 4) bad++; take(a); }        // by-value argument
+    { S a; a.id = 5; S b = copy_of(&a); }                       // return *p
+    { S a; a.id = 6; S b; b.id = 7; S c = pick(&a, &b, 1); }    // ?: of copies
+    { S a; a.id = 8; Option<S> o = Option::Some(a); Option<S> p = o; }  // payload
+    { S a; a.id = 9; list<S> l; l.add(a); S x = l[0]; }         // container
+    { W w; w.s.id = 10; W v = w; }                              // nested
+    { S a; a.id = 11; S b = a; S c = b; S d = a; }              // one count, four owners
+    return bad;
+}
+
+int main() {
+    if (shapes()) return 1;
+    int want[] = { 1, 2, 99, 3, 4, 5, 7, 6, 8, 9, 10, 11 };
+    int nw = (int)(sizeof(want) / sizeof(want[0]));
+    if (n != nw) return 10 + n;
+    for (int i = 0; i < nw; i++) if (log[i] != want[i]) return 30 + i;
+
+    for (int i = 0; i < 20; i++) { n = 0; shapes(); }
+    usize before = mallinfo2().uordblks;
+    for (int i = 0; i < 2000; i++) { n = 0; shapes(); }
+    usize after = mallinfo2().uordblks;
+    if (after - before > 4096) return 2;                        // a count leaked
+    return 42;
+}

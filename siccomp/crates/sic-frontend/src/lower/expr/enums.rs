@@ -137,6 +137,7 @@ impl<'m> FuncCtx<'m> {
                     // result is moved in (its temporary's destructor dropped).
                     let src = self.lower_aggregate_ptr(&args[0])?;
                     if super::super::func::is_fresh_struct_expr(&args[0]) { self.take_struct_temp(&src); }
+                    else if super::super::func::is_place_expr(&args[0]) { self.share_counted_at(&src, pty)?; }
                     let sz = pty.size_of(self.ptr_size());
                     let al = pty.align_of(self.ptr_size());
                     self.push_instr(Instr::MemCopy { dst: payload_ptr.ptr, src, size: sz, align: al });
