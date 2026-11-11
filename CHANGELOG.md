@@ -63,7 +63,14 @@
   - a static assertion in a function sees the function's names;
   - unary `+` keeps a negative zero;
   - every object of an array or struct is constructed;
-  - `bigint` literals past `long`.
+  - `bigint` literals past `long`;
+  - `sizeof` of a string literal is its array's (it was a pointer's 8);
+  - `\u` and `\U` escapes name a character: UTF-8 in a narrow literal, a
+    surrogate pair in `u""` (they were read as the letter).
+- `-fshort-wchar` (Linux): `wchar_t` and `L""` are 16-bit `unsigned short`,
+  with GCC's macros. A wide literal initializing an array of narrower
+  units no longer writes past it: Linux's EFI code overwrote its saved
+  registers, and the Cranelift kernel failed in `do_one_initcall`.
 - Preprocessor: `L'x'`, `u'x'`, `U'x'` (and C23 `u8'x'`) with every escape in
   `#if`; `-ffreestanding` makes `__STDC_HOSTED__` 0.
 - Driver: an input without a source suffix is a linker input, as with gcc (libtool's

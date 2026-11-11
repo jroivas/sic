@@ -1788,19 +1788,27 @@ pub(crate) fn unique_ns_type(named: &HashMap<String, Type>, name: &str) -> Optio
 }
 
 /// The element type of a wide string literal: `L` → wchar_t (`int` on
-/// x86-64 Linux), `u` → char16_t, `U` → char32_t.
+/// x86-64 Linux, `unsigned short` with -fshort-wchar), `u` → char16_t,
+/// `U` → char32_t.
 pub(crate) fn wide_char_type(prefix: char) -> Type {
     match prefix {
         'u' => Type::Int { bits: 16, signed: false },
         'U' => Type::Int { bits: 32, signed: false },
+        _ if crate::target::short_wchar() => Type::Int { bits: 16, signed: false },
         _ => Type::Int { bits: 32, signed: true },
     }
+}
+
+/// Whether a wide literal with `prefix` is UTF-16 (`u`, or `L` with
+/// -fshort-wchar), so its units are 2 bytes.
+pub(crate) fn wide_is_utf16(prefix: char) -> bool {
+    prefix == 'u' || (prefix == 'L' && crate::target::short_wchar())
 }
 
 /// A wide string literal's bytes for `len` elements: the units, then zeros
 /// (the terminator and any padding); truncated when `len` is shorter.
 pub(crate) fn wide_string_bytes(units: &[u32], prefix: char, len: usize) -> Vec<u8> {
-    let w = if prefix == 'u' { 2 } else { 4 };
+    let w = if wide_is_utf16(prefix) { 2 } else { 4 };
     let mut out = vec![0u8; len * w];
     for (i, u) in units.iter().take(len).enumerate() {
         out[i * w..(i + 1) * w].copy_from_slice(&u.to_le_bytes()[..w]);

@@ -542,6 +542,12 @@ fn main() {
         return;
     }
     delegate_non_64bit(&raw_args);
+    // Before preprocessing: the macros and literals follow it.
+    if let Some(f) = expand_response_files(raw_args.iter().cloned()).iter().rev()
+        .find(|a| matches!(a.as_str(), "-fshort-wchar" | "-fno-short-wchar"))
+    {
+        sic_frontend::target::set_short_wchar(f == "-fshort-wchar");
+    }
 
     // Normalize a few GCC-style flags before clap sees them.
     let mut want_debug = false;

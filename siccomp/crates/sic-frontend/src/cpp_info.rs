@@ -179,7 +179,21 @@ pub fn target_macros() -> Vec<(&'static str, String)> {
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     {
         let table = if crate::target::is_i386() { I386_LINUX } else { X86_64_LINUX };
-        table.iter().map(|(n, v)| (*n, v.to_string())).collect()
+        let mut v: Vec<(&'static str, String)> = table.iter().map(|(n, v)| (*n, v.to_string())).collect();
+        if crate::target::short_wchar() {
+            // As GCC's -fshort-wchar.
+            for (n, val) in v.iter_mut() {
+                match *n {
+                    "__SIZEOF_WCHAR_T__" => *val = "2".into(),
+                    "__WCHAR_MAX__" => *val = "0xffff".into(),
+                    "__WCHAR_MIN__" => *val = "0".into(),
+                    "__WCHAR_TYPE__" => *val = "short unsigned int".into(),
+                    "__WCHAR_WIDTH__" => *val = "16".into(),
+                    _ => {}
+                }
+            }
+        }
+        v
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
     {

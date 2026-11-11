@@ -5044,7 +5044,7 @@ fn scan_generic_fns(tokens: &[Token], fns: &mut HashSet<String>, params: &mut Ha
 /// Append the characters of a narrow literal piece as wide code units.
 fn push_units(units: &mut Vec<u32>, piece: &str, prefix: char) {
     for c in String::from_utf8_lossy(piece.as_bytes()).chars() {
-        if prefix == 'u' {
+        if crate::lower::types::wide_is_utf16(prefix) {
             let mut buf = [0u16; 2];
             units.extend(c.encode_utf16(&mut buf).iter().map(|&u| u as u32));
         } else {

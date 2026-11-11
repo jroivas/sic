@@ -430,8 +430,9 @@ impl Lexer {
                 if self.pos >= self.src.len() {
                     return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
                 }
+                let named = matches!(self.peek(), 'u' | 'U');
                 let val = self.read_escape_value();
-                bytes.push(val as u8);
+                push_escape(&mut bytes, val, named);
             } else {
                 let mut buf = [0u8; 4];
                 bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
@@ -451,7 +452,8 @@ impl Lexer {
     fn scan_wide_string_literal(&mut self, sp: Span, prefix: char) -> Result<Token> {
         self.advance(); // opening "
         let mut units: Vec<u32> = Vec::new();
-        let mask: u32 = if prefix == 'u' { 0xFFFF } else { 0xFFFF_FFFF };
+        let utf16 = crate::lower::types::wide_is_utf16(prefix);
+        let mask: u32 = if utf16 { 0xFFFF } else { 0xFFFF_FFFF };
         loop {
             if self.pos >= self.src.len() {
                 return Err(CompileError::at("unterminated string literal", sp.file.clone(), sp.line, sp.col));
@@ -462,8 +464,18 @@ impl Lexer {
                 if self.pos >= self.src.len() {
                     return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
                 }
-                units.push(self.read_escape_value() & mask);
-            } else if prefix == 'u' {
+                // `\u`/`\U` name a character (a surrogate pair in UTF-16);
+                // `\x` and octal escapes are one unit.
+                let named = matches!(self.peek(), 'u' | 'U');
+                let v = self.read_escape_value();
+                match char::from_u32(v).filter(|_| named && utf16) {
+                    Some(ch) => {
+                        let mut buf = [0u16; 2];
+                        units.extend(ch.encode_utf16(&mut buf).iter().map(|&u| u as u32));
+                    }
+                    None => units.push(v & mask),
+                }
+            } else if utf16 {
                 let mut buf = [0u16; 2];
                 units.extend(c.encode_utf16(&mut buf).iter().map(|&u| u as u32));
             } else {
@@ -516,8 +528,9 @@ impl Lexer {
                 if self.pos >= self.src.len() {
                     return Err(CompileError::at("unterminated escape", sp.file.clone(), sp.line, sp.col));
                 }
+                let named = matches!(self.peek(), 'u' | 'U');
                 let val = self.read_escape_value();
-                bytes.push(val as u8);
+                push_escape(&mut bytes, val, named);
             } else {
                 let mut buf = [0u8; 4];
                 bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
@@ -562,6 +575,16 @@ impl Lexer {
                         self.advance();
                         count += 1;
                     } else { break; }
+                }
+                val
+            }
+            'u' | 'U' => {
+                // A universal character name: exactly 4 / 8 hex digits.
+                let mut val = 0u32;
+                for _ in 0..if c == 'u' { 4 } else { 8 } {
+                    let Some(h) = self.src.get(self.pos).and_then(|d| d.to_digit(16)) else { break };
+                    val = val.wrapping_mul(16).wrapping_add(h);
+                    self.advance();
                 }
                 val
             }
@@ -643,6 +666,18 @@ impl Lexer {
             _ => (TokenKind::Unknown, ""),
         };
         Ok(Token::new(kind, extra.to_string(), sp))
+    }
+}
+
+/// A narrow literal's escape: one byte, or a named character (`\u`, `\U`)
+/// in UTF-8, as GCC writes it.
+fn push_escape(bytes: &mut Vec<u8>, val: u32, named: bool) {
+    match char::from_u32(val).filter(|_| named) {
+        Some(ch) => {
+            let mut buf = [0u8; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+        None => bytes.push(val as u8),
     }
 }
 

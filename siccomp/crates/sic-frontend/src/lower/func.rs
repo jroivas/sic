@@ -3704,11 +3704,13 @@ impl<'m> FuncCtx<'m> {
             Initializer::Expr(Expr { kind: ExprKind::WideStringLit(units, p), .. })
                 if matches!(ty, Type::Array { .. }) =>
             {
-                let Type::Array { len, .. } = ty else { unreachable!() };
-                let w: u64 = if *p == 'u' { 2 } else { 4 };
+                let Type::Array { len, elem } = ty else { unreachable!() };
+                let w: u64 = if super::types::wide_is_utf16(*p) { 2 } else { 4 };
                 let gref = self.lowerer.add_wide_string_global(units, *p);
-                let copy = (units.len() as u64 + 1).min((*len).max(1) as u64) * w;
-                let total = (*len as u64 * w).max(copy);
+                // The array's own size bounds both: a literal of wider units
+                // (`L"…"` in a `u16[]` without -fshort-wchar) wrote past it.
+                let total = *len as u64 * elem.size_of(self.ptr_size());
+                let copy = ((units.len() as u64 + 1) * w).min(total);
                 self.push_instr(Instr::MemSet { dst: ptr.clone(), val: Constant::zero(), size: total, align: 1 });
                 self.push_instr(Instr::MemCopy { dst: ptr, src: Val::Global(gref), size: copy, align: 1 });
             }
