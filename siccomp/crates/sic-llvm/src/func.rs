@@ -127,7 +127,16 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         } else {
             d.di.create_auto_variable(scope, name, d.file, loc.get_line(), t, true, flags, 0)
         };
-        d.di.insert_declare_at_end(p, Some(var), None, loc, block);
+        // inkwell's insert_declare_at_end takes the debug record LLVM 19+
+        // returns for an instruction, and its check reads it as one (a
+        // panic, depending on memory, in a debug build): call LLVM itself.
+        use inkwell::values::AsValueRef;
+        let expr = d.di.create_expression(vec![]);
+        unsafe {
+            inkwell::llvm_sys::debuginfo::LLVMDIBuilderInsertDeclareRecordAtEnd(
+                d.di.as_mut_ptr(), p.as_value_ref(), var.as_mut_ptr(), expr.as_mut_ptr(),
+                loc.as_mut_ptr(), block.as_mut_ptr());
+        }
     }
 
     /// The type of an object of `ty` in memory (`long double` is x87, an
