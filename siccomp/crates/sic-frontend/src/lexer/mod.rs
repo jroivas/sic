@@ -223,7 +223,7 @@ impl Lexer {
         if matches!(c, 'L' | 'u' | 'U') {
             let n1 = self.peek2();
             if n1 == '"' { self.advance(); return self.scan_wide_string_literal(sp, c); }
-            if n1 == '\'' { self.advance(); return self.scan_char_literal(sp); }
+            if n1 == '\'' { self.advance(); return self.scan_char_literal(sp, Some(c)); }
             if c == 'u' && n1 == '8' && self.src.get(self.pos + 2) == Some(&'"') {
                 self.advance(); self.advance();
                 return self.scan_string_literal(sp);
@@ -267,7 +267,7 @@ impl Lexer {
 
         // Char literal
         if c == '\'' {
-            return self.scan_char_literal(sp);
+            return self.scan_char_literal(sp, None);
         }
 
         // Operators and punctuation
@@ -540,7 +540,9 @@ impl Lexer {
         Ok(Token::new(TokenKind::StringLit, s, sp))
     }
 
-    fn scan_char_literal(&mut self, sp: Span) -> Result<Token> {
+    /// A character constant; a prefixed one (`L'x'`, `u'x'`, `U'x'`) carries
+    /// its prefix in the token text (`u65`), for the parser to type it.
+    fn scan_char_literal(&mut self, sp: Span, prefix: Option<char>) -> Result<Token> {
         self.advance(); // opening '
         if self.pos >= self.src.len() {
             return Err(CompileError::at("unterminated char literal", sp.file.clone(), sp.line, sp.col));
@@ -556,7 +558,11 @@ impl Lexer {
         };
         // closing '
         if self.pos < self.src.len() && self.src[self.pos] == '\'' { self.advance(); }
-        Ok(Token::new(TokenKind::CharLit, val.to_string(), sp))
+        let text = match prefix {
+            Some(p) => format!("{}{}", p, val),
+            None => val.to_string(),
+        };
+        Ok(Token::new(TokenKind::CharLit, text, sp))
     }
 
     /// Read an escape sequence's value, with the leading `\` already consumed.

@@ -4009,8 +4009,21 @@ impl Parser {
             }
             TokenKind::CharLit => {
                 let text = self.advance().text.clone();
-                let v: i32 = text.parse().unwrap_or(0);
-                Ok(Expr::new(ExprKind::CharLit(v), sp))
+                // `u'x'` is a char16_t, `U'x'` a char32_t, `L'x'` a wchar_t
+                // (`unsigned short` with -fshort-wchar, else `int`).
+                let (ty, digits) = match text.chars().next() {
+                    Some('u') => (Some(AstType::Short { signed: false }), &text[1..]),
+                    Some('U') => (Some(AstType::Int { signed: false }), &text[1..]),
+                    Some('L') if crate::target::short_wchar() => (Some(AstType::Short { signed: false }), &text[1..]),
+                    Some('L') => (None, &text[1..]),
+                    _ => (None, &text[..]),
+                };
+                let v: i64 = digits.parse().unwrap_or(0);
+                let lit = Expr::new(ExprKind::CharLit(v as i32), sp.clone());
+                Ok(match ty {
+                    Some(ty) => Expr::new(ExprKind::Cast { ty: QualType::new(ty), expr: Box::new(lit) }, sp),
+                    None => lit,
+                })
             }
             TokenKind::BoolLit => {
                 // sic `true`/`false` — lexed as text "1"/"0", typed `bool`.

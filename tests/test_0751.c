@@ -24,7 +24,7 @@ __attribute__((noinline)) static int efi_shape(void) {
 int main(void) {
     if (sizeof(wchar_t) != 2 || __SIZEOF_WCHAR_T__ != 2 || __WCHAR_MAX__ != 0xffff) return 1;
     if ((wchar_t)-1 < 0) return 2;                      /* unsigned */
-    if (sizeof(L"abc") != 8) return 3;
+    if (sizeof(L"abc") != 8 || sizeof(L'a') != 2) return 3;
     if (sizeof(g) != 6 || g[0] != 'A' || g[1] != 'b' || g[2] != 0) return 4;
     unsigned short e[] = L"a\U0001F600";                /* UTF-16: a surrogate pair */
     if (sizeof(e) != 8 || e[1] != 0xd83d || e[2] != 0xde00) return 5;
