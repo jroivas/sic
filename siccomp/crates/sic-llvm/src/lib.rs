@@ -463,11 +463,7 @@ fn constructors<'ctx>(cx: &Cx<'ctx, '_>) -> R<Vec<PointerValue<'ctx>>> {
 /// named section (found by `__start_`/`__stop_`, or by a tool), and an internal
 /// symbol that only inline-asm text names.
 fn named_elsewhere<'ctx>(cx: &Cx<'ctx, '_>) -> Vec<PointerValue<'ctx>> {
-    let mut words = sic_ir::fast_hash::HashSet::default();
-    let texts = cx.ir.asm_text_helpers.iter().map(|(_, t)| t).chain(cx.ir.file_asm.iter());
-    for t in texts {
-        for w in t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$')) { words.insert(w); }
-    }
+    let words = cx.ir.asm_names();
     let mut out = Vec::new();
     for (i, g) in cx.ir.globals.iter().enumerate() {
         let Some(lg) = cx.globals.get(&(i as u32)) else { continue };

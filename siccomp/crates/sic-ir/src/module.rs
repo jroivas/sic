@@ -427,10 +427,13 @@ impl Module {
     }
 
     /// The identifiers in assembler text of this unit: what it names is used,
-    /// whatever the IR says.
+    /// whatever the IR says. The text is file-scope asm, the out-of-line asm
+    /// helpers, and the templates of inline asm a back end assembles itself.
     pub fn asm_names(&self) -> crate::fast_hash::HashSet<&str> {
         let mut names = crate::fast_hash::HashSet::default();
-        let texts = self.asm_text_helpers.iter().map(|(_, t)| t).chain(&self.file_asm);
+        let inline = self.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instrs)
+            .filter_map(|i| match i { crate::Instr::InlineAsm { template, .. } => Some(template), _ => None });
+        let texts = self.asm_text_helpers.iter().map(|(_, t)| t).chain(&self.file_asm).chain(inline);
         for t in texts {
             names.extend(t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '$')).filter(|w| !w.is_empty()));
         }

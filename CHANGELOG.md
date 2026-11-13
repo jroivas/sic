@@ -16,6 +16,8 @@
 - LLVM: `-S` is LLVM's own assembly, inline asm as written (Linux's
   `asm-offsets.h` and `devicetable-offsets.h` come from it).
 - LLVM: `-fno-delete-null-pointer-checks` (Linux) is honoured.
+- LLVM: a `static` that only inline asm names is kept, as on Cranelift;
+  `-g` no longer panics in a debug build of sic (on a local variable).
 - `-m32`: `.S` files are assembled as i386; `sizeof(long)` and pointer
   sizes in attribute arguments (`aligned(2 * sizeof(long))`) are i386's.
 - Fixed: a `switch`'s `default:` ending in `__builtin_unreachable()` ran on
@@ -66,7 +68,9 @@
   - `bigint` literals past `long`;
   - `sizeof` of a string literal is its array's (it was a pointer's 8);
   - `\u` and `\U` escapes name a character: UTF-8 in a narrow literal, a
-    surrogate pair in `u""` (they were read as the letter).
+    surrogate pair in `u""` (they were read as the letter);
+  - `u'x'` is a `char16_t`, `U'x'` a `char32_t` and `L'x'` a `wchar_t` (they
+    were all `int`).
 - `-fshort-wchar` (Linux): `wchar_t` and `L""` are 16-bit `unsigned short`,
   with GCC's macros. A wide literal initializing an array of narrower
   units no longer writes past it: Linux's EFI code overwrote its saved
