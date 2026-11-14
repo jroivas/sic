@@ -5,12 +5,13 @@
 #include <malloc.h>
 int log[64];
 int n = 0;
-struct S { int id; ~S() { log[n++] = id; } };
+struct S { int id; ~S() { log[n++] = id; } int same(S *self, S o) { return self->id == o.id; } };
 struct W { S s; int k; ~W() { } };
 
 int take(S s) { return s.id; }
 S copy_of(S *p) { return *p; }
 S pick(S *a, S *b, int k) { return k ? *a : *b; }
+S mk(int id) { S s; s.id = id; return s; }
 
 int shapes() {
     int bad = 0;
@@ -24,12 +25,14 @@ int shapes() {
     { S a; a.id = 9; list<S> l; l.add(a); S x = l[0]; }         // container
     { W w; w.s.id = 10; W v = w; }                              // nested
     { S a; a.id = 11; S b = a; S c = b; S d = a; }              // one count, four owners
+    { if (take(mk(12)) != 12) bad++; }                          // a temporary argument
+    { S a; a.id = 13; if (!a.same(a) || a.same(mk(14))) bad++; }  // method arguments: 14, 13
     return bad;
 }
 
 int main() {
     if (shapes()) return 1;
-    int want[] = { 1, 2, 99, 3, 4, 5, 7, 6, 8, 9, 10, 11 };
+    int want[] = { 1, 2, 99, 3, 4, 5, 7, 6, 8, 9, 10, 11, 12, 14, 13 };
     int nw = (int)(sizeof(want) / sizeof(want[0]));
     if (n != nw) return 10 + n;
     for (int i = 0; i < nw; i++) if (log[i] != want[i]) return 30 + i;

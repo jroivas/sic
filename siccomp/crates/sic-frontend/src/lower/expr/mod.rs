@@ -7499,8 +7499,11 @@ impl<'m> FuncCtx<'m> {
                 return Ok(lv.ptr);
             }
             // Non-lvalue aggregate (e.g. a struct returned by value): its rvalue
-            // lowering already yields a pointer to the temporary.
-            return self.lower_expr(a);
+            // lowering already yields a pointer to the temporary, which is
+            // destroyed here as the parameter is there: two owners.
+            let p = self.lower_expr(a)?;
+            self.share_counted_at(&p, &aty)?;
+            return Ok(p);
         }
         self.lower_expr(a)
     }
