@@ -1829,9 +1829,11 @@ impl Lowerer {
             fc.switch_to_block(body);
             let r2 = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r2, ptr: Val::Local(slot), ty: rcp.clone() });
+            // Atomic: a string may be shared with another thread.
+            let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
             let v = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(r2), ty: usize_ty.clone() });
-            // A count at its maximum would carry into the foreign flag: abort
+            fc.push_instr(Instr::AtomicRmw { dest: v, op: sic_ir::AtomicOp::Add, ptr: Val::Local(r2), val: one, ty: usize_ty.clone() });
+            // A count at its maximum carried into the foreign flag: abort
             // (unreachable in a correct program — see `str_foreign_flag`).
             let mask = fc.coerce(Constant::uint(!flag & umask), &usize_ty).unwrap();
             let low = fc.alloc_val();
@@ -1845,10 +1847,6 @@ impl Lowerer {
             fc.push_instr(Instr::Call { dest: None, func: abort_fref, args: vec![], ret_ty: Type::Void });
             fc.set_terminator(Terminator::Jump(inc_bb));
             fc.switch_to_block(inc_bb);
-            let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
-            let v2 = fc.alloc_val();
-            fc.push_instr(Instr::BinOp { dest: v2, op: BinOp::Add, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
-            fc.push_instr(Instr::Store { val: Val::Local(v2), ptr: Val::Local(r2) });
             fc.set_terminator(Terminator::Jump(done));
             fc.switch_to_block(done);
             fc.set_terminator(Terminator::Ret(None));
@@ -1857,7 +1855,7 @@ impl Lowerer {
     }
 
     /// Synthesize `void __sic_str_release(usize* rc)` —
-    /// `if (rc && --(*rc)==0) free(rc);`. NULL rc is a no-op.
+    /// `if (rc && --(*rc)==0) free(rc);`, the decrement atomic. NULL rc is a no-op.
     pub(crate) fn ensure_str_release_fn(&mut self) -> FuncRef {
         if let Some(f) = self.module.func_ref_by_name("__sic_str_release") {
             return f;
@@ -1896,12 +1894,12 @@ impl Lowerer {
             fc.switch_to_block(body);
             let r2 = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r2, ptr: Val::Local(slot), ty: rcp.clone() });
-            let v = fc.alloc_val();
-            fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(r2), ty: usize_ty.clone() });
+            // Atomic, as the retain: the count before, less one.
             let one = fc.coerce(Constant::int(1), &usize_ty).unwrap();
+            let v = fc.alloc_val();
+            fc.push_instr(Instr::AtomicRmw { dest: v, op: sic_ir::AtomicOp::Sub, ptr: Val::Local(r2), val: one.clone(), ty: usize_ty.clone() });
             let n = fc.alloc_val();
             fc.push_instr(Instr::BinOp { dest: n, op: BinOp::Sub, lhs: Val::Local(v), rhs: one, ty: usize_ty.clone() });
-            fc.push_instr(Instr::Store { val: Val::Local(n), ptr: Val::Local(r2) });
             // The count is the low bits; the top bit (`str_foreign_flag`) marks a
             // block made outside SIC (a Rust `String`), released by the
             // finalizer in its second word instead of `free`.

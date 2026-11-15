@@ -60,25 +60,28 @@ __attribute__((weak)) __sic_dict *__sic_dict_new(void) {
     d->nents = 0;
     d->live = 0;
     d->rc = 1;
-    d->wrc = 0;
+    d->wrc = 1;   /* the strong owners' one weak reference */
     return d;
 }
 
 /* Share the handle: another owner (a binding, a return, a closure capture). */
 __attribute__((weak)) void __sic_dict_retain(__sic_dict *d) {
-    if (d) d->rc++;
+    if (d) __atomic_fetch_add(&d->rc, 1, __ATOMIC_SEQ_CST);
 }
 
 /* sic weak references (sic.md §"Weak"): weak counts don't keep the dict alive;
    `upgrade` returns a fresh strong reference if still live, else NULL. */
 __attribute__((weak)) void __sic_dict_weak_retain(__sic_dict *d) {
-    if (d) d->wrc++;
+    if (d) __atomic_fetch_add(&d->wrc, 1, __ATOMIC_SEQ_CST);
 }
 __attribute__((weak)) void __sic_dict_weak_release(__sic_dict *d) {
-    if (d && --d->wrc == 0 && d->rc == 0) free(d);
+    if (d && __atomic_sub_fetch(&d->wrc, 1, __ATOMIC_SEQ_CST) == 0) free(d);
 }
 __attribute__((weak)) __sic_dict *__sic_dict_upgrade(__sic_dict *d) {
-    if (d && d->rc > 0) { d->rc++; return d; }
+    if (!d) return 0;
+    unsigned long n = __atomic_load_n(&d->rc, __ATOMIC_SEQ_CST);
+    while (n > 0)   /* only while some strong owner keeps it */
+        if (__atomic_compare_exchange_n(&d->rc, &n, n + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return d;
     return 0;
 }
 
@@ -185,7 +188,7 @@ __attribute__((weak)) unsigned long __sic_dict_len(__sic_dict *d) { return d ? d
    The handle struct is kept while weak references remain, freed by the last weak
    release. */
 __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
-    if (!d || d->rc == 0 || --d->rc != 0) return;
+    if (!d || __atomic_load_n(&d->rc, __ATOMIC_SEQ_CST) == 0 || __atomic_sub_fetch(&d->rc, 1, __ATOMIC_SEQ_CST) != 0) return;
     for (unsigned long e = 0; e < d->nents; e++) {
         if (!d->ents[e].live) continue;
         if (d->ents[e].kind == 2) free((void *)d->ents[e].a);   /* string key bytes */
@@ -194,7 +197,7 @@ __attribute__((weak)) void __sic_dict_free(__sic_dict *d) {
     free(d->ents);
     free(d->index);
     d->ents = 0; d->index = 0; d->nents = 0; d->live = 0; d->cap = 0;
-    if (d->wrc == 0) free(d);
+    if (__atomic_sub_fetch(&d->wrc, 1, __ATOMIC_SEQ_CST) == 0) free(d);
 }
 
 /* ── Enumeration → `list` (sic.md §"Iterators", `.keys`/`.values`) ────────────
@@ -261,7 +264,7 @@ __attribute__((weak)) __sic_dict *__sic_dict_clone(__sic_dict *d, const struct _
     __sic_dict *r = (__sic_dict *)malloc(sizeof(__sic_dict));
     *r = *d;
     r->rc = 1;
-    r->wrc = 0;
+    r->wrc = 1;
     r->index = (int *)malloc(sizeof(int) * d->cap);
     memcpy(r->index, d->index, sizeof(int) * d->cap);
     r->ents = (__sic_dent *)malloc(sizeof(__sic_dent) * d->ecap);

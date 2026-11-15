@@ -21,7 +21,7 @@ __attribute__((weak)) void __sic_tuple_release(void *data) {
     if (!data) return;
     unsigned long *p = (unsigned long *)data;
     unsigned long *rc = p - 1;                 /* rc at data - 1 word */
-    if (--(*rc) != 0) return;
+    if (__atomic_sub_fetch(rc, 1, __ATOMIC_SEQ_CST) != 0) return;
     void (*dtor)(void *) = *(void (**)(void *))(p - 3);  /* __dtor at data - 3 words */
     if (dtor) dtor(data);
     free((void *)(p - 4));                      /* block base = data - 4 words */
@@ -34,7 +34,7 @@ __attribute__((weak)) void __sic_tuple_release(void *data) {
 __attribute__((weak)) void __sic_str_rc_release(unsigned long *rc) {
     if ((unsigned long)rc <= 1) return;
     const unsigned long flag = 1UL << (sizeof(unsigned long) * 8 - 1);
-    unsigned long n = --(*rc);
+    unsigned long n = __atomic_sub_fetch(rc, 1, __ATOMIC_SEQ_CST);
     if ((n & ~flag) != 0) return;
     if (n & flag) ((void (*)(void *))rc[1])((void *)rc);
     else free((void *)rc);
@@ -105,7 +105,7 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
     l->cap = 8;
     l->len = 0;
     l->rc = 1;
-    l->wrc = 0;
+    l->wrc = 1;   /* the strong owners' one weak reference */
     l->retired = 0;
     l->retired_owned = 0;
     l->nretired = 0;
@@ -117,7 +117,7 @@ __attribute__((weak)) __sic_list *__sic_list_new(void) {
 
 /* Share the handle: another owner (a binding, a return, a closure capture). */
 __attribute__((weak)) void __sic_list_retain(__sic_list *l) {
-    if (l) l->rc++;
+    if (l) __atomic_fetch_add(&l->rc, 1, __ATOMIC_SEQ_CST);
 }
 
 /* sic weak references (sic.md §"Weak"): a weak ref does not keep the list alive.
@@ -125,13 +125,16 @@ __attribute__((weak)) void __sic_list_retain(__sic_list *l) {
    with a fresh STRONG reference if it is still live, else NULL — so a weak ref
    detects a freed container and breaks reference cycles. */
 __attribute__((weak)) void __sic_list_weak_retain(__sic_list *l) {
-    if (l) l->wrc++;
+    if (l) __atomic_fetch_add(&l->wrc, 1, __ATOMIC_SEQ_CST);
 }
 __attribute__((weak)) void __sic_list_weak_release(__sic_list *l) {
-    if (l && --l->wrc == 0 && l->rc == 0) free(l);   /* contents already freed at rc==0 */
+    if (l && __atomic_sub_fetch(&l->wrc, 1, __ATOMIC_SEQ_CST) == 0) free(l);   /* contents already freed at rc==0 */
 }
 __attribute__((weak)) __sic_list *__sic_list_upgrade(__sic_list *l) {
-    if (l && l->rc > 0) { l->rc++; return l; }
+    if (!l) return 0;
+    unsigned long n = __atomic_load_n(&l->rc, __ATOMIC_SEQ_CST);
+    while (n > 0)   /* only while some strong owner keeps it */
+        if (__atomic_compare_exchange_n(&l->rc, &n, n + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return l;
     return 0;
 }
 
@@ -194,7 +197,7 @@ __attribute__((weak)) __sic_list *__sic_list_keys(__sic_list *l) {
    The handle struct itself is kept while weak references remain (so they can see
    it is dead), and freed by the last weak release. */
 __attribute__((weak)) void __sic_list_free(__sic_list *l) {
-    if (!l || l->rc == 0 || --l->rc != 0) return;
+    if (!l || __atomic_load_n(&l->rc, __ATOMIC_SEQ_CST) == 0 || __atomic_sub_fetch(&l->rc, 1, __ATOMIC_SEQ_CST) != 0) return;
     for (unsigned long i = 0; i < l->len; i++)
         __sic_box_free(l->vslot[i], l->vowned[i]);
     for (unsigned long i = 0; i < l->nretired; i++)
@@ -206,7 +209,7 @@ __attribute__((weak)) void __sic_list_free(__sic_list *l) {
     free(l->vslot);
     free(l->vowned);
     l->vty = 0; l->vslot = 0; l->vowned = 0; l->len = 0; l->cap = 0;
-    if (l->wrc == 0) free(l);
+    if (__atomic_sub_fetch(&l->wrc, 1, __ATOMIC_SEQ_CST) == 0) free(l);
 }
 
 /* ── `clone()` (sic.md §"Copying: clone") ──────────────────────────────────────

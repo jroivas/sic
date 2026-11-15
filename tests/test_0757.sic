@@ -1,0 +1,42 @@
+// A `string`, `list` and `dict` shared between threads: each copy retains and
+// each scope exit releases, eight threads at once. The counts were plain
+// `++`/`--` (only struct, closure and `new` counts were atomic), so updates
+// were lost: freed early or never. Returns 42.
+#include <pthread.h>
+#include <malloc.h>
+
+string g;
+list<int> gl;
+dict<string, int> gd;
+
+void *churn(void *arg) {
+    for (int i = 0; i < 200000; i++) {
+        string s = g;
+        list<int> l = gl;
+        dict<string, int> d = gd;
+        if (s.length != 11 || l.length != 3 || d.length != 1) return (void *)1;
+    }
+    return NULL;
+}
+
+int run() {
+    pthread_t th[8];
+    for (int i = 0; i < 8; i++) pthread_create(&th[i], NULL, churn, NULL);
+    int bad = 0;
+    for (int i = 0; i < 8; i++) {
+        void *r;
+        pthread_join(th[i], &r);
+        if (r != NULL) bad++;
+    }
+    return bad;
+}
+
+int main() {
+    string a = "shared ";
+    g = a + "text";                 // a heap string, counted
+    gl.add(1); gl.add(2); gl.add(3);
+    gd["k"] = 7;
+    if (run() != 0) return 1;
+    if (g != "shared text" || gl[2] != 3 || gd["k"] != 7) return 2;
+    return 42;
+}
