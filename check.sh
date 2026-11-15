@@ -128,10 +128,23 @@ ELAPSED=$(( $(date +%s) - START ))
 # Compare against the previous run's total (last record) before appending, so a
 # creeping build/compile-time regression is visible run over run.
 PREV=""
+PREV_LINE=""
 if [ -f "$TIMES_FILE" ]; then
     # Only runs over the same back ends compare.
-    PREV="$(grep -F " backends=$BUILD_BACKENDS " "$TIMES_FILE" | grep -oE 'total=[0-9]+' | tail -1 | cut -d= -f2)"
+    PREV_LINE="$(grep -F " backends=$BUILD_BACKENDS " "$TIMES_FILE" | tail -1)"
+    PREV="$(printf '%s' "$PREV_LINE" | grep -oE 'total=[0-9]+' | cut -d= -f2)"
 fi
+# The steps that took clearly longer than in that run (20% and 5 s): a total
+# says something is slower, these say what.
+SLOW=""
+for kv in $RECORD; do
+    key="${kv%%=*}"; now="${kv#*=}"
+    was="$(printf '%s' "$PREV_LINE" | grep -oE "(^| )${key}=[0-9]+" | cut -d= -f2)"
+    [ -n "$was" ] || continue
+    if [ $((now - was)) -ge 5 ] && [ $((now * 100)) -ge $((was * 120)) ]; then
+        SLOW="$SLOW ${key}:${was}s->${now}s"
+    fi
+done
 
 TSTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -150,9 +163,17 @@ if [ -n "$PREV" ]; then
     if [ "$PCT" -ge 20 ]; then
         echo "   ⚠️  possible compile-time regression (>=20% slower than last run)"
     fi
+    for s in $SLOW; do
+        echo "   slower step: ${s%%:*}  ${s#*:}"
+    done
 else
     echo "   (first recorded run — baseline saved to .check_times.log)"
 fi
 echo "   timings appended to $TIMES_FILE"
+if [ -n "$SLOW" ]; then
+    # Kept, so what a slow step waited on can be looked at.
+    echo "   step logs kept in $LOGDIR"
+else
+    rm -rf "$LOGDIR"
+fi
 echo "================================================================"
-rm -rf "$LOGDIR"
