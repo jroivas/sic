@@ -221,7 +221,9 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         for (i, (p, _)) in outputs.iter().enumerate() {
             let v = if outputs.len() == 1 { r } else { self.b().build_extract_value(r.into_struct_value(), i as u32, "")? };
             let at = self.ptr_of(p)?;
-            self.b().build_store(at, v)?;
+            // Of the slot's alignment, not the vector's (a 256-bit output in a
+            // 16-aligned slot: `vmovdqa` faulted).
+            self.store(at, v)?;
         }
         Ok(())
     }

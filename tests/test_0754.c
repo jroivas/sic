@@ -2,8 +2,9 @@
  * SSE_REASSOC_BARRIER in util/bufferiszero.c. With LLVM sic passed a vector's
  * value where its address was expected ("cannot convert <2 x i64> to ptr"),
  * ignored __attribute__((target("avx2"))), and gave a 256-bit operand a byte
- * array type ("couldn't allocate output register for constraint 'x'").
- * Returns 42. */
+ * array type ("couldn't allocate output register for constraint 'x'"); its
+ * output was then stored with the vector's 32-byte alignment into a 16-aligned
+ * slot (vmovdqa faulted when the stack happened to sit so). Returns 42. */
 typedef long long v2 __attribute__((vector_size(16)));
 typedef long long v4 __attribute__((vector_size(32)));
 
@@ -29,6 +30,14 @@ __attribute__((noinline, target("avx2"))) static int zero_avx2(const v4 *p, int 
     return v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0;
 }
 
+/* zero_avx2 called with the stack 16 bytes apart: one of the two is not
+ * 32-byte aligned. */
+__attribute__((noinline)) static int shifted(int k, const v4 *p) {
+    volatile char *pad = __builtin_alloca(16 * k + 1);
+    pad[0] = 0;
+    return zero_avx2(p, 8) + pad[0];
+}
+
 int main(void) {
     v2 b2[8] = { 0 };
     if (!zero_sse2(b2, 8)) return 1;
@@ -36,9 +45,9 @@ int main(void) {
     if (zero_sse2(b2, 8)) return 2;
     if (__builtin_cpu_supports("avx2")) {
         v4 b4[8] = { 0 };
-        if (!zero_avx2(b4, 8)) return 3;
+        if (!shifted(0, b4) || !shifted(1, b4)) return 3;
         b4[6][3] = 1;
-        if (zero_avx2(b4, 8)) return 4;
+        if (shifted(0, b4) || shifted(1, b4)) return 4;
     }
     return 42;
 }
