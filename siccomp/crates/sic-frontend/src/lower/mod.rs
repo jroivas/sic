@@ -1,4 +1,5 @@
 pub(crate) mod types;
+pub(crate) mod ckind;
 mod expr;
 pub(crate) use expr::builtin_extra_names;
 mod func;
@@ -517,6 +518,10 @@ impl Lowerer {
         // Before any pass declares globals: a global register variable is none.
         self.reg_vars.extend(tu.reg_vars.iter().cloned());
         types::clear_typedefs();
+        ckind::clear();
+        for d in &tu.decls {
+            if let Decl::Func { name, ret_ty, .. } = d { ckind::note_function(name, &ret_ty.ty); }
+        }
         types::clear_global_vars();
         let dbg = std::env::var("SIC_TIMING").is_ok();
         let t0 = std::time::Instant::now();
@@ -963,6 +968,7 @@ impl Lowerer {
                         if let Type::Struct(StructType { name: Some(target), .. }) | Type::Union(sic_ir::UnionType { pack_limit: None, name: Some(target), .. }) = &ir_ty {
                             if target != name { self.typedef_aliases.push((name.clone(), target.clone())); }
                         }
+                        ckind::note_typedef(name, &ty.ty);
                         self.register_type_name(name.clone(), ir_ty);
                     }
                 }
@@ -2602,6 +2608,7 @@ impl Lowerer {
                             AstType::Enum(e) => { self.register_enum(e)?; }
                             _ => {}
                         }
+                        ckind::note_typedef(name, &ty.ty);
                         self.register_type_name(name.clone(), ir_ty);
                     }
                 }
@@ -3360,6 +3367,7 @@ impl Lowerer {
                             AstType::Enum(e) => { self.register_enum(e)?; }
                             _ => {}
                         }
+                        ckind::note_typedef(name, &ty.ty);
                         self.register_type_name(name.clone(), ir_ty);
                     }
                 }
@@ -4825,13 +4833,23 @@ impl Lowerer {
             Some(t) => t,
             None => decay(self.const_expr_type(controlling)?),
         };
+        // `long` and `long long` (one IR type): a literal's, a cast's or a
+        // global's declared kind tells them apart.
+        let ctrl_kind = match &controlling.kind {
+            ExprKind::IntLit(_, false) | ExprKind::UIntLit(_, false) => Some((0, ckind::IntKind::Int)),
+            ExprKind::Cast { ty, .. } => ckind::ast_kind(&ty.ty),
+            ExprKind::Ident(n) => self.global_qtypes.get(n).and_then(|qt| ckind::ast_kind(&qt.ty)),
+            _ => None,
+        };
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {
                 None => default_idx = Some(i),
                 Some(qt) => {
                     if let Ok(at) = lower_type(qt, &self.struct_types, self.ptr_size) {
-                        if types::type_matches_generic(&decay(at), &ctrl) {
+                        if types::type_matches_generic(&decay(at), &ctrl)
+                            && !ckind::differ(ctrl_kind, ckind::ast_kind(&qt.ty))
+                        {
                             return Some(i);
                         }
                     }

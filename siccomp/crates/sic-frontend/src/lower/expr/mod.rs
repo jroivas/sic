@@ -1332,13 +1332,7 @@ impl<'m> FuncCtx<'m> {
                 if self.eval_choose_cond(cond) != 0 { self.lower_expr(then) }
                 else { self.lower_expr(else_) }
             }
-            ExprKind::TypesCompatible(t1, t2) => {
-                let compat = match (self.lower_type(t1), self.lower_type(t2)) {
-                    (Ok(a), Ok(b)) => self.types_equal(&a, &b),
-                    _ => false,
-                };
-                Ok(Constant::int(if compat { 1 } else { 0 }))
-            }
+            ExprKind::TypesCompatible(t1, t2) => Ok(Constant::int(if self.types_compatible(t1, t2) { 1 } else { 0 })),
 
             ExprKind::AlignofType(ty) => {
                 if let crate::ast::AstType::Typeof(e) = &ty.ty {
@@ -5618,13 +5612,7 @@ impl<'m> FuncCtx<'m> {
                 let sz = sized(&t)?;
                 return lit(if matches!(e.kind, SizeofType(_)) { sz } else { t.align_of(ps) });
             }
-            TypesCompatible(t1, t2) => {
-                let compat = match (self.lower_type(t1), self.lower_type(t2)) {
-                    (Ok(a), Ok(b)) => self.types_equal(&a, &b),
-                    _ => false,
-                };
-                return lit(compat as u64);
-            }
+            TypesCompatible(t1, t2) => return lit(self.types_compatible(t1, t2) as u64),
             BinOp { op, lhs, rhs } => BinOp {
                 op: op.clone(), lhs: Box::new(self.subst_scoped_consts(lhs)?), rhs: Box::new(self.subst_scoped_consts(rhs)?),
             },
@@ -7738,12 +7726,7 @@ impl<'m> FuncCtx<'m> {
     /// glib/QEMU macros build them from. Unknown → 0 (pick the else branch).
     fn eval_choose_cond(&self, e: &Expr) -> i64 {
         match &e.kind {
-            ExprKind::TypesCompatible(t1, t2) => {
-                match (self.lower_type(t1), self.lower_type(t2)) {
-                    (Ok(a), Ok(b)) => if self.types_equal(&a, &b) { 1 } else { 0 },
-                    _ => 0,
-                }
-            }
+            ExprKind::TypesCompatible(t1, t2) => self.types_compatible(t1, t2) as i64,
             ExprKind::ChooseExpr { cond, then, else_ } => {
                 if self.eval_choose_cond(cond) != 0 { self.eval_choose_cond(then) }
                 else { self.eval_choose_cond(else_) }

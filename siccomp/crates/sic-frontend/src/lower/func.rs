@@ -3631,6 +3631,7 @@ impl<'m> FuncCtx<'m> {
                     // QEMU's loongarch DO_VMUH multiplied in 32 bits).
                     if let Ok(ir_ty) = self.lower_type(ty) {
                         super::types::note_typedef(name, &ir_ty);
+                        super::ckind::note_typedef(name, &ty.ty);
                         if let Some(old) = self.lowerer.struct_types.insert(name.clone(), ir_ty) {
                             self.typedef_shadows.push((self.scope_ids.len(), name.clone(), old));
                         }

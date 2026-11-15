@@ -91,6 +91,4 @@ gcc on `PATH`, as before.
 - The system C driver links (`cc -m32`), so 32-bit libraries must be installed
   (`gcc-multilib`).
 
-Not there yet: `_Generic` and `__builtin_types_compatible_p` cannot tell `int` from
-`long` (both are the same 32-bit type in sic's IR, as `long` and `long long` are on
-x86-64), and the SIC language's `std` is not built for i386.
+Not there yet: the SIC language's `std` is not built for i386.

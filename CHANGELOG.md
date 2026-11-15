@@ -74,7 +74,10 @@
   - `\u` and `\U` escapes name a character: UTF-8 in a narrow literal, a
     surrogate pair in `u""` (they were read as the letter);
   - `u'x'` is a `char16_t`, `U'x'` a `char32_t` and `L'x'` a `wchar_t` (they
-    were all `int`).
+    were all `int`);
+  - `_Generic` and `__builtin_types_compatible_p` tell `long` from `long long`
+    (and `int` from `long` on i386), pointers to them too: they were one
+    type, and `long long` took the `long` association.
 - `-fshort-wchar` (Linux): `wchar_t` and `L""` are 16-bit `unsigned short`,
   with GCC's macros. A wide literal initializing an array of narrower
   units no longer writes past it: Linux's EFI code overwrote its saved
@@ -115,8 +118,9 @@
 - `-g`: lines of the main source file only, without columns; no global variables;
   Cranelift's has no variables. The Cranelift back end ignores Linux's mitigation
   options (it warns).
-- `_Generic` and `__builtin_types_compatible_p` cannot tell `int` from `long` on i386
-  (nor `long` from `long long` on x86-64).
+- `_Generic` cannot tell a `long` literal (`1L`) from a `long long` one (`1LL`):
+  for such an operand the first of the two matches. Variables, members,
+  casts, typedefs and function results are told apart.
 - `long double`, `_Complex long double` included, is computed in double precision;
   complex values cannot be passed through `...`.
 - `-m16` and `-mx32` are handed to clang or gcc.

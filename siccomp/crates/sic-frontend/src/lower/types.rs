@@ -1414,7 +1414,14 @@ fn eval_const_size_typed(
                 AstType::Typeof(x) => const_operand_type(x, named, ptr_size, enum_consts),
                 other => lower_ast_type(other, named, ptr_size).ok(),
             };
-            Some(ConstInt::new((ty_of(a)? == ty_of(b)?) as i64, 32, true))
+            // `long` and `long long` are one IR type, not one C type.
+            let kind = |qt: &crate::ast::QualType| match &qt.ty {
+                AstType::Typeof(_) => None,
+                other => super::ckind::ast_kind(other),
+            };
+            let (ta, tb) = (ty_of(a)?, ty_of(b)?);
+            let same = ta == tb && !super::ckind::differ(kind(a), kind(b));
+            Some(ConstInt::new(same as i64, 32, true))
         }
         ExprKind::OffsetOf { ty, designators } => {
             let mut cur = lower_ast_type(&ty.ty, named, ptr_size).ok()?;

@@ -1,6 +1,7 @@
 use crate::ast::{Expr, ExprKind, UnOpKind};
 use crate::{Result, CompileError};
 use super::super::func::{FuncCtx, LookupResult};
+use super::super::ckind::{self, IntKind, Kind};
 #[allow(unused_imports)]
 use super::*;
 
@@ -657,6 +658,66 @@ impl<'m> FuncCtx<'m> {
     /// falling back to the `default` association. Matching is done on the IR
     /// `Type`, which is qualifier-insensitive — adequate because only the
     /// selected branch is ever lowered.
+    /// The C integer kind of a written type (`typeof(e)`: of `e`), where the IR
+    /// type does not tell it (see `ckind`).
+    pub(crate) fn qt_int_kind(&self, qt: &crate::ast::QualType) -> Option<Kind> {
+        match &qt.ty {
+            crate::ast::AstType::Typeof(e) => self.expr_int_kind(e),
+            t => ckind::ast_kind(t),
+        }
+    }
+
+    /// The C integer kind of an expression's value: what its declaration, cast,
+    /// literal or function says, and C's conversions for arithmetic.
+    pub(crate) fn expr_int_kind(&self, e: &Expr) -> Option<Kind> {
+        use crate::ast::BinOpKind as B;
+        const INT: Kind = (0, IntKind::Int);
+        // The usual arithmetic conversions: the higher rank, which is
+        // `long long` even when the other operand's is not known. Pointer
+        // arithmetic keeps the pointer's; a pointer difference is a `long`.
+        let arith = |a: Option<Kind>, b: Option<Kind>, sub: bool| match (a, b) {
+            (Some((da, _)), Some((db, _))) if da > 0 && db > 0 && sub => Some((0, IntKind::Long)),
+            (Some(p @ (d, _)), _) | (_, Some(p @ (d, _))) if d > 0 => Some(p),
+            (Some(x), Some(y)) => Some(x.max(y).max(INT)),
+            (Some(k @ (0, IntKind::LongLong)), None) | (None, Some(k @ (0, IntKind::LongLong))) => Some(k),
+            _ => None,
+        };
+        match &e.kind {
+            // A 64-bit literal is `long` or `long long` (`L`, `LL`): not kept.
+            ExprKind::IntLit(_, wide) | ExprKind::UIntLit(_, wide) => if *wide { None } else { Some(INT) },
+            ExprKind::CharLit(_) => Some(INT),
+            ExprKind::SizeofExpr(_) | ExprKind::SizeofType(_) | ExprKind::AlignofExpr(_) | ExprKind::AlignofType(_) => Some((0, IntKind::Long)),
+            ExprKind::Cast { ty, .. } => self.qt_int_kind(ty),
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Ident(n) => ckind::function_kind(n),
+                _ => None,
+            },
+            ExprKind::BinOp { op, lhs, rhs } => match op {
+                B::Lt | B::Gt | B::Le | B::Ge | B::Eq | B::Ne | B::LogAnd | B::LogOr => Some(INT),
+                // The promoted left operand's.
+                B::Shl | B::Shr | B::RotL | B::RotR => self.expr_int_kind(lhs).map(|k| k.max(INT)),
+                _ => arith(self.expr_int_kind(lhs), self.expr_int_kind(rhs), *op == B::Sub),
+            },
+            ExprKind::Unary { op: UnOpKind::Neg | UnOpKind::BitNot, expr } =>
+                self.expr_int_kind(expr).map(|k| k.max(INT)),
+            ExprKind::Unary { op: UnOpKind::Not, .. } => Some(INT),
+            ExprKind::Unary { op: UnOpKind::Addr, expr } => self.expr_int_kind(expr).map(|(d, k)| (d + 1, k)),
+            ExprKind::Ternary { then, else_, .. } => arith(self.expr_int_kind(then), self.expr_int_kind(else_), false),
+            ExprKind::Comma(_, rhs) => self.expr_int_kind(rhs),
+            ExprKind::Assign { lhs, .. } => self.expr_int_kind(lhs),
+            _ => self.access_qt(e).and_then(|qt| self.qt_int_kind(&qt)),
+        }
+    }
+
+    /// `__builtin_types_compatible_p(t1, t2)`: one type, `long` and `long long`
+    /// told apart where the IR has one type for both.
+    pub(crate) fn types_compatible(&self, t1: &crate::ast::QualType, t2: &crate::ast::QualType) -> bool {
+        match (self.lower_type(t1), self.lower_type(t2)) {
+            (Ok(a), Ok(b)) => self.types_equal(&a, &b) && !ckind::differ(self.qt_int_kind(t1), self.qt_int_kind(t2)),
+            _ => false,
+        }
+    }
+
     pub(crate) fn select_generic(&self, controlling: &Expr, assocs: &[(Option<crate::ast::QualType>, Box<Expr>)]) -> Result<usize> {
         fn decay(t: Type) -> Type {
             match t {
@@ -679,12 +740,15 @@ impl<'m> FuncCtx<'m> {
             .and_then(|qt| self.typeof_operand_qt(&qt))
             .as_ref()
             .and_then(super::super::pointee_quals);
+        let ctrl_kind = self.expr_int_kind(controlling);
         let mut default_idx = None;
         for (i, (aty, _)) in assocs.iter().enumerate() {
             match aty {
                 None => default_idx = Some(i),
                 Some(qt) => {
-                    if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty) {
+                    if generic_type_eq(&decay(self.lower_type(qt)?), &ctrl_ty)
+                        && !ckind::differ(ctrl_kind, self.qt_int_kind(qt))
+                    {
                         let aq = match &qt.ty {
                             crate::ast::AstType::Typeof(_) => self.typeof_operand_qt(qt)
                                 .as_ref()
