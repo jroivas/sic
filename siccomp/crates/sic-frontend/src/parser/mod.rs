@@ -98,6 +98,9 @@ pub struct Parser {
     no_stack_protector: Vec<String>,
     pending_patchable: Option<(u32, u32)>,
     patchable_entry: Vec<(String, u32, u32)>,
+    /// `__attribute__((target("avx2,popcnt")))`: GCC's option string.
+    pending_target: Option<String>,
+    fn_targets: Vec<(String, String)>,
     pending_noreturn: bool,
     noreturn: Vec<String>,
     /// The functions so declared.
@@ -221,7 +224,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_noreturn: false, noreturn: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_target: None, fn_targets: Vec::new(), pending_noreturn: false, noreturn: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -385,6 +388,7 @@ impl Parser {
             used_fns: std::mem::take(&mut self.used_fns), fn_sections: std::mem::take(&mut self.fn_sections),
             no_stack_protector: std::mem::take(&mut self.no_stack_protector),
             patchable_entry: std::mem::take(&mut self.patchable_entry),
+            fn_targets: std::mem::take(&mut self.fn_targets),
             noreturn: std::mem::take(&mut self.noreturn),
             reg_vars: std::mem::take(&mut self.reg_vars) })
     }
@@ -397,6 +401,7 @@ impl Parser {
         self.pending_cc = None;
         self.pending_no_ssp = false;
         self.pending_patchable = None;
+        self.pending_target = None;
         self.pending_noreturn = false;
         self.pending_used = false;
         self.pending_section = None;
@@ -688,6 +693,7 @@ impl Parser {
             if let Some(sec) = self.pending_section.take() { self.fn_sections.push((name.clone(), sec)); }
             if std::mem::take(&mut self.pending_no_ssp) { self.no_stack_protector.push(name.clone()); }
             if let Some((n, m)) = self.pending_patchable.take() { self.patchable_entry.push((name.clone(), n, m)); }
+            if let Some(t) = self.pending_target.take() { self.fn_targets.push((name.clone(), t)); }
             if std::mem::take(&mut self.pending_noreturn) && !self.noreturn.contains(&name) { self.noreturn.push(name.clone()); }
             if let Some((what, at)) = self.pending_cc.take() {
                 if !self.at(TokenKind::Semi) && !self.at(TokenKind::Comma) && !self.at(TokenKind::Eof) {
@@ -4452,6 +4458,16 @@ impl Parser {
                             let m = if self.tokens.get(i + 3).map(|t| t.kind) == Some(TokenKind::Comma) { num(i + 4).unwrap_or(0) } else { 0 };
                             self.pending_patchable = Some((n, m));
                         }
+                    } else if name == "target" || name == "__target__" {
+                        // `("avx2")`, `("avx2,bmi2")` or `("avx2", "bmi2")`.
+                        let mut parts = Vec::new();
+                        let mut k = i + 2;
+                        while let Some(t) = self.tokens.get(k).filter(|t| t.kind == TokenKind::StringLit) {
+                            parts.push(t.text.clone());
+                            k += 1;
+                            if self.tokens.get(k).map(|t| t.kind) == Some(TokenKind::Comma) { k += 1; }
+                        }
+                        if !parts.is_empty() { self.pending_target = Some(parts.join(",")); }
                     } else if name == "constructor" || name == "__constructor__" {
                         // Optional priority: `constructor(101)`. Default 65535
                         // (GCC's default, run after all prioritized constructors).

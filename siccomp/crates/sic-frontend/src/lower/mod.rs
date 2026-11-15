@@ -700,6 +700,10 @@ impl Lowerer {
         for name in &tu.no_stack_protector {
             if !self.module.no_stack_protector.contains(name) { self.module.no_stack_protector.push(name.clone()); }
         }
+        for t in &tu.fn_targets {
+            self.module.fn_targets.retain(|q| q.0 != t.0);
+            self.module.fn_targets.push(t.clone());
+        }
         for p in &tu.patchable_entry {
             self.module.patchable_entry.retain(|q| q.0 != p.0);
             self.module.patchable_entry.push(p.clone());

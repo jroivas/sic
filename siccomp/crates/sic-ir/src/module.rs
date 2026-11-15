@@ -224,6 +224,9 @@ pub struct Module {
     /// Per-function patchable entry padding: (function, N bytes, M of them before
     /// the entry), over `-fpatchable-function-entry=`.
     pub patchable_entry: Vec<(String, u32, u32)>,
+    /// `__attribute__((target("…")))` per function: GCC's option string
+    /// (`avx2,no-sse4.1,arch=haswell`).
+    pub fn_targets: Vec<(String, String)>,
     /// Internal functions to emit even when nothing calls them (`used`).
     pub used_functions: Vec<String>,
     /// sic module enum export (sic.md §"Namespace"): public payload-less enums this
@@ -287,6 +290,7 @@ impl Module {
             debug_types: Vec::new(),
             noreturn: Vec::new(),
             patchable_entry: Vec::new(),
+            fn_targets: Vec::new(),
             used_functions: Vec::new(),
             sic_enum_exports: Vec::new(),
             sic_tagenum_exports: Vec::new(),

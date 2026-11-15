@@ -75,6 +75,21 @@ fn target_features(opts: &BackendOptions) -> String {
     f.join(",")
 }
 
+/// GCC's `target("…")` string as LLVM's: `arch=` is the CPU, `no-x` is `-x`,
+/// any other item `+x` (the names are the same); `tune=` and `fpmath=` do
+/// not change the code that may run.
+fn gcc_target(t: &str) -> (Option<String>, String) {
+    let mut cpu = None;
+    let mut f = Vec::new();
+    for item in t.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(a) = item.strip_prefix("arch=") { cpu = Some(a.to_string()); }
+        else if item.starts_with("tune=") || item.starts_with("fpmath=") || item == "default" {}
+        else if let Some(n) = item.strip_prefix("no-") { f.push(format!("-{}", n)); }
+        else { f.push(format!("+{}", item)); }
+    }
+    (cpu, f.join(","))
+}
+
 /// The module-wide part of the mitigations, as LLVM's module flags (clang's).
 fn mitigation_flags(cx: &Cx<'_, '_>) {
     use inkwell::module::FlagBehavior;
@@ -239,6 +254,14 @@ fn declare_functions<'ctx>(cx: &mut Cx<'ctx, '_>, asm: &mut String) -> R<()> {
             if prefix > 0 { attr(cx.ctx.create_string_attribute("patchable-function-prefix", &prefix.to_string())); }
         }
         if let Some(z) = &m.zero_call_used_regs { attr(cx.ctx.create_string_attribute("zero-call-used-regs", z)); }
+        // `target("avx2")`: this function's own features over the module's, as
+        // clang gives them (an AVX2 function's "+x" operand is a ymm register).
+        if let Some((_, t)) = ir.fn_targets.iter().find(|(n, _)| *n == f.name) {
+            let (cpu, extra) = gcc_target(t);
+            let features: Vec<String> = [target_features(cx.opts), extra].into_iter().filter(|s| !s.is_empty()).collect();
+            attr(cx.ctx.create_string_attribute("target-features", &features.join(",")));
+            if let Some(cpu) = cpu { attr(cx.ctx.create_string_attribute("target-cpu", &cpu)); }
+        }
         match ir.fn_sections.iter().find(|(n, _)| *n == f.name) {
             Some((_, sec)) => lf.as_global_value().set_section(Some(sec)),
             None if cx.opts.function_sections => lf.as_global_value().set_section(Some(&format!(".text.{}", f.name))),

@@ -153,11 +153,35 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         }
     }
 
+    /// The type of an asm register operand of `ty`: its memory type, but a
+    /// 256- or 512-bit `vector_size` value is a vector, for a ymm/zmm register
+    /// (sic keeps those as bytes elsewhere, and bytes fit no register).
+    fn asm_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
+        let ctx = self.cx.ctx;
+        if let Type::Array { elem, len } = ty {
+            let bits = elem.size_of(self.cx.opts.ptr_size) * 8 * *len as u64;
+            if bits == 256 || bits == 512 {
+                let lanes = *len as u32;
+                let v: Option<BasicTypeEnum> = match &**elem {
+                    Type::Float32 => Some(ctx.f32_type().vec_type(lanes).into()),
+                    Type::Float64 => Some(ctx.f64_type().vec_type(lanes).into()),
+                    Type::Int { bits: 8, .. } => Some(ctx.i8_type().vec_type(lanes).into()),
+                    Type::Int { bits: 16, .. } => Some(ctx.i16_type().vec_type(lanes).into()),
+                    Type::Int { bits: 32, .. } => Some(ctx.i32_type().vec_type(lanes).into()),
+                    Type::Int { bits: 64, .. } => Some(ctx.i64_type().vec_type(lanes).into()),
+                    _ => None,
+                };
+                if let Some(v) = v { return v; }
+            }
+        }
+        self.mem_type(ty)
+    }
+
     /// GNU inline assembly as LLVM's: a call of the asm, whose register outputs
     /// (one value, or a struct of them) are stored through `outputs`.
     fn inline_asm(&mut self, template: &str, constraints: &str, outputs: &[(Val, Type)], args: &[sic_ir::AsmArg]) -> R<()> {
         let cx = self.cx;
-        let out_tys: Vec<BasicTypeEnum> = outputs.iter().map(|(_, t)| self.mem_type(t)).collect();
+        let out_tys: Vec<BasicTypeEnum> = outputs.iter().map(|(_, t)| self.asm_type(t)).collect();
         let mut tys: Vec<inkwell::types::BasicMetadataTypeEnum> = Vec::new();
         let mut vals: Vec<BasicMetadataValueEnum> = Vec::new();
         for a in args {
@@ -165,7 +189,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 tys.push(cx.ptr().into());
                 vals.push(self.ptr_of(&a.val)?.into());
             } else {
-                let t = self.mem_type(&a.ty);
+                let t = self.asm_type(&a.ty);
                 let v = if matches!(a.ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {
                     // An aggregate (a vector) is its address in the IR: its value.
                     let p = self.ptr_of(&a.val)?;

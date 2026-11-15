@@ -16,6 +16,10 @@
 - LLVM: `-S` is LLVM's own assembly, inline asm as written (Linux's
   `asm-offsets.h` and `devicetable-offsets.h` come from it).
 - LLVM: `-fno-delete-null-pointer-checks` (Linux) is honoured.
+- LLVM: `__attribute__((target("avx2")))` gives the function its own CPU
+  features (`arch=` its CPU), and sic does not inline it into a caller of
+  another target; a read-write `"+x"` operand on a `vector_size` value, of
+  any width (QEMU's `util/bufferiszero.c`).
 - LLVM: a `static` that only inline asm names is kept, as on Cranelift;
   `-g` no longer panics in a debug build of sic (on a local variable).
 - `-m32`: `.S` files are assembled as i386; `sizeof(long)` and pointer

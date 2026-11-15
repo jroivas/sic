@@ -179,7 +179,13 @@ impl<'m> FuncCtx<'m> {
             let l = self.pinned_constraint(&o.expr).unwrap_or_else(|| legacy(register_letters(&letters), &ty));
             cons.push(format!("={}{}", if early { "&" } else { "" }, l));
             if rw {
-                let cur = self.load_lvalue(&lv)?;
+                // An aggregate (a `vector_size` value in an SSE register, `+x`)
+                // is passed by its address, as `asm_input_value` passes one.
+                let cur = if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {
+                    lv.ptr.clone()
+                } else {
+                    self.load_lvalue(&lv)?
+                };
                 tied.push((i.to_string(), AsmArg { val: cur, ty: ty.clone(), elem: None }));
             }
             outputs.push((lv.ptr, ty));

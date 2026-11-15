@@ -287,6 +287,10 @@ impl Inline {
                         let ci = &info[callee];
                         if !ci.eligible || (capped && !ci.always) { continue; }
                         if cycle[callee] && expanded.contains(&callee) { continue; }
+                        // A `target("avx2")` function is not code for a caller of
+                        // another target (GCC and LLVM do not inline it either).
+                        let target = |f: usize| m.fn_targets.iter().find(|(n, _)| *n == m.functions[f].name).map(|(_, t)| t);
+                        if target(callee).is_some() && target(callee) != target(caller) { continue; }
                         // Threshold 0 (below -O2): only `always_inline` functions.
                         if !(self.aggressive || ci.always || (self.threshold > 0 && ci.size <= self.threshold)) { continue; }
                         // parameter/argument arity must match (variadic excluded).
