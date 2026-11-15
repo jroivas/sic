@@ -103,6 +103,8 @@
 - A second constructor, destructor or same-named method is an error.
 - The last owner of a reference-counted struct clears its whole count
   pointer, not the low 4 bytes of it.
+- A backward `goto` across a move of an object declared before its label
+  runs the cleanups after the label: it skipped one.
 - `string`, `list`, `dict`, `set` and tuple counts are atomic, as struct,
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a

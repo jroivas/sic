@@ -1025,13 +1025,26 @@ impl<'m> FuncCtx<'m> {
     /// Move the managed-struct temporary at `v` into its consumer: drop its
     /// pending destructor. False if `v` is not a pending temporary.
     pub(crate) fn take_struct_temp(&mut self, v: &Val) -> bool {
-        for scope in self.cleanups.iter_mut().rev() {
-            if let Some(i) = scope.iter().position(|c| matches!(c, Cleanup::AttrFn { addr, .. } if addr == v)) {
-                scope.remove(i);
+        for k in (0..self.cleanups.len()).rev() {
+            if let Some(i) = self.cleanups[k].iter().position(|c| matches!(c, Cleanup::AttrFn { addr, .. } if addr == v)) {
+                self.remove_cleanup(k, i);
                 return true;
             }
         }
         false
+    }
+
+    /// Drop cleanup `i` of scope `k` (a move). A label records how many cleanups
+    /// each scope had (`label_scopes`): one past `i` now has one fewer, or a
+    /// backward `goto` to it skipped the cleanup after the moved one.
+    fn remove_cleanup(&mut self, k: usize, i: usize) {
+        self.cleanups[k].remove(i);
+        let id = self.scope_ids[k];
+        for counts in self.label_scopes.values_mut() {
+            for (sid, n) in counts.iter_mut() {
+                if *sid == id && *n > i { *n -= 1; }
+            }
+        }
     }
 
     /// The libc function `name`, declared with this signature if it is not yet.
@@ -1313,10 +1326,10 @@ impl<'m> FuncCtx<'m> {
     fn take_scope_dtor(&mut self, name: &str) -> bool {
         let Some((Type::Struct(st), vid)) = self.locals.last().and_then(|sc| sc.get(name)).cloned() else { return false };
         let Some(dtor) = st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned() else { return false };
-        let Some(scope) = self.cleanups.last_mut() else { return false };
+        let Some(k) = self.cleanups.len().checked_sub(1) else { return false };
         let addr = Val::Local(vid);
-        match scope.iter().position(|c| matches!(c, Cleanup::AttrFn { addr: a, fn_name } if *a == addr && *fn_name == dtor)) {
-            Some(i) => { scope.remove(i); true }
+        match self.cleanups[k].iter().position(|c| matches!(c, Cleanup::AttrFn { addr: a, fn_name } if *a == addr && *fn_name == dtor)) {
+            Some(i) => { self.remove_cleanup(k, i); true }
             None => false,
         }
     }

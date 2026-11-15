@@ -1,0 +1,27 @@
+// A label records how many cleanups each scope has, and a backward goto runs
+// those registered after it. A move (`Option::Some(a)`) of an object declared
+// before the label removed a cleanup, and the goto then skipped the one after:
+// `b` was never released. Returns 42.
+int log[32];
+int n = 0;
+struct R { int id; ~R() { log[n++] = id; } };
+
+int main() {
+    int i = 0;
+    {
+        R a; a.id = 1;
+again:
+        R b; b.id = 10 + i;
+        Option<R> o = Option::Some(a);
+        i++;
+        if (i < 3) goto again;
+    }
+    // Each `b` once, in order; `a`'s repeated move is not what this pins.
+    int seen = 0;
+    for (int k = 0; k < n; k++) {
+        if (log[k] == 1) continue;
+        if (log[k] != 10 + seen) return 10 + k;
+        seen++;
+    }
+    return seen == 3 ? 42 : 20 + seen;
+}
