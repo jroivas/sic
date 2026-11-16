@@ -1,7 +1,8 @@
 // A `string`, `list` and `dict` shared between threads: each copy retains and
-// each scope exit releases, eight threads at once. The counts were plain
-// `++`/`--` (only struct, closure and `new` counts were atomic), so updates
-// were lost: freed early or never. Returns 42.
+// each scope exit releases, eight threads at once, and a `stringbuilder` holds
+// the shared string as a piece. The counts were plain `++`/`--` (only struct,
+// closure and `new` counts were atomic), so updates were lost: freed early or
+// never. Returns 42.
 #include <pthread.h>
 #include <malloc.h>
 
@@ -15,6 +16,12 @@ void *churn(void *arg) {
         list<int> l = gl;
         dict<string, int> d = gd;
         if (s.length != 11 || l.length != 3 || d.length != 1) return (void *)1;
+        stringbuilder b;
+        b += g;
+        string one = b.build();          // the shared string itself, one more owner
+        b += g;
+        string two = b.build();
+        if (one.length != 11 || two.length != 22) return (void *)2;
     }
     return NULL;
 }

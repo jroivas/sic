@@ -34,7 +34,7 @@ __attribute__((weak)) void __sic_sb_free(void *block) {
         for (int i = 0; i < b->n; i++) {
             unsigned long *rc = b->p[i].rc;
             if ((unsigned long)rc <= 1) continue;
-            unsigned long c = --(*rc);
+            unsigned long c = __atomic_sub_fetch(rc, 1, __ATOMIC_SEQ_CST);
             if ((c & ~flag) != 0) continue;
             if (c & flag) ((void (*)(void *))rc[1])((void *)rc);
             else free((void *)rc);
@@ -42,7 +42,7 @@ __attribute__((weak)) void __sic_sb_free(void *block) {
         __sic_sb_block *parent = b->parent;
         free(b);
         b = parent;
-        if (b && ((--b->count) & ~flag) != 0) break;
+        if (b && (__atomic_sub_fetch(&b->count, 1, __ATOMIC_SEQ_CST) & ~flag) != 0) break;
     }
 }
 
@@ -52,7 +52,7 @@ __attribute__((weak)) void __sic_sb_append(void *handle, void *piece) {
     __sic_sb_str *s = (__sic_sb_str *)piece;
     if (s->size == 0) return;
     __sic_sb_block *b = (__sic_sb_block *)h->rc;
-    int mine = b && (b->count & ~flag) == 1;
+    int mine = b && (__atomic_load_n(&b->count, __ATOMIC_SEQ_CST) & ~flag) == 1;
     if (mine && b->n > 0) {
         __sic_sb_str *last = &b->p[b->n - 1];
         if (last->rc == s->rc && last->data + last->size == s->data) {
@@ -83,7 +83,7 @@ __attribute__((weak)) void __sic_sb_append(void *handle, void *piece) {
         p.data = (const char *)(copy + 1);
         p.rc = copy;
     } else if ((unsigned long)p.rc > 1) {
-        ++*p.rc;
+        __atomic_fetch_add(p.rc, 1, __ATOMIC_SEQ_CST);   /* the piece may be shared across threads */
     }
     b->p[b->n++] = p;
     b->total += p.size;
@@ -97,7 +97,7 @@ __attribute__((weak)) void __sic_sb_build(void *handle, void *out) {
     /* One owned piece is already the result. */
     if (!b->parent && b->n == 1 && (unsigned long)b->p[0].rc > 1) {
         *r = b->p[0];
-        ++*r->rc;
+        __atomic_fetch_add(r->rc, 1, __ATOMIC_SEQ_CST);
         return;
     }
     unsigned long *block = (unsigned long *)malloc(sizeof(unsigned long) + b->total + 1);
