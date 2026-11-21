@@ -508,8 +508,8 @@ impl<'m> FuncCtx<'m> {
                 // Bare variant constructor `Ok(5)`.
                 if let ExprKind::Ident(name) = &func.kind {
                     if self.is_sic() && !matches!(self.lookup(name), Some(LookupResult::Func(_))) {
-                        if let Some(en) = self.lowerer.variant_enum.get(name) {
-                            if let Some(info) = self.lowerer.enum_defs.get(en) {
+                        if let Some(en) = self.bare_variant_enum(name) {
+                            if let Some(info) = self.lowerer.enum_defs.get(&en) {
                                 return Ok(info.struct_type.clone());
                             }
                         }

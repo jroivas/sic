@@ -1,0 +1,24 @@
+// A bare variant constructor builds the enum the context expects: `Some(x)`
+// for an `Option<string>` built the first Option instance registered with a
+// `Some` (`Option<i64>`), storing the string's descriptor as an integer, and
+// reading it back crashed. Returns 42.
+import std;
+import std::*;
+
+// A heap string (a concatenation), without calling into libstd.
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+string mk(int i) { return "x" + num(i); }
+Option<string> os(int c) { if (c) return Some(mk(c)); return None; }
+
+int main() {
+    int r = 0;
+    Option<string> o = Some(mk(2));
+    if ((o ?: "none") == "x2") r += 1;
+    Option<string> l = Some("lit");
+    if ((l ?: "none") == "lit") r += 1;
+    if ((os(3) ?: "none") == "x3") r += 1;
+    Option<int> i = Some(40);
+    if ((i ?: 0) == 40) r += 1;
+    return r == 4 ? 42 : r;
+}

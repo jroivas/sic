@@ -200,6 +200,21 @@ impl<'m> FuncCtx<'m> {
             sp.file.clone(), sp.line, sp.col))
     }
 
+    /// The enum a bare variant constructor (`Some(x)`) builds: the expected
+    /// type's when it has that variant — `variant_enum` holds the first enum
+    /// registered with it, which for a generic enum is whichever instance came
+    /// first (`Option<i64>`), not the `Option<string>` being initialized.
+    pub(crate) fn bare_variant_enum(&self, name: &str) -> Option<String> {
+        if let Some(Type::Struct(st)) = &self.expected_ty {
+            if let Some(n) = &st.name {
+                if self.lowerer.enum_defs.get(n).is_some_and(|info| info.variant(name).is_some()) {
+                    return Some(n.clone());
+                }
+            }
+        }
+        self.lowerer.variant_enum.get(name).cloned()
+    }
+
     /// True if `t` is the `{tag,union}` struct of the named tagged enum.
     pub(crate) fn is_enum_struct(&self, t: &Type, enum_name: &str) -> bool {
         matches!(t, Type::Struct(st) if st.name.as_deref() == Some(enum_name))

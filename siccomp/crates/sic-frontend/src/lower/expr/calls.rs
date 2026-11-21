@@ -321,7 +321,7 @@ impl<'m> FuncCtx<'m> {
                 && !matches!(self.lookup(name),
                     Some(LookupResult::Func(_)) | Some(LookupResult::Local(..)) | Some(LookupResult::Global(..)))
             {
-                let en = self.lowerer.variant_enum.get(name).cloned().unwrap();
+                let en = self.bare_variant_enum(name).unwrap();
                 return self.construct_enum(&en, name, args, sp);
             }
         }
