@@ -1176,6 +1176,67 @@ else
     bad "art-coroutines" "compile/link failed: $(cat err)"
 fi
 
+# Async functions' tasks and art's coroutines share the program's scheduler:
+# two tasks interleave at `art::yield_now()`, `art::sleep` wakes the shorter
+# sleep first while both sleep at once, and a module's exported async function
+# runs on the consumer's scheduler, dynamically and statically.
+cat > atask.sic <<'EOF'
+import art;
+#include <stdio.h>
+static int seq[16];
+static int si = 0;
+async int w(int id) { for (int i = 0; i < 3; i++) { seq[si++] = id + i; art::yield_now(); } return id; }
+async int nap(int ms, int v) { art::sleep(ms); seq[si++] = v; return v; }
+int main() {
+    Task<int> a = w(10);
+    Task<int> b = w(20);
+    int s = await a + await b;
+    Task<int> slow = nap(40, 1);
+    Task<int> quick = nap(5, 2);
+    s += await slow + await quick;
+    for (int i = 0; i < si; i++) printf("%d ", seq[i]);
+    printf("%d", s);
+    return 0;
+}
+EOF
+if "$SIC" atask.sic -Iarun -Larun -o atask 2>err; then
+    out="$(./atask)"
+    [ "$out" = "10 20 11 21 12 22 2 1 33" ] && ok "art-async-tasks" || bad "art-async-tasks" "order wrong: [$out]"
+else
+    bad "art-async-tasks" "compile/link failed: $(cat err)"
+fi
+mkdir -p amod
+cat > amod/amod.sic <<'EOF'
+module amod;
+import art;
+async string greet(string who, int ms) { art::sleep(ms); return "hi " + who; }
+EOF
+cat > amain.sic <<'EOF'
+import amod;
+#include <stdio.h>
+int main() {
+    Task<string> a = amod::greet("ann", 30);
+    Task<string> b = amod::greet("bob", 5);
+    string x = await a;
+    string y = await b;
+    printf("%s %s", x.ptr, y.ptr);
+    return 0;
+}
+EOF
+if "$SIC" --emit-module amod 2>err; then
+    for link in dynamic static; do
+        flag=""; [ "$link" = static ] && flag="-static"
+        if "$SIC" $flag amain.sic -Iamod -Lamod -o amain 2>err; then
+            out="$(./amain)"
+            [ "$out" = "hi ann hi bob" ] && ok "async-module-$link" || bad "async-module-$link" "got [$out]"
+        else
+            bad "async-module-$link" "compile/link failed: $(cat err)"
+        fi
+    done
+else
+    bad "async-module" "emit-module failed: $(cat err)"
+fi
+
 # ── std::Buffer cross-module ctor/dtor (sic.md §"Memory safety") ─────────────
 # A consumer's `del buf` must run the module's `~Buffer()` (freeing the data
 # block), not just free the handle — the dtor symbol + association cross the

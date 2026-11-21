@@ -1,8 +1,8 @@
-// art — sic's async runtime (sic.md §"Async"). A small cooperative,
-// single-threaded coroutine executor built on `ucontext` stackful coroutines. This
-// is the "as much as possible in a module" implementation: the compiler only emits
-// the `async`/`await`/`Task<T>` surface; the scheduling lives here and can grow
-// (timers, I/O reactor, join/select) without touching the compiler.
+// art — sic's async runtime module (sic.md §"Async"). The scheduler itself is
+// the task runtime sic adds to every program that uses `async`, `await`, `Task`
+// or `import art` (one per thread, each task on a stack of its own); this module
+// is its API, so `art::spawn` coroutines and async functions' tasks share one
+// scheduler.
 //
 // Usage:
 //   import art;
@@ -11,90 +11,42 @@
 //   art::run();          // drive all coroutines to completion
 module art;
 
-#include <ucontext.h>
+// The program's scheduler (its definitions are in the program, not here).
+extern int __sic_task_spawn_fn(void (*fn)(void *), void *arg);
+extern void __sic_task_yield(void);
+extern void __sic_task_sleep_ms(long ms);
+extern void __sic_task_run_all(void);
+extern long __sic_task_pending(void);
 
-extern void *malloc(unsigned long);
-extern void free(void *);
-
-// Fixed-capacity scheduler state (single-threaded, so plain statics are fine).
-#define ART_MAX   256
-#define ART_STACK 65536
-
-static ucontext_t art_main;
-static ucontext_t *art_ctx[ART_MAX];
-static void *art_stack[ART_MAX];
-static void (*art_fn[ART_MAX])(void *);
-static void *art_arg[ART_MAX];
-static int art_alive[ART_MAX];
-static int art_n = 0;
-static int art_cur = -1;
-
-// Each coroutine starts here, runs its function, then marks itself done and
-// switches back to the scheduler (uc_link also points there as a safety net).
-static void art_trampoline(void)
-{
-    int i = art_cur;
-    art_fn[i](art_arg[i]);
-    art_alive[i] = 0;
-    swapcontext(art_ctx[i], &art_main);
-}
-
-// Schedule `fn(arg)` to run as a coroutine. It does not start until `run()`.
+// Schedule `fn(arg)` to run as a coroutine nobody waits for. It starts when the
+// code that made it waits (`run()`, `yield_now()`, `sleep()`, an `await`).
+// 0, or -1 when out of memory.
 int spawn(void (*fn)(void *), void *arg)
 {
-    if (art_n >= ART_MAX) return -1;
-    int i = art_n;
-    art_n = art_n + 1;
-    art_ctx[i] = (ucontext_t *)malloc(sizeof(ucontext_t));
-    art_stack[i] = malloc(ART_STACK);
-    getcontext(art_ctx[i]);
-    art_ctx[i]->uc_stack.ss_sp = art_stack[i];
-    art_ctx[i]->uc_stack.ss_size = ART_STACK;
-    art_ctx[i]->uc_link = &art_main;
-    art_fn[i] = fn;
-    art_arg[i] = arg;
-    art_alive[i] = 1;
-    makecontext(art_ctx[i], art_trampoline, 0);
-    return i;
+    return __sic_task_spawn_fn(fn, arg);
 }
 
-// Yield from the current coroutine back to the scheduler (call only inside a
-// coroutine started by `spawn`).
+// Let the other coroutines run: in a coroutine, until it is resumed; elsewhere,
+// each of them once.
 void yield_now(void)
 {
-    int i = art_cur;
-    if (i < 0) return;
-    swapcontext(art_ctx[i], &art_main);
+    __sic_task_yield();
 }
 
-// Run the scheduler until every spawned coroutine has finished. Round-robin: each
-// pass resumes every still-alive coroutine once.
+// Wait at least `ms` milliseconds while the other coroutines run.
+void sleep(int ms)
+{
+    __sic_task_sleep_ms((long)ms);
+}
+
+// Run until every coroutine has finished (in a coroutine: every other one).
 void run(void)
 {
-    int progress = 1;
-    while (progress) {
-        progress = 0;
-        for (int i = 0; i < art_n; i++) {
-            if (art_alive[i]) {
-                progress = 1;
-                art_cur = i;
-                swapcontext(&art_main, art_ctx[i]);
-            }
-        }
-    }
-    // All done — reclaim stacks/contexts and reset for a fresh run.
-    for (int i = 0; i < art_n; i++) {
-        free(art_stack[i]);
-        free(art_ctx[i]);
-    }
-    art_n = 0;
-    art_cur = -1;
+    __sic_task_run_all();
 }
 
-// The number of coroutines still scheduled (alive) — handy for tests/diagnostics.
+// The number of coroutines of this thread not yet finished.
 int pending(void)
 {
-    int c = 0;
-    for (int i = 0; i < art_n; i++) if (art_alive[i]) c = c + 1;
-    return c;
+    return (int)__sic_task_pending();
 }

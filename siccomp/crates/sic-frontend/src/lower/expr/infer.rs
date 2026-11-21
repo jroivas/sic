@@ -7,9 +7,9 @@ use super::*;
 impl<'m> FuncCtx<'m> {
     /// The result type of a call of the generic function `name` (sic.md
     /// §"Generics"), with the type arguments inferred from `args` or given as
-    /// `explicit`.
+    /// `explicit`; a `Task` of it when the function is async.
     pub(crate) fn generic_call_type(&self, name: &str, args: &[Expr], explicit: Option<&[ast::QualType]>) -> Option<Type> {
-        let Some(ast::Decl::Func { type_params, params, ret_ty, .. }) = self.lowerer.generic_fn_defs.get(name) else { return None };
+        let Some(ast::Decl::Func { type_params, params, ret_ty, is_async, .. }) = self.lowerer.generic_fn_defs.get(name) else { return None };
         let ps = self.ptr_size();
         let mut subst: sic_ir::fast_hash::HashMap<String, Type> = sic_ir::fast_hash::HashMap::default();
         match explicit {
@@ -28,7 +28,7 @@ impl<'m> FuncCtx<'m> {
         let mut named = self.lowerer.struct_types.clone();
         for (p, t) in subst { named.insert(p, t); }
         let r = super::super::types::lower_type(ret_ty, &named, ps).ok()?;
-        Some(r)
+        Some(if *is_async { super::super::types::task_type(&r) } else { r })
     }
 
     /// The type of a C23 `auto` / GNU `__auto_type` variable: its initializer's
@@ -298,6 +298,11 @@ impl<'m> FuncCtx<'m> {
                     Ok(Type::i32())
                 }
             }
+            // `await t`: the task's result type (sic.md §"Async").
+            ExprKind::Await(inner) => {
+                let t = self.infer_expr_type(inner)?;
+                Ok(super::super::types::resolve_aggregate(&super::super::types::task_elem(&t, self.ptr_size()), &self.lowerer.struct_types))
+            }
             // `base?.field` (sic.md §"Match") has the field's type — the zero value
             // on the absent path shares it.
             ExprKind::OptField { base, name } => {
@@ -413,8 +418,8 @@ impl<'m> FuncCtx<'m> {
             }
             ExprKind::Call { func, args } => {
                 // A generic function's call (sic.md §"Generics"): its result type
-                // under the type arguments the call implies (or names). It was
-                // taken for an `int`.
+                // under the type arguments the call implies (or names), a `Task` of
+                // it for an async one. It was taken for an `int`.
                 if self.is_sic() {
                     let generic = match &func.kind {
                         ExprKind::Ident(name) if self.lowerer.generic_fn_defs.contains_key(name)
@@ -427,6 +432,10 @@ impl<'m> FuncCtx<'m> {
                     if let Some((name, explicit)) = generic {
                         if let Some(t) = self.generic_call_type(name, args, explicit) { return Ok(t); }
                     }
+                }
+                // An async function's spawner gives its `Task` (sic.md §"Async").
+                if let (ExprKind::Ident(n), Some(a)) = (&func.kind, &self.async_spawn) {
+                    if n == "__sic_async_spawn" { return Ok(super::super::types::task_type(&a.elem)); }
                 }
                 // `base?.method(…)`: the method's result.
                 if let ExprKind::OptField { base, name } = &func.kind {

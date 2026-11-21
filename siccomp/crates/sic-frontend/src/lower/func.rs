@@ -26,6 +26,19 @@ fn goto_cleanups(scopes: &[(u32, Vec<Cleanup>)], kept: &[(u32, usize)]) -> Vec<C
     run
 }
 
+/// What an async function's spawner needs (see `lower_async_function`).
+#[derive(Clone)]
+pub struct AsyncSpawn {
+    /// `f$run`, and the function releasing the result (if it owns something).
+    pub runner: String,
+    pub rdrop: Option<String>,
+    /// The result type, the frame's type (`p0`, `p1`, … the arguments), and
+    /// the parameters' names and types.
+    pub elem: Type,
+    pub frame_ty: Type,
+    pub params: Vec<(String, Type)>,
+}
+
 /// A scope-exit action, run in LIFO order on every exit path (fall-through,
 /// `return`, `break`, `continue`, `goto`).
 #[derive(Clone)]
@@ -177,7 +190,7 @@ pub(crate) fn is_dynamic_tuple(t: &Type) -> bool {
 }
 
 pub(crate) fn is_fresh_struct_expr(e: &Expr) -> bool {
-    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. } | ExprKind::Elvis { .. })
+    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. } | ExprKind::Elvis { .. } | ExprKind::Await(_))
 }
 
 fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
@@ -434,9 +447,9 @@ pub struct FuncCtx<'m> {
     /// (sic.md §"Integer sizes"): freed at the end of that statement, so a value
     /// re-evaluated each loop iteration doesn't leak. Holds the temp pointers.
     pub bigint_temps: Vec<Val>,
-    /// sic `async` (sic.md §"Async"): `Some(elem)` when the current function is
-    /// async — its `return v` wraps `v` into a `Task<elem>`.
-    pub async_elem: Option<Type>,
+    /// sic `async` (sic.md §"Async"): in the function that starts an async
+    /// function's task, what `__sic_async_spawn()` (its whole body) needs.
+    pub async_spawn: Option<AsyncSpawn>,
     /// sic `va_dict` (sic.md §"Named parameters"): dict handles packed for a call's
     /// named arguments, freed at the end of the statement (the callee consumes the
     /// va_dict during the call and never keeps it).
@@ -554,7 +567,7 @@ impl<'m> FuncCtx<'m> {
             bigint_temps: Vec::new(),
             list_temps: Vec::new(),
             container_temps: Vec::new(),
-            async_elem: None,
+            async_spawn: None,
             va_dict_temps: Vec::new(),
             unsafe_depth: 0,
             guard_stack: Vec::new(),
@@ -1000,6 +1013,8 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn is_owned_temporary(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
+            // `await` gives a copy of the task's result.
+            ExprKind::Await(_) => true,
             _ => false,
         }
     }
@@ -1317,6 +1332,8 @@ impl<'m> FuncCtx<'m> {
                     _ => self.enum_payload_op(ptr, ty, true, true),
                 }
             }
+            // `await` gives an owned copy: moved in.
+            ExprKind::Await(_) => Ok(()),
             _ => self.enum_payload_op(ptr, ty, true, false),
         }
     }
@@ -2356,12 +2373,187 @@ impl<'m> Lowerer {
         // typed in the WHOLE function (not just after the conflicting assignment):
         // lowering records it and asks for the function to be lowered again
         // (sic.md §"Tuples"). Bounded — each round adds a variable.
+        if is_async && self.sic {
+            return self.lower_async_function(name, ret_ty, params, variadic, body, storage, inline, constructor);
+        }
         for _ in 0..16 {
             self.tuple_restart.remove(name);
             let r = self.lower_function_once(name, ret_ty, params, variadic, body, storage, inline, constructor, is_async);
             if !self.tuple_restart.remove(name) { return r; }
         }
         self.lower_function_once(name, ret_ty, params, variadic, body, storage, inline, constructor, is_async)
+    }
+
+    /// sic `async T f(params) { body }` (sic.md §"Async") becomes three
+    /// functions: `f$async`, the body as an ordinary function returning `T`;
+    /// `f$run(frame, out)`, which calls it with the arguments kept in `frame`
+    /// and puts its result in `out` (the task's); and `f` itself, which copies
+    /// its arguments into a new frame and starts a task that runs `f$run`.
+    /// The task runs on a stack of its own, so the body is not transformed: an
+    /// `await` in it suspends that stack.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_async_function(
+        &mut self,
+        name: &str,
+        ret_ty: &QualType,
+        params: &[AstParam],
+        variadic: bool,
+        body: &[Stmt],
+        storage: &Option<StorageClass>,
+        inline: bool,
+        constructor: Option<sic_ir::RunAt>,
+    ) -> Result<()> {
+        let at = |msg: String| {
+            let sp = body.first().map(stmt_loc).unwrap_or((None, 0, 0));
+            CompileError::at(msg, sp.0, sp.1, sp.2)
+        };
+        if variadic {
+            return Err(at(format!("async function `{}` cannot be variadic", name)));
+        }
+        let mut fields = Vec::new();
+        let mut pnames = Vec::new();
+        for (i, p) in params.iter().enumerate() {
+            let Some(pn) = p.name.clone() else {
+                return Err(at(format!("async function `{}`: every parameter needs a name", name)));
+            };
+            let pty = lower_param_type(&p.ty, &self.struct_types, self.ptr_size)?;
+            if super::types::is_tuple(&pty) {
+                return Err(at(format!("async function `{}`: a tuple parameter is not supported", name)));
+            }
+            fields.push((format!("p{}", i), pty.clone()));
+            pnames.push((pn, pty));
+        }
+        let elem = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
+        if super::types::is_tuple(&elem) || super::types::is_closure(&elem) || super::types::is_any(&elem)
+            || super::types::is_bigint(&elem) || super::types::is_fixed(&elem)
+        {
+            return Err(at(format!(
+                "async function `{}`: a tuple, closure, `any`, `bigint` or `fixed` result is not supported", name)));
+        }
+        let frame_ty = Type::Struct(sic_ir::StructType::plain(None, fields, false));
+
+        // The body, as an ordinary function.
+        let inner = format!("{}$async", name);
+        self.lower_function(&inner, ret_ty, params, false, body, &Some(StorageClass::Static), false, None, false)?;
+        let runner = self.synthesize_task_runner(name, &inner, &frame_ty, &elem, params.len())?;
+        let rdrop = if self.managed_value_type(&elem) { Some(self.synthesize_task_rdrop(&elem)?) } else { None };
+
+        // `f`: its body is the spawn.
+        self.pending_async = Some(AsyncSpawn { runner, rdrop, elem, frame_ty, params: pnames });
+        let sp = crate::lexer::Span::default();
+        let spawn = Expr::new(ExprKind::Call {
+            func: Box::new(Expr::new(ExprKind::Ident("__sic_async_spawn".to_string()), sp.clone())),
+            args: Vec::new(),
+        }, sp.clone());
+        let r = self.lower_function_once(name, ret_ty, params, false, &[Stmt::Return(Some(spawn), sp)],
+            storage, inline, constructor, true);
+        self.pending_async = None;
+        r
+    }
+
+    /// `void f$run(void *frame, void *out)`: `*out = f$async(frame.p0, …)`, then
+    /// release the arguments and free the frame.
+    fn synthesize_task_runner(&mut self, name: &str, inner: &str, frame_ty: &Type, elem: &Type, nparams: usize) -> Result<String> {
+        let sym = format!("{}$run", name);
+        let voidp = Type::void_ptr();
+        let sig = super::build_fn_sig(Type::Void, vec![voidp.clone(), voidp.clone()], false, self.ptr_size);
+        let ps = vec![
+            sic_ir::Param { name: "frame".to_string(), ty: voidp.clone() },
+            sic_ir::Param { name: "out".to_string(), ty: voidp.clone() },
+        ];
+        let mut func = Function::new(sym.clone(), sig, ps, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        let sp = crate::lexer::Span::default();
+        {
+            let mut fc = FuncCtx::new_with_func(self, &mut func);
+            fc.cur_fn = sym.clone();
+            fc.enter_scope();
+            let fpty = Type::Pointer(Box::new(frame_ty.clone()));
+            let framep = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: framep, op: CastOp::BitCast, val: Val::Local(ValId(0x10000)), to_ty: fpty.clone() });
+            fc.val_types.insert(framep.0, fpty.clone());
+            let slot = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: slot, ty: fpty.clone(), align: None });
+            fc.push_instr(Instr::Store { val: Val::Local(framep), ptr: Val::Local(slot) });
+            fc.define_local("__sic_frame".to_string(), fpty, slot);
+            let out = Val::Local(ValId(0x10001));
+            let args: Vec<Expr> = (0..nparams).map(|i| Expr::new(ExprKind::Field {
+                base: Box::new(Expr::new(ExprKind::Ident("__sic_frame".to_string()), sp.clone())),
+                name: format!("p{}", i),
+            }, sp.clone())).collect();
+            let call = Expr::new(ExprKind::Call {
+                func: Box::new(Expr::new(ExprKind::Ident(inner.to_string()), sp.clone())),
+                args,
+            }, sp.clone());
+            // The call, its temporaries released in a scope of its own; the
+            // result copied into `out`, which owns it.
+            fc.enter_scope();
+            let mark = fc.temp_mark();
+            match elem {
+                Type::Void => { fc.lower_expr(&call)?; }
+                Type::Struct(_) | Type::Union(_) => {
+                    let p = fc.lower_aggregate_ptr(&call)?;
+                    let size = elem.size_of(fc.ptr_size());
+                    let align = elem.align_of(fc.ptr_size());
+                    // A call's enum is its consumer's (moved); a string or
+                    // managed struct result is released with the scope (copied).
+                    if fc.is_tagged_enum_struct(elem) {
+                        fc.push_instr(Instr::MemCopy { dst: out.clone(), src: p, size, align });
+                    } else {
+                        fc.share_counted_at(&p, elem)?;
+                        fc.push_instr(Instr::MemCopy { dst: out.clone(), src: p, size, align });
+                        fc.retain_managed_at(out.clone(), elem)?;
+                    }
+                }
+                _ => {
+                    let v = fc.lower_expr(&call)?;
+                    let v = fc.coerce(v, elem)?;
+                    fc.push_instr(Instr::Store { val: v, ptr: out.clone() });
+                    fc.retain_managed_at(out.clone(), elem)?;
+                }
+            }
+            fc.flush_temps_from(mark);
+            fc.exit_scope();
+            // The arguments' copies are the frame's.
+            if let Type::Struct(st) = frame_ty {
+                for (fname, fty) in &st.fields {
+                    if !fc.lowerer.managed_value_type(fty) { continue; }
+                    let flv = fc.field_ptr_from(super::expr::LValue::plain(Val::Local(framep), frame_ty.clone()), fname, false, &sp)?;
+                    fc.release_managed_at(flv.ptr, fty)?;
+                }
+            }
+            fc.emit_free(Val::Local(framep))?;
+            fc.exit_scope();
+            fc.set_terminator(Terminator::Ret(None));
+            if let Some(e) = fc.cleanup_error.take() { return Err(e); }
+        }
+        self.module.add_function(func);
+        Ok(sym)
+    }
+
+    /// `void __sic_task_rdrop_<T>(void *out)`: release a task's result of type
+    /// `elem`, when its last handle goes.
+    fn synthesize_task_rdrop(&mut self, elem: &Type) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", elem).hash(&mut h);
+        let sym = format!("__sic_task_rdrop_{:016x}", h.finish());
+        if self.module.func_ref_by_name(&sym).is_some() { return Ok(sym); }
+        let voidp = Type::void_ptr();
+        let sig = super::build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
+        let ps = vec![sic_ir::Param { name: "out".to_string(), ty: voidp }];
+        let mut func = Function::new(sym.clone(), sig, ps, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = FuncCtx::new_with_func(self, &mut func);
+            fc.cur_fn = sym.clone();
+            fc.release_managed_at(Val::Local(ValId(0x10000)), elem)?;
+            fc.set_terminator(Terminator::Ret(None));
+        }
+        self.module.add_function(func);
+        Ok(sym)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2419,10 +2611,9 @@ impl<'m> Lowerer {
             lower_type(ret_ty, &self.struct_types, self.ptr_size)?
         };
         // sic `async` (sic.md §"Async"): the function returns a `Task<ret>`; its
-        // `return v` wraps `v` into a task (handled during return lowering).
-        let (ir_ret, async_elem) = if is_async {
-            let elem = ir_ret;
-            (super::types::task_type(&elem), Some(elem))
+        // body (`lower_async_function`) starts the task.
+        let (ir_ret, async_spawn) = if is_async {
+            (super::types::task_type(&ir_ret), self.pending_async.take())
         } else {
             (ir_ret, None)
         };
@@ -2489,7 +2680,7 @@ impl<'m> Lowerer {
                 || file.as_deref().map_or(false, |f| fc.lowerer.strict_files.contains(f));
             if fc.strict { fc.late_init_sites(params, body); }
         }
-        fc.async_elem = async_elem;
+        fc.async_spawn = async_spawn;
         // sic strict enum typing (sic.md §"Enums"): a payload-less enum return type
         // makes `return <int/other-enum>;` an error without an explicit cast.
         fc.ret_enum = fc.lowerer.c_enum_name_of_ast(&ret_ty.ty);
@@ -2723,19 +2914,6 @@ impl<'m> FuncCtx<'m> {
                 if let Some(e) = val {
                     let rt = self.ret_ty.clone();
                     self.check_tuple_shape(&rt, e, "returned as")?;
-                }
-                // sic `async` (sic.md §"Async"): wrap the returned value in a
-                // `Task<elem>` (the stub runtime makes it ready) and return that.
-                if let Some(elem) = self.async_elem.clone() {
-                    let boxed = match val {
-                        Some(e) => { let v = self.lower_expr(e)?; self.async_box_u64(v, &elem)? }
-                        None => Constant::uint(0),
-                    };
-                    let task = self.emit_task_new(boxed, &elem)?;
-                    self.flush_bigint_temps();
-                    self.emit_cleanups_to(0);
-                    self.set_terminator(Terminator::Ret(Some(task)));
-                    return Ok(());
                 }
                 // sic strict enum typing (sic.md §"Enums"): reject returning an
                 // `int`/other-enum from an `enum`-returning function without a cast.
@@ -3505,7 +3683,7 @@ impl<'m> FuncCtx<'m> {
                                     // producer temp; retain it into the local and free it
                                     // at scope exit, so the statement-end release of that
                                     // temp leaves the local its own reference.
-                                    ExprKind::Ternary { .. } | ExprKind::Elvis { .. } => (true, true),
+                                    ExprKind::Ternary { .. } | ExprKind::Elvis { .. } | ExprKind::Await(_) => (true, true),
                                     _ => (false, false),
                                 };
                                 if needs_retain {

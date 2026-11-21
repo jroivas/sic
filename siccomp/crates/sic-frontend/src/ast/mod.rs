@@ -192,6 +192,8 @@ pub struct StructMethod {
     pub params: Vec<Param>,
     pub variadic: bool,
     pub body: Vec<Stmt>,
+    /// `async` (sic.md §"Async"): a plain method only.
+    pub is_async: bool,
     pub span: Span,
 }
 

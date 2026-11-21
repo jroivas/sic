@@ -634,45 +634,63 @@ into the returned list, so the projection is safe to keep after the source chang
 # Async
 
 A function marked `async` is asynchronous: it returns a `Task<T>` (where `T` is its
-written return type) instead of running to completion at the call site. `await` drives
-a task to completion and yields its `T`:
+written return type) instead of running to completion at the call site. `await` waits
+for a task to finish and yields its `T`:
 
     async int fetch(int id) { return id * 2; }
 
-    Task<int> t = fetch(21);   // start it; get a handle
+    Task<int> t = fetch(21);   // make the task; get a handle
     int a = await t;           // 42
     int b = await fetch(50);   // 100 — await a call directly
 
 Inside an `async` function, `return v` completes the task with `v`. `await` accepts
-any `Task<T>` and produces the `T`.
+any `Task<T>` and produces the `T`. Struct methods and generic functions can be
+`async` too (`async int get(C *self)`, `async T same<T>(T x)`).
 
-> This is language-level support. The compiler emits only the surface; the executor
-> lives in a **module**. A built-in synchronous stub keeps `async`/`await` working
-> standalone (an async call runs eagerly and `await` returns the stored result).
+Tasks are **cooperative**: each runs on a stack of its own (so an `await` anywhere in
+its calls suspends it), on the thread that made it, and only while the code that made
+it waits. A task starts when something waits — an `await`, or `art::yield_now()`,
+`art::sleep()` or `art::run()` — and then runs until it finishes or waits itself.
+Awaiting a task that is not done runs the other tasks until it is; tasks awaiting
+each other in a cycle stop the program with a message.
+
+- A `Task<T>` is a handle. Copies of it are the same task, and every `await` of it
+  gives a copy of its result, so a task can be awaited more than once. The task and
+  its result are freed with the last handle; a task nobody awaits still runs when
+  the thread next waits (dropping the handle does not cancel it).
+- The call copies its arguments into the task, as a call passes them (a string or
+  list stays alive for the task); a pointer argument — `self` of a method too — must
+  outlive the task.
+- A task's stack is 256 KiB, with a guard page under it: overflowing it is a fault,
+  not a corruption.
+- Each thread has its own scheduler; a task stays on its thread.
+- A `tuple`, closure, `any`, `bigint` or `fixed` result is not supported yet.
 
 ## The `art` runtime module
 
-`art` is sic's async runtime — a small **cooperative, single-threaded coroutine
-executor** built on stackful `ucontext` coroutines. It lives entirely in a module
-(`import art;`), so scheduling can grow — timers, an I/O reactor, `join`/`select` —
-without touching the compiler.
+`art` (`import art;`) is the API of the scheduler — the task runtime sic adds to
+every program that uses `async`, `await`, `Task` or `art`:
+
+- `art::yield_now()` lets the other tasks run (from the thread's own code: each of
+  them once);
+- `art::sleep(ms)` waits at least `ms` milliseconds while the others run;
+- `art::spawn(fn, arg)` runs a plain `void fn(void *)` as a task nobody awaits;
+- `art::run()` runs until every task has finished; `art::pending()` counts them.
+
+<!-- -->
 
     import art;
 
-    void worker(void *arg) {
-        for (int i = 0; i < 3; i++) { /* … */ art::yield_now(); }
-    }
+    async int nap(int ms, int v) { art::sleep(ms); return v; }
 
     int main() {
-        art::spawn(worker, a);   // schedule a coroutine
-        art::spawn(worker, b);
-        art::run();              // drive them to completion (round-robin)
-        return 0;
+        Task<int> slow = nap(40, 1);
+        Task<int> quick = nap(5, 2);
+        return await slow + await quick;   // both sleep at once: ~40 ms, not 45
     }
 
-Two spawned coroutines that `yield_now()` interleave cooperatively. This is the
-foundation the richer async API (and a bridge from `async`/`await` to real
-suspension) builds on.
+Under valgrind, pass `--max-stackframe=65536` (or smaller): its default treats a
+switch to a task's stack as a huge stack frame and reports uninitialised values.
 
 # Generics
 

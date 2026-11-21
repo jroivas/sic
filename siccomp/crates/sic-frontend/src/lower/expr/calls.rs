@@ -144,6 +144,12 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // An async function's spawner (sic.md §"Async").
+        if self.async_spawn.is_some() {
+            if let ExprKind::Ident(n) = &func_expr.kind {
+                if n == "__sic_async_spawn" { return self.lower_async_spawn(sp); }
+            }
+        }
         // `base?.method(args)` (sic.md §"Safe access").
         if self.is_sic() {
             if let ExprKind::OptField { base, name } = &func_expr.kind {

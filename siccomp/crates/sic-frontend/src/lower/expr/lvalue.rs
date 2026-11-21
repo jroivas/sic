@@ -497,8 +497,7 @@ impl<'m> FuncCtx<'m> {
                 || super::super::types::is_fixed(ty) || super::super::types::is_bigint(ty)
                 || super::super::types::is_dict(ty) || super::super::types::is_list(ty)
                 || super::super::types::is_va_array(ty) || super::super::types::is_any(ty)
-                || super::super::types::is_u8char(ty) || super::super::types::is_type_info(ty)
-                || super::super::types::is_task(ty);
+                || super::super::types::is_u8char(ty) || super::super::types::is_type_info(ty);
             if special { return false; }
             let resolved = super::super::types::resolve_aggregate(inner, &self.lowerer.struct_types);
             return matches!(resolved, Type::Struct(_) | Type::Union(_));

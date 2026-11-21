@@ -1,0 +1,70 @@
+// `async` functions run as tasks on the scheduler (sic.md §"Async"): a call
+// makes a task, which runs when its result is awaited (each on a stack of its
+// own, so it can await in turn), and `await` gives a copy of the result. The
+// result was kept in one 64-bit slot, so a string, struct or list result was
+// garbage; a `double` awaited inside a call was taken for an `int`; awaiting a
+// task twice freed it twice. Returns 42.
+import std::*;
+
+int dtors = 0;
+struct P { int a; int b; int c; };
+struct R { string s; ~R() { dtors++; } };
+struct C {
+    int v;
+    async int get(C *self, int k) { return self.v + k; }
+};
+
+int log[16];
+int nlog = 0;
+
+// A heap string (a concatenation), without calling into libstd.
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+async int twice(int x) { log[nlog++] = x; return x * 2; }
+async string greet(string who, int n) { return who + num(n); }
+async P point() { P p; p.a = 1; p.b = 2; p.c = 3; return p; }
+async R res(int i) { R r; r.s = "r" + num(i); return r; }
+async list<int> items(int n) { list<int> l; for (int i = 0; i < n; i++) l.add(i); return l; }
+async Option<string> maybe(int c) { if (c) return Some("m" + num(c)); return None; }
+async double half(int x) { return x / 2.0; }
+async int fib(int n) { if (n < 2) return n; return await fib(n - 1) + await fib(n - 2); }
+async T same<T>(T x) { return x; }
+async void note(int v) { log[nlog++] = v; }
+
+double sum2(double a, double b) { return a + b; }
+
+int main() {
+    int r = 0;
+    if (await twice(21) == 42) r += 1;
+    // A task runs when it is awaited, not when it is made.
+    Task<int> t = twice(5);
+    log[nlog++] = 100;
+    if (await t == 10 && await t == 10 && log[1] == 100 && log[2] == 5) r += 1;
+    // Arguments are the task's own copies.
+    string who = "a" + num(1);
+    Task<string> g = greet(who, 2);
+    who = "z";
+    if (await g == "a12") r += 1;
+    P p = await point();
+    if (p.a + p.b + p.c == 6) r += 1;
+    {
+        R a = await res(3);
+        Task<R> u = res(4);
+        Task<R> v = u;          // a copy of the handle: the same task
+        R b = await v;
+        if (a.s == "r3" && b.s == "r4" && (await u).s == "r4") r += 1;
+    }
+    // One destructor per object: the task's copy and the awaited ones share it.
+    if (dtors == 2) r += 1;
+    list<int> l = await items(4);
+    if (l.length == 4 && l[3] == 3) r += 1;
+    if ((await maybe(1) ?: "-") == "m1" && (await maybe(0) ?: "-") == "-") r += 1;
+    if (sum2(await half(3), 0.25) == 1.75) r += 1;
+    if (await fib(12) == 144) r += 1;
+    C c; c.v = 40;
+    if (await c.get(2) == 42) r += 1;
+    if (await same(2.5) == 2.5 && await same("s") == "s") r += 1;
+    await note(7);
+    if (log[nlog - 1] == 7) r += 1;
+    return r == 13 ? 42 : r;
+}

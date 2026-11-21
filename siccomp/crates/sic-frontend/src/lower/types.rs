@@ -543,27 +543,31 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
 // carrying the eventual `T`. `async` functions return it; `await` drives it to
 // completion and yields the `T`. The element type is encoded in the marker name.
 
-/// Build a `Task<T>` value type.
+/// The destructor of a `Task<T>` handle (the task runtime's).
+pub const TASK_DROP: &str = "__sic_task_drop";
+
+/// Build a `Task<T>` value type: a handle to the runtime's task, a struct with
+/// a destructor, so its copies share a count like any such struct's and the
+/// last one releases the task (`TASK_DROP`). The layout is the runtime's.
 pub fn task_type(elem: &Type) -> Type {
     let name = format!("(task|{})", mangle_type_name(elem));
-    Type::Pointer(Box::new(Type::Struct(StructType::plain(Some(name), vec![], false))))
+    Type::Struct(StructType::plain(Some(name), vec![
+        ("h".to_string(), Type::void_ptr()),
+        (crate::ast::STRUCT_RC_FIELD.to_string(), Type::Pointer(Box::new(Type::u64()))),
+    ], false))
 }
 
 /// True if `t` is a `Task<T>` value.
 pub fn is_task(t: &Type) -> bool {
-    matches!(t, Type::Pointer(inner)
-        if matches!(inner.as_ref(), Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(task|"))))
+    matches!(t, Type::Struct(st) if st.name.as_deref().map_or(false, |n| n.starts_with("(task|")))
 }
 
 /// The result type `T` of a `Task<T>` (defaults to `void`).
 pub fn task_elem(t: &Type, ptr_size: u32) -> Type {
     match t {
-        Type::Pointer(inner) => match inner.as_ref() {
-            Type::Struct(st) => match st.name.as_deref().and_then(|n| n.strip_prefix("(task|")).and_then(|n| n.strip_suffix(')')) {
-                Some(e) => demangle_type(e, ptr_size),
-                None => Type::Void,
-            },
-            _ => Type::Void,
+        Type::Struct(st) => match st.name.as_deref().and_then(|n| n.strip_prefix("(task|")).and_then(|n| n.strip_suffix(')')) {
+            Some(e) => demangle_type(e, ptr_size),
+            None => Type::Void,
         },
         _ => Type::Void,
     }

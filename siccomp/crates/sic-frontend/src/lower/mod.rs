@@ -280,6 +280,8 @@ pub struct Lowerer {
     /// Only `static` functions qualify — an externally-visible function could be
     /// called from another unit with a raw pointer.
     pub fat_params: HashMap<String, sic_ir::fast_hash::HashSet<usize>>,
+    /// sic `async` (sic.md §"Async"): handed to the spawner being lowered.
+    pub pending_async: Option<func::AsyncSpawn>,
     /// sic low-severity suggestions (below a warning): collected during lowering and
     /// printed once, deduplicated. Used to hint that a raw `list`/`dict`/`set` stored
     /// in a tuple shares it by reference, so a cycle should be broken with `weak<T>`.
@@ -436,6 +438,7 @@ impl Lowerer {
             notes: Vec::new(),
             tuple_param_types: HashMap::default(),
             fat_params: HashMap::default(),
+            pending_async: None,
             float_vararg_externs: HashSet::default(),
             weak_vars: Vec::new(),
             type_info_globals: HashMap::default(),
@@ -886,7 +889,10 @@ impl Lowerer {
                 self.register_nested_struct_defs(&ret_ty.ty)?;
                 for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
-                if *is_async { ir_ret = types::task_type(&ir_ret); }
+                if *is_async {
+                    ir_ret = types::task_type(&ir_ret);
+                    self.register_task_type(&ir_ret);
+                }
                 let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                 }).collect();
@@ -920,7 +926,10 @@ impl Lowerer {
                 // Function definition — pre-register with empty body for stable FuncRef
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                 // sic async: the signature returns `Task<ret>` (sic.md §"Async").
-                if *is_async { ir_ret = types::task_type(&ir_ret); }
+                if *is_async {
+                    ir_ret = types::task_type(&ir_ret);
+                    self.register_task_type(&ir_ret);
+                }
                 let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                 }).collect();
@@ -2924,7 +2933,7 @@ impl Lowerer {
                         variadic: m.variadic,
                         type_params: Vec::new(),
                         template_src: None,
-                        is_async: false,
+                        is_async: m.is_async,
                         body: Some(body),
                         // A module's methods and ctor/dtor are exported so consumers
                         // can link them (see `in_module`); a plain build keeps them local.
@@ -3100,7 +3109,24 @@ impl Lowerer {
         let mut uses: Vec<(String, Vec<QualType>)> = Vec::new();
         for d in &tu.decls { collect_generics_decl(d, &mut uses); }
         for t in &tu.expr_types { collect_generics_type(&t.ty, &mut uses); }
+        // The `Task<T>` an async function returns.
+        for d in &tu.decls {
+            if let Decl::Func { ret_ty, is_async: true, type_params, .. } = d {
+                if !type_params.is_empty() { continue; }
+                if let Ok(e) = lower_type(ret_ty, &self.struct_types, self.ptr_size) {
+                    self.register_task_type(&types::task_type(&e));
+                }
+            }
+        }
         for (name, args) in uses {
+            if name == "Task" {
+                let e = match args.first() {
+                    Some(a) => lower_type(a, &self.struct_types, self.ptr_size).unwrap_or(Type::Void),
+                    None => Type::Void,
+                };
+                self.register_task_type(&types::task_type(&e));
+                continue;
+            }
             if name.contains("::") && self.rust_generic_of(&name).is_some() {
                 self.instantiate_rust_generic(&name, &args)?;
                 continue;
@@ -3196,6 +3222,16 @@ impl Lowerer {
         Ok(())
     }
 
+    /// A `Task<T>` handle type (sic.md §"Async") is a struct whose destructor
+    /// is the task runtime's: register both, so the handle is owned and copied
+    /// as any struct with a destructor is.
+    pub(crate) fn register_task_type(&mut self, t: &Type) {
+        let Type::Struct(st) = t else { return };
+        let Some(n) = st.name.clone() else { return };
+        self.struct_types.entry(n.clone()).or_insert_with(|| t.clone());
+        self.struct_dtor.entry(n).or_insert_with(|| types::TASK_DROP.to_string());
+    }
+
     /// Monomorphize `name<args…>` into a concrete tagged enum registered under its
     /// mangled name (`Option<i32>`), reusing the ordinary tagged-enum machinery.
     /// Idempotent; returns the concrete struct type.
@@ -3252,9 +3288,9 @@ impl Lowerer {
         let decl = self.generic_fn_defs.get(base_name).cloned().ok_or_else(|| {
             CompileError::new(format!("unknown generic function '{}'", base_name))
         })?;
-        let (type_params, ret_ty, params, variadic, body) = match decl {
-            Decl::Func { type_params, ret_ty, params, variadic, body: Some(body), .. } =>
-                (type_params, ret_ty, params, variadic, body),
+        let (type_params, ret_ty, params, variadic, body, is_async) = match decl {
+            Decl::Func { type_params, ret_ty, params, variadic, body: Some(body), is_async, .. } =>
+                (type_params, ret_ty, params, variadic, body, is_async),
             _ => return Err(CompileError::new(format!("'{}' is not a generic function", base_name))),
         };
         if type_params.len() != arg_tys.len() {
@@ -3274,7 +3310,11 @@ impl Lowerer {
 
         let res = (|| -> Result<()> {
             // Pre-register a defined placeholder so recursion resolves to this symbol.
-            let ir_ret = lower_type(&ret_ty, &self.struct_types, self.ptr_size)?;
+            let mut ir_ret = lower_type(&ret_ty, &self.struct_types, self.ptr_size)?;
+            if is_async {
+                ir_ret = types::task_type(&ir_ret);
+                self.register_task_type(&ir_ret);
+            }
             let ir_params: Result<Vec<_>> = params.iter()
                 .map(|p| lower_param_type(&p.ty, &self.struct_types, self.ptr_size)).collect();
             let sig = build_fn_sig(ir_ret, ir_params?, variadic, self.ptr_size);
@@ -3285,7 +3325,7 @@ impl Lowerer {
                 self.module.add_function(Function::new(mangled.clone(), sig, vec![], linkage));
             }
             self.lower_function(&mangled, &ret_ty, &params, variadic, &body,
-                &Some(StorageClass::Static), false, None, false)
+                &Some(StorageClass::Static), false, None, is_async)
         })();
 
         // Restore the type-parameter bindings.
@@ -6014,9 +6054,10 @@ fn collect_generics_type(ty: &AstType, out: &mut Vec<(String, Vec<QualType>)>) {
     match ty {
         Generic { name, args } => {
             for a in args { collect_generics_type(&a.ty, out); }
-            // `dict<K,V>` / `Task<T>` are built-ins, not user generic enums — don't
-            // try to monomorphize them as one (sic.md §"Dict", §"Async").
-            if name != "dict" && name != "Task" && name != "set" && name != "list" && name != "tuple" {
+            // `dict<K,V>` and the containers are built-ins, not user generic enums —
+            // don't try to monomorphize them as one (sic.md §"Dict"). A `Task<T>`
+            // is collected to register its handle type (sic.md §"Async").
+            if name != "dict" && name != "set" && name != "list" && name != "tuple" {
                 out.push((name.clone(), args.clone()));
             }
         }

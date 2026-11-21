@@ -2013,73 +2013,120 @@ impl<'m> FuncCtx<'m> {
     // ─── sic `async` / `await` (sic.md §"Async") ─────────────────────────────
 
     /// Resolve a `__sic_task_*` runtime function, declaring it as an extern if absent
-    /// (the definition comes from the prepended async runtime).
+    /// (the definition comes from the prepended task runtime).
     fn task_runtime_fn(&mut self, name: &str) -> FuncRef {
         if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
-        let u64t = Type::u64();
         let ptr = Type::void_ptr();
         let (params, ret): (Vec<Type>, Type) = match name {
-            "__sic_task_new" => (vec![u64t], ptr),
-            "__sic_await" => (vec![ptr], u64t),
+            "__sic_task_spawn" => (vec![ptr.clone(), ptr.clone(), ptr.clone(), Type::u64()], ptr),
+            "__sic_task_await" => (vec![ptr.clone()], ptr),
             _ => (vec![], Type::Void),
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
         self.lowerer.module.add_extern(sic_ir::ExternFunc { name: name.to_string(), sig })
     }
 
-    /// Widen an async result value to the 64-bit task slot (inverse of
-    /// `reinterpret_slot`): a float's bits via a memory round-trip, a pointer/scalar
-    /// by cast/coercion.
-    pub(crate) fn async_box_u64(&mut self, v: Val, elem: &Type) -> Result<Val> {
-        match elem {
-            Type::Float32 | Type::Float64 | Type::Float80 => {
-                let d = self.coerce(v, &Type::Float64)?;
-                let mem = self.alloc_val();
-                self.push_instr(Instr::Alloca { dest: mem, ty: Type::Float64, align: None });
-                self.push_instr(Instr::Store { val: d, ptr: Val::Local(mem) });
-                let out = self.alloc_val();
-                self.push_instr(Instr::Load { dest: out, ptr: Val::Local(mem), ty: Type::u64() });
-                self.val_types.insert(out.0, Type::u64());
-                Ok(Val::Local(out))
+    /// The body of an async function's spawner (`lower_async_function`): copy
+    /// the arguments into a new frame, start a task running `f$run` on it, and
+    /// give its `Task` handle.
+    pub(crate) fn lower_async_spawn(&mut self, sp: &crate::lexer::Span) -> Result<Val> {
+        let Some(a) = self.async_spawn.clone() else {
+            return Err(CompileError::at("`__sic_async_spawn` is the compiler's".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        };
+        let ps = self.ptr_size();
+        let frame = self.emit_calloc(Constant::uint(a.frame_ty.size_of(ps).max(1)))?;
+        for (i, (pname, pty)) in a.params.iter().enumerate() {
+            let src = self.lower_lvalue(&Expr::new(ExprKind::Ident(pname.clone()), sp.clone()))?.ptr;
+            let dst = self.field_ptr_from(LValue::plain(frame.clone(), a.frame_ty.clone()), &format!("p{}", i), false, sp)?.ptr;
+            if matches!(pty, Type::Struct(_) | Type::Union(_) | Type::Array { .. }) {
+                self.share_counted_at(&src, pty)?;
+                self.push_instr(Instr::MemCopy { dst: dst.clone(), src, size: pty.size_of(ps), align: pty.align_of(ps) });
+            } else {
+                let v = self.alloc_val();
+                self.push_instr(Instr::Load { dest: v, ptr: src, ty: pty.clone() });
+                self.push_instr(Instr::Store { val: Val::Local(v), ptr: dst.clone() });
             }
-            Type::Pointer(_) => {
-                let d = self.alloc_val();
-                self.push_instr(Instr::Cast { dest: d, op: CastOp::BitCast, val: v, to_ty: Type::u64() });
-                self.val_types.insert(d.0, Type::u64());
-                Ok(Val::Local(d))
-            }
-            _ => self.coerce(v, &Type::u64()),
+            self.retain_managed_at(dst, pty)?;
         }
+        let run = self.lowerer.module.func_ref_by_name(&a.runner).ok_or_else(|| CompileError::new(
+            format!("no task runner `{}`", a.runner)))?;
+        let rdrop = match &a.rdrop {
+            Some(n) => Val::Func(self.lowerer.module.func_ref_by_name(n).ok_or_else(|| CompileError::new(
+                format!("no task result destructor `{}`", n)))?),
+            None => Constant::null(),
+        };
+        let size = match a.elem { Type::Void => 0, ref t => t.size_of(ps) };
+        let f = self.task_runtime_fn("__sic_task_spawn");
+        let h = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(h), func: f,
+            args: vec![Val::Func(run), frame, rdrop, Constant::uint(size)], ret_ty: Type::void_ptr() });
+        // The handle: the task, and no count yet (one owner).
+        let tt = super::types::task_type(&a.elem);
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: tt.clone(), align: None });
+        let hp = self.field_ptr_from(LValue::plain(Val::Local(slot), tt.clone()), "h", false, sp)?;
+        self.store_lvalue(&hp, Val::Local(h))?;
+        let rcp = self.field_ptr_from(LValue::plain(Val::Local(slot), tt.clone()), crate::ast::STRUCT_RC_FIELD, false, sp)?;
+        self.push_instr(Instr::Store { val: Val::Const(Constant::Null), ptr: rcp.ptr });
+        self.val_types.insert(slot.0, tt.clone());
+        self.register_struct_temp(&Val::Local(slot), &tt);
+        Ok(Val::Local(slot))
     }
 
-    /// `__sic_task_new(v)` → a `Task<elem>` holding the async result `v` (already a
-    /// 64-bit slot). The synchronous stub runtime makes a ready task.
-    pub(crate) fn emit_task_new(&mut self, v: Val, elem: &Type) -> Result<Val> {
-        let f = self.task_runtime_fn("__sic_task_new");
-        let tt = super::types::task_type(elem);
-        let d = self.alloc_val();
-        self.push_instr(Instr::Call { dest: Some(d), func: f, args: vec![v], ret_ty: tt.clone() });
-        self.val_types.insert(d.0, tt);
-        Ok(Val::Local(d))
-    }
-
-    /// `await task` → `__sic_await(task)` driven to completion, its `T` value.
+    /// `await task`: run until the task is done, then its result — a copy, which
+    /// owns what it holds; the task keeps its own until its last handle goes.
     fn lower_await(&mut self, inner: &Expr) -> Result<Val> {
-        let task = self.lower_expr(inner)?;
-        let tt = self.val_type(&task);
+        let sp = inner.span.clone();
+        let tt = self.infer_expr_type(inner)?;
         if !super::types::is_task(&tt) {
             return Err(CompileError::at(
                 "`await` expects a `Task<T>` (the result of an async call)".to_string(),
-                inner.span.file.clone(), inner.span.line, inner.span.col));
+                sp.file.clone(), sp.line, sp.col));
         }
-        let elem = super::types::task_elem(&tt, self.ptr_size());
-        let taskp = self.coerce(task, &Type::void_ptr())?;
-        let f = self.task_runtime_fn("__sic_await");
-        let raw = self.alloc_val();
-        self.push_instr(Instr::Call { dest: Some(raw), func: f, args: vec![taskp], ret_ty: Type::u64() });
-        self.val_types.insert(raw.0, Type::u64());
-        // Unbox the 64-bit slot back to the result type.
-        self.reinterpret_slot(Val::Local(raw), &elem)
+        // The name carries `T` opaque: its layout is the registered type's.
+        let elem = super::types::resolve_aggregate(&super::types::task_elem(&tt, self.ptr_size()), &self.lowerer.struct_types);
+        let tp = self.lower_aggregate_ptr(inner)?;
+        let hp = self.field_ptr_from(LValue::plain(tp, tt.clone()), "h", false, &sp)?;
+        let h = self.load_lvalue(&hp)?;
+        let f = self.task_runtime_fn("__sic_task_await");
+        let out = self.alloc_val();
+        self.push_instr(Instr::Call { dest: Some(out), func: f, args: vec![h], ret_ty: Type::void_ptr() });
+        let outp = Type::Pointer(Box::new(elem.clone()));
+        self.val_types.insert(out.0, outp);
+        let ps = self.ptr_size();
+        match &elem {
+            Type::Void => Ok(Constant::zero()),
+            Type::Struct(_) | Type::Union(_) => {
+                let slot = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: slot, ty: elem.clone(), align: None });
+                self.share_counted_at(&Val::Local(out), &elem)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: Val::Local(out), size: elem.size_of(ps), align: elem.align_of(ps) });
+                self.retain_managed_at(Val::Local(slot), &elem)?;
+                self.val_types.insert(slot.0, elem.clone());
+                // A temporary of its own: a string released at scope exit (a
+                // binding retains its copy), a managed struct moved into its
+                // binding or destroyed; an enum is adopted, as a call's is.
+                if self.is_sic() && super::types::is_sic_string(&elem) {
+                    self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(slot) });
+                } else if self.struct_has_dtor(&elem) {
+                    self.register_struct_temp(&Val::Local(slot), &elem);
+                }
+                Ok(Val::Local(slot))
+            }
+            _ => {
+                let v = self.alloc_val();
+                self.push_instr(Instr::Load { dest: v, ptr: Val::Local(out), ty: elem.clone() });
+                self.val_types.insert(v.0, elem.clone());
+                // A container: one reference of its own, released at the end of
+                // the statement unless a binding takes one.
+                if super::types::is_list(&elem) || super::types::is_dict(&elem) || super::types::is_set(&elem) {
+                    self.container_retain(Val::Local(v), &elem)?;
+                    self.container_temps.push((Val::Local(v), elem.clone()));
+                }
+                Ok(Val::Local(v))
+            }
+        }
     }
 
     // ─── sic `list` (sic.md §"List") ─────────────────────────────────────────

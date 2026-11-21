@@ -1601,7 +1601,7 @@ impl Parser {
             self.skip_attributes();
             let body = self.parse_compound_stmt_as_stmts()?;
             self.eat(TokenKind::Semi);
-            return Ok(Some(StructMethod { kind: MethodKind::Dtor, name, ret_ty: QualType::new(AstType::Void), params, variadic, body, span: sp }));
+            return Ok(Some(StructMethod { kind: MethodKind::Dtor, name, ret_ty: QualType::new(AstType::Void), params, variadic, body, is_async: false, span: sp }));
         }
         let start = self.pos;
         // Speculatively parsing a ctor/method rewinds `pos` on failure, but parsing a
@@ -1620,7 +1620,7 @@ impl Parser {
                         self.skip_attributes();
                         let body = self.parse_compound_stmt_as_stmts()?;
                         self.eat(TokenKind::Semi);
-                        return Ok(Some(StructMethod { kind: MethodKind::Ctor, name: sname.to_string(), ret_ty: QualType::new(AstType::Void), params, variadic, body, span: sp }));
+                        return Ok(Some(StructMethod { kind: MethodKind::Ctor, name: sname.to_string(), ret_ty: QualType::new(AstType::Void), params, variadic, body, is_async: false, span: sp }));
                     }
                 }
                 self.pos = save; // not a constructor — rewind
@@ -1629,6 +1629,11 @@ impl Parser {
         }
         // Method: `Ret name( … ) { … }`. Parse a full declarator; if it is a
         // function declarator immediately followed by a `{`, it is a method body.
+        // `async Ret name(…) { … }` (sic.md §"Async").
+        let is_async = self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "async"
+            && self.tokens.get(self.pos + 1).is_some_and(|t| !matches!(t.kind,
+                TokenKind::Semi | TokenKind::Comma | TokenKind::LBracket | TokenKind::Colon | TokenKind::Eq));
+        if is_async { self.advance(); }
         let parsed = (|| -> Result<Option<StructMethod>> {
             self.kw_names = self.lang == Lang::Sic;
             let (base_ty, _) = match self.parse_decl_specifiers() {
@@ -1644,7 +1649,7 @@ impl Parser {
                     self.skip_attributes();
                     let body = self.parse_compound_stmt_as_stmts()?;
                     self.eat(TokenKind::Semi);
-                    return Ok(Some(StructMethod { kind: MethodKind::Method, name, ret_ty: *ret, params, variadic, body, span: sp.clone() }));
+                    return Ok(Some(StructMethod { kind: MethodKind::Method, name, ret_ty: *ret, params, variadic, body, is_async, span: sp.clone() }));
                 }
             }
             Ok(None)

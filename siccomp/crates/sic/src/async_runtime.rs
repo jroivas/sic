@@ -1,19 +1,17 @@
-//! Minimal synchronous stub runtime for sic's `async`/`await` (sic.md §"Async").
-//! Plain C over `malloc`/`free`, prepended only when a unit uses `async`/`await`/
-//! `Task` (see [`uses_async`]). Every function is `__attribute__((weak))` so copies
-//! dedupe at link.
-//!
-//! This is a placeholder: an async call runs eagerly and its result is wrapped in a
-//! ready `Task`; `await` just returns the stored value. A real executor (scheduling,
-//! stack switching, an I/O reactor) is a separate runtime module that replaces these
-//! weak symbols.
+//! sic's task runtime for `async`/`await` (sic.md §"Async"): a cooperative
+//! scheduler per thread, each task on a stack of its own. Plain C, prepended
+//! when a unit uses `async`, `await`, `Task` or the `art` module (see
+//! [`uses_async`]). Everything is `__attribute__((weak))`, so the copies in a
+//! program's units are one; the `art` module has no copy and calls the
+//! program's.
 
 /// The runtime source, prepended (post-preprocess) ahead of the user code.
 pub const ASYNC_RUNTIME: &str = include_str!("async_runtime.c");
 
-/// True if `src` uses async support (so the runtime must be prepended). A crude
-/// word-boundary scan for `async`, `await`, or `Task`.
+/// True if `src` uses async support (so the runtime must be prepended): a crude
+/// word-boundary scan for `async`, `await` or `Task`, or `import art`.
 pub fn uses_async(src: &str) -> bool {
+    if src.contains("import art") { return true; }
     let bytes = src.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     for kw in ["async", "await", "Task"] {

@@ -111,6 +111,16 @@
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a
   container's handle.
+- **Async functions run as tasks**: `async`/`await` used to run the function
+  at once and keep its result in one 64-bit slot (a string, struct or list
+  result was garbage, awaiting twice freed the task twice). Now a call makes a
+  task, which a cooperative scheduler runs on a stack of its own (256 KiB with
+  a guard page) when the thread waits; `await` gives a copy of the result, and
+  `Task<T>` handles are counted like structs with destructors. Async struct
+  methods and generic functions work. `art` is the scheduler's API —
+  `yield_now`, `sleep(ms)` (new), `spawn`, `run`, `pending` — and its
+  coroutines and async tasks share the one scheduler, which the program holds
+  (a module's async functions run on it too). Each thread has its own.
 - **`?.` method calls**: `user?.name()` calls the method when `user` is a
   non-null pointer or a present `Option`, else gives the zero value of its
   result (`None` for an `Option`); the arguments are evaluated only when it
