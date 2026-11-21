@@ -1,0 +1,23 @@
+// A generic function's call has the result type its type arguments give:
+// inference took every generic call for an `int`, so `auto d = id(2.5)` was
+// 2, and a string result passed on was read as a number. Returns 42.
+T id<T>(T x) { return x; }
+T add<T>(T a, T b) { return a + b; }
+T first<T>(T *p) { return p[0]; }
+
+double twice(double v) { return v * 2; }
+
+int main() {
+    int r = 0;
+    auto d = id(2.5);
+    if (d == 2.5) r += 1;
+    auto s = add("ab", "cd");
+    if (s == "abcd" && s.size == 4) r += 1;
+    double xs[2]; xs[0] = 1.25; xs[1] = 0;
+    auto f = first(xs);
+    if (f == 1.25) r += 1;
+    auto l = add<long>(3, 4);
+    if (l == 7 && sizeof(l) == 8) r += 1;
+    if (twice(id(1.5)) == 3.0) r += 1;
+    return r == 5 ? 42 : r;
+}

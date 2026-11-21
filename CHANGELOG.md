@@ -115,6 +115,9 @@
   non-null pointer or a present `Option`, else gives the zero value of its
   result (`None` for an `Option`); the arguments are evaluated only when it
   is called.
+- A generic function's call has the result type its type arguments give: it
+  was taken for an `int` (`auto d = id(2.5)` was 2, and `std::Println` read a
+  string result as a number).
 - A bare variant constructor builds the enum its context expects: `Some(x)`
   into an `Option<string>` built whichever `Option` instance was registered
   first (`Option<i64>`) and crashed on reading it.

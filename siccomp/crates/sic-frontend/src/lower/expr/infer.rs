@@ -5,6 +5,32 @@ use super::super::func::{FuncCtx, LookupResult};
 use super::*;
 
 impl<'m> FuncCtx<'m> {
+    /// The result type of a call of the generic function `name` (sic.md
+    /// §"Generics"), with the type arguments inferred from `args` or given as
+    /// `explicit`.
+    pub(crate) fn generic_call_type(&self, name: &str, args: &[Expr], explicit: Option<&[ast::QualType]>) -> Option<Type> {
+        let Some(ast::Decl::Func { type_params, params, ret_ty, .. }) = self.lowerer.generic_fn_defs.get(name) else { return None };
+        let ps = self.ptr_size();
+        let mut subst: sic_ir::fast_hash::HashMap<String, Type> = sic_ir::fast_hash::HashMap::default();
+        match explicit {
+            Some(ex) => for (p, q) in type_params.iter().zip(ex) {
+                subst.insert(p.clone(), super::super::types::lower_type(q, &self.lowerer.struct_types, ps).ok()?);
+            },
+            None => {
+                let set: sic_ir::fast_hash::HashSet<String> = type_params.iter().cloned().collect();
+                for (p, a) in params.iter().zip(args) {
+                    let at = self.infer_expr_type(a).ok()?;
+                    super::super::unify_type(&p.ty.ty, &at, &set, &mut subst, ps).ok()?;
+                }
+            }
+        }
+        if type_params.iter().any(|p| !subst.contains_key(p)) { return None; }
+        let mut named = self.lowerer.struct_types.clone();
+        for (p, t) in subst { named.insert(p, t); }
+        let r = super::super::types::lower_type(ret_ty, &named, ps).ok()?;
+        Some(r)
+    }
+
     /// The type of a C23 `auto` / GNU `__auto_type` variable: its initializer's
     /// after the usual decay, so an array/function initializer gives a pointer.
     pub fn infer_auto_type(&self, init: &Expr) -> Result<Type> {
@@ -386,6 +412,22 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
+                // A generic function's call (sic.md §"Generics"): its result type
+                // under the type arguments the call implies (or names). It was
+                // taken for an `int`.
+                if self.is_sic() {
+                    let generic = match &func.kind {
+                        ExprKind::Ident(name) if self.lowerer.generic_fn_defs.contains_key(name)
+                            && !matches!(self.lookup(name), Some(LookupResult::Local(..)) | Some(LookupResult::Global(..))) =>
+                            Some((name, None)),
+                        ExprKind::GenericRef { name, type_args } if self.lowerer.generic_fn_defs.contains_key(name) =>
+                            Some((name, Some(type_args.as_slice()))),
+                        _ => None,
+                    };
+                    if let Some((name, explicit)) = generic {
+                        if let Some(t) = self.generic_call_type(name, args, explicit) { return Ok(t); }
+                    }
+                }
                 // `base?.method(…)`: the method's result.
                 if let ExprKind::OptField { base, name } = &func.kind {
                     if self.is_sic() { return self.opt_call_type(base, name, &expr.span); }
