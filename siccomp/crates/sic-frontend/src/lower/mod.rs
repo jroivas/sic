@@ -3606,11 +3606,11 @@ impl Lowerer {
     /// Create an internal global backing a function-scope `static` local, and
     /// return its type and ref. Uses the same constant-initializer serialization
     /// as file-scope globals; the caller binds the local name to this global.
-    fn add_static_local_global(&mut self, name: String, d: &Declarator, mut ir_ty: Type) -> Result<(Type, GlobalRef)> {
+    fn add_static_local_global(&mut self, name: String, d: &Declarator, mut ir_ty: Type, thread_local: bool) -> Result<(Type, GlobalRef)> {
         self.note_data_section(&name, d);
         // Reserved first: the initializer may name the variable itself.
         let gref = self.module.add_global(Global { name: name.clone(), ty: ir_ty.clone(), init: None,
-            linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local: false, align: None });
+            linkage: Linkage::Internal, constant: type_is_const(&d.ty), thread_local, align: None });
         self.scoped_statics.insert(d.name.clone(), (ir_ty.clone(), gref));
         self.global_init_unserializable = false;
         let declared_ty = ir_ty.clone();

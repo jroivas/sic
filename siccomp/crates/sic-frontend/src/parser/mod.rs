@@ -3205,6 +3205,9 @@ impl Parser {
     fn parse_local_decl(&mut self) -> Result<Decl> {
         let sp = self.span();
         let (base_ty, storage) = self.parse_decl_specifiers()?;
+        // `static __thread` / `_Thread_local` (it was dropped: one variable for
+        // every thread).
+        let thread_local = std::mem::take(&mut self.pending_thread_local);
 
         if let Some(StorageClass::Typedef) = storage {
             return self.parse_typedef(base_ty, sp);
@@ -3279,7 +3282,7 @@ impl Parser {
             if !self.eat(TokenKind::Comma) { break; }
         }
         self.expect_semi("the declaration")?;
-        Ok(Decl::Var { base_ty, declarators, weak: false, thread_local: false, span: sp })
+        Ok(Decl::Var { base_ty, declarators, weak: false, thread_local, span: sp })
     }
 
     // ─── Expressions ──────────────────────────────────────────────────────────

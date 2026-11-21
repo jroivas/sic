@@ -50,6 +50,8 @@
 
 ### C
 
+- A block-scope `static __thread` / `_Thread_local` variable is one per thread
+  (every thread shared one).
 - **`_Complex`** types: imaginary constants, arithmetic (libgcc's `__mulXc3` and
   `__divXc3`, as GCC), conversions, `__real__`/`__imag__`, `__builtin_complex`,
   constant initializers, and the System V calling convention, including

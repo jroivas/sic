@@ -3017,7 +3017,7 @@ impl<'m> FuncCtx<'m> {
             Decl::StaticAssert { cond, msg, span } => {
                 if let Some(cond) = self.subst_scoped_consts(cond) { self.lowerer.check_static_assert(&cond, msg, span)?; }
             }
-            Decl::Var { base_ty, declarators, .. } => {
+            Decl::Var { base_ty, declarators, thread_local, .. } => {
                 match &self.resolve_typeof(&base_ty.ty)? {
                     AstType::Struct(s) => {
                         self.lowerer.register_struct_type_from_def(s)?;
@@ -3093,7 +3093,8 @@ impl<'m> FuncCtx<'m> {
                         // The size of a local is a constant, which only this scope knows.
                         let mut scoped = d.clone();
                         if let Some(i) = &mut scoped.init { self.subst_scoped_init(i); }
-                        let added = self.lowerer.add_static_local_global(gname, &scoped, ty);
+                        // `static __thread`: one per thread, as at file scope.
+                        let added = self.lowerer.add_static_local_global(gname, &scoped, ty, *thread_local);
                         self.lowerer.scoped_fn_name = None;
                         super::types::set_local_var_types(HashMap::default());
                         self.lowerer.scoped_statics.clear();
