@@ -177,7 +177,7 @@ pub(crate) fn is_dynamic_tuple(t: &Type) -> bool {
 }
 
 pub(crate) fn is_fresh_struct_expr(e: &Expr) -> bool {
-    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. })
+    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. } | ExprKind::Elvis { .. })
 }
 
 fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
@@ -997,7 +997,7 @@ impl<'m> FuncCtx<'m> {
     /// copy of a still-live variable). A guard/match binding of such a payload
     /// adopts it ([`Self::adopt_payload`]); a binding from a named enum variable
     /// stays a borrow of that variable's storage.
-    fn is_owned_temporary(&self, e: &Expr) -> bool {
+    pub(crate) fn is_owned_temporary(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
             _ => false,

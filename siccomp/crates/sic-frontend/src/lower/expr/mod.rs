@@ -7187,22 +7187,30 @@ impl<'m> FuncCtx<'m> {
         let is_container = self.is_sic() && (super::types::is_list(&ty)
             || super::types::is_dict(&ty) || super::types::is_set(&ty));
 
+        // A `string` or managed-struct temporary of an arm (`c ? len(mk()) : 0`)
+        // registers its release in the arm's own scope, as `&&`'s right operand
+        // does: at the enclosing scope's exit the arm not taken left it
+        // uninitialized.
         self.switch_to_block(then_bb);
+        self.enter_scope();
         let tmark = self.temp_mark();
         let tv = self.lower_expr(then)?;
         let tv = self.coerce(tv, &ty)?;
         if is_container { self.container_retain(tv.clone(), &ty)?; }
         if free_arm_temps { self.flush_temps_from(tmark); }
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
+        self.exit_scope();
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(else_bb);
+        self.enter_scope();
         let emark = self.temp_mark();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
         if is_container { self.container_retain(ev.clone(), &ty)?; }
         if free_arm_temps { self.flush_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
+        self.exit_scope();
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(merge_bb);
@@ -7263,13 +7271,17 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Store { val: tv, ptr: Val::Local(result_ptr) });
         self.set_terminator(Terminator::Jump(merge_bb));
 
+        // The right side runs on one path only: its temporaries are released
+        // there (see the ternary).
         self.switch_to_block(else_bb);
+        self.enter_scope();
         let emark = self.temp_mark();
         let ev = self.lower_expr(else_)?;
         let ev = self.coerce(ev, &ty)?;
         if is_container { self.container_retain(ev.clone(), &ty)?; }
         if is_container { self.flush_temps_from(emark); }
         self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
+        self.exit_scope();
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(merge_bb);
@@ -7301,6 +7313,11 @@ impl<'m> FuncCtx<'m> {
         let _ = ename;
         let pty = present.payload.clone().unwrap();
         let ptr = self.lower_aggregate_ptr(cond)?;
+        // A call's Option owns its payload, and the result is a copy: release
+        // it (`os() ?: "none"` leaked the string).
+        if self.is_owned_temporary(cond) {
+            self.register_scope_exit(super::func::Cleanup::EnumRelease { addr: ptr.clone(), ty: sty.clone() });
+        }
         let tag = self.load_enum_tag(ptr.clone(), sty, &sp)?;
         let present_bool = self.alloc_val();
         self.push_instr(Instr::Cmp { dest: present_bool, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(present.tag), ty: Type::i32() });
@@ -7312,14 +7329,24 @@ impl<'m> FuncCtx<'m> {
         let merge_bb = self.new_block_after_current();
         self.set_terminator(Terminator::CondJump { cond: Val::Local(present_bool), then_bb, else_bb });
 
-        // Present: copy out the payload (borrowed — scalars loaded, aggregates /
-        // strings memcopied). The result is transient (used in-statement).
+        // A `string` or managed-struct result is a temporary of its own, as a
+        // ternary's: each path retains what it copies in (the default may be a
+        // temporary released in its arm, `o ?: mk()`), and the result is
+        // released at scope exit unless a binding takes it.
+        let is_str = self.is_sic() && super::types::is_sic_string(&pty);
+        let is_managed = self.is_sic() && !is_str && self.struct_has_dtor(&pty);
+
+        // Present: copy out the payload (scalars loaded, aggregates / strings
+        // memcopied).
         self.switch_to_block(then_bb);
         let data = self.enum_data_ptr(ptr.clone(), sty, &sp)?;
-        if super::types::is_sic_string(&pty) || matches!(pty, Type::Struct(_) | Type::Union(_)) {
+        if is_str || matches!(pty, Type::Struct(_) | Type::Union(_)) {
             let size = pty.size_of(self.ptr_size());
             let align = pty.align_of(self.ptr_size());
+            if is_managed { self.share_counted_at(&data, &pty)?; }
             self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src: data, size, align });
+            if is_str { self.retain_string_at(&Val::Local(result_ptr))?; }
+            if is_managed { self.retain_struct_owned_fields(Val::Local(result_ptr), &pty)?; }
         } else {
             let d = self.alloc_val();
             self.push_instr(Instr::Load { dest: d, ptr: data, ty: pty.clone() });
@@ -7327,10 +7354,13 @@ impl<'m> FuncCtx<'m> {
         }
         self.set_terminator(Terminator::Jump(merge_bb));
 
-        // Absent: the default expression. A `string` payload wraps a bare
+        // Absent: the default expression, whose temporaries are released here,
+        // on the one path that made them. A `string` payload wraps a bare
         // `char*`/literal default into a `{data,size,rc}` descriptor.
         self.switch_to_block(else_bb);
-        if super::types::is_sic_string(&pty) {
+        self.enter_scope();
+        let emark = self.temp_mark();
+        if is_str {
             let ev = self.lower_expr(else_)?;
             let vt = self.val_type(&ev);
             let is_str = super::types::is_sic_string(&vt)
@@ -7339,14 +7369,28 @@ impl<'m> FuncCtx<'m> {
             let size = pty.size_of(self.ptr_size());
             let align = pty.align_of(self.ptr_size());
             self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src, size, align });
+            self.retain_string_at(&Val::Local(result_ptr))?;
+        } else if is_managed {
+            let ep = self.lower_aggregate_ptr(else_)?;
+            let size = pty.size_of(self.ptr_size());
+            let align = pty.align_of(self.ptr_size());
+            self.share_counted_at(&ep, &pty)?;
+            self.push_instr(Instr::MemCopy { dst: Val::Local(result_ptr), src: ep, size, align });
+            self.retain_struct_owned_fields(Val::Local(result_ptr), &pty)?;
         } else {
             let ev = self.lower_expr(else_)?;
             let ev = self.coerce(ev, &pty)?;
             self.push_instr(Instr::Store { val: ev, ptr: Val::Local(result_ptr) });
         }
+        self.flush_temps_from(emark);
+        self.exit_scope();
         self.set_terminator(Terminator::Jump(merge_bb));
 
         self.switch_to_block(merge_bb);
+        if is_str {
+            self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(result_ptr) });
+        }
+        if is_managed { self.register_struct_temp(&Val::Local(result_ptr), &pty); }
         // A `string`/aggregate rvalue is the POINTER to its storage (like a compound
         // literal); a scalar is the loaded value.
         if super::types::is_sic_string(&pty) || matches!(pty, Type::Struct(_) | Type::Union(_)) {
@@ -7385,6 +7429,10 @@ impl<'m> FuncCtx<'m> {
                 sp.file.clone(), sp.line, sp.col))?;
             let pty = pres.payload.clone().unwrap();
             let ptr = self.lower_aggregate_ptr(base)?;
+            // A call's Option is a temporary that owns its payload (see the elvis).
+            if self.is_owned_temporary(base) {
+                self.register_scope_exit(super::func::Cleanup::EnumRelease { addr: ptr.clone(), ty: bty.clone() });
+            }
             let tag = self.load_enum_tag(ptr.clone(), &bty, sp)?;
             let pb = self.alloc_val();
             self.push_instr(Instr::Cmp { dest: pb, op: CmpOp::IEq, lhs: tag, rhs: Constant::int(pres.tag), ty: Type::i32() });

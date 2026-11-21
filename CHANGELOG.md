@@ -109,6 +109,13 @@
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a
   container's handle.
+- A bare variant constructor builds the enum its context expects: `Some(x)`
+  into an `Option<string>` built whichever `Option` instance was registered
+  first (`Option<i64>`) and crashed on reading it.
+- A temporary made in one arm of `?:`, or on the elvis `?:`'s right side, is
+  released in that arm: when the other arm ran, a string was released
+  uninitialized (a crash) and a struct's destructor ran on garbage. A call's
+  `Option` used by `?:` or `?.` is released (it leaked its payload).
 - A reference-counted struct gets its count at its first copy: one never
   copied allocates nothing for it (binarytrees made twice the allocations
   of C).
