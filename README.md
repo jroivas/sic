@@ -40,6 +40,10 @@ That is just a wrapper around `cargo`; you can also build the compiler alone:
 
 The binary lands at `siccomp/target/release/sic` (or `.../debug/sic`).
 
+Release packages (tarballs, `.deb`, `.rpm` for Ubuntu 24.04/26.04 and Fedora 43)
+are built in containers by `release/release.sh` from a tag or any commit; see
+[release/README.md](release/README.md).
+
 ## Usage
 
     sic hello.c   -o hello       # compile C and link a binary
