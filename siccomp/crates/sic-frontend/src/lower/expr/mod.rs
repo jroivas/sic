@@ -7469,6 +7469,169 @@ impl<'m> FuncCtx<'m> {
         Ok(rhs_val)
     }
 
+    /// The struct method `base?.name(…)` calls (sic.md §"Safe access"): its
+    /// mangled function and the receiver's struct type. `base` is a pointer to
+    /// a struct or an Option/Result whose present payload is one.
+    pub(crate) fn opt_call_method(&self, base: &Expr, name: &str, sp: &crate::lexer::Span) -> Result<(String, Type)> {
+        let bty = self.infer_expr_type(base)?;
+        let recv = match &bty {
+            Type::Pointer(p) => Some(super::types::resolve_aggregate(p, &self.lowerer.struct_types)),
+            t if self.is_tagged_enum_struct(t) => self.enum_present_variant(t).and_then(|(_, v)| v.payload),
+            _ => None,
+        };
+        let Some(recv) = recv else {
+            return Err(CompileError::at(
+                "`?.` requires an Option/Result or a pointer on the left".to_string(),
+                sp.file.clone(), sp.line, sp.col));
+        };
+        let sname = match &recv { Type::Struct(st) => st.name.clone(), _ => None };
+        match sname.as_ref().and_then(|s| self.lowerer.struct_methods.get(&(s.clone(), name.to_string()))) {
+            Some(m) => Ok((m.clone(), recv)),
+            None => Err(CompileError::at(match sname {
+                Some(s) => format!("`?.{}()`: struct `{}` has no method `{}`", name, s, name),
+                None => format!("`?.{}()` calls a struct's method; the value here is not a struct", name),
+            }, sp.file.clone(), sp.line, sp.col)),
+        }
+    }
+
+    /// The type `base?.name(…)` has: the method's result type.
+    pub(crate) fn opt_call_type(&self, base: &Expr, name: &str, sp: &crate::lexer::Span) -> Result<Type> {
+        let (mangled, _) = self.opt_call_method(base, name, sp)?;
+        match self.lowerer.module.func_ref_by_name(&mangled) {
+            Some(f) => Ok(self.lowerer.module.func_sig(f).ret.clone()),
+            None => Ok(Type::i32()),
+        }
+    }
+
+    /// sic `base?.name(args)` (sic.md §"Safe access"): when `base` is a non-null
+    /// pointer or a present Option/Result, call the method on it; else the zero
+    /// value of its result type (`None` for an Option). The arguments are
+    /// evaluated only when the method is called, and the call's temporaries are
+    /// released on that path. A result that owns something (a `string`, a
+    /// struct with a destructor, a container) is a temporary of its own, as a
+    /// ternary's is.
+    pub(crate) fn lower_opt_call(&mut self, base: &Expr, name: &str, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let (_, recv_ty) = self.opt_call_method(base, name, sp)?;
+        let rty = self.opt_call_type(base, name, sp)?;
+        let (present, recv, _) = self.opt_field_target(base, sp)?;
+        // The receiver, in a hidden pointer local the call names, so that the
+        // call goes through the ordinary method lowering (arguments, defaults,
+        // the sret ABI).
+        let pty = Type::Pointer(Box::new(recv_ty));
+        let rslot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: rslot, ty: pty.clone(), align: None });
+        self.push_instr(Instr::Store { val: recv, ptr: Val::Local(rslot) });
+        let hidden = format!("__sic_optrecv{}", rslot.0);
+        self.define_local(hidden.clone(), pty, rslot);
+        let callee = Expr::new(ExprKind::Field {
+            base: Box::new(Expr::new(ExprKind::Ident(hidden), sp.clone())),
+            name: name.to_string(),
+        }, sp.clone());
+        let call = Expr::new(ExprKind::Call { func: Box::new(callee), args: args.to_vec() }, sp.clone());
+
+        let unsupported = super::types::is_tuple(&rty) || super::types::is_any(&rty)
+            || super::types::is_bigint(&rty) || super::types::is_fixed(&rty)
+            || super::types::is_task(&rty) || super::types::is_closure(&rty);
+        if self.is_sic() && unsupported {
+            return Err(CompileError::at(format!(
+                "`?.{}()`: a method returning this type cannot be called through `?.`; test the receiver first",
+                name), sp.file.clone(), sp.line, sp.col));
+        }
+        let is_enum = self.is_tagged_enum_struct(&rty);
+        let none_variant = if is_enum {
+            let Type::Struct(st) = &rty else { unreachable!() };
+            let ename = st.name.clone().unwrap_or_default();
+            let v = self.lowerer.enum_defs.get(&ename)
+                .and_then(|info| info.variants.iter().find(|v| v.payload.is_none()).map(|v| v.name.clone()));
+            match v {
+                Some(v) => Some((ename, v)),
+                None => return Err(CompileError::at(format!(
+                    "`?.{}()` returns `{}`, which has no variant without a value to stand for a missing receiver",
+                    name, ename), sp.file.clone(), sp.line, sp.col)),
+            }
+        } else { None };
+        let is_str = self.is_sic() && super::types::is_sic_string(&rty);
+        let is_managed = self.is_sic() && !is_enum && self.struct_has_dtor(&rty);
+        let is_container = self.is_sic() && (super::types::is_list(&rty)
+            || super::types::is_dict(&rty) || super::types::is_set(&rty));
+        let is_agg = matches!(rty, Type::Struct(_) | Type::Union(_));
+
+        let then_bb = self.new_block_after_current();
+        let else_bb = self.new_block_after_current();
+        let merge_bb = self.new_block_after_current();
+        let slot = if matches!(rty, Type::Void) { None } else {
+            let s = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: s, ty: rty.clone(), align: None });
+            Some(s)
+        };
+        self.set_terminator(Terminator::CondJump { cond: present, then_bb, else_bb });
+
+        // Present: the call, in a scope of its own.
+        self.switch_to_block(then_bb);
+        self.enter_scope();
+        let mark = self.temp_mark();
+        self.last_struct_temp = None;
+        match slot {
+            None => { self.lower_expr(&call)?; }
+            Some(s) if is_agg => {
+                let size = rty.size_of(self.ptr_size());
+                let align = rty.align_of(self.ptr_size());
+                let p = self.lower_aggregate_ptr(&call)?;
+                if is_managed {
+                    if let Some(t) = self.last_struct_temp.take() { self.take_struct_temp(&t); }
+                }
+                // A managed struct or an Option moves out of the call's
+                // temporary (an Option is adopted by its consumer); a string
+                // is retained here, and the call's own released with the scope.
+                self.push_instr(Instr::MemCopy { dst: Val::Local(s), src: p, size, align });
+                if is_str { self.retain_string_at(&Val::Local(s))?; }
+            }
+            Some(s) => {
+                let v = self.lower_expr(&call)?;
+                let v = self.coerce(v, &rty)?;
+                if is_container { self.container_retain(v.clone(), &rty)?; }
+                self.push_instr(Instr::Store { val: v, ptr: Val::Local(s) });
+            }
+        }
+        self.flush_temps_from(mark);
+        self.exit_scope();
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        // Absent: the zero value, or the Option's `None`.
+        self.switch_to_block(else_bb);
+        if let Some(s) = slot {
+            if let Some((ename, v)) = &none_variant {
+                let n = self.construct_enum(ename, v, &[], sp)?;
+                let size = rty.size_of(self.ptr_size());
+                self.push_instr(Instr::MemCopy { dst: Val::Local(s), src: n, size, align: rty.align_of(self.ptr_size()) });
+            } else if is_agg {
+                let size = rty.size_of(self.ptr_size());
+                self.push_instr(Instr::MemSet { dst: Val::Local(s), val: Constant::zero(), size, align: rty.align_of(self.ptr_size()) });
+            } else {
+                let z = self.coerce(Constant::zero(), &rty)?;
+                self.push_instr(Instr::Store { val: z, ptr: Val::Local(s) });
+            }
+        }
+        self.set_terminator(Terminator::Jump(merge_bb));
+
+        self.switch_to_block(merge_bb);
+        let Some(s) = slot else { return Ok(Constant::zero()) };
+        if is_agg {
+            if is_str {
+                self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(s) });
+            }
+            if is_managed { self.register_struct_temp(&Val::Local(s), &rty); }
+            self.val_types.insert(s.0, rty.clone());
+            return Ok(Val::Local(s));
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(s), ty: rty.clone() });
+        self.val_types.insert(dest.0, rty.clone());
+        // A container result holds one reference, which `lower_expr` records as
+        // a producer, as for any call that is not method syntax.
+        Ok(Val::Local(dest))
+    }
+
     fn lower_opt_field(&mut self, base: &Expr, field: &str, sp: &crate::lexer::Span) -> Result<Val> {
         let (present, struct_ptr, struct_ty) = self.opt_field_target(base, sp)?;
         let fty = self.opt_field_type(&struct_ty, field).ok_or_else(|| CompileError::at(

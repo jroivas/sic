@@ -144,6 +144,12 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // `base?.method(args)` (sic.md §"Safe access").
+        if self.is_sic() {
+            if let ExprKind::OptField { base, name } = &func_expr.kind {
+                return self.lower_opt_call(base, name, args, sp);
+            }
+        }
         // A Rust generic's associated function: `m::Map<i64, string>::new()`, or
         // `m::Map::new()` where the target type is that instance — the call goes
         // to the instance (`m::hash_map::HashMap__i64__String::new`).

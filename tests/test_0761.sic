@@ -1,0 +1,56 @@
+// `base?.method(args)` (sic.md §"Safe access"): the method is called when the
+// base is a non-null pointer or a present Option, else the result is its
+// type's zero value (`None` for an Option) and the arguments are not
+// evaluated. Owned results (strings, managed structs, lists) are counted
+// right whichever path ran. Returns 42.
+import std;
+import std::*;
+
+// A heap string (a concatenation), without calling into libstd.
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+int dtors = 0;
+int calls = 0;
+struct R { string s; ~R() { dtors++; } };
+struct User {
+    string n;
+    int age;
+    list<int> xs;
+    string name(User *self) { return self.n; }
+    string greet(User *self, string who) { return who + "/" + self.n; }
+    int get_age(User *self) { return self.age; }
+    void bump(User *self, int by) { self.age += by; }
+    Option<string> nick(User *self) { if (self.age > 1) return Some("n" + self.n); return None; }
+    R res(User *self) { R r; r.s = "r" + self.n; return r; }
+    User *me(User *self) { return self; }
+    list<int> items(User *self) { return self.xs; }
+};
+string arg() { calls++; return "a" + num(calls); }
+
+int main() {
+    User *u = new User;
+    u.n = "ann" + num(1);
+    u.age = 30;
+    u.xs.add(5);
+    User *z = NULL;
+    int r = 0;
+    if (u?.name() == "ann1" && z?.name() == "") r += 1;
+    if (u?.greet(arg()) == "a1/ann1" && z?.greet(arg()) == "" && calls == 1) r += 1;
+    if (u?.get_age() == 30 && z?.get_age() == 0) r += 1;
+    u?.bump(2); z?.bump(2);
+    if (u.age == 32) r += 1;
+    if ((u?.nick() ?: "-") == "nann1" && (z?.nick() ?: "-") == "-") r += 1;
+    {
+        R a = u?.res(); R b = z?.res();
+        if (a.s == "rann1" && b.s == "") r += 1;
+    }
+    if (dtors == 2) r += 1;
+    if (u?.me()?.name() == "ann1" && z?.me()?.name() == "") r += 1;
+    list<int> l = u?.items(); list<int> m = z?.items();
+    if (l.length == 1 && m.length == 0) r += 1;
+    Option<User> ou = Some(*u);
+    Option<User> on = None;
+    if (ou?.get_age() == 32 && on?.get_age() == 0) r += 1;
+    del u;
+    return r == 10 ? 42 : r;
+}

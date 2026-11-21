@@ -386,6 +386,10 @@ impl<'m> FuncCtx<'m> {
                     .ok_or_else(|| self.unresolved_path_error(enum_name, variant, &expr.span))
             }
             ExprKind::Call { func, args } => {
+                // `base?.method(…)`: the method's result.
+                if let ExprKind::OptField { base, name } = &func.kind {
+                    if self.is_sic() { return self.opt_call_type(base, name, &expr.span); }
+                }
                 // A builtin sic lowers itself has the result type GCC gives it
                 // (`c ? __builtin_bswap64(v) : 0` was cut to 32 bits).
                 if let ExprKind::Ident(name) = &func.kind {

@@ -109,6 +109,10 @@
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a
   container's handle.
+- **`?.` method calls**: `user?.name()` calls the method when `user` is a
+  non-null pointer or a present `Option`, else gives the zero value of its
+  result (`None` for an `Option`); the arguments are evaluated only when it
+  is called.
 - A bare variant constructor builds the enum its context expects: `Some(x)`
   into an `Option<string>` built whichever `Option` instance was registered
   first (`Option<i64>`) and crashed on reading it.

@@ -8,8 +8,7 @@ compiler (Rust front end, Cranelift or LLVM back end). They are active for SIC-m
 sources (`.sic` files); the same compiler also builds ordinary C (it compiles real
 C codebases such as SQLite and QEMU). A few items remain partial or planned, noted
 inline where relevant: compile-time enforced error handling (§"Errors and exceptions"), and a cross-module generic
-template whose body calls other module functions; calling a method through `?.`,
-and swapping through a cast.
+template whose body calls other module functions, and swapping through a cast.
 
 ## Limit undefined behavior
 
@@ -861,8 +860,14 @@ For example:
     // otherwise it is the result of the "user.name()" call.
     char *username = user?.name();
 
-(Not implemented yet: calling a method through `?.`; reading and writing a field
-through `?.` works.)
+A method called through `?.` runs only when the value on the left is a non-null
+pointer or a present `Option`/`Result`; its arguments are evaluated only then.
+Otherwise the result is the zero value of the method's result type (an empty
+`string`, a zeroed struct), or `None` when the method returns an `Option`, so
+`user?.nickname() ?: "anon"` works whether `user` or its nickname is missing. A
+method returning a type with no empty value (a `Result`, a tuple, a closure, a
+`Task`, `bigint`, `fixed`, `any`) cannot be called through `?.`: test the
+receiver first.
 
 On top of these, an `else` guard runs a custom action when a value is missing — an
 `Option`/`Result` without a value, or a null pointer — or a condition is false:
