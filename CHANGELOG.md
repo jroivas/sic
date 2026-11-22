@@ -111,11 +111,6 @@
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a
   container's handle.
-- An enum owning its payload (`Option<string>`) is owned once wherever it
-  goes: a ternary of them copied its arms without a reference (a call's
-  payload leaked), a call's passed straight to a function was never released,
-  and a list or dict element was a plain copy — sharing a local's payload
-  without a reference (freed under the list) and never releasing a call's.
 - **Async functions run as tasks**: `async`/`await` used to run the function
   at once and keep its result in one 64-bit slot (a string, struct or list
   result was garbage, awaiting twice freed the task twice). Now a call makes a
@@ -126,6 +121,14 @@
   `yield_now`, `sleep(ms)` (new), `spawn`, `run`, `pending` — and its
   coroutines and async tasks share the one scheduler, which the program holds
   (a module's async functions run on it too). Each thread has its own.
+- Task stacks are registered with valgrind (its client request, a no-op
+  outside it), which took a switch to one for a frame of megabytes and
+  reported uninitialised values.
+- An enum owning its payload (`Option<string>`) is owned once wherever it
+  goes: a ternary of them copied its arms without a reference (a call's
+  payload leaked), a call's passed straight to a function was never released,
+  and a list or dict element was a plain copy — sharing a local's payload
+  without a reference (freed under the list) and never releasing a call's.
 - **`?.` method calls**: `user?.name()` calls the method when `user` is a
   non-null pointer or a present `Option`, else gives the zero value of its
   result (`None` for an `Option`); the arguments are evaluated only when it

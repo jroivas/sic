@@ -689,9 +689,6 @@ every program that uses `async`, `await`, `Task` or `art`:
         return await slow + await quick;   // both sleep at once: ~40 ms, not 45
     }
 
-Under valgrind, pass `--max-stackframe=65536` (or smaller): its default treats a
-switch to a task's stack as a huge stack frame and reports uninitialised values.
-
 # Generics
 
 Functions may be generic over one or more type parameters, written in a `<…>` list

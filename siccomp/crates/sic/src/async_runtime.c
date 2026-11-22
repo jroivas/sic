@@ -36,6 +36,7 @@ typedef struct __sic_task {
     struct __sic_task *blocked_on;   /* awaiting this task */
     long wake;                       /* asleep until this time (ns), or 0 */
     struct __sic_task *next;         /* the scheduler's ring */
+    unsigned long vg_stack;          /* the stack's valgrind id */
 } __sic_task;
 
 typedef struct __sic_sched {
@@ -82,9 +83,40 @@ __asm__(
     "    movq %r12, %rdi\n"
     "    call __sic_task_main@PLT\n"
     "    ud2\n"
-    ".size __sic_task_start, .-__sic_task_start\n");
+    ".size __sic_task_start, .-__sic_task_start\n"
+    /* A valgrind client request (`args`: the request and its arguments) and
+       its result, or 0 outside valgrind: the rotations add up to none and
+       the `xchg` does nothing, unless valgrind runs the program. */
+    ".weak __sic_valgrind_request\n"
+    ".type __sic_valgrind_request,@function\n"
+    "__sic_valgrind_request:\n"
+    "    movq %rdi, %rax\n"
+    "    xorl %edx, %edx\n"
+    "    rolq $3, %rdi\n"
+    "    rolq $13, %rdi\n"
+    "    rolq $61, %rdi\n"
+    "    rolq $51, %rdi\n"
+    "    xchgq %rbx, %rbx\n"
+    "    movq %rdx, %rax\n"
+    "    ret\n"
+    ".size __sic_valgrind_request, .-__sic_valgrind_request\n");
 extern void __sic_ctx_switch(void **from, void *to);
 extern void __sic_task_start(void);
+extern unsigned long __sic_valgrind_request(unsigned long *args);
+
+/* Tell valgrind about a task's stack (`VALGRIND_STACK_REGISTER`, request
+   0x1501), so that a switch to it is a change of stack, not a frame of
+   megabytes whose memory it takes for uninitialised; and forget it
+   (`VALGRIND_STACK_DEREGISTER`, 0x1502). */
+__attribute__((weak)) unsigned long __sic_vg_stack_register(char *lo, char *hi) {
+    unsigned long a[6] = { 0x1501, (unsigned long)lo, (unsigned long)hi, 0, 0, 0 };
+    return __sic_valgrind_request(a);
+}
+
+__attribute__((weak)) void __sic_vg_stack_deregister(unsigned long id) {
+    unsigned long a[6] = { 0x1502, id, 0, 0, 0, 0 };
+    __sic_valgrind_request(a);
+}
 
 __attribute__((weak)) __sic_sched *__sic_sched_get(void) {
     static __thread __sic_sched s;
@@ -174,7 +206,10 @@ __attribute__((weak)) void __sic_task_retire(__sic_sched *s, __sic_task *t) {
     }
     t->next = 0;
     s->live--;
-    if (t->stack) munmap(t->stack, 262144UL /* __SIC_TASK_STACK */ + 4096UL /* __SIC_TASK_GUARD */);
+    if (t->stack) {
+        __sic_vg_stack_deregister(t->vg_stack);
+        munmap(t->stack, 262144UL /* __SIC_TASK_STACK */ + 4096UL /* __SIC_TASK_GUARD */);
+    }
     t->stack = 0;
     __sic_task_release(t);
 }
@@ -187,6 +222,8 @@ __attribute__((weak)) void __sic_task_resume(__sic_sched *s, __sic_task *t) {
         if (m == (char *)-1) __sic_task_fail("sic: out of memory for a task's stack\n");
         mprotect(m, 4096UL /* __SIC_TASK_GUARD */, 0 /* PROT_NONE */);
         t->stack = m;
+        t->vg_stack = __sic_vg_stack_register(m + 4096UL /* __SIC_TASK_GUARD */,
+                                              m + 262144UL /* __SIC_TASK_STACK */ + 4096UL /* __SIC_TASK_GUARD */);
         unsigned long *sp = (unsigned long *)(m + 262144UL /* __SIC_TASK_STACK */ + 4096UL /* __SIC_TASK_GUARD */) - 10;
         sp[0] = 0x1F80UL | (0x037FUL << 32);     /* MXCSR, x87 control word */
         sp[1] = sp[2] = sp[3] = 0;               /* r15 r14 r13 */
