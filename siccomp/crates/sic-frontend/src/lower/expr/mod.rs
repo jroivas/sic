@@ -2547,7 +2547,7 @@ impl<'m> FuncCtx<'m> {
             // (or move a call's temporary in) and box it with its destructor in a
             // header, which the runtime runs before freeing (`vowned` 8). It was a
             // raw copy freed with `free`, left dangling once the source died.
-            let src = self.lower_aggregate_ptr(val)?;
+            let src = self.element_value_ptr(val, v)?;
             let bytes = v.size_of(self.ptr_size()).max(1) as i64;
             let total = self.coerce(Constant::int(bytes + 16), &Type::i64())?;
             let block = self.emit_malloc(total)?;
@@ -2585,7 +2585,7 @@ impl<'m> FuncCtx<'m> {
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
         } else if is_owned_struct {
-            let src = self.lower_aggregate_ptr(val)?;
+            let src = self.element_value_ptr(val, v)?;
             let sz = self.coerce(Constant::int(v.size_of(self.ptr_size()).max(1) as i64), &Type::i64())?;
             let heap = self.emit_malloc(sz.clone())?;
             self.emit_memcpy(heap.clone(), src, sz)?;
@@ -2653,15 +2653,24 @@ impl<'m> FuncCtx<'m> {
             }
         }
         // A struct element is boxed by pointer: a missing key / out-of-range
-        // index reads as a zeroed value (as a missing int reads 0) — it
-        // dereferenced the NULL slot.
-        if matches!(v, Type::Struct(_) | Type::Union(_)) && !self.is_tagged_enum_struct(v) {
+        // index reads as a zeroed value (as a missing int reads 0), and an
+        // enum's as its variant without a value (`None`) — it dereferenced the
+        // NULL slot.
+        if matches!(v, Type::Struct(_) | Type::Union(_)) {
             if let Some(found) = found {
                 let z = self.alloc_val();
                 self.push_instr(Instr::Alloca { dest: z, ty: v.clone(), align: None });
                 let size = v.size_of(self.ptr_size());
                 if size > 0 {
                     self.push_instr(Instr::MemSet { dst: Val::Local(z), val: Constant::zero(), size, align: v.align_of(self.ptr_size()) });
+                }
+                if self.is_tagged_enum_struct(v) {
+                    let Type::Struct(st) = v else { unreachable!() };
+                    let none = st.name.as_ref().and_then(|n| self.lowerer.enum_defs.get(n))
+                        .and_then(|i| i.variants.iter().find(|x| x.payload.is_none()).map(|x| x.tag));
+                    if let Some(tag) = none {
+                        self.build_enum_from_tag(&Val::Local(z), v, Constant::int(tag), sp)?;
+                    }
                 }
                 let sel = self.alloc_val();
                 self.push_instr(Instr::Select { dest: sel, cond: found, on_true: val, on_false: Val::Local(z), ty: Type::void_ptr() });
@@ -2670,6 +2679,24 @@ impl<'m> FuncCtx<'m> {
             }
         }
         Ok(val)
+    }
+
+    /// The address of `val` stored as an element of type `v`. A bare variant
+    /// (`l.add(None)`) is its tag: the enum value is built from it (the tag
+    /// was taken for an address).
+    fn element_value_ptr(&mut self, val: &Expr, v: &Type) -> Result<Val> {
+        if self.is_sic() && self.is_tagged_enum_struct(v) {
+            let vt = self.infer_expr_type(val).map(|t| super::types::resolve_aggregate(&t, &self.lowerer.struct_types));
+            if !matches!(&vt, Ok(t) if t == v) {
+                let tag = self.lower_expr(val)?;
+                let slot = self.alloc_val();
+                self.push_instr(Instr::Alloca { dest: slot, ty: v.clone(), align: None });
+                self.val_types.insert(slot.0, v.clone());
+                self.build_enum_from_tag(&Val::Local(slot), v, tag, &val.span)?;
+                return Ok(Val::Local(slot));
+            }
+        }
+        self.lower_aggregate_ptr(val)
     }
 
     /// `del dict[key]`: `__sic_dict_del` (frees the entry's resources).

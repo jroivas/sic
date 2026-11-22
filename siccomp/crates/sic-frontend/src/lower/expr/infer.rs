@@ -326,7 +326,9 @@ impl<'m> FuncCtx<'m> {
                     } else { None };
                     if let Some(dt) = dt {
                         if let Some((_, v)) = super::super::types::dict_kv(&dt, self.ptr_size()) {
-                            return Ok(v);
+                            // The name carries the type opaque (`Option<i32>`
+                            // with no layout, unequal to the declared one).
+                            return Ok(super::super::types::resolve_aggregate(&v, &self.lowerer.struct_types));
                         }
                     }
                     // sic `list[i]` yields the element type T (sic.md §"List").
@@ -335,7 +337,8 @@ impl<'m> FuncCtx<'m> {
                             if super::super::types::is_list(i) { Some((**i).clone()) } else { None }
                         } else { None };
                     if let Some(lt) = lt {
-                        return Ok(super::super::types::list_elem(&lt, self.ptr_size()));
+                        return Ok(super::super::types::resolve_aggregate(
+                            &super::super::types::list_elem(&lt, self.ptr_size()), &self.lowerer.struct_types));
                     }
                 }
                 // sic `va_array` element `va[i]` is an `any` (sic.md std).
@@ -484,7 +487,8 @@ impl<'m> FuncCtx<'m> {
                     if let ExprKind::Field { base, name } | ExprKind::Arrow { base, name } = &func.kind {
                         if name == "pop" {
                             if let Some(lt) = self.list_type_of(base) {
-                                return Ok(super::super::types::list_elem(&lt, self.ptr_size()));
+                                return Ok(super::super::types::resolve_aggregate(
+                                    &super::super::types::list_elem(&lt, self.ptr_size()), &self.lowerer.struct_types));
                             }
                         }
                     }

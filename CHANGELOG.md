@@ -121,6 +121,10 @@
   `yield_now`, `sleep(ms)` (new), `spawn`, `run`, `pending` — and its
   coroutines and async tasks share the one scheduler, which the program holds
   (a module's async functions run on it too). Each thread has its own.
+- An `Option` read out of a list or dict binds, assigns and iterates like any
+  other (`Option<int> x = l[0];`, `for (Option<int> o : l.values)` were
+  compile errors); a stored bare `None` no longer crashes, and a missing dict
+  key reads as `None`.
 - Task stacks are registered with valgrind (its client request, a no-op
   outside it), which took a switch to one for a frame of megabytes and
   reported uninitialised values.

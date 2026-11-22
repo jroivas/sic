@@ -1,0 +1,48 @@
+// An Option read out of a list or dict binds, assigns and iterates like any
+// Option: `Option<int> x = l[0];` was a compile error (the element's type,
+// rebuilt from the list's, had no layout and was taken for a bare tag), a
+// stored bare `None` was boxed as if its tag were an address (a crash), and a
+// missing dict key dereferenced a NULL slot (now `None`). Returns 42.
+import std::*;
+
+int made = 0;
+int dtors = 0;
+struct R { int v; ~R() { dtors++; } };
+Option<R> orr(int c) { if (c) { R r; r.v = c; made++; return Some(r); } return None; }
+Option<int> head(list<Option<int>> l) { return l[0]; }
+
+int main() {
+    int r = 0;
+    list<Option<int>> l;
+    l.add(Some(1));
+    l.add(None);
+    Option<int> x = l[0];
+    Option<int> y;
+    y = l[1];
+    if ((x ?: 0) == 1 && (y ?: 5) == 5) r += 1;
+    int s = 0;
+    for (Option<int> o : l.values) s += o ?: 10;
+    if (s == 11) r += 1;
+    l[0] = None;
+    if ((l[0] ?: 9) == 9 && (head(l) ?: 8) == 8) r += 1;
+    dict<int, Option<int>> d;
+    d[1] = Some(2);
+    d[2] = None;
+    Option<int> a = d[1];
+    Option<int> b = d[2];
+    Option<int> m = d[7];       // missing: None
+    if ((a ?: 0) == 2 && (b ?: 3) == 3 && (m ?: 4) == 4) r += 1;
+    {
+        list<Option<R>> rl;
+        rl.add(orr(5));
+        rl.add(None);
+        Option<R> p = rl[0];
+        Option<R> q = p;
+        int got = 0;
+        match (rl[0]) { Some(v): got = v.v; None: got = -1; }
+        for (Option<R> o : rl.values) { match (o) { Some(v): got += v.v; None: got += 100; } }
+        if (got == 110) r += 1;
+    }
+    if (made == 1 && dtors == 1) r += 1;
+    return r == 6 ? 42 : r;
+}
