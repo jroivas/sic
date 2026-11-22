@@ -8,9 +8,9 @@
 //! toolchain matching the triple can read the symbols and link — no compiler
 //! private blob (unlike a C++20 BMI or Rust rmeta).
 //!
-//! Format (v2):
+//! Format (v3):
 //! ```text
-//! sicmod 2
+//! sicmod 3
 //! module std
 //! triple x86_64-linux-gnu
 //! link -L/opt/sic/lib -lstd
@@ -34,14 +34,20 @@
 //! `@bits:I:W` (member I is a W-bit bit-field), `@fpacked:I` (member I is
 //! packed); a reader refuses an `@`
 //! token it does not know rather than mislay the type.
+//!
+//! A `fn` record may end in attributes after its symbol too: `@cc:win64` (v3)
+//! is a function called with the Microsoft x64 convention (`ms_abi`); without
+//! one it is System V.
 
 use sic_ir::{Type, StructType, UnionType, FunctionType, Linkage, Module};
 use crate::lower::types as ltypes;
 
 /// Current manifest format version. Bumped on any incompatible format change; a
 /// consumer hard-errors on a version it does not understand. v2 adds `struct`/
-/// `union` records and `@name` aggregate tokens (v1 was scalars + pointers only).
-pub const MANIFEST_VERSION: u32 = 2;
+/// `union` records and `@name` aggregate tokens (v1 was scalars + pointers only);
+/// v3 a function's calling convention (`@cc:win64`), which a v2 reader would
+/// ignore and call as System V.
+pub const MANIFEST_VERSION: u32 = 3;
 
 /// One exported symbol in a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +140,7 @@ impl ModuleManifest {
             // USER-FACING signature (sret stripped) — a consumer re-derives the sret
             // ABI itself; leaving it in would double the pointer.
             let mut sig = f.sig.clone();
-            if sic_ir::abi::ret_in_memory(&sig.ret, ptr_size) && !sig.params.is_empty() {
+            if sic_ir::abi::ret_in_memory_cc(&sig.ret, ptr_size, sig.cc) && !sig.params.is_empty() {
                 sig.params.remove(0);
             }
             // Every aggregate passed or returned BY VALUE must be fully described,
@@ -317,7 +323,11 @@ impl ModuleManifest {
                         else { plist.push_str(",..."); }
                     }
                     let ret = encode_type(&ft.ret).unwrap_or_else(|| "opaque".to_string());
-                    s.push_str(&format!("fn {} ({}) -> {} {}\n", e.name, plist, ret, e.symbol));
+                    let cc = match ft.cc {
+                        sic_ir::CallConv::SysV => "",
+                        sic_ir::CallConv::Win64 => " @cc:win64",
+                    };
+                    s.push_str(&format!("fn {} ({}) -> {} {}{}\n", e.name, plist, ret, e.symbol, cc));
                 }
                 _ => {
                     let ty = encode_type(&e.ty).unwrap_or_else(|| "opaque".to_string());
@@ -422,10 +432,17 @@ impl ModuleManifest {
                     }
                     let ret = decode_type(ret_tok, ptr_size, &registry)
                         .ok_or_else(|| format!("line {}: bad return type '{}'", lineno + 1, ret_tok))?;
+                    let mut cc = sic_ir::CallConv::SysV;
+                    for attr in it.by_ref() {
+                        match attr {
+                            "@cc:win64" => cc = sic_ir::CallConv::Win64,
+                            _ => return Err(format!("line {}: unknown fn attribute '{}'", lineno + 1, attr)),
+                        }
+                    }
                     exports.push(Export {
                         name: name.to_string(),
                         symbol: symbol.to_string(),
-                        ty: Type::Function(Box::new(FunctionType { cc: Default::default(), ret, params, variadic })),
+                        ty: Type::Function(Box::new(FunctionType { cc, ret, params, variadic })),
                     });
                 }
                 "var" => {
@@ -912,6 +929,15 @@ mod tests {
                         variadic: false,
                     })),
                 },
+                // `ms_abi`: the calling convention survives the round trip.
+                Export {
+                    name: "efi".into(), symbol: "math_efi".into(),
+                    ty: Type::Function(Box::new(FunctionType { cc: sic_ir::CallConv::Win64,
+                        ret: Type::Int { bits: 64, signed: true },
+                        params: vec![Type::void_ptr(), Type::Int { bits: 64, signed: true }],
+                        variadic: true,
+                    })),
+                },
                 Export {
                     name: "meaning".into(), symbol: "math_meaning".into(),
                     ty: Type::Int { bits: 32, signed: true },
@@ -931,8 +957,13 @@ mod tests {
             fn_defaults: vec![],
         };
         let text = m.to_text();
+        assert!(text.contains(" math_efi @cc:win64\n"), "{text}");
+        assert!(!text.contains(" math_sq @"), "{text}");
         let back = ModuleManifest::parse(&text, 8).unwrap();
         assert_eq!(m, back);
+        // A reader refuses a `fn` attribute it does not know.
+        let bad = text.replace("@cc:win64", "@cc:vectorcall");
+        assert!(ModuleManifest::parse(&bad, 8).is_err());
     }
 
     #[test]

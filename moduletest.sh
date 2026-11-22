@@ -194,6 +194,30 @@ else
     bad "c-consumer" "cc failed: $(cat err)"
 fi
 
+# 7b. An `ms_abi` export keeps its calling convention: in the manifest
+#     (`@cc:win64`) for a SIC importer, and in the generated C header. Both
+#     called it as System V.
+mkdir -p efim
+cat > efim/efim.sic <<'EOF'
+module efim;
+__attribute__((ms_abi)) long sub3(long a, long b, long c) { return a - b - c; }
+EOF
+cat > useefim.sic <<'EOF'
+import efim;
+int main(){ return (int)efim.sub3(50, 5, 3); }
+EOF
+cat > cefim.c <<'EOF'
+#include "module_efim.h"
+int main(void){ return (int)efim_sub3(50, 5, 3); }
+EOF
+if "$SIC" --emit-module efim 2>err && "$SIC" useefim.sic -Iefim -o useefim 2>>err \
+    && "$CC" cefim.c -Iefim -Lefim -Wl,-rpath,"$WORK/efim" -lefim -o cefim 2>>err; then
+    ./useefim; a=$?; ./cefim; b=$?
+    [ "$a" -eq 42 ] && [ "$b" -eq 42 ] && ok "ms-abi-export" || bad "ms-abi-export" "expected 42 42, got $a $b"
+else
+    bad "ms-abi-export" "$(head -3 err)"
+fi
+
 # 8. The `std` library (`import std;`): an ordinary SIC module, built with the
 #    compiler (`--emit-module`) and resolved through its manifest via the module
 #    search path (`$SIC_MODULE_PATH`) — no blessed special case. `std.Fmt`/`Print`/

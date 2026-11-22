@@ -98,7 +98,7 @@ impl<'m> FuncCtx<'m> {
         // a hidden pointer as param 0 (the frontend prepends it for local functions).
         // The stored export type is user-facing (no sret), so prepend it here so the
         // extern's cranelift signature matches the definition across objects.
-        if super::super::ret_is_sret(&ft.ret, self.ptr_size()) {
+        if super::super::sig_is_sret(&ft, self.ptr_size()) {
             ft.params.insert(0, Type::Pointer(Box::new(ft.ret.clone())));
         }
         Ok(self.lowerer.module.func_ref_by_name(symbol).unwrap_or_else(|| {

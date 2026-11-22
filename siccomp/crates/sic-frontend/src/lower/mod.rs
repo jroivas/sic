@@ -1225,7 +1225,7 @@ impl Lowerer {
                     let mut ft = (**ft).clone();
                     // An aggregate return takes the hidden sret pointer first, as
                     // the definition does (see `module_extern`).
-                    if ret_is_sret(&ft.ret, self.ptr_size) {
+                    if sig_is_sret(&ft, self.ptr_size) {
                         ft.params.insert(0, Type::Pointer(Box::new(ft.ret.clone())));
                     }
                     self.module.add_extern(ExternFunc { name: sym.clone(), sig: ft });

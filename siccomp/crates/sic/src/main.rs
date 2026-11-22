@@ -1808,7 +1808,12 @@ fn c_header_for(manifest: &sic_frontend::ModuleManifest) -> String {
                     if ft.variadic { ps.push("...".to_string()); }
                     ps.join(", ")
                 };
-                s.push_str(&format!("{} {}({});\n", c_type_spell(&ft.ret), e.symbol, params));
+                // Its calling convention, as GCC and Clang spell it.
+                let cc = match ft.cc {
+                    sic_ir::CallConv::SysV => "",
+                    sic_ir::CallConv::Win64 => "__attribute__((ms_abi)) ",
+                };
+                s.push_str(&format!("{}{} {}({});\n", cc, c_type_spell(&ft.ret), e.symbol, params));
             }
             other => {
                 s.push_str(&format!("extern {} {};\n", c_type_spell(other), e.symbol));
