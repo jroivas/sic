@@ -24,8 +24,8 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 5. [Memory & ownership](memory-and-ownership.md) — the move/borrow model,
    reference counting, copy-on-escape, `defer`, `new`/`del`, and `@` references.
 6. [Enums & pattern matching](enums-and-matching.md) — tagged enums, generics,
-   `Option`/`Result`, `match`, `bitfield` flag sets, the tightened `switch`, and
-   `?:` / `?.` / `else` guards.
+   generic functions, `Option`/`Result`, `match`, `bitfield` flag sets, the
+   tightened `switch`, and `?:` / `?.` (fields and method calls) / `else` guards.
 7. [RTTI & dynamic values](rtti-and-dynamic.md) — `type(x)`/`typeid`, the `any`
    box, `va_array` varargs, and `match (type(x))`.
 8. [Arrays & tuples](arrays-and-tuples.md) — `.length`/`.size`, array/tuple
@@ -42,19 +42,22 @@ unchanged; the improvements are opt-in and live in `.sic` files.
 13. [Atomics](atomics.md) — the `atomic` qualifier, lock-free RMW ops,
     `.swap`/`.cas`, atomic pointers and struct fields, and the `fence;` /
     `barrier;` memory barriers.
-14. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
+14. [Async](async.md) — `async` functions and `Task<T>`, `await`, the
+    cooperative scheduler (a stack per task), and the `art` module (`sleep`,
+    `yield_now`, `spawn`, `run`).
+15. [Modules](modules.md) — `module`/`import` (namespaced, selective, `::*`),
     namespaces, building a module, chain-loaded dependencies, and the `.smod`
     manifest.
-15. [Rust crates](rust-crates.md) — `cargo sic add <crate>`: Rust crates as SIC
+16. [Rust crates](rust-crates.md) — `cargo sic add <crate>`: Rust crates as SIC
     modules — the project and `sic.toml`, generated bindings, generic instances,
     hand-written wrappers, type mapping, panics.
-16. [Standard library](standard-library.md) — `import std;`,
+17. [Standard library](standard-library.md) — `import std;`,
     `Fmt`/`Print`/`Println`, `std::file`, `std::buffer` and `std::thread`.
-17. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
+18. [Writing idiomatic SIC — for LLMs](sic-for-llms.md) — short C/Rust → SIC
     conversion guide with ✗/✓ examples.
-18. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
+19. [Style](style.md) — the default layout (K&R braces, spacing, `match` arms,
     wrapping, comments): what `sic-fmt` produces.
-19. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
+20. [Back ends](backends.md) — Cranelift and LLVM: building them in, the default,
     `-fbackend=`, how they differ, and `-m32`.
 
 ## Design goals

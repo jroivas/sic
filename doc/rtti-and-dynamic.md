@@ -54,7 +54,7 @@ You rarely compare `.kind` by number — use [`match (type(x))`](#match-typex--d
 
 ## `any` — a boxed dynamic value
 
-`any` is a 16-byte box `{ type, value }` holding a value of any type together with
+`any` is a 32-byte box `{ type, value }` holding a value of any type together with
 its runtime type. Box implicitly or with a cast; read the dynamic type with
 `type()`; recover the value by casting *or* by assigning into a typed slot — an
 `any` **converts implicitly** to the target type (no cast needed) at
@@ -81,6 +81,21 @@ with what it holds (a non-numeric mismatch, e.g. reading a boxed string as an
 `int`, still just reinterprets the slot).
 
 `type(x)` on an `any` is **dynamic** — it reads the boxed type, not `any` itself.
+
+An `any` **holds its value**: a number, pointer or handle as itself, a `string`'s
+descriptor or a struct of up to 24 bytes inside the box, a bigger struct as its own
+copy. One that a variable, field or container keeps owns what the value owns (a
+string's bytes, a struct's destructor), like any other copy — so an `any` can be
+returned, stored in a struct or a `list<any>`, or be an async result, and outlive
+the value it was made from:
+
+```sic
+any word(int i) { any a = std::Fmt("w{}", i); return a; }   // the string goes with it
+any seven() { return 7; }                              // boxed on return
+```
+
+The `any`s made for a call's `va_array` arguments only borrow their values for the
+call.
 
 ## `va_array` — variadic arguments
 

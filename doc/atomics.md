@@ -123,4 +123,4 @@ usable as names. In C, `__atomic_thread_fence`, `__atomic_signal_fence` and
 | `atomic` integer / bool (variable or struct field) | ✅ | ✅ | ✅ | ✅ | ✗ |
 | `atomic(T *)` pointer | ✅ | ✗ | ✅ | ✅ | ✗ |
 
-Next: [standard library](standard-library.md).
+Next: [async](async.md).

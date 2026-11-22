@@ -2,9 +2,10 @@
 
 SIC has three built-in generic containers. Each is an opaque, heap-backed handle
 that is created empty on declaration, grows on demand, and is **freed
-automatically at scope exit** — you never `free` one. String and struct elements
-they hold are owned (deep-copied and reclaimed with the container); reading one
-out shares it safely.
+automatically at scope exit** — you never `free` one. The elements they hold are
+owned — a string, struct, `Option`/`Result`, `bigint`, `fixed` or `any` element is
+the container's own copy, reclaimed with it — so an element outlives the variable it
+was added from, and reading one out shares it safely.
 
 The handle is **reference-counted**, so a container can be returned from a
 function, shared through several bindings, stored inside another container, or

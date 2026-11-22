@@ -92,7 +92,29 @@ part of the `std` module: use them without declaring or importing anything.
 Values of them cross module boundaries too — a module function may return
 `Option<T>`, and the caller matches or guard-unwraps it as usual.
 `Some`/`None`/`Ok`/`Err` resolve to the right instantiation from the target type,
-so `Option<int> b = None;` and `Result::Ok(7)` just work.
+so `Option<int> b = None;`, `Option<string> s = Some(name);` and `Result::Ok(7)`
+just work.
+
+An `Option`/`Result` works as any value in a container too — read with
+`l[i]` / `d[k]`, bound, assigned, iterated with `for (Option<int> o : l.values)`;
+a missing dict key reads as `None`.
+
+### Generic functions
+
+A function generic over types is monomorphized per set of type arguments, which
+are inferred from the call's arguments or given explicitly:
+
+```sic
+T add<T>(T a, T b) { return a + b; }
+
+int    i = add(1, 2);          // add<i32>
+double d = add(1.5, 2.25);     // add<f64>
+long   l = add<long>(3, 4);    // explicit
+auto   s = add("a", "b");      // string "ab"
+```
+
+A call's type is the result type under those arguments, so `auto` and
+`std::Println` see a `double` or a `string`, not an `int`.
 
 ## Old-C-style enums
 
@@ -311,16 +333,33 @@ There's also a boolean form — `cond else <stmt>;` is `if (!cond) <stmt>` (the
 x > 0 else return EINVAL;
 ```
 
-### `?.` — null-safe field access
+### `?.` — null-safe access
 
 `base?.field` yields the field when `base` is a non-null pointer (or a present
 `Option`/`Result`), otherwise a zero value of the field type — so it chains and
-pairs with `?:`:
+pairs with `?:`. `base?.field = v` writes only when `base` is present.
 
 ```sic
 struct Node { int value; struct Node *next; };
 int v = node?.next?.value ?: -1;   // 0-propagates through nulls, then -1
 ```
+
+`base?.method(args)` calls a struct's method the same way: when `base` is present
+the method runs (its arguments are evaluated only then), otherwise the result is
+the zero value of the method's result type — an empty `string`, a zeroed struct —
+or `None` when the method returns an `Option`, so absence nests cleanly:
+
+```sic
+struct User { string n; string name(User *self) { return self.n; }
+              Option<string> nick(User *self) { … } };
+string who  = user?.name();             // "" when user is null
+string nick = user?.nick() ?: "anon";   // user missing, or no nick
+user?.touch();                          // a void method: called or skipped
+```
+
+A method returning a type with no empty value (a `Result`, a tuple, a closure, a
+`Task`, `bigint`, `fixed`, `any`) cannot be called through `?.` — test the
+receiver first.
 
 ## `switch`
 
