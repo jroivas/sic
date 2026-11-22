@@ -1,0 +1,40 @@
+// An enum owning its payload is owned once wherever it goes. A ternary of
+// them copied its arms without a reference (a call's payload leaked); a
+// call's Option passed straight to a function was never released; and a
+// list element was a plain copy: it shared a local's payload without a
+// reference (freed under the list) and never released a call's. Counted by
+// the payload's destructor, which must run once per object. Returns 42.
+import std::*;
+
+int made = 0;
+int dtors = 0;
+struct R { int v; ~R() { dtors++; } };
+
+Option<R> orr(int c) { if (c) { R r; r.v = c; made++; return Some(r); } return None; }
+int value(Option<R> o) { int n = 0; match (o) { Some(r): n = r.v; None: n = -1; } return n; }
+Option<R> pick(int c) { return c ? orr(c) : orr(0); }
+
+int main(int argc, char **argv) {
+    int yes = argc;
+    int r = 0;
+    {
+        Option<R> a = yes ? orr(1) : orr(0);
+        Option<R> b = orr(2);
+        Option<R> d = yes ? b : orr(0);       // a copy of b: the same R
+        if (value(a) == 1 && value(d) == 2) r += 1;
+        if (value(orr(3)) == 3) r += 1;
+        if (value(yes ? orr(4) : orr(0)) == 4) r += 1;
+        if (value(pick(5)) == 5) r += 1;
+        yes ? orr(6) : orr(0);
+    }
+    if (dtors == made) r += 1;
+    {
+        list<Option<R>> l;
+        l.add(orr(7));
+        { Option<R> o = orr(8); l.add(o); }   // o's copy outlives o
+        l.add(yes ? orr(9) : orr(0));
+        if (l.length == 3 && dtors == made - 3) r += 1;
+    }
+    if (dtors == made && made == 9) r += 1;
+    return r == 7 ? 42 : r;
+}

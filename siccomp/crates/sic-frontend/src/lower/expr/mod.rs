@@ -2525,7 +2525,13 @@ impl<'m> FuncCtx<'m> {
         let is_owned_string = super::types::is_sic_string(v) || super::types::is_sic_string(&ety);
         let is_owned_struct = !is_owned_string && !super::types::is_any(v)
             && matches!(v, Type::Struct(_) | Type::Union(_));
+        // An enum owning its payload (`list<Option<string>>`) is boxed as a
+        // managed struct is, with a function releasing the payload: it was a
+        // plain copy, which shared a local's payload without a reference (freed
+        // under the list) and never released a call's.
+        let owned_enum = self.is_sic() && is_owned_struct && self.enum_is_managed(v);
         let managed_dtor = match v {
+            _ if owned_enum => Some(self.lowerer.value_drop_fn(v)?),
             Type::Struct(st) if self.is_sic() => st.name.as_deref().and_then(|n| self.lowerer.struct_dtor.get(n)).cloned(),
             _ => None,
         };
@@ -2558,14 +2564,21 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::GetElemPtr { dest: data, base: block, index: Constant::int(16), elem_size: 1,
                 result_ty: Type::Pointer(Box::new(v.clone())) });
             let n = self.coerce(Constant::int(bytes), &Type::i64())?;
-            if !super::func::is_fresh_struct_expr(val) { self.share_counted_at(&src, v)?; }
-            self.emit_memcpy(Val::Local(data), src.clone(), n)?;
-            if super::func::is_place_expr(val) {
-                self.retain_struct_owned_fields(Val::Local(data), v)?;
-            } else if super::func::is_fresh_struct_expr(val) {
-                self.take_struct_temp(&src);
+            if owned_enum {
+                // Move an owned temporary in; retain a copy of anything else.
+                self.share_counted_at(&src, v)?;
+                self.emit_memcpy(Val::Local(data), src.clone(), n)?;
+                self.acquire_enum_value(Val::Local(data), v, val)?;
             } else {
-                self.retain_struct_owned_fields(Val::Local(data), v)?;
+                if !super::func::is_fresh_struct_expr(val) { self.share_counted_at(&src, v)?; }
+                self.emit_memcpy(Val::Local(data), src.clone(), n)?;
+                if super::func::is_place_expr(val) {
+                    self.retain_struct_owned_fields(Val::Local(data), v)?;
+                } else if super::func::is_fresh_struct_expr(val) {
+                    self.take_struct_temp(&src);
+                } else {
+                    self.retain_struct_owned_fields(Val::Local(data), v)?;
+                }
             }
             let w = self.alloc_val();
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: Val::Local(data), to_ty: Type::u64() });
@@ -7046,6 +7059,18 @@ impl<'m> FuncCtx<'m> {
                         self.register_struct_temp(&Val::Local(slot), &aty);
                         return Ok(Val::Local(slot));
                     }
+                    // An owning enum: an owned copy, as the runtime path makes.
+                    if self.is_sic() && self.enum_is_managed(&aty) {
+                        let slot = self.alloc_val();
+                        self.push_instr(Instr::Alloca { dest: slot, ty: aty.clone(), align: None });
+                        let tp = self.lower_aggregate_ptr(taken)?;
+                        let size = aty.size_of(self.ptr_size());
+                        let align = aty.align_of(self.ptr_size());
+                        self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+                        self.acquire_enum_value(Val::Local(slot), &aty, taken)?;
+                        self.val_types.insert(slot.0, aty.clone());
+                        return Ok(Val::Local(slot));
+                    }
                 }
                 return self.lower_aggregate_ptr(taken);
             }
@@ -7134,6 +7159,11 @@ impl<'m> FuncCtx<'m> {
             // destroyed in that arm, so the copy retains its fields and the result
             // is a temporary of its own (moved into a binding, else destroyed).
             let is_managed = self.is_sic() && self.struct_has_dtor(&aty);
+            // An enum owning its payload (`c ? os(1) : o`): the result is an
+            // owned temporary, as a call's is — each arm moves a call's value
+            // in and retains a copy of anything else (they were plain copies:
+            // a call's payload leaked, nobody owning it).
+            let is_owned_enum = self.is_sic() && self.enum_is_managed(&aty);
             let then_bb  = self.new_block_after_current();
             let else_bb  = self.new_block_after_current();
             let merge_bb = self.new_block_after_current();
@@ -7150,6 +7180,11 @@ impl<'m> FuncCtx<'m> {
                 self.share_counted_at(&tp, &aty)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
                 self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
+                self.flush_temps_from(m); self.exit_scope();
+            } else if is_owned_enum { self.enter_scope(); let m = self.temp_mark();
+                let tp = self.lower_aggregate_ptr(then)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: tp, size, align });
+                self.acquire_enum_value(Val::Local(slot), &aty, then)?;
                 self.flush_temps_from(m); self.exit_scope();
             } else {
                 let tp = self.lower_aggregate_ptr(then)?;
@@ -7168,6 +7203,11 @@ impl<'m> FuncCtx<'m> {
                 self.share_counted_at(&ep, &aty)?;
                 self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
                 self.retain_struct_owned_fields(Val::Local(slot), &aty)?;
+                self.flush_temps_from(m); self.exit_scope();
+            } else if is_owned_enum { self.enter_scope(); let m = self.temp_mark();
+                let ep = self.lower_aggregate_ptr(else_)?;
+                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: ep, size, align });
+                self.acquire_enum_value(Val::Local(slot), &aty, else_)?;
                 self.flush_temps_from(m); self.exit_scope();
             } else {
                 let ep = self.lower_aggregate_ptr(else_)?;
@@ -7749,6 +7789,11 @@ impl<'m> FuncCtx<'m> {
             // destroyed here as the parameter is there: two owners.
             let p = self.lower_expr(a)?;
             self.share_counted_at(&p, &aty)?;
+            // An owned enum temporary (`use(os())`): the parameter borrows it,
+            // so it is the caller's to release (its payload leaked).
+            if self.is_sic() && self.enum_is_managed(&aty) && self.is_owned_temporary(a) {
+                self.register_scope_exit(super::func::Cleanup::EnumRelease { addr: p.clone(), ty: aty.clone() });
+            }
             return Ok(p);
         }
         self.lower_expr(a)

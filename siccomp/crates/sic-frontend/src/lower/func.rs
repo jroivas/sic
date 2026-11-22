@@ -1015,6 +1015,10 @@ impl<'m> FuncCtx<'m> {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
             // `await` gives a copy of the task's result.
             ExprKind::Await(_) => true,
+            // A ternary of an enum that owns its payload makes its own copy
+            // (`lower_ternary`).
+            ExprKind::Ternary { .. } => self.is_sic()
+                && matches!(self.infer_expr_type(e), Ok(t) if self.enum_is_managed(&t)),
             _ => false,
         }
     }
@@ -1332,8 +1336,8 @@ impl<'m> FuncCtx<'m> {
                     _ => self.enum_payload_op(ptr, ty, true, true),
                 }
             }
-            // `await` gives an owned copy: moved in.
-            ExprKind::Await(_) => Ok(()),
+            // `await` and a ternary give an owned copy: moved in.
+            _ if self.is_owned_temporary(e) => Ok(()),
             _ => self.enum_payload_op(ptr, ty, true, false),
         }
     }
@@ -1381,6 +1385,8 @@ impl<'m> FuncCtx<'m> {
                     }
                 }
             }
+            // An owned temporary (`await`, a ternary) moves out, as a call's.
+            _ if self.is_owned_temporary(e) => {}
             _ => self.ret_enum_retain = Some(false),
         }
     }
@@ -2436,7 +2442,7 @@ impl<'m> Lowerer {
         let inner = format!("{}$async", name);
         self.lower_function(&inner, ret_ty, params, false, body, &Some(StorageClass::Static), false, None, false)?;
         let runner = self.synthesize_task_runner(name, &inner, &frame_ty, &elem, params.len())?;
-        let rdrop = if self.managed_value_type(&elem) { Some(self.synthesize_task_rdrop(&elem)?) } else { None };
+        let rdrop = if self.managed_value_type(&elem) { Some(self.value_drop_fn(&elem)?) } else { None };
 
         // `f`: its body is the spawn.
         self.pending_async = Some(AsyncSpawn { runner, rdrop, elem, frame_ty, params: pnames });
@@ -2532,13 +2538,14 @@ impl<'m> Lowerer {
         Ok(sym)
     }
 
-    /// `void __sic_task_rdrop_<T>(void *out)`: release a task's result of type
-    /// `elem`, when its last handle goes.
-    fn synthesize_task_rdrop(&mut self, elem: &Type) -> Result<String> {
+    /// `void __sic_drop_<T>(void *p)`: release what the value of type `elem` at
+    /// `p` owns — a task's result when its last handle goes, a container
+    /// element that is an enum owning its payload.
+    pub(crate) fn value_drop_fn(&mut self, elem: &Type) -> Result<String> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", elem).hash(&mut h);
-        let sym = format!("__sic_task_rdrop_{:016x}", h.finish());
+        let sym = format!("__sic_drop_{:016x}", h.finish());
         if self.module.func_ref_by_name(&sym).is_some() { return Ok(sym); }
         let voidp = Type::void_ptr();
         let sig = super::build_fn_sig(Type::Void, vec![voidp.clone()], false, self.ptr_size);
@@ -2549,7 +2556,11 @@ impl<'m> Lowerer {
         {
             let mut fc = FuncCtx::new_with_func(self, &mut func);
             fc.cur_fn = sym.clone();
-            fc.release_managed_at(Val::Local(ValId(0x10000)), elem)?;
+            let pty = Type::Pointer(Box::new(elem.clone()));
+            let p = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: p, op: CastOp::BitCast, val: Val::Local(ValId(0x10000)), to_ty: pty.clone() });
+            fc.val_types.insert(p.0, pty);
+            fc.release_managed_at(Val::Local(p), elem)?;
             fc.set_terminator(Terminator::Ret(None));
         }
         self.module.add_function(func);

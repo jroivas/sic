@@ -111,6 +111,11 @@
   closure and `new` counts were: sharing one between threads freed it twice.
   A weak reference and the last strong owner no longer race to free a
   container's handle.
+- An enum owning its payload (`Option<string>`) is owned once wherever it
+  goes: a ternary of them copied its arms without a reference (a call's
+  payload leaked), a call's passed straight to a function was never released,
+  and a list or dict element was a plain copy — sharing a local's payload
+  without a reference (freed under the list) and never releasing a call's.
 - **Async functions run as tasks**: `async`/`await` used to run the function
   at once and keep its result in one 64-bit slot (a string, struct or list
   result was garbage, awaiting twice freed the task twice). Now a call makes a
