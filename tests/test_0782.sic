@@ -1,0 +1,16 @@
+// A read of an array in a loop is hoisted out of it only when every
+// iteration does it: LICM hoisted one under an `if`, so a read the loop never
+// made — here past the end, guarded — was made (bounds-checked: aborted)
+// before the loop. Returns 42.
+int main() {
+    int *a = new int[4];
+    a[0] = 1;
+    int s = 0;
+    int k = 10;
+    for (int i = 0; i < 3; i++) {
+        if (k < 4) s += a[k];
+        s += i;
+    }
+    del a;
+    return s == 3 ? 42 : 1;
+}

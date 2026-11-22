@@ -83,6 +83,9 @@
 - A floating value converts to `unsigned` and `unsigned long` in all of their
   range: they were clamped to the signed one's (`(unsigned)3e9` was
   2147483647).
+- A `new[]` array read in a loop is hoisted out of it only when every
+  iteration makes it: one under an `if` was made — and bounds-checked —
+  before the loop.
 - System V calls of structs and unions now match GCC: one passed through `...`
   goes by value (in registers or on the stack, and `va_arg` reads it from
   there), where sic passed and read its address; and one whose eightbytes no

@@ -273,35 +273,40 @@ impl Hoister {
         { let mut b = body.clone(); ws.visit_stmt(&mut b);
           let mut pe = post.clone(); ws.visit_expr(&mut pe); }
 
-        // Collect candidate `arr[E]` reads over the body.
+        // Collect candidate `arr[E]` reads: only those executed on every
+        // iteration, as the hoisted read happens whenever the loop is entered.
+        // (A `new[]` array's read is bounds-checked: one the body might skip —
+        // `if (k < a.length) … a[k]` — would abort where the loop does not. A C
+        // array's is not checked, so speculating it could fault.) C arrays only
+        // when every call in the loop is to a leaf function of the unit.
         let mut cs = CandScan { safe_arrays: &self.safe_arrays, out: Vec::new() };
-        { let mut b = body.clone(); cs.visit_stmt(&mut b); }
-        // C arrays: only when every call in the loop is to a leaf function of the
-        // unit, and only reads executed on every iteration.
-        if !self.c_arrays.is_empty() {
+        let c_ok = !self.c_arrays.is_empty() && {
             let mut cf = CallFinder { leaf_fns: Some(&self.leaf_fns), ..Default::default() };
             { let mut b = body.clone(); cf.visit_stmt(&mut b); let mut pe = post.clone(); cf.visit_expr(&mut pe); }
-            if !cf.non_leaf {
-                let mut cc = CandScan { safe_arrays: &self.c_arrays, out: Vec::new() };
-                let stmts: Vec<Stmt> = match body.as_ref() {
-                    Stmt::Block(v, _) => v.clone(),
-                    other => vec![other.clone()],
-                };
-                for st in stmts {
-                    match st {
-                        Stmt::Expr(mut e, _) => { unconditional_reads(&mut e, &mut cc); }
-                        Stmt::Decl(Decl::Var { declarators, .. }) => {
-                            for d in declarators {
-                                if let Some(Initializer::Expr(mut e)) = d.init { unconditional_reads(&mut e, &mut cc); }
-                            }
-                        }
-                        // Past any other statement, later reads may be skipped.
-                        _ => break,
+            !cf.non_leaf
+        };
+        let mut cc = CandScan { safe_arrays: &self.c_arrays, out: Vec::new() };
+        let stmts: Vec<Stmt> = match body.as_ref() {
+            Stmt::Block(v, _) => v.clone(),
+            other => vec![other.clone()],
+        };
+        for st in stmts {
+            let mut scan = |e: &mut Expr| {
+                unconditional_reads(e, &mut cs);
+                if c_ok { unconditional_reads(e, &mut cc); }
+            };
+            match st {
+                Stmt::Expr(mut e, _) => scan(&mut e),
+                Stmt::Decl(Decl::Var { declarators, .. }) => {
+                    for d in declarators {
+                        if let Some(Initializer::Expr(mut e)) = d.init { scan(&mut e); }
                     }
                 }
-                cs.out.extend(cc.out);
+                // Past any other statement, later reads may be skipped.
+                _ => break,
             }
         }
+        cs.out.extend(cc.out);
         if cs.out.is_empty() { return None; }
 
         // Filter to genuinely invariant, non-aliased reads and assign temp names.
