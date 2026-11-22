@@ -125,6 +125,8 @@
   other (`Option<int> x = l[0];`, `for (Option<int> o : l.values)` were
   compile errors); a stored bare `None` no longer crashes, and a missing dict
   key reads as `None`.
+- An async function takes a plain `tuple` parameter, static or dynamic as
+  its calls give it (it was a compile error).
 - Async functions return any type but `any`: `bigint`, `fixed`, tuples
   (`tuple<…>`, or a plain `tuple` as a dynamic one) and closures (`Fn<…>`)
   were compile errors. `await` is a call of a generated function, so its

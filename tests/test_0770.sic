@@ -1,0 +1,24 @@
+// An async function takes a plain `tuple` parameter: static when its calls
+// agree on the shape, dynamic (checked reads) when they don't; the task keeps
+// its own reference, so the tuple outlives the caller's. It was a compile
+// error. Returns 42.
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+async int sum(tuple t) { int a = t[0]; int b = t[1]; return a + b; }
+async string show(tuple t) { string s = t[1]; return s + num(t.length); }
+async string first(tuple t) { string s = t[0]; return s; }
+async int both(tuple<int, string> t) { return t[0] + t[1].size; }
+
+int main() {
+    int r = 0;
+    if (await sum(tuple(40, 2)) == 42) r += 1;
+    Task<string> a = show(tuple(1, "x" + num(5)));
+    tuple k = tuple(2, "q", 3);
+    Task<string> b = show(k);
+    if (await a == "x52" && await b == "q3") r += 1;
+    Task<string> c;
+    { tuple t = tuple("y" + num(7)); c = first(t); }
+    if (await c == "y7") r += 1;
+    if (await both(tuple(40, "ab")) == 42) r += 1;
+    return r == 4 ? 42 : r;
+}

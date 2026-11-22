@@ -2420,10 +2420,12 @@ impl<'m> Lowerer {
             let Some(pn) = p.name.clone() else {
                 return Err(at(format!("async function `{}`: every parameter needs a name", name)));
             };
-            let pty = lower_param_type(&p.ty, &self.struct_types, self.ptr_size)?;
-            if super::types::is_tuple(&pty) {
-                return Err(at(format!("async function `{}`: a tuple parameter is not supported", name)));
-            }
+            // A plain `tuple` parameter has the shape its calls give it
+            // (static when they agree, else dynamic); the body sees the same.
+            let pty = match self.tuple_param_types.get(&(name.to_string(), i)) {
+                Some(t) if self.sic && matches!(p.ty.ty, AstType::Tuple) => t.clone(),
+                _ => lower_param_type(&p.ty, &self.struct_types, self.ptr_size)?,
+            };
             fields.push((format!("p{}", i), pty.clone()));
             pnames.push((pn, pty));
         }
@@ -2437,6 +2439,9 @@ impl<'m> Lowerer {
 
         // The body, as an ordinary function.
         let inner = format!("{}$async", name);
+        for (i, (_, pty)) in pnames.iter().enumerate() {
+            if super::types::is_tuple(pty) { self.tuple_param_types.insert((inner.clone(), i), pty.clone()); }
+        }
         self.lower_function(&inner, ret_ty, params, false, body, &Some(StorageClass::Static), false, None, false)?;
         let runner = self.synthesize_task_runner(name, &inner, &frame_ty, &elem, params.len())?;
         let rdrop = if self.managed_value_type(&elem) { Some(self.value_drop_fn(&elem)?) } else { None };
