@@ -11,6 +11,14 @@ struct __sic_list;
 void __sic_list_free(struct __sic_list *);
 void __sic_list_weak_release(struct __sic_list *);
 extern __attribute__((weak)) void __sic_dict_free(void *);
+/* A `bigint` / `fixed` element is its own copy (the bignum runtime, prepended
+   whenever one is used). */
+struct __sic_bi;
+struct __sic_rat;
+extern __attribute__((weak)) void __sic_bi_free(struct __sic_bi *);
+extern __attribute__((weak)) struct __sic_bi *__sic_bi_clone(const struct __sic_bi *);
+extern __attribute__((weak)) void __sic_rat_free(struct __sic_rat *);
+extern __attribute__((weak)) struct __sic_rat *__sic_rat_clone(const struct __sic_rat *);
 extern __attribute__((weak)) void __sic_dict_weak_release(void *);
 
 /* Release a tuple stored as a container element (sic.md §"Tuples"): mirrors the
@@ -47,7 +55,8 @@ __attribute__((weak)) void __sic_str_rc_release(unsigned long *rc) {
          (word 2) is the block base, so decrement the rc and free only at 0 (a
          reader that copied the descriptor and retained keeps it alive);
      3/4 = a nested list / dict handle, 5/6 = a weak one, 7 = a tuple;
-     8 = a deep-copied managed struct: its destructor runs before the free.
+     8 = a deep-copied managed struct: its destructor runs before the free;
+     9 = a `bigint`, 10 = a `fixed`: the element's own copy.
    A borrowed value (vowned 0) is left alone. */
 __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
     if (vowned == 1) {
@@ -77,6 +86,10 @@ __attribute__((weak)) void __sic_box_free(unsigned long vslot, int vowned) {
         void (*dtor)(void *) = (void (*)(void *))hdr[0];
         if (dtor) dtor((void *)vslot);
         free(hdr);
+    } else if (vowned == 9) {
+        if (__sic_bi_free) __sic_bi_free((struct __sic_bi *)vslot);
+    } else if (vowned == 10) {
+        if (__sic_rat_free) __sic_rat_free((struct __sic_rat *)vslot);
     }
 }
 
@@ -256,6 +269,8 @@ __attribute__((weak)) unsigned long __sic_str_box_clone(unsigned long vslot) {
 __attribute__((weak)) unsigned long __sic_box_clone(unsigned long vslot, int vowned, const __sic_elem_tinfo *ti) {
     if (vowned == 2) return __sic_str_box_clone(vslot);
     if (vowned == 5) { __sic_list_weak_retain((__sic_list *)vslot); return vslot; }
+    if (vowned == 9 && __sic_bi_clone) return (unsigned long)__sic_bi_clone((const struct __sic_bi *)vslot);
+    if (vowned == 10 && __sic_rat_clone) return (unsigned long)__sic_rat_clone((const struct __sic_rat *)vslot);
     if (vowned == 6) { __sic_dict_weak_retain((struct __sic_dict *)vslot); return vslot; }
     if (vowned == 1 || vowned == 8) {
         /* a struct in its own block (8: after a `[dtor | pad]` header) */

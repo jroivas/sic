@@ -503,6 +503,16 @@ fn demangle_type(s: &str, ptr_size: u32) -> Type {
             // is typed. Fields are split at top-level `|` (nested markers keep their
             // own `|` inside balanced parens).
             if s == "(tuple)" { return tuple_type(vec![]); }
+            // `fixed<I,F>`, an open dimension marked `?` (it came back as `any`).
+            if let Some(body) = s.strip_prefix("fixed<").and_then(|b| b.strip_suffix('>')) {
+                let dim = |x: &str| match x.strip_suffix('?') {
+                    Some(n) => n.parse().ok().map(|n| (n, true)),
+                    None => x.parse().ok().map(|n| (n, false)),
+                };
+                if let Some((Some((i, i_open)), Some((f, f_open)))) = body.split_once(',').map(|(a, b)| (dim(a), dim(b))) {
+                    return fixed_type_dims(FixedDims { i, f, i_open, f_open });
+                }
+            }
             if let Some(inner) = s.strip_prefix("(tuple|").and_then(|b| b.strip_suffix(')')) {
                 let fields = split_top_level(inner).into_iter()
                     .map(|f| demangle_type(&f, ptr_size)).collect();
@@ -1186,7 +1196,10 @@ pub fn generic_fn_mangled(name: &str, args: &[Type]) -> String {
 pub fn type_display_name(t: &Type) -> String { mangle_type_name(t) }
 
 fn mangle_type_name(t: &Type) -> String {
-    if let Some((i, f)) = fixed_dims(t) { return format!("fixed<{},{}>", i, f); }
+    if let Some(d) = fixed_full_dims(t) {
+        let q = |open: bool| if open { "?" } else { "" };
+        return format!("fixed<{}{},{}{}>", d.i, q(d.i_open), d.f, q(d.f_open));
+    }
     if is_sic_string(t) { return "string".to_string(); }
     if is_bigint(t) { return "bigint".to_string(); }
     // A weak container-element reference `(weak|<inner>)` mangles as `w_<inner>`.

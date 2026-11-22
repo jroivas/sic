@@ -125,6 +125,10 @@
   other (`Option<int> x = l[0];`, `for (Option<int> o : l.values)` were
   compile errors); a stored bare `None` no longer crashes, and a missing dict
   key reads as `None`.
+- A `bigint` or `fixed` list or dict element is the container's own copy: it
+  was the source's block and was freed under the container; a number stored
+  into a `fixed` element (`d[1] = 2.5`) kept the double's bits as an address;
+  and a `fixed` element type kept its digits (it came back as `any`).
 - Task stacks are registered with valgrind (its client request, a no-op
   outside it), which took a switch to one for a frame of megabytes and
   reported uninitialised values.

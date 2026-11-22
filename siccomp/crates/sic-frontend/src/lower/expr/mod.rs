@@ -2525,6 +2525,7 @@ impl<'m> FuncCtx<'m> {
         let is_owned_string = super::types::is_sic_string(v) || super::types::is_sic_string(&ety);
         let is_owned_struct = !is_owned_string && !super::types::is_any(v)
             && matches!(v, Type::Struct(_) | Type::Union(_));
+        let is_bignum = self.is_sic() && (super::types::is_bigint(v) || super::types::is_fixed(v));
         // An enum owning its payload (`list<Option<string>>`) is boxed as a
         // managed struct is, with a function releasing the payload: it was a
         // plain copy, which shared a local's payload without a reference (freed
@@ -2593,6 +2594,19 @@ impl<'m> FuncCtx<'m> {
             self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: heap, to_ty: Type::u64() });
             self.val_types.insert(w.0, Type::u64());
             Val::Local(w)
+        } else if is_bignum {
+            // A `bigint` / `fixed` element is the container's own copy (it was
+            // the source's block, freed under the container): the value built
+            // as the element type (`d[k] = 2.5` stored the double's bits), then
+            // cloned.
+            let mut p = self.lower_expr(val)?;
+            self.build_bignum_arg(&mut p, v, val)?;
+            let clone = if super::types::is_fixed(v) { "__sic_rat_clone" } else { "__sic_bi_clone" };
+            let c = self.emit_bigint_call(clone, vec![p], v.clone())?;
+            let w = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: w, op: CastOp::BitCast, val: c, to_ty: Type::u64() });
+            self.val_types.insert(w.0, Type::u64());
+            Val::Local(w)
         } else {
             self.box_slot(val, &ety)?
         };
@@ -2611,6 +2625,7 @@ impl<'m> FuncCtx<'m> {
         // (release: decrement its rc, free only at 0 — so a reader that copied the
         // descriptor and retained keeps it alive past an overwrite/remove).
         let vowned = if is_owned_string { Constant::int(2) }
+            else if is_bignum { Constant::int(if super::types::is_fixed(v) { 10 } else { 9 }) }
             else if is_owned_struct && managed_dtor.is_some() { Constant::int(8) }
             else if is_owned_struct { Constant::int(1) }
             else { Constant::int(0) };
