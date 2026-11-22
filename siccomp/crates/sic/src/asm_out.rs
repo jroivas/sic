@@ -42,8 +42,18 @@ fn reloc_name(t: elf::RelocationType) -> Option<&'static str> {
     })
 }
 
-/// Section flags and type as `.section` spells them.
-fn section_spec(flags: u64, sh_type: u32, entsize: u64) -> String {
+/// Section flags and type as `.section` spells them. A constructor or
+/// destructor array (`.init_array`, `.init_array.NNNNN`, …) is that type even
+/// when the object gives it as plain bits, as Cranelift's custom sections are:
+/// GNU as warned about the type and used the right one.
+fn section_spec(name: &str, flags: u64, sh_type: u32, entsize: u64) -> String {
+    let base = name.split('.').nth(1).unwrap_or("");
+    let sh_type = match (sh_type, base) {
+        (t, "init_array") if t == elf::SHT_PROGBITS.0 => elf::SHT_INIT_ARRAY.0,
+        (t, "fini_array") if t == elf::SHT_PROGBITS.0 => elf::SHT_FINI_ARRAY.0,
+        (t, "preinit_array") if t == elf::SHT_PROGBITS.0 => elf::SHT_PREINIT_ARRAY.0,
+        (t, _) => t,
+    };
     let mut f = String::new();
     if flags & elf::SHF_ALLOC.0 != 0 { f.push('a'); }
     if flags & elf::SHF_WRITE.0 != 0 { f.push('w'); }
@@ -116,7 +126,7 @@ pub fn object_to_asm(obj: &[u8], ir_module: &sic_ir::Module, source: &str, funct
         }
         let flags = name_flags.get(name).copied().unwrap_or(hdr.sh_flags.get(e).0);
         let entsize = hdr.sh_entsize.get(e);
-        let _ = writeln!(out, "\n\t.section\t{},{}", sym_ref(name), section_spec(flags, sh_type, entsize));
+        let _ = writeln!(out, "\n\t.section\t{},{}", sym_ref(name), section_spec(name, flags, sh_type, entsize));
         let align = sec.align().max(1);
         if align > 1 { let _ = writeln!(out, "\t.balign\t{}", align); }
         let idx = sec.index().0;
