@@ -190,7 +190,7 @@ pub(crate) fn is_dynamic_tuple(t: &Type) -> bool {
 }
 
 pub(crate) fn is_fresh_struct_expr(e: &Expr) -> bool {
-    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. } | ExprKind::Elvis { .. } | ExprKind::Await(_))
+    matches!(e.kind, ExprKind::Call { .. } | ExprKind::Ternary { .. } | ExprKind::Elvis { .. })
 }
 
 fn arm_value_expr(body: &Stmt) -> Option<&Expr> {
@@ -1013,8 +1013,6 @@ impl<'m> FuncCtx<'m> {
     pub(crate) fn is_owned_temporary(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Call { func, .. } => self.variant_ctor_name(func).is_none(),
-            // `await` gives a copy of the task's result.
-            ExprKind::Await(_) => true,
             // A ternary of an enum that owns its payload makes its own copy
             // (`lower_ternary`).
             ExprKind::Ternary { .. } => self.is_sic()
@@ -2375,13 +2373,13 @@ impl<'m> Lowerer {
                     &format!("code will never be executed{}", why));
             }
         }
+        if is_async && self.sic {
+            return self.lower_async_function(name, ret_ty, params, variadic, body, storage, inline, constructor);
+        }
         // A plain `tuple` local assigned tuples of different shapes is dynamically
         // typed in the WHOLE function (not just after the conflicting assignment):
         // lowering records it and asks for the function to be lowered again
         // (sic.md §"Tuples"). Bounded — each round adds a variable.
-        if is_async && self.sic {
-            return self.lower_async_function(name, ret_ty, params, variadic, body, storage, inline, constructor);
-        }
         for _ in 0..16 {
             self.tuple_restart.remove(name);
             let r = self.lower_function_once(name, ret_ty, params, variadic, body, storage, inline, constructor, is_async);
@@ -2430,11 +2428,10 @@ impl<'m> Lowerer {
             pnames.push((pn, pty));
         }
         let elem = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
-        if super::types::is_tuple(&elem) || super::types::is_closure(&elem) || super::types::is_any(&elem)
-            || super::types::is_bigint(&elem) || super::types::is_fixed(&elem)
-        {
-            return Err(at(format!(
-                "async function `{}`: a tuple, closure, `any`, `bigint` or `fixed` result is not supported", name)));
+        // An `any` holding a string points at the string's descriptor, which
+        // may be in the frame that made it: it cannot outlive that frame yet.
+        if super::types::is_any(&elem) {
+            return Err(at(format!("async function `{}`: an `any` result is not supported", name)));
         }
         let frame_ty = Type::Struct(sic_ir::StructType::plain(None, fields, false));
 
@@ -2484,43 +2481,43 @@ impl<'m> Lowerer {
             fc.push_instr(Instr::Store { val: Val::Local(framep), ptr: Val::Local(slot) });
             fc.define_local("__sic_frame".to_string(), fpty, slot);
             let out = Val::Local(ValId(0x10001));
-            let args: Vec<Expr> = (0..nparams).map(|i| Expr::new(ExprKind::Field {
-                base: Box::new(Expr::new(ExprKind::Ident("__sic_frame".to_string()), sp.clone())),
-                name: format!("p{}", i),
-            }, sp.clone())).collect();
-            let call = Expr::new(ExprKind::Call {
-                func: Box::new(Expr::new(ExprKind::Ident(inner.to_string()), sp.clone())),
-                args,
-            }, sp.clone());
-            // The call, its temporaries released in a scope of its own; the
-            // result copied into `out`, which owns it.
-            fc.enter_scope();
-            let mark = fc.temp_mark();
-            match elem {
-                Type::Void => { fc.lower_expr(&call)?; }
-                Type::Struct(_) | Type::Union(_) => {
-                    let p = fc.lower_aggregate_ptr(&call)?;
-                    let size = elem.size_of(fc.ptr_size());
-                    let align = elem.align_of(fc.ptr_size());
-                    // A call's enum is its consumer's (moved); a string or
-                    // managed struct result is released with the scope (copied).
-                    if fc.is_tagged_enum_struct(elem) {
-                        fc.push_instr(Instr::MemCopy { dst: out.clone(), src: p, size, align });
+            // The call, emitted directly: its result is an owned value, which
+            // moves into `out` — written there by the callee when it returns
+            // through a result pointer. Each argument is passed as a call
+            // passes a place (a counted struct shares its count first).
+            let fref = fc.lowerer.module.func_ref_by_name(inner).ok_or_else(|| CompileError::new(
+                format!("no async body `{}`", inner)))?;
+            let ret = fc.lowerer.module.func_sig(fref).ret.clone();
+            let sret = super::ret_is_sret(&ret, fc.ptr_size());
+            let mut args = Vec::new();
+            if sret { args.push(out.clone()); }
+            if let Type::Struct(st) = frame_ty {
+                for (fname, fty) in st.fields.iter().take(nparams) {
+                    let fp = fc.field_ptr_from(super::expr::LValue::plain(Val::Local(framep), frame_ty.clone()), fname, false, &sp)?.ptr;
+                    if matches!(fty, Type::Struct(_) | Type::Union(_)) {
+                        fc.share_counted_at(&fp, fty)?;
+                        args.push(fp);
                     } else {
-                        fc.share_counted_at(&p, elem)?;
-                        fc.push_instr(Instr::MemCopy { dst: out.clone(), src: p, size, align });
-                        fc.retain_managed_at(out.clone(), elem)?;
+                        let v = fc.alloc_val();
+                        fc.push_instr(Instr::Load { dest: v, ptr: fp, ty: fty.clone() });
+                        args.push(Val::Local(v));
                     }
                 }
-                _ => {
-                    let v = fc.lower_expr(&call)?;
-                    let v = fc.coerce(v, elem)?;
-                    fc.push_instr(Instr::Store { val: v, ptr: out.clone() });
-                    fc.retain_managed_at(out.clone(), elem)?;
+            }
+            if sret || ret == Type::Void {
+                fc.push_instr(Instr::Call { dest: None, func: fref, args, ret_ty: ret.clone() });
+            } else {
+                let d = fc.alloc_val();
+                fc.push_instr(Instr::Call { dest: Some(d), func: fref, args, ret_ty: ret.clone() });
+                if matches!(ret, Type::Struct(_) | Type::Union(_)) {
+                    let size = ret.size_of(fc.ptr_size());
+                    let align = ret.align_of(fc.ptr_size());
+                    fc.push_instr(Instr::MemCopy { dst: out.clone(), src: Val::Local(d), size, align });
+                } else {
+                    fc.push_instr(Instr::Store { val: Val::Local(d), ptr: out.clone() });
                 }
             }
-            fc.flush_temps_from(mark);
-            fc.exit_scope();
+            let _ = elem;
             // The arguments' copies are the frame's.
             if let Type::Struct(st) = frame_ty {
                 for (fname, fty) in &st.fields {
@@ -2532,6 +2529,100 @@ impl<'m> Lowerer {
             fc.emit_free(Val::Local(framep))?;
             fc.exit_scope();
             fc.set_terminator(Terminator::Ret(None));
+            if let Some(e) = fc.cleanup_error.take() { return Err(e); }
+        }
+        self.module.add_function(func);
+        Ok(sym)
+    }
+
+    /// `T __sic_await_<T>(void *task, void *count)`: `await` of a `Task<T>`
+    /// (see `lower_await_call`). Runs the tasks until this one is done, then
+    /// returns its result as a function returns a value it owns: moved out of
+    /// the task when the caller's handle is a temporary without copies
+    /// (`count` null — the task then never releases it), else a copy.
+    pub(crate) fn await_fn(&mut self, elem: &Type) -> Result<String> {
+        use std::hash::{Hash, Hasher};
+        let mut hs = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", elem).hash(&mut hs);
+        let sym = format!("__sic_await_{:016x}", hs.finish());
+        if self.module.func_ref_by_name(&sym).is_some() { return Ok(sym); }
+        let voidp = Type::void_ptr();
+        let sret = super::ret_is_sret(elem, self.ptr_size);
+        let sig = super::build_fn_sig(elem.clone(), vec![voidp.clone(), voidp.clone()], false, self.ptr_size);
+        let mut ps = vec![
+            sic_ir::Param { name: "task".to_string(), ty: voidp.clone() },
+            sic_ir::Param { name: "count".to_string(), ty: voidp.clone() },
+        ];
+        if sret { ps.insert(0, sic_ir::Param { name: String::new(), ty: Type::Pointer(Box::new(elem.clone())) }); }
+        let mut func = Function::new(sym.clone(), sig, ps, Linkage::Internal);
+        let entry = func.alloc_block();
+        func.blocks.push(BasicBlock::new(entry));
+        {
+            let mut fc = FuncCtx::new_with_func(self, &mut func);
+            fc.cur_fn = sym.clone();
+            let base = sret as u32;
+            let task = Val::Local(ValId(0x10000 + base));
+            let count = Val::Local(ValId(0x10001 + base));
+            let moved = fc.alloc_val();
+            fc.push_instr(Instr::Alloca { dest: moved, ty: Type::i32(), align: None });
+            let take = fc.task_runtime_fn("__sic_task_await_take");
+            let out = fc.alloc_val();
+            fc.push_instr(Instr::Call { dest: Some(out), func: take, args: vec![task, count, Val::Local(moved)], ret_ty: voidp.clone() });
+            let outp_ty = Type::Pointer(Box::new(elem.clone()));
+            let outp = fc.alloc_val();
+            fc.push_instr(Instr::Cast { dest: outp, op: CastOp::BitCast, val: Val::Local(out), to_ty: outp_ty.clone() });
+            fc.val_types.insert(outp.0, outp_ty);
+            let managed = fc.lowerer.managed_value_type(elem);
+            let mv = fc.alloc_val();
+            fc.push_instr(Instr::Load { dest: mv, ptr: Val::Local(moved), ty: Type::i32() });
+            let copy = fc.alloc_val();
+            fc.push_instr(Instr::Cmp { dest: copy, op: CmpOp::IEq, lhs: Val::Local(mv), rhs: Constant::int(0), ty: Type::i32() });
+            let ps_ = fc.ptr_size();
+            match elem {
+                Type::Void => fc.set_terminator(Terminator::Ret(None)),
+                Type::Struct(_) | Type::Union(_) => {
+                    let dst = if sret { Val::Local(ValId(0x10000)) } else {
+                        let d = fc.alloc_val();
+                        fc.push_instr(Instr::Alloca { dest: d, ty: elem.clone(), align: None });
+                        Val::Local(d)
+                    };
+                    let (size, align) = (elem.size_of(ps_), elem.align_of(ps_));
+                    if managed {
+                        // A copy shares the task's counts (installed on the
+                        // source first) and takes its references.
+                        let done = fc.branch_if(Val::Local(copy));
+                        fc.share_counted_at(&Val::Local(outp), elem)?;
+                        fc.push_instr(Instr::MemCopy { dst: dst.clone(), src: Val::Local(outp), size, align });
+                        fc.retain_managed_at(dst.clone(), elem)?;
+                        let end = fc.new_block_after_current();
+                        fc.set_terminator(Terminator::Jump(end));
+                        fc.switch_to_block(done);
+                        fc.push_instr(Instr::MemCopy { dst: dst.clone(), src: Val::Local(outp), size, align });
+                        fc.set_terminator(Terminator::Jump(end));
+                        fc.switch_to_block(end);
+                    } else {
+                        fc.push_instr(Instr::MemCopy { dst: dst.clone(), src: Val::Local(outp), size, align });
+                    }
+                    fc.set_terminator(Terminator::Ret(if sret { None } else { Some(dst) }));
+                }
+                _ => {
+                    let slot = fc.alloc_val();
+                    fc.push_instr(Instr::Alloca { dest: slot, ty: elem.clone(), align: None });
+                    let v = fc.alloc_val();
+                    fc.push_instr(Instr::Load { dest: v, ptr: Val::Local(outp), ty: elem.clone() });
+                    fc.push_instr(Instr::Store { val: Val::Local(v), ptr: Val::Local(slot) });
+                    if managed {
+                        // A copy takes its own reference (a bignum: its own clone).
+                        let done = fc.branch_if(Val::Local(copy));
+                        fc.retain_managed_at(Val::Local(slot), elem)?;
+                        fc.set_terminator(Terminator::Jump(done));
+                        fc.switch_to_block(done);
+                    }
+                    let r = fc.alloc_val();
+                    fc.push_instr(Instr::Load { dest: r, ptr: Val::Local(slot), ty: elem.clone() });
+                    fc.set_terminator(Terminator::Ret(Some(Val::Local(r))));
+                }
+            }
             if let Some(e) = fc.cleanup_error.take() { return Err(e); }
         }
         self.module.add_function(func);
@@ -2624,7 +2715,7 @@ impl<'m> Lowerer {
         // sic `async` (sic.md §"Async"): the function returns a `Task<ret>`; its
         // body (`lower_async_function`) starts the task.
         let (ir_ret, async_spawn) = if is_async {
-            (super::types::task_type(&ir_ret), self.pending_async.take())
+            (self.task_of(&ir_ret), self.pending_async.take())
         } else {
             (ir_ret, None)
         };
@@ -3694,7 +3785,7 @@ impl<'m> FuncCtx<'m> {
                                     // producer temp; retain it into the local and free it
                                     // at scope exit, so the statement-end release of that
                                     // temp leaves the local its own reference.
-                                    ExprKind::Ternary { .. } | ExprKind::Elvis { .. } | ExprKind::Await(_) => (true, true),
+                                    ExprKind::Ternary { .. } | ExprKind::Elvis { .. } => (true, true),
                                     _ => (false, false),
                                 };
                                 if needs_retain {

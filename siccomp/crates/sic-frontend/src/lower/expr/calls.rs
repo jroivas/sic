@@ -144,6 +144,12 @@ impl<'m> FuncCtx<'m> {
     }
 
     pub(crate) fn lower_call(&mut self, func_expr: &Expr, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        // `await task` (sic.md §"Async").
+        if self.is_sic() {
+            if let ExprKind::Ident(n) = &func_expr.kind {
+                if n == crate::ast::AWAIT_FN && self.lookup(n).is_none() { return self.lower_await_call(args, sp); }
+            }
+        }
         // An async function's spawner (sic.md §"Async").
         if self.async_spawn.is_some() {
             if let ExprKind::Ident(n) = &func_expr.kind {

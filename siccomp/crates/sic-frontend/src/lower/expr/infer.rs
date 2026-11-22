@@ -298,11 +298,6 @@ impl<'m> FuncCtx<'m> {
                     Ok(Type::i32())
                 }
             }
-            // `await t`: the task's result type (sic.md §"Async").
-            ExprKind::Await(inner) => {
-                let t = self.infer_expr_type(inner)?;
-                Ok(super::super::types::resolve_aggregate(&super::super::types::task_elem(&t, self.ptr_size()), &self.lowerer.struct_types))
-            }
             // `base?.field` (sic.md §"Match") has the field's type — the zero value
             // on the absent path shares it.
             ExprKind::OptField { base, name } => {
@@ -434,6 +429,15 @@ impl<'m> FuncCtx<'m> {
                     };
                     if let Some((name, explicit)) = generic {
                         if let Some(t) = self.generic_call_type(name, args, explicit) { return Ok(t); }
+                    }
+                }
+                // `await task`: the task's result (sic.md §"Async").
+                if let ExprKind::Ident(n) = &func.kind {
+                    if self.is_sic() && n == crate::ast::AWAIT_FN && self.lookup(n).is_none() {
+                        if let Some(a) = args.first() {
+                            let t = self.infer_expr_type(a)?;
+                            return Ok(self.awaited_type(&t).unwrap_or(Type::Void));
+                        }
                     }
                 }
                 // An async function's spawner gives its `Task` (sic.md §"Async").

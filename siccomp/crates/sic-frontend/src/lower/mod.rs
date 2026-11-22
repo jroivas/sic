@@ -890,8 +890,7 @@ impl Lowerer {
                 for p in params { self.register_nested_struct_defs(&p.ty.ty)?; }
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                 if *is_async {
-                    ir_ret = types::task_type(&ir_ret);
-                    self.register_task_type(&ir_ret);
+                    ir_ret = self.task_of(&ir_ret);
                 }
                 let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
@@ -927,8 +926,7 @@ impl Lowerer {
                 let mut ir_ret = lower_type(ret_ty, &self.struct_types, self.ptr_size)?;
                 // sic async: the signature returns `Task<ret>` (sic.md §"Async").
                 if *is_async {
-                    ir_ret = types::task_type(&ir_ret);
-                    self.register_task_type(&ir_ret);
+                    ir_ret = self.task_of(&ir_ret);
                 }
                 let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
@@ -3114,7 +3112,7 @@ impl Lowerer {
             if let Decl::Func { ret_ty, is_async: true, type_params, .. } = d {
                 if !type_params.is_empty() { continue; }
                 if let Ok(e) = lower_type(ret_ty, &self.struct_types, self.ptr_size) {
-                    self.register_task_type(&types::task_type(&e));
+                    self.task_of(&e);
                 }
             }
         }
@@ -3124,7 +3122,7 @@ impl Lowerer {
                     Some(a) => lower_type(a, &self.struct_types, self.ptr_size).unwrap_or(Type::Void),
                     None => Type::Void,
                 };
-                self.register_task_type(&types::task_type(&e));
+                self.task_of(&e);
                 continue;
             }
             if name.contains("::") && self.rust_generic_of(&name).is_some() {
@@ -3222,14 +3220,26 @@ impl Lowerer {
         Ok(())
     }
 
-    /// A `Task<T>` handle type (sic.md §"Async") is a struct whose destructor
-    /// is the task runtime's: register both, so the handle is owned and copied
-    /// as any struct with a destructor is.
-    pub(crate) fn register_task_type(&mut self, t: &Type) {
-        let Type::Struct(st) = t else { return };
-        let Some(n) = st.name.clone() else { return };
-        self.struct_types.entry(n.clone()).or_insert_with(|| t.clone());
-        self.struct_dtor.entry(n).or_insert_with(|| types::TASK_DROP.to_string());
+    /// The `Task<elem>` handle type (sic.md §"Async"): a struct whose destructor
+    /// is the task runtime's. Registers both, so the handle is owned and copied
+    /// as any struct with a destructor is, and what an `await` needs to rebuild
+    /// `elem` from the task's name: an `Fn<…>` closure's header struct.
+    pub(crate) fn task_of(&mut self, elem: &Type) -> Type {
+        let t = types::task_type(elem);
+        if let Type::Pointer(inner) = elem {
+            if let Type::Struct(st) = inner.as_ref() {
+                if let Some(n) = &st.name {
+                    if types::is_closure(elem) { self.struct_types.entry(n.clone()).or_insert_with(|| (**inner).clone()); }
+                }
+            }
+        }
+        if let Type::Struct(st) = &t {
+            if let Some(n) = st.name.clone() {
+                self.struct_types.entry(n.clone()).or_insert_with(|| t.clone());
+                self.struct_dtor.entry(n).or_insert_with(|| types::TASK_DROP.to_string());
+            }
+        }
+        t
     }
 
     /// Monomorphize `name<args…>` into a concrete tagged enum registered under its
@@ -3312,8 +3322,7 @@ impl Lowerer {
             // Pre-register a defined placeholder so recursion resolves to this symbol.
             let mut ir_ret = lower_type(&ret_ty, &self.struct_types, self.ptr_size)?;
             if is_async {
-                ir_ret = types::task_type(&ir_ret);
-                self.register_task_type(&ir_ret);
+                ir_ret = self.task_of(&ir_ret);
             }
             let ir_params: Result<Vec<_>> = params.iter()
                 .map(|p| lower_param_type(&p.ty, &self.struct_types, self.ptr_size)).collect();
@@ -6230,7 +6239,6 @@ fn collect_expr_names(e: &Expr, out: &mut Vec<String>) {
         }
         GenericRef { name, .. } => out.push(name.clone()),
         NamedArg { value, .. } => collect_expr_names(value, out),
-        Await(e) => collect_expr_names(e, out),
         Index { base, index } => { collect_expr_names(base, out); collect_expr_names(index, out); }
         Slice { base, lo, hi } => {
             collect_expr_names(base, out);

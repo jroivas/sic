@@ -37,6 +37,7 @@ typedef struct __sic_task {
     long wake;                       /* asleep until this time (ns), or 0 */
     struct __sic_task *next;         /* the scheduler's ring */
     unsigned long vg_stack;          /* the stack's valgrind id */
+    int taken;                       /* the result was moved out */
 } __sic_task;
 
 typedef struct __sic_sched {
@@ -140,7 +141,7 @@ __attribute__((weak)) long __sic_task_now(void) {
 __attribute__((weak)) void __sic_task_release(__sic_task *t) {
     if (!t) return;
     if (__atomic_sub_fetch(&t->refs, 1, __ATOMIC_SEQ_CST) != 0) return;
-    if (t->state == 2 && t->rdrop) t->rdrop(t->out);
+    if (t->state == 2 && !t->taken && t->rdrop) t->rdrop(t->out);
     free(t);
 }
 
@@ -300,6 +301,20 @@ __attribute__((weak)) void *__sic_task_await(__sic_task *t) {
         me->blocked_on = 0;
     }
     return t->out;
+}
+
+/* `await` of a task whose handle the caller gives up right after (`await
+   f(x)`): the result, and in `*moved` whether the caller may take it rather
+   than copy it — when that handle has no count (`rc`, so no copies), it is
+   the only one, and nobody can await the task again. */
+__attribute__((weak)) void *__sic_task_await_take(__sic_task *t, void *rc, int *moved) {
+    void *out = __sic_task_await(t);
+    *moved = 0;
+    if (!rc && !t->taken) {
+        t->taken = 1;
+        *moved = 1;
+    }
+    return out;
 }
 
 /* `art::yield_now()`: let the other tasks run. */

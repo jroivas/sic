@@ -3576,11 +3576,14 @@ impl Parser {
 
     fn parse_unary(&mut self) -> Result<Expr> {
         let sp = self.span();
-        // sic `await expr` (sic.md §"Async"): drive a `Task<T>` to completion.
+        // sic `await expr` (sic.md §"Async"): a call of the compiler's
+        // `__sic_await(task)`, so that its result is owned and handed on as any
+        // function's result is.
         if self.lang == Lang::Sic && self.at(TokenKind::Ident) && self.peek().text == "await" {
             self.advance();
             let inner = self.parse_unary()?;
-            return Ok(Expr::new(ExprKind::Await(Box::new(inner)), sp));
+            let f = Expr::new(ExprKind::Ident(crate::ast::AWAIT_FN.to_string()), sp.clone());
+            return Ok(Expr::new(ExprKind::Call { func: Box::new(f), args: vec![inner] }, sp));
         }
         match self.peek_kind() {
             TokenKind::PlusPlus => {

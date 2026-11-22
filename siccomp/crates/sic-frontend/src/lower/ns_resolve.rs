@@ -287,7 +287,7 @@ impl<'a> NsRenamer<'a> {
             | ExprKind::Swap { lhs, rhs } | ExprKind::Comma(lhs, rhs) => { self.expr(lhs); self.expr(rhs); }
             ExprKind::Unary { expr, .. } | ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. }
             | ExprKind::SizeofExpr(expr) | ExprKind::AlignofExpr(expr) | ExprKind::Ref { expr, .. }
-            | ExprKind::Await(expr) | ExprKind::TypeId(expr) => self.expr(expr),
+            | ExprKind::TypeId(expr) => self.expr(expr),
             ExprKind::Cast { ty, expr } => { self.qual_type(ty); self.expr(expr); }
             ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } | ExprKind::OptField { base, .. } => self.expr(base),
             ExprKind::Index { base, index } => { self.expr(base); self.expr(index); }

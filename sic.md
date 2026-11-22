@@ -664,7 +664,10 @@ each other in a cycle stop the program with a message.
 - A task's stack is 256 KiB, with a guard page under it: overflowing it is a fault,
   not a corruption.
 - Each thread has its own scheduler; a task stays on its thread.
-- A `tuple`, closure, `any`, `bigint` or `fixed` result is not supported yet.
+- `await` gives the result as a call does, owned: moved out of a task that is a
+  temporary (`await f(x)`), a copy from a kept handle. Any result type works
+  except `any` (not supported yet); a closure result is an `Fn<…>`
+  (`async Fn<int(int)> f()`), and a plain `tuple` result is a dynamic tuple.
 
 ## The `art` runtime module
 

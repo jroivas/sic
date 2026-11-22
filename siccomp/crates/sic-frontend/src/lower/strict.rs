@@ -365,7 +365,7 @@ impl Walk {
                 self.expr(else_, st)
             }
             Unary { expr, .. } | Ref { expr, .. } | Cast { expr, .. } | SizeofExpr(expr) | AlignofExpr(expr)
-            | Await(expr) | TypeId(expr) | Field { base: expr, .. } | Arrow { base: expr, .. }
+            | TypeId(expr) | Field { base: expr, .. } | Arrow { base: expr, .. }
             | OptField { base: expr, .. } | NamedArg { value: expr, .. } | VaArg { list: expr, .. }
             | VaEnd { list: expr } => self.expr(expr, st),
             Call { func, args } => {

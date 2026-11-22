@@ -38,6 +38,9 @@ impl Eq for AlignExpr {}
 /// (sic.md §"Copying"). Every copy of the object holds the same block.
 pub const STRUCT_RC_FIELD: &str = "__sic_rc";
 
+/// sic `await t` (sic.md §"Async") parses as a call of this compiler function.
+pub const AWAIT_FN: &str = "__sic_await";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeQual {
     Const, Volatile, Restrict, Atomic,
@@ -679,10 +682,6 @@ pub enum ExprKind {
     /// Function call: f(args)
     Call { func: BoxExpr, args: Vec<Expr> },
 
-    /// sic `await expr` (sic.md §"Async"): drive an async `Task<T>` to completion and
-    /// yield its `T`. Lowers to a runtime hook (`__sic_await`).
-    Await(BoxExpr),
-
     /// sic named argument (sic.md §"Named parameters"): `name = value` in a call's
     /// argument list. Purely a caller-side construct — the call site maps it to the
     /// callee's parameter of that name (or, for a variadic argument, drops the name
@@ -838,7 +837,7 @@ fn expr_stmts<'a>(e: &'a Expr, out: &mut Vec<&'a Stmt>) {
         }
         Elvis { cond, else_ } => { go(cond, out); go(else_, out); }
         Unary { expr, .. } | PreInc { expr, .. } | PostInc { expr, .. } | Ref { expr, .. }
-        | Cast { expr, .. } | SizeofExpr(expr) | AlignofExpr(expr) | Await(expr) | TypeId(expr)
+        | Cast { expr, .. } | SizeofExpr(expr) | AlignofExpr(expr) | TypeId(expr)
         | Field { base: expr, .. } | Arrow { base: expr, .. } | OptField { base: expr, .. }
         | NamedArg { value: expr, .. } | VaArg { list: expr, .. } | VaEnd { list: expr } => go(expr, out),
         Call { func, args } => { go(func, out); for a in args { go(a, out); } }

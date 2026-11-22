@@ -799,7 +799,6 @@ impl<'m> FuncCtx<'m> {
             }
 
             // sic `await expr` (sic.md §"Async").
-            ExprKind::Await(inner) => self.lower_await(inner),
 
             // sic named argument (sic.md §"Named parameters") outside a call's
             // argument list — the call site resolves these, so reaching here means
@@ -2014,12 +2013,12 @@ impl<'m> FuncCtx<'m> {
 
     /// Resolve a `__sic_task_*` runtime function, declaring it as an extern if absent
     /// (the definition comes from the prepended task runtime).
-    fn task_runtime_fn(&mut self, name: &str) -> FuncRef {
+    pub(crate) fn task_runtime_fn(&mut self, name: &str) -> FuncRef {
         if let Some(fr) = self.lowerer.module.func_ref_by_name(name) { return fr; }
         let ptr = Type::void_ptr();
         let (params, ret): (Vec<Type>, Type) = match name {
             "__sic_task_spawn" => (vec![ptr.clone(), ptr.clone(), ptr.clone(), Type::u64()], ptr),
-            "__sic_task_await" => (vec![ptr.clone()], ptr),
+            "__sic_task_await_take" => (vec![ptr.clone(), ptr.clone(), Type::Pointer(Box::new(Type::i32()))], ptr),
             _ => (vec![], Type::Void),
         };
         let sig = super::build_fn_sig(ret, params, false, self.ptr_size());
@@ -2062,7 +2061,7 @@ impl<'m> FuncCtx<'m> {
         self.push_instr(Instr::Call { dest: Some(h), func: f,
             args: vec![Val::Func(run), frame, rdrop, Constant::uint(size)], ret_ty: Type::void_ptr() });
         // The handle: the task, and no count yet (one owner).
-        let tt = super::types::task_type(&a.elem);
+        let tt = self.lowerer.task_of(&a.elem);
         let slot = self.alloc_val();
         self.push_instr(Instr::Alloca { dest: slot, ty: tt.clone(), align: None });
         let hp = self.field_ptr_from(LValue::plain(Val::Local(slot), tt.clone()), "h", false, sp)?;
@@ -2074,59 +2073,62 @@ impl<'m> FuncCtx<'m> {
         Ok(Val::Local(slot))
     }
 
-    /// `await task`: run until the task is done, then its result — a copy, which
-    /// owns what it holds; the task keeps its own until its last handle goes.
-    fn lower_await(&mut self, inner: &Expr) -> Result<Val> {
-        let sp = inner.span.clone();
-        let tt = self.infer_expr_type(inner)?;
-        if !super::types::is_task(&tt) {
+    /// The result type of `await t`, `t` of type `tt` (a `Task<T>`): `T` with
+    /// its layout (the task's name carries it opaque), or None for a non-task.
+    pub(crate) fn awaited_type(&self, tt: &Type) -> Option<Type> {
+        if !super::types::is_task(tt) { return None; }
+        let e = super::types::task_elem(tt, self.ptr_size());
+        Some(match &e {
+            // An `Fn<…>` closure is a pointer to its header struct.
+            Type::Pointer(inner) => Type::Pointer(Box::new(super::types::resolve_aggregate(inner, &self.lowerer.struct_types))),
+            _ => super::types::resolve_aggregate(&e, &self.lowerer.struct_types),
+        })
+    }
+
+    /// `await task` (`__sic_await(task)`): a call of the generated
+    /// `T __sic_await_<T>(handle, count)` (`Lowerer::await_fn`), which runs the
+    /// tasks until this one is done and gives its result, owned, as any
+    /// function's result is. A task that is a temporary (`await f(x)`) and has
+    /// no copies gives its result up (moved); one that is kept gives a copy.
+    pub(crate) fn lower_await_call(&mut self, args: &[Expr], sp: &crate::lexer::Span) -> Result<Val> {
+        let err = |m: &str| CompileError::at(m.to_string(), sp.file.clone(), sp.line, sp.col);
+        let [task] = args else { return Err(err("`await` takes one task")) };
+        let tt = self.infer_expr_type(task)?;
+        let Some(elem) = self.awaited_type(&tt) else {
             return Err(CompileError::at(
                 "`await` expects a `Task<T>` (the result of an async call)".to_string(),
-                sp.file.clone(), sp.line, sp.col));
+                task.span.file.clone(), task.span.line, task.span.col));
+        };
+        let fname = self.lowerer.await_fn(&elem)?;
+        let tp = self.lower_aggregate_ptr(task)?;
+        let h = self.field_ptr_from(LValue::plain(tp.clone(), tt.clone()), "h", false, sp)?;
+        let h = self.load_lvalue(&h)?;
+        // The count: a kept handle passes a non-null marker (copy), a temporary
+        // its own count, null when it has no copies (move).
+        let movable = self.is_owned_temporary(task);
+        let rc = if movable {
+            let rcp = self.field_ptr_from(LValue::plain(tp, tt.clone()), crate::ast::STRUCT_RC_FIELD, false, sp)?;
+            let v = self.alloc_val();
+            self.push_instr(Instr::Load { dest: v, ptr: rcp.ptr, ty: Type::void_ptr() });
+            Val::Local(v)
+        } else {
+            let v = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: v, op: CastOp::IntToPtr, val: Constant::uint(1), to_ty: Type::void_ptr() });
+            Val::Local(v)
+        };
+        // Hidden locals for the two words, so the call is an ordinary one.
+        let mut names = Vec::new();
+        for (i, v) in [h, rc].into_iter().enumerate() {
+            let slot = self.alloc_val();
+            self.push_instr(Instr::Alloca { dest: slot, ty: Type::void_ptr(), align: None });
+            let v = self.coerce(v, &Type::void_ptr())?;
+            self.push_instr(Instr::Store { val: v, ptr: Val::Local(slot) });
+            let n = format!("__sic_await{}_{}", slot.0, i);
+            self.define_local(n.clone(), Type::void_ptr(), slot);
+            names.push(Expr::new(ExprKind::Ident(n), sp.clone()));
         }
-        // The name carries `T` opaque: its layout is the registered type's.
-        let elem = super::types::resolve_aggregate(&super::types::task_elem(&tt, self.ptr_size()), &self.lowerer.struct_types);
-        let tp = self.lower_aggregate_ptr(inner)?;
-        let hp = self.field_ptr_from(LValue::plain(tp, tt.clone()), "h", false, &sp)?;
-        let h = self.load_lvalue(&hp)?;
-        let f = self.task_runtime_fn("__sic_task_await");
-        let out = self.alloc_val();
-        self.push_instr(Instr::Call { dest: Some(out), func: f, args: vec![h], ret_ty: Type::void_ptr() });
-        let outp = Type::Pointer(Box::new(elem.clone()));
-        self.val_types.insert(out.0, outp);
-        let ps = self.ptr_size();
-        match &elem {
-            Type::Void => Ok(Constant::zero()),
-            Type::Struct(_) | Type::Union(_) => {
-                let slot = self.alloc_val();
-                self.push_instr(Instr::Alloca { dest: slot, ty: elem.clone(), align: None });
-                self.share_counted_at(&Val::Local(out), &elem)?;
-                self.push_instr(Instr::MemCopy { dst: Val::Local(slot), src: Val::Local(out), size: elem.size_of(ps), align: elem.align_of(ps) });
-                self.retain_managed_at(Val::Local(slot), &elem)?;
-                self.val_types.insert(slot.0, elem.clone());
-                // A temporary of its own: a string released at scope exit (a
-                // binding retains its copy), a managed struct moved into its
-                // binding or destroyed; an enum is adopted, as a call's is.
-                if self.is_sic() && super::types::is_sic_string(&elem) {
-                    self.register_scope_exit(super::func::Cleanup::StringRelease { addr: Val::Local(slot) });
-                } else if self.struct_has_dtor(&elem) {
-                    self.register_struct_temp(&Val::Local(slot), &elem);
-                }
-                Ok(Val::Local(slot))
-            }
-            _ => {
-                let v = self.alloc_val();
-                self.push_instr(Instr::Load { dest: v, ptr: Val::Local(out), ty: elem.clone() });
-                self.val_types.insert(v.0, elem.clone());
-                // A container: one reference of its own, released at the end of
-                // the statement unless a binding takes one.
-                if super::types::is_list(&elem) || super::types::is_dict(&elem) || super::types::is_set(&elem) {
-                    self.container_retain(Val::Local(v), &elem)?;
-                    self.container_temps.push((Val::Local(v), elem.clone()));
-                }
-                Ok(Val::Local(v))
-            }
-        }
+        let callee = Expr::new(ExprKind::Ident(fname), sp.clone());
+        self.lower_call(&callee, &names, sp)
     }
 
     // ─── sic `list` (sic.md §"List") ─────────────────────────────────────────
@@ -8449,7 +8451,7 @@ fn rewrite_capture_expr(e: &mut Expr, name: &str, deref: bool) {
         }
         ExprKind::Unary { expr, .. } | ExprKind::PreInc { expr, .. } | ExprKind::PostInc { expr, .. }
         | ExprKind::Cast { expr, .. } | ExprKind::SizeofExpr(expr) | ExprKind::AlignofExpr(expr)
-        | ExprKind::Ref { expr, .. } | ExprKind::Await(expr) | ExprKind::TypeId(expr) => rewrite_capture_expr(expr, name, deref),
+        | ExprKind::Ref { expr, .. } | ExprKind::TypeId(expr) => rewrite_capture_expr(expr, name, deref),
         ExprKind::Field { base, .. } | ExprKind::Arrow { base, .. } | ExprKind::OptField { base, .. } =>
             rewrite_capture_expr(base, name, deref),
         ExprKind::Index { base, index } => { rewrite_capture_expr(base, name, deref); rewrite_capture_expr(index, name, deref); }

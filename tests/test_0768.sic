@@ -1,0 +1,41 @@
+// Every result type an async function can have comes back from `await`: a
+// `bigint`, a `fixed`, a tuple (static `tuple<…>`, or a plain `tuple` whose
+// shape is checked when read), a closure (`Fn<…>`). They were compile errors.
+// `await` of a temporary task moves the result out; of a kept handle, it
+// copies, so a task can be awaited twice. Returns 42.
+string num(int i) { char b[2]; b[0] = '0' + i; b[1] = 0; string d = b; return "" + d; }
+
+async bigint pow10(int n) { bigint b = 1; for (int i = 0; i < n; i++) b = b * 10; return b; }
+async fixed<10,4> quarter(int n) { fixed<10,4> q = 0.25; fixed<10,4> k = n; return (fixed<10,4>)(q * k); }
+async tuple<int, string> pair(int i) { return tuple(i, "p" + num(i)); }
+async tuple shaped(int c) { if (c) return tuple(1, "a" + num(1)); return tuple("b" + num(2)); }
+async Fn<int(int)> adder(int n) { string tag = "t" + num(n); return [n, tag](int x) => x + n + tag.size; }
+
+int main() {
+    int r = 0;
+    bigint e30 = await pow10(30);
+    bigint want = 1000000000000000000000000000000;
+    Task<bigint> t = pow10(3);
+    bigint a = await t;
+    bigint b = await t;
+    if (e30 == want && a == 1000 && b + 1 == 1001) r += 1;
+    fixed<10,4> q = await quarter(3);
+    fixed<10,4> three4 = 0.75;
+    if (q == three4) r += 1;
+    tuple<int, string> p = await pair(4);
+    Task<tuple<int, string>> k = pair(5);
+    auto p1 = await k;
+    auto p2 = await k;
+    if (p[0] == 4 && p[1] == "p4" && p1[1] == "p5" && p2[0] == 5) r += 1;
+    tuple s1 = await shaped(1);
+    tuple s0 = await shaped(0);
+    int n = s1[0];
+    string w = s0[0];
+    if (s1.length == 2 && n == 1 && s0.length == 1 && w == "b2") r += 1;
+    Fn<int(int)> f = await adder(40);
+    Task<Fn<int(int)>> tf = adder(1);
+    Fn<int(int)> g = await tf;
+    Fn<int(int)> h = await tf;
+    if (f(0) == 42 && g(1) == 4 && h(2) == 5 && (await adder(5))(1) == 8) r += 1;
+    return r == 5 ? 42 : r;
+}

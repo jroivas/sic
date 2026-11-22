@@ -125,6 +125,12 @@
   other (`Option<int> x = l[0];`, `for (Option<int> o : l.values)` were
   compile errors); a stored bare `None` no longer crashes, and a missing dict
   key reads as `None`.
+- Async functions return any type but `any`: `bigint`, `fixed`, tuples
+  (`tuple<…>`, or a plain `tuple` as a dynamic one) and closures (`Fn<…>`)
+  were compile errors. `await` is a call of a generated function, so its
+  result is owned as any call's is; it moves the result out of a temporary
+  task and copies it from a kept one, and the task's runner moves the body's
+  result in.
 - A `bigint` or `fixed` list or dict element is the container's own copy: it
   was the source's block and was freed under the container; a number stored
   into a `fixed` element (`d[1] = 2.5`) kept the double's bits as an address;
