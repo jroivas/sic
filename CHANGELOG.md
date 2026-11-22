@@ -2,6 +2,13 @@
 
 ## 0.3.0 (unreleased)
 
+### Compatibility
+
+- Modules (`.smod`, `lib*.a`/`.so`) built with 0.2.x must be rebuilt: an `any`
+  is 32 bytes (it was 16), the RTTI type-info record 56 (was 32), and a
+  `Task<T>` a counted struct handle. `std`'s `Print`/`Fmt` take their
+  arguments as `any`, so code calling them is affected too.
+
 ### Back ends
 
 - An optional **LLVM back end** (`crates/sic-llvm`, through inkwell, in process):
