@@ -854,7 +854,7 @@ impl<'m> FuncCtx<'m> {
         if let Some(r) = self.lowerer.module.func_ref_by_name(f) { return Ok(r); }
         let params = if n == 1 { vec![Type::i32()] } else { vec![Type::u32(); 5] };
         Ok(self.lowerer.module.add_extern(ExternFunc { name: f.to_string(),
-            sig: FunctionType { ret: Type::i32(), params, variadic: false } }))
+            sig: FunctionType { cc: Default::default(), ret: Type::i32(), params, variadic: false } }))
     }
 
     /// `__builtin_{add,sub,mul}_overflow` on operands already of the result type

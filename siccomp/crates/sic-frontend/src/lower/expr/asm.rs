@@ -565,7 +565,7 @@ impl<'m> FuncCtx<'m> {
             Some(f) => f,
             None => self.lowerer.module.add_extern(ExternFunc {
                 name: sym,
-                sig: FunctionType { ret: ret.clone(), params: params.to_vec(), variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: ret.clone(), params: params.to_vec(), variadic: false },
             }),
         };
         let mut vals = Vec::with_capacity(args.len());

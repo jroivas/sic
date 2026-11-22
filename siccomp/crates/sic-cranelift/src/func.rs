@@ -21,6 +21,9 @@ struct VaInfo {
     gp_start: u32,
     /// Initial `fp_offset`: 48 + named FP args * 16.
     fp_start: u32,
+    /// Microsoft x64 (`ms_abi`): `va_list` is a `char *`, `reg_save` its start
+    /// (the first variadic home slot).
+    ms: bool,
 }
 
 /// The module's `long double` helpers (sic_ir::f80), when it uses any.
@@ -114,7 +117,7 @@ pub fn compile_function(
     // the return registers.
     let ret_chunks: Option<Vec<sic_ir::abi::Chunk>> = match &f.sig.ret {
         sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) => {
-            match sic_ir::abi::classify_struct_union(&f.sig.ret, ptr_size) {
+            match sic_ir::abi::classify_ret_cc(&f.sig.ret, ptr_size, f.sig.cc) {
                 sic_ir::abi::AggClass::Regs(chunks) => Some(chunks),
                 sic_ir::abi::AggClass::Memory(_) => None,
             }
@@ -137,7 +140,9 @@ pub fn compile_function(
         st0: obj_module.declare_func_in_func(h.st0, builder.func),
         ret: obj_module.declare_func_in_func(h.ret, builder.func),
     });
-    let vty = if f80.is_some() { sic_ir::analysis::value_types(f) } else { HashMap::default() };
+    // Value types: of `long double` values, and of the aggregates passed
+    // through `...` (`marshal_args`).
+    let vty = sic_ir::analysis::value_types(f);
     let mut data_refs: HashMap<u32, cir::GlobalValue> = HashMap::default();
     let mut sorted_globals: Vec<(u32, DataId)> = global_ids.iter().map(|(&k, &v)| (k, v)).collect();
     sorted_globals.sort_by_key(|(k, _)| *k);
@@ -175,8 +180,8 @@ pub fn compile_function(
         // A ByValStack aggregate already arrives as a pointer (Cranelift's copy).
         let mut bp = 0usize; // entry-block param cursor
         // 16-byte stack alignment pads (abi::stack_pads) are extra block params.
-        let passes: Vec<crate::abi::ParamPass> = f.params.iter()
-            .map(|p| crate::abi::classify_param(&p.ty, ptr_size)).collect();
+        let passes: Vec<crate::abi::ParamPass> =
+            crate::abi::classify_params(f.params.iter().map(|p| &p.ty), ptr_size, f.sig.cc);
         let kinds_of = |i: usize| crate::abi::param_kinds(&passes[i], &f.params[i].ty, ptr_size);
         let kinds: Vec<crate::abi::ArgKind> = (0..passes.len()).flat_map(kinds_of).collect();
         let (pads, named_stack) = crate::abi::stack_pads(&kinds);
@@ -186,7 +191,7 @@ pub fn compile_function(
             let nk = kinds_of(i).len();
             if nk > 0 && pads[kcur] { bp += 1; }
             kcur += nk;
-            match crate::abi::classify_param(pty, ptr_size) {
+            match passes[i].clone() {
                 crate::abi::ParamPass::X87 => {
                     // Arrives as a pointer to the caller's 16-byte stack copy.
                     if bp < params.len() {
@@ -198,7 +203,10 @@ pub fn compile_function(
                     }
                     bp += 1;
                 }
-                crate::abi::ParamPass::Scalar | crate::abi::ParamPass::ByValStack(..) => {
+                // A by-reference aggregate (Microsoft x64) arrives as the address
+                // of the caller's copy, which the body uses as the aggregate.
+                crate::abi::ParamPass::Scalar | crate::abi::ParamPass::ByValStack(..)
+                | crate::abi::ParamPass::ByRef(..) => {
                     if bp < params.len() {
                         val_map.insert(0x10000 + i as u32, params[bp]);
                     }
@@ -221,7 +229,24 @@ pub fn compile_function(
                 }
             }
         }
-        if f.sig.variadic {
+        if f.sig.variadic && f.sig.cc == sic_ir::CallConv::Win64 {
+            // Microsoft x64: the caller's 32-byte home area for the four
+            // register arguments is just above the return address, and the
+            // stack arguments follow it, so storing the register arguments past
+            // the named ones into their home slots makes one array of 8-byte
+            // slots: `va_list` (a `char *`) starts at the first variadic one.
+            let fp = builder.ins().get_frame_pointer(ptr_ty);
+            let home = builder.ins().iadd_imm_s(fp, 16);
+            let mut idx = bp;
+            for k in named.min(4)..4 {
+                if idx < params.len() {
+                    builder.ins().store(MemFlagsData::new(), params[idx], home, (k * 8) as i32);
+                }
+                idx += 1;
+            }
+            let start = builder.ins().iadd_imm_s(home, (named * 8) as i64);
+            va_info = Some(VaInfo { reg_save: start, overflow: start, gp_start: 0, fp_start: 0, ms: true });
+        } else if f.sig.variadic {
             // Reconstruct the System V register save area from the over-declared
             // trailing params (see `build_cl_sig_def`): GP fillers, then FP
             // fillers. Only the *vararg* slots need
@@ -262,6 +287,7 @@ pub fn compile_function(
                 gp_start: (n_gp * 8) as u32,
                 // Without SSE every FP slot counts as used (176 = the end).
                 fp_start: if sse { (48 + n_fp * 16) as u32 } else { 176 },
+                ms: false,
             });
         }
     }
@@ -709,8 +735,9 @@ fn emit_instr(
             let named_count = ir_sig.params.len();
             let is_variadic = ir_sig.variadic;
             let _ = &param_tys;
+            let cc = ir_sig.cc;
             let (arg_vals, arg_abi) = marshal_args(
-                args, &ir_sig.params, named_count, is_variadic, ptr_size,
+                args, &ir_sig.params, named_count, is_variadic, cc, ptr_size,
                 val_map, callee_refs, data_refs, builder, ptr_ty, f80, vty,
             );
 
@@ -744,14 +771,14 @@ fn emit_instr(
                 bind_x87_complex(dest, h, builder, ptr_ty, val_map);
                 return;
             }
-            bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
+            bind_call_result(dest, &results, ret_ty, cc, ptr_size, builder, ptr_ty, val_map);
         }
 
         Instr::CallIndirect { dest, fptr, args, ret_ty, func_ty } => {
             let base_sig = build_cl_sig(func_ty, ptr_size, builder.func.signature.call_conv);
             let fp = rval(fptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
             let (arg_vals, arg_abi) = marshal_args(
-                args, &func_ty.params, func_ty.params.len(), func_ty.variadic, ptr_size,
+                args, &func_ty.params, func_ty.params.len(), func_ty.variadic, func_ty.cc, ptr_size,
                 val_map, callee_refs, data_refs, builder, ptr_ty, f80, vty,
             );
             // Build the call signature from the marshalled values: base returns
@@ -767,7 +794,7 @@ fn emit_instr(
                 bind_x87_complex(dest, h, builder, ptr_ty, val_map);
                 return;
             }
-            bind_call_result(dest, &results, ret_ty, ptr_size, builder, ptr_ty, val_map);
+            bind_call_result(dest, &results, ret_ty, func_ty.cc, ptr_size, builder, ptr_ty, val_map);
         }
 
         Instr::GetElemPtr { dest, base, index, elem_size, .. } => {
@@ -960,7 +987,11 @@ fn emit_instr(
         Instr::VaStart { list_ptr } => {
             // Initialize the System V va_list tag:
             //   {u32 gp_offset; u32 fp_offset; void* overflow; void* reg_save;}
-            if let Some(va) = va_info {
+            if let Some(va) = va_info.filter(|v| v.ms) {
+                // `__builtin_ms_va_start`: the `char *` to the first variadic slot.
+                let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                builder.ins().store(MemFlagsData::new(), va.reg_save, lp, 0);
+            } else if let Some(va) = va_info {
                 let lp = rval(list_ptr, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
                 let gp = builder.ins().iconst(ct::I32, va.gp_start as i64);
                 builder.ins().store(MemFlagsData::new(), gp, lp, 0);
@@ -1071,6 +1102,7 @@ fn bind_call_result(
     dest: &Option<ValId>,
     results: &[cir::Value],
     ret_ty: &sic_ir::Type,
+    cc: sic_ir::CallConv,
     ptr_size: u32,
     builder: &mut FunctionBuilder<'_>,
     ptr_ty: cir::Type,
@@ -1082,7 +1114,7 @@ fn bind_call_result(
     }
     if matches!(ret_ty, sic_ir::Type::Struct(_) | sic_ir::Type::Union(_)) {
         if let sic_ir::abi::AggClass::Regs(chunks) =
-            sic_ir::abi::classify_struct_union(ret_ty, ptr_size)
+            sic_ir::abi::classify_ret_cc(ret_ty, ptr_size, cc)
         {
             let size = ret_ty.size_of(ptr_size) as u32;
             let align = ret_ty.align_of(ptr_size).max(1);
@@ -1133,6 +1165,7 @@ fn marshal_args(
     ir_params: &[sic_ir::Type],
     named: usize,
     is_variadic: bool,
+    cc: sic_ir::CallConv,
     ptr_size: u32,
     val_map: &HashMap<u32, cir::Value>,
     callee_refs: &HashMap<u32, cir::FuncRef>,
@@ -1145,12 +1178,18 @@ fn marshal_args(
     use crate::abi::{ParamPass, ArgKind};
     // One (value, AbiParam, kind) group per IR argument.
     let mut groups: Vec<Vec<(cir::Value, cir::AbiParam, ArgKind)>> = Vec::with_capacity(args.len());
+    let mut regs = sic_ir::abi::ArgRegs::new(ptr_size, cc);
     for (i, a) in args.iter().enumerate() {
         let is_named = !is_variadic || i < named;
         let pass = if is_named && i < ir_params.len() {
-            Some(crate::abi::classify_param(&ir_params[i], ptr_size))
-        } else if f80.is_some() && is_f80(vty, a) {
+            Some(regs.next(&ir_params[i]))
+        } else if f80.is_some() && is_f80(vty, a) && cc == sic_ir::CallConv::SysV {
             Some(ParamPass::X87)
+        } else if let Val::Local(id) = a {
+            // A variadic aggregate (typed so by the frontend) is passed as a
+            // named one of its type would be.
+            vty.get(&id.0).filter(|t| matches!(t, Type::Struct(_) | Type::Union(_)))
+                .map(|t| regs.next(t))
         } else {
             None
         };
@@ -1184,10 +1223,22 @@ fn marshal_args(
                     g.push((v, cir::AbiParam::new(t), ArgKind::Reg(t)));
                 }
             }
+            Some(ParamPass::ByRef(size, align)) => {
+                let src = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ptr_ty);
+                let copy = crate::abi::byref_copy(builder, src, size, align, ptr_ty);
+                g.push((copy, cir::AbiParam::new(ptr_ty), ArgKind::Reg(ptr_ty)));
+            }
             None => {
                 // Variadic (or over-provided) argument.
                 let v = rval(a, val_map, callee_refs, data_refs, builder, ptr_ty, ct::I64);
-                let v = va_promote(v, builder);
+                let mut v = va_promote(v, builder);
+                // Microsoft x64: a variadic callee reads every argument from the
+                // integer registers' home slots, so a `double` goes as its bits
+                // in the integer register of its position.
+                regs.note_scalar(builder.func.dfg.value_type(v).is_float());
+                if cc == sic_ir::CallConv::Win64 && builder.func.dfg.value_type(v) == ct::F64 {
+                    v = builder.ins().bitcast(ct::I64, cir::MemFlagsData::new(), v);
+                }
                 let t = builder.func.dfg.value_type(v);
                 g.push((v, cir::AbiParam::new(t), ArgKind::Reg(t)));
             }

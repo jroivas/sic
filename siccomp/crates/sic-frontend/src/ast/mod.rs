@@ -65,6 +65,9 @@ pub enum TypeQual {
     /// sic strict mode: `strict` on a function — its variables are immutable
     /// unless `mut`.
     Strict,
+    /// `__attribute__((ms_abi))` on a function type (or on a typedef name of
+    /// one): the function is called with the Microsoft x64 convention.
+    MsAbi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -815,6 +818,9 @@ pub struct TranslationUnit {
     pub fn_targets: Vec<(String, String)>,
     /// Functions declared `_Noreturn` / `__attribute__((noreturn))`.
     pub noreturn: Vec<String>,
+    /// Functions declared `__attribute__((ms_abi))` (the Microsoft x64
+    /// convention; EFI's `__efiapi`).
+    pub ms_abi_fns: Vec<String>,
     /// Register variables named after a register (`register T x asm("rsp")`):
     /// (variable, register). At file scope one is a global register variable —
     /// the register itself, with no storage (Linux's `current_stack_pointer`).

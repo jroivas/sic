@@ -52,7 +52,7 @@ pub const WARNINGS: &[(&str, Group, bool)] = &[
     // sic: an option it accepts but does not implement (`-fstack-protector`,
     // return thunks, `-g` with the LLVM back end, …).
     ("ignored-option", Group::Default, false),
-    // sic: an attribute it does not implement (`ms_abi`, i386 `regparm`).
+    // sic: an attribute it does not implement (i386 `regparm`).
     ("unsupported-attribute", Group::Default, false),
     // sic: `alloca` without a dynamic stack (Cranelift): `malloc`ed and never
     // freed, or a fixed slot the stack pointer does not move by.

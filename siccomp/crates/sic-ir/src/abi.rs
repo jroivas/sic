@@ -1,4 +1,5 @@
-//! System V x86-64 aggregate argument/return classification.
+//! x86-64 aggregate argument/return classification: System V, and the
+//! Microsoft x64 convention (`ms_abi`) — see `classify_param_cc`.
 //!
 //! This is the one part of the C ABI that Cranelift does not do for us: it has
 //! no notion of C structs, so the frontend must decide how each by-value
@@ -14,7 +15,7 @@
 //! left on the by-pointer path for now (a documented follow-up in ABI.md), so
 //! SIMD lowering is untouched.
 
-use crate::types::Type;
+use crate::types::{CallConv, Type};
 
 /// Which register bank an eightbyte is passed in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -195,6 +196,7 @@ fn contains_x87(ty: &Type) -> bool {
 }
 
 /// How one IR parameter is passed.
+#[derive(Clone, Debug)]
 pub enum ParamPass {
     /// A scalar, or an `Array` (vector, kept on the pointer path): one value.
     Scalar,
@@ -206,6 +208,10 @@ pub enum ParamPass {
     /// `long double` (X87 class → MEMORY): 16 bytes on the stack, 16-aligned, in
     /// x87 format. The IR value is an `f64`; the boundary converts (`f80`).
     X87,
+    /// Microsoft x64: an aggregate that is not 1, 2, 4 or 8 bytes is passed by
+    /// reference — the caller makes a copy and passes its address in the
+    /// argument's slot. The IR value is the aggregate's address. `(size, align)`.
+    ByRef(u32, u32),
 }
 
 /// Classify one IR parameter type for the System V ABI.
@@ -218,6 +224,108 @@ pub fn classify_param(ty: &Type, ptr_size: u32) -> ParamPass {
         // i386: on the stack, 12 bytes, 4-aligned.
         Type::Float80 => ParamPass::X87,
         _ => ParamPass::Scalar,
+    }
+}
+
+/// Classifies a call's arguments in order, as the registers run out: under
+/// System V an aggregate whose eightbytes do not all fit in the integer and
+/// SSE argument registers still free goes, whole, on the stack (it is never
+/// split), and the registers it would have used stay free for the arguments
+/// after it. (Microsoft x64 assigns registers by position: nothing to track.)
+pub struct ArgRegs { gp: u32, fp: u32, cc: CallConv, ptr_size: u32 }
+
+impl ArgRegs {
+    pub fn new(ptr_size: u32, cc: CallConv) -> Self { ArgRegs { gp: 6, fp: 8, cc, ptr_size } }
+
+    /// A variadic scalar argument (its type known only to the back end): it
+    /// takes an SSE register when `float`, else an integer one.
+    pub fn note_scalar(&mut self, float: bool) {
+        if float { self.fp = self.fp.saturating_sub(1) } else { self.gp = self.gp.saturating_sub(1) }
+    }
+
+    /// How the next argument, of type `ty`, is passed.
+    pub fn next(&mut self, ty: &Type) -> ParamPass {
+        let pass = classify_param_cc(ty, self.ptr_size, self.cc);
+        if self.cc != CallConv::SysV || self.ptr_size != 8 { return pass; }
+        match &pass {
+            ParamPass::Direct(chunks) => {
+                let gp = chunks.iter().filter(|c| c.class == RegClass::Int).count() as u32;
+                let fp = chunks.len() as u32 - gp;
+                if gp > self.gp || fp > self.fp {
+                    return ParamPass::ByValStack(ty.size_of(self.ptr_size) as u32, ty.align_of(self.ptr_size) as u32);
+                }
+                self.gp -= gp;
+                self.fp -= fp;
+            }
+            ParamPass::Scalar => match ty {
+                Type::Float32 | Type::Float64 => self.fp = self.fp.saturating_sub(1),
+                Type::Int { bits, .. } if *bits > 64 => self.gp = self.gp.saturating_sub(2),
+                _ => self.gp = self.gp.saturating_sub(1),
+            },
+            ParamPass::ByValStack(..) | ParamPass::X87 | ParamPass::ByRef(..) => {}
+        }
+        pass
+    }
+}
+
+/// How each of `tys` is passed, in order (see [`ArgRegs`]).
+pub fn classify_params<'a>(tys: impl IntoIterator<Item = &'a Type>, ptr_size: u32, cc: CallConv) -> Vec<ParamPass> {
+    let mut regs = ArgRegs::new(ptr_size, cc);
+    tys.into_iter().map(|t| regs.next(t)).collect()
+}
+
+/// Microsoft x64: an aggregate of 1, 2, 4 or 8 bytes is passed and returned in
+/// one integer register (whatever its fields are); any other size by
+/// reference, or through the hidden result pointer.
+fn win64_in_reg(size: u64) -> bool { matches!(size, 1 | 2 | 4 | 8) }
+
+/// Classify one IR parameter type for the convention `cc`. Microsoft x64
+/// passes each of the first four arguments in a register by position (rcx,
+/// rdx, r8, r9, or xmm0–3 for a float) — the back end's part; here only how an
+/// aggregate or a vector travels: in one integer register when it is 1, 2, 4
+/// or 8 bytes, else by reference. (`long double` is rejected for `ms_abi` by
+/// the front end.)
+pub fn classify_param_cc(ty: &Type, ptr_size: u32, cc: CallConv) -> ParamPass {
+    match cc {
+        CallConv::SysV => classify_param(ty, ptr_size),
+        CallConv::Win64 => match ty {
+            Type::Struct(_) | Type::Union(_) | Type::Array { .. } => {
+                let size = ty.size_of(ptr_size);
+                if win64_in_reg(size) {
+                    ParamPass::Direct(vec![Chunk { class: RegClass::Int, offset: 0, bytes: size as u32 }])
+                } else {
+                    ParamPass::ByRef(size as u32, ty.align_of(ptr_size) as u32)
+                }
+            }
+            _ => ParamPass::Scalar,
+        },
+    }
+}
+
+/// How a `Struct`/`Union` result comes back under `cc` (System V: its class;
+/// Microsoft x64: 1, 2, 4 or 8 bytes in rax, else through the result pointer).
+pub fn classify_ret_cc(ty: &Type, ptr_size: u32, cc: CallConv) -> AggClass {
+    match cc {
+        CallConv::SysV => classify_struct_union(ty, ptr_size),
+        CallConv::Win64 => {
+            let size = ty.size_of(ptr_size);
+            if win64_in_reg(size) {
+                AggClass::Regs(vec![Chunk { class: RegClass::Int, offset: 0, bytes: size as u32 }])
+            } else {
+                AggClass::Memory(size as u32)
+            }
+        }
+    }
+}
+
+/// True if a result of type `ty` uses the hidden result pointer under `cc`.
+pub fn ret_in_memory_cc(ty: &Type, ptr_size: u32, cc: CallConv) -> bool {
+    match cc {
+        CallConv::SysV => ret_in_memory(ty, ptr_size),
+        CallConv::Win64 => match ty {
+            Type::Struct(_) | Type::Union(_) | Type::Array { .. } => !win64_in_reg(ty.size_of(ptr_size)),
+            _ => false,
+        },
     }
 }
 
@@ -283,6 +391,20 @@ mod tests {
     #[test]
     fn x87_forces_memory() {
         assert!(is_mem(&st(vec![Type::Float80]))); // long double
+    }
+    #[test]
+    fn win64_sizes() {
+        let w = CallConv::Win64;
+        // 8 bytes, even of floats: one integer register.
+        assert!(matches!(classify_param_cc(&st(vec![Type::Float32, Type::Float32]), 8, w),
+            ParamPass::Direct(ref c) if c.len() == 1 && c[0].class == RegClass::Int && c[0].bytes == 8));
+        // 3, 12 and 16 bytes: by reference.
+        assert!(matches!(classify_param_cc(&st(vec![i(8), i(8), i(8)]), 8, w), ParamPass::ByRef(3, 1)));
+        assert!(matches!(classify_param_cc(&st(vec![i(32), i(32), i(32)]), 8, w), ParamPass::ByRef(12, 4)));
+        assert!(matches!(classify_param_cc(&st(vec![i(64), i(64)]), 8, w), ParamPass::ByRef(16, 8)));
+        assert!(!ret_in_memory_cc(&st(vec![i(32)]), 8, w));
+        assert!(ret_in_memory_cc(&st(vec![i(64), i(64)]), 8, w));
+        assert!(!ret_in_memory(&st(vec![i(64), i(64)]), 8)); // System V: two registers
     }
     #[test]
     fn three_byte_struct_one_partial_int() {

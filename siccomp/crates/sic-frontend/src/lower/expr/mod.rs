@@ -1475,20 +1475,39 @@ impl<'m> FuncCtx<'m> {
 
             ExprKind::VaStart { list, last } => {
                 let _ = last;
+                // The list's kind must be the function's convention's: the
+                // back end makes the one its convention passes arguments for.
+                let ms = self.is_ms_va_list(list);
+                let ms_fn = self.lowerer.fn_cc(&self.cur_fn) == CallConv::Win64;
+                if ms != ms_fn {
+                    let sp = &expr.span;
+                    return Err(CompileError::at(if ms_fn {
+                        "an `ms_abi` function's variable arguments need a `__builtin_ms_va_list` and `__builtin_ms_va_start`"
+                    } else {
+                        "`__builtin_ms_va_start` needs an `ms_abi` function"
+                    }.to_string(), sp.file.clone(), sp.line, sp.col));
+                }
                 let list_ptr = self.lower_va_list_ptr(list)?;
                 self.push_instr(Instr::VaStart { list_ptr });
                 Ok(Constant::zero())
             }
 
             ExprKind::VaArg { list, ty } => {
+                let ms = self.is_ms_va_list(list);
                 let list_ptr = self.lower_va_list_ptr(list)?;
                 let ir_ty = self.lower_type(ty)?;
+                if ms { return self.ms_va_arg(list_ptr, ir_ty); }
+                if !sic_ir::target::is_i386() && matches!(ir_ty, Type::Struct(_) | Type::Union(_)) {
+                    return self.sysv_va_arg_agg(list_ptr, ir_ty);
+                }
                 let dest = self.alloc_val();
                 self.push_instr(Instr::VaArg { dest, list_ptr, ty: ir_ty });
                 Ok(Val::Local(dest))
             }
 
             ExprKind::VaEnd { list } => {
+                // A Microsoft x64 list is a plain pointer: nothing to end.
+                if self.is_ms_va_list(list) { return Ok(Constant::zero()); }
                 let list_ptr = self.lower_va_list_ptr(list)?;
                 self.push_instr(Instr::VaEnd { list_ptr });
                 Ok(Constant::zero())
@@ -1498,6 +1517,12 @@ impl<'m> FuncCtx<'m> {
                 // va_copy(d, s): duplicate the whole va_list state.
                 let dptr = self.lower_va_list_ptr(dst)?;
                 let sptr = self.lower_va_list_ptr(src)?;
+                if self.is_ms_va_list(dst) {
+                    let p = self.alloc_val();
+                    self.push_instr(Instr::Load { dest: p, ptr: sptr, ty: Type::void_ptr() });
+                    self.push_instr(Instr::Store { val: Val::Local(p), ptr: dptr });
+                    return Ok(Constant::zero());
+                }
                 let vl = super::types::va_list_type();
                 let size = vl.size_of(self.ptr_size());
                 let align = vl.align_of(self.ptr_size());
@@ -1505,6 +1530,146 @@ impl<'m> FuncCtx<'m> {
                 Ok(Constant::zero())
             }
         }
+    }
+
+    /// Whether `list` is a Microsoft x64 `va_list` (`__builtin_ms_va_list`, a
+    /// `char *`) — on x86-64, where the System V one is an array of a struct.
+    fn is_ms_va_list(&mut self, list: &Expr) -> bool {
+        !sic_ir::target::is_i386() && matches!(self.infer_expr_type(list),
+            Ok(Type::Pointer(p)) if matches!(*p, Type::Int { bits: 8, .. }))
+    }
+
+    /// `va_arg` of a Microsoft x64 list: every argument is one 8-byte slot (an
+    /// aggregate of other than 1, 2, 4 or 8 bytes is there as the address of
+    /// the caller's copy); the list moves on by 8.
+    fn ms_va_arg(&mut self, list_ptr: Val, ty: Type) -> Result<Val> {
+        let ptr_size = self.ptr_size();
+        let cur = self.alloc_val();
+        self.push_instr(Instr::Load { dest: cur, ptr: list_ptr.clone(), ty: Type::void_ptr() });
+        let next = self.alloc_val();
+        self.push_instr(Instr::PtrOffset { dest: next, base: Val::Local(cur), offset: Constant::int(8) });
+        self.push_instr(Instr::Store { val: Val::Local(next), ptr: list_ptr });
+        let agg = matches!(ty, Type::Struct(_) | Type::Union(_) | Type::Array { .. });
+        if agg {
+            // An aggregate value is its address.
+            let in_slot = matches!(sic_ir::abi::classify_param_cc(&ty, ptr_size, CallConv::Win64),
+                sic_ir::abi::ParamPass::Direct(_));
+            let addr = if in_slot {
+                cur
+            } else {
+                let a = self.alloc_val();
+                self.push_instr(Instr::Load { dest: a, ptr: Val::Local(cur), ty: Type::void_ptr() });
+                a
+            };
+            self.val_types.insert(addr.0, ty);
+            return Ok(Val::Local(addr));
+        }
+        if matches!(ty, Type::Float80) {
+            return Err(CompileError::new("`va_arg` of a `long double` is not supported with `ms_abi`".to_string()));
+        }
+        let dest = self.alloc_val();
+        self.push_instr(Instr::Load { dest, ptr: Val::Local(cur), ty });
+        Ok(Val::Local(dest))
+    }
+
+    /// `va_arg` of a struct or union from a System V list, as the caller
+    /// passed it: an aggregate of register class from the register save area
+    /// (its integer eightbytes at `gp_offset`, its SSE ones at `fp_offset`)
+    /// when all of them are left there, else — like a MEMORY-class one — in
+    /// place in the overflow area. Gives the aggregate's address.
+    fn sysv_va_arg_agg(&mut self, lp: Val, ty: Type) -> Result<Val> {
+        use sic_ir::abi::{classify_struct_union, AggClass, RegClass};
+        let ptr_size = self.ptr_size();
+        let (u32t, i64t, vp) = (Type::Int { bits: 32, signed: false }, Type::i64(), Type::void_ptr());
+        let size = ty.size_of(ptr_size);
+        let align = ty.align_of(ptr_size).max(1);
+        let at = |this: &mut Self, base: Val, off: i64| -> Val {
+            if off == 0 { return base; }
+            let d = this.alloc_val();
+            this.push_instr(Instr::PtrOffset { dest: d, base, offset: Constant::int(off) });
+            Val::Local(d)
+        };
+        let load = |this: &mut Self, ptr: Val, ty: &Type| -> Val {
+            let d = this.alloc_val();
+            this.push_instr(Instr::Load { dest: d, ptr, ty: ty.clone() });
+            Val::Local(d)
+        };
+        let bin = |this: &mut Self, op: BinOp, lhs: Val, rhs: Val, ty: &Type| -> Val {
+            let d = this.alloc_val();
+            this.push_instr(Instr::BinOp { dest: d, op, lhs, rhs, ty: ty.clone() });
+            Val::Local(d)
+        };
+        let select = |this: &mut Self, cond: Val, a: Val, b: Val, ty: &Type| -> Val {
+            let d = this.alloc_val();
+            this.push_instr(Instr::Select { dest: d, cond, on_true: a, on_false: b, ty: ty.clone() });
+            Val::Local(d)
+        };
+        // The overflow area's next argument, aligned past 8 bytes as the type asks.
+        let ovf_at = at(self, lp.clone(), 8);
+        let ovf = load(self, ovf_at.clone(), &vp);
+        let ovf = if align > 8 {
+            let i = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: i, op: CastOp::PtrToInt, val: ovf, to_ty: i64t.clone() });
+            let up = bin(self, BinOp::Add, Val::Local(i), Constant::int(align as i64 - 1), &i64t);
+            let al = bin(self, BinOp::And, up, Constant::int(-(align as i64)), &i64t);
+            let p = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: p, op: CastOp::IntToPtr, val: al, to_ty: vp.clone() });
+            Val::Local(p)
+        } else { ovf };
+        let ovf_next = at(self, ovf.clone(), ((size + 7) & !7) as i64);
+        let chunks = match classify_struct_union(&ty, ptr_size) {
+            AggClass::Regs(c) => c,
+            AggClass::Memory(_) => {
+                self.push_instr(Instr::Store { val: ovf_next, ptr: ovf_at });
+                let Val::Local(id) = ovf else { unreachable!() };
+                self.val_types.insert(id.0, ty);
+                return Ok(Val::Local(id));
+            }
+        };
+        let n_gp = chunks.iter().filter(|c| c.class == RegClass::Int).count() as i64;
+        let n_fp = chunks.len() as i64 - n_gp;
+        let fp_at = at(self, lp.clone(), 4);
+        let gp = load(self, lp.clone(), &u32t);
+        let fp = load(self, fp_at.clone(), &u32t);
+        let rsa_at = at(self, lp.clone(), 16);
+        let rsa = load(self, rsa_at, &vp);
+        // All its eightbytes still fit in the registers' save area?
+        let fits = |this: &mut Self, off: Val, limit: i64| -> Val {
+            let d = this.alloc_val();
+            this.push_instr(Instr::Cmp { dest: d, op: CmpOp::IULe, lhs: off, rhs: Constant::int(limit), ty: u32t.clone() });
+            Val::Local(d)
+        };
+        let gp_ok = fits(self, gp.clone(), 48 - 8 * n_gp);
+        let fp_ok = fits(self, fp.clone(), 176 - 16 * n_fp);
+        let in_regs = select(self, gp_ok, fp_ok, Constant::bool_val(false), &Type::Bool);
+        let slot = self.alloc_val();
+        self.push_instr(Instr::Alloca { dest: slot, ty: ty.clone(), align: None });
+        let (mut gi, mut fi) = (0i64, 0i64);
+        for c in &chunks {
+            let (off, k) = match c.class {
+                RegClass::Int => { gi += 1; (gp.clone(), 8 * (gi - 1)) }
+                RegClass::Sse => { fi += 1; (fp.clone(), 16 * (fi - 1)) }
+            };
+            let off64 = self.alloc_val();
+            self.push_instr(Instr::Cast { dest: off64, op: CastOp::ZExt, val: off, to_ty: i64t.clone() });
+            let o = bin(self, BinOp::Add, Val::Local(off64), Constant::int(k), &i64t);
+            let r = self.alloc_val();
+            self.push_instr(Instr::PtrOffset { dest: r, base: rsa.clone(), offset: o });
+            let m = at(self, ovf.clone(), c.offset as i64);
+            let src = select(self, in_regs.clone(), Val::Local(r), m, &vp);
+            let dst = at(self, Val::Local(slot), c.offset as i64);
+            self.push_instr(Instr::MemCopy { dst, src, size: c.bytes as u64, align: 1 });
+        }
+        let gp2 = bin(self, BinOp::Add, gp.clone(), Constant::int(8 * n_gp), &u32t);
+        let gp2 = select(self, in_regs.clone(), gp2, gp, &u32t);
+        self.push_instr(Instr::Store { val: gp2, ptr: lp });
+        let fp2 = bin(self, BinOp::Add, fp.clone(), Constant::int(16 * n_fp), &u32t);
+        let fp2 = select(self, in_regs.clone(), fp2, fp, &u32t);
+        self.push_instr(Instr::Store { val: fp2, ptr: fp_at });
+        let ovf2 = select(self, in_regs, ovf.clone(), ovf_next, &vp);
+        self.push_instr(Instr::Store { val: ovf2, ptr: ovf_at });
+        self.val_types.insert(slot.0, ty);
+        Ok(Val::Local(slot))
     }
 
     /// The function-pointer type of a lambda (sic.md §"Lambdas"): its parameter
@@ -1583,7 +1748,7 @@ impl<'m> FuncCtx<'m> {
             sic_ir::StructType::plain(Some(env_name.clone()), vec![], false))));
         let mut code_params = vec![env_opaque];
         code_params.extend(user_sig.params.clone());
-        let code_fn_ty = FunctionType { ret: user_sig.ret.clone(), params: code_params, variadic: false };
+        let code_fn_ty = FunctionType { cc: Default::default(), ret: user_sig.ret.clone(), params: code_params, variadic: false };
         let env_ty = super::types::closure_env_type(&env_name, &code_fn_ty, &cap_fields, self.lowerer.ptr_size);
         Ok((caps, user_sig, env_name, code_fn_ty, env_ty))
     }
@@ -2034,7 +2199,7 @@ impl<'m> FuncCtx<'m> {
             "__sic_tuple_check_shape" => (vec![ptr.clone(), ptr.clone()], Type::Void),
             _ => (vec![ptr.clone(), u64t.clone(), ptr.clone()], ptr.clone()), // __sic_tuple_elem
         };
-        self.lowerer.module.add_extern(ExternFunc { name: name.to_string(), sig: FunctionType { ret, params, variadic: false } })
+        self.lowerer.module.add_extern(ExternFunc { name: name.to_string(), sig: FunctionType { cc: Default::default(), ret, params, variadic: false } })
     }
 
     pub(crate) fn dict_runtime_fn(&mut self, name: &str) -> FuncRef {
@@ -2635,7 +2800,7 @@ impl<'m> FuncCtx<'m> {
             let fref = match self.lowerer.module.func_ref_by_name(&dtor) {
                 Some(f) => f,
                 None => {
-                    let sig = FunctionType { params: vec![Type::void_ptr()], ret: Type::Void, variadic: false };
+                    let sig = FunctionType { cc: Default::default(), params: vec![Type::void_ptr()], ret: Type::Void, variadic: false };
                     self.lowerer.module.add_extern(ExternFunc { name: dtor.clone(), sig })
                 }
             };
@@ -3483,7 +3648,7 @@ impl<'m> FuncCtx<'m> {
         let memcmp = self.lowerer.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "memcmp".to_string(),
-                sig: FunctionType { ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false },
             })
         });
         let d1v = self.coerce(d1, &voidp)?;
@@ -4005,7 +4170,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name(name).unwrap_or_else(|| {
             self.lowerer.module.add_extern(sic_ir::ExternFunc {
                 name: name.to_string(),
-                sig: sic_ir::FunctionType {
+                sig: sic_ir::FunctionType { cc: Default::default(),
                     ret: ty.clone(),
                     params: vec![ty.clone(), ty.clone()],
                     variadic: false,
@@ -4025,7 +4190,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("malloc").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "malloc".to_string(),
-                sig: FunctionType { ret: voidp.clone(), params: vec![Type::u64()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: voidp.clone(), params: vec![Type::u64()], variadic: false },
             })
         });
         let sz = self.coerce(n, &Type::u64())?;
@@ -4041,7 +4206,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("calloc").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "calloc".to_string(),
-                sig: FunctionType { ret: voidp.clone(), params: vec![Type::u64(), Type::u64()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: voidp.clone(), params: vec![Type::u64(), Type::u64()], variadic: false },
             })
         });
         let sz = self.coerce(n, &Type::u64())?;
@@ -4058,7 +4223,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("strlen").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "strlen".to_string(),
-                sig: FunctionType { ret: usize_ty.clone(), params: vec![Type::char_ptr()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: usize_ty.clone(), params: vec![Type::char_ptr()], variadic: false },
             })
         });
         let s = self.coerce(s, &Type::char_ptr())?;
@@ -4279,7 +4444,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("__sic_utf8_decode").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "__sic_utf8_decode".to_string(),
-                sig: FunctionType {
+                sig: FunctionType { cc: Default::default(),
                     ret: Type::void_ptr(),
                     params: vec![Type::char_ptr(), usize_ty.clone(), Type::Pointer(Box::new(usize_ty.clone()))],
                     variadic: false,
@@ -4336,7 +4501,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("free").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "free".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false },
             })
         });
         let p = self.coerce(p, &voidp)?;
@@ -5139,7 +5304,7 @@ impl<'m> FuncCtx<'m> {
         let fref = self.lowerer.module.func_ref_by_name("memcpy").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc {
                 name: "memcpy".to_string(),
-                sig: FunctionType { ret: voidp.clone(), params: vec![voidp.clone(), voidp.clone(), Type::u64()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: voidp.clone(), params: vec![voidp.clone(), voidp.clone(), Type::u64()], variadic: false },
             })
         });
         let dstp = self.coerce(dst, &voidp)?;
@@ -5470,7 +5635,7 @@ impl<'m> FuncCtx<'m> {
         let usize_ty = Type::Int { bits: self.ptr_size() * 8, signed: false };
         let memcmp = self.lowerer.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
             self.lowerer.module.add_extern(ExternFunc { name: "memcmp".to_string(),
-                sig: FunctionType { ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false } })
+                sig: FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![voidp.clone(), voidp.clone(), usize_ty.clone()], variadic: false } })
         });
         let bpv = self.coerce(Val::Local(bp), &voidp)?;
         let ndv = self.coerce(nd, &voidp)?;

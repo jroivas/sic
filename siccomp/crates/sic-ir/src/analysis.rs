@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn types_of_values() {
-        let sig = FunctionType { ret: Type::Void, params: vec![Type::i64()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![Type::i64()], variadic: false };
         let params = vec![Param { name: "a".to_string(), ty: Type::i64() }];
         let f = Function::new("f".to_string(), sig, params, Linkage::External);
         let m = value_types(&f);

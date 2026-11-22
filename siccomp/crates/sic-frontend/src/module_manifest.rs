@@ -425,7 +425,7 @@ impl ModuleManifest {
                     exports.push(Export {
                         name: name.to_string(),
                         symbol: symbol.to_string(),
-                        ty: Type::Function(Box::new(FunctionType { ret, params, variadic })),
+                        ty: Type::Function(Box::new(FunctionType { cc: Default::default(), ret, params, variadic })),
                     });
                 }
                 "var" => {
@@ -906,7 +906,7 @@ mod tests {
             exports: vec![
                 Export {
                     name: "sq".into(), symbol: "math_sq".into(),
-                    ty: Type::Function(Box::new(FunctionType {
+                    ty: Type::Function(Box::new(FunctionType { cc: Default::default(),
                         ret: Type::Int { bits: 32, signed: true },
                         params: vec![Type::Int { bits: 32, signed: true }],
                         variadic: false,
@@ -948,7 +948,7 @@ mod tests {
             links: vec![],
             exports: vec![Export {
                 name: "Fmt".into(), symbol: "std_Fmt".into(),
-                ty: Type::Function(Box::new(FunctionType {
+                ty: Type::Function(Box::new(FunctionType { cc: Default::default(),
                     ret: strt.clone(), params: vec![strt.clone(), vat.clone()], variadic: false,
                 })),
             }],
@@ -1019,7 +1019,7 @@ mod tests {
             links: vec![],
             exports: vec![Export {
                 name: "mid".into(), symbol: "geo_mid".into(),
-                ty: Type::Function(Box::new(FunctionType {
+                ty: Type::Function(Box::new(FunctionType { cc: Default::default(),
                     ret: point.clone(), params: vec![point.clone(), point.clone()], variadic: false,
                 })),
             }],

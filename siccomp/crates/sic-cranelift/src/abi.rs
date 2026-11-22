@@ -5,7 +5,8 @@
 
 use cranelift_codegen::ir::{types as ct, AbiParam, ArgumentPurpose, InstBuilder, MemFlagsData, Type as ClType, Value};
 use cranelift_frontend::FunctionBuilder;
-pub use sic_ir::abi::{classify_param, ParamPass};
+pub use sic_ir::abi::{classify_params, ParamPass};
+use sic_ir::CallConv;
 use sic_ir::abi::{Chunk, RegClass};
 use sic_ir::Type;
 
@@ -25,6 +26,8 @@ pub fn param_kinds(pass: &ParamPass, ty: &Type, ptr_size: u32) -> Vec<ArgKind> {
         ParamPass::Direct(chunks) => chunks.iter().map(|c| ArgKind::Reg(chunk_cl_type(c))).collect(),
         ParamPass::ByValStack(size, align) => vec![ArgKind::Stack { size: (size + 7) & !7, align: *align }],
         ParamPass::X87 => vec![ArgKind::Stack { size: 16, align: 16 }],
+        // Microsoft x64: the address of the caller's copy, in the argument's slot.
+        ParamPass::ByRef(..) => vec![ArgKind::Reg(ct::I64)],
     }
 }
 
@@ -98,24 +101,28 @@ pub fn scalar_abi_param(ty: &Type, ptr_size: u32) -> AbiParam {
 
 /// The `AbiParam`s for a whole IR parameter list, with the 16-byte stack
 /// alignment pads of [`stack_pads`].
-pub fn params_abi(tys: &[Type], ptr_size: u32, ptr_ty: ClType) -> Vec<AbiParam> {
+pub fn params_abi(tys: &[Type], ptr_size: u32, ptr_ty: ClType, cc: CallConv) -> Vec<AbiParam> {
     let tys: Vec<&Type> = tys.iter().filter(|t| !matches!(t, Type::Void)).collect();
-    let kinds: Vec<ArgKind> = tys.iter().flat_map(|t| param_kinds(&classify_param(t, ptr_size), t, ptr_size)).collect();
+    let passes = classify_params(tys.iter().copied(), ptr_size, cc);
+    let kinds: Vec<ArgKind> = tys.iter().zip(&passes).flat_map(|(t, p)| param_kinds(p, t, ptr_size)).collect();
+    // The 16-byte pads are System V's (Microsoft x64 passes no aggregate by
+    // value on the stack).
     let (pads, _) = stack_pads(&kinds);
     let mut out = Vec::new();
     let mut k = 0usize;
-    for t in tys {
-        let n = param_kinds(&classify_param(t, ptr_size), t, ptr_size).len();
-        if n > 0 && pads[k] { out.push(pad_abi_param(ptr_ty)); }
+    for (t, pass) in tys.into_iter().zip(passes) {
+        let n = param_kinds(&pass, t, ptr_size).len();
+        if n > 0 && pads[k] && cc == CallConv::SysV { out.push(pad_abi_param(ptr_ty)); }
         k += n;
-        push_param_abi(t, ptr_size, ptr_ty, &mut out);
+        push_param_abi(t, pass, ptr_size, ptr_ty, &mut out);
     }
     out
 }
 
-/// Append the `AbiParam`s for one IR parameter.
-pub fn push_param_abi(ty: &Type, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<AbiParam>) {
-    match classify_param(ty, ptr_size) {
+/// Append the `AbiParam`s for one IR parameter, passed as `pass`.
+pub fn push_param_abi(ty: &Type, pass: ParamPass, ptr_size: u32, ptr_ty: ClType, out: &mut Vec<AbiParam>) {
+    match pass {
+        ParamPass::ByRef(..) => out.push(AbiParam::new(ptr_ty)),
         ParamPass::X87 => out.push(AbiParam::special(ptr_ty, ArgumentPurpose::StructArgument(16))),
         ParamPass::Scalar => out.push(scalar_abi_param(ty, ptr_size)),
         ParamPass::Direct(chunks) => {
@@ -185,4 +192,24 @@ pub fn store_chunk(builder: &mut FunctionBuilder, val: Value, dst: Value, chunk:
             }
         }
     }
+}
+
+/// Copy the `size`-byte aggregate at `src` into a fresh stack slot (aligned to
+/// `align`): the copy a Microsoft x64 call passes by reference, so the callee
+/// may change it without changing the caller's object. Returns its address.
+pub fn byref_copy(builder: &mut FunctionBuilder, src: Value, size: u32, align: u32, ptr_ty: ClType) -> Value {
+    use cranelift_codegen::ir::{StackSlotData, StackSlotKind};
+    let align = align.max(1);
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot, size.max(1), align.trailing_zeros() as u8));
+    let dst = builder.ins().stack_addr(ptr_ty, slot, 0);
+    let mut off = 0u32;
+    while off < size {
+        let bytes = (size - off).min(8);
+        let c = Chunk { class: RegClass::Int, offset: off, bytes };
+        let v = load_chunk(builder, src, &c);
+        store_chunk(builder, v, dst, &c);
+        off += bytes;
+    }
+    dst
 }

@@ -266,7 +266,16 @@ pub(crate) fn enum_int_type(e: &EnumDef) -> Type {
 }
 
 pub fn lower_type(qt: &QualType, named: &HashMap<String, Type>, ptr_size: u32) -> crate::Result<Type> {
-    lower_ast_type(&qt.ty, named, ptr_size)
+    let ty = lower_ast_type(&qt.ty, named, ptr_size)?;
+    // `ms_abi` on a function type (or a typedef name of one).
+    if qt.qualifiers.contains(&TypeQual::MsAbi) {
+        if let Type::Function(ft) = ty {
+            let ft = super::with_cc(*ft, sic_ir::CallConv::Win64, ptr_size);
+            super::check_cc(&ft, "an `ms_abi` function type")?;
+            return Ok(Type::Function(Box::new(ft)));
+        }
+    }
+    Ok(ty)
 }
 
 /// Like lower_type, but array parameters decay to pointer-to-element (C semantics).
@@ -1082,6 +1091,11 @@ pub fn lower_ast_type(ty: &AstType, named: &HashMap<String, Type>, ptr_size: u32
         AstType::Named(n) | AstType::Builtin(n) => {
             if n == "__builtin_va_list" {
                 return Ok(va_list_type());
+            }
+            // The Microsoft x64 one (`ms_abi` functions): a pointer into the
+            // arguments' 8-byte slots.
+            if n == "__builtin_ms_va_list" {
+                return Ok(Type::Pointer(Box::new(Type::Int { bits: 8, signed: true })));
             }
             if !SIC_SOURCE.with(|s| s.get()) {
                 if let Some(t) = named.get(n) { return Ok(t.clone()); }

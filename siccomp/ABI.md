@@ -36,12 +36,22 @@ not scattering ABI logic.
       le/ie/local-dynamic, and Mach-O / Windows TLS).
 
 ## 3. Windows x64 (`CallConv::WindowsFastcall`)
-- [ ] Classifier arm: aggregate of size ∈ {1,2,4,8} → one register; any other size →
-      **by reference** (caller copies, passes pointer). Never split.
-- [ ] 4 int / 4 fp arg registers; **32-byte shadow space**; **no red zone**.
-- [ ] Return: {1,2,4,8} → RAX, else sret pointer (RAX).
-- [ ] **Variadic**: float args duplicated into GPR **and** XMM; `va_list` is a plain
-      pointer, not the SysV register-save struct → per-target `va_start`/`va_arg`.
+Done per function as `ms_abi` (`sic_ir::CallConv::Win64` on `FunctionType`;
+Cranelift `WindowsFastcall`, LLVM `win64cc`), tested against GCC by
+`tests/abi/abi.sh`:
+- [x] Classifier arm (`classify_param_cc`): aggregate of size ∈ {1,2,4,8} → one
+      register; any other size → **by reference** (`ParamPass::ByRef`: caller copies,
+      passes pointer). Never split.
+- [x] 4 int / 4 fp arg registers by position; **32-byte shadow space**.
+- [x] Return (`classify_ret_cc`): {1,2,4,8} → RAX, else sret pointer (RAX).
+- [x] **Variadic**: `va_list` is a plain pointer (`__builtin_ms_va_list`) into the
+      home area, which a variadic definition fills from the register arguments;
+      `va_arg` is frontend IR. A variadic call passes a float in its GPR (LLVM:
+      in the XMM register too; Cranelift: GPR only, which every variadic callee
+      reads). GCC's `va_arg` of a by-reference struct reads the slots in place
+      (a GCC bug); sic, like Clang, takes the pointer.
+- [ ] `long double` under `ms_abi` (an error now).
+- [ ] As the target's default convention (a Windows target).
 - [ ] **MSVC bit-field** allocation rules (differ from Itanium).
 - [ ] SEH unwind info (if needed); COFF symbol decoration.
 

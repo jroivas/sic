@@ -1299,15 +1299,15 @@ impl<'m> FuncCtx<'m> {
                         let func_ty = match &fptr_ty {
                             Type::Pointer(inner) => match inner.as_ref() {
                                 Type::Function(ft) => *ft.clone(),
-                                _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                                _ => sic_ir::FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: true },
                             },
                             // A function-typed parameter does not decay to a
                             // pointer type in sic's IR; accept it directly.
                             Type::Function(ft) => *ft.clone(),
-                            _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                            _ => sic_ir::FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: true },
                         };
                         let ret_ty = func_ty.ret.clone();
-                        if super::super::ret_is_sret(&ret_ty, self.ptr_size()) {
+                        if super::super::sig_is_sret(&func_ty, self.ptr_size()) {
                             return self.lower_indirect_sret(fptr, func_ty, arg_vals);
                         }
                         let is_void = ret_ty == Type::Void;
@@ -1357,13 +1357,13 @@ impl<'m> FuncCtx<'m> {
                 let func_ty = match &fptr_ty {
                     Type::Pointer(inner) => match inner.as_ref() {
                         Type::Function(ft) => *ft.clone(),
-                        _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                        _ => sic_ir::FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: true },
                     },
                     Type::Function(ft) => *ft.clone(),
-                    _ => sic_ir::FunctionType { ret: Type::i32(), params: vec![], variadic: true },
+                    _ => sic_ir::FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: true },
                 };
                 let ret_ty = func_ty.ret.clone();
-                if super::super::ret_is_sret(&ret_ty, self.ptr_size()) {
+                if super::super::sig_is_sret(&func_ty, self.ptr_size()) {
                     return self.lower_indirect_sret(fptr, func_ty, arg_vals);
                 }
                 // Coerce fixed args to their param types and apply the default
@@ -1405,7 +1405,7 @@ impl<'m> FuncCtx<'m> {
                     || super::super::types::is_va_dict(p));
             if !variadic {
                 let mut expected = sig.params.len();
-                if super::super::ret_is_sret(&sig.ret, ptr_size) && expected > 0 { expected -= 1; }
+                if super::super::sig_is_sret(sig, ptr_size) && expected > 0 { expected -= 1; }
                 if args.len() != expected {
                     return Err(CompileError::at(
                         format!("this call passes {} argument(s), but the function expects {}",
@@ -1420,7 +1420,7 @@ impl<'m> FuncCtx<'m> {
 
         // Aggregate return (sret ABI): allocate the result slot, pass its pointer
         // as the hidden first argument, and yield that pointer as the call value.
-        if super::super::ret_is_sret(&ret_ty, self.ptr_size()) {
+        if super::super::sig_is_sret(self.lowerer.module.func_sig(fref), self.ptr_size()) {
             let slot = self.alloc_val();
             self.push_instr(Instr::Alloca { dest: slot, ty: ret_ty.clone(), align: None });
             let slot = Val::Local(slot);
@@ -1596,7 +1596,7 @@ impl<'m> FuncCtx<'m> {
                 Some(LookupResult::Func(fr)) => {
                     let sig = self.lowerer.module.func_sig(fr);
                     let mut ps = sig.params.clone();
-                    if super::super::ret_is_sret(&sig.ret, self.ptr_size()) && !ps.is_empty() {
+                    if super::super::sig_is_sret(sig, self.ptr_size()) && !ps.is_empty() {
                         ps.remove(0);
                     }
                     ps
@@ -1806,7 +1806,7 @@ impl<'m> FuncCtx<'m> {
         };
         // The environment pointer, then the user args: after the hidden result
         // pointer, which `func_ty` has first when there is one.
-        let env_at = super::super::ret_is_sret(&func_ty.ret, self.ptr_size()) as usize;
+        let env_at = super::super::sig_is_sret(&func_ty, self.ptr_size()) as usize;
         let mut all_args = Vec::with_capacity(arg_vals.len() + 1);
         let env_pty = func_ty.params.get(env_at).cloned().unwrap_or_else(|| self.val_type(&clo));
         all_args.push(self.coerce(clo, &env_pty)?);
@@ -1819,7 +1819,7 @@ impl<'m> FuncCtx<'m> {
             }
         }
         let ret_ty = func_ty.ret.clone();
-        if super::super::ret_is_sret(&ret_ty, self.ptr_size()) {
+        if super::super::sig_is_sret(&func_ty, self.ptr_size()) {
             return self.lower_indirect_sret(code, func_ty, all_args);
         }
         let is_void = ret_ty == Type::Void;
@@ -2281,6 +2281,27 @@ impl<'m> FuncCtx<'m> {
                 }
                 if matches!(t, Type::Int { .. } | Type::Pointer(_)) {
                     let v = self.coerce(v, &t)?;
+                    let dest = self.alloc_val();
+                    self.push_instr(Instr::Cast { dest, op: CastOp::Typed, val: v, to_ty: t });
+                    return Ok(Val::Local(dest));
+                }
+            }
+        }
+        // x86-64: a C struct or union goes by value as a named one of its type
+        // would (System V: in registers or on the stack; Microsoft x64: in its
+        // slot or by reference), so the back end must know the type: the IR
+        // value alone is its address. (Sic's own handles — strings, `any`,
+        // tuples, containers — keep passing as they do.)
+        if !sic_ir::target::is_i386() {
+            if let Some(t @ (Type::Struct(_) | Type::Union(_))) = arg.and_then(|e| self.infer_expr_type(e).ok()) {
+                let t = super::super::types::resolve_aggregate(&t, &self.lowerer.struct_types);
+                let user = |n: &Option<String>| n.as_deref().map_or(true, |n| !n.starts_with("__sic") && !n.starts_with('('));
+                let c_agg = match &t {
+                    Type::Struct(st) => user(&st.name) && !st.fields.is_empty(),
+                    Type::Union(u) => user(&u.name) && !u.fields.is_empty(),
+                    _ => false,
+                };
+                if c_agg {
                     let dest = self.alloc_val();
                     self.push_instr(Instr::Cast { dest, op: CastOp::Typed, val: v, to_ty: t });
                     return Ok(Val::Local(dest));

@@ -78,7 +78,7 @@ impl<'m> FuncCtx<'m> {
             Some(f) => f,
             None => self.lowerer.module.add_extern(ExternFunc {
                 name: name.to_string(),
-                sig: FunctionType { params, ret, variadic: false },
+                sig: FunctionType { cc: Default::default(), params, ret, variadic: false },
             }),
         }
     }
@@ -706,7 +706,7 @@ impl Lowerer {
                 result_ty: Type::char_ptr() });
             fc.push_instr(Instr::Store { val: Val::Local(nd), ptr: out.clone() });
             // Pass 2: clone each element that has a clone, in the new block.
-            let fty = FunctionType { params: vec![voidp.clone()], ret: Type::Void, variadic: false };
+            let fty = FunctionType { cc: Default::default(), params: vec![voidp.clone()], ret: Type::Void, variadic: false };
             each(fc, &mut |fc, i| {
                 let (cl, _, off) = elem(fc, i);
                 let has = cmp(fc, CmpOp::INe, cl.clone(), zero.clone());

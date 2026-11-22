@@ -824,7 +824,7 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         "_Generic"       => TokenKind::Generic,
         "_Complex"       => TokenKind::Complex,
         "_Atomic"        => TokenKind::Atomic,
-        "__builtin_va_list" => TokenKind::TypeName,
+        "__builtin_va_list" | "__builtin_ms_va_list" => TokenKind::TypeName,
         // Extended floating types (GCC `__float128`/`__float80`, C23 `_FloatN`).
         // Resolved to an IR float type in `lower_ast_type`.
         "__float128" | "_Float128" | "_Float128x" | "__float80" | "__ibm128"
@@ -849,7 +849,8 @@ fn keyword_or_ident(s: &str, typedefs: &HashSet<String>, lang: Lang) -> TokenKin
         // `current_cpu`, `bql_locked`, `rcu_reader`).
         "__thread" | "_Thread_local" | "thread_local" => TokenKind::ThreadLocal,
         "__builtin_va_start" | "__builtin_c23_va_start"
-        | "__builtin_va_end" | "__builtin_va_arg" | "__builtin_va_copy" => TokenKind::Ident,
+        | "__builtin_va_end" | "__builtin_va_arg" | "__builtin_va_copy"
+        | "__builtin_ms_va_start" | "__builtin_ms_va_end" | "__builtin_ms_va_copy" => TokenKind::Ident,
         _ if typedefs.contains(s) => TokenKind::TypeName,
         _ => TokenKind::Ident,
     }

@@ -9,7 +9,7 @@ use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, CallSiteValue, FunctionValue, IntValue, PointerValue,
 };
 use inkwell::{AtomicOrdering, AtomicRMWBinOp, FloatPredicate, IntPredicate};
-use sic_ir::abi::{classify_param, classify_struct_union, AggClass, Chunk, ParamPass, RegClass};
+use sic_ir::abi::{classify_params, classify_ret_cc, AggClass, Chunk, ParamPass, RegClass};
 use sic_ir::analysis::{store_type, value_types, PARAM_VAL_BASE};
 use sic_ir::fast_hash::HashMap;
 use sic_ir::{AtomicOp, BinOp, CastOp, CmpOp, Constant, Function, FunctionType, Instr, Terminator, Type, UnOp, Val};
@@ -243,10 +243,12 @@ impl<'ctx> Fx<'ctx, '_, '_> {
     fn bind_params(&mut self) -> R<()> {
         let ptr_size = self.cx.opts.ptr_size;
         let mut next = 0u32;
-        for (i, p) in self.f.params.iter().enumerate() {
+        let passes = classify_params(self.f.params.iter().map(|p| &p.ty), ptr_size, self.f.sig.cc);
+        for ((i, p), pass) in self.f.params.iter().enumerate().zip(passes) {
             let id = PARAM_VAL_BASE + i as u32;
-            match classify_param(&p.ty, ptr_size) {
-                ParamPass::Scalar | ParamPass::ByValStack(..) => {
+            match pass {
+                // A by-reference aggregate (Microsoft x64) is the caller copy's address.
+                ParamPass::Scalar | ParamPass::ByValStack(..) | ParamPass::ByRef(..) => {
                     if let Some(v) = self.lf.get_nth_param(next) { self.vals.insert(id, v); }
                     next += 1;
                 }
@@ -900,6 +902,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let mut tys: Vec<BasicTypeEnum> = Vec::with_capacity(args.len());
         let mut attrs: Vec<(u32, Attribute)> = Vec::new();
         let mut named_tys = 0usize;
+        let mut regs = sic_ir::abi::ArgRegs::new(ptr_size, sig.cc);
         for (i, a) in args.iter().enumerate() {
             let is_named = !sig.variadic || i < named;
             // A variadic aggregate (typed so by the frontend) is passed as a named
@@ -908,16 +911,25 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                 Val::Local(id) => self.types.get(&id.0).filter(|t| matches!(t, Type::Struct(_) | Type::Union(_))).cloned(),
                 _ => None,
             };
-            let pass = if is_named && i < named { Some(classify_param(&sig.params[i], ptr_size)) }
-                else if let Some(t) = &agg { Some(classify_param(t, ptr_size)) }
-                else if self.is_f80(a) { Some(ParamPass::X87) } else { None };
+            let pass = if is_named && i < named { Some(regs.next(&sig.params[i])) }
+                else if let Some(t) = &agg { Some(regs.next(t)) }
+                else if self.is_f80(a) && sig.cc == sic_ir::CallConv::SysV { Some(ParamPass::X87) } else { None };
             let at = tys.len() as u32;
             match pass {
                 Some(ParamPass::Scalar) => {
                     let t = cx.value_type(&sig.params[i]);
                     vals.push(self.typed(a, t)?.into());
                     tys.push(t);
-                    if let Some(x) = cx.ext_attr(&sig.params[i]) { attrs.push((at, x)); }
+                    if let Some(x) = cx.ext_attr(&sig.params[i], sig.cc) { attrs.push((at, x)); }
+                }
+                Some(ParamPass::ByRef(size, align)) => {
+                    // Microsoft x64: a copy the callee may change, by address.
+                    let src = self.ptr_of(a)?;
+                    let copy = self.slot(size, align.max(1))?;
+                    let n = cx.ctx.i64_type().const_int(size as u64, false);
+                    self.b().build_memcpy(copy, align.max(1), src, 1, n)?;
+                    vals.push(copy.into());
+                    tys.push(cx.ptr());
                 }
                 Some(ParamPass::ByValStack(size, align)) => {
                     vals.push(self.ptr_of(a)?.into());
@@ -942,26 +954,28 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     // default promotion of `float`.
                     let mut v = self.val(a, cx.ctx.i64_type().into());
                     if v.is_float_value() { v = self.coerce(v, cx.ctx.f64_type().into())?; }
+                    regs.note_scalar(v.is_float_value());
                     vals.push(v.into());
                     tys.push(v.get_type());
                 }
             }
             if i < named { named_tys = tys.len(); }
         }
-        let fn_ty = if sig.variadic { cx.fn_type(&sig.ret, &tys[..named_tys], true) } else { cx.fn_type(&sig.ret, &tys, false) };
+        let fn_ty = if sig.variadic { cx.fn_type(&sig.ret, &tys[..named_tys], true, sig.cc) } else { cx.fn_type(&sig.ret, &tys, false, sig.cc) };
         let site = self.b().build_indirect_call(fn_ty, callee, &vals, "")?;
         for (i, a) in attrs { site.add_attribute(AttributeLoc::Param(i), a); }
-        if let Some(a) = cx.sret_attr(&sig.ret) { site.add_attribute(AttributeLoc::Param(0), a); }
-        if let Some(a) = cx.ext_attr(&sig.ret) { site.add_attribute(AttributeLoc::Return, a); }
-        self.bind_result(site, &sig.ret, dest)
+        if let Some(a) = cx.sret_attr(&sig.ret, sig.cc) { site.add_attribute(AttributeLoc::Param(0), a); }
+        if let Some(a) = cx.ext_attr(&sig.ret, sig.cc) { site.add_attribute(AttributeLoc::Return, a); }
+        if let Some(c) = crate::types::llvm_cc(sig.cc) { site.set_call_convention(c); }
+        self.bind_result(site, &sig.ret, sig.cc, dest)
     }
 
-    fn bind_result(&mut self, site: CallSiteValue<'ctx>, ret: &Type, dest: Option<u32>) -> R<()> {
+    fn bind_result(&mut self, site: CallSiteValue<'ctx>, ret: &Type, cc: sic_ir::CallConv, dest: Option<u32>) -> R<()> {
         let Some(d) = dest else { return Ok(()) };
         let cx = self.cx;
         let Some(v) = site.try_as_basic_value().basic() else { return Ok(()) };
         let ptr_size = cx.opts.ptr_size;
-        if sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
+        if cc == sic_ir::CallConv::SysV && sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
             let addr = self.slot(32, 16)?;
             for i in 0..2u32 {
                 let part = self.b().build_extract_value(v.into_struct_value(), i, "")?;
@@ -972,7 +986,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
             return Ok(());
         }
         if matches!(ret, Type::Struct(_) | Type::Union(_)) {
-            if let AggClass::Regs(chunks) = classify_struct_union(ret, ptr_size) {
+            if let AggClass::Regs(chunks) = classify_ret_cc(ret, ptr_size, cc) {
                 let addr = self.slot(ret.size_of(ptr_size) as u32, ret.align_of(ptr_size).max(1) as u32)?;
                 if chunks.len() == 1 {
                     self.store_chunk(v, addr, &chunks[0])?;
@@ -1052,7 +1066,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
         let cx = self.cx;
         match t {
             Terminator::Ret(v) => {
-                let Some(rt) = cx.return_type(&self.f.sig.ret) else {
+                let Some(rt) = cx.return_type(&self.f.sig.ret, self.f.sig.cc) else {
                     self.b().build_return(None)?;
                     return Ok(());
                 };
@@ -1062,7 +1076,8 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     return Ok(());
                 };
                 let ret = &self.f.sig.ret;
-                if sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
+                let cc = self.f.sig.cc;
+                if cc == sic_ir::CallConv::SysV && sic_ir::abi::ret_in_x87_pair(ret, cx.opts.ptr_size) {
                     let base = self.ptr_of(v)?;
                     let f80 = cx.ctx.x86_f80_type().into();
                     let re = self.load(f80, base)?;
@@ -1074,7 +1089,7 @@ impl<'ctx> Fx<'ctx, '_, '_> {
                     let x = self.b().build_float_ext(d, cx.ctx.x86_f80_type(), "")?;
                     self.b().build_return(Some(&x))?;
                 } else if matches!(ret, Type::Struct(_) | Type::Union(_)) {
-                    let AggClass::Regs(chunks) = classify_struct_union(ret, cx.opts.ptr_size) else { return Err("aggregate return".into()) };
+                    let AggClass::Regs(chunks) = classify_ret_cc(ret, cx.opts.ptr_size, cc) else { return Err("aggregate return".into()) };
                     let base = self.ptr_of(v)?;
                     let parts: Vec<BasicValueEnum> = chunks.iter().map(|c| self.load_chunk(base, c)).collect::<R<_>>()?;
                     if parts.len() == 1 { self.b().build_return(Some(&parts[0]))?; }

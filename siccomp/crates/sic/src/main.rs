@@ -1614,7 +1614,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
     entries.sort();
 
     let mut module_name: Option<String> = None;
-    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), no_stack_protector: Vec::new(), patchable_entry: Vec::new(), fn_targets: Vec::new(), noreturn: Vec::new(), reg_vars: Vec::new() };
+    let mut combined = sic_frontend::ast::TranslationUnit { hidden: Vec::new(), visible: Vec::new(), decls: Vec::new(), source_file: dir.to_string(), expr_types: Vec::new(), strict_files: Vec::new(), always_inline: Vec::new(), noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), used_fns: Vec::new(), fn_sections: Vec::new(), no_stack_protector: Vec::new(), patchable_entry: Vec::new(), fn_targets: Vec::new(), noreturn: Vec::new(), ms_abi_fns: Vec::new(), reg_vars: Vec::new() };
     let mut used_files: Vec<String> = Vec::new();
     for path in &entries {
         let ps = path.to_string_lossy().into_owned();
@@ -1650,6 +1650,7 @@ fn emit_folder_module(dir: &str, args: &Args) -> Result<(), Box<dyn std::error::
         combined.patchable_entry.extend(tu.patchable_entry);
         combined.fn_targets.extend(tu.fn_targets);
         combined.noreturn.extend(tu.noreturn);
+        combined.ms_abi_fns.extend(tu.ms_abi_fns);
         used_files.push(ps);
     }
 

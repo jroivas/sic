@@ -66,9 +66,9 @@ pub struct Parser {
     pending_always_inline: bool,
     /// `__attribute__((noinline))` seen for the current declaration.
     pending_noinline: bool,
-    /// A calling-convention attribute sic does not implement (`ms_abi`): its
-    /// warning, given when a function DEFINITION has it (a type that only
-    /// mentions it, as Linux's efi.h's, is not compiled code).
+    /// A calling-convention attribute sic does not implement (i386 `regparm`,
+    /// `stdcall`, `fastcall`): its warning, given when a function DEFINITION
+    /// has it (a type that only mentions it is not compiled code).
     pending_cc: Option<(String, Span)>,
     noinline: Vec<String>,
     weak_fns: Vec<String>,
@@ -103,6 +103,13 @@ pub struct Parser {
     fn_targets: Vec<(String, String)>,
     pending_noreturn: bool,
     noreturn: Vec<String>,
+    /// `__attribute__((ms_abi))` seen and not yet given to a function type
+    /// (see `parse_declarator_suffix` / `parse_decl_specifiers`).
+    pending_ms_abi: bool,
+    /// `ms_abi` written inside a declarator (after `*`, or opening a group:
+    /// `(__efiapi *f)(…)`): the function type its suffix makes.
+    decl_ms_abi: bool,
+    ms_abi_fns: Vec<String>,
     /// The functions so declared.
     always_inline: Vec<String>,
     /// `__attribute__((weak))` seen while parsing the current declaration; the
@@ -224,7 +231,7 @@ impl Parser {
                 }
             }
         }
-        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_target: None, fn_targets: Vec::new(), pending_noreturn: false, noreturn: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
+        let mut p = Parser { complex_typedefs: HashSet::default(), typedef_aligns: HashMap::default(), stmt_attrs: false, array_typedefs: HashMap::default(), pending_visibility: None, decl_hidden: false, hidden: HashSet::default(), visible: HashSet::default(), volatile_typedefs: HashSet::default(), lazy_bodies: Vec::new(), tokens, pos: 0, typedefs, generic_enums, generic_fns, pending_type_params: Vec::new(), expr_types: Vec::new(), ns_depth: 0, in_module: false, kw_names: false, local_labels: Vec::new(), addr_labels: None, local_label_count: 0, src_chars: Vec::new(), source_file, lang, pending_vector_size: None, pending_constructor: None, pending_always_inline: false, always_inline: Vec::new(), pending_noinline: false, pending_cc: None, noinline: Vec::new(), weak_fns: Vec::new(), file_asm: Vec::new(), pending_alias: None, pending_gnu_inline: false, gnu_inline: Vec::new(), pending_used: false, pending_section: None, used_fns: Vec::new(), pending_asm_label: None, reg_vars: Vec::new(), fn_sections: Vec::new(), pending_no_ssp: false, no_stack_protector: Vec::new(), pending_patchable: None, patchable_entry: Vec::new(), pending_target: None, fn_targets: Vec::new(), pending_noreturn: false, noreturn: Vec::new(), pending_ms_abi: false, decl_ms_abi: false, ms_abi_fns: Vec::new(), pending_weak: false, pending_cleanup: None, pending_unused: false, local_decls: Vec::new(), pending_thread_local: false, pending_packed: false, pending_order: None, pending_aligned: None, pending_aligned_expr: None, pending_private: false, pending_async: false, func_vars: HashSet::default(), pending_decls: Vec::new(), macros: HashMap::default(), macro_matching: false, macro_expansions: 0, macro_counter: 0, declared_fns: HashSet::default(), stmt_block_item: false, macro_depth: 0, last_macro: String::new(), prelude_macros: HashSet::default(), last_expansion: String::new(), strict_files: Vec::new() };
         if lang == Lang::Sic { p.load_prelude_macros(); }
         p
     }
@@ -352,6 +359,7 @@ impl Parser {
     pub fn parse(&mut self) -> Result<TranslationUnit> {
         // Pre-register __builtin_va_list as a type name
         self.typedefs.insert("__builtin_va_list".to_string());
+        self.typedefs.insert("__builtin_ms_va_list".to_string());
 
         let mut decls = Vec::new();
         while !self.at(TokenKind::Eof) {
@@ -390,6 +398,7 @@ impl Parser {
             patchable_entry: std::mem::take(&mut self.patchable_entry),
             fn_targets: std::mem::take(&mut self.fn_targets),
             noreturn: std::mem::take(&mut self.noreturn),
+            ms_abi_fns: std::mem::take(&mut self.ms_abi_fns),
             reg_vars: std::mem::take(&mut self.reg_vars) })
     }
 
@@ -403,6 +412,8 @@ impl Parser {
         self.pending_patchable = None;
         self.pending_target = None;
         self.pending_noreturn = false;
+        self.pending_ms_abi = false;
+        self.decl_ms_abi = false;
         self.pending_used = false;
         self.pending_section = None;
         self.pending_alias = None;
@@ -677,6 +688,10 @@ impl Parser {
             let ret_ty = *ret.clone();
 
             self.skip_decl_tail();
+            // `ms_abi` after the declarator (`void f(void) __attribute__((ms_abi));`).
+            if std::mem::take(&mut self.pending_ms_abi) || ty.qualifiers.contains(&TypeQual::MsAbi) {
+                if !self.ms_abi_fns.contains(&name) { self.ms_abi_fns.push(name.clone()); }
+            }
             // `__attribute__((constructor))` may appear before the specifiers or
             // after the declarator; take whichever was captured for this function.
             let ctor = self.pending_constructor.take();
@@ -949,8 +964,16 @@ impl Parser {
         // A nested type (`list<u64>`, `Option<T>`) parses its own declarator,
         // which would consume `kw_names`: keep it for this declaration's name.
         let kw = self.kw_names;
-        let r = self.parse_decl_specifiers_inner(kw);
+        let prev_ms = std::mem::replace(&mut self.pending_ms_abi, false);
+        let mut r = self.parse_decl_specifiers_inner(kw);
         self.kw_names = kw;
+        // `ms_abi` among the specifiers (or just before them) belongs to the
+        // type they name — the function a declarator makes of it, or a
+        // typedef'd function type (`efi_get_time_t __efiapi *get_time;`) —
+        // not to the first function type built after it (a parameter's).
+        if std::mem::take(&mut self.pending_ms_abi) | prev_ms {
+            if let Ok((qt, _)) = &mut r { qt.qualifiers.push(TypeQual::MsAbi); }
+        }
         r
     }
 
@@ -2077,7 +2100,10 @@ impl Parser {
                     TokenKind::Volatile => { pq.push(TypeQual::Volatile); self.advance(); }
                     TokenKind::Restrict => { pq.push(TypeQual::Restrict); self.advance(); }
                     // `int * __attribute__((...)) p` — pointer attribute.
-                    TokenKind::Attribute => { self.skip_attributes(); }
+                    TokenKind::Attribute => {
+                        self.skip_attributes();
+                        self.decl_ms_abi |= std::mem::take(&mut self.pending_ms_abi);
+                    }
                     _ => break,
                 }
             }
@@ -2089,6 +2115,7 @@ impl Parser {
         }
 
         self.skip_attributes();
+        self.decl_ms_abi |= std::mem::take(&mut self.pending_ms_abi);
 
         // sic: a keyword followed by `(` names a function when it is a member —
         // of a namespace or module (`ns::new(…)`, `m::default(…)`) or a struct
@@ -2155,6 +2182,7 @@ impl Parser {
             let sentinel = format!("\0decl{}", self.pos);
             self.advance(); // (
             self.skip_attributes();
+            self.decl_ms_abi |= std::mem::take(&mut self.pending_ms_abi);
             let sent_qt = QualType::new(AstType::Named(sentinel.clone()));
             let (name, inner_ty) = self.parse_declarator(sent_qt)?;
             self.expect(TokenKind::RParen)?;
@@ -2203,7 +2231,11 @@ impl Parser {
                     suffixes.push(Suffix::Array(size));
                 }
                 TokenKind::LParen => {
-                    let (params, variadic) = self.parse_params()?;
+                    // The parameters' declarators are their own.
+                    let ms = std::mem::take(&mut self.decl_ms_abi);
+                    let r = self.parse_params();
+                    self.decl_ms_abi = ms;
+                    let (params, variadic) = r?;
                     suffixes.push(Suffix::Func(params, variadic));
                 }
                 _ => break,
@@ -2212,9 +2244,15 @@ impl Parser {
         for suf in suffixes.into_iter().rev() {
             ty = match suf {
                 Suffix::Array(size) => QualType::new(AstType::Array { base: Box::new(ty), size, vector: false }),
-                Suffix::Func(params, variadic) => QualType::new(AstType::Function {
-                    ret: Box::new(ty), params, variadic,
-                }),
+                Suffix::Func(params, variadic) => {
+                    // `ms_abi` given inside the declarator (`(__efiapi *f)(…)`),
+                    // or among the specifiers (on the result type here): this
+                    // function's.
+                    let ms = std::mem::take(&mut self.decl_ms_abi) | take_ms_abi(&mut ty);
+                    let mut q = QualType::new(AstType::Function { ret: Box::new(ty), params, variadic });
+                    if ms { q.qualifiers.push(TypeQual::MsAbi); }
+                    q
+                }
             };
         }
         Ok(ty)
@@ -4054,7 +4092,11 @@ impl Parser {
                 let name = self.advance().text.clone();
                 // Handle va builtins
                 match name.as_str() {
-                    "__builtin_va_start"     => return self.parse_va_builtin_start(sp),
+                    // The Microsoft x64 ones (`__builtin_ms_va_list`) are told
+                    // apart by the list's type when lowering.
+                    "__builtin_va_start" | "__builtin_ms_va_start" => return self.parse_va_builtin_start(sp),
+                    "__builtin_ms_va_end"    => return self.parse_va_builtin_end(sp),
+                    "__builtin_ms_va_copy"   => return self.parse_va_builtin_copy(sp),
                     "__builtin_c23_va_start" => return self.parse_va_builtin_c23_start(sp),
                     "__builtin_va_arg"       => return self.parse_va_builtin_arg(sp),
                     "__builtin_va_end"       => return self.parse_va_builtin_end(sp),
@@ -4449,6 +4491,12 @@ impl Parser {
                                 }
                             }
                         }
+                    } else if matches!(name, "ms_abi" | "__ms_abi__") {
+                        // The Microsoft x64 convention, for the function type
+                        // this attribute belongs to.
+                        self.pending_ms_abi = true;
+                    } else if matches!(name, "sysv_abi" | "__sysv_abi__") {
+                        // System V: the default here.
                     } else if let Some(what) = unsupported_attribute(name, || {
                         // `regparm(0)` asks for the default.
                         self.tokens.get(i + 2).map(|t| t.text.clone())
@@ -4967,14 +5015,12 @@ pub(crate) fn kind_spelling(k: TokenKind) -> String {
 
 /// The suffix makes a `float` (not `double`/`long double`) constant.
 /// The warning for an attribute sic accepts but does not implement, if `name` is
-/// one: `ms_abi` (the System V convention is used), and on i386 the calling
-/// conventions that pass arguments in registers or pop them (`arg` is the
-/// attribute's first argument token, for `regparm(N)`).
+/// one: on i386 the calling conventions that pass arguments in registers or pop
+/// them (`arg` is the attribute's first argument token, for `regparm(N)`).
 fn unsupported_attribute(name: &str, arg: impl FnOnce() -> Option<String>) -> Option<String> {
     let name = name.trim_start_matches("__").trim_end_matches("__");
     let i386 = crate::target::is_i386();
     match name {
-        "ms_abi" => Some("the `ms_abi` calling convention is not implemented: the function uses the System V one".into()),
         "regparm" if i386 && arg().as_deref() != Some("0") =>
             Some("`regparm` is not implemented: all arguments are passed on the stack".into()),
         "stdcall" | "fastcall" | "thiscall" | "vectorcall" if i386 =>
@@ -5093,5 +5139,21 @@ fn push_units(units: &mut Vec<u32>, piece: &str, prefix: char) {
         } else {
             units.push(c as u32);
         }
+    }
+}
+
+/// Take an `ms_abi` qualifier off the result type `ty` of a function being
+/// built, or off the type a chain of pointers ends in (`T __efiapi *f(…)` puts
+/// it on `T`): it is the function's, as a result type cannot be a function.
+/// (On a typedef of a function type in a declaration of no function —
+/// `efi_get_time_t __efiapi *get_time;` — it stays, for the type.)
+fn take_ms_abi(ty: &mut QualType) -> bool {
+    if let Some(i) = ty.qualifiers.iter().position(|q| *q == TypeQual::MsAbi) {
+        ty.qualifiers.remove(i);
+        return true;
+    }
+    match &mut ty.ty {
+        AstType::Pointer { base, .. } => take_ms_abi(base),
+        _ => false,
     }
 }

@@ -1862,9 +1862,11 @@ struct st { efi_fn f; };
 int __attribute__((ms_abi)) proto(int);
 __attribute__((ms_abi)) int entry(int a) { return a; }
 EOF
+# `ms_abi` is implemented (it was an unsupported-attribute warning on a
+# definition): no warning for any of its forms.
 "$SIC" -Werror -c attr.c -o attr.o 2>err; rc=$?
-if [ "$rc" = 0 ] && [ "$(grep -c 'unsupported-attribute' err)" = 1 ] && grep -q 'attr.c:4:' err; then
-    ok "unsupported-attribute"; else bad "unsupported-attribute" "rc=$rc $(cat err)"; fi
+if [ "$rc" = 0 ] && [ ! -s err ]; then
+    ok "ms-abi-attribute"; else bad "ms-abi-attribute" "rc=$rc $(cat err)"; fi
 printf 'int f(int n) { char *p = __builtin_alloca(n); p[0] = 1; return p[0]; }\n' > al.c
 for b in $("$SIC" -print-backends); do
     "$SIC" -fbackend=$b -Werror -c al.c -o al.o 2>err; rc=$?

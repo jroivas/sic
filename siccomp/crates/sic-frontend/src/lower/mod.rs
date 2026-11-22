@@ -33,6 +33,9 @@ pub struct Lowerer {
     pub atomic_globals: sic_ir::fast_hash::HashSet<String>,
     /// Register variables named after a register: (variable → register).
     pub reg_vars: HashMap<String, String>,
+    /// Functions declared `ms_abi` (the parser's `ms_abi_fns`): their
+    /// signatures use the Microsoft x64 convention.
+    pub ms_abi_fns: HashSet<String>,
     /// Global register variables (file scope): variable → (type, register).
     /// No storage; a read is the register's value (see `read_global_reg`).
     pub global_reg_vars: HashMap<String, (Type, String)>,
@@ -362,6 +365,7 @@ impl Lowerer {
             global_qtypes: HashMap::default(),
             atomic_globals: sic_ir::fast_hash::HashSet::default(),
             reg_vars: HashMap::default(),
+            ms_abi_fns: HashSet::default(),
             global_reg_vars: HashMap::default(),
             const_global_vals: HashMap::default(),
             atomic_fields: sic_ir::fast_hash::HashSet::default(),
@@ -520,6 +524,7 @@ impl Lowerer {
         self.strict_files = tu.strict_files.iter().cloned().collect();
         // Before any pass declares globals: a global register variable is none.
         self.reg_vars.extend(tu.reg_vars.iter().cloned());
+        self.ms_abi_fns.extend(tu.ms_abi_fns.iter().cloned());
         types::clear_typedefs();
         ckind::clear();
         for d in &tu.decls {
@@ -895,7 +900,8 @@ impl Lowerer {
                 let ir_params: Result<Vec<_>> = params.iter().map(|p| {
                     lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                 }).collect();
-                let sig = build_fn_sig(ir_ret, ir_params?, *variadic, self.ptr_size);
+                let sig = build_fn_sig_cc(ir_ret, ir_params?, *variadic, self.fn_cc(name), self.ptr_size);
+                check_cc(&sig, &format!("`{name}`"))?;
                 types::note_global_var(name, &Type::Function(Box::new(sig.clone())));
                 if self.module.func_ref_by_name(name).is_none() {
                     self.module.add_extern(ExternFunc { name: name.clone(), sig });
@@ -917,7 +923,7 @@ impl Lowerer {
                         lower_param_type(&p.ty, &self.struct_types, self.ptr_size)
                     }).collect();
                     if let (Ok(ret), Ok(ps)) = (ret, ps) {
-                        let sig = build_fn_sig(ret, ps, *variadic, self.ptr_size);
+                        let sig = build_fn_sig_cc(ret, ps, *variadic, self.fn_cc(name), self.ptr_size);
                         types::note_global_var(name, &Type::Function(Box::new(sig)));
                     }
                     return Ok(());
@@ -937,7 +943,8 @@ impl Lowerer {
                 if *is_async {
                     ir_ret = self.task_of(&ir_ret);
                 }
-                let sig = build_fn_sig(ir_ret, ir_params, *variadic, self.ptr_size);
+                let sig = build_fn_sig_cc(ir_ret, ir_params, *variadic, self.fn_cc(name), self.ptr_size);
+                check_cc(&sig, &format!("`{name}`"))?;
                 types::note_global_var(name, &Type::Function(Box::new(sig.clone())));
                 // Register the DEFINED function even when a prior forward
                 // declaration only produced an extern (e.g. `static void f();`
@@ -1576,7 +1583,7 @@ impl Lowerer {
         }
         let usize_ty = Type::Int { bits: self.ptr_size * 8, signed: false };
         let i8p = Type::char_ptr();
-        let sig = FunctionType { ret: usize_ty.clone(), params: vec![i8p.clone(), usize_ty.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: usize_ty.clone(), params: vec![i8p.clone(), usize_ty.clone()], variadic: false };
         let params = vec![
             sic_ir::Param { name: "data".to_string(), ty: i8p.clone() },
             sic_ir::Param { name: "size".to_string(), ty: usize_ty.clone() },
@@ -1684,12 +1691,12 @@ impl Lowerer {
         let memcmp = self.module.func_ref_by_name("memcmp").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "memcmp".to_string(),
-                sig: FunctionType { ret: Type::i32(),
+                sig: FunctionType { cc: Default::default(), ret: Type::i32(),
                     params: vec![Type::void_ptr(), Type::void_ptr(), Type::Int { bits: self.ptr_size * 8, signed: false }],
                     variadic: false },
             })
         });
-        let sig = FunctionType { ret: i64t.clone(),
+        let sig = FunctionType { cc: Default::default(), ret: i64t.clone(),
             params: vec![i8p.clone(), i64t.clone(), i8p.clone(), i64t.clone()], variadic: false };
         let params = vec![
             sic_ir::Param { name: "h".into(), ty: i8p.clone() },
@@ -1816,10 +1823,10 @@ impl Lowerer {
         let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "abort".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false },
             })
         });
-        let sig = FunctionType { ret: Type::Void, params: vec![rcp.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![rcp.clone()], variadic: false };
         let params = vec![sic_ir::Param { name: "rc".to_string(), ty: rcp.clone() }];
         let mut func = Function::new("__sic_str_retain".to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
@@ -1880,10 +1887,10 @@ impl Lowerer {
         let free_fref = self.module.func_ref_by_name("free").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "free".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false },
             })
         });
-        let sig = FunctionType { ret: Type::Void, params: vec![rcp.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![rcp.clone()], variadic: false };
         let params = vec![sic_ir::Param { name: "rc".to_string(), ty: rcp.clone() }];
         let mut func = Function::new("__sic_str_release".to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
@@ -1936,7 +1943,7 @@ impl Lowerer {
             fc.switch_to_block(fin_bb);
             let r4 = fc.alloc_val();
             fc.push_instr(Instr::Load { dest: r4, ptr: Val::Local(slot), ty: rcp.clone() });
-            let fin_ty = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+            let fin_ty = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false };
             let fin_slot = fc.alloc_val();
             fc.push_instr(Instr::GetElemPtr { dest: fin_slot, base: Val::Local(r4), index: Constant::int(1), elem_size: ps, result_ty: Type::Pointer(Box::new(voidp.clone())) });
             let fin = fc.alloc_val();
@@ -1989,7 +1996,7 @@ impl Lowerer {
         let voidp = Type::void_ptr();
         let u32_ty = Type::Int { bits: 32, signed: false };
         let u64_ty = Type::u64();
-        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false };
         let params = vec![sic_ir::Param { name: "a".to_string(), ty: voidp.clone() }];
         let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
@@ -2032,7 +2039,7 @@ impl Lowerer {
             let slotw_p = fc.alloc_val();
             fc.push_instr(Instr::Cast { dest: slotw_p, op: CastOp::IntToPtr, val: Val::Local(slotw), to_ty: voidp.clone() });
             let slotw_p = Val::Local(slotw_p);
-            let fnty = Box::new(FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false });
+            let fnty = Box::new(FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false });
             // `f(p)` when the type has the function.
             let call_f = |fc: &mut func::FuncCtx, p: Val| {
                 let has = is(fc, CmpOp::INe, f.clone(), Val::Const(Constant::Null), &voidp);
@@ -2432,7 +2439,7 @@ impl Lowerer {
         let i64_ty = Type::i64();
         let u32_ty = Type::Int { bits: 32, signed: false };
         let voidp = Type::void_ptr();
-        let sig = FunctionType { ret: i64_ty.clone(), params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: i64_ty.clone(), params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
         let params = vec![
             sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
             sic_ir::Param { name: "slot".to_string(), ty: u64_ty.clone() },
@@ -2506,11 +2513,11 @@ impl Lowerer {
         let voidp = Type::void_ptr();
         let u64_ty = Type::u64();
         let ext = |s: &mut Self, n: &str, params: Vec<Type>, ret: Type| s.module.func_ref_by_name(n).unwrap_or_else(||
-            s.module.add_extern(ExternFunc { name: n.to_string(), sig: FunctionType { ret, params, variadic: false } }));
+            s.module.add_extern(ExternFunc { name: n.to_string(), sig: FunctionType { cc: Default::default(), ret, params, variadic: false } }));
         let write = ext(self, "write", vec![Type::i32(), voidp.clone(), u64_ty.clone()], Type::i64());
         let strlen = ext(self, "strlen", vec![voidp.clone()], u64_ty.clone());
         let abort = ext(self, "abort", vec![], Type::Void);
-        let sig = FunctionType { ret: Type::Void, params: vec![voidp.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![voidp.clone()], variadic: false };
         let params = vec![sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() }];
         let mut func = Function::new(name.to_string(), sig, params, Linkage::Internal);
         let entry = func.alloc_block();
@@ -2547,7 +2554,7 @@ impl Lowerer {
         let i64_ty = Type::i64();
         let u32_ty = Type::Int { bits: 32, signed: false };
         let voidp = Type::void_ptr();
-        let sig = FunctionType { ret: Type::Float64, params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Float64, params: vec![voidp.clone(), u64_ty.clone()], variadic: false };
         let params = vec![
             sic_ir::Param { name: "ty".to_string(), ty: voidp.clone() },
             sic_ir::Param { name: "slot".to_string(), ty: u64_ty.clone() },
@@ -2626,16 +2633,16 @@ impl Lowerer {
         let write_fref = self.module.func_ref_by_name("write").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "write".to_string(),
-                sig: FunctionType { ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
             })
         });
         let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "abort".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false },
             })
         });
-        let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false };
         let mut func = Function::new("__sic_bounds_fail".to_string(), sig, vec![], Linkage::Internal);
         // Cold: keep the failure path one argument-less call (see `Function::noinline`).
         func.noinline = true;
@@ -2667,16 +2674,16 @@ impl Lowerer {
         let write_fref = self.module.func_ref_by_name("write").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "write".to_string(),
-                sig: FunctionType { ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
             })
         });
         let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "abort".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false },
             })
         });
-        let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false };
         let mut func = Function::new("__sic_match_fail".to_string(), sig, vec![], Linkage::Internal);
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
@@ -2706,16 +2713,16 @@ impl Lowerer {
         let write_fref = self.module.func_ref_by_name("write").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "write".to_string(),
-                sig: FunctionType { ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::i64(), params: vec![Type::i32(), voidp.clone(), usize_ty.clone()], variadic: false },
             })
         });
         let abort_fref = self.module.func_ref_by_name("abort").unwrap_or_else(|| {
             self.module.add_extern(sic_ir::ExternFunc {
                 name: "abort".to_string(),
-                sig: FunctionType { ret: Type::Void, params: vec![], variadic: false },
+                sig: FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false },
             })
         });
-        let sig = FunctionType { ret: Type::Void, params: vec![], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false };
         let mut func = Function::new("__sic_trap".to_string(), sig, vec![], Linkage::Internal);
         let entry = func.alloc_block();
         func.blocks.push(BasicBlock::new(entry));
@@ -3919,7 +3926,7 @@ impl Lowerer {
         if self.sic {
             if let (Some(Initializer::Expr(e)), Ok(target)) = (&d.init, lower_type(&d.ty, &self.struct_types, self.ptr_size)) {
                 if matches!(target, Type::Int { .. } | Type::Bool) {
-                    let mut f = Function::new(String::new(), FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+                    let mut f = Function::new(String::new(), FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
                     let src = func::FuncCtx::new_with_func(self, &mut f).infer_expr_type(e);
                     if let Ok(src) = src {
                         if src.is_float() || types::is_fixed(&src) {
@@ -5209,7 +5216,7 @@ impl Lowerer {
         let has_content = tu.decls.iter().any(|d| !matches!(d, Decl::Func { .. }));
         if defines_functions || !has_content { return Ok(()); }
 
-        let sig = FunctionType { ret: Type::i32(), params: vec![], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: false };
         let mut func = Function::new("main".to_string(), sig, vec![], Linkage::External);
 
         let entry_id = func.alloc_block();
@@ -5313,14 +5320,46 @@ pub(crate) fn expand_init_ranges(items: &[InitItem], enum_consts: &HashMap<Strin
 /// caller-provided result slot). `ret` is preserved unchanged so call sites can
 /// detect the ABI from the signature.
 pub(crate) fn build_fn_sig(ret: Type, params: Vec<Type>, variadic: bool, ptr_size: u32) -> FunctionType {
-    if ret_is_sret(&ret, ptr_size) {
+    build_fn_sig_cc(ret, params, variadic, CallConv::SysV, ptr_size)
+}
+
+/// `build_fn_sig` for the calling convention `cc`, which decides which
+/// aggregates come back through the hidden pointer.
+pub(crate) fn build_fn_sig_cc(ret: Type, params: Vec<Type>, variadic: bool, cc: CallConv, ptr_size: u32) -> FunctionType {
+    if sic_ir::abi::ret_in_memory_cc(&ret, ptr_size, cc) {
         let mut ps = Vec::with_capacity(params.len() + 1);
         ps.push(Type::Pointer(Box::new(ret.clone())));
         ps.extend(params);
-        FunctionType { ret, params: ps, variadic }
+        FunctionType { cc, ret, params: ps, variadic }
     } else {
-        FunctionType { ret, params, variadic }
+        FunctionType { cc, ret, params, variadic }
     }
+}
+
+/// `sig` (built by `build_fn_sig`) with the calling convention `cc`: the hidden
+/// result pointer comes or goes as `cc` returns the result.
+pub(crate) fn with_cc(mut sig: FunctionType, cc: CallConv, ptr_size: u32) -> FunctionType {
+    if sig.cc == cc { return sig; }
+    if sig_is_sret(&sig, ptr_size) && !sig.params.is_empty() { sig.params.remove(0); }
+    build_fn_sig_cc(sig.ret, sig.params, sig.variadic, cc, ptr_size)
+}
+
+/// An `ms_abi` signature sic cannot pass: `long double` (x87) parameters and
+/// results have no agreed Microsoft x64 form (MSVC's is a `double`).
+pub(crate) fn check_cc(sig: &FunctionType, what: &str) -> Result<()> {
+    if sig.cc != CallConv::Win64 { return Ok(()); }
+    let x87 = |t: &Type| matches!(t, Type::Float80) || sic_ir::abi::ret_in_x87_pair(t, 8);
+    if x87(&sig.ret) || sig.params.iter().any(x87) {
+        return Err(CompileError::new(format!(
+            "{what}: a `long double` parameter or result is not supported with `ms_abi`")));
+    }
+    Ok(())
+}
+
+/// Whether a function of this signature returns its result through the hidden
+/// pointer (its first parameter).
+pub(crate) fn sig_is_sret(sig: &FunctionType, ptr_size: u32) -> bool {
+    sic_ir::abi::ret_in_memory_cc(&sig.ret, ptr_size, sig.cc)
 }
 
 /// Whether a return type uses the sret ABI (aggregate returned by value).
@@ -5337,6 +5376,13 @@ pub(crate) fn fn_linkage(storage: &Option<StorageClass>, inline: bool, declared_
         _ if declared_static => Linkage::Internal,
         _ if inline => Linkage::Internal,
         _ => Linkage::External,
+    }
+}
+
+impl Lowerer {
+    /// The calling convention of the function `name`.
+    pub(crate) fn fn_cc(&self, name: &str) -> CallConv {
+        if self.ms_abi_fns.contains(name) { CallConv::Win64 } else { CallConv::SysV }
     }
 }
 

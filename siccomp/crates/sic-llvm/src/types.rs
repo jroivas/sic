@@ -7,7 +7,8 @@ use inkwell::module::Linkage as LLinkage;
 use inkwell::types::{AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType as LFunctionType, IntType};
 use inkwell::values::FunctionValue;
 use inkwell::AddressSpace;
-use sic_ir::abi::{classify_param, classify_struct_union, AggClass, Chunk, ParamPass, RegClass};
+use sic_ir::abi::{classify_params, classify_ret_cc, AggClass, Chunk, ParamPass, RegClass};
+use sic_ir::CallConv;
 use sic_ir::{FunctionType, Type};
 
 impl<'ctx> Cx<'ctx, '_> {
@@ -66,14 +67,14 @@ impl<'ctx> Cx<'ctx, '_> {
 
     /// What a function returns at the C ABI, if anything: a small aggregate as its
     /// eightbytes. A MEMORY aggregate has the frontend's hidden pointer instead.
-    pub fn return_type(&self, ret: &Type) -> Option<BasicTypeEnum<'ctx>> {
+    pub fn return_type(&self, ret: &Type, cc: CallConv) -> Option<BasicTypeEnum<'ctx>> {
         // `_Complex long double` comes back in `st(0)` and `st(1)`.
-        if sic_ir::abi::ret_in_x87_pair(ret, self.opts.ptr_size) {
+        if cc == CallConv::SysV && sic_ir::abi::ret_in_x87_pair(ret, self.opts.ptr_size) {
             let f = self.ctx.x86_f80_type().into();
             return Some(self.ctx.struct_type(&[f, f], false).into());
         }
         match ret {
-            Type::Struct(_) | Type::Union(_) => match classify_struct_union(ret, self.opts.ptr_size) {
+            Type::Struct(_) | Type::Union(_) => match classify_ret_cc(ret, self.opts.ptr_size, cc) {
                 AggClass::Regs(chunks) if chunks.len() == 1 => Some(self.chunk_type(&chunks[0])),
                 AggClass::Regs(chunks) => {
                     let f: Vec<BasicTypeEnum> = chunks.iter().map(|c| self.chunk_type(c)).collect();
@@ -88,9 +89,11 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 
     /// The LLVM parameters of one IR parameter, with their attributes.
-    pub fn param_abi(&self, ty: &Type) -> Vec<(BasicTypeEnum<'ctx>, Vec<Attribute>)> {
-        match classify_param(ty, self.opts.ptr_size) {
-            ParamPass::Scalar => vec![(self.value_type(ty), self.ext_attr(ty).into_iter().collect())],
+    pub fn param_abi(&self, ty: &Type, pass: ParamPass, cc: CallConv) -> Vec<(BasicTypeEnum<'ctx>, Vec<Attribute>)> {
+        match pass {
+            ParamPass::Scalar => vec![(self.value_type(ty), self.ext_attr(ty, cc).into_iter().collect())],
+            // Microsoft x64: the address of the caller's copy.
+            ParamPass::ByRef(..) => vec![(self.ptr(), Vec::new())],
             ParamPass::Direct(chunks) => chunks.iter().map(|c| (self.chunk_type(c), Vec::new())).collect(),
             ParamPass::ByValStack(size, align) => vec![(self.ptr(), self.byval_attrs(size, align))],
             ParamPass::X87 => vec![(self.ctx.x86_f80_type().into(), Vec::new())],
@@ -108,8 +111,8 @@ impl<'ctx> Cx<'ctx, '_> {
 
     /// The hidden result pointer of an aggregate returned in memory is `sret`: the
     /// callee returns it in `rax` (x86-64) or pops it (`ret $4`, i386).
-    pub fn sret_attr(&self, ret: &Type) -> Option<Attribute> {
-        if !matches!(ret, Type::Struct(_) | Type::Union(_)) || !sic_ir::abi::ret_in_memory(ret, self.opts.ptr_size) {
+    pub fn sret_attr(&self, ret: &Type, cc: CallConv) -> Option<Attribute> {
+        if !matches!(ret, Type::Struct(_) | Type::Union(_)) || !sic_ir::abi::ret_in_memory_cc(ret, self.opts.ptr_size, cc) {
             return None;
         }
         let block: AnyTypeEnum = self.ctx.i8_type().array_type(ret.size_of(self.opts.ptr_size).max(1) as u32).into();
@@ -117,7 +120,9 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 
     /// A narrow integer is extended to 32 bits at the boundary (SysV, gcc).
-    pub fn ext_attr(&self, ty: &Type) -> Option<Attribute> {
+    /// Microsoft x64 leaves the upper bits undefined: no extension is assumed.
+    pub fn ext_attr(&self, ty: &Type, cc: CallConv) -> Option<Attribute> {
+        if cc == CallConv::Win64 { return None; }
         match ty {
             Type::Bool => Some(enum_attr(self.ctx, "zeroext", 0)),
             Type::Int { bits, signed } if *bits < 32 => Some(enum_attr(self.ctx, if *signed { "signext" } else { "zeroext" }, 0)),
@@ -126,9 +131,9 @@ impl<'ctx> Cx<'ctx, '_> {
     }
 
     /// The function type of `ret` with these (already ABI-expanded) parameters.
-    pub fn fn_type(&self, ret: &Type, params: &[BasicTypeEnum<'ctx>], variadic: bool) -> LFunctionType<'ctx> {
+    pub fn fn_type(&self, ret: &Type, params: &[BasicTypeEnum<'ctx>], variadic: bool, cc: CallConv) -> LFunctionType<'ctx> {
         let meta: Vec<BasicMetadataTypeEnum> = params.iter().map(|t| (*t).into()).collect();
-        match self.return_type(ret) {
+        match self.return_type(ret, cc) {
             Some(t) => t.fn_type(&meta, variadic),
             None => self.ctx.void_type().fn_type(&meta, variadic),
         }
@@ -137,13 +142,24 @@ impl<'ctx> Cx<'ctx, '_> {
 
 pub fn declare<'ctx>(cx: &Cx<'ctx, '_>, name: &str, sig: &FunctionType, linkage: Option<LLinkage>) -> FunctionValue<'ctx> {
     let params: Vec<&Type> = sig.params.iter().filter(|t| !matches!(t, Type::Void)).collect();
-    let abi: Vec<_> = params.iter().flat_map(|t| cx.param_abi(t)).collect();
+    let passes = classify_params(params.iter().copied(), cx.opts.ptr_size, sig.cc);
+    let abi: Vec<_> = params.iter().zip(passes).flat_map(|(t, p)| cx.param_abi(t, p, sig.cc)).collect();
     let tys: Vec<BasicTypeEnum> = abi.iter().map(|(t, _)| *t).collect();
-    let lf = cx.module.add_function(name, cx.fn_type(&sig.ret, &tys, sig.variadic), linkage);
+    let lf = cx.module.add_function(name, cx.fn_type(&sig.ret, &tys, sig.variadic, sig.cc), linkage);
     for (i, (_, attrs)) in abi.iter().enumerate() {
         for a in attrs { lf.add_attribute(AttributeLoc::Param(i as u32), *a); }
     }
-    if let Some(a) = cx.ext_attr(&sig.ret) { lf.add_attribute(AttributeLoc::Return, a); }
-    if let Some(a) = cx.sret_attr(&sig.ret) { lf.add_attribute(AttributeLoc::Param(0), a); }
+    if let Some(a) = cx.ext_attr(&sig.ret, sig.cc) { lf.add_attribute(AttributeLoc::Return, a); }
+    if let Some(a) = cx.sret_attr(&sig.ret, sig.cc) { lf.add_attribute(AttributeLoc::Param(0), a); }
+    if let Some(c) = llvm_cc(sig.cc) { lf.set_call_conventions(c); }
     lf
+}
+
+/// LLVM's number for a calling convention other than C's: `win64cc` (79) for
+/// Microsoft x64.
+pub fn llvm_cc(cc: CallConv) -> Option<u32> {
+    match cc {
+        CallConv::SysV => None,
+        CallConv::Win64 => Some(79),
+    }
 }

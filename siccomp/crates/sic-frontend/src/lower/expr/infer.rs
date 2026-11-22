@@ -848,7 +848,10 @@ impl<'m> FuncCtx<'m> {
     /// its address.
     pub(crate) fn lower_va_list_ptr(&mut self, list: &Expr) -> Result<Val> {
         let ty = self.infer_expr_type(list).unwrap_or_else(|_| Type::void_ptr());
-        if sic_ir::target::is_i386() {
+        // A `char *` list (i386's, and x86-64's Microsoft x64 one,
+        // `__builtin_ms_va_list`) is the variable itself, not an array.
+        let char_ptr = matches!(&ty, Type::Pointer(p) if matches!(**p, Type::Int { bits: 8, .. }));
+        if sic_ir::target::is_i386() || char_ptr {
             return Ok(self.lower_lvalue(list)?.ptr);
         }
         if matches!(ty, Type::Array { .. } | Type::Struct(_) | Type::Union(_)) {

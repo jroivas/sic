@@ -57,6 +57,20 @@
 
 ### C
 
+- **`ms_abi`** (the Microsoft x64 convention; EFI's `__efiapi`) on both back
+  ends: definitions, prototypes, function pointers and typedef'd function
+  types; scalars, floats, structs by value (1, 2, 4 or 8 bytes in a register,
+  others by reference to a copy) and returned; variadic calls, and variadic
+  definitions with `__builtin_ms_va_list` / `__builtin_ms_va_start`. It was a
+  warning on a definition and silently System V on a function pointer.
+  `long double` parameters and results are an error with `ms_abi`. Tested
+  against GCC in both directions by `tests/abi/abi.sh`.
+- System V calls of structs and unions now match GCC: one passed through `...`
+  goes by value (in registers or on the stack, and `va_arg` reads it from
+  there), where sic passed and read its address; and one whose eightbytes no
+  longer all fit in the argument registers left goes whole on the stack, where
+  sic split it between them. Both were silent, on both back ends, in calls
+  between sic and other compilers' code.
 - A block-scope `static __thread` / `_Thread_local` variable is one per thread
   (every thread shared one).
 - **`_Complex`** types: imaginary constants, arithmetic (libgcc's `__mulXc3` and
@@ -100,8 +114,7 @@
   - `-Wignored-option`: the mitigation and hardening options (`-fstack-protector*`,
     `-mfunction-return=`, `-mindirect-branch=`, `-fcf-protection`,
     `-fpatchable-function-entry=`, `-fsanitize=`, …), and `-g` with LLVM;
-  - `-Wunsupported-attribute`: a function defined `ms_abi`, and on i386 `regparm`,
-    `stdcall`, `fastcall`;
+  - `-Wunsupported-attribute`: on i386 `regparm`, `stdcall`, `fastcall`;
   - `-Wunsupported-alloca`: `alloca` on Cranelift (LLVM's is on the stack).
 
 ### SIC

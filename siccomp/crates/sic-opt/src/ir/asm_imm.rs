@@ -534,7 +534,7 @@ pub fn specialize_asm(m: &mut Module) -> Result<(), String> {
     for (fi, bi, ii, name, params, ret) in rewrites {
         let fref = match m.func_ref_by_name(&name) {
             Some(f) => f,
-            None => m.add_extern(ExternFunc { name, sig: FunctionType { ret, params: params.clone(), variadic: false } }),
+            None => m.add_extern(ExternFunc { name, sig: FunctionType { cc: Default::default(), ret, params: params.clone(), variadic: false } }),
         };
         if let Instr::Call { func, args, .. } = &mut m.functions[fi].blocks[bi].instrs[ii] {
             *func = fref;

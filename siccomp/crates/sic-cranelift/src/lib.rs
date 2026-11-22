@@ -852,13 +852,18 @@ pub fn build_cl_sig(
     ptr_size: u32,
     call_conv: CallConv,
 ) -> cir::Signature {
+    // `ms_abi` (Microsoft x64): Cranelift's Windows fastcall — the register
+    // order, the 32-byte home area, and its callee-saved set (rsi, rdi,
+    // xmm6–15) — whatever the target's default is.
+    let call_conv = if sig.cc == sic_ir::CallConv::Win64 { CallConv::WindowsFastcall } else { call_conv };
     let mut cl_sig = cir::Signature::new(call_conv);
     let ptr_ty = types::ptr_cl(ptr_size);
 
     // System V: a small struct/union is passed in registers (one param per
     // eightbyte), a large one by value on the stack (StructArgument); scalars
-    // and vectors keep their single-value mapping. See abi.rs / ABI.md.
-    cl_sig.params = abi::params_abi(&sig.params, ptr_size, ptr_ty);
+    // and vectors keep their single-value mapping. Microsoft x64: 1, 2, 4 or 8
+    // bytes in one register, else by reference. See abi.rs / ABI.md.
+    cl_sig.params = abi::params_abi(&sig.params, ptr_size, ptr_ty, sig.cc);
 
     // Returns: a small struct/union comes back in registers (one return value per
     // eightbyte); a MEMORY-class aggregate (and, for now, `Array`/vectors) uses the
@@ -867,7 +872,7 @@ pub fn build_cl_sig(
     match &sig.ret {
         sic_ir::Type::Struct(_) | sic_ir::Type::Union(_) => {
             if let sic_ir::abi::AggClass::Regs(chunks) =
-                sic_ir::abi::classify_struct_union(&sig.ret, ptr_size)
+                sic_ir::abi::classify_ret_cc(&sig.ret, ptr_size, sig.cc)
             {
                 for c in &chunks {
                     cl_sig.returns.push(cir::AbiParam::new(abi::chunk_cl_type(c)));
@@ -898,11 +903,12 @@ pub const VA_FP_REGS: usize = 8;
 pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize, usize) {
     let mut n_gp = 0usize;
     let mut n_fp = 0usize;
-    for p in &sig.params {
+    let passes = abi::classify_params(&sig.params, ptr_size, sig.cc);
+    for (p, pass) in sig.params.iter().zip(passes) {
         // A Direct aggregate consumes one register per eightbyte (by class); a
         // ByValStack aggregate is on the stack and consumes none.
-        match abi::classify_param(p, ptr_size) {
-            abi::ParamPass::Scalar => {
+        match pass {
+            abi::ParamPass::Scalar | abi::ParamPass::ByRef(..) => {
                 if cl_type(p, ptr_size).is_some_and(|t| t.is_float()) { n_fp += 1 } else { n_gp += 1 }
             }
             abi::ParamPass::Direct(chunks) => {
@@ -919,9 +925,10 @@ pub fn va_named_reg_counts(sig: &sic_ir::FunctionType, ptr_size: u32) -> (usize,
 /// Bytes of stack the named parameters occupy (incl. alignment pads): a
 /// variadic function's first stack vararg starts there.
 pub fn named_stack_bytes(sig: &sic_ir::FunctionType, ptr_size: u32) -> u32 {
-    let kinds: Vec<abi::ArgKind> = sig.params.iter()
-        .filter(|t| !matches!(t, sic_ir::Type::Void))
-        .flat_map(|t| abi::param_kinds(&abi::classify_param(t, ptr_size), t, ptr_size)).collect();
+    let tys: Vec<&sic_ir::Type> = sig.params.iter().filter(|t| !matches!(t, sic_ir::Type::Void)).collect();
+    let passes = abi::classify_params(tys.iter().copied(), ptr_size, sig.cc);
+    let kinds: Vec<abi::ArgKind> = tys.iter().zip(&passes)
+        .flat_map(|(t, p)| abi::param_kinds(p, t, ptr_size)).collect();
     abi::stack_pads(&kinds).1
 }
 
@@ -939,6 +946,16 @@ pub fn build_cl_sig_def(
     sse: bool,
 ) -> cir::Signature {
     let mut cl_sig = build_cl_sig(sig, ptr_size, call_conv);
+    if sig.variadic && sig.cc == sic_ir::CallConv::Win64 {
+        // Microsoft x64: the first four arguments are in registers by position
+        // (a float's bits are in the integer one too): over-declare the
+        // integer slots past the named ones, which the prologue stores into
+        // the home area for `va_list` to walk.
+        for _ in sig.params.len().min(4)..4 {
+            cl_sig.params.push(cir::AbiParam::new(cir::types::I64));
+        }
+        return cl_sig;
+    }
     if sig.variadic {
         let (n_gp, n_fp) = va_named_reg_counts(sig, ptr_size);
         for _ in 0..(VA_GP_REGS - n_gp) {

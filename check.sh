@@ -97,6 +97,8 @@ has_backends() {
 echo "== RELEASE =="
 step "build compiler + sysroot (release)" ./build.sh release --backend "$BUILD_BACKENDS"
 step "back ends (release)" has_backends "$REL"
+# Calling conventions against GCC (every back end, both directions).
+step "abi vs gcc (release)" env SIC="$REL" tests/abi/abi.sh
 for be in "${BACKENDS[@]}"; do
     step "moduletest (release, $be)" \
         env SIC="$REL" SIC_BACKEND="$be" FAILFAST=1 ./moduletest_rust.sh "$LOGDIR/mod_release_$be"

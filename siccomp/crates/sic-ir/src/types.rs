@@ -100,6 +100,18 @@ pub struct FunctionType {
     pub ret: Type,
     pub params: Vec<Type>,
     pub variadic: bool,
+    /// How the function is called: part of the type, so a call through a
+    /// pointer uses its pointee's convention.
+    pub cc: CallConv,
+}
+
+/// An x86-64 calling convention: System V (the default), or Microsoft's x64
+/// (`__attribute__((ms_abi))`, which EFI firmware uses). See `abi`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CallConv {
+    #[default]
+    SysV,
+    Win64,
 }
 
 impl Type {

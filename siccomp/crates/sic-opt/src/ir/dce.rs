@@ -56,7 +56,7 @@ mod tests {
 
     #[test]
     fn removes_dead_pure_keeps_call() {
-        let sig = FunctionType { ret: Type::i32(), params: vec![], variadic: false };
+        let sig = FunctionType { cc: Default::default(), ret: Type::i32(), params: vec![], variadic: false };
         let mut f = Function::new("f".into(), sig, vec![] as Vec<Param>, Linkage::External);
         let mut bb = BasicBlock::new(f.alloc_block());
         // %0 = 1 + 2  (pure, unused)

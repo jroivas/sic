@@ -1097,7 +1097,7 @@ impl<'m> FuncCtx<'m> {
             Some(f) => f,
             None => self.lowerer.module.add_extern(sic_ir::ExternFunc {
                 name: name.to_string(),
-                sig: sic_ir::FunctionType { ret, params, variadic: false },
+                sig: sic_ir::FunctionType { cc: Default::default(), ret, params, variadic: false },
             }),
         }
     }
@@ -1553,7 +1553,7 @@ impl<'m> FuncCtx<'m> {
         let fref = match self.lowerer.module.func_ref_by_name(fn_name) {
             Some(f) => f,
             None => {
-                let sig = sic_ir::FunctionType {
+                let sig = sic_ir::FunctionType { cc: Default::default(),
                     params: vec![Type::void_ptr()],
                     ret: Type::Void,
                     variadic: false,
@@ -2173,7 +2173,7 @@ impl<'m> Lowerer {
         for d in &tu.decls {
             if let Decl::Func { params, body: Some(body), .. } = d {
                 let mut dummy = Function::new("__tparam_infer".to_string(),
-                    FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+                    FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
                 let blk = dummy.alloc_block();
                 dummy.blocks.push(BasicBlock::new(blk));
                 let mut found: Vec<(String, usize, Type)> = Vec::new();
@@ -2297,7 +2297,7 @@ impl<'m> Lowerer {
         all_return_exprs(body, &mut rets);
         let ret_expr = rets.first()?.clone();
         let mut dummy = Function::new("__tuple_infer".to_string(),
-            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+            FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
         let blk = dummy.alloc_block();
         dummy.blocks.push(BasicBlock::new(blk));
         let ty = {
@@ -2374,7 +2374,7 @@ impl<'m> Lowerer {
     pub(crate) fn lambda_type_global(&mut self, captures: &[crate::ast::LambdaCapture],
         params: &[AstParam], ret: &Option<QualType>, body: &[Stmt], span: &crate::lexer::Span) -> Result<Type> {
         let mut dummy = Function::new("__lambda_ty".to_string(),
-            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+            FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
         let blk = dummy.alloc_block();
         dummy.blocks.push(BasicBlock::new(blk));
         let mut fc = FuncCtx::new_with_func(self, &mut dummy);
@@ -2389,7 +2389,7 @@ impl<'m> Lowerer {
         ir_params: &[Type], extra: &[(String, Type)]) -> Type {
         let ret_expr = match first_return_expr(body) { Some(e) => e, None => return Type::Void };
         let mut dummy = Function::new("__lambda_infer".to_string(),
-            FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+            FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
         let blk = dummy.alloc_block();
         dummy.blocks.push(BasicBlock::new(blk));
         let mut fc = FuncCtx::new_with_func(self, &mut dummy);
@@ -2743,7 +2743,7 @@ impl<'m> Lowerer {
         let f = |s: &mut Self, op| s.value_op_fn(ty, op).ok().and_then(|n| s.module.func_ref_by_name(&n));
         // `holds_counted` is a function context's: ask a throwaway one.
         let counted = {
-            let mut d = Function::new(String::new(), FunctionType { ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
+            let mut d = Function::new(String::new(), FunctionType { cc: Default::default(), ret: Type::Void, params: vec![], variadic: false }, vec![], Linkage::Internal);
             let fc = FuncCtx::new_with_func(self, &mut d);
             fc.holds_counted(ty)
         };
@@ -2825,8 +2825,8 @@ impl<'m> Lowerer {
             (ir_ret, None)
         };
 
-        let sig = super::build_fn_sig(ir_ret.clone(), ir_params.clone(), variadic, self.ptr_size);
-        let is_sret = super::ret_is_sret(&ir_ret, self.ptr_size);
+        let sig = super::build_fn_sig_cc(ir_ret.clone(), ir_params.clone(), variadic, self.fn_cc(name), self.ptr_size);
+        let is_sret = super::sig_is_sret(&sig, self.ptr_size);
 
         let mut linkage = super::fn_linkage(storage, inline, self.static_funcs.contains(name));
         // Compiler runtime helpers (`__sic_*`: the bigint / dict / … prepended
